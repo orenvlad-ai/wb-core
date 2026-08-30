@@ -132,7 +132,8 @@
         ["python3", "apps/root_storage_warm_archive_smoke.py"],
         ["python3", "apps/promo_campaign_archive_gc_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py"],
-        ["python3", "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"]
+        ["python3", "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"],
+        ["python3", "apps/wbc0027_capital_recovery_smoke.py"]
       ]
     },
     "fulfillment": {
@@ -396,6 +397,12 @@
       "id": "wbc0010-autoanswers-budget-recovery",
       "paths": ["apps/wbc0010_autoanswers_budget_recovery*.py"],
       "suites": ["release_safety"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "wbc0027-capital-recovery",
+      "paths": ["apps/wbc0027_capital_recovery*.py"],
+      "suites": ["warehouse_recovery", "fulfillment", "web_vitrina", "release_safety"],
       "release": "live_runtime"
     },
     {

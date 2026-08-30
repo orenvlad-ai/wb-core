@@ -7498,6 +7498,135 @@ def run_finance_daily_recovery_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_wbc0027_capital_recovery_command(args: argparse.Namespace) -> int:
+    target = load_hosted_runtime_target(args.target_file or resolve_target_file())
+    action = str(args.wbc0027_capital_action)
+    plan_path = Path(str(args.plan_file)).resolve() if action in {"apply", "readback"} else None
+    if plan_path is not None and (plan_path == ROOT or ROOT in plan_path.parents):
+        raise ValueError("WBC0027 reviewed plan must stay outside the Git checkout")
+    payload = _run_remote_wbc0027_capital_recovery(
+        target,
+        action=action,
+        plan_path=plan_path,
+        fingerprint=str(args.fingerprint or ""),
+        approval_reference=str(args.approval_reference or ""),
+        phase=str(getattr(args, "phase", "") or ""),
+    )
+    output = str(args.output or "").strip()
+    if output:
+        output_path = Path(output).resolve()
+        if output_path == ROOT or ROOT in output_path.parents:
+            raise ValueError("WBC0027 evidence must stay outside the Git checkout")
+        _write_private_json(output_path, payload)
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+            "action": f"wbc0027-capital-{action}",
+            "result": payload,
+        }
+    )
+    return 0
+
+
+def _run_remote_wbc0027_capital_recovery(
+    target: HostedRuntimeTarget,
+    *,
+    action: str,
+    plan_path: Path | None,
+    fingerprint: str,
+    approval_reference: str,
+    phase: str,
+) -> dict[str, Any]:
+    _ensure_active_hosted_runtime_target(target, action=f"wbc0027-capital-{action}")
+    if action not in {"plan", "apply", "readback"}:
+        raise ValueError(f"unsupported WBC0027 capital recovery action: {action}")
+    if action == "apply":
+        _ensure_target_allows_mutation(target, action="wbc0027-capital-apply", dry_run=False)
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("WBC0027 recovery requires the canonical active runtime dir")
+    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    expected_sha = ""
+    runner_args = [
+        "python3",
+        "apps/wbc0027_capital_recovery.py",
+        "--runtime-dir",
+        runtime_dir,
+        "--deployed-sha-file",
+        runtime_sha_path,
+        "--expected-deployed-sha",
+        expected_sha,
+        action,
+    ]
+    reviewed_plan_json = ""
+    if action in {"apply", "readback"}:
+        if plan_path is None or not plan_path.is_file():
+            raise ValueError("WBC0027 apply/readback requires an existing reviewed plan")
+        reviewed_plan_json = plan_path.read_text(encoding="utf-8")
+        reviewed = json.loads(reviewed_plan_json)
+        reviewed_deployed_sha = str(reviewed.get("deployed_sha") or "").lower()
+        if re.fullmatch(r"[0-9a-f]{40}", reviewed_deployed_sha) is None:
+            raise ValueError("WBC0027 reviewed plan lacks an exact deployed SHA")
+        runner_args[7] = reviewed_deployed_sha
+        product_counts = dict((reviewed.get("product_capital") or {}).get("counts") or {})
+        economics = dict(reviewed.get("functional_economics") or {})
+        if (
+            reviewed.get("contract_name") != "wbc0027_capital_recovery_v1"
+            or product_counts.get("primary_row_count") != 936
+            or product_counts.get("primary_cell_count") != 19656
+            or product_counts.get("primary_mismatch_count") != 7655
+            or product_counts.get("event_path_mismatch_count") != 7639
+            or product_counts.get("separate_20260821_mismatch_count") != 16
+            or economics.get("logical_repair_count") != 298
+            or economics.get("persisted_repair_count") != 472
+            or len(economics.get("evidence_blocked") or []) != 12
+        ):
+            raise ValueError("WBC0027 reviewed plan does not match the exact accepted scope")
+        runner_args.append("--reviewed-plan-stdin")
+        if action == "apply":
+            if str(reviewed.get("plan_fingerprint") or "") != fingerprint:
+                raise ValueError("WBC0027 reviewed fingerprint differs")
+            if not approval_reference.strip():
+                raise ValueError("WBC0027 apply requires immutable approval reference")
+            runner_args.extend(
+                [
+                    "--fingerprint",
+                    fingerprint,
+                    "--approval-reference",
+                    approval_reference.strip(),
+                    "--phase",
+                    phase,
+                ]
+            )
+    shell_command = " && ".join(
+        [
+            f"test -s {shlex.quote(runtime_sha_path)}",
+            f"cd {shlex.quote(target.target_dir)}",
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    result = subprocess.run(
+        _remote_shell_command(target, shell_command),
+        text=True,
+        capture_output=True,
+        input=reviewed_plan_json if reviewed_plan_json else None,
+        cwd=ROOT,
+        timeout=1800,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"WBC0027 capital {action} failed: "
+            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        )
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict) or payload.get("status") == "blocked":
+        raise RuntimeError("WBC0027 capital runner returned an incomplete result")
+    return payload
+
+
 def _run_remote_finance_daily_recovery(
     target: HostedRuntimeTarget,
     *,
@@ -12395,6 +12524,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
         fingerprint="",
         approval_reference="",
         actor="",
+    )
+
+    wbc0027_plan = subparsers.add_parser(
+        "wbc0027-capital-recovery-plan",
+        help="Build the query-only exact WBC0027 product-capital/economics plan.",
+    )
+    wbc0027_plan.add_argument("--output", required=True)
+    wbc0027_plan.set_defaults(
+        handler=run_wbc0027_capital_recovery_command,
+        wbc0027_capital_action="plan",
+        plan_file="",
+        fingerprint="",
+        approval_reference="",
+        phase="",
+    )
+
+    wbc0027_apply = subparsers.add_parser(
+        "wbc0027-capital-recovery-apply",
+        help="Apply the two exact WBC0027 T1 operations once.",
+    )
+    wbc0027_apply.add_argument("--plan-file", required=True)
+    wbc0027_apply.add_argument("--fingerprint", required=True)
+    wbc0027_apply.add_argument("--approval-reference", required=True)
+    wbc0027_apply.add_argument("--phase", choices=("product", "economics"), required=True)
+    wbc0027_apply.add_argument("--output", default="")
+    wbc0027_apply.set_defaults(
+        handler=run_wbc0027_capital_recovery_command,
+        wbc0027_capital_action="apply",
+    )
+
+    wbc0027_readback = subparsers.add_parser(
+        "wbc0027-capital-recovery-readback",
+        help="Run query-only readback for both WBC0027 T1 operations.",
+    )
+    wbc0027_readback.add_argument("--plan-file", required=True)
+    wbc0027_readback.add_argument("--output", default="")
+    wbc0027_readback.set_defaults(
+        handler=run_wbc0027_capital_recovery_command,
+        wbc0027_capital_action="readback",
+        fingerprint="",
+        approval_reference="",
+        phase="",
     )
 
     vitrina_incident_dry_run = subparsers.add_parser(

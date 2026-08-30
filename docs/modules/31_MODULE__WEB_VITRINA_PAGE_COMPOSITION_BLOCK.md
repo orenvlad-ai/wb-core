@@ -608,3 +608,13 @@ and contains no customer PII. In the FF
 overhead modal, manual mode renders only neutral `основание: ручной ввод`; the
 PDF evidence block exists only for `source_mode=payment_order_pdf`, so an empty
 parser object cannot leak a red technical panel into manual entry.
+
+## Product-capital overlay guard
+
+The read-time product-capital overlay accepts only rows whose provenance is
+bound to an exact good functional version for the same business/snapshot date
+and, when ready-snapshot coverage names a version, to that exact version.
+Unbound or mismatched rows are ignored in favour of the immutable ready
+snapshot/last-good value and are exposed as typed
+`historical_repair_required` incident evidence. Browser arithmetic never
+repairs or invents these cells.

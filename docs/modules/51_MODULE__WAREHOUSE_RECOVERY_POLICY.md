@@ -352,3 +352,14 @@ runtime and exact `.wb-core-runtime-sha`; only apply is a production mutation.
 After successful readback, ordinary hourly/manual warehouse sync may publish a
 fresh functional/business projection. Supersession itself never edits a
 projection row.
+
+## WBC0027 two-operation recovery
+
+The product-capital correction and qualified cost/Proxy correction are two
+independent T1 identities even when one production-mutation manifest
+orchestrates them. Each phase has its own exact before images, source/non-target
+digests, one-submit boundary and query-only reconciliation. Product-capital
+publication appends one recovery revision and supersedes current pointers; the
+economics phase CAS-updates only three qualified ready-snapshot rows. A
+transport ambiguity is read back by operation identity and never blindly
+resubmitted.

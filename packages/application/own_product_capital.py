@@ -2044,10 +2044,24 @@ class OwnProductCapitalBlock:
                 load_current_business_projection_metrics,
             )
 
-            projected = load_current_business_projection_metrics(
-                self.runtime,
-                as_of_date=as_of_date,
-                requested_nm_ids=requested_nm_ids,
+            functional_version_ids = {
+                str(row.get("_warehouse_version_id") or "")
+                for row in functional.values()
+                if str(row.get("_warehouse_version_id") or "")
+            }
+            projected = (
+                load_current_business_projection_metrics(
+                    self.runtime,
+                    as_of_date=as_of_date,
+                    requested_nm_ids=requested_nm_ids,
+                    expected_functional_version_id=(
+                        next(iter(functional_version_ids))
+                        if len(functional_version_ids) == 1
+                        else ""
+                    ),
+                )
+                if len(functional_version_ids) == 1
+                else {}
             )
             for nm_id, projected_row in projected.items():
                 current_row = functional.setdefault(nm_id, {})

@@ -1315,15 +1315,15 @@ class CnyLedgerBlock:
             for item in [source_order_id, *additional_shipment_ids]
             if str(item or "").strip()
         }
+        # An account-level CNY document is valid accounting evidence, but it is
+        # not warehouse scope.  Empty scope must therefore stay an explicit
+        # warehouse no-op.  The former ``else True`` branch selected every
+        # shipment and could replay closed warehouse history globally.
         affected_ids = [
             str(item.get("shipment_id") or "")
             for item in shipment_summaries
             if str(item.get("shipment_id") or "")
-            and (
-                str(item.get("shipment_id") or "") in requested_ids
-                if requested_ids
-                else True
-            )
+            and str(item.get("shipment_id") or "") in requested_ids
         ]
         missing_requested_ids = sorted(requested_ids - set(affected_ids))
         nm_ids: set[int] = set()
@@ -1357,6 +1357,19 @@ class CnyLedgerBlock:
             json.dumps(revision_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         stable_source_id = f"cny_document:{document.get('document_id')}"
+        if not requested_ids:
+            return {
+                "status": "no_op",
+                "terminal_no_op": True,
+                "presentation_status": "Документ учтён без складского пересчёта",
+                "stable_source_id": stable_source_id,
+                "source_revision": revision,
+                "affected_nm_ids": [],
+                "affected_shipment_ids": [],
+                "warehouse_mutation_count": 0,
+                "functional_queue_count": 0,
+                "diagnostic_code": "cny_replay_shipment_scope_unbound",
+            }
         if missing_requested_ids:
             return {
                 "status": "replay_error",

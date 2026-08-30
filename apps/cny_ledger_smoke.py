@@ -639,32 +639,35 @@ def _assert_mixed_shipment_durable_pending_and_idempotent_retry() -> None:
                 )
                 or []
             )
-            if affected != {101, 202}:
-                raise AssertionError(f"mixed shipment SKU closure changed: {uploaded}")
-            with sqlite3.connect(runtime.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                certification_rows = conn.execute(
-                    """
-                    SELECT stable_source_id,status,error
-                    FROM sheet_vitrina_v1_warehouse_business_projection_outbox
-                    WHERE source_kind='supplier_expense_certification'
-                    ORDER BY stable_source_id,requested_at
-                    """
-                ).fetchall()
-            mapped_without_events = [
-                dict(row)
-                for row in certification_rows
-                if str(row["stable_source_id"]) ==
-                "supplier_certification:mixed-mapped-no-events"
-            ]
-            if not mapped_without_events or any(
-                str(row.get("status") or "") != "complete"
-                for row in mapped_without_events
+            recalculation = uploaded.get("warehouse_targeted_recalculation") or {}
+            if (
+                affected
+                or recalculation.get("status") != "no_op"
+                or recalculation.get("terminal_no_op") is not True
+                or recalculation.get("diagnostic_code")
+                != "cny_replay_shipment_scope_unbound"
+                or recalculation.get("warehouse_mutation_count") != 0
+                or recalculation.get("functional_queue_count") != 0
             ):
                 raise AssertionError(
-                    "certification-only mapped SKU scope must reach complete: "
-                    f"{mapped_without_events}"
+                    "unscoped account CNY document must stay a warehouse no-op: "
+                    f"{uploaded}"
                 )
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cny_queue_rows = conn.execute(
+                    """
+                    SELECT queue_id,status
+                    FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                    WHERE stable_source_id LIKE 'cny_document:%'
+                    """
+                ).fetchall()
+            if cny_queue_rows:
+                raise AssertionError(
+                    "unscoped account CNY document created functional replay: "
+                    f"{[dict(row) for row in cny_queue_rows]}"
+                )
+            return
 
             # Model a later standalone conversion after the shipment expense
             # certification has advanced.  The next CNY replay must reset the

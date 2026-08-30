@@ -371,7 +371,8 @@ def ensure_warehouse_projection_source_outbox(
                 ),
                 affected_nm_ids_json=excluded.affected_nm_ids_json,
                 status=CASE
-                  WHEN status='complete' THEN status ELSE 'queued'
+                  WHEN status IN ('published_exact','historical_repair_required')
+                  THEN status ELSE 'queued'
                 END,
                 requested_at=excluded.requested_at,
                 error=NULL;
@@ -405,7 +406,8 @@ def ensure_warehouse_projection_source_outbox(
                 ),
                 affected_nm_ids_json=excluded.affected_nm_ids_json,
                 status=CASE
-                  WHEN status='complete' THEN status ELSE 'queued'
+                  WHEN status IN ('published_exact','historical_repair_required')
+                  THEN status ELSE 'queued'
                 END,
                 requested_at=excluded.requested_at,
                 error=NULL;
@@ -439,7 +441,8 @@ def ensure_warehouse_projection_source_outbox(
                 ),
                 affected_nm_ids_json=excluded.affected_nm_ids_json,
                 status=CASE
-                  WHEN status='complete' THEN status ELSE 'queued'
+                  WHEN status IN ('published_exact','historical_repair_required')
+                  THEN status ELSE 'queued'
                 END,
                 requested_at=excluded.requested_at,
                 error=NULL;
@@ -473,7 +476,8 @@ def ensure_warehouse_projection_source_outbox(
                 ),
                 affected_nm_ids_json=excluded.affected_nm_ids_json,
                 status=CASE
-                  WHEN status='complete' THEN status ELSE 'queued'
+                  WHEN status IN ('published_exact','historical_repair_required')
+                  THEN status ELSE 'queued'
                 END,
                 requested_at=excluded.requested_at,
                 error=NULL;
@@ -514,7 +518,8 @@ def ensure_warehouse_projection_source_outbox(
                     ),
                     affected_nm_ids_json=excluded.affected_nm_ids_json,
                     status=CASE
-                      WHEN status='complete' THEN status ELSE 'queued'
+                      WHEN status IN ('published_exact','historical_repair_required')
+                      THEN status ELSE 'queued'
                     END,
                     requested_at=excluded.requested_at,
                     error=NULL;
@@ -565,7 +570,8 @@ def ensure_warehouse_projection_source_outbox(
                     ),
                     affected_nm_ids_json=excluded.affected_nm_ids_json,
                     status=CASE
-                      WHEN status='complete' THEN status ELSE 'queued'
+                      WHEN status IN ('published_exact','historical_repair_required')
+                      THEN status ELSE 'queued'
                     END,
                     requested_at=excluded.requested_at,
                     error=NULL;
@@ -609,7 +615,8 @@ def ensure_warehouse_projection_source_outbox(
                 ),
                 affected_nm_ids_json=excluded.affected_nm_ids_json,
                 status=CASE
-                  WHEN status='complete' THEN status ELSE 'queued'
+                  WHEN status IN ('published_exact','historical_repair_required')
+                  THEN status ELSE 'queued'
                 END,
                 requested_at=excluded.requested_at,
                 error=NULL;
@@ -1302,6 +1309,82 @@ def publish_targeted_supplier_business_projection(
         raise WarehouseBusinessProjectionError(
             "stable source identity and source revision are required"
         )
+    affected_nm_ids = sorted(
+        {int(value) for value in plan.get("affected_nm_ids") or [] if int(value) > 0}
+    )
+    target_dates = _date_range(
+        business_effective_date,
+        business_date_from_timestamp(published_at),
+    )
+    # A targeted supplier version can legitimately carry an earlier business
+    # effect while reusing today's official WB snapshot.  That is a replay
+    # signal, not an exact same-date historical version.  Publishing its
+    # reprojected balances would rewrite closed days without an exact
+    # date/version pair, so preserve last-good and wait for exact functional
+    # versions (or the bounded historical recovery contour).
+    pending_stable_source_id = f"functional_queue:{stable_source_id}"
+    pending_request_id = "whbpo_targeted_" + _fingerprint(
+        {
+            "stable_source_id": pending_stable_source_id,
+            "source_revision": source_revision,
+        }
+    ).removeprefix("sha256:")[:24]
+    conn.execute(
+        f"""
+        INSERT INTO {OUTBOX_TABLE}(
+            request_id,stable_source_id,source_revision,
+            business_effective_date,affected_nm_ids_json,source_kind,
+            status,requested_at,started_at,finished_at,error
+        ) VALUES(?,?,?,?,?,'functional_source_revision',
+                 'pending_exact_functional',?,NULL,NULL,NULL)
+        ON CONFLICT(stable_source_id,source_revision) DO UPDATE SET
+            business_effective_date=MIN(
+                business_effective_date,
+                excluded.business_effective_date
+            ),
+            affected_nm_ids_json=excluded.affected_nm_ids_json,
+            source_kind=excluded.source_kind,
+            status='pending_exact_functional',
+            requested_at=excluded.requested_at,
+            started_at=NULL,finished_at=NULL,error=NULL
+        """,
+        (
+            pending_request_id,
+            pending_stable_source_id,
+            source_revision,
+            business_effective_date,
+            _json(affected_nm_ids),
+            str(published_at),
+        ),
+    )
+    conn.execute(
+        f"""
+        UPDATE {OUTBOX_TABLE}
+        SET status='pending_exact_functional',finished_at=NULL,error=NULL
+        WHERE stable_source_id=? AND source_revision=?
+          AND status IN ('queued','running','error')
+        """,
+        (pending_stable_source_id, source_revision),
+    )
+    return {
+        "status": "pending_exact_functional",
+        "idempotent": False,
+        "source_revision": source_revision,
+        "business_effective_date": business_effective_date,
+        "published_at": str(published_at),
+        "affected_nm_ids": affected_nm_ids,
+        "affected_dates": target_dates,
+        "changed_rows": 0,
+        "changed_cells": 0,
+        "diagnostics": {
+            "last_good_preserved": True,
+            "awaiting_exact_functional_replay": True,
+            "targeted_version_is_replay_signal_only": True,
+            "external_source_refresh_count": 0,
+            "full_vitrina_refresh_count": 0,
+            "all_history_rebuild": False,
+        },
+    }
     plan_fingerprint = _fingerprint(
         {
             "contract_name": CONTRACT_NAME,
@@ -2033,7 +2116,8 @@ def publish_functional_version_business_projection(
     version = conn.execute(
         """
         SELECT version.version_id,version.status,version.business_effective_date,
-               version.published_at,version.created_at,snapshot.snapshot_date
+               version.published_at,version.created_at,version.plan_fingerprint,
+               snapshot.snapshot_date
         FROM sheet_vitrina_v1_warehouse_functional_versions AS version
         JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
           ON snapshot.version_id=version.version_id
@@ -2078,9 +2162,20 @@ def publish_functional_version_business_projection(
             "as_of_date": selected_date,
             "base_version_id": str(published_version_id),
             "published_version_id": str(published_version_id),
+            "functional_version_id": str(published_version_id),
+            "snapshot_date": selected_date,
+            "source_digest": str(version["plan_fingerprint"] or ""),
             "published_at": str(published_at),
             "missing_exact_projection_date": False,
         }
+        provenance["publication_identity"] = _fingerprint(
+            {
+                "functional_version_id": str(published_version_id),
+                "snapshot_date": selected_date,
+                "nm_id": int(nm_id),
+                "metrics": dict(item["metrics"]),
+            }
+        )
         material = {
             "as_of_date": selected_date,
             "nm_id": int(nm_id),
@@ -2135,12 +2230,44 @@ def publish_functional_version_business_projection(
             "exact_functional_version": True,
         },
     )
+    pending_rows = conn.execute(
+        f"""
+        SELECT request_id,affected_nm_ids_json
+        FROM {OUTBOX_TABLE}
+        WHERE status='pending_exact_functional'
+          AND business_effective_date=?
+        ORDER BY request_id
+        """,
+        (selected_date,),
+    ).fetchall()
+    published_ids = set(affected_nm_ids)
+    resolved_request_ids = []
+    for pending_row in pending_rows:
+        pending_ids = {
+            int(value)
+            for value in _loads(pending_row["affected_nm_ids_json"], [])
+            if int(value) > 0
+        }
+        if pending_ids.issubset(published_ids):
+            resolved_request_ids.append(str(pending_row["request_id"]))
+    if resolved_request_ids:
+        placeholders = ",".join("?" for _ in resolved_request_ids)
+        conn.execute(
+            f"""
+            UPDATE {OUTBOX_TABLE}
+            SET status='published_exact',finished_at=?,error=NULL
+            WHERE request_id IN ({placeholders})
+              AND status='pending_exact_functional'
+            """,
+            (str(published_at), *resolved_request_ids),
+        )
     return {
         **result,
         "plan_fingerprint": plan_fingerprint,
         "business_effective_date": selected_date,
         "published_version_id": str(published_version_id),
         "affected_nm_ids": affected_nm_ids,
+        "resolved_replay_signal_count": len(resolved_request_ids),
     }
 
 
@@ -2224,7 +2351,13 @@ def drain_warehouse_business_projection_outbox(
     published_at: str | None = None,
     inject_failure: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Coalesce and publish canonical capital events without external fetches."""
+    """Persist replay demand while preserving version-bound last-good rows.
+
+    Every outbox request is only a signal for the functional calculator.  It
+    cannot publish closed product-capital values from mutable daily event state.
+    The exact functional writer resolves the durable pending state later in the
+    same transaction as the matching version-bound publication.
+    """
 
     timestamp = str(published_at or _now())
     started = time.perf_counter()
@@ -2329,6 +2462,42 @@ def drain_warehouse_business_projection_outbox(
                 publication_business_date=business_date_from_timestamp(timestamp),
                 cost_only=cost_only,
             )
+            if inject_failure is not None:
+                inject_failure("business_projection_candidate_ready")
+            conn.execute(
+                f"""
+                UPDATE {OUTBOX_TABLE}
+                SET status='pending_exact_functional',finished_at=NULL,error=NULL
+                WHERE request_id IN ({placeholders}) AND status='running'
+                """,
+                tuple(request_ids),
+            )
+            conn.commit()
+            return {
+                "status": "pending_exact_functional",
+                "idempotent": False,
+                "request_count": len(request_rows),
+                "business_effective_date": business_effective_date,
+                "affected_nm_ids": affected_nm_ids,
+                "affected_dates": target_dates,
+                "changed_rows": 0,
+                "changed_cells": 0,
+                "diagnostics": {
+                    "last_good_preserved": True,
+                    "awaiting_exact_functional_replay": True,
+                    "replay_signal_request_count": len(request_rows),
+                    "mutable_daily_state_read_count": 0,
+                    "external_source_refresh_count": 0,
+                    "full_vitrina_refresh_count": 0,
+                    "all_history_rebuild": False,
+                    "cost_only": cost_only,
+                    **date_scope,
+                    "elapsed_ms": round(
+                        (time.perf_counter() - started) * 1000,
+                        3,
+                    ),
+                },
+            }
             has_canonical_event_proof = bool(projection_request_rows)
             if not has_canonical_event_proof:
                 # These requests only prove that the full functional
@@ -2673,6 +2842,7 @@ def load_warehouse_business_projection_status(
                     """
                 ).fetchall()
             }
+        reconciliation = reconcile_warehouse_business_projection(conn)
         if (
             latest_outbox_failure is not None
             and (
@@ -2704,11 +2874,20 @@ def load_warehouse_business_projection_status(
             "revision_id": "",
             "queue_counts": queue_counts,
             "outbox_counts": outbox_counts,
+            "health_status": (
+                "historical_repair_required"
+                if reconciliation.get("status") == "historical_repair_required"
+                else "pending_exact_functional"
+                if outbox_counts.get("pending_exact_functional")
+                else str(reconciliation.get("status") or "pending_exact_functional")
+            ),
             "updating": bool(
                 outbox_counts.get("queued")
                 or outbox_counts.get("running")
+                or outbox_counts.get("pending_exact_functional")
             ),
             "latest_failure": dict(latest_failure) if latest_failure else None,
+            "reconciliation": reconciliation,
         }
     return {
         "contract_name": CONTRACT_NAME,
@@ -2716,11 +2895,277 @@ def load_warehouse_business_projection_status(
         **dict(state),
         "queue_counts": queue_counts,
         "outbox_counts": outbox_counts,
+        "health_status": (
+            "historical_repair_required"
+            if reconciliation.get("status") == "historical_repair_required"
+            else "pending_exact_functional"
+            if outbox_counts.get("pending_exact_functional")
+            else str(reconciliation.get("status") or "pending_exact_functional")
+        ),
         "updating": bool(
             outbox_counts.get("queued")
             or outbox_counts.get("running")
+            or outbox_counts.get("pending_exact_functional")
         ),
         "latest_failure": dict(latest_failure) if latest_failure else None,
+        "reconciliation": reconciliation,
+    }
+
+
+def _latest_exact_functional_version_id(
+    conn: sqlite3.Connection,
+    *,
+    as_of_date: str,
+) -> str:
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('sheet_vitrina_v1_warehouse_functional_versions',"
+            "'sheet_vitrina_v1_warehouse_wb_snapshots')"
+        ).fetchall()
+    }
+    if len(tables) != 2:
+        return ""
+    row = conn.execute(
+        """
+        SELECT version.version_id
+        FROM sheet_vitrina_v1_warehouse_functional_versions AS version
+        JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
+          ON snapshot.version_id=version.version_id
+        WHERE version.status='good'
+          AND version.business_effective_date=?
+          AND snapshot.snapshot_date=?
+        ORDER BY COALESCE(NULLIF(version.published_at,''),version.created_at) DESC,
+                 version.created_at DESC,version.version_id DESC
+        LIMIT 1
+        """,
+        (as_of_date, as_of_date),
+    ).fetchone()
+    return str(row["version_id"] if row is not None else "")
+
+
+def _ready_bound_functional_version_id(
+    conn: sqlite3.Connection,
+    *,
+    as_of_date: str,
+) -> str:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sheet_vitrina_v1_ready_snapshots'"
+    ).fetchone()
+    if table is None:
+        return ""
+    rows = conn.execute(
+        """
+        SELECT plan_json
+        FROM sheet_vitrina_v1_ready_snapshots
+        ORDER BY CASE WHEN as_of_date=? THEN 0 ELSE 1 END,as_of_date DESC
+        """,
+        (as_of_date,),
+    ).fetchall()
+    for row in rows:
+        metadata = dict(_loads(row["plan_json"], {}).get("metadata") or {})
+        coverage = metadata.get("warehouse_history_coverage") or {}
+        if not isinstance(coverage, Mapping):
+            continue
+        entry = coverage.get(as_of_date) or {}
+        if not isinstance(entry, Mapping):
+            continue
+        version_id = str(entry.get("functional_version_id") or "")
+        if version_id:
+            return version_id
+    return ""
+
+
+def _projection_row_binding_incident(
+    conn: sqlite3.Connection,
+    row: Mapping[str, Any],
+    *,
+    expected_functional_version_id: str,
+) -> str:
+    selected_date = str(row.get("as_of_date") or "")[:10]
+    provenance = _loads(row.get("provenance_json"), {})
+    bound_version_id = str(
+        provenance.get("functional_version_id")
+        or provenance.get("published_version_id")
+        or ""
+    )
+    if str(provenance.get("source") or "") != "canonical_functional_warehouse_version":
+        return "projection_source_unbound"
+    if (
+        str(provenance.get("as_of_date") or "") != selected_date
+        or str(provenance.get("business_effective_date") or "") != selected_date
+        or str(provenance.get("snapshot_date") or selected_date) != selected_date
+    ):
+        return "projection_date_binding_mismatch"
+    if not bound_version_id:
+        return "projection_functional_version_unbound"
+    if (
+        expected_functional_version_id
+        and bound_version_id != expected_functional_version_id
+    ):
+        return "projection_functional_version_mismatch"
+    tables = {
+        str(item[0])
+        for item in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('sheet_vitrina_v1_warehouse_functional_versions',"
+            "'sheet_vitrina_v1_warehouse_wb_snapshots')"
+        ).fetchall()
+    }
+    if len(tables) != 2:
+        return "projection_exact_version_missing"
+    exact = conn.execute(
+        """
+        SELECT 1
+        FROM sheet_vitrina_v1_warehouse_functional_versions AS version
+        JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
+          ON snapshot.version_id=version.version_id
+        WHERE version.version_id=? AND version.status='good'
+          AND version.business_effective_date=? AND snapshot.snapshot_date=?
+        """,
+        (bound_version_id, selected_date, selected_date),
+    ).fetchone()
+    return "" if exact is not None else "projection_exact_version_missing"
+
+
+def reconcile_warehouse_business_projection(
+    conn: sqlite3.Connection,
+    *,
+    target_dates: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Exhaustively compare all 42 owned keys with exact functional truth."""
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    required = {
+        CURRENT_ROW_TABLE,
+        "sheet_vitrina_v1_warehouse_functional_versions",
+        "sheet_vitrina_v1_warehouse_wb_snapshots",
+        "sheet_vitrina_v1_warehouse_functional_balances",
+    }
+    if not required.issubset(tables):
+        return {
+            "status": "pending_exact_functional",
+            "date_count": 0,
+            "scope_count": 0,
+            "cell_count": 0,
+            "mismatch_count": 0,
+            "unbound_row_count": 0,
+            "numeric_to_missing_count": 0,
+            "digest": _fingerprint([]),
+        }
+    normalized_dates = sorted(
+        {
+            _iso_date(value, field_name="target_date")
+            for value in target_dates or []
+        }
+    )
+    if not normalized_dates:
+        normalized_dates = [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT DISTINCT as_of_date FROM {CURRENT_ROW_TABLE} ORDER BY as_of_date"
+            ).fetchall()
+        ]
+    date_results: list[dict[str, Any]] = []
+    mismatch_count = 0
+    unbound_row_count = 0
+    numeric_to_missing_count = 0
+    scope_count = 0
+    cell_count = 0
+    for selected_date in normalized_dates:
+        current_rows = conn.execute(
+            f"SELECT * FROM {CURRENT_ROW_TABLE} WHERE as_of_date=? ORDER BY nm_id",
+            (selected_date,),
+        ).fetchall()
+        expected_version_id = (
+            _ready_bound_functional_version_id(
+                conn,
+                as_of_date=selected_date,
+            )
+            or _latest_exact_functional_version_id(
+                conn,
+                as_of_date=selected_date,
+            )
+        )
+        if not expected_version_id:
+            date_results.append(
+                {
+                    "as_of_date": selected_date,
+                    "status": "historical_repair_required",
+                    "reason": "exact_functional_version_missing",
+                    "scope_count": len(current_rows),
+                    "mismatch_count": 0,
+                    "unbound_row_count": len(current_rows),
+                }
+            )
+            scope_count += len(current_rows)
+            unbound_row_count += len(current_rows)
+            continue
+        current_ids = sorted({int(row["nm_id"]) for row in current_rows if int(row["nm_id"]) > 0})
+        balances = _version_balances(conn, version_id=expected_version_id)
+        expected_rows = _metric_rows(balances, affected_nm_ids=current_ids)
+        date_mismatches = 0
+        date_unbound = 0
+        date_numeric_to_missing = 0
+        for row in current_rows:
+            incident = _projection_row_binding_incident(
+                conn,
+                dict(row),
+                expected_functional_version_id=expected_version_id,
+            )
+            if incident:
+                date_unbound += 1
+            expected = dict((expected_rows.get(int(row["nm_id"])) or {}).get("metrics") or {})
+            actual = _loads(row["metrics_json"], {})
+            for metric_key in OWN_PRODUCT_CAPITAL_METRIC_KEYS:
+                if metric_key not in expected and metric_key not in actual:
+                    continue
+                cell_count += 1
+                if actual.get(metric_key) != expected.get(metric_key):
+                    date_mismatches += 1
+                    if expected.get(metric_key) is not None and actual.get(metric_key) is None:
+                        date_numeric_to_missing += 1
+        scope_count += len(current_rows)
+        mismatch_count += date_mismatches
+        unbound_row_count += date_unbound
+        numeric_to_missing_count += date_numeric_to_missing
+        date_results.append(
+            {
+                "as_of_date": selected_date,
+                "status": (
+                    "published_exact"
+                    if not date_mismatches and not date_unbound
+                    else "historical_repair_required"
+                ),
+                "functional_version_id": expected_version_id,
+                "scope_count": len(current_rows),
+                "mismatch_count": date_mismatches,
+                "unbound_row_count": date_unbound,
+                "numeric_to_missing_count": date_numeric_to_missing,
+            }
+        )
+    status = (
+        "published_exact"
+        if not mismatch_count and not unbound_row_count
+        else "historical_repair_required"
+    )
+    return {
+        "status": status,
+        "date_count": len(normalized_dates),
+        "scope_count": scope_count,
+        "owned_metric_key_count": len(OWN_PRODUCT_CAPITAL_METRIC_KEYS),
+        "cell_count": cell_count,
+        "mismatch_count": mismatch_count,
+        "unbound_row_count": unbound_row_count,
+        "numeric_to_missing_count": numeric_to_missing_count,
+        "dates": date_results,
+        "digest": _fingerprint(date_results),
     }
 
 
@@ -2729,6 +3174,7 @@ def load_current_business_projection_metrics(
     *,
     as_of_date: str,
     requested_nm_ids: Iterable[int] | None = None,
+    expected_functional_version_id: str = "",
 ) -> dict[int, dict[str, Any]]:
     """Return the exact owned SKU metrics for one business date."""
 
@@ -2752,15 +3198,31 @@ def load_current_business_projection_metrics(
         ensure_warehouse_business_projection_schema(conn)
         rows = conn.execute(
             f"""
-            SELECT nm_id,metrics_json,presentation_json,revision_id,published_at
+            SELECT as_of_date,nm_id,metrics_json,presentation_json,
+                   provenance_json,revision_id,published_at
             FROM {CURRENT_ROW_TABLE}
             WHERE {" AND ".join(conditions)}
             ORDER BY nm_id
             """,
             tuple(parameters),
         ).fetchall()
+        expected_version_id = str(expected_functional_version_id or "")
+        if not expected_version_id:
+            expected_version_id = _latest_exact_functional_version_id(
+                conn,
+                as_of_date=selected_date,
+            )
+        accepted_rows = [
+            row
+            for row in rows
+            if not _projection_row_binding_incident(
+                conn,
+                dict(row),
+                expected_functional_version_id=expected_version_id,
+            )
+        ]
     result: dict[int, dict[str, Any]] = {}
-    for row in rows:
+    for row in accepted_rows:
         metrics = {
             key: value
             for key, value in _loads(row["metrics_json"], {}).items()
@@ -2796,6 +3258,9 @@ def load_current_business_projection_metrics(
             ),
             "_warehouse_business_projection_published_at": str(
                 row["published_at"]
+            ),
+            "_warehouse_business_projection_functional_version_id": (
+                expected_version_id
             ),
         }
     return result
@@ -2840,6 +3305,48 @@ def apply_warehouse_business_projection_overlay(
         state = conn.execute(
             f"SELECT * FROM {STATE_TABLE} WHERE slot=1"
         ).fetchone()
+        coverage = dict(
+            (dict(snapshot.metadata or {}).get("warehouse_history_coverage") or {})
+        )
+        expected_versions: dict[str, str] = {}
+        for selected_date in target_dates:
+            coverage_entry = coverage.get(selected_date) or {}
+            bound_version_id = (
+                str(coverage_entry.get("functional_version_id") or "")
+                if isinstance(coverage_entry, Mapping)
+                else ""
+            )
+            expected_versions[selected_date] = (
+                bound_version_id
+                or _latest_exact_functional_version_id(
+                    conn,
+                    as_of_date=selected_date,
+                )
+            )
+        accepted_rows: list[sqlite3.Row] = []
+        ignored_incidents: list[dict[str, Any]] = []
+        for stored_row in stored_rows:
+            selected_date = str(stored_row["as_of_date"])
+            incident = _projection_row_binding_incident(
+                conn,
+                dict(stored_row),
+                expected_functional_version_id=expected_versions.get(
+                    selected_date,
+                    "",
+                ),
+            )
+            if incident:
+                ignored_incidents.append(
+                    {
+                        "as_of_date": selected_date,
+                        "nm_id": int(stored_row["nm_id"]),
+                        "revision_id": str(stored_row["revision_id"]),
+                        "reason": incident,
+                        "status": "historical_repair_required",
+                    }
+                )
+            else:
+                accepted_rows.append(stored_row)
     if not stored_rows:
         return snapshot
     overlay = {
@@ -2849,7 +3356,7 @@ def apply_warehouse_business_projection_overlay(
             "revision_id": str(row["revision_id"]),
             "published_at": str(row["published_at"]),
         }
-        for row in stored_rows
+        for row in accepted_rows
     }
     rows = [list(row) for row in sheet.rows]
     date_index = {
@@ -2924,6 +3431,8 @@ def apply_warehouse_business_projection_overlay(
         "published_at": str(state["published_at"]) if state is not None else "",
         "owned_metric_keys": sorted(OWN_PRODUCT_CAPITAL_METRIC_KEYS),
         "changed_cells": changed_cells,
+        "ignored_unbound_row_count": len(ignored_incidents),
+        "incidents": ignored_incidents,
         "read_merge_only": True,
         "ready_snapshot_mutated": False,
     }

@@ -468,6 +468,7 @@ def _assert_business_time_projection(
     applied: dict,
 ) -> None:
     publication = dict(applied.get("business_projection") or {})
+    assert publication["status"] == "pending_exact_functional", publication
     assert publication["business_effective_date"] == "2026-07-21", publication
     assert publication["affected_dates"] == [
         "2026-07-21",
@@ -477,7 +478,9 @@ def _assert_business_time_projection(
         "2026-07-25",
     ], publication
     diagnostics = dict(publication.get("diagnostics") or {})
-    assert diagnostics["missing_exact_functional_dates"] == [], diagnostics
+    assert diagnostics["last_good_preserved"] is True, diagnostics
+    assert diagnostics["awaiting_exact_functional_replay"] is True, diagnostics
+    assert diagnostics["targeted_version_is_replay_signal_only"] is True, diagnostics
     assert diagnostics["external_source_refresh_count"] == 0, diagnostics
     assert diagnostics["full_vitrina_refresh_count"] == 0, diagnostics
     assert diagnostics["all_history_rebuild"] is False, diagnostics
@@ -491,31 +494,9 @@ def _assert_business_time_projection(
         ).fetchone()[0]
         assert non_target == 0
         rows = conn.execute(
-            f"""
-            SELECT as_of_date,metrics_json
-            FROM {CURRENT_ROW_TABLE}
-            WHERE nm_id=101
-            ORDER BY as_of_date
-            """
+            f"SELECT as_of_date,metrics_json FROM {CURRENT_ROW_TABLE} WHERE nm_id=101"
         ).fetchall()
-    assert [row["as_of_date"] for row in rows] == publication["affected_dates"]
-    for row in rows:
-        metrics = json.loads(row["metrics_json"])
-        assert (
-            metrics[own_stage_metric_key("PRODUCTION", "qty")] == 2.0
-        ), (row["as_of_date"], metrics)
-        assert (
-            metrics[own_stage_metric_key("PRODUCTION_TO_FF", "qty")] == 10.0
-        ), (row["as_of_date"], metrics)
-        assert metrics[OWN_TOTAL_QTY_METRIC_KEY] == 12.0
-    absorbed = OwnProductCapitalBlock(
-        runtime=runtime,
-        timestamp_factory=lambda: NOW,
-    ).load_daily_metric_lookup("2026-07-21")
-    assert (
-        absorbed[101][own_stage_metric_key("PRODUCTION_TO_FF", "qty")]
-        == 10.0
-    ), absorbed
+    assert rows == [], rows
 
 
 def _failure_is_atomic(runtime: RegistryUploadDbBackedRuntime) -> None:
@@ -637,7 +618,21 @@ def _failure_is_atomic(runtime: RegistryUploadDbBackedRuntime) -> None:
                 ),
             ).fetchall()
         }
-    assert statuses == {"active", "failed"}, statuses
+    assert statuses == {"failed"}, statuses
+    with sqlite3.connect(runtime.db_path) as conn:
+        pending = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM sheet_vitrina_v1_warehouse_business_projection_outbox
+            WHERE stable_source_id=? AND source_revision=?
+              AND status='pending_exact_functional'
+            """,
+            (
+                f"functional_queue:supplier_shipment:{SHIPMENT_ID}",
+                plan["source_revision"],
+            ),
+        ).fetchone()[0]
+    assert pending == 1, pending
 
 
 def _lock_is_shared(runtime: RegistryUploadDbBackedRuntime) -> None:
