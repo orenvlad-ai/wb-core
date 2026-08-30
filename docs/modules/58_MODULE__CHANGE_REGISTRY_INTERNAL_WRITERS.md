@@ -3,8 +3,8 @@ title: "Модуль: единая инструментация внутренн
 doc_id: "WB-CORE-MODULE-58-CHANGE-REGISTRY-INTERNAL-WRITERS"
 doc_type: "module"
 status: "active"
-purpose: "Гарантированно фиксировать будущие внутренние price/bid interventions до WB submit и завершать их только доказанным lifecycle."
-scope: "Standalone Prices/Ads, SKU Management price/bid и каждый SPP measurement/restore transition; один canonical seller/account; immutable StoreRegistry operational storage."
+purpose: "Гарантированно фиксировать внутренние price/bid interventions до WB submit и завершать их только доказанным lifecycle."
+scope: "Standalone Prices/Ads, SKU Management price/bid, Balance bid apply и каждый SPP measurement/restore transition; один canonical seller/account; immutable StoreRegistry operational storage."
 source_basis:
   - "docs/modules/54_MODULE__CHANGE_REGISTRY_FOUNDATION.md"
   - "docs/modules/56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md"
@@ -13,15 +13,15 @@ source_basis:
 related_runners:
   - "apps/change_registry_internal_writers_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Future-write activation only; no import, backfill, new write capability or deploy-time WB mutation."
+update_note: "Balance live bid apply подключён к тому же writer seam; deploy по-прежнему не выполняет WB mutation."
 ---
 
 # 1. Runtime binding and surfaces
 
 `RegistryUploadHttpEntrypoint` creates one `InternalWriterRegistry` and passes
-that same seam to five source surfaces: `prices_upload`,
+that same seam to six source surfaces: `prices_upload`,
 `sku_management_price`, `spp_tester`, `ads_bid_change` and
-`sku_management_bid`. The binding is the supported
+`sku_management_bid`, plus `sku_inventory_balance`. The binding is the supported
 `SELLER_PORTAL_CANONICAL_SUPPLIER_ID`; `account_scope` is the repo-owned fixed
 `seller-portal-primary`. Production startup fails closed if this binding
 is absent. No multi-account selector or UI is introduced.
@@ -40,6 +40,11 @@ and requested values. The provenance annotation separately records which
 fields were explicitly supplied, preserving omitted-vs-explicit semantics.
 Bid identity is seller/account + nmID + advert_id + placement + `bid_minor`;
 integer zero is valid.
+
+Balance batch is transport grouping only: it prepares one immutable operation,
+item and attempt per atomic target before the shared PATCH. Every operation
+carries `calculation_id`, `apply_job_id` and stable `recommendation_item_id`;
+analytics never treats a transport batch as one intervention.
 
 # 3. Submit, proof and ambiguity
 
@@ -69,7 +74,7 @@ intervals remain separate facts.
 
 # 5. Excluded scope
 
-Excluded: historical import/backfill, public registry API/UI, new WB write
-routes, campaign writers, Balance instrumentation, automatic WB probes,
-deployment-time writes and production-mutation manifests. Balance dry-run
-continues to report `wb_patch_called=false` and creates zero registry rows.
+Excluded: historical import/backfill, campaign-state writers, automatic WB
+probes, deployment-time writes and production-mutation manifests. Balance
+dry-run continues to report `wb_patch_called=false` and creates zero registry
+rows; confirmed live Balance targets use the same immutable proof contract.

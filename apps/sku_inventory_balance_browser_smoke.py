@@ -55,6 +55,7 @@ def main() -> None:
     latest_job: list[dict | None] = [None]
     latest_operation: list[dict | None] = [None]
     operation_status_reads = [0]
+    apply_status_reads = [0]
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -101,8 +102,8 @@ def main() -> None:
                             "registry": _registry(latest_job[0]),
                             "calculation_operation": latest_operation[0],
                             "apply_capability": {
-                                "live_wb_available": False,
-                                "wb_patch_reachable": False,
+                                "live_wb_available": True,
+                                "wb_patch_reachable": True,
                             },
                         }
                     ),
@@ -155,6 +156,14 @@ def main() -> None:
                 return
             if path == base + "/apply-jobs":
                 latest_job[0] = _job("pending", 0)
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(latest_job[0]))
+                return
+            if path == base + "/apply-jobs/ibj_browser":
+                apply_status_reads[0] += 1
+                latest_job[0] = _job(
+                    "running" if apply_status_reads[0] == 1 else "completed",
+                    0 if apply_status_reads[0] == 1 else 2,
+                )
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(latest_job[0]))
                 return
             if path.endswith("/resume"):
@@ -344,12 +353,11 @@ def main() -> None:
         manual_confirmation = page.locator(
             "[data-inventory-balance-confirm-body]"
         ).inner_text()
-        assert "Применить на портале" in page.locator(
+        assert "Изменить вручную на портале" in page.locator(
             "[data-inventory-balance-confirm-title]"
         ).inner_text()
         assert "Реестр будет ждать доказанное изменение 24 часа" in manual_confirmation
-        assert "не выполняет POST/PATCH в WB" in manual_confirmation
-        assert "Подтвердить ожидание 24 часа" in page.locator(
+        assert "Зафиксировать ожидание" in page.locator(
             "[data-inventory-balance-confirm-start]"
         ).inner_text()
         page.locator("[data-inventory-balance-confirm-close]").first.click()
@@ -358,14 +366,14 @@ def main() -> None:
         confirmation = page.locator("[data-inventory-balance-confirm-body]").inner_text()
         normalized_confirmation = confirmation.replace("\xa0", " ")
         assert "Выбрано SKU\n2" in confirmation
-        assert "Точных целей\n2" in confirmation
+        assert "Ставок\n2" in confirmation
         assert "Повышений\n1" in confirmation
         assert "Понижений\n1" in confirmation
         assert "1 000 → 725,25 ₽/1000 показов" in normalized_confirmation
         assert "10 → 15 ₽/клик" in normalized_confirmation
-        assert "Исключено целей без изменения или точного расчёта: 3" in confirmation
-        assert "Недоступных строк текущего фильтра, не включено: 2" in confirmation
-        assert "Только dry-run, ставки WB не изменятся" in confirmation
+        assert "Не включено целей без точного изменения: 3" in confirmation
+        assert "ставки действительно изменятся в WB" in confirmation
+        assert "контрольную ставку" in confirmation
         screenshot_modal_path = os.environ.get(
             "SKU_INVENTORY_BALANCE_SCREENSHOT_MODAL", ""
         ).strip()
@@ -373,10 +381,16 @@ def main() -> None:
             page.screenshot(path=screenshot_modal_path, full_page=True)
         page.locator("[data-inventory-balance-confirm-start]").click()
         page.wait_for_function(
-            "document.querySelector('[data-inventory-balance-progress-summary]') && document.querySelector('[data-inventory-balance-progress-summary]').textContent.includes('100%')"
+            "document.querySelector('[data-inventory-balance-progress]').getAttribute('data-state') === 'running'"
         )
-        assert "succeeded" in page.locator("[data-inventory-balance-progress-body]").inner_text()
-        assert "WB PATCH: нет" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Применяем ставки" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        page.reload()
+        page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-progress]').getAttribute('data-state') === 'completed'"
+        )
+        assert "Применено" in page.locator("[data-inventory-balance-progress-body]").inner_text()
+        assert "2 применено" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         assert page.locator("[data-inventory-balance-progress]").get_attribute("data-state") == "completed"
         assert page.locator("[data-inventory-balance-progress-fill]").get_attribute("style") == "width: 100%;"
         assert page.locator("[data-inventory-balance-progress-spinner]").is_hidden()
@@ -384,7 +398,26 @@ def main() -> None:
         assert "manifest sha256:manifest-browser" in page.locator("[data-inventory-balance-registry-body]").inner_text()
         page.locator("[data-inventory-balance-refresh]").click()
         page.wait_for_timeout(100)
-        assert "100%" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Все ставки применены" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+
+        latest_job[0] = _job("completed_with_errors", 2)
+        page.locator("[data-inventory-balance-refresh]").click()
+        page.wait_for_timeout(100)
+        partial_summary = page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Ставки применены частично" in partial_summary
+        assert "1 применено" in partial_summary
+        assert "1 требует проверки" in partial_summary
+        assert "Требуется проверка" in page.locator(
+            "[data-inventory-balance-progress-body]"
+        ).inner_text()
+
+        latest_job[0] = _job("stalled", 1)
+        page.locator("[data-inventory-balance-refresh]").click()
+        page.wait_for_timeout(100)
+        assert "Процесс приостановлен" in page.locator(
+            "[data-inventory-balance-progress-summary]"
+        ).inner_text()
+        assert page.locator("[data-inventory-balance-progress-resume]").is_visible()
 
         browser.close()
 
@@ -393,7 +426,7 @@ def main() -> None:
     assert override_requests and override_requests[-1][2]["manual_target_bid_rub"] == 725.25
     assert any(item[2]["manual_target_bid_rub"] is None for item in override_requests)
     start_requests = [item for item in requests if item[1].endswith("/apply-jobs")]
-    assert start_requests and start_requests[-1][2]["mode"] == "dry_run"
+    assert start_requests and start_requests[-1][2]["mode"] == "live_wb"
     assert start_requests[-1][2]["confirmed"] is True
     settings_requests = [item for item in requests if item[1].endswith("/inventory-balance/settings")]
     assert settings_requests and settings_requests[-1][2]["table"]["preset"] == "actionable"
@@ -407,6 +440,7 @@ def main() -> None:
     assert calculate_requests[0][2]["operation_id"].startswith("ibop_")
     assert calculate_requests[0][2]["idempotency_key"].startswith("ibkey_")
     assert operation_status_reads[0] >= 2
+    assert apply_status_reads[0] >= 2
     unexpected_console_errors = [
         item for item in console_errors if "ERR_CONNECTION_FAILED" not in item
     ]
@@ -547,6 +581,13 @@ def _calculation() -> dict:
         "formula_version": "sku_inventory_balance_conservative_pace_v2",
         "registry_immutable": True,
         "overrides_are_separate": True,
+        "apply_capability": {
+            "live_wb_available": True,
+            "wb_patch_reachable": True,
+            "batch_size": 10,
+            "canary_required": True,
+            "reload_safe": True,
+        },
         "automatic_ml_or_training": False,
         "lineage": {
             "sales_evidence_window": {"sales_period_days": 7, "date_from": "2026-08-20"},
@@ -679,24 +720,67 @@ def _calculation() -> dict:
 
 def _job(state: str, terminal: int) -> dict:
     total = 2
+    succeeded = state == "completed"
+    partial = state == "completed_with_errors"
+    stalled = state == "stalled"
+    applied = 1 if partial or stalled else terminal
+    needs_check = 1 if partial else 0
     return {
         "job_id": "ibj_browser",
         "calculation_id": "ibc_browser",
-        "mode": "dry_run",
+        "mode": "live_wb",
         "state": state,
         "progress": {
             "total": total,
             "terminal": terminal,
             "percent": int(terminal / total * 100),
             "states": {"pending": total - terminal, "succeeded": terminal},
+            "applied": applied,
+            "verifying": 1 if stalled else 0 if succeeded or partial else total,
+            "waiting": 0,
+            "failed": 0,
+            "needs_check": needs_check,
         },
         "sku_states": [
             {"nm_id": nm_id, "state": "succeeded" if terminal else "pending", "target_count": 1}
             for nm_id in (101, 202)
         ],
-        "items": [],
-        "external_writes": False,
-        "wb_patch_called": False,
+        "items": [
+            {
+                "nm_id": nm_id,
+                "advert_id": advert_id,
+                "campaign_name": campaign,
+                "payment_type": payment,
+                "placement": placement,
+                "current_bid_rub": current,
+                "final_target_bid_rub": target,
+                "state": (
+                    "succeeded"
+                    if succeeded or item_index == 0
+                    else "ambiguous"
+                    if partial
+                    else "delayed"
+                    if stalled
+                    else "verifying"
+                ),
+                "phase": (
+                    "Применено"
+                    if succeeded or item_index == 0
+                    else "Требуется проверка"
+                    if partial
+                    else "WB задерживает подтверждение"
+                    if stalled
+                    else "Проверяем фактические ставки в WB"
+                ),
+                "error": "WB не подтвердил ставку" if partial and item_index == 1 else "",
+            }
+            for item_index, (nm_id, advert_id, campaign, payment, placement, current, target) in enumerate((
+                (101, 8001, "Снижение дефицитной CPM", "cpm", "search", 1000, 725.25),
+                (202, 9202, "Продвижение CPC", "cpc", "search", 10, 15),
+            ))
+        ],
+        "external_writes": True,
+        "wb_patch_called": state != "pending",
     }
 
 
@@ -727,7 +811,7 @@ def _registry(job: dict | None) -> dict:
         jobs.append(
             {
                 "job_id": job["job_id"],
-                "mode": "dry_run",
+                "mode": "live_wb",
                 "state": job["state"],
                 "apply_manifest_digest": "sha256:manifest-browser",
                 "target_count": job["progress"]["total"],
@@ -745,7 +829,7 @@ def _registry(job: dict | None) -> dict:
                 "row_count": 4,
                 "apply_protocols": [
                     {"protocol": "inventory_balance_apply_job/v1", "mode": "dry_run"},
-                    {"protocol": "inventory_balance_live_wb_boundary/v1", "mode": "live_wb", "available": False},
+                    {"protocol": "inventory_balance_live_wb_boundary/v1", "mode": "live_wb", "available": True},
                 ],
                 "apply_jobs": jobs,
             }

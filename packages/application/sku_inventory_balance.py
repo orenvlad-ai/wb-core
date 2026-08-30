@@ -22,7 +22,14 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from packages.application.sku_management import SkuManagementError
+from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.change_registry import ChangeRegistryRepository
+from packages.application.change_registry_writer import (
+    InternalWriterRegistry,
+    InternalWriterRegistryError,
+    PreparedWriterOperation,
+)
+from packages.adapters.wb_promotion import WbPromotionApiError
 from packages.business_time import current_business_date_iso
 
 
@@ -41,6 +48,16 @@ DRY_RUN_MODE = "dry_run"
 LIVE_MODE = "live_wb"
 MANUAL_PENDING_CONTRACT = "change_registry_manual_pending/v1"
 TERMINAL_ITEM_STATES = {"succeeded", "failed", "skipped", "ambiguous"}
+ACTIVE_JOB_STATES = {"pending", "running", "delayed", "stalled"}
+ACTIVE_ITEM_STATES = {
+    "pending",
+    "preflighting",
+    "ready",
+    "submitting",
+    "submitted",
+    "verifying",
+    "delayed",
+}
 SUPPORTED_CAMPAIGN_STATUSES = {4, 9, 11}
 EXCLUSION_POLICY_VERSION = "sku_inventory_balance_exclusions_v1"
 EXCLUDED_NM_IDS = {
@@ -102,13 +119,7 @@ class DryRunInventoryBalanceApplyAdapter:
 
 
 class LiveWbInventoryBalanceApplyAdapter:
-    """Future exact-target adapter; construction alone never enables live writes.
-
-    The adapter deliberately delegates to the incumbent guarded SKU bid
-    preview/commit/readback state machine. It is not wired into the HTTP runtime
-    by this module and refuses every call unless a separate capability provider
-    returns true at call time.
-    """
+    """Balance-owned bulk transport over the incumbent guarded Ads source."""
 
     mode = LIVE_MODE
 
@@ -116,45 +127,54 @@ class LiveWbInventoryBalanceApplyAdapter:
         self,
         *,
         sku_management_block: Any,
-        capability_provider: Callable[[], bool] | None = None,
     ) -> None:
         self.sku_management_block = sku_management_block
-        self.capability_provider = capability_provider or (lambda: False)
 
     @property
     def external_writes_enabled(self) -> bool:
-        return bool(self.capability_provider())
+        ads = getattr(self.sku_management_block, "ads_block", None)
+        safety = getattr(ads, "safety", None)
+        return bool(safety is not None and getattr(safety, "write_enabled", False))
 
     def apply(self, target: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        del target, actor
+        raise SkuInventoryBalanceError(
+            "live Balance jobs use batch preflight/submit/readback, not single apply",
+            http_status=409,
+        )
+
+    def preflight(
+        self,
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        min_bid_interval_seconds: float,
+        sleep: Callable[[float], None],
+    ) -> list[dict[str, Any]]:
         if not self.external_writes_enabled:
             raise SkuInventoryBalanceError(
                 "live WB inventory-balance capability is disabled",
                 http_status=403,
             )
-        preview_payload = self.sku_management_block.preview_bid(
-            {
-                "nm_id": int(target["nm_id"]),
-                "advert_id": int(target["advert_id"]),
-                "placement": str(target["placement"]),
-                "requested_bid_rub": target["final_target_bid_rub"],
-            },
-            actor=actor,
+        return self.sku_management_block.ads_block.preflight_bid_targets(
+            targets,
+            min_bid_interval_seconds=min_bid_interval_seconds,
+            sleep=sleep,
         )
-        preview = dict(preview_payload.get("preview") or {})
-        if not preview.get("preview_id"):
+
+    def submit_batch(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
+        if not self.external_writes_enabled:
             raise SkuInventoryBalanceError(
-                "guarded WB preview did not return preview_id",
-                http_status=409,
+                "live WB inventory-balance capability is disabled",
+                http_status=403,
             )
-        return self.sku_management_block.commit_bid(
-            {
-                "preview_id": preview["preview_id"],
-                "confirmed": True,
-                "stabilization_override": False,
-                "warning_override": False,
-            },
-            actor=actor,
-        )
+        return self.sku_management_block.ads_block.submit_bid_targets(targets)
+
+    def readback(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return self.sku_management_block.ads_block.read_bid_targets(targets)
 
 
 class SkuInventoryBalanceBlock:
@@ -169,8 +189,18 @@ class SkuInventoryBalanceBlock:
         timestamp_factory: Callable[[], str] | None = None,
         apply_adapter: InventoryBalanceApplyAdapter | None = None,
         manual_pending_registry: ChangeRegistryRepository | None = None,
+        writer_registry: InternalWriterRegistry | None = None,
         seller_id: str = "",
         account_scope: str = "seller-portal-primary",
+        live_batch_size: int = 10,
+        min_bid_interval_seconds: float = 3.0,
+        patch_interval_seconds: float = 0.2,
+        readback_initial_delay_seconds: float = 30.0,
+        readback_poll_seconds: float = 5.0,
+        readback_deadline_seconds: float = 90.0,
+        apply_lease_seconds: int = 180,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic_factory: Callable[[], float] = time.monotonic,
     ) -> None:
         self.runtime = runtime
         self.sku_management_block = sku_management_block
@@ -180,18 +210,44 @@ class SkuInventoryBalanceBlock:
         )
         self.apply_adapter = apply_adapter or DryRunInventoryBalanceApplyAdapter()
         self.manual_pending_registry = manual_pending_registry
+        self.writer_registry = writer_registry
         self.seller_id = str(seller_id or "").strip()
         self.account_scope = str(account_scope or "").strip()
-        if self.apply_adapter.mode != DRY_RUN_MODE or self.apply_adapter.external_writes_enabled:
+        self.live_batch_size = min(max(int(live_batch_size), 1), 50)
+        self.min_bid_interval_seconds = max(float(min_bid_interval_seconds), 0.0)
+        self.patch_interval_seconds = max(float(patch_interval_seconds), 0.0)
+        self.readback_initial_delay_seconds = max(
+            float(readback_initial_delay_seconds), 0.0
+        )
+        self.readback_poll_seconds = max(float(readback_poll_seconds), 0.0)
+        self.readback_deadline_seconds = max(float(readback_deadline_seconds), 0.0)
+        self.apply_lease_seconds = max(int(apply_lease_seconds), 30)
+        self.sleep = sleep
+        self.monotonic_factory = monotonic_factory
+        if self.apply_adapter.mode not in {DRY_RUN_MODE, LIVE_MODE}:
             raise SkuInventoryBalanceError(
-                "HTTP inventory-balance runtime accepts only the dry-run adapter",
+                "inventory-balance apply adapter mode is unsupported",
+                http_status=500,
+            )
+        if self.apply_adapter.mode == LIVE_MODE and (
+            not self.apply_adapter.external_writes_enabled
+            or self.writer_registry is None
+            or not self.seller_id
+        ):
+            raise SkuInventoryBalanceError(
+                "live inventory-balance runtime requires enabled Ads writes and registry binding",
                 http_status=500,
             )
         self._calculation_worker_lock = threading.Lock()
         self._calculation_worker_thread: threading.Thread | None = None
         self._calculation_worker_operation_id = ""
+        self._apply_worker_lock = threading.Lock()
+        self._apply_worker_thread: threading.Thread | None = None
+        self._apply_worker_wakeup = threading.Event()
+        self._apply_worker_stop = threading.Event()
         self.ensure_schema()
         self._terminalize_interrupted_calculation_operations()
+        self._start_apply_worker_if_needed()
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:
@@ -329,6 +385,47 @@ class SkuInventoryBalanceBlock:
                    ON sheet_vitrina_v1_inventory_balance_calculations(operation_id)
                    WHERE operation_id IS NOT NULL"""
             )
+            job_columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(sheet_vitrina_v1_inventory_balance_apply_jobs)"
+                ).fetchall()
+            }
+            for name, declaration in (
+                ("phase", "TEXT NOT NULL DEFAULT 'queued'"),
+                ("worker_token", "TEXT NOT NULL DEFAULT ''"),
+                ("lease_expires_at", "TEXT NOT NULL DEFAULT ''"),
+                ("started_at", "TEXT NOT NULL DEFAULT ''"),
+                ("finished_at", "TEXT NOT NULL DEFAULT ''"),
+                ("error_code", "TEXT NOT NULL DEFAULT ''"),
+                ("error_message", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in job_columns:
+                    conn.execute(
+                        "ALTER TABLE sheet_vitrina_v1_inventory_balance_apply_jobs "
+                        f"ADD COLUMN {name} {declaration}"
+                    )
+            item_columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(sheet_vitrina_v1_inventory_balance_apply_items)"
+                ).fetchall()
+            }
+            for name, declaration in (
+                ("phase", "TEXT NOT NULL DEFAULT 'queued'"),
+                ("submit_group", "INTEGER NOT NULL DEFAULT 0"),
+                ("submitted_at", "TEXT NOT NULL DEFAULT ''"),
+                ("readback_deadline_at", "TEXT NOT NULL DEFAULT ''"),
+                ("registry_operation_id", "TEXT NOT NULL DEFAULT ''"),
+                ("registry_receipt_reference", "TEXT NOT NULL DEFAULT ''"),
+                ("error_code", "TEXT NOT NULL DEFAULT ''"),
+                ("last_observed_bid_minor", "INTEGER"),
+            ):
+                if name not in item_columns:
+                    conn.execute(
+                        "ALTER TABLE sheet_vitrina_v1_inventory_balance_apply_items "
+                        f"ADD COLUMN {name} {declaration}"
+                    )
             conn.commit()
 
     def get_settings(self, *, user_key: str) -> dict[str, Any]:
@@ -1075,10 +1172,17 @@ class SkuInventoryBalanceBlock:
         if payload.get("confirmed") is not True:
             raise SkuInventoryBalanceError("explicit confirmation is required", http_status=409)
         requested_mode = str(payload.get("mode") or DRY_RUN_MODE)
-        if requested_mode != DRY_RUN_MODE:
+        if requested_mode not in {DRY_RUN_MODE, LIVE_MODE}:
             raise SkuInventoryBalanceError(
-                "live WB apply is unavailable; only dry_run is accepted",
-                http_status=403,
+                "unsupported inventory-balance apply mode", http_status=422
+            )
+        if requested_mode == LIVE_MODE and (
+            self.apply_adapter.mode != LIVE_MODE
+            or not self.apply_adapter.external_writes_enabled
+            or self.writer_registry is None
+        ):
+            raise SkuInventoryBalanceError(
+                "live WB inventory-balance apply is unavailable", http_status=503
             )
         calculation = self.get_calculation(calculation_id)
         selected_nm_ids = {
@@ -1114,10 +1218,14 @@ class SkuInventoryBalanceBlock:
                     "nm_id": int(item["nm_id"]),
                     "advert_id": int(item["advert_id"]),
                     "placement": str(item["placement"]),
+                    "payment_type": str(item.get("payment_type") or ""),
                     "current_bid_rub": item.get("current_bid_rub"),
+                    "current_bid_minor": int(item["current_bid_minor"]),
                     "calculated_target_bid_rub": item.get("calculated_target_bid_rub"),
                     "manual_target_bid_rub": item.get("manual_target_bid_rub"),
                     "final_target_bid_rub": item.get("final_target_bid_rub"),
+                    "final_target_bid_minor": int(item["final_target_bid_minor"]),
+                    "recommendation_item_id": str(item["recommendation_item_id"]),
                     "override_updated_at": item.get("override_updated_at") or "",
                 }
                 for item in targets
@@ -1127,9 +1235,11 @@ class SkuInventoryBalanceBlock:
         apply_manifest = {
             "contract_name": "sheet_vitrina_v1_inventory_balance_apply_manifest/v1",
             "calculation_id": calculation_id,
-            "mode": DRY_RUN_MODE,
+            "mode": requested_mode,
             "targets": manifest_targets,
-            "external_writes": False,
+            "external_writes": requested_mode == LIVE_MODE,
+            "batch_size": self.live_batch_size if requested_mode == LIVE_MODE else 0,
+            "canary_required": requested_mode == LIVE_MODE,
         }
         manifest_digest = _digest(apply_manifest)
         idempotency_key = manifest_digest
@@ -1147,7 +1257,7 @@ class SkuInventoryBalanceBlock:
             "unchanged_count": sum(
                 1 for item in targets if float(item["final_target_bid_rub"]) == float(item["current_bid_rub"])
             ),
-            "external_writes": False,
+            "external_writes": requested_mode == LIVE_MODE,
         }
         with self._connect() as conn:
             existing = conn.execute(
@@ -1155,7 +1265,10 @@ class SkuInventoryBalanceBlock:
                 (idempotency_key,),
             ).fetchone()
             if existing is not None:
-                return self.get_apply_job(str(existing["job_id"]))
+                existing_job_id = str(existing["job_id"])
+                if requested_mode == LIVE_MODE:
+                    self._start_apply_worker_if_needed()
+                return self.get_apply_job(existing_job_id)
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_inventory_balance_apply_jobs(
                        job_id,calculation_id,mode,state,idempotency_key,
@@ -1165,7 +1278,7 @@ class SkuInventoryBalanceBlock:
                 (
                     job_id,
                     calculation_id,
-                    DRY_RUN_MODE,
+                    requested_mode,
                     "pending",
                     idempotency_key,
                     manifest_digest,
@@ -1192,6 +1305,8 @@ class SkuInventoryBalanceBlock:
                     ),
                 )
             conn.commit()
+        if requested_mode == LIVE_MODE:
+            self._start_apply_worker_if_needed()
         return self.get_apply_job(job_id)
 
     def start_manual_pending(
@@ -1256,6 +1371,30 @@ class SkuInventoryBalanceBlock:
         return receipt
 
     def resume_apply(self, job_id: str, *, actor: str, limit: int = 10) -> dict[str, Any]:
+        existing = self.get_apply_job(job_id)
+        if existing["mode"] == LIVE_MODE:
+            if existing["state"] == "stalled":
+                now = self.timestamp_factory()
+                with self._connect() as conn:
+                    resumed = conn.execute(
+                        """UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs
+                           SET state='running',phase='resume_requested',error_code='',
+                               error_message='',worker_token='',lease_expires_at='',updated_at=?
+                           WHERE job_id=? AND (
+                               state='stalled'
+                               OR (state IN ('pending','running','delayed')
+                                   AND (lease_expires_at='' OR lease_expires_at<?))
+                           )""",
+                        (now, job_id, now),
+                    ).rowcount
+                    conn.commit()
+                if resumed != 1:
+                    raise SkuInventoryBalanceError(
+                        "live apply job is active under a valid worker lease",
+                        http_status=409,
+                    )
+            self._start_apply_worker_if_needed()
+            return self.get_apply_job(job_id)
         limit = min(max(int(limit), 1), 50)
         self._terminalize_stale_running_items(job_id)
         for _ in range(limit):
@@ -1293,7 +1432,7 @@ class SkuInventoryBalanceBlock:
                 conn.commit()
             target = json.loads(str(item["target_json"]))
             try:
-                result = self.apply_adapter.apply(target, actor=actor)
+                result = DryRunInventoryBalanceApplyAdapter().apply(target, actor=actor)
                 if result.get("wb_patch_called") is not False:
                     raise SkuInventoryBalanceError("dry-run adapter did not prove no WB PATCH")
                 state, error = "succeeded", ""
@@ -1311,6 +1450,895 @@ class SkuInventoryBalanceBlock:
         self._refresh_job_state(job_id)
         return self.get_apply_job(job_id)
 
+    def _start_apply_worker_if_needed(self) -> bool:
+        if self.apply_adapter.mode != LIVE_MODE:
+            return False
+        with self._apply_worker_lock:
+            active = self._apply_worker_thread
+            if active is not None and active.is_alive():
+                self._apply_worker_wakeup.set()
+                return True
+            worker = threading.Thread(
+                target=self._apply_worker_loop,
+                name="sku-inventory-balance-live-apply",
+                daemon=True,
+            )
+            self._apply_worker_thread = worker
+            worker.start()
+            return True
+
+    def _apply_worker_loop(self) -> None:
+        try:
+            while not self._apply_worker_stop.is_set():
+                claimed = self._claim_next_live_job()
+                if claimed:
+                    job_id, worker_token = claimed
+                    try:
+                        self._run_live_job(job_id, worker_token)
+                    except Exception as exc:  # final worker containment
+                        self._mark_job_worker_error(job_id, worker_token, exc)
+                    continue
+                if not self._has_active_live_jobs():
+                    break
+                self._apply_worker_wakeup.wait(timeout=1.0)
+                self._apply_worker_wakeup.clear()
+        finally:
+            with self._apply_worker_lock:
+                self._apply_worker_thread = None
+
+    def _claim_next_live_job(self) -> tuple[str, str] | None:
+        now = self.timestamp_factory()
+        lease_until = (
+            self.now_factory().astimezone(timezone.utc)
+            + timedelta(seconds=self.apply_lease_seconds)
+        ).isoformat()
+        token = f"ibw_{uuid4().hex}"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT job_id FROM sheet_vitrina_v1_inventory_balance_apply_jobs
+                   WHERE mode=? AND state IN ('pending','running','delayed')
+                     AND (worker_token='' OR lease_expires_at='' OR lease_expires_at<?)
+                   ORDER BY created_at,job_id LIMIT 1""",
+                (LIVE_MODE, now),
+            ).fetchone()
+            if row is None:
+                conn.commit()
+                return None
+            job_id = str(row["job_id"])
+            updated = conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs
+                   SET worker_token=?,lease_expires_at=?,state='running',
+                       phase=CASE WHEN phase='' OR phase='queued' THEN 'preflight' ELSE phase END,
+                       started_at=CASE WHEN started_at='' THEN ? ELSE started_at END,
+                       updated_at=?
+                   WHERE job_id=? AND (worker_token='' OR lease_expires_at='' OR lease_expires_at<?)""",
+                (token, lease_until, now, now, job_id, now),
+            ).rowcount
+            conn.commit()
+        return (job_id, token) if updated == 1 else None
+
+    def _has_active_live_jobs(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM sheet_vitrina_v1_inventory_balance_apply_jobs
+                   WHERE mode=? AND state IN ('pending','running','delayed') LIMIT 1""",
+                (LIVE_MODE,),
+            ).fetchone()
+        return row is not None
+
+    def _renew_job_lease(
+        self, job_id: str, worker_token: str, *, phase: str
+    ) -> None:
+        now = self.timestamp_factory()
+        lease_until = (
+            self.now_factory().astimezone(timezone.utc)
+            + timedelta(seconds=self.apply_lease_seconds)
+        ).isoformat()
+        with self._connect() as conn:
+            updated = conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs
+                   SET lease_expires_at=?,phase=?,updated_at=?
+                   WHERE job_id=? AND worker_token=?""",
+                (lease_until, phase, now, job_id, worker_token),
+            ).rowcount
+            conn.commit()
+        if updated != 1:
+            raise SkuInventoryBalanceError("live apply worker lease was lost")
+
+    def _release_job_lease(self, job_id: str, worker_token: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs
+                   SET worker_token='',lease_expires_at='',updated_at=?
+                   WHERE job_id=? AND worker_token=?""",
+                (self.timestamp_factory(), job_id, worker_token),
+            )
+            conn.commit()
+
+    def _run_live_job(self, job_id: str, worker_token: str) -> None:
+        self._recover_uncertain_submit_items(job_id)
+        active_uncertain = self._load_job_items(
+            job_id, states={"submitting", "submitted", "verifying", "delayed"}
+        )
+        if active_uncertain:
+            self._renew_job_lease(job_id, worker_token, phase="verifying")
+            self._verify_live_targets(
+                job_id, worker_token, active_uncertain, wait_initial=False
+            )
+
+        pending = self._load_job_items(
+            job_id, states={"pending", "preflighting", "ready"}
+        )
+        if pending:
+            self._renew_job_lease(job_id, worker_token, phase="preflight")
+            self._set_item_states(
+                job_id,
+                [item["target_key"] for item in pending],
+                state="preflighting",
+                phase="Проверяем текущие и минимальные ставки",
+            )
+            preflight = self.apply_adapter.preflight(
+                [self._transport_target(item) for item in pending],
+                min_bid_interval_seconds=self.min_bid_interval_seconds,
+                sleep=lambda seconds: self._sleep_with_lease(
+                    job_id, worker_token, seconds, phase="preflight"
+                ),
+            )
+            self._renew_job_lease(job_id, worker_token, phase="preflight_result")
+            for result in preflight:
+                if result.get("ok"):
+                    self._update_item(
+                        job_id,
+                        str(result["target_key"]),
+                        state="ready",
+                        phase="Готово к применению",
+                        result={"preflight": _public_preflight_result(result)},
+                    )
+                else:
+                    self._update_item(
+                        job_id,
+                        str(result["target_key"]),
+                        state="failed",
+                        phase="Не применено",
+                        error_code=str(result.get("error_code") or "preflight_failed"),
+                        error=str(result.get("message") or "Проверка перед применением не пройдена."),
+                        result={"preflight": _public_preflight_result(result)},
+                    )
+
+        succeeded = self._load_job_items(job_id, states={"succeeded"})
+        ready = self._load_job_items(job_id, states={"ready"})
+        if ready and not succeeded:
+            canary = [ready[0]]
+            self._renew_job_lease(job_id, worker_token, phase="canary_submit")
+            submitted = self._submit_live_group(
+                job_id, worker_token, canary, group_no=1
+            )
+            if submitted:
+                self._renew_job_lease(
+                    job_id, worker_token, phase="canary_verifying"
+                )
+                self._verify_live_targets(
+                    job_id, worker_token, submitted, wait_initial=True
+                )
+            canary_result = self._load_job_items(
+                job_id, target_keys=[canary[0]["target_key"]]
+            )[0]
+            if canary_result["state"] != "succeeded":
+                remaining = self._load_job_items(job_id, states={"ready"})
+                self._set_item_states(
+                    job_id,
+                    [item["target_key"] for item in remaining],
+                    state="skipped",
+                    phase="Не отправлено: контрольная ставка не подтверждена",
+                    error_code="canary_not_confirmed",
+                    error="Остальные ставки не отправлены: контрольное изменение не подтверждено.",
+                )
+                self._refresh_job_state(job_id)
+                self._release_job_lease(job_id, worker_token)
+                return
+
+        ready = self._load_job_items(job_id, states={"ready"})
+        group_no = 2
+        submitted_all: list[dict[str, Any]] = []
+        for offset in range(0, len(ready), self.live_batch_size):
+            batch = ready[offset : offset + self.live_batch_size]
+            self._renew_job_lease(job_id, worker_token, phase="batch_submit")
+            submitted_all.extend(
+                self._submit_live_group(
+                    job_id, worker_token, batch, group_no=group_no
+                )
+            )
+            group_no += 1
+            if offset + self.live_batch_size < len(ready) and self.patch_interval_seconds:
+                self._sleep_with_lease(
+                    job_id,
+                    worker_token,
+                    self.patch_interval_seconds,
+                    phase="batch_submit",
+                )
+        if submitted_all:
+            self._renew_job_lease(job_id, worker_token, phase="batch_verifying")
+            self._verify_live_targets(
+                job_id, worker_token, submitted_all, wait_initial=True
+            )
+        self._refresh_job_state(job_id)
+        self._release_job_lease(job_id, worker_token)
+
+    def _recover_uncertain_submit_items(self, job_id: str) -> None:
+        items = self._load_job_items(job_id, states={"submitting"})
+        for item in items:
+            prepared = self._prepared_from_item(item)
+            if prepared is not None:
+                try:
+                    self.writer_registry.ambiguous(
+                        prepared,
+                        error_code="worker_interrupted_at_submit",
+                        error_message="Worker был прерван на границе отправки; повтор запрещён.",
+                        receipt_reference=item["registry_receipt_reference"],
+                    )
+                except InternalWriterRegistryError:
+                    pass
+            self._update_item(
+                job_id,
+                item["target_key"],
+                state="verifying",
+                phase="Проверяем результат после перезапуска",
+                error_code="worker_interrupted_at_submit",
+                error="Отправка могла состояться; выполняется только проверка.",
+            )
+
+    def _submit_live_group(
+        self,
+        job_id: str,
+        worker_token: str,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        group_no: int,
+    ) -> list[dict[str, Any]]:
+        if not items:
+            return []
+        job = self._job_row(job_id)
+        prepared_by_key: dict[str, PreparedWriterOperation] = {}
+        try:
+            for item in items:
+                target = self._transport_target(item)
+                receipt = f"inventory-balance:{job_id}:{target['target_key']}"
+                prepared = self._prepared_from_item(item)
+                if prepared is None:
+                    prepared = self.writer_registry.prepare_bid(
+                        source_surface="sku_inventory_balance",
+                        actor=str(job["created_by"]),
+                        native_operation_id=f"{job_id}:{target['target_key']}",
+                        nm_id=int(target["nm_id"]),
+                        advert_id=int(target["advert_id"]),
+                        placement=str(target["placement"]),
+                        before_bid_minor=int(target["current_bid_minor"]),
+                        requested_bid_minor=int(target["requested_bid_minor"]),
+                        requested_at=str(job["created_at"]),
+                        correlation_id=job_id,
+                        calculation_id=str(job["calculation_id"]),
+                        apply_operation_id=job_id,
+                        recommendation_item_id=str(target["recommendation_item_id"]),
+                        native_audit_reference=f"inventory-balance/apply-job/{job_id}",
+                    )
+                prepared_by_key[target["target_key"]] = prepared
+                self._update_item(
+                    job_id,
+                    target["target_key"],
+                    state="ready",
+                    phase="Зарегистрировано перед отправкой",
+                    registry_operation_id=prepared.operation_id,
+                    registry_receipt_reference=receipt,
+                )
+        except Exception as exc:
+            for key, prepared in prepared_by_key.items():
+                try:
+                    self.writer_registry.fail_before_submit(
+                        prepared,
+                        rejected=False,
+                        error_code="batch_registry_prepare_failed",
+                        error_message=str(exc),
+                    )
+                except Exception:
+                    pass
+                self._update_item(
+                    job_id,
+                    key,
+                    state="failed",
+                    phase="Не применено",
+                    error_code="registry_prepare_failed",
+                    error="Не удалось надёжно зарегистрировать изменение до отправки.",
+                )
+            for item in items:
+                key = str(item["target_key"])
+                if key not in prepared_by_key:
+                    self._update_item(
+                        job_id,
+                        key,
+                        state="failed",
+                        phase="Не применено",
+                        error_code="registry_prepare_failed",
+                        error="Пакет остановлен до отправки из-за ошибки реестра.",
+                    )
+            return []
+
+        keys = [str(item["target_key"]) for item in items]
+        self._set_item_states(
+            job_id,
+            keys,
+            state="submitting",
+            phase="Отправляем в WB",
+            submit_group=group_no,
+        )
+        transport_targets = [self._transport_target(item) for item in items]
+        response: Mapping[str, Any] = {}
+        for attempt in range(2):
+            try:
+                response = self.apply_adapter.submit_batch(transport_targets)
+            except WbPromotionApiError as exc:
+                self._renew_job_lease(
+                    job_id, worker_token, phase="submit_error_received"
+                )
+                if exc.http_status == 429 and attempt == 0:
+                    delay = max(float(exc.retry_after_seconds or 1.0), 0.0)
+                    self._set_item_states(
+                        job_id,
+                        keys,
+                        state="delayed",
+                        phase="WB ограничил частоту, ждём безопасное повторение",
+                        error_code="wb_rate_limited",
+                        error="WB временно ограничил частоту запросов.",
+                    )
+                    if delay:
+                        self._sleep_with_lease(
+                            job_id, worker_token, delay, phase="wb_rate_limited"
+                        )
+                    self._set_item_states(
+                        job_id, keys, state="submitting", phase="Повторяем после лимита"
+                    )
+                    continue
+                if exc.http_status is not None and exc.http_status < 500:
+                    self._reject_pre_submit_group(
+                        job_id, items, prepared_by_key, exc
+                    )
+                    return []
+                self._mark_submit_ambiguous(
+                    job_id, items, prepared_by_key, exc, group_no=group_no
+                )
+                return self._load_job_items(job_id, target_keys=keys)
+            except (SheetVitrinaV1AdsError, SkuManagementError) as exc:
+                self._renew_job_lease(
+                    job_id, worker_token, phase="submit_rejected_locally"
+                )
+                self._fail_local_pre_submit_group(
+                    job_id, items, prepared_by_key, exc
+                )
+                return []
+            except Exception as exc:
+                self._renew_job_lease(
+                    job_id, worker_token, phase="submit_error_received"
+                )
+                self._mark_submit_ambiguous(
+                    job_id, items, prepared_by_key, exc, group_no=group_no
+                )
+                return self._load_job_items(job_id, target_keys=keys)
+            else:
+                self._renew_job_lease(
+                    job_id, worker_token, phase="submit_response_received"
+                )
+                break
+        else:
+            return []
+
+        submitted_at = self.timestamp_factory()
+        deadline_at = (
+            self.now_factory().astimezone(timezone.utc)
+            + timedelta(seconds=self.readback_deadline_seconds)
+        ).isoformat()
+        receipt_digest = _digest(
+            {
+                "job_id": job_id,
+                "submit_group": group_no,
+                "target_keys": keys,
+                "response": dict(response),
+            }
+        )
+        for item in items:
+            key = str(item["target_key"])
+            receipt = f"inventory-balance:{job_id}:{key}"
+            try:
+                self.writer_registry.submitted(
+                    prepared_by_key[key],
+                    receipt_reference=receipt,
+                    receipt_basis={
+                        "job_id": job_id,
+                        "submit_group": group_no,
+                        "target_key": key,
+                        "transport_receipt_digest": receipt_digest,
+                    },
+                )
+            except InternalWriterRegistryError as exc:
+                try:
+                    self.writer_registry.ambiguous(
+                        prepared_by_key[key],
+                        error_code="registry_post_submit_failure",
+                        error_message=str(exc),
+                        receipt_reference=receipt,
+                    )
+                except InternalWriterRegistryError:
+                    pass
+            self._update_item(
+                job_id,
+                key,
+                state="submitted",
+                phase="Отправлено, ожидаем подтверждение WB",
+                submitted_at=submitted_at,
+                readback_deadline_at=deadline_at,
+                result={"transport_receipt_digest": receipt_digest},
+                error_code="",
+                error="",
+            )
+        return self._load_job_items(job_id, target_keys=keys)
+
+    def _reject_pre_submit_group(
+        self,
+        job_id: str,
+        items: Sequence[Mapping[str, Any]],
+        prepared_by_key: Mapping[str, PreparedWriterOperation],
+        exc: WbPromotionApiError,
+    ) -> None:
+        code = f"wb_http_{exc.http_status}"
+        for item in items:
+            key = str(item["target_key"])
+            try:
+                self.writer_registry.fail_before_submit(
+                    prepared_by_key[key],
+                    rejected=True,
+                    error_code=code,
+                    error_message=str(exc),
+                )
+            except InternalWriterRegistryError:
+                pass
+            self._update_item(
+                job_id,
+                key,
+                state="failed",
+                phase="WB отклонил изменение",
+                error_code=code,
+                error="WB отклонил пакет до применения.",
+            )
+
+    def _fail_local_pre_submit_group(
+        self,
+        job_id: str,
+        items: Sequence[Mapping[str, Any]],
+        prepared_by_key: Mapping[str, PreparedWriterOperation],
+        exc: Exception,
+    ) -> None:
+        for item in items:
+            key = str(item["target_key"])
+            try:
+                self.writer_registry.fail_before_submit(
+                    prepared_by_key[key],
+                    rejected=False,
+                    error_code="local_submit_guard",
+                    error_message=str(exc),
+                )
+            except InternalWriterRegistryError:
+                pass
+            self._update_item(
+                job_id,
+                key,
+                state="failed",
+                phase="Не применено",
+                error_code="local_submit_guard",
+                error="Локальная проверка остановила отправку до обращения к WB.",
+            )
+
+    def _mark_submit_ambiguous(
+        self,
+        job_id: str,
+        items: Sequence[Mapping[str, Any]],
+        prepared_by_key: Mapping[str, PreparedWriterOperation],
+        exc: Exception,
+        *,
+        group_no: int,
+    ) -> None:
+        submitted_at = self.timestamp_factory()
+        deadline_at = (
+            self.now_factory().astimezone(timezone.utc)
+            + timedelta(seconds=self.readback_deadline_seconds)
+        ).isoformat()
+        for item in items:
+            key = str(item["target_key"])
+            receipt = f"inventory-balance:{job_id}:{key}"
+            try:
+                self.writer_registry.ambiguous(
+                    prepared_by_key[key],
+                    error_code="wb_submit_transport_unknown",
+                    error_message=str(exc),
+                    receipt_reference=receipt,
+                )
+            except InternalWriterRegistryError:
+                pass
+            self._update_item(
+                job_id,
+                key,
+                state="verifying",
+                phase="Ответ WB неясен, проверяем фактическую ставку",
+                submit_group=group_no,
+                submitted_at=submitted_at,
+                readback_deadline_at=deadline_at,
+                error_code="wb_submit_transport_unknown",
+                error="Ответ WB не подтверждает результат; повторная отправка запрещена.",
+            )
+
+    def _verify_live_targets(
+        self,
+        job_id: str,
+        worker_token: str,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        wait_initial: bool,
+    ) -> None:
+        keys = [str(item["target_key"]) for item in items]
+        if wait_initial and self.readback_initial_delay_seconds:
+            self._set_item_states(
+                job_id,
+                keys,
+                state="delayed",
+                phase="WB синхронизирует ставки, ожидаем проверку",
+            )
+            self._sleep_with_lease(
+                job_id,
+                worker_token,
+                self.readback_initial_delay_seconds,
+                phase="waiting_for_wb_sync",
+            )
+        while True:
+            current = self._load_job_items(
+                job_id,
+                target_keys=keys,
+                states={"submitting", "submitted", "verifying", "delayed"},
+            )
+            if not current:
+                return
+            self._renew_job_lease(job_id, worker_token, phase="readback")
+            self._set_item_states(
+                job_id,
+                [item["target_key"] for item in current],
+                state="verifying",
+                phase="Проверяем фактические ставки в WB",
+            )
+            try:
+                readbacks = self.apply_adapter.readback(
+                    [self._transport_target(item) for item in current]
+                )
+            except Exception as exc:
+                readbacks = [
+                    {
+                        **self._transport_target(item),
+                        "ok": False,
+                        "error_code": "readback_unavailable",
+                        "message": str(exc),
+                        "observed_bid_minor": None,
+                    }
+                    for item in current
+                ]
+            self._renew_job_lease(
+                job_id, worker_token, phase="readback_received"
+            )
+            by_key = {str(item["target_key"]): item for item in readbacks}
+            now = self.now_factory().astimezone(timezone.utc)
+            pending: list[dict[str, Any]] = []
+            for item in current:
+                key = str(item["target_key"])
+                result = by_key.get(key) or {}
+                observed = _optional_int(result.get("observed_bid_minor"))
+                requested = int(self._transport_target(item)["requested_bid_minor"])
+                if result.get("ok") and observed == requested:
+                    prepared = self._prepared_from_item(item)
+                    if prepared is None:
+                        self._update_item(
+                            job_id,
+                            key,
+                            state="ambiguous",
+                            phase="Требуется проверка",
+                            error_code="registry_operation_missing",
+                            error="Ставка совпала, но связь с реестром не восстановлена.",
+                            last_observed_bid_minor=observed,
+                        )
+                        continue
+                    try:
+                        self.writer_registry.confirm_bid(
+                            prepared,
+                            confirmed_bid_minor=observed,
+                            readback_basis={
+                                "job_id": job_id,
+                                "calculation_id": str(self._job_row(job_id)["calculation_id"]),
+                                "recommendation_item_id": str(
+                                    self._transport_target(item)["recommendation_item_id"]
+                                ),
+                                "nm_id": int(item["nm_id"]),
+                                "advert_id": int(self._transport_target(item)["advert_id"]),
+                                "placement": str(self._transport_target(item)["placement"]),
+                                "bid_minor": observed,
+                            },
+                            receipt_reference=str(item["registry_receipt_reference"]),
+                            native_audit_references=(
+                                f"inventory-balance/apply-job/{job_id}",
+                            ),
+                        )
+                    except InternalWriterRegistryError as exc:
+                        self._update_item(
+                            job_id,
+                            key,
+                            state="ambiguous",
+                            phase="Требуется проверка",
+                            error_code="registry_confirmation_failed",
+                            error="Ставка применена, но подтверждение реестра не завершено.",
+                            last_observed_bid_minor=observed,
+                            result={"registry_error": str(exc)},
+                        )
+                        continue
+                    self._persist_confirmed_bid_event(job_id, item, observed)
+                    self._update_item(
+                        job_id,
+                        key,
+                        state="succeeded",
+                        phase="Применено",
+                        error_code="",
+                        error="",
+                        last_observed_bid_minor=observed,
+                        result={"readback_status": "matching", "confirmed_bid_minor": observed},
+                    )
+                    continue
+                deadline = _parse_timestamp(str(item.get("readback_deadline_at") or ""))
+                if deadline is None:
+                    deadline = now + timedelta(seconds=self.readback_deadline_seconds)
+                if now >= deadline:
+                    prepared = self._prepared_from_item(item)
+                    if prepared is not None:
+                        try:
+                            self.writer_registry.ambiguous(
+                                prepared,
+                                error_code="wb_readback_unconfirmed",
+                                error_message="Exact readback did not confirm the requested bid before deadline.",
+                                receipt_reference=str(item["registry_receipt_reference"]),
+                            )
+                        except InternalWriterRegistryError:
+                            pass
+                    self._update_item(
+                        job_id,
+                        key,
+                        state="ambiguous",
+                        phase="Требуется проверка",
+                        error_code=str(result.get("error_code") or "wb_readback_unconfirmed"),
+                        error="WB не подтвердил рекомендованную ставку в отведённое время.",
+                        last_observed_bid_minor=observed,
+                    )
+                else:
+                    self._update_item(
+                        job_id,
+                        key,
+                        state="delayed",
+                        phase="WB задерживает подтверждение, продолжаем проверку",
+                        error_code=str(result.get("error_code") or ""),
+                        error="" if result.get("ok") else "Проверка временно недоступна.",
+                        last_observed_bid_minor=observed,
+                    )
+                    pending.append(item)
+            if not pending:
+                return
+            if self.readback_poll_seconds:
+                self._sleep_with_lease(
+                    job_id,
+                    worker_token,
+                    self.readback_poll_seconds,
+                    phase="readback",
+                )
+
+    def _sleep_with_lease(
+        self,
+        job_id: str,
+        worker_token: str,
+        seconds: float,
+        *,
+        phase: str,
+    ) -> None:
+        remaining = max(float(seconds), 0.0)
+        slice_seconds = max(min(self.apply_lease_seconds / 3.0, 30.0), 1.0)
+        while remaining > 0:
+            delay = min(remaining, slice_seconds)
+            self.sleep(delay)
+            remaining -= delay
+            self._renew_job_lease(job_id, worker_token, phase=phase)
+
+    def _persist_confirmed_bid_event(
+        self, job_id: str, item: Mapping[str, Any], confirmed_minor: int
+    ) -> None:
+        try:
+            target = self._transport_target(item)
+            job = self._job_row(job_id)
+            self.sku_management_block.persist_balance_bid_result(
+                job_id=job_id,
+                calculation_id=str(job["calculation_id"]),
+                actor=str(job["created_by"]),
+                target=target,
+                confirmed_bid_minor=confirmed_minor,
+                requested_at=str(job["created_at"]),
+                confirmed_at=self.timestamp_factory(),
+            )
+        except Exception as exc:
+            _LOGGER.warning("balance apply native event persistence failed: %s", exc)
+
+    def _prepared_from_item(
+        self, item: Mapping[str, Any]
+    ) -> PreparedWriterOperation | None:
+        operation_id = str(item.get("registry_operation_id") or "")
+        if not operation_id or self.writer_registry is None:
+            return None
+        try:
+            stored = self.writer_registry.repository.read_operation(operation_id)
+        except Exception:
+            return None
+        operation = stored["operation"]
+        change_item_ids = {
+            ":".join(
+                (
+                    str(value["target_kind"]),
+                    str(value["nm_id"]),
+                    str(value["advert_id"]),
+                    str(value["placement"]),
+                    str(value["parameter_field"]),
+                )
+            ): str(value["change_item_id"])
+            for value in stored["items"]
+        }
+        return PreparedWriterOperation(
+            operation_id=operation_id,
+            change_item_ids=change_item_ids,
+            source_surface=str(operation["source_surface"]),
+            native_operation_id=str(operation["native_idempotency_key"]),
+        )
+
+    def _transport_target(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        target = json.loads(str(item["target_json"])) if "target_json" in item else dict(item)
+        return {
+            **target,
+            "target_key": str(target["target_key"]),
+            "nm_id": int(target["nm_id"]),
+            "advert_id": int(target["advert_id"]),
+            "placement": str(target["placement"]),
+            "current_bid_minor": int(target["current_bid_minor"]),
+            "requested_bid_minor": int(target["final_target_bid_minor"]),
+            "recommendation_item_id": str(target["recommendation_item_id"]),
+        }
+
+    def _job_row(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_inventory_balance_apply_jobs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise SkuInventoryBalanceError("inventory balance apply job not found", http_status=404)
+        return dict(row)
+
+    def _load_job_items(
+        self,
+        job_id: str,
+        *,
+        states: set[str] | None = None,
+        target_keys: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = ["job_id=?"]
+        params: list[Any] = [job_id]
+        if states:
+            conditions.append("state IN (%s)" % ",".join("?" for _ in states))
+            params.extend(sorted(states))
+        if target_keys:
+            conditions.append("target_key IN (%s)" % ",".join("?" for _ in target_keys))
+            params.extend(str(value) for value in target_keys)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_inventory_balance_apply_items WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY target_key",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _set_item_states(
+        self,
+        job_id: str,
+        target_keys: Sequence[str],
+        *,
+        state: str,
+        phase: str,
+        error_code: str | None = None,
+        error: str | None = None,
+        submit_group: int | None = None,
+    ) -> None:
+        for key in target_keys:
+            self._update_item(
+                job_id,
+                str(key),
+                state=state,
+                phase=phase,
+                error_code=error_code,
+                error=error,
+                submit_group=submit_group,
+            )
+
+    def _update_item(
+        self,
+        job_id: str,
+        target_key: str,
+        *,
+        state: str | None = None,
+        phase: str | None = None,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        error: str | None = None,
+        submit_group: int | None = None,
+        submitted_at: str | None = None,
+        readback_deadline_at: str | None = None,
+        registry_operation_id: str | None = None,
+        registry_receipt_reference: str | None = None,
+        last_observed_bid_minor: int | None = None,
+    ) -> None:
+        assignments = ["updated_at=?"]
+        params: list[Any] = [self.timestamp_factory()]
+        values = {
+            "state": state,
+            "phase": phase,
+            "result_json": _json(result) if result is not None else None,
+            "error_code": error_code,
+            "error": error,
+            "submit_group": submit_group,
+            "submitted_at": submitted_at,
+            "readback_deadline_at": readback_deadline_at,
+            "registry_operation_id": registry_operation_id,
+            "registry_receipt_reference": registry_receipt_reference,
+            "last_observed_bid_minor": last_observed_bid_minor,
+        }
+        for column, value in values.items():
+            if value is None:
+                continue
+            assignments.append(f"{column}=?")
+            params.append(value)
+        params.extend((job_id, target_key))
+        with self._connect() as conn:
+            updated = conn.execute(
+                "UPDATE sheet_vitrina_v1_inventory_balance_apply_items SET "
+                + ",".join(assignments)
+                + " WHERE job_id=? AND target_key=?",
+                params,
+            ).rowcount
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs SET updated_at=? WHERE job_id=?",
+                (self.timestamp_factory(), job_id),
+            )
+            conn.commit()
+        if updated != 1:
+            raise SkuInventoryBalanceError("inventory balance apply item not found")
+
+    def _mark_job_worker_error(
+        self, job_id: str, worker_token: str, exc: Exception
+    ) -> None:
+        now = self.timestamp_factory()
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs
+                   SET state='stalled',phase='worker_error',error_code='worker_error',
+                       error_message=?,worker_token='',lease_expires_at='',updated_at=?
+                   WHERE job_id=? AND worker_token=?""",
+                (_bounded_error(exc), now, job_id, worker_token),
+            )
+            conn.commit()
+
     def get_apply_job(self, job_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             job = conn.execute(
@@ -1324,7 +2352,23 @@ class SkuInventoryBalanceBlock:
                    WHERE job_id=? ORDER BY nm_id,target_key""",
                 (job_id,),
             ).fetchall()
-        states = {state: 0 for state in ("pending", "running", "succeeded", "failed", "skipped", "ambiguous")}
+        states = {
+            state: 0
+            for state in (
+                "pending",
+                "preflighting",
+                "ready",
+                "submitting",
+                "submitted",
+                "verifying",
+                "delayed",
+                "running",
+                "succeeded",
+                "failed",
+                "skipped",
+                "ambiguous",
+            )
+        }
         payload_items = []
         by_nm: dict[int, list[str]] = {}
         for item in items:
@@ -1338,6 +2382,14 @@ class SkuInventoryBalanceBlock:
                     "state": state,
                     "attempt_count": int(item["attempt_count"]),
                     "result": json.loads(str(item["result_json"] or "{}")),
+                    "phase": str(item["phase"] or ""),
+                    "submit_group": int(item["submit_group"] or 0),
+                    "submitted_at": str(item["submitted_at"] or ""),
+                    "readback_deadline_at": str(item["readback_deadline_at"] or ""),
+                    "registry_operation_id": str(item["registry_operation_id"] or ""),
+                    "registry_receipt_reference": str(item["registry_receipt_reference"] or ""),
+                    "error_code": str(item["error_code"] or ""),
+                    "last_observed_bid_minor": item["last_observed_bid_minor"],
                     "error": str(item["error"] or ""),
                     "updated_at": str(item["updated_at"]),
                 }
@@ -1348,19 +2400,36 @@ class SkuInventoryBalanceBlock:
                 row_state = "failed"
             elif all(state in TERMINAL_ITEM_STATES for state in item_states):
                 row_state = "succeeded"
-            elif any(state == "running" for state in item_states):
+            elif any(state in ACTIVE_ITEM_STATES or state == "running" for state in item_states):
                 row_state = "running"
             else:
                 row_state = "pending"
             sku_states.append({"nm_id": nm_id, "state": row_state, "target_count": len(item_states)})
         terminal = sum(states.get(state, 0) for state in TERMINAL_ITEM_STATES)
         total = len(items)
+        verifying = sum(
+            states.get(state, 0)
+            for state in ("submitting", "submitted", "verifying", "delayed")
+        )
+        waiting = sum(
+            states.get(state, 0)
+            for state in ("pending", "preflighting", "ready")
+        )
+        failed = states.get("failed", 0) + states.get("skipped", 0)
+        needs_check = states.get("ambiguous", 0)
+        updated_at = str(job["updated_at"])
+        stored_state = str(job["state"])
+        stalled = stored_state == "stalled" or (
+            stored_state in ACTIVE_JOB_STATES
+            and _timestamp_age_seconds(updated_at, self.now_factory()) > self.apply_lease_seconds
+        )
         return {
             "contract_name": "sheet_vitrina_v1_inventory_balance_apply_job/v1",
             "job_id": str(job["job_id"]),
             "calculation_id": str(job["calculation_id"]),
             "mode": str(job["mode"]),
-            "state": str(job["state"]),
+            "state": "stalled" if stalled else stored_state,
+            "stored_state": stored_state,
             "idempotency_key": str(job["idempotency_key"]),
             "apply_manifest_digest": str(job["apply_manifest_digest"]),
             "apply_manifest": json.loads(str(job["apply_manifest_json"])),
@@ -1371,14 +2440,25 @@ class SkuInventoryBalanceBlock:
                 "terminal": terminal,
                 "percent": round(terminal / total * 100, 1) if total else 100.0,
                 "states": states,
+                "applied": states.get("succeeded", 0),
+                "verifying": verifying,
+                "waiting": waiting,
+                "failed": failed,
+                "needs_check": needs_check,
             },
             "sku_states": sku_states,
             "items": payload_items,
             "created_at": str(job["created_at"]),
             "created_by": str(job["created_by"]),
-            "updated_at": str(job["updated_at"]),
-            "external_writes": False,
-            "wb_patch_called": False,
+            "updated_at": updated_at,
+            "phase": str(job["phase"] or ""),
+            "error_code": str(job["error_code"] or ""),
+            "error_message": str(job["error_message"] or ""),
+            "stalled": stalled,
+            "external_writes": str(job["mode"]) == LIVE_MODE,
+            "wb_patch_called": str(job["mode"]) == LIVE_MODE and any(
+                int(item["submit_group"] or 0) > 0 for item in items
+            ),
         }
 
     def build_workbook(self, calculation_id: str) -> tuple[bytes, str]:
@@ -1663,26 +2743,46 @@ class SkuInventoryBalanceBlock:
                     (job_id,),
                 ).fetchall()
             }
-            if counts.get("pending") or counts.get("running"):
+            if any(counts.get(state) for state in ACTIVE_ITEM_STATES | {"running"}):
                 state = "running"
             elif counts.get("failed") or counts.get("ambiguous"):
                 state = "completed_with_errors"
             else:
                 state = "completed"
             conn.execute(
-                "UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs SET state=?,updated_at=? WHERE job_id=?",
-                (state, self.timestamp_factory(), job_id),
+                """UPDATE sheet_vitrina_v1_inventory_balance_apply_jobs
+                   SET state=?,phase=?,finished_at=CASE WHEN ? IN ('completed','completed_with_errors')
+                       THEN ? ELSE finished_at END,updated_at=? WHERE job_id=?""",
+                (
+                    state,
+                    "complete" if state == "completed" else "complete_with_issues"
+                    if state == "completed_with_errors"
+                    else "running",
+                    state,
+                    self.timestamp_factory(),
+                    self.timestamp_factory(),
+                    job_id,
+                ),
             )
             conn.commit()
 
     def _apply_capability(self) -> dict[str, Any]:
+        live = bool(
+            self.apply_adapter.mode == LIVE_MODE
+            and self.apply_adapter.external_writes_enabled
+            and self.writer_registry is not None
+            and self.seller_id
+        )
         return {
-            "default_mode": DRY_RUN_MODE,
-            "accepted_modes": [DRY_RUN_MODE],
-            "live_wb_available": False,
-            "external_writes_enabled": False,
-            "single_target_guard_reuse": "sku_management.preview_bid -> commit_bid -> exact readback",
-            "wb_patch_reachable": False,
+            "default_mode": LIVE_MODE if live else DRY_RUN_MODE,
+            "accepted_modes": [DRY_RUN_MODE, LIVE_MODE] if live else [DRY_RUN_MODE],
+            "live_wb_available": live,
+            "external_writes_enabled": live,
+            "guard_contract": "fresh batch current/min preflight -> canary -> micro-batches -> exact readback",
+            "wb_patch_reachable": live,
+            "batch_size": self.live_batch_size,
+            "canary_required": True,
+            "reload_safe": True,
         }
 
     def _apply_protocols(self) -> list[dict[str, Any]]:
@@ -1698,9 +2798,12 @@ class SkuInventoryBalanceBlock:
             {
                 "protocol": "inventory_balance_live_wb_boundary/v1",
                 "mode": LIVE_MODE,
-                "available": False,
+                "available": self._apply_capability()["live_wb_available"],
                 "fail_closed": True,
-                "single_target_guard_reuse": True,
+                "batch_size": self.live_batch_size,
+                "canary_required": True,
+                "server_owned_worker": True,
+                "exact_readback": True,
                 "blind_retry": False,
             },
         ]
@@ -2021,6 +3124,48 @@ def _rub_to_minor(value: Any) -> int | None:
         )
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        moment = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        return None
+    return moment.astimezone(timezone.utc)
+
+
+def _timestamp_age_seconds(value: str, now: datetime) -> float:
+    moment = _parse_timestamp(value)
+    if moment is None:
+        return float("inf")
+    return max(
+        (now.astimezone(timezone.utc) - moment).total_seconds(),
+        0.0,
+    )
+
+
+def _bounded_error(exc: Exception) -> str:
+    text = " ".join(str(exc).split())
+    return text[:800]
+
+
+def _public_preflight_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "ok",
+        "error_code",
+        "message",
+        "observed_bid_minor",
+        "minimum_bid_minor",
+        "payment_type",
+        "candidate_nm_ids",
+    }
+    return {key: value.get(key) for key in sorted(allowed) if key in value}
 
 
 def _allocate_campaign_targets(
