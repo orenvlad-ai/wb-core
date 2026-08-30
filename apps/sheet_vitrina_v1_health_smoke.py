@@ -27,8 +27,11 @@ from packages.application.registry_upload_http_entrypoint import (
 from packages.application.sheet_vitrina_v1_health import (
     build_web_vitrina_health_operator_surface,
     evaluate_web_vitrina_health,
+    mark_web_vitrina_health_cycle_incomplete,
     persist_web_vitrina_health_evaluation,
 )
+from apps.sheet_vitrina_v1_auto_refresh_tick import JobPollDeadlineError
+from apps.sheet_vitrina_v1_health_tick import _execute_health_tick
 from packages.application.sheet_vitrina_v1_live_plan import SOURCE_TEMPORAL_POLICIES
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item
@@ -171,6 +174,64 @@ class _FakeRuntime:
 
     def load_current_state(self):
         return SimpleNamespace(config_v2=[SimpleNamespace(enabled=True), SimpleNamespace(enabled=True)])
+
+
+class _TickRuntime(_FakeRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        seller_funnel = next(
+            item
+            for item in self.refresh_status.source_outcomes
+            if item["source_key"] == "seller_funnel_snapshot"
+        )
+        seller_yesterday = next(
+            item
+            for item in seller_funnel["slots"]
+            if item["temporal_slot"] == "yesterday_closed"
+        )
+        seller_yesterday.update(
+            _slot(
+                "seller_funnel_snapshot",
+                "yesterday_closed",
+                YESTERDAY,
+                kind="missing",
+                requested=2,
+                covered=0,
+            )
+        )
+        self.observations: list[dict[str, object]] = []
+
+    def save_sheet_vitrina_health_observation(self, **payload):
+        record = {
+            "observation_id": payload["observation_id"],
+            "business_date": payload["business_date"],
+            "phase": payload["phase"],
+            "observed_at": payload["observed_at"],
+            "ready_snapshot_id": payload["ready_snapshot_id"],
+            "payload_fingerprint": payload["payload_fingerprint"],
+            "payload": deepcopy(payload["payload"]),
+        }
+        if not any(item["observation_id"] == record["observation_id"] for item in self.observations):
+            self.observations.append(record)
+        return {
+            "status": "appended",
+            "observation_id": record["observation_id"],
+            "business_date": record["business_date"],
+            "phase": record["phase"],
+            "payload_fingerprint": record["payload_fingerprint"],
+            "transition_count": 1,
+        }
+
+    def list_sheet_vitrina_health_observations(self, *, business_date: str, limit: int):
+        return [
+            deepcopy(item)
+            for item in reversed(self.observations)
+            if item["business_date"] == business_date
+        ][:limit]
+
+    def list_sheet_vitrina_health_transitions(self, *, business_date: str, limit: int):
+        del business_date, limit
+        return []
 
 
 class _HealthSurfaceRuntime:
@@ -370,6 +431,7 @@ def _health_entrypoint_shell(runtime: _HealthSurfaceRuntime, jobs: _HealthJobs):
 
 
 def main() -> None:
+    _assert_timeout_cycle_is_durable_and_single_flight_confirmation_is_bounded()
     _assert_sku_no_event_status_is_covered()
     evaluation = evaluate_web_vitrina_health(runtime=_FakeRuntime(), now=NOW, history_days=2)
     cells = {
@@ -560,6 +622,25 @@ def main() -> None:
         )
         assert receipt["status"] == "appended"
         assert receipt["transition_count"] == 3
+        incomplete = mark_web_vitrina_health_cycle_incomplete(
+            evaluation,
+            phase="candidate",
+            failure_code="poll_deadline_exceeded",
+            reason="bounded fixture timeout",
+            observed_at="2026-08-29T03:02:00Z",
+            job={"job_id": "job-timeout", "status": "running", "operation": "auto_update"},
+        )
+        incomplete_receipt = persist_web_vitrina_health_evaluation(
+            runtime=runtime,
+            evaluation=incomplete,
+            phase="candidate",
+            observed_at="2026-08-29T03:02:00Z",
+        )
+        assert incomplete_receipt["status"] == "appended"
+        assert incomplete_receipt["transition_count"] >= 1
+        assert incomplete["signals"]["yesterday_closed"]["state"] == "incomplete"
+        assert incomplete["signals"]["bot_health"]["state"] == "error"
+        assert incomplete["fingerprint"] != evaluation["fingerprint"]
         repeated = persist_web_vitrina_health_evaluation(
             runtime=runtime,
             evaluation=evaluation,
@@ -568,7 +649,7 @@ def main() -> None:
         )
         assert repeated["status"] == "already_recorded"
         latest = runtime.load_latest_sheet_vitrina_health_observation(business_date=TODAY)
-        assert latest and latest["payload_fingerprint"] == evaluation["fingerprint"]
+        assert latest and latest["payload_fingerprint"] == incomplete["fingerprint"]
         durable_receipt = runtime.save_sheet_vitrina_health_recovery_receipt(
             action_fingerprint="sha256:durable-action",
             plan_fingerprint="sha256:durable-plan",
@@ -613,9 +694,14 @@ def main() -> None:
     systemd_dir = ROOT / "artifacts" / "registry_upload_http_entrypoint" / "systemd"
     candidate_timer = (systemd_dir / "wb-core-sheet-vitrina-health-candidate.timer").read_text()
     confirmation_timer = (systemd_dir / "wb-core-sheet-vitrina-health-confirmation.timer").read_text()
+    candidate_service = (systemd_dir / "wb-core-sheet-vitrina-health-candidate.service").read_text()
+    confirmation_service = (systemd_dir / "wb-core-sheet-vitrina-health-confirmation.service").read_text()
     assert "06:30:00 Asia/Yekaterinburg" in candidate_timer
     assert "07:30:00 Asia/Yekaterinburg" in confirmation_timer
     assert "Persistent=" not in candidate_timer + confirmation_timer
+    assert "--timeout-seconds 1500" in candidate_service + confirmation_service
+    assert candidate_service.count("TimeoutStartSec=1800") == 1
+    assert confirmation_service.count("TimeoutStartSec=1800") == 1
     target = json.loads(
         (ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__europe_api.json").read_text()
     )
@@ -623,6 +709,89 @@ def main() -> None:
     assert managed["wb-core-sheet-vitrina-health-candidate.timer"]["enable"] is True
     assert managed["wb-core-sheet-vitrina-health-confirmation.timer"]["enable"] is True
     print("sheet_vitrina_v1 health smoke: ok")
+
+
+def _assert_timeout_cycle_is_durable_and_single_flight_confirmation_is_bounded() -> None:
+    runtime = _TickRuntime()
+    args = SimpleNamespace(
+        phase="candidate",
+        dry_run=False,
+        timeout_seconds=1500,
+        poll_seconds=0.1,
+    )
+    launches: list[dict[str, object]] = []
+    polls: list[str] = []
+
+    def post_candidate(url, payload, *, cookie, timeout):
+        del url, payload, cookie, timeout
+        launch = {
+            "job_id": "long-running-job",
+            "status": "running",
+            "operation": "auto_update",
+            "single_flight": False,
+        }
+        launches.append(launch)
+        return launch
+
+    def poll_timeout(**payload):
+        polls.append(str(payload["job_id"]))
+        raise JobPollDeadlineError("fixture deadline")
+
+    exit_code = _execute_health_tick(
+        runtime=runtime,
+        base_url="http://fixture",
+        cookie="fixture",
+        args=args,
+        post_json=post_candidate,
+        poll_job=poll_timeout,
+    )
+    assert exit_code == 1
+    assert len(launches) == 1 and polls == ["long-running-job"]
+    assert [item["phase"] for item in runtime.observations] == ["candidate"]
+    candidate_payload = runtime.observations[0]["payload"]
+    assert candidate_payload["morning_cycle_execution"]["failure_code"] == "poll_deadline_exceeded"
+
+    args.phase = "confirmation"
+    confirmation_posts: list[dict[str, object]] = []
+
+    def post_single_flight(url, payload, *, cookie, timeout):
+        del url, payload, cookie, timeout
+        response = {
+            "job_id": "long-running-job",
+            "status": "running",
+            "operation": "auto_update",
+            "single_flight": True,
+        }
+        confirmation_posts.append(response)
+        return response
+
+    exit_code = _execute_health_tick(
+        runtime=runtime,
+        base_url="http://fixture",
+        cookie="fixture",
+        args=args,
+        post_json=post_single_flight,
+        poll_job=lambda **payload: (_ for _ in ()).throw(
+            AssertionError(f"confirmation must not poll active single-flight: {payload}")
+        ),
+    )
+    assert exit_code == 1
+    assert len(confirmation_posts) == 1
+    assert [item["phase"] for item in runtime.observations] == ["candidate", "confirmation"]
+    surface = build_web_vitrina_health_operator_surface(
+        runtime=runtime,
+        now=datetime.now(timezone.utc),
+    )
+    assert surface["morning_cycle"]["pair_complete"] is True
+    indicators = {item["indicator_id"]: item for item in surface["indicators"]}
+    assert indicators["yesterday_closed"]["state"] == "incomplete"
+    assert indicators["bot_health"]["state"] == "error"
+    assert surface["latest_observation"]["cycle_execution"]["failure_code"] == "active_single_flight"
+    morning_group = next(
+        item for item in surface["source_groups"]
+        if item["source_group_id"] == "health_runtime"
+    )
+    assert morning_group["source_group_label"] == "Утренний контур"
 
 
 def _assert_sku_no_event_status_is_covered() -> None:

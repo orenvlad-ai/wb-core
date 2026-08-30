@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
@@ -55,6 +56,7 @@ BOT_HISTORICAL_ROLES = {
 }
 BOT_CURRENT_ROLE = "accepted_current_snapshot"
 HEALTH_CURRENT_EXPECTATION_HOUR = 10
+HEALTH_RUNTIME_SOURCE_GROUP_ID = "health_runtime"
 
 _EXPECTATION_LABELS_RU = {
     "complete": "полные данные",
@@ -185,6 +187,89 @@ def persist_web_vitrina_health_evaluation(
         payload_fingerprint=fingerprint,
         payload=dict(evaluation),
     )
+
+
+def mark_web_vitrina_health_cycle_incomplete(
+    evaluation: Mapping[str, Any],
+    *,
+    phase: str,
+    failure_code: str,
+    reason: str,
+    observed_at: str,
+    job: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind a failed morning runner to durable, explicitly non-green health truth."""
+
+    del observed_at  # the append-only observation row owns time; payload identity stays retry-stable
+    payload = deepcopy(dict(evaluation))
+    normalized_phase = str(phase or "shadow").strip() or "shadow"
+    normalized_failure = str(failure_code or "runner_failed").strip() or "runner_failed"
+    normalized_reason = str(reason or "morning health runner did not complete").strip()
+    job_payload = dict(job or {})
+    source_key = f"health_cycle_{normalized_phase}"
+    yesterday_date = str(payload.get("yesterday_date") or "")
+    matrix = [
+        dict(item)
+        for item in payload.get("expectation_matrix") or []
+        if isinstance(item, Mapping)
+    ]
+    matrix.append(
+        {
+            "source_group_id": HEALTH_RUNTIME_SOURCE_GROUP_ID,
+            "source_key": source_key,
+            "date_role": TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            "target_date": yesterday_date,
+            "temporal_policy": "morning_cycle_execution",
+            "expectation_state": "partial",
+            "reason": normalized_reason,
+            "kind": "incomplete",
+            "requested_count": 1,
+            "covered_count": 0,
+        }
+    )
+    payload["expectation_matrix"] = matrix
+    signals = deepcopy(dict(payload.get("signals") or {}))
+    yesterday_signal = dict(signals.get("yesterday_closed") or {})
+    yesterday_sources = {
+        str(item) for item in yesterday_signal.get("problem_sources") or [] if str(item)
+    }
+    yesterday_sources.add(source_key)
+    yesterday_signal.update(
+        {
+            "state": "incomplete",
+            "problem_count": max(1, len(yesterday_sources)),
+            "problem_sources": sorted(yesterday_sources),
+        }
+    )
+    signals["yesterday_closed"] = yesterday_signal
+    bot_signal = dict(signals.get("bot_health") or {})
+    bot_problems = {
+        str(item) for item in bot_signal.get("confirmed_problems") or [] if str(item)
+    }
+    bot_problems.add(f"collector_job:{normalized_failure}")
+    bot_signal.update(
+        {
+            "state": "error",
+            "confirmed_problem_count": max(1, len(bot_problems)),
+            "confirmed_problems": sorted(bot_problems),
+        }
+    )
+    signals["bot_health"] = bot_signal
+    payload["signals"] = signals
+    payload["morning_cycle_execution"] = {
+        "schema_version": "sheet_vitrina_v1_health_cycle_execution_v1",
+        "phase": normalized_phase,
+        "status": "incomplete",
+        "failure_code": normalized_failure,
+        "reason": normalized_reason,
+        "job_id": str(job_payload.get("job_id") or ""),
+        "operation": str(job_payload.get("operation") or ""),
+        "job_status": str(job_payload.get("status") or ""),
+        "single_flight": bool(job_payload.get("single_flight")),
+    }
+    payload.pop("fingerprint", None)
+    payload["fingerprint"] = _fingerprint(payload)
+    return payload
 
 
 def build_web_vitrina_health_operator_surface(
@@ -600,7 +685,20 @@ def _operator_observation_metadata(observation: Mapping[str, Any] | None) -> dic
             "observed_at": "",
             "ready_snapshot_id": "",
             "payload_fingerprint": "",
+            "cycle_execution": {
+                "phase": "",
+                "status": "",
+                "failure_code": "",
+                "reason": "",
+                "job_id": "",
+                "operation": "",
+                "job_status": "",
+                "single_flight": False,
+            },
         }
+    cycle_execution = dict(
+        ((observation.get("payload") or {}).get("morning_cycle_execution") or {})
+    )
     return {
         "available": True,
         "observation_id": str(observation.get("observation_id") or ""),
@@ -608,6 +706,16 @@ def _operator_observation_metadata(observation: Mapping[str, Any] | None) -> dic
         "observed_at": str(observation.get("observed_at") or ""),
         "ready_snapshot_id": str(observation.get("ready_snapshot_id") or ""),
         "payload_fingerprint": str(observation.get("payload_fingerprint") or ""),
+        "cycle_execution": {
+            "phase": str(cycle_execution.get("phase") or ""),
+            "status": str(cycle_execution.get("status") or ""),
+            "failure_code": str(cycle_execution.get("failure_code") or ""),
+            "reason": str(cycle_execution.get("reason") or ""),
+            "job_id": str(cycle_execution.get("job_id") or ""),
+            "operation": str(cycle_execution.get("operation") or ""),
+            "job_status": str(cycle_execution.get("job_status") or ""),
+            "single_flight": bool(cycle_execution.get("single_flight")),
+        },
     }
 
 
@@ -635,7 +743,11 @@ def _operator_source_group_details(matrix: list[Mapping[str, Any]]) -> list[dict
         {
             "source_group_id": group_id,
             "source_group_label": str(
-                (WEB_VITRINA_SOURCE_GROUPS.get(group_id) or {}).get("label_ru")
+                (
+                    "Утренний контур"
+                    if group_id == HEALTH_RUNTIME_SOURCE_GROUP_ID
+                    else (WEB_VITRINA_SOURCE_GROUPS.get(group_id) or {}).get("label_ru")
+                )
                 or "Прочие источники"
             ),
             "sources": grouped[group_id],
@@ -647,6 +759,8 @@ def _operator_source_group_details(matrix: list[Mapping[str, Any]]) -> list[dict
 def _operator_expectation_reason(cell: Mapping[str, Any]) -> str:
     state = str(cell.get("expectation_state") or "")
     source_key = str(cell.get("source_key") or "")
+    if source_key.startswith("health_cycle_"):
+        return str(cell.get("reason") or "Утренний контур не завершил штатную проверку.")
     if state == "complete":
         return "Дата и обязательное покрытие подтверждены."
     if state == "exact_zero":

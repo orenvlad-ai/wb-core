@@ -50,6 +50,7 @@ READY_TEXT = "Файл сформирован"
 VISIBLE_TABS = ("Доступные", "Участвую", "Не участвую", "Акции WB", "Мои акции", "Скидка лояльности")
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 PROMOTIONS_TIMELINE_PATH = "/ns/calendar-api/dp-calendar/web/api/v3/promotions/timeline"
+CAMPAIGN_MANIFEST_FETCH_TIMEOUT_MS = 10_000
 _ENDED_PARTICIPATION_STATUSES = {"PARTICIPATED", "SKIPPED"}
 _ACTIVE_PARTICIPATION_STATUSES = {"PARTICIPATING", "SKIPPING"}
 _FUTURE_PARTICIPATION_STATUSES = {"WILL_PARTICIPATE"}
@@ -123,10 +124,12 @@ class PlaywrightPromoCollectorDriver:
         self._request: PromoXlsxCollectorRequest | None = None
         self._last_state: CollectorStateSnapshot | None = None
         self._latest_period_id: int | None = None
+        self._campaign_manifest_response_url: str | None = None
         self._campaign_manifest_snapshot = CampaignManifestSnapshot()
 
     def start(self, request: PromoXlsxCollectorRequest) -> None:
         self._request = request
+        self._campaign_manifest_response_url = None
         self._campaign_manifest_snapshot = CampaignManifestSnapshot()
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._logs_dir.mkdir(parents=True, exist_ok=True)
@@ -204,6 +207,7 @@ class PlaywrightPromoCollectorDriver:
                 blocker="calendar did not hydrate",
             )
         modal_info = self._handle_modal_if_present()
+        self._load_campaign_manifest_bounded()
         return HydrationAttemptSummary(
             attempt_num=attempt_num,
             entry_strategy="direct_open",
@@ -487,7 +491,7 @@ class PlaywrightPromoCollectorDriver:
         period_id = _parse_period_id(response.url)
         if period_id is not None:
             self._latest_period_id = period_id
-        self._capture_campaign_manifest_response(response)
+        self._remember_campaign_manifest_response(response)
         self._append_jsonl(
             self._logs_dir / "responses.jsonl",
             {
@@ -499,7 +503,7 @@ class PlaywrightPromoCollectorDriver:
             },
         )
 
-    def _capture_campaign_manifest_response(self, response: Any) -> None:
+    def _remember_campaign_manifest_response(self, response: Any) -> None:
         parsed_url = urllib_parse.urlparse(str(getattr(response, "url", "") or ""))
         if parsed_url.path != PROMOTIONS_TIMELINE_PATH:
             return
@@ -508,22 +512,41 @@ class PlaywrightPromoCollectorDriver:
         content_type = str(getattr(response, "headers", {}).get("content-type", "") or "")
         if "json" not in content_type.lower():
             return
+        # Playwright response callbacks run inside the synchronous protocol loop.
+        # Reading response.json() here can wait forever on an incomplete body and
+        # strand the whole HTTP worker plus its Chromium children.  Store identity
+        # only; the hydrated path performs one separately timeout-bounded replay.
+        self._campaign_manifest_response_url = str(getattr(response, "url", "") or "")
+
+    def _load_campaign_manifest_bounded(self) -> None:
+        url = str(self._campaign_manifest_response_url or "").strip()
+        if not url:
+            return
         started = time.perf_counter()
         try:
+            if self._context is None:
+                raise RuntimeError("browser_context_unavailable")
+            response = self._context.request.get(
+                url,
+                timeout=CAMPAIGN_MANIFEST_FETCH_TIMEOUT_MS,
+                fail_on_status_code=False,
+            )
+            if int(response.status or 0) != 200:
+                raise RuntimeError(f"manifest_http_status_{int(response.status or 0)}")
             payload = response.json()
         except Exception as exc:
             self._campaign_manifest_snapshot = CampaignManifestSnapshot(
                 manifest_source="network_response",
                 manifest_loaded_success=False,
                 manifest_error_kind=f"manifest_json_error={type(exc).__name__}",
-                manifest_source_path=parsed_url.path,
+                manifest_source_path=PROMOTIONS_TIMELINE_PATH,
                 manifest_load_duration_ms=_elapsed_ms(started),
                 manifest_parse_duration_ms=_elapsed_ms(started),
             )
             return
         snapshot = _build_campaign_manifest_snapshot(
             payload=payload,
-            source_path=parsed_url.path,
+            source_path=PROMOTIONS_TIMELINE_PATH,
             started_perf=started,
         )
         self._campaign_manifest_snapshot = snapshot

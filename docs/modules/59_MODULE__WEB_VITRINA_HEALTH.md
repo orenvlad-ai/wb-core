@@ -14,7 +14,7 @@ source_basis:
 related_runners:
   - "apps/sheet_vitrina_v1_health_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Server-owned health projection plus compact operator UI and exact recovery seam; no metric/formula/history rewrite and no performance work."
+update_note: "Server-owned health projection plus compact operator UI and exact recovery seam; morning runner now has a shorter application poll deadline, guaranteed launch/terminal receipts and durable fail-closed timeout evidence; no metric/formula/history rewrite and no performance work."
 ---
 
 # 1. Expectation and signal contract
@@ -77,6 +77,22 @@ promote a still-incomplete semantic signal.
   It is never a second blind full refresh.
 - Both timers are non-persistent, so deployment does not replay an old night
   experiment or stale absolute slot.
+- Both services pass an explicit 1500-second application polling deadline under
+  a distinct 1800-second systemd hard timeout. The runner flushes a launch
+  receipt as soon as the canonical job identity is known and always emits a
+  terminal receipt before its outer service deadline. A poll deadline, failed
+  job or active single-flight is persisted as an append-only non-green
+  candidate/confirmation observation with its own fingerprint; it is never
+  promoted from a last-good snapshot.
+- Confirmation does not spend another polling window on the candidate's still
+  active single-flight and does not start a second refresh/recovery job. It
+  persists the truthful incomplete confirmation instead, so the same-day pair,
+  transitions and operator details remain observable without duplicate work.
+- The live promo collector never reads a response body inside Playwright's
+  synchronous response callback. The callback records only the timeline
+  manifest URL; after hydration, one authenticated read-only replay with a
+  10-second request timeout materializes the same manifest. This bounds the
+  proven callback deadlock while preserving the current collector semantics.
 
 The existing runtime-managed `10:00, 13:00, 16:00, 19:00, 22:00
 Asia/Yekaterinburg` interval slots and the 15-minute temporal closure state
@@ -113,3 +129,8 @@ and a new current observation is required. Login/relogin remains exclusively in
 `Настройки → Источники и сессии`; no credential/session control is added to the
 Vitrina header. After a terminal job, the UI rereads both health and page
 composition and displays the new semantic result.
+
+Runner failures appear as the synthetic server-owned `Утренний контур` source
+group with a safe reason and cycle execution metadata (`phase`, failure code,
+job identity/status and single-flight flag). They do not create a runnable
+recovery action and cannot render `Вчера` or `BOT` green.

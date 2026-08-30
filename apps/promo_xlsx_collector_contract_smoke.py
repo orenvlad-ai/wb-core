@@ -14,10 +14,12 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.promo_xlsx_collector_block import (  # noqa: E402
     AUTO_PROMO_MODAL_CLOSE_SELECTOR,
+    CAMPAIGN_MANIFEST_FETCH_TIMEOUT_MS,
     COOKIE_ACCEPT_TEXT,
     DRAWER_CLOSE_SELECTOR,
     DRAWER_OVERLAY_SELECTOR,
     PROMOTIONS_TIMELINE_PATH,
+    PlaywrightPromoCollectorDriver,
     TIMELINE_ACTION_SELECTOR,
     _build_campaign_manifest_snapshot,
     is_hydrated_state,
@@ -45,6 +47,7 @@ ARTIFACTS = ROOT / "artifacts" / "promo_xlsx_collector_block" / "fixture"
 
 
 def main() -> None:
+    _assert_manifest_response_callback_never_reads_body()
     exclude_fixture = json.loads((ARTIFACTS / "workbook_headers__exclude_list_template__fixture.json").read_text(encoding="utf-8"))
     eligible_fixture = json.loads((ARTIFACTS / "workbook_headers__eligible_items_report__fixture.json").read_text(encoding="utf-8"))
     cross_year_fixture = json.loads((ARTIFACTS / "card__cross_year__fixture.json").read_text(encoding="utf-8"))
@@ -343,6 +346,78 @@ def main() -> None:
     print("manifest_ended_no_drawer: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
+
+
+def _assert_manifest_response_callback_never_reads_body() -> None:
+    output_root = Path("/tmp/wb-core-promo-manifest-callback-smoke")
+    driver = PlaywrightPromoCollectorDriver(output_root)
+
+    class EventResponse:
+        url = "https://seller.wildberries.ru/ns/calendar-api/dp-calendar/web/api/v3/promotions/timeline?fixture=1"
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            raise AssertionError("response body must not be read inside Playwright callback")
+
+    event_response = EventResponse()
+    driver._on_response(event_response)
+    if driver._campaign_manifest_response_url != event_response.url:
+        raise AssertionError("manifest callback must retain only the bounded replay URL")
+
+    calls: list[dict[str, object]] = []
+
+    class ReplayResponse:
+        status = 200
+
+        @staticmethod
+        def json():
+            return {
+                "data": {
+                    "promotions": [
+                        {
+                            "promoID": 1,
+                            "name": "Fixture",
+                            "type": "AUTO_PROMO",
+                            "startDate": "2026-08-29T00:00:00Z",
+                            "endDate": "2026-08-30T00:00:00Z",
+                            "participation": {
+                                "status": "PARTICIPATING",
+                                "counts": {"eligible": 1},
+                            },
+                        }
+                    ]
+                }
+            }
+
+    class RequestContext:
+        @staticmethod
+        def get(url, *, timeout, fail_on_status_code):
+            calls.append(
+                {
+                    "url": url,
+                    "timeout": timeout,
+                    "fail_on_status_code": fail_on_status_code,
+                }
+            )
+            return ReplayResponse()
+
+    class BrowserContext:
+        request = RequestContext()
+
+    driver._context = BrowserContext()
+    driver._load_campaign_manifest_bounded()
+    expected = [
+        {
+            "url": event_response.url,
+            "timeout": CAMPAIGN_MANIFEST_FETCH_TIMEOUT_MS,
+            "fail_on_status_code": False,
+        }
+    ]
+    if calls != expected:
+        raise AssertionError(f"manifest replay must have one exact bounded GET, got {calls}")
+    if not driver.campaign_manifest_snapshot().manifest_loaded_success:
+        raise AssertionError("bounded manifest replay must preserve successful manifest semantics")
 
 
 class _HydrationExceptionDriver:
