@@ -368,3 +368,13 @@ recovery and fills only currently missing, source-proven cost/Proxy cells for
 26 and 29 August. The 26 August SKU `428853741` unit-cost invariant
 `117.537167` and its dependent unresolved cells stay separately explicit;
 unrelated 21 August Proxy V4 and Finance are non-targets.
+
+The active consolidated profile builds economics only after retained exact
+product readback. Its normalized witness contains exact accepted target cells,
+source proof and protected invariant, while the rest of each mutable ready
+envelope is semantically rebased under the writer lock. Exact before/after
+target cells are still transaction-CAS; an ordinary publication outside that
+slice neither becomes an economics target nor creates false stale-plan drift.
+The 29-August missing target closes to zero, the twelve 26-August gaps remain
+explicit `EVIDENCE_BLOCKED`, and no Finance or unrelated Proxy value is
+cleared or copied.

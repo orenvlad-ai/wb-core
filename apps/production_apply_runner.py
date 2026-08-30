@@ -56,6 +56,16 @@ WARM_MOUNT_PROBE_MARKER = "wb-core-root-warm-archive-mount-probe-receipt"
 GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 WBC0013_GOAL_PROFILE = "dense-fbs-historical-recovery"
+WBC0027_GOAL_PROFILE = "product-capital-qualified-economics"
+WBC0027_LEGACY_MANIFEST_SHA256 = (
+    "84a4bef9d6cba4c969988d880ab56bde06db307f3caf87a42305f7fe8c8680ee"
+)
+WBC0027_LEGACY_MANIFEST_OPERATIONS = frozenset(
+    {
+        "wbc0027-product-capital-and-qualified-economics-v1",
+        "wbc0027-product-capital-and-qualified-economics-v2",
+    }
+)
 HISTORICAL_COST_GOAL_PROFILE = "historical-analytical-cost-carry-forward"
 HISTORICAL_MISSING_REPAIR_GOAL_PROFILE = "historical-missing-repair"
 WARM_ARCHIVE_LEGACY_EVIDENCE_BASE = (
@@ -215,6 +225,30 @@ WBC0013_AUTH_RE = re.compile(
     r"historical-version (?P<historical_version>whfv_[a-z0-9_]{8,120}) "
     r"historical-event (?P<historical_event>ffbf_[a-z0-9]{8,120}) "
     r"historical-repairs (?P<historical_repairs>[1-9][0-9]*)$"
+)
+WBC0027_AUTH_RE = re.compile(
+    r"^/wb-core authorize-goal-v1 task (?P<task>WBC0027) "
+    r"profile (?P<profile>product-capital-qualified-economics) "
+    r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
+    r"product-rows (?P<product_rows>[1-9][0-9]*) "
+    r"product-cells (?P<product_cells>[1-9][0-9]*) "
+    r"product-mismatches (?P<product_mismatches>[1-9][0-9]*) "
+    r"primary-rows (?P<primary_rows>[1-9][0-9]*) "
+    r"primary-cells (?P<primary_cells>[1-9][0-9]*) "
+    r"primary-mismatches (?P<primary_mismatches>[1-9][0-9]*) "
+    r"secondary-rows (?P<secondary_rows>[1-9][0-9]*) "
+    r"secondary-mismatches (?P<secondary_mismatches>[1-9][0-9]*) "
+    r"special-date (?P<special_date>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    r"special-nm (?P<special_nm>[1-9][0-9]*) "
+    r"special-cells (?P<special_cells>[1-9][0-9]*) "
+    r"blocked-date (?P<blocked_date>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    r"hard-non-target-from (?P<hard_from>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    r"economics-logical (?P<economics_logical>[1-9][0-9]*) "
+    r"economics-persisted (?P<economics_persisted>[1-9][0-9]*) "
+    r"economics-blocked (?P<economics_blocked>[1-9][0-9]*) "
+    r"protected-nm (?P<protected_nm>[1-9][0-9]*) "
+    r"protected-unit-cost-rub (?P<protected_cost>[1-9][0-9]*\.[0-9]{6}) "
+    r"submits (?P<submits>[1-9][0-9]*)$"
 )
 HISTORICAL_COST_AUTH_RE = re.compile(
     r"^/wb-core authorize-goal-v1 task (?P<task>WBC0013) "
@@ -806,6 +840,11 @@ def validate_legacy_authorization(
     manifest_sha: str,
     operation: str,
 ) -> None:
+    if (
+        operation in WBC0027_LEGACY_MANIFEST_OPERATIONS
+        or manifest_sha == WBC0027_LEGACY_MANIFEST_SHA256
+    ):
+        raise ApplyError("superseded WBC0027 exact-manifest authorization is non-reusable")
     association = str(comment.get("author_association") or "").upper()
     if association not in {"OWNER", "MEMBER"}:
         raise ApplyError("apply authorization association is not OWNER or MEMBER")
@@ -840,12 +879,14 @@ def validate_authorization(
     match = AUTH_RE.fullmatch(body)
     warm_match = WARM_ARCHIVE_AUTH_RE.fullmatch(body)
     wbc0013_match = WBC0013_AUTH_RE.fullmatch(body)
+    wbc0027_match = WBC0027_AUTH_RE.fullmatch(body)
     historical_cost_match = HISTORICAL_COST_AUTH_RE.fullmatch(body)
     historical_missing_match = HISTORICAL_MISSING_REPAIR_AUTH_RE.fullmatch(body)
     if (
         match is None
         and warm_match is None
         and wbc0013_match is None
+        and wbc0027_match is None
         and historical_cost_match is None
         and historical_missing_match is None
     ):
@@ -854,6 +895,7 @@ def validate_authorization(
         match
         or warm_match
         or wbc0013_match
+        or wbc0027_match
         or historical_cost_match
         or historical_missing_match
     ).groupdict()
@@ -927,6 +969,61 @@ def validate_authorization(
             != goal["expected_roster_count"]
         ):
             raise ApplyError("WBC0013 authorization scope is not exact SSS017")
+        return goal
+    if wbc0027_match is not None:
+        goal = {
+            "contract": "wb-core.production-goal-passport/v1",
+            "task": "WBC0027",
+            "profile": WBC0027_GOAL_PROFILE,
+            "target_id": raw["target"],
+            "expected_product_row_count": int(raw["product_rows"]),
+            "expected_product_cell_count": int(raw["product_cells"]),
+            "expected_product_mismatch_count": int(raw["product_mismatches"]),
+            "expected_primary_row_count": int(raw["primary_rows"]),
+            "expected_primary_cell_count": int(raw["primary_cells"]),
+            "expected_primary_mismatch_count": int(raw["primary_mismatches"]),
+            "expected_secondary_row_count": int(raw["secondary_rows"]),
+            "expected_secondary_mismatch_count": int(raw["secondary_mismatches"]),
+            "special_business_date": raw["special_date"],
+            "special_nm_id": int(raw["special_nm"]),
+            "expected_special_cell_count": int(raw["special_cells"]),
+            "evidence_blocked_date": raw["blocked_date"],
+            "hard_non_target_from": raw["hard_from"],
+            "expected_economics_logical_count": int(raw["economics_logical"]),
+            "expected_economics_persisted_count": int(raw["economics_persisted"]),
+            "expected_economics_blocked_count": int(raw["economics_blocked"]),
+            "protected_nm_id": int(raw["protected_nm"]),
+            "protected_unit_cost_rub": raw["protected_cost"],
+            "max_product_submits": 1,
+            "max_economics_submits": 1,
+            "max_pre_submit_regenerations": MAX_QUALIFICATION_CANDIDATES - 1,
+            "timer_changes_allowed": False,
+            "reversible": True,
+        }
+        exact = {
+            "expected_product_row_count": 1152,
+            "expected_product_cell_count": 24192,
+            "expected_product_mismatch_count": 9446,
+            "expected_primary_row_count": 936,
+            "expected_primary_cell_count": 19656,
+            "expected_primary_mismatch_count": 7655,
+            "expected_secondary_row_count": 216,
+            "expected_secondary_mismatch_count": 1791,
+            "special_business_date": "2026-08-21",
+            "special_nm_id": 497413772,
+            "expected_special_cell_count": 16,
+            "evidence_blocked_date": "2026-08-15",
+            "hard_non_target_from": "2026-08-30",
+            "expected_economics_logical_count": 298,
+            "expected_economics_persisted_count": 472,
+            "expected_economics_blocked_count": 12,
+            "protected_nm_id": 428853741,
+            "protected_unit_cost_rub": "117.537167",
+        }
+        if any(goal.get(key) != value for key, value in exact.items()) or int(
+            raw["submits"]
+        ) != 2:
+            raise ApplyError("WBC0027 authorization scope is not exact")
         return goal
     if historical_cost_match is not None:
         goal = {
@@ -1698,6 +1795,241 @@ def _wbc0013_remote_command(
         + " ".join(shlex.quote(part) for part in parts)
     )
     return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _wbc0027_remote_command(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    operation: str,
+    evidence_dir: str,
+    action: str,
+    phase: str,
+    product_phase_operation_id: str = "",
+    manifest_path: str = "",
+    manifest_sha256: str = "",
+    phase_operation_id: str = "",
+    phase_fingerprint: str = "",
+    approval_reference: str = "",
+) -> list[str]:
+    if action not in {"plan", "apply", "readback"} or phase not in {
+        "product",
+        "economics",
+    }:
+        raise ApplyError("unsupported WBC0027 recovery action")
+    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation) is None:
+        raise ApplyError("WBC0027 goal operation namespace is invalid")
+    target_dir = str(target["target_dir"])
+    parts = [
+        "python3",
+        f"{target_dir}/apps/wbc0027_capital_recovery.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--deployed-sha-file",
+        f"{target_dir}/.wb-core-runtime-sha",
+        "--expected-deployed-sha",
+        merge_sha,
+        "--profile",
+        WBC0027_GOAL_PROFILE,
+        "--target-id",
+        CANONICAL_PRODUCTION_TARGET_ID,
+        "--operation-id",
+        operation,
+        "--evidence-dir",
+        evidence_dir,
+        action,
+        "--phase",
+        phase,
+    ]
+    if action == "plan" and phase == "economics":
+        if re.fullmatch(r"recovery_[0-9a-f]{32}", product_phase_operation_id) is None:
+            raise ApplyError("WBC0027 economics predecessor identity is invalid")
+        parts.extend(
+            ["--product-phase-operation-id", product_phase_operation_id]
+        )
+    if action in {"apply", "readback"}:
+        if (
+            posixpath.normpath(manifest_path) != manifest_path
+            or posixpath.dirname(manifest_path) != evidence_dir
+            or re.fullmatch(
+                rf"{re.escape(evidence_dir)}/wbc0027-{phase}-plan-"
+                r"[0-9]{8}T[0-9]{12}Z-[0-9a-f]{12}\.json",
+                manifest_path,
+            )
+            is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256) is None
+            or re.fullmatch(r"recovery_[0-9a-f]{32}", phase_operation_id) is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", phase_fingerprint) is None
+        ):
+            raise ApplyError("WBC0027 reviewed phase bindings are invalid")
+        parts.extend(
+            [
+                "--manifest",
+                manifest_path,
+                "--manifest-sha256",
+                manifest_sha256,
+                "--phase-operation-id",
+                phase_operation_id,
+                "--phase-fingerprint",
+                phase_fingerprint,
+            ]
+        )
+        if action == "apply":
+            if not approval_reference or len(approval_reference) > 500:
+                raise ApplyError("WBC0027 approval reference is invalid")
+            parts.extend(["--approval-reference", approval_reference])
+    setup = (
+        "install -d -m 0700 " + shlex.quote(evidence_dir)
+        if action == "plan" and phase == "product"
+        else "test -d "
+        + shlex.quote(evidence_dir)
+        + ' && test "$(stat -c %a '
+        + shlex.quote(evidence_dir)
+        + ')" = 700'
+    )
+    shell = (
+        "set -eu; umask 077; "
+        + setup
+        + "; cd "
+        + shlex.quote(target_dir)
+        + "; export PYTHONPATH="
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _validate_wbc0027_candidate(
+    payload: Mapping[str, Any],
+    goal: Mapping[str, Any],
+    *,
+    phase: str,
+    merge_sha: str,
+    operation: str,
+    evidence_dir: str,
+    product_phase_operation_id: str = "",
+) -> None:
+    expected = {
+        "status": "ready",
+        "phase": phase,
+        "profile": WBC0027_GOAL_PROFILE,
+        "target_id": CANONICAL_PRODUCTION_TARGET_ID,
+        "goal_operation_id": operation,
+        "deployed_sha": merge_sha,
+        "query_only": True,
+        "database_written": False,
+        "production_mutation_count": 0,
+        "legacy_release_operation_reusable": False,
+        "legacy_phase_operation_reusable": False,
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise ApplyError(f"WBC0027 {phase} candidate escaped goal: {field}")
+    for field in (
+        "manifest_sha256",
+        "material_qualification_digest",
+        "phase_fingerprint",
+    ):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
+            raise ApplyError(f"WBC0027 {phase} candidate digest is invalid: {field}")
+    if re.fullmatch(
+        r"recovery_[0-9a-f]{32}", str(payload.get("phase_operation_id") or "")
+    ) is None:
+        raise ApplyError("WBC0027 phase operation identity is invalid")
+    generation = payload.get("storage_generation")
+    if not (
+        isinstance(generation, Mapping)
+        and str(generation.get("generation_id") or "").startswith("operational-")
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(generation.get("manifest_sha256") or "")
+        )
+        and isinstance(generation.get("schema_version"), int)
+        and int(generation["schema_version"]) > 0
+    ):
+        raise ApplyError("WBC0027 StoreRegistry generation binding is invalid")
+    manifest_path = str(payload.get("manifest_path") or "")
+    if (
+        posixpath.dirname(manifest_path) != evidence_dir
+        or re.fullmatch(
+            rf"{re.escape(evidence_dir)}/wbc0027-{phase}-plan-"
+            r"[0-9]{8}T[0-9]{12}Z-[0-9a-f]{12}\.json",
+            manifest_path,
+        )
+        is None
+    ):
+        raise ApplyError("WBC0027 private manifest path is invalid")
+    persistence = payload.get("plan_persistence")
+    admission = persistence.get("root_storage_admission") if isinstance(persistence, Mapping) else None
+    size = persistence.get("size_bytes") if isinstance(persistence, Mapping) else None
+    maximum = persistence.get("max_size_bytes") if isinstance(persistence, Mapping) else None
+    if not (
+        isinstance(persistence, Mapping)
+        and persistence.get("owner") == "production_apply_evidence"
+        and persistence.get("destination") == manifest_path
+        and persistence.get("evidence_dir") == evidence_dir
+        and persistence.get("evidence_dir_mode") == "0700"
+        and persistence.get("file_mode") == "0600"
+        and persistence.get("parent_mode") == "0700"
+        and isinstance(size, int)
+        and not isinstance(size, bool)
+        and isinstance(maximum, int)
+        and not isinstance(maximum, bool)
+        and 0 < size <= maximum <= 64_000_000
+        and persistence.get("bounded_size") is True
+        and persistence.get("atomic_publish") is True
+        and persistence.get("no_overwrite") is True
+        and persistence.get("durable_file_fsync") is True
+        and persistence.get("durable_directory_fsync") is True
+        and persistence.get("no_create") is False
+        and isinstance(admission, Mapping)
+        and admission.get("owner") == "production_apply_evidence"
+        and admission.get("destination") == manifest_path
+        and admission.get("destination_role") == "backup"
+        and admission.get("predicted_output_bytes") == size
+        and admission.get("allowed") is True
+    ):
+        raise ApplyError("WBC0027 private plan persistence receipt is invalid")
+    if phase == "product":
+        counts = payload.get("product_counts") or {}
+        count_bindings = {
+            "product_row_count": goal["expected_product_row_count"],
+            "product_cell_count": goal["expected_product_cell_count"],
+            "product_mismatch_count": goal["expected_product_mismatch_count"],
+            "primary_row_count": goal["expected_primary_row_count"],
+            "primary_cell_count": goal["expected_primary_cell_count"],
+            "primary_mismatch_count": goal["expected_primary_mismatch_count"],
+            "secondary_row_count": goal["expected_secondary_row_count"],
+            "secondary_mismatch_count": goal["expected_secondary_mismatch_count"],
+        }
+        special = payload.get("special_20260821") or {}
+        if any(counts.get(key) != value for key, value in count_bindings.items()) or not (
+            special.get("as_of_date") == goal["special_business_date"]
+            and special.get("nm_id") == goal["special_nm_id"]
+            and special.get("cell_count") == goal["expected_special_cell_count"]
+            and (payload.get("hard_non_target") or {}).get("from_date")
+            == goal["hard_non_target_from"]
+            and (payload.get("evidence_blocked") or [{}])[0].get("as_of_date")
+            == goal["evidence_blocked_date"]
+        ):
+            raise ApplyError("WBC0027 product qualification is not exact")
+    else:
+        if not (
+            payload.get("logical_repair_count")
+            == goal["expected_economics_logical_count"]
+            and payload.get("persisted_repair_count")
+            == goal["expected_economics_persisted_count"]
+            and len(payload.get("evidence_blocked") or [])
+            == goal["expected_economics_blocked_count"]
+            and (payload.get("protected_invariant") or {}).get("nm_id")
+            == goal["protected_nm_id"]
+            and (payload.get("protected_invariant") or {}).get("unit_cost_rub")
+            == goal["protected_unit_cost_rub"]
+            and payload.get("product_phase_operation_id")
+            == product_phase_operation_id
+            and (payload.get("product_predecessor") or {}).get("reconciled") is True
+        ):
+            raise ApplyError("WBC0027 economics qualification is not exact")
 
 
 def _validate_wbc0013_candidate(
@@ -2956,6 +3288,260 @@ def run_wbc0013_goal(
     return result
 
 
+def run_wbc0027_goal(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    goal: Mapping[str, Any],
+    operation: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / operation
+    )
+    qualification: dict[str, list[dict[str, Any]]] = {
+        "product": [],
+        "economics": [],
+    }
+
+    def qualify(
+        phase: str, *, product_phase_operation_id: str = ""
+    ) -> Mapping[str, Any] | None:
+        previous = ""
+        for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
+            evidence = command_evidence(
+                _wbc0027_remote_command(
+                    target=target,
+                    merge_sha=merge_sha,
+                    operation=operation,
+                    evidence_dir=evidence_dir,
+                    action="plan",
+                    phase=phase,
+                    product_phase_operation_id=product_phase_operation_id,
+                )
+            )
+            payload = evidence.get("result")
+            if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
+                qualification[phase].append({**evidence, "attempt": attempt})
+                return None
+            try:
+                _validate_wbc0027_candidate(
+                    payload,
+                    goal,
+                    phase=phase,
+                    merge_sha=merge_sha,
+                    operation=operation,
+                    evidence_dir=evidence_dir,
+                    product_phase_operation_id=product_phase_operation_id,
+                )
+            except ApplyError as exc:
+                qualification[phase].append(
+                    {
+                        **evidence,
+                        "attempt": attempt,
+                        "candidate_validation_error": str(exc)[:500],
+                    }
+                )
+                return None
+            current = str(payload["material_qualification_digest"])
+            qualification[phase].append(
+                {
+                    **{key: value for key, value in evidence.items() if key != "result"},
+                    "attempt": attempt,
+                    "manifest_path": payload["manifest_path"],
+                    "manifest_sha256": payload["manifest_sha256"],
+                    "phase_operation_id": payload["phase_operation_id"],
+                    "phase_fingerprint": payload["phase_fingerprint"],
+                    "material_qualification_digest": current,
+                    "storage_generation": dict(payload["storage_generation"]),
+                    "plan_persistence": dict(payload["plan_persistence"]),
+                }
+            )
+            if current == previous:
+                qualification[phase][-2]["qualification_state"] = "matching_witness"
+                qualification[phase][-1]["qualification_state"] = "qualified"
+                return payload
+            if len(qualification[phase]) > 1:
+                qualification[phase][-2]["qualification_state"] = (
+                    "superseded_material_drift"
+                )
+            qualification[phase][-1]["qualification_state"] = "candidate"
+            previous = current
+            if attempt < MAX_QUALIFICATION_CANDIDATES:
+                time.sleep(1.1)
+        qualification[phase][-1]["qualification_state"] = "unstable_at_bound"
+        return None
+
+    def invoke(candidate: Mapping[str, Any], phase: str, action: str) -> dict[str, Any]:
+        return command_evidence(
+            _wbc0027_remote_command(
+                target=target,
+                merge_sha=merge_sha,
+                operation=operation,
+                evidence_dir=evidence_dir,
+                action=action,
+                phase=phase,
+                manifest_path=str(candidate["manifest_path"]),
+                manifest_sha256=str(candidate["manifest_sha256"]),
+                phase_operation_id=str(candidate["phase_operation_id"]),
+                phase_fingerprint=str(candidate["phase_fingerprint"]),
+                approval_reference=approval_reference if action == "apply" else "",
+            )
+        )
+
+    def applied_submit_count(evidence: Mapping[str, Any]) -> int:
+        if evidence.get("transport_ambiguous") is True:
+            return 1
+        payload = evidence.get("result")
+        if not isinstance(payload, Mapping):
+            return 0
+        value = payload.get("production_mutation_submit_count")
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    def readback_exact(
+        evidence: Mapping[str, Any], *, phase: str, phase_operation_id: str
+    ) -> bool:
+        payload = evidence.get("result")
+        return bool(
+            evidence.get("return_code") == 0
+            and evidence.get("transport_ambiguous") is False
+            and isinstance(payload, Mapping)
+            and payload.get("status") == "reconciled"
+            and payload.get("phase") == phase
+            and payload.get("profile") == WBC0027_GOAL_PROFILE
+            and payload.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
+            and payload.get("goal_operation_id") == operation
+            and payload.get("phase_operation_id") == phase_operation_id
+            and payload.get("deployed_sha") == merge_sha
+            and payload.get("query_only") is True
+            and payload.get("database_written") is False
+            and payload.get("production_mutation_submit_count") == 0
+            and payload.get("recovery_lifecycle") == "retained"
+            and payload.get("hard_non_target", {}).get("all_exact") is True
+            and (
+                payload.get("product_exact") is True
+                if phase == "product"
+                else payload.get("economics_target_exact") is True
+                and payload.get("functional_economics_missing")
+                == {"2026-08-26": 12, "2026-08-29": 0}
+            )
+        )
+
+    product_candidate = qualify("product")
+    if product_candidate is None:
+        return {
+            "state": "blocked",
+            "reason": "wbc0027-product-material-not-qualified",
+            "apply_count": 0,
+            "product_state": "not_applied",
+            "economics_state": "not_applied",
+            "qualification_attempts": qualification,
+        }
+    product_apply = invoke(product_candidate, "product", "apply")
+    product_readback = invoke(product_candidate, "product", "readback")
+    product_submits = applied_submit_count(product_apply)
+    if not readback_exact(
+        product_readback,
+        phase="product",
+        phase_operation_id=str(product_candidate["phase_operation_id"]),
+    ):
+        product_payload = product_apply.get("result")
+        product_state = (
+            str(product_payload.get("status"))
+            if isinstance(product_payload, Mapping)
+            and product_payload.get("status") in {"not_applied", "ambiguous"}
+            else "ambiguous"
+            if product_apply.get("transport_ambiguous") is True or product_submits
+            else "not_applied"
+        )
+        return {
+            "state": "blocked",
+            "reason": "wbc0027-product-query-only-readback-not-reconciled",
+            "apply_count": product_submits,
+            "product_state": product_state,
+            "economics_state": "not_applied",
+            "qualification_attempts": qualification,
+            "product_apply": product_apply,
+            "product_readback": product_readback,
+        }
+    economics_candidate = qualify(
+        "economics",
+        product_phase_operation_id=str(product_candidate["phase_operation_id"]),
+    )
+    if economics_candidate is None:
+        return {
+            "state": "blocked",
+            "reason": "wbc0027-economics-material-not-qualified",
+            "apply_count": product_submits,
+            "product_state": "applied",
+            "economics_state": "not_applied",
+            "qualification_attempts": qualification,
+            "product_apply": product_apply,
+            "product_readback": product_readback,
+        }
+    economics_apply = invoke(economics_candidate, "economics", "apply")
+    economics_readback = invoke(economics_candidate, "economics", "readback")
+    economics_submits = applied_submit_count(economics_apply)
+    economics_exact = readback_exact(
+        economics_readback,
+        phase="economics",
+        phase_operation_id=str(economics_candidate["phase_operation_id"]),
+    )
+    economics_payload = economics_apply.get("result")
+    economics_state = (
+        "applied"
+        if economics_exact
+        else str(economics_payload.get("status"))
+        if isinstance(economics_payload, Mapping)
+        and economics_payload.get("status") in {"not_applied", "ambiguous"}
+        else "ambiguous"
+        if economics_apply.get("transport_ambiguous") is True or economics_submits
+        else "not_applied"
+    )
+    return {
+        "state": "done" if economics_exact else "blocked",
+        "reason": (
+            "reconciled"
+            if economics_exact
+            else "wbc0027-economics-query-only-readback-not-reconciled"
+        ),
+        "apply_count": product_submits + economics_submits,
+        "product_submit_count": product_submits,
+        "economics_submit_count": economics_submits,
+        "product_state": "applied",
+        "economics_state": economics_state,
+        "qualification_attempts": qualification,
+        "product_candidate": {
+            key: product_candidate[key]
+            for key in (
+                "manifest_path",
+                "manifest_sha256",
+                "phase_operation_id",
+                "phase_fingerprint",
+                "material_qualification_digest",
+                "storage_generation",
+            )
+        },
+        "economics_candidate": {
+            key: economics_candidate[key]
+            for key in (
+                "manifest_path",
+                "manifest_sha256",
+                "phase_operation_id",
+                "phase_fingerprint",
+                "material_qualification_digest",
+                "storage_generation",
+            )
+        },
+        "product_apply": product_apply,
+        "product_readback": product_readback,
+        "economics_apply": economics_apply,
+        "economics_readback": economics_readback,
+    }
+
+
 def run_dynamic_goal(
     *,
     target: Mapping[str, Any],
@@ -3726,6 +4312,7 @@ def _validate_recovery_receipt(
     expected_operation: str,
     goal: Mapping[str, Any],
 ) -> None:
+    expected_apply_count = 2 if goal.get("profile") == WBC0027_GOAL_PROFILE else 1
     expected = {
         "schema": APPLY_RECEIPT_SCHEMA,
         "state": "done",
@@ -3735,7 +4322,7 @@ def _validate_recovery_receipt(
         "merge_sha": merge_sha,
         "deployed_sha": merge_sha,
         "authorization_comment_id": authorization_comment_id,
-        "apply_count": 1,
+        "apply_count": expected_apply_count,
     }
     for field, value in expected.items():
         if receipt.get(field) != value:
@@ -3761,11 +4348,89 @@ def _validate_recovery_receipt(
     expected_evidence = {
         "state": "done",
         "reason": "reconciled",
-        "apply_count": 1,
+        "apply_count": expected_apply_count,
     }
     for field, value in expected_evidence.items():
         if evidence.get(field) != value:
             raise ApplyError(f"recovery receipt evidence mismatch: {field}")
+    if goal.get("profile") == WBC0027_GOAL_PROFILE:
+        if not (
+            evidence.get("product_submit_count") == 1
+            and evidence.get("economics_submit_count") == 1
+            and evidence.get("product_state") == "applied"
+            and evidence.get("economics_state") == "applied"
+        ):
+            raise ApplyError("WBC0027 recovery phase states are invalid")
+        candidates = {
+            "product": evidence.get("product_candidate"),
+            "economics": evidence.get("economics_candidate"),
+        }
+        for phase in ("product", "economics"):
+            candidate = candidates[phase]
+            apply_evidence = evidence.get(f"{phase}_apply")
+            readback_evidence = evidence.get(f"{phase}_readback")
+            apply_result = (
+                apply_evidence.get("result")
+                if isinstance(apply_evidence, Mapping)
+                else None
+            )
+            readback = (
+                readback_evidence.get("result")
+                if isinstance(readback_evidence, Mapping)
+                else None
+            )
+            attempts = (evidence.get("qualification_attempts") or {}).get(phase)
+            apply_transport_ambiguous = bool(
+                isinstance(apply_evidence, Mapping)
+                and apply_evidence.get("transport_ambiguous") is True
+                and apply_evidence.get("return_code") is None
+            )
+            apply_confirmed = bool(
+                isinstance(apply_evidence, Mapping)
+                and apply_evidence.get("return_code") == 0
+                and apply_evidence.get("transport_ambiguous") is False
+                and isinstance(apply_result, Mapping)
+                and apply_result.get("status") == "applied"
+                and apply_result.get("phase") == phase
+                and apply_result.get("phase_operation_id")
+                == (
+                    candidate.get("phase_operation_id")
+                    if isinstance(candidate, Mapping)
+                    else None
+                )
+                and apply_result.get("production_mutation_submit_count") == 1
+            )
+            if not (
+                isinstance(candidate, Mapping)
+                and re.fullmatch(
+                    r"recovery_[0-9a-f]{32}",
+                    str(candidate.get("phase_operation_id") or ""),
+                )
+                and re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(candidate.get("material_qualification_digest") or ""),
+                )
+                and (apply_confirmed or apply_transport_ambiguous)
+                and isinstance(readback_evidence, Mapping)
+                and readback_evidence.get("return_code") == 0
+                and readback_evidence.get("transport_ambiguous") is False
+                and isinstance(readback, Mapping)
+                and readback.get("status") == "reconciled"
+                and readback.get("query_only") is True
+                and readback.get("database_written") is False
+                and readback.get("phase") == phase
+                and readback.get("goal_operation_id") == expected_operation
+                and readback.get("phase_operation_id")
+                == candidate.get("phase_operation_id")
+                and readback.get("deployed_sha") == merge_sha
+                and isinstance(attempts, list)
+                and len(attempts) >= 2
+                and attempts[-1].get("qualification_state") == "qualified"
+                and attempts[-2].get("material_qualification_digest")
+                == attempts[-1].get("material_qualification_digest")
+            ):
+                raise ApplyError(f"WBC0027 {phase} recovery evidence is invalid")
+        return
     qualified = evidence.get("qualified_manifest")
     apply_evidence = evidence.get("apply")
     readback_evidence = evidence.get("readback")
@@ -3947,6 +4612,13 @@ def _run_receipt_recovery(
         repository=args.repository,
         pr=args.pr,
     )
+    configured_profiles = {
+        item.strip()
+        for item in os.environ.get("WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST", "").split(",")
+        if item.strip()
+    }
+    if configured_profiles and goal["profile"] not in configured_profiles:
+        raise ApplyError("scope-goal profile is not workflow-allowlisted")
     _validate_recovery_receipt(
         receipt,
         repository=args.repository,
@@ -6628,6 +7300,13 @@ def main() -> int:
         repository=args.repository,
         pr=args.pr,
     )
+    configured_profiles = {
+        item.strip()
+        for item in os.environ.get("WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST", "").split(",")
+        if item.strip()
+    }
+    if configured_profiles and goal["profile"] not in configured_profiles:
+        raise ApplyError("scope-goal profile is not workflow-allowlisted")
     operation = operation_id(
         args.repository,
         args.pr,
@@ -6679,7 +7358,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="wb-core-production-goal-") as directory:
         configure_deploy_environment(Path(directory))
         result = (
-            run_wbc0013_goal(
+            run_wbc0027_goal(
+                target=target,
+                merge_sha=merge_sha,
+                goal=goal,
+                operation=operation,
+                approval_reference=approval_reference,
+            )
+            if goal["profile"] == WBC0027_GOAL_PROFILE
+            else run_wbc0013_goal(
                 target=target,
                 merge_sha=merge_sha,
                 goal=goal,

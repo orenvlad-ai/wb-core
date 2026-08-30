@@ -43,6 +43,18 @@ WBC0013_AUTH_BODY = (
     "historical-nm 428853741 historical-version whfv_cb0657c384d5adebae01e585 "
     "historical-event ffbf_87cea959c9d600da99caa1ab68ef historical-repairs 1"
 )
+WBC0027_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0027 "
+    "profile product-capital-qualified-economics "
+    "target wb_core_eu_hosted_runtime_active "
+    "product-rows 1152 product-cells 24192 product-mismatches 9446 "
+    "primary-rows 936 primary-cells 19656 primary-mismatches 7655 "
+    "secondary-rows 216 secondary-mismatches 1791 "
+    "special-date 2026-08-21 special-nm 497413772 special-cells 16 "
+    "blocked-date 2026-08-15 hard-non-target-from 2026-08-30 "
+    "economics-logical 298 economics-persisted 472 economics-blocked 12 "
+    "protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2"
+)
 HISTORICAL_COST_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 "
     "profile historical-analytical-cost-carry-forward "
@@ -347,6 +359,231 @@ def _exercise_historical_missing_runner() -> None:
         "matching_witness",
         "qualified",
     ]
+
+
+def _exercise_wbc0027_two_phase_runner() -> None:
+    goal = apply.validate_authorization(
+        authorization(body=WBC0027_AUTH_BODY),
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+    )
+    assert goal["profile"] == apply.WBC0027_GOAL_PROFILE
+    assert goal["max_product_submits"] == goal["max_economics_submits"] == 1
+    legacy_body = (
+        "/wb-core apply-v2 pr 1126 merge "
+        + MERGE_SHA
+        + " deployed "
+        + MERGE_SHA
+        + " manifest sha256:"
+        + apply.WBC0027_LEGACY_MANIFEST_SHA256
+        + " operation wbc0027-product-capital-and-qualified-economics-v2"
+    )
+    try:
+        apply.validate_legacy_authorization(
+            {"author_association": "OWNER", "body": legacy_body},
+            pr=1126,
+            merge_sha=MERGE_SHA,
+            deployed_sha=MERGE_SHA,
+            manifest_sha=apply.WBC0027_LEGACY_MANIFEST_SHA256,
+            operation="wbc0027-product-capital-and-qualified-economics-v2",
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("legacy WBC0027 exact-manifest authorization was reused")
+    operation = "production-goal-v1-" + "6" * 32
+    base = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        + operation
+    )
+    generation = {
+        "generation_id": "operational-c540-smoke",
+        "manifest_sha256": "sha256:" + "8" * 64,
+        "schema_version": 172,
+    }
+    phase_ids = {
+        "product": "recovery_" + "1" * 32,
+        "economics": "recovery_" + "2" * 32,
+    }
+
+    def candidate(phase: str) -> dict[str, object]:
+        manifest = (
+            f"{base}/wbc0027-{phase}-plan-"
+            f"20260831T120000123456Z-{'3' if phase == 'product' else '4' * 1}"
+            "00000000000.json"
+        )
+        # Keep the generated suffix exactly twelve hexadecimal characters.
+        manifest = manifest.replace("3000000000000", "333333333333").replace(
+            "4000000000000", "444444444444"
+        )
+        size = 4_000_000 if phase == "product" else 2_000_000
+        payload: dict[str, object] = {
+            "status": "ready",
+            "phase": phase,
+            "profile": apply.WBC0027_GOAL_PROFILE,
+            "target_id": "wb_core_eu_hosted_runtime_active",
+            "goal_operation_id": operation,
+            "deployed_sha": MERGE_SHA,
+            "query_only": True,
+            "database_written": False,
+            "production_mutation_count": 0,
+            "legacy_release_operation_reusable": False,
+            "legacy_phase_operation_reusable": False,
+            "manifest_path": manifest,
+            "manifest_sha256": "sha256:" + ("3" if phase == "product" else "4") * 64,
+            "material_qualification_digest": "sha256:"
+            + ("5" if phase == "product" else "6") * 64,
+            "phase_fingerprint": "sha256:"
+            + ("7" if phase == "product" else "9") * 64,
+            "phase_operation_id": phase_ids[phase],
+            "storage_generation": generation,
+            "plan_persistence": {
+                "owner": "production_apply_evidence",
+                "destination": manifest,
+                "evidence_dir": base,
+                "evidence_dir_mode": "0700",
+                "file_mode": "0600",
+                "parent_mode": "0700",
+                "size_bytes": size,
+                "max_size_bytes": 64_000_000,
+                "bounded_size": True,
+                "atomic_publish": True,
+                "no_overwrite": True,
+                "durable_file_fsync": True,
+                "durable_directory_fsync": True,
+                "no_create": False,
+                "root_storage_admission": {
+                    "owner": "production_apply_evidence",
+                    "destination": manifest,
+                    "destination_role": "backup",
+                    "predicted_output_bytes": size,
+                    "allowed": True,
+                },
+            },
+        }
+        if phase == "product":
+            payload.update(
+                {
+                    "product_counts": {
+                        "product_row_count": 1152,
+                        "product_cell_count": 24192,
+                        "product_mismatch_count": 9446,
+                        "primary_row_count": 936,
+                        "primary_cell_count": 19656,
+                        "primary_mismatch_count": 7655,
+                        "secondary_row_count": 216,
+                        "secondary_mismatch_count": 1791,
+                    },
+                    "special_20260821": {
+                        "as_of_date": "2026-08-21",
+                        "nm_id": 497413772,
+                        "cell_count": 16,
+                    },
+                    "hard_non_target": {"from_date": "2026-08-30"},
+                    "evidence_blocked": [{"as_of_date": "2026-08-15"}],
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "logical_repair_count": 298,
+                    "persisted_repair_count": 472,
+                    "evidence_blocked": [str(index) for index in range(12)],
+                    "protected_invariant": {
+                        "nm_id": 428853741,
+                        "unit_cost_rub": "117.537167",
+                    },
+                    "product_phase_operation_id": phase_ids["product"],
+                    "product_predecessor": {"reconciled": True},
+                }
+            )
+        return payload
+
+    common = {
+        "return_code": 0,
+        "transport_ambiguous": False,
+        "command_sha256": "a" * 64,
+        "stdout_sha256": "b" * 64,
+        "stderr_sha256": "c" * 64,
+    }
+
+    def readback(phase: str) -> dict[str, object]:
+        return {
+            "status": "reconciled",
+            "phase": phase,
+            "profile": apply.WBC0027_GOAL_PROFILE,
+            "target_id": "wb_core_eu_hosted_runtime_active",
+            "goal_operation_id": operation,
+            "phase_operation_id": phase_ids[phase],
+            "deployed_sha": MERGE_SHA,
+            "query_only": True,
+            "database_written": False,
+            "production_mutation_submit_count": 0,
+            "recovery_lifecycle": "retained",
+            "hard_non_target": {"all_exact": True},
+            "product_exact": True,
+            "economics_target_exact": phase == "economics",
+            "functional_economics_missing": (
+                {"2026-08-26": 12, "2026-08-29": 0}
+                if phase == "economics"
+                else {}
+            ),
+        }
+
+    sequence = iter(
+        [
+            {**common, "result": candidate("product")},
+            {**common, "result": candidate("product")},
+            {
+                **common,
+                "result": {
+                    "status": "applied",
+                    "production_mutation_submit_count": 1,
+                },
+            },
+            {**common, "result": readback("product")},
+            {**common, "result": candidate("economics")},
+            {**common, "result": candidate("economics")},
+            {**common, "return_code": None, "transport_ambiguous": True},
+            {**common, "result": readback("economics")},
+        ]
+    )
+    original_command = apply.command_evidence
+    original_sleep = apply.time.sleep
+    calls = 0
+
+    def fake_command(_command: list[str], *, timeout_seconds: float = 3600.0) -> dict:
+        nonlocal calls
+        calls += 1
+        return next(sequence)
+
+    try:
+        apply.command_evidence = fake_command
+        apply.time.sleep = lambda _seconds: None
+        result = apply.run_wbc0027_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "d" * 64,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert calls == 8
+    assert result["state"] == "done"
+    assert result["apply_count"] == 2
+    assert result["product_submit_count"] == 1
+    assert result["economics_submit_count"] == 1
+    assert result["economics_state"] == "applied"
+    assert all(
+        rows[-2]["material_qualification_digest"]
+        == rows[-1]["material_qualification_digest"]
+        for rows in result["qualification_attempts"].values()
+    )
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
@@ -1271,6 +1508,7 @@ def _exercise_worker_mount_probe() -> None:
 def main() -> None:
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
+    _exercise_wbc0027_two_phase_runner()
     _exercise_wbc0013_two_phase_runner()
     _exercise_historical_cost_runner()
     _exercise_historical_missing_runner()
@@ -2158,6 +2396,8 @@ def main() -> None:
     assert "--authorization-mode warm-archive-readiness" in apply_job
     assert "--authorization-mode warm-archive-mount-probe" in apply_job
     assert "--authorization-comment-id" in apply_job
+    assert "product-capital-qualified-economics" in apply_job
+    assert "WBC0027 runs product then fresh economics" in apply_job
     assert "root-warm-archive-readiness-receipt.json" in apply_job
     assert "root-warm-archive-mount-probe-receipt.json" in apply_job
     assert "actions: read" in recovery_job

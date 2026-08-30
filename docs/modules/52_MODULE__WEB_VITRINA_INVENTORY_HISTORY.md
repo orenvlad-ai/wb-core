@@ -229,3 +229,12 @@ reconciliation; blind replay запрещён.
   receipt binding, consecutive qualification, bounded regeneration, one-submit
   boundary, ambiguous-transport query-only reconciliation and immutable
   done-receipt recovery without any production command.
+
+WBC0027 product/economics recovery is not an inventory-history backfill and
+does not append, supersede or reinterpret history captures. Its product phase
+changes only the exact-functional warehouse projection slice; economics
+changes only qualified ready target cells. Inventory history, current FBS,
+selected facility, missing/exact-zero semantics and its apply identity are
+hard non-targets. The shared Production Apply tests additionally prove two
+separate one-submit phases, transport-ambiguous readback-only convergence and
+`already_terminal` before remote execution.

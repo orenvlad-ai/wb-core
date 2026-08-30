@@ -796,3 +796,12 @@ Projection/ready-binding triggers only invalidate that durable materialization;
 the next owning publication recomputes it exactly. The synchronous status GET
 is query-only and reads the compact row with a fixed query count. A missing or
 invalidated materialization is never green and never replays history on GET.
+
+WBC0027 JIT recovery owns a closed product slice: dates 13, 14, 16 and 17–29
+August, exactly 1,152 rows / 24,192 owned cells / 9,446 mismatches. The
+15-August absence of an exact same-date functional version remains
+`EVIDENCE_BLOCKED`; 30 August and later are hard non-target. SKU `497413772`
+on 21 August contributes exactly 16 separately qualified cells. Apply rebuilds
+the candidate beneath the shared writer lock, checks every target row's exact
+before image and the ready pointer, then publishes once through T1. Events and
+outbox are audit-only and are not acknowledged or rewritten by this recovery.

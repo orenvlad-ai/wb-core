@@ -281,6 +281,34 @@ observed_cardinality/candidate_digest/details_digest`; stderr digest не
 заменяет доменную причину. В частности, storage admission сохраняет полный
 `RootStoragePolicyError: <reason>`, а не обобщённую ошибку persistence.
 
+WBC0027 использует отдельный consolidated JIT profile и не принимает
+исторический exact-manifest/comment/phase identity из PR #1126:
+
+```text
+/wb-core authorize-goal-v1 task WBC0027 profile product-capital-qualified-economics target wb_core_eu_hosted_runtime_active product-rows 1152 product-cells 24192 product-mismatches 9446 primary-rows 936 primary-cells 19656 primary-mismatches 7655 secondary-rows 216 secondary-mismatches 1791 special-date 2026-08-21 special-nm 497413772 special-cells 16 blocked-date 2026-08-15 hard-non-target-from 2026-08-30 economics-logical 298 economics-persisted 472 economics-blocked 12 protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2
+```
+
+Runner выводит deployed SHA только из единственного trusted
+`live_runtime/done`, создаёт две consecutive нормализованные material
+witness для product, допускает максимум три регенерации только до первого
+product submit и после submit делает только same-operation query-only
+readback. Лишь retained/exact product readback разрешает fresh economics
+qualification с отдельной phase identity и одним submit. Итоговый максимум —
+два submit, по одному на фазу. Сбой до submit имеет typed `not_applied`;
+transport/terminal uncertainty — `ambiguous`; exact retained readback —
+`applied`. Existing terminal Apply receipt возвращает `already_terminal` до
+SSH, private directory или нового файла.
+
+Каждый фактический candidate хранится только в mode-0700 goal directory и
+mode-0600 no-overwrite файле через `O_EXCL`, file fsync, atomic publish и
+directory fsync; storage admission входит в receipt. Обычная публикация вне
+accepted target slice не меняет material witness: apply заново строит current
+candidate под warehouse writer lock и проверяет exact target before image.
+Изменение target, deployed SHA, StoreRegistry generation или schema до submit
+fail closed. Events/outbox/timestamps и широкие ready envelopes audit-only.
+Workflow остаётся default-off в `production` environment; release/deploy его
+не запускает, timers/services не останавливаются.
+
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:
 

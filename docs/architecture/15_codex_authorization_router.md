@@ -247,6 +247,14 @@ reconciliation и no-secrets. Они остаются machine guards. Missing gu
 evidence блокирует действие и запускает correction; оно не становится новым
 permission question.
 
+Для WBC0027 accepted goal-to-COMPLETE разрешает consolidated technical
+correction, merge/deploy и query-only deployed qualification, но не подменяет
+отдельный immutable Production Apply passport. Release block обязан завершить
+`live_runtime/done` и может подготовить fresh OWNER/MEMBER scope-goal comment;
+сам Production Apply dispatch и его business-data submit остаются отдельным
+следующим действием. Исторические manifest/comment/operation bindings не
+расширяют эту авторизацию и fail closed.
+
 Validator pure: он не пишет GitHub, runtime, database или owner surface и не
 выполняет proposed action. Repository test registry исполняет smoke contract;
 owner-facing actor использует только validated receipt и publication

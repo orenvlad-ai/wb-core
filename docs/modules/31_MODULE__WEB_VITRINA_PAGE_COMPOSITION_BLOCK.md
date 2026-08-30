@@ -624,3 +624,11 @@ Unbound or mismatched rows are ignored in favour of the immutable ready
 snapshot/last-good value and are exposed as typed
 `historical_repair_required` incident evidence. Browser arithmetic never
 repairs or invents these cells.
+
+The WBC0027 consolidated recovery does not move exhaustive reconciliation
+back into `/status` or page composition. Product/economics apply revalidates
+exact target rows under the warehouse writer lock and materializes the compact
+truthful reconciliation. Status remains query-only and bounded independently
+of the 1,152-row / 24,192-cell recovery scope; ordinary non-target publication
+may invalidate or refresh its compact evidence but cannot be labelled green by
+the GET path itself.
