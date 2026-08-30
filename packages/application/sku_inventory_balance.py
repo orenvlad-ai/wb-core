@@ -22,7 +22,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from packages.application.sku_management import SkuManagementError
-from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
+from packages.application.sheet_vitrina_v1_ads import (
+    AdsBidSafetyThresholdPolicy,
+    SheetVitrinaV1AdsError,
+)
 from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.change_registry_writer import (
     InternalWriterRegistry,
@@ -47,6 +50,9 @@ CONFIG_SCHEMA_VERSION = 1
 DRY_RUN_MODE = "dry_run"
 LIVE_MODE = "live_wb"
 MANUAL_PENDING_CONTRACT = "change_registry_manual_pending/v1"
+BALANCE_OWNER_CONFIRMATION_POLICY_CONTRACT = (
+    "inventory_balance_owner_confirmed_bid_thresholds/v1"
+)
 TERMINAL_ITEM_STATES = {"succeeded", "failed", "skipped", "ambiguous"}
 ACTIVE_JOB_STATES = {"pending", "running", "delayed", "stalled"}
 ACTIVE_ITEM_STATES = {
@@ -149,6 +155,7 @@ class LiveWbInventoryBalanceApplyAdapter:
         *,
         min_bid_interval_seconds: float,
         sleep: Callable[[float], None],
+        safety_threshold_policy: AdsBidSafetyThresholdPolicy,
     ) -> list[dict[str, Any]]:
         if not self.external_writes_enabled:
             raise SkuInventoryBalanceError(
@@ -159,6 +166,39 @@ class LiveWbInventoryBalanceApplyAdapter:
             targets,
             min_bid_interval_seconds=min_bid_interval_seconds,
             sleep=sleep,
+            safety_threshold_policy=safety_threshold_policy,
+        )
+
+    def owner_confirmation_policy(self) -> dict[str, Any]:
+        ads = self.sku_management_block.ads_block
+        safety = ads.safety
+        return {
+            "contract_name": BALANCE_OWNER_CONFIRMATION_POLICY_CONTRACT,
+            "safety_threshold_policy": (
+                AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_BALANCE.value
+            ),
+            "warnings_only": [
+                "absolute_max_bid",
+                "max_absolute_increase",
+                "max_percent_increase",
+            ],
+            "thresholds": {
+                "absolute_max_bid_rub": safety.absolute_max_bid_kopecks / 100,
+                "max_absolute_increase_rub": (
+                    safety.max_absolute_increase_kopecks / 100
+                ),
+                "max_percent_increase": float(safety.max_percent_increase),
+            },
+            "direct_submit": True,
+            "staircase_submit": False,
+        }
+
+    def safety_threshold_warnings(
+        self, target: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        return self.sku_management_block.ads_block.bid_safety_threshold_warnings(
+            old_bid_kopecks=int(target["current_bid_minor"]),
+            new_bid_kopecks=int(target["final_target_bid_minor"]),
         )
 
     def submit_batch(
@@ -827,7 +867,6 @@ class SkuInventoryBalanceBlock:
                 if job_row is not None
                 else None
             ),
-            "registry": self.list_registry(limit=20),
             "apply_capability": self._apply_capability(),
             "calculation_operation": self.latest_calculation_operation(user_key=user_key),
         }
@@ -1211,8 +1250,21 @@ class SkuInventoryBalanceBlock:
             "nm_ids": sorted({int(item["nm_id"]) for item in targets}),
             "target_keys": sorted(str(item["target_key"]) for item in targets),
         }
-        manifest_targets = sorted(
-            [
+        confirmation_policy = self._balance_owner_confirmation_policy()
+        job_targets = []
+        manifest_targets = []
+        for item in targets:
+            safety_warnings = self._balance_safety_threshold_warnings(item)
+            job_targets.append(
+                {
+                    **item,
+                    "owner_confirmation_policy": confirmation_policy[
+                        "contract_name"
+                    ],
+                    "safety_warnings": safety_warnings,
+                }
+            )
+            manifest_targets.append(
                 {
                     "target_key": str(item["target_key"]),
                     "nm_id": int(item["nm_id"]),
@@ -1227,11 +1279,10 @@ class SkuInventoryBalanceBlock:
                     "final_target_bid_minor": int(item["final_target_bid_minor"]),
                     "recommendation_item_id": str(item["recommendation_item_id"]),
                     "override_updated_at": item.get("override_updated_at") or "",
+                    "safety_warnings": safety_warnings,
                 }
-                for item in targets
-            ],
-            key=lambda item: item["target_key"],
-        )
+            )
+        manifest_targets.sort(key=lambda item: item["target_key"])
         apply_manifest = {
             "contract_name": "sheet_vitrina_v1_inventory_balance_apply_manifest/v1",
             "calculation_id": calculation_id,
@@ -1240,6 +1291,11 @@ class SkuInventoryBalanceBlock:
             "external_writes": requested_mode == LIVE_MODE,
             "batch_size": self.live_batch_size if requested_mode == LIVE_MODE else 0,
             "canary_required": requested_mode == LIVE_MODE,
+            "owner_confirmation": {
+                **confirmation_policy,
+                "confirmed": True,
+                "scope": "exact_immutable_manifest_targets",
+            },
         }
         manifest_digest = _digest(apply_manifest)
         idempotency_key = manifest_digest
@@ -1290,7 +1346,7 @@ class SkuInventoryBalanceBlock:
                     now,
                 ),
             )
-            for target in targets:
+            for target in job_targets:
                 conn.execute(
                     """INSERT INTO sheet_vitrina_v1_inventory_balance_apply_items(
                            job_id,target_key,nm_id,target_json,state,updated_at
@@ -1584,6 +1640,7 @@ class SkuInventoryBalanceBlock:
                 sleep=lambda seconds: self._sleep_with_lease(
                     job_id, worker_token, seconds, phase="preflight"
                 ),
+                safety_threshold_policy=self._job_safety_threshold_policy(job_id),
             )
             self._renew_job_lease(job_id, worker_token, phase="preflight_result")
             for result in preflight:
@@ -2783,7 +2840,55 @@ class SkuInventoryBalanceBlock:
             "batch_size": self.live_batch_size,
             "canary_required": True,
             "reload_safe": True,
+            "owner_confirmation_policy": self._balance_owner_confirmation_policy(),
         }
+
+    def _balance_owner_confirmation_policy(self) -> dict[str, Any]:
+        policy_factory = getattr(
+            self.apply_adapter, "owner_confirmation_policy", None
+        )
+        if callable(policy_factory):
+            policy = dict(policy_factory())
+        else:
+            policy = {
+                "contract_name": BALANCE_OWNER_CONFIRMATION_POLICY_CONTRACT,
+                "safety_threshold_policy": (
+                    AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_BALANCE.value
+                ),
+                "warnings_only": [],
+                "thresholds": {},
+                "direct_submit": True,
+                "staircase_submit": False,
+            }
+        return policy
+
+    def _balance_safety_threshold_warnings(
+        self, target: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        warning_factory = getattr(
+            self.apply_adapter, "safety_threshold_warnings", None
+        )
+        if not callable(warning_factory):
+            return []
+        return [dict(item) for item in warning_factory(target)]
+
+    def _job_safety_threshold_policy(
+        self, job_id: str
+    ) -> AdsBidSafetyThresholdPolicy:
+        job = self._job_row(job_id)
+        manifest = json.loads(str(job.get("apply_manifest_json") or "{}"))
+        confirmation = manifest.get("owner_confirmation")
+        if not isinstance(confirmation, Mapping):
+            return AdsBidSafetyThresholdPolicy.STRICT
+        if (
+            confirmation.get("confirmed") is True
+            and str(confirmation.get("contract_name") or "")
+            == BALANCE_OWNER_CONFIRMATION_POLICY_CONTRACT
+            and str(confirmation.get("safety_threshold_policy") or "")
+            == AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_BALANCE.value
+        ):
+            return AdsBidSafetyThresholdPolicy.OWNER_CONFIRMED_BALANCE
+        return AdsBidSafetyThresholdPolicy.STRICT
 
     def _apply_protocols(self) -> list[dict[str, Any]]:
         return [
@@ -3164,6 +3269,8 @@ def _public_preflight_result(value: Mapping[str, Any]) -> dict[str, Any]:
         "minimum_bid_minor",
         "payment_type",
         "candidate_nm_ids",
+        "safety_threshold_policy",
+        "safety_warnings",
     }
     return {key: value.get(key) for key in sorted(allowed) if key in value}
 

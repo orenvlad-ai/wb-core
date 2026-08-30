@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import Enum
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,13 @@ class AdsSafetyConfig:
     max_percent_increase: Decimal
     max_absolute_increase_kopecks: int
     preview_ttl_seconds: int
+
+
+class AdsBidSafetyThresholdPolicy(str, Enum):
+    """Controls only seller-defined bid thresholds, never WB/API guards."""
+
+    STRICT = "strict"
+    OWNER_CONFIRMED_BALANCE = "owner_confirmed_balance"
 
 
 class SheetVitrinaV1AdsBlock:
@@ -279,6 +287,7 @@ class SheetVitrinaV1AdsBlock:
         *,
         min_bid_interval_seconds: float = 3.0,
         sleep: Callable[[float], None] = time.sleep,
+        safety_threshold_policy: AdsBidSafetyThresholdPolicy = AdsBidSafetyThresholdPolicy.STRICT,
     ) -> list[dict[str, Any]]:
         """Fresh, fail-closed bulk guard for Balance-owned bid targets.
 
@@ -287,6 +296,12 @@ class SheetVitrinaV1AdsBlock:
         are paced at the documented three-second interval.
         """
 
+        try:
+            threshold_policy = AdsBidSafetyThresholdPolicy(safety_threshold_policy)
+        except ValueError as exc:
+            raise SheetVitrinaV1AdsError(
+                "unsupported bid safety threshold policy", http_status=422
+            ) from exc
         normalized = [_normalize_bulk_bid_target(item) for item in targets]
         advert_ids = sorted({item["advert_id"] for item in normalized})
         payload: Mapping[str, Any] = {}
@@ -388,17 +403,29 @@ class SheetVitrinaV1AdsBlock:
                         observed_bid_minor=current,
                     )
                     continue
-                try:
-                    self._validate_safety_thresholds(
-                        old_bid_kopecks=current,
-                        new_bid_kopecks=item["requested_bid_minor"],
-                    )
-                except SheetVitrinaV1AdsError as exc:
+                safety_warnings = self.bid_safety_threshold_warnings(
+                    old_bid_kopecks=current,
+                    new_bid_kopecks=item["requested_bid_minor"],
+                )
+                if (
+                    safety_warnings
+                    and threshold_policy is AdsBidSafetyThresholdPolicy.STRICT
+                ):
                     results[item["target_key"]] = _bulk_preflight_error(
-                        item, "safety_guard", str(exc)
+                        item,
+                        "safety_guard",
+                        str(safety_warnings[0]["message"]),
+                        safety_warnings=safety_warnings,
                     )
                     continue
-                valid.append({**item, "payment_type": payment_type})
+                valid.append(
+                    {
+                        **item,
+                        "payment_type": payment_type,
+                        "safety_threshold_policy": threshold_policy.value,
+                        "safety_warnings": safety_warnings,
+                    }
+                )
             if valid:
                 eligible_groups.append((advert_id, campaign, valid))
 
@@ -1133,18 +1160,62 @@ class SheetVitrinaV1AdsBlock:
         with self._audit_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
 
-    def _validate_safety_thresholds(self, *, old_bid_kopecks: int, new_bid_kopecks: int) -> None:
-        if new_bid_kopecks > self.safety.absolute_max_bid_kopecks:
-            raise SheetVitrinaV1AdsError("requested_bid_rub exceeds absolute safety threshold", http_status=422)
-        increase = new_bid_kopecks - old_bid_kopecks
+    def bid_safety_threshold_warnings(
+        self, *, old_bid_kopecks: int, new_bid_kopecks: int
+    ) -> list[dict[str, Any]]:
+        """Return seller-threshold warnings without weakening WB/API validation."""
+
+        old_bid = _as_nonnegative_int(old_bid_kopecks, "old_bid_kopecks")
+        new_bid = _as_positive_int(new_bid_kopecks, "new_bid_kopecks")
+        warnings: list[dict[str, Any]] = []
+        if new_bid > self.safety.absolute_max_bid_kopecks:
+            warnings.append(
+                {
+                    "code": "absolute_max_bid",
+                    "message": "requested_bid_rub exceeds absolute safety threshold",
+                    "current_bid_minor": old_bid,
+                    "requested_bid_minor": new_bid,
+                    "threshold_minor": self.safety.absolute_max_bid_kopecks,
+                }
+            )
+        increase = new_bid - old_bid
         if increase <= 0:
-            return
+            return warnings
         if increase > self.safety.max_absolute_increase_kopecks:
-            raise SheetVitrinaV1AdsError("requested_bid_rub exceeds absolute increase threshold", http_status=422)
-        if old_bid_kopecks > 0:
-            pct = Decimal(increase * 100) / Decimal(old_bid_kopecks)
+            warnings.append(
+                {
+                    "code": "max_absolute_increase",
+                    "message": "requested_bid_rub exceeds absolute increase threshold",
+                    "current_bid_minor": old_bid,
+                    "requested_bid_minor": new_bid,
+                    "delta_minor": increase,
+                    "threshold_minor": self.safety.max_absolute_increase_kopecks,
+                }
+            )
+        if old_bid > 0:
+            pct = Decimal(increase * 100) / Decimal(old_bid)
             if pct > self.safety.max_percent_increase:
-                raise SheetVitrinaV1AdsError("requested_bid_rub exceeds percent increase threshold", http_status=422)
+                warnings.append(
+                    {
+                        "code": "max_percent_increase",
+                        "message": "requested_bid_rub exceeds percent increase threshold",
+                        "current_bid_minor": old_bid,
+                        "requested_bid_minor": new_bid,
+                        "delta_percent": float(pct),
+                        "threshold_percent": float(self.safety.max_percent_increase),
+                    }
+                )
+        return warnings
+
+    def _validate_safety_thresholds(self, *, old_bid_kopecks: int, new_bid_kopecks: int) -> None:
+        warnings = self.bid_safety_threshold_warnings(
+            old_bid_kopecks=old_bid_kopecks,
+            new_bid_kopecks=new_bid_kopecks,
+        )
+        if warnings:
+            raise SheetVitrinaV1AdsError(
+                str(warnings[0]["message"]), http_status=422
+            )
 
 
 def normalize_placement(value: Any) -> str:
@@ -1360,7 +1431,7 @@ def _normalize_bulk_bid_target(value: Mapping[str, Any]) -> dict[str, Any]:
         "current_bid_minor": _as_nonnegative_int(
             value.get("current_bid_minor"), "current_bid_minor"
         ),
-        "requested_bid_minor": _as_nonnegative_int(
+        "requested_bid_minor": _as_positive_int(
             value.get("requested_bid_minor"), "requested_bid_minor"
         ),
     }
