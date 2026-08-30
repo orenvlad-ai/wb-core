@@ -57,6 +57,7 @@ GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 WBC0013_GOAL_PROFILE = "dense-fbs-historical-recovery"
 HISTORICAL_COST_GOAL_PROFILE = "historical-analytical-cost-carry-forward"
+HISTORICAL_MISSING_REPAIR_GOAL_PROFILE = "historical-missing-repair"
 WARM_ARCHIVE_LEGACY_EVIDENCE_BASE = (
     Path("/opt/wb-core-runtime/state") / "private-evidence" / "production-goals"
 )
@@ -224,6 +225,17 @@ HISTORICAL_COST_AUTH_RE = re.compile(
     r"(?P<unit_cost_rub>[1-9][0-9]*\.[0-9]{6}) "
     r"accepted-versions (?P<versions>[1-9][0-9]*) "
     r"ready-snapshots (?P<snapshots>[1-9][0-9]*)$"
+)
+HISTORICAL_MISSING_REPAIR_AUTH_RE = re.compile(
+    r"^/wb-core authorize-goal-v1 task (?P<task>WBC0010) "
+    r"profile (?P<profile>historical-missing-repair) "
+    r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
+    r"source-operation (?P<source_operation>recovery_[a-z0-9]{32}) "
+    r"source-digest (?P<source_digest>sha256:[0-9a-f]{64}) "
+    r"dates (?P<dates>[1-9][0-9]*) logical-targets (?P<targets>[1-9][0-9]*) "
+    r"snapshots (?P<snapshots>[1-9][0-9]*) "
+    r"missing-before (?P<missing_before>[1-9][0-9]*) missing-after (?P<missing_after>[0-9]+) "
+    r"excluded-date (?P<excluded_date>[0-9]{4}-[0-9]{2}-[0-9]{2})$"
 )
 LEGACY_AUTH_RE = re.compile(
     r"^/wb-core apply-v2 pr (?P<pr>[1-9][0-9]*) merge (?P<merge>[0-9a-f]{40}) "
@@ -829,14 +841,22 @@ def validate_authorization(
     warm_match = WARM_ARCHIVE_AUTH_RE.fullmatch(body)
     wbc0013_match = WBC0013_AUTH_RE.fullmatch(body)
     historical_cost_match = HISTORICAL_COST_AUTH_RE.fullmatch(body)
+    historical_missing_match = HISTORICAL_MISSING_REPAIR_AUTH_RE.fullmatch(body)
     if (
         match is None
         and warm_match is None
         and wbc0013_match is None
         and historical_cost_match is None
+        and historical_missing_match is None
     ):
         raise ApplyError("task authorization body is not exact goal-v1 syntax")
-    raw = (match or warm_match or wbc0013_match or historical_cost_match).groupdict()
+    raw = (
+        match
+        or warm_match
+        or wbc0013_match
+        or historical_cost_match
+        or historical_missing_match
+    ).groupdict()
     if raw["target"] != CANONICAL_PRODUCTION_TARGET_ID:
         raise ApplyError("task authorization target is not canonical production")
     if warm_match is not None:
@@ -932,6 +952,39 @@ def validate_authorization(
             or goal["expected_updated_ready_snapshot_count"] != 1
         ):
             raise ApplyError("historical analytical cost authorization is not exact")
+        return goal
+    if historical_missing_match is not None:
+        goal = {
+            "contract": "wb-core.production-goal-passport/v1",
+            "task": "WBC0010",
+            "profile": HISTORICAL_MISSING_REPAIR_GOAL_PROFILE,
+            "target_id": raw["target"],
+            "source_operation_id": raw["source_operation"],
+            "source_digest": raw["source_digest"],
+            "expected_date_count": int(raw["dates"]),
+            "expected_logical_target_count": int(raw["targets"]),
+            "expected_updated_ready_snapshot_count": int(raw["snapshots"]),
+            "expected_missing_before_count": int(raw["missing_before"]),
+            "expected_missing_after_count": int(raw["missing_after"]),
+            "excluded_date": raw["excluded_date"],
+            "max_mutation_submits": 1,
+            "max_pre_submit_regenerations": MAX_QUALIFICATION_CANDIDATES - 1,
+            "timer_changes_allowed": False,
+            "reversible": True,
+        }
+        if (
+            goal["source_operation_id"]
+            != "recovery_6b52b021d0d8302fdf87004487661709"
+            or goal["source_digest"]
+            != "sha256:510138ca43f717751ebcbc85997bc66baec3f7c65bf89c041f52943a4eb59181"
+            or goal["expected_date_count"] != 7
+            or goal["expected_logical_target_count"] != 1428
+            or goal["expected_updated_ready_snapshot_count"] != 9
+            or goal["expected_missing_before_count"] != 1302
+            or goal["expected_missing_after_count"] != 0
+            or goal["excluded_date"] != "2026-08-26"
+        ):
+            raise ApplyError("historical missing repair authorization is not exact")
         return goal
     if raw["profile"] != GOAL_PROFILE:
         raise ApplyError("task authorization profile is unsupported")
@@ -2214,6 +2267,364 @@ def run_historical_cost_goal(
             "reconciled"
             if reconciled
             else "historical-cost-query-only-readback-not-reconciled"
+        ),
+        "apply_count": 1,
+        "submit_count": submit_count,
+        "qualification_attempts": attempts,
+        "apply": apply_evidence,
+        "readback": readback_evidence,
+    }
+    if not reconciled:
+        result["failure"] = {
+            "code": str(
+                (readback or {}).get("code")
+                if isinstance(readback, Mapping)
+                else "readback_not_reconciled"
+            ),
+            "message": "query-only readback did not prove exact reconciliation",
+            "details_digest": payload_digest(readback),
+            "submit_count": submit_count,
+        }
+    return result
+
+
+def _historical_missing_remote_command(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    operation: str,
+    evidence_dir: str,
+    phase: str,
+    manifest_path: str = "",
+    manifest_sha256: str = "",
+    approval_reference: str = "",
+) -> list[str]:
+    if phase not in {"plan", "apply", "readback"}:
+        raise ApplyError("unsupported historical missing repair phase")
+    target_dir = str(target["target_dir"])
+    parts = [
+        "python3",
+        f"{target_dir}/apps/sheet_vitrina_v1_historical_missing_repair.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--target-file",
+        f"{target_dir}/artifacts/registry_upload_http_entrypoint/input/"
+        "hosted_runtime_target__europe_api.json",
+        "--expected-deployed-sha",
+        merge_sha,
+        "--evidence-dir",
+        evidence_dir,
+        "--operation-id",
+        operation,
+    ]
+    if phase in {"apply", "readback"}:
+        if (
+            posixpath.dirname(posixpath.normpath(manifest_path)) != evidence_dir
+            or posixpath.normpath(manifest_path) != manifest_path
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256) is None
+        ):
+            raise ApplyError("historical missing repair manifest binding is invalid")
+        parts.extend(["--manifest-path", manifest_path])
+    if phase == "apply":
+        if len(approval_reference) > 500:
+            raise ApplyError("historical missing repair approval binding is invalid")
+        parts.extend(
+            [
+                "--apply",
+                "--expected-manifest-sha256",
+                manifest_sha256,
+                "--approval-reference",
+                approval_reference,
+            ]
+        )
+    elif phase == "readback":
+        parts.append("--readback")
+    setup = (
+        "install -d -m 0700 " + shlex.quote(evidence_dir)
+        if phase == "plan"
+        else "test -d "
+        + shlex.quote(evidence_dir)
+        + ' && test "$(stat -c %a '
+        + shlex.quote(evidence_dir)
+        + ')" = 700'
+    )
+    shell = (
+        "set -eu; umask 077; "
+        + setup
+        + "; cd "
+        + shlex.quote(target_dir)
+        + "; export PYTHONPATH="
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _validate_historical_missing_candidate(
+    payload: Mapping[str, Any],
+    goal: Mapping[str, Any],
+    *,
+    merge_sha: str,
+    evidence_dir: str,
+) -> None:
+    expected = {
+        "status": "ready",
+        "query_only": True,
+        "database_written": False,
+        "source_operation_id": goal["source_operation_id"],
+        "source_digest": goal["source_digest"],
+        "excluded_date": goal["excluded_date"],
+        "logical_target_count": goal["expected_logical_target_count"],
+        "updated_ready_snapshot_count": goal[
+            "expected_updated_ready_snapshot_count"
+        ],
+        "current_missing_count": goal["expected_missing_before_count"],
+        "after_missing_count": goal["expected_missing_after_count"],
+        "would_change": True,
+        "target_generation_bound": True,
+        "barrier_inactive": True,
+        "timer_change_count": 0,
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            raise ApplyError(f"historical missing qualification escaped goal: {field}")
+    target_dates = payload.get("target_dates")
+    if not (
+        isinstance(target_dates, list)
+        and len(target_dates) == goal["expected_date_count"]
+        and target_dates
+        == [
+            "2026-08-22",
+            "2026-08-23",
+            "2026-08-24",
+            "2026-08-25",
+            "2026-08-27",
+            "2026-08-28",
+            "2026-08-29",
+        ]
+    ):
+        raise ApplyError("historical missing target dates are invalid")
+    binding = payload.get("target_binding")
+    if not (
+        isinstance(binding, Mapping)
+        and binding.get("validated") is True
+        and binding.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
+        and binding.get("deployed_sha") == merge_sha
+    ):
+        raise ApplyError("historical missing target binding is invalid")
+    for field in (
+        "manifest_sha256",
+        "material_qualification_digest",
+        "source_digest",
+        "non_target_digest",
+        "other_ready_snapshots_digest",
+    ):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get(field) or "")) is None:
+            raise ApplyError(f"historical missing digest is invalid: {field}")
+    manifest_path = str(payload.get("manifest_path") or "")
+    if not (
+        posixpath.dirname(manifest_path) == evidence_dir
+        and re.fullmatch(
+            r"historical-missing-repair-plan-[0-9]{8}T[0-9]{6}Z\.json",
+            posixpath.basename(manifest_path),
+        )
+    ):
+        raise ApplyError("historical missing private manifest path is invalid")
+    persistence = payload.get("plan_persistence")
+    admission = (
+        persistence.get("root_storage_admission")
+        if isinstance(persistence, Mapping)
+        else None
+    )
+    if not (
+        isinstance(persistence, Mapping)
+        and persistence.get("owner") == "production_apply_evidence"
+        and persistence.get("destination") == manifest_path
+        and persistence.get("evidence_dir") == evidence_dir
+        and persistence.get("evidence_dir_mode") == "0700"
+        and persistence.get("file_mode") == "0600"
+        and persistence.get("parent_mode") == "0700"
+        and persistence.get("bounded_size") is True
+        and persistence.get("atomic_publish") is True
+        and persistence.get("no_overwrite") is True
+        and persistence.get("durable_file_fsync") is True
+        and persistence.get("durable_directory_fsync") is True
+        and isinstance(admission, Mapping)
+        and admission.get("owner") == "production_apply_evidence"
+        and admission.get("allowed") is True
+    ):
+        raise ApplyError("historical missing plan persistence is invalid")
+
+
+def run_historical_missing_goal(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    goal: Mapping[str, Any],
+    operation: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / operation
+    )
+    attempts: list[dict[str, Any]] = []
+    previous = ""
+    candidate: Mapping[str, Any] | None = None
+    for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
+        evidence = command_evidence(
+            _historical_missing_remote_command(
+                target=target,
+                merge_sha=merge_sha,
+                operation=operation,
+                evidence_dir=evidence_dir,
+                phase="plan",
+            )
+        )
+        payload = evidence.get("result")
+        try:
+            if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
+                raise ApplyError("query-only historical missing qualification failed")
+            _validate_historical_missing_candidate(
+                payload,
+                goal,
+                merge_sha=merge_sha,
+                evidence_dir=evidence_dir,
+            )
+        except ApplyError as exc:
+            attempts.append(
+                {
+                    **evidence,
+                    "attempt": attempt,
+                    "qualification_state": "blocked",
+                    "typed_failure": {
+                        "code": str(
+                            (payload or {}).get("code")
+                            if isinstance(payload, Mapping)
+                            else "qualification_failed"
+                        ),
+                        "message": str(exc)[:500],
+                        "details_digest": payload_digest(payload),
+                        "submit_count": 0,
+                    },
+                }
+            )
+            return {
+                "state": "blocked",
+                "reason": "historical-missing-qualification-blocked",
+                "apply_count": 0,
+                "qualification_attempts": attempts,
+                "failure": attempts[-1]["typed_failure"],
+            }
+        current = str(payload["material_qualification_digest"])
+        attempts.append(
+            {
+                **{key: value for key, value in evidence.items() if key != "result"},
+                "attempt": attempt,
+                "manifest_path": payload["manifest_path"],
+                "manifest_sha256": payload["manifest_sha256"],
+                "material_qualification_digest": current,
+                "qualification_state": "candidate",
+            }
+        )
+        if current == previous:
+            attempts[-2]["qualification_state"] = "matching_witness"
+            attempts[-1]["qualification_state"] = "qualified"
+            candidate = payload
+            break
+        if len(attempts) > 1:
+            attempts[-2]["qualification_state"] = "superseded_material_drift"
+        previous = current
+        if attempt < MAX_QUALIFICATION_CANDIDATES:
+            time.sleep(1.1)
+    if candidate is None:
+        attempts[-1]["qualification_state"] = "unstable_at_bound"
+        return {
+            "state": "blocked",
+            "reason": "historical-missing-material-cas-not-qualified",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+            "failure": {
+                "code": "material_cas_unstable",
+                "message": "bounded query-only qualification did not stabilize",
+                "details_digest": payload_digest(attempts),
+                "submit_count": 0,
+            },
+        }
+    apply_evidence = command_evidence(
+        _historical_missing_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            phase="apply",
+            manifest_path=str(candidate["manifest_path"]),
+            manifest_sha256=str(candidate["manifest_sha256"]),
+            approval_reference=approval_reference,
+        )
+    )
+    readback_evidence = command_evidence(
+        _historical_missing_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            phase="readback",
+            manifest_path=str(candidate["manifest_path"]),
+            manifest_sha256=str(candidate["manifest_sha256"]),
+        )
+    )
+    readback = readback_evidence.get("result")
+    apply_payload = apply_evidence.get("result")
+    reconciled = bool(
+        readback_evidence.get("return_code") == 0
+        and isinstance(readback, Mapping)
+        and readback.get("status") == "reconciled"
+        and readback.get("query_only") is True
+        and readback.get("database_written") is False
+        and readback.get("submit_count") == 1
+        and readback.get("target_dates")
+        == [
+            "2026-08-22",
+            "2026-08-23",
+            "2026-08-24",
+            "2026-08-25",
+            "2026-08-27",
+            "2026-08-28",
+            "2026-08-29",
+        ]
+        and readback.get("excluded_date") == goal["excluded_date"]
+        and readback.get("source_operation_id") == goal["source_operation_id"]
+        and readback.get("source_digest") == goal["source_digest"]
+        and readback.get("logical_target_count")
+        == goal["expected_logical_target_count"]
+        and readback.get("updated_ready_snapshot_count")
+        == goal["expected_updated_ready_snapshot_count"]
+        and readback.get("after_missing_count")
+        == goal["expected_missing_after_count"]
+        and readback.get("active_target_repair_dates") == []
+        and readback.get("recovery_lifecycle") == "retained"
+        and readback.get("runtime_controls_changed") is False
+        and readback.get("timer_change_count") == 0
+    )
+    submit_count = int(
+        (
+            readback.get("submit_count")
+            if isinstance(readback, Mapping)
+            else apply_payload.get("submit_count")
+            if isinstance(apply_payload, Mapping)
+            else 0
+        )
+        or 0
+    )
+    result = {
+        "state": "done" if reconciled else "blocked",
+        "reason": (
+            "reconciled"
+            if reconciled
+            else "historical-missing-query-only-readback-not-reconciled"
         ),
         "apply_count": 1,
         "submit_count": submit_count,
@@ -6284,6 +6695,14 @@ def main() -> int:
                 approval_reference=approval_reference,
             )
             if goal["profile"] == HISTORICAL_COST_GOAL_PROFILE
+            else run_historical_missing_goal(
+                target=target,
+                merge_sha=merge_sha,
+                goal=goal,
+                operation=operation,
+                approval_reference=approval_reference,
+            )
+            if goal["profile"] == HISTORICAL_MISSING_REPAIR_GOAL_PROFILE
             else run_dynamic_goal(
                 target=target,
                 merge_sha=merge_sha,

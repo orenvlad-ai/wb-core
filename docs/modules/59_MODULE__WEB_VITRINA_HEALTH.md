@@ -13,6 +13,7 @@ source_basis:
   - "apps/sheet_vitrina_v1_health_browser_smoke.py"
 related_runners:
   - "apps/sheet_vitrina_v1_health_smoke.py"
+  - "apps/sheet_vitrina_v1_historical_missing_repair.py"
 source_of_truth_level: "module_canonical"
 update_note: "Server-owned health projection plus compact operator UI and exact recovery seam; closed-history repair evidence is overlaid after any daytime publication and has no ordinary refresh hook."
 ---
@@ -71,6 +72,14 @@ mass historical apply occurs.
 Closed warehouse economics is deliberately not assigned a group-refresh hook.
 Its recovery preview is `hook=none`: only a separately reviewed version-bound
 historical reconciliation may change the closed target cells.
+
+That reconciliation clears an active date from
+`functional_economics_historical_repair_required` only after the exact
+source-operation-bound target values and their date-specific functional
+coverage/evidence have passed CAS, T1 recovery and query-only readback. Prior
+incident/recovery receipts remain append-only. A date excluded for insufficient
+business proof remains non-green and is never hidden by a successful repair of
+independent dates.
 
 Recovery submissions append an idempotency receipt to
 `sheet_vitrina_v1_health_recovery_receipts`. The action fingerprint is bound to
