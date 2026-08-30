@@ -49,6 +49,9 @@ ROW_TABLE = "sheet_vitrina_v1_warehouse_business_projection_rows"
 CURRENT_ROW_TABLE = "sheet_vitrina_v1_warehouse_business_projection_current_rows"
 STATE_TABLE = "sheet_vitrina_v1_warehouse_business_projection_state"
 OUTBOX_TABLE = "sheet_vitrina_v1_warehouse_business_projection_outbox"
+RECONCILIATION_STATE_TABLE = (
+    "sheet_vitrina_v1_warehouse_business_projection_reconciliation_state"
+)
 DATA_SHEET_NAME = "DATA_VITRINA"
 MAX_TARGET_DAYS = 366
 ZERO = Decimal("0")
@@ -242,13 +245,37 @@ def ensure_warehouse_business_projection_schema(conn: sqlite3.Connection) -> Non
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    if {
+    required_tables = {
         REVISION_TABLE,
         ROW_TABLE,
         CURRENT_ROW_TABLE,
         STATE_TABLE,
         OUTBOX_TABLE,
-    }.issubset(existing_tables):
+        RECONCILIATION_STATE_TABLE,
+    }
+    existing_triggers = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE "
+            "'warehouse_business_projection_reconciliation_%'"
+        ).fetchall()
+    }
+    required_triggers = {
+        "warehouse_business_projection_reconciliation_current_insert",
+        "warehouse_business_projection_reconciliation_current_update",
+        "warehouse_business_projection_reconciliation_current_delete",
+    }
+    if "sheet_vitrina_v1_ready_snapshots" in existing_tables:
+        required_triggers.update(
+            {
+                "warehouse_business_projection_reconciliation_ready_insert",
+                "warehouse_business_projection_reconciliation_ready_update",
+                "warehouse_business_projection_reconciliation_ready_delete",
+            }
+        )
+    if required_tables.issubset(existing_tables) and required_triggers.issubset(
+        existing_triggers
+    ):
         return
     conn.executescript(
         f"""
@@ -327,8 +354,137 @@ def ensure_warehouse_business_projection_schema(conn: sqlite3.Connection) -> Non
         );
         CREATE INDEX IF NOT EXISTS warehouse_business_projection_outbox_status
         ON {OUTBOX_TABLE}(status,business_effective_date,requested_at);
+
+        CREATE TABLE IF NOT EXISTS {RECONCILIATION_STATE_TABLE}(
+            slot INTEGER PRIMARY KEY CHECK(slot=1),
+            status TEXT NOT NULL,
+            materialization_state TEXT NOT NULL,
+            materialized_revision_no INTEGER NOT NULL,
+            materialized_revision_id TEXT NOT NULL,
+            materialized_at TEXT NOT NULL,
+            invalidated_at TEXT,
+            invalidation_reason TEXT NOT NULL,
+            invalidation_count INTEGER NOT NULL,
+            dirty_projection_row_count INTEGER NOT NULL,
+            dirty_ready_snapshot_count INTEGER NOT NULL,
+            date_count INTEGER NOT NULL,
+            scope_count INTEGER NOT NULL,
+            owned_metric_key_count INTEGER NOT NULL,
+            cell_count INTEGER NOT NULL,
+            mismatch_count INTEGER NOT NULL,
+            unbound_row_count INTEGER NOT NULL,
+            numeric_to_missing_count INTEGER NOT NULL,
+            cost_only_quantity_drift_count INTEGER NOT NULL,
+            closed_date_rewrite_count INTEGER NOT NULL,
+            source_digest TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            dates_json TEXT NOT NULL,
+            reason_counts_json TEXT NOT NULL
+        );
+
+        INSERT INTO {RECONCILIATION_STATE_TABLE}(
+            slot,status,materialization_state,materialized_revision_no,
+            materialized_revision_id,materialized_at,invalidated_at,
+            invalidation_reason,invalidation_count,
+            dirty_projection_row_count,dirty_ready_snapshot_count,
+            date_count,scope_count,owned_metric_key_count,cell_count,
+            mismatch_count,unbound_row_count,numeric_to_missing_count,
+            cost_only_quantity_drift_count,closed_date_rewrite_count,
+            source_digest,digest,dates_json,reason_counts_json
+        ) VALUES(
+            1,'pending_exact_functional','missing',0,'','',NULL,
+            'reconciliation_not_materialized',0,0,0,
+            0,0,{len(OWN_PRODUCT_CAPITAL_METRIC_KEYS)},0,0,0,0,0,0,
+            '{_fingerprint([])}','{_fingerprint([])}','[]','{{}}'
+        ) ON CONFLICT(slot) DO NOTHING;
+
+        CREATE TRIGGER IF NOT EXISTS warehouse_business_projection_reconciliation_current_insert
+        AFTER INSERT ON {CURRENT_ROW_TABLE}
+        BEGIN
+          UPDATE {RECONCILIATION_STATE_TABLE}
+          SET status='historical_repair_required',
+              materialization_state='stale',
+              invalidated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+              invalidation_reason='projection_rows_changed_after_reconciliation',
+              invalidation_count=invalidation_count+1,
+              dirty_projection_row_count=dirty_projection_row_count+1
+          WHERE slot=1 AND materialization_state!='stale';
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS warehouse_business_projection_reconciliation_current_update
+        AFTER UPDATE ON {CURRENT_ROW_TABLE}
+        BEGIN
+          UPDATE {RECONCILIATION_STATE_TABLE}
+          SET status='historical_repair_required',
+              materialization_state='stale',
+              invalidated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+              invalidation_reason='projection_rows_changed_after_reconciliation',
+              invalidation_count=invalidation_count+1,
+              dirty_projection_row_count=dirty_projection_row_count+1
+          WHERE slot=1 AND materialization_state!='stale';
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS warehouse_business_projection_reconciliation_current_delete
+        AFTER DELETE ON {CURRENT_ROW_TABLE}
+        BEGIN
+          UPDATE {RECONCILIATION_STATE_TABLE}
+          SET status='historical_repair_required',
+              materialization_state='stale',
+              invalidated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+              invalidation_reason='projection_rows_changed_after_reconciliation',
+              invalidation_count=invalidation_count+1,
+              dirty_projection_row_count=dirty_projection_row_count+1
+          WHERE slot=1 AND materialization_state!='stale';
+        END;
         """
     )
+    ready_snapshot_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='sheet_vitrina_v1_ready_snapshots'"
+    ).fetchone()
+    if ready_snapshot_table is not None:
+        conn.executescript(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS warehouse_business_projection_reconciliation_ready_insert
+            AFTER INSERT ON sheet_vitrina_v1_ready_snapshots
+            BEGIN
+              UPDATE {RECONCILIATION_STATE_TABLE}
+              SET status='pending_exact_functional',
+                  materialization_state='stale',
+                  invalidated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                  invalidation_reason='ready_snapshot_binding_changed',
+                  invalidation_count=invalidation_count+1,
+                  dirty_ready_snapshot_count=dirty_ready_snapshot_count+1
+              WHERE slot=1 AND materialization_state!='stale';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS warehouse_business_projection_reconciliation_ready_update
+            AFTER UPDATE OF plan_json ON sheet_vitrina_v1_ready_snapshots
+            BEGIN
+              UPDATE {RECONCILIATION_STATE_TABLE}
+              SET status='pending_exact_functional',
+                  materialization_state='stale',
+                  invalidated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                  invalidation_reason='ready_snapshot_binding_changed',
+                  invalidation_count=invalidation_count+1,
+                  dirty_ready_snapshot_count=dirty_ready_snapshot_count+1
+              WHERE slot=1 AND materialization_state!='stale';
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS warehouse_business_projection_reconciliation_ready_delete
+            AFTER DELETE ON sheet_vitrina_v1_ready_snapshots
+            BEGIN
+              UPDATE {RECONCILIATION_STATE_TABLE}
+              SET status='pending_exact_functional',
+                  materialization_state='stale',
+                  invalidated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                  invalidation_reason='ready_snapshot_binding_changed',
+                  invalidation_count=invalidation_count+1,
+                  dirty_ready_snapshot_count=dirty_ready_snapshot_count+1
+              WHERE slot=1 AND materialization_state!='stale';
+            END;
+            """
+        )
 
 
 def ensure_warehouse_projection_source_outbox(
@@ -1404,6 +1560,10 @@ def publish_targeted_supplier_business_projection(
         (plan_fingerprint,),
     ).fetchone()
     if existing is not None and str(existing["status"]) == "active":
+        reconciliation = materialize_warehouse_business_projection_reconciliation(
+            conn,
+            materialized_at=published_at,
+        )
         return {
             "status": "success",
             "idempotent": True,
@@ -1951,6 +2111,7 @@ def _persist_projection_revision(
             ),
             "changed_rows": int(existing["changed_row_count"]),
             "changed_cells": int(existing["changed_cell_count"]),
+            "reconciliation": reconciliation,
         }
     changed_rows = 0
     changed_cells = 0
@@ -2081,6 +2242,10 @@ def _persist_projection_revision(
         """,
         (published_at, revision_id),
     )
+    reconciliation = materialize_warehouse_business_projection_reconciliation(
+        conn,
+        materialized_at=published_at,
+    )
     return {
         "status": "success",
         "idempotent": False,
@@ -2088,6 +2253,7 @@ def _persist_projection_revision(
         "revision_id": revision_id,
         "changed_rows": changed_rows,
         "changed_cells": changed_cells,
+        "reconciliation": reconciliation,
     }
 
 
@@ -2787,121 +2953,180 @@ def drain_warehouse_business_projection_outbox(
 def load_warehouse_business_projection_status(
     runtime: RegistryUploadDbBackedRuntime,
 ) -> dict[str, Any]:
-    with sqlite3.connect(runtime.db_path) as conn:
+    db_path = runtime.db_path.resolve()
+    if not db_path.is_file():
+        return _empty_warehouse_business_projection_status()
+    with sqlite3.connect(
+        f"file:{db_path.as_posix()}?mode=ro",
+        uri=True,
+        timeout=1.0,
+    ) as conn:
         conn.row_factory = sqlite3.Row
-        ensure_warehouse_business_projection_schema(conn)
-        state = conn.execute(
-            f"SELECT * FROM {STATE_TABLE} WHERE slot=1"
-        ).fetchone()
-        latest_failure = conn.execute(
-            f"""
-            SELECT revision_id,stable_source_id,source_revision,
-                   business_effective_date,published_at,error
-            FROM {REVISION_TABLE}
-            WHERE status='failed'
-            ORDER BY published_at DESC,revision_id DESC LIMIT 1
-            """
-        ).fetchone()
-        latest_outbox_failure = conn.execute(
-            f"""
-            SELECT request_id,stable_source_id,source_revision,
-                   business_effective_date,
-                   COALESCE(finished_at,requested_at) AS published_at,error
-            FROM {OUTBOX_TABLE}
-            WHERE status='error'
-            ORDER BY COALESCE(finished_at,requested_at) DESC,request_id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        queue_counts: dict[str, int] = {}
-        outbox_counts = {
-            str(row["status"]): int(row["count"])
-            for row in conn.execute(
-                f"""
-                SELECT status,COUNT(*) AS count
-                FROM {OUTBOX_TABLE}
-                GROUP BY status
-                """
-            ).fetchall()
-        }
-        queue_table = conn.execute(
-            """
-            SELECT 1 FROM sqlite_master
-            WHERE type='table'
-              AND name='sheet_vitrina_v1_warehouse_targeted_recalc_queue'
-            """
-        ).fetchone()
-        if queue_table is not None:
-            queue_counts = {
-                str(row["status"]): int(row["count"])
-                for row in conn.execute(
-                    """
-                    SELECT status,COUNT(*) AS count
-                    FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
-                    GROUP BY status
-                    """
-                ).fetchall()
-            }
-        reconciliation = reconcile_warehouse_business_projection(conn)
-        if (
-            latest_outbox_failure is not None
-            and (
-                latest_failure is None
-                or str(latest_outbox_failure["published_at"] or "")
-                > str(latest_failure["published_at"] or "")
-            )
-        ):
-            latest_failure = {
-                "revision_id": str(latest_outbox_failure["request_id"]),
-                "stable_source_id": str(
-                    latest_outbox_failure["stable_source_id"]
-                ),
-                "source_revision": str(
-                    latest_outbox_failure["source_revision"]
-                ),
-                "business_effective_date": str(
-                    latest_outbox_failure["business_effective_date"]
-                ),
-                "published_at": str(latest_outbox_failure["published_at"]),
-                "error": str(latest_outbox_failure["error"] or ""),
-            }
-    if state is None:
-        return {
-            "contract_name": CONTRACT_NAME,
-            "contract_version": CONTRACT_VERSION,
-            "status": "not_materialized",
-            "revision_no": 0,
-            "revision_id": "",
-            "queue_counts": queue_counts,
-            "outbox_counts": outbox_counts,
-            "health_status": (
-                "historical_repair_required"
-                if reconciliation.get("status") == "historical_repair_required"
-                else "pending_exact_functional"
-                if outbox_counts.get("pending_exact_functional")
-                else str(reconciliation.get("status") or "pending_exact_functional")
-            ),
-            "updating": bool(
-                outbox_counts.get("queued")
-                or outbox_counts.get("running")
-                or outbox_counts.get("pending_exact_functional")
-            ),
-            "latest_failure": dict(latest_failure) if latest_failure else None,
-            "reconciliation": reconciliation,
-        }
+        conn.execute("PRAGMA query_only=ON")
+        return _load_warehouse_business_projection_status_from_connection(conn)
+
+
+def _empty_reconciliation_status(
+    *,
+    materialization_state: str = "missing",
+    reason: str = "reconciliation_not_materialized",
+) -> dict[str, Any]:
+    return {
+        "status": "pending_exact_functional",
+        "materialization_state": materialization_state,
+        "counts_exact": False,
+        "materialized_revision_no": 0,
+        "materialized_revision_id": "",
+        "materialized_at": "",
+        "invalidated_at": None,
+        "invalidation_reason": reason,
+        "invalidation_count": 0,
+        "dirty_projection_row_count": 0,
+        "dirty_ready_snapshot_count": 0,
+        "date_count": 0,
+        "scope_count": 0,
+        "owned_metric_key_count": len(OWN_PRODUCT_CAPITAL_METRIC_KEYS),
+        "cell_count": 0,
+        "mismatch_count": 0,
+        "unbound_row_count": 0,
+        "numeric_to_missing_count": 0,
+        "cost_only_quantity_drift_count": 0,
+        "closed_date_rewrite_count": 0,
+        "source_digest": _fingerprint([]),
+        "digest": _fingerprint([]),
+        "digest_role": "no_exact_materialization",
+        "dates": [],
+        "reason_counts": {},
+    }
+
+
+def _empty_warehouse_business_projection_status() -> dict[str, Any]:
     return {
         "contract_name": CONTRACT_NAME,
         "contract_version": CONTRACT_VERSION,
-        **dict(state),
+        "status": "not_materialized",
+        "revision_no": 0,
+        "revision_id": "",
+        "queue_counts": {},
+        "outbox_counts": {},
+        "health_status": "pending_exact_functional",
+        "updating": False,
+        "latest_failure": None,
+        "reconciliation": _empty_reconciliation_status(),
+    }
+
+
+def _load_warehouse_business_projection_status_from_connection(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Read one compact persisted status without reconciliation or writes."""
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if not {STATE_TABLE, REVISION_TABLE, OUTBOX_TABLE}.issubset(tables):
+        return _empty_warehouse_business_projection_status()
+    state = conn.execute(
+        f"SELECT * FROM {STATE_TABLE} WHERE slot=1"
+    ).fetchone()
+    latest_failure = conn.execute(
+        f"""
+        SELECT revision_id,stable_source_id,source_revision,
+               business_effective_date,published_at,error
+        FROM {REVISION_TABLE}
+        WHERE status='failed'
+        ORDER BY published_at DESC,revision_id DESC LIMIT 1
+        """
+    ).fetchone()
+    latest_outbox_failure = conn.execute(
+        f"""
+        SELECT request_id,stable_source_id,source_revision,
+               business_effective_date,
+               COALESCE(finished_at,requested_at) AS published_at,error
+        FROM {OUTBOX_TABLE}
+        WHERE status='error'
+        ORDER BY COALESCE(finished_at,requested_at) DESC,request_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    outbox_counts = {
+        str(row["status"]): int(row["count"])
+        for row in conn.execute(
+            f"SELECT status,COUNT(*) AS count FROM {OUTBOX_TABLE} GROUP BY status"
+        ).fetchall()
+    }
+    queue_counts: dict[str, int] = {}
+    if "sheet_vitrina_v1_warehouse_targeted_recalc_queue" in tables:
+        queue_counts = {
+            str(row["status"]): int(row["count"])
+            for row in conn.execute(
+                "SELECT status,COUNT(*) AS count "
+                "FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue "
+                "GROUP BY status"
+            ).fetchall()
+        }
+    reconciliation = _empty_reconciliation_status()
+    if RECONCILIATION_STATE_TABLE in tables:
+        materialized = conn.execute(
+            f"SELECT * FROM {RECONCILIATION_STATE_TABLE} WHERE slot=1"
+        ).fetchone()
+        if materialized is not None:
+            materialization_state = str(materialized["materialization_state"])
+            reconciliation = {
+                key: materialized[key]
+                for key in materialized.keys()
+                if key not in {"slot", "dates_json", "reason_counts_json"}
+            }
+            reconciliation["counts_exact"] = materialization_state == "current"
+            reconciliation["digest_role"] = (
+                "exact_current_materialization"
+                if materialization_state == "current"
+                else "last_exact_materialization"
+            )
+            reconciliation["dates"] = _loads(materialized["dates_json"], [])
+            reconciliation["reason_counts"] = _loads(
+                materialized["reason_counts_json"],
+                {},
+            )
+    if (
+        latest_outbox_failure is not None
+        and (
+            latest_failure is None
+            or str(latest_outbox_failure["published_at"] or "")
+            > str(latest_failure["published_at"] or "")
+        )
+    ):
+        latest_failure = {
+            "revision_id": str(latest_outbox_failure["request_id"]),
+            "stable_source_id": str(latest_outbox_failure["stable_source_id"]),
+            "source_revision": str(latest_outbox_failure["source_revision"]),
+            "business_effective_date": str(
+                latest_outbox_failure["business_effective_date"]
+            ),
+            "published_at": str(latest_outbox_failure["published_at"]),
+            "error": str(latest_outbox_failure["error"] or ""),
+        }
+    health_status = str(reconciliation.get("status") or "pending_exact_functional")
+    if health_status != "historical_repair_required" and (
+        outbox_counts.get("pending_exact_functional")
+        or health_status != "published_exact"
+    ):
+        health_status = "pending_exact_functional"
+    base = (
+        dict(state)
+        if state is not None
+        else {"status": "not_materialized", "revision_no": 0, "revision_id": ""}
+    )
+    return {
+        "contract_name": CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        **base,
         "queue_counts": queue_counts,
         "outbox_counts": outbox_counts,
-        "health_status": (
-            "historical_repair_required"
-            if reconciliation.get("status") == "historical_repair_required"
-            else "pending_exact_functional"
-            if outbox_counts.get("pending_exact_functional")
-            else str(reconciliation.get("status") or "pending_exact_functional")
-        ),
+        "health_status": health_status,
         "updating": bool(
             outbox_counts.get("queued")
             or outbox_counts.get("running")
@@ -2990,6 +3215,51 @@ def _projection_row_binding_incident(
         or provenance.get("published_version_id")
         or ""
     )
+    tables = {
+        str(item[0])
+        for item in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('sheet_vitrina_v1_warehouse_functional_versions',"
+            "'sheet_vitrina_v1_warehouse_wb_snapshots')"
+        ).fetchall()
+    }
+    if len(tables) != 2:
+        return "projection_exact_version_missing"
+    exact_versions = {
+        (str(item["version_id"]), str(item["business_effective_date"]))
+        for item in conn.execute(
+            """
+            SELECT version.version_id,version.business_effective_date
+            FROM sheet_vitrina_v1_warehouse_functional_versions AS version
+            JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
+              ON snapshot.version_id=version.version_id
+            WHERE version.status='good'
+              AND version.business_effective_date=snapshot.snapshot_date
+              AND version.version_id=?
+            """,
+            (bound_version_id,),
+        ).fetchall()
+    }
+    return _projection_row_binding_incident_from_exact_versions(
+        row,
+        expected_functional_version_id=expected_functional_version_id,
+        exact_versions=exact_versions,
+    )
+
+
+def _projection_row_binding_incident_from_exact_versions(
+    row: Mapping[str, Any],
+    *,
+    expected_functional_version_id: str,
+    exact_versions: set[tuple[str, str]],
+) -> str:
+    selected_date = str(row.get("as_of_date") or "")[:10]
+    provenance = _loads(row.get("provenance_json"), {})
+    bound_version_id = str(
+        provenance.get("functional_version_id")
+        or provenance.get("published_version_id")
+        or ""
+    )
     if str(provenance.get("source") or "") != "canonical_functional_warehouse_version":
         return "projection_source_unbound"
     if (
@@ -3005,28 +3275,11 @@ def _projection_row_binding_incident(
         and bound_version_id != expected_functional_version_id
     ):
         return "projection_functional_version_mismatch"
-    tables = {
-        str(item[0])
-        for item in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
-            "('sheet_vitrina_v1_warehouse_functional_versions',"
-            "'sheet_vitrina_v1_warehouse_wb_snapshots')"
-        ).fetchall()
-    }
-    if len(tables) != 2:
-        return "projection_exact_version_missing"
-    exact = conn.execute(
-        """
-        SELECT 1
-        FROM sheet_vitrina_v1_warehouse_functional_versions AS version
-        JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
-          ON snapshot.version_id=version.version_id
-        WHERE version.version_id=? AND version.status='good'
-          AND version.business_effective_date=? AND snapshot.snapshot_date=?
-        """,
-        (bound_version_id, selected_date, selected_date),
-    ).fetchone()
-    return "" if exact is not None else "projection_exact_version_missing"
+    return (
+        ""
+        if (bound_version_id, selected_date) in exact_versions
+        else "projection_exact_version_missing"
+    )
 
 
 def reconcile_warehouse_business_projection(
@@ -3053,10 +3306,16 @@ def reconcile_warehouse_business_projection(
             "status": "pending_exact_functional",
             "date_count": 0,
             "scope_count": 0,
+            "owned_metric_key_count": len(OWN_PRODUCT_CAPITAL_METRIC_KEYS),
             "cell_count": 0,
             "mismatch_count": 0,
             "unbound_row_count": 0,
             "numeric_to_missing_count": 0,
+            "cost_only_quantity_drift_count": 0,
+            "closed_date_rewrite_count": 0,
+            "source_digest": _fingerprint([]),
+            "reason_counts": {"required_tables_missing": 1},
+            "dates": [],
             "digest": _fingerprint([]),
         }
     normalized_dates = sorted(
@@ -3065,76 +3324,212 @@ def reconcile_warehouse_business_projection(
             for value in target_dates or []
         }
     )
+    current_query = f"SELECT * FROM {CURRENT_ROW_TABLE}"
+    current_parameters: tuple[Any, ...] = ()
+    if normalized_dates:
+        current_query += " WHERE as_of_date IN (" + ",".join(
+            "?" for _ in normalized_dates
+        ) + ")"
+        current_parameters = tuple(normalized_dates)
+    current_query += " ORDER BY as_of_date,nm_id"
+    current_rows = conn.execute(current_query, current_parameters).fetchall()
+    current_by_date: dict[str, list[sqlite3.Row]] = {}
+    for row in current_rows:
+        current_by_date.setdefault(str(row["as_of_date"]), []).append(row)
     if not normalized_dates:
-        normalized_dates = [
-            str(row[0])
-            for row in conn.execute(
-                f"SELECT DISTINCT as_of_date FROM {CURRENT_ROW_TABLE} ORDER BY as_of_date"
-            ).fetchall()
-        ]
+        normalized_dates = sorted(current_by_date)
+
+    ready_exact_bindings: dict[str, str] = {}
+    ready_fallback_bindings: dict[str, str] = {}
+    if "sheet_vitrina_v1_ready_snapshots" in tables and normalized_dates:
+        selected_dates = set(normalized_dates)
+        ready_rows = conn.execute(
+            "SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
+            "ORDER BY as_of_date DESC,bundle_version DESC"
+        ).fetchall()
+        for ready_row in ready_rows:
+            ready_date = str(ready_row["as_of_date"])
+            metadata = dict(_loads(ready_row["plan_json"], {}).get("metadata") or {})
+            coverage = metadata.get("warehouse_history_coverage") or {}
+            if not isinstance(coverage, Mapping):
+                continue
+            for selected_date, raw_entry in coverage.items():
+                selected_date = str(selected_date)
+                if selected_date not in selected_dates:
+                    continue
+                entry = raw_entry or {}
+                if not isinstance(entry, Mapping):
+                    continue
+                version_id = str(entry.get("functional_version_id") or "")
+                if not version_id:
+                    continue
+                ready_fallback_bindings.setdefault(selected_date, version_id)
+                if ready_date == selected_date:
+                    ready_exact_bindings.setdefault(selected_date, version_id)
+
+    version_rows: Sequence[sqlite3.Row] = []
+    if normalized_dates:
+        date_placeholders = ",".join("?" for _ in normalized_dates)
+        version_rows = conn.execute(
+            """
+            SELECT version.version_id,version.business_effective_date,
+                   version.plan_fingerprint,version.published_at,version.created_at
+            FROM sheet_vitrina_v1_warehouse_functional_versions AS version
+            JOIN sheet_vitrina_v1_warehouse_wb_snapshots AS snapshot
+              ON snapshot.version_id=version.version_id
+            WHERE version.status='good'
+              AND version.business_effective_date=snapshot.snapshot_date
+              AND version.business_effective_date IN ("""
+            + date_placeholders
+            + """)
+            ORDER BY version.business_effective_date,
+                     COALESCE(NULLIF(version.published_at,''),version.created_at) DESC,
+                     version.created_at DESC,version.version_id DESC
+            """,
+            tuple(normalized_dates),
+        ).fetchall()
+    latest_version_by_date: dict[str, str] = {}
+    version_source_digests: dict[str, str] = {}
+    exact_versions: set[tuple[str, str]] = set()
+    for row in version_rows:
+        version_id = str(row["version_id"])
+        selected_date = str(row["business_effective_date"])
+        latest_version_by_date.setdefault(selected_date, version_id)
+        version_source_digests[version_id] = str(row["plan_fingerprint"] or "")
+        exact_versions.add((version_id, selected_date))
+    expected_version_by_date = {
+        selected_date: (
+            ready_exact_bindings.get(selected_date)
+            or ready_fallback_bindings.get(selected_date)
+            or latest_version_by_date.get(selected_date, "")
+        )
+        for selected_date in normalized_dates
+    }
+    expected_version_ids = sorted(
+        {value for value in expected_version_by_date.values() if value}
+    )
+    balances_by_version: dict[str, list[dict[str, Any]]] = {}
+    if expected_version_ids:
+        placeholders = ",".join("?" for _ in expected_version_ids)
+        balance_rows = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_warehouse_functional_balances "
+            f"WHERE version_id IN ({placeholders}) "
+            "ORDER BY version_id,nm_id,warehouse_key",
+            tuple(expected_version_ids),
+        ).fetchall()
+        for row in balance_rows:
+            balances_by_version.setdefault(str(row["version_id"]), []).append(
+                dict(row)
+            )
     date_results: list[dict[str, Any]] = []
     mismatch_count = 0
     unbound_row_count = 0
     numeric_to_missing_count = 0
+    cost_only_quantity_drift_count = 0
+    closed_date_rewrite_count = 0
     scope_count = 0
     cell_count = 0
+    reason_counts: dict[str, int] = {}
+    source_material: list[dict[str, Any]] = []
     for selected_date in normalized_dates:
-        current_rows = conn.execute(
-            f"SELECT * FROM {CURRENT_ROW_TABLE} WHERE as_of_date=? ORDER BY nm_id",
-            (selected_date,),
-        ).fetchall()
-        expected_version_id = (
-            _ready_bound_functional_version_id(
-                conn,
-                as_of_date=selected_date,
-            )
-            or _latest_exact_functional_version_id(
-                conn,
-                as_of_date=selected_date,
-            )
-        )
+        selected_rows = current_by_date.get(selected_date, [])
+        expected_version_id = expected_version_by_date.get(selected_date, "")
         if not expected_version_id:
             date_results.append(
                 {
                     "as_of_date": selected_date,
                     "status": "historical_repair_required",
                     "reason": "exact_functional_version_missing",
-                    "scope_count": len(current_rows),
+                    "scope_count": len(selected_rows),
                     "mismatch_count": 0,
-                    "unbound_row_count": len(current_rows),
+                    "unbound_row_count": len(selected_rows),
+                    "numeric_to_missing_count": 0,
+                    "cost_only_quantity_drift_count": 0,
+                    "closed_date_rewrite_count": 0,
+                    "mismatch_digest": _fingerprint([]),
                 }
             )
-            scope_count += len(current_rows)
-            unbound_row_count += len(current_rows)
+            scope_count += len(selected_rows)
+            unbound_row_count += len(selected_rows)
+            reason_counts["exact_functional_version_missing"] = (
+                reason_counts.get("exact_functional_version_missing", 0)
+                + len(selected_rows)
+            )
             continue
-        current_ids = sorted({int(row["nm_id"]) for row in current_rows if int(row["nm_id"]) > 0})
-        balances = _version_balances(conn, version_id=expected_version_id)
+        current_ids = sorted(
+            {int(row["nm_id"]) for row in selected_rows if int(row["nm_id"]) > 0}
+        )
+        balances = balances_by_version.get(expected_version_id, [])
         expected_rows = _metric_rows(balances, affected_nm_ids=current_ids)
         date_mismatches = 0
         date_unbound = 0
         date_numeric_to_missing = 0
-        for row in current_rows:
-            incident = _projection_row_binding_incident(
-                conn,
+        date_quantity_drift = 0
+        date_closed_rewrite = 0
+        mismatch_material: list[dict[str, Any]] = []
+        for row in selected_rows:
+            incident = _projection_row_binding_incident_from_exact_versions(
                 dict(row),
                 expected_functional_version_id=expected_version_id,
+                exact_versions=exact_versions,
             )
             if incident:
                 date_unbound += 1
+                reason_counts[incident] = reason_counts.get(incident, 0) + 1
             expected = dict((expected_rows.get(int(row["nm_id"])) or {}).get("metrics") or {})
             actual = _loads(row["metrics_json"], {})
-            for metric_key in OWN_PRODUCT_CAPITAL_METRIC_KEYS:
-                if metric_key not in expected and metric_key not in actual:
-                    continue
+            expected_keys = (
+                OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS
+                if int(row["nm_id"]) == 0
+                else OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS
+            )
+            row_has_mismatch = False
+            for metric_key in expected_keys:
                 cell_count += 1
                 if actual.get(metric_key) != expected.get(metric_key):
+                    row_has_mismatch = True
                     date_mismatches += 1
+                    mismatch_kind = "cell_mismatch"
                     if expected.get(metric_key) is not None and actual.get(metric_key) is None:
                         date_numeric_to_missing += 1
-        scope_count += len(current_rows)
+                        mismatch_kind = "numeric_to_missing"
+                    if metric_key.endswith("_qty") or metric_key.endswith("_qty_total"):
+                        date_quantity_drift += 1
+                        mismatch_kind = "cost_only_quantity_drift"
+                    reason_counts[mismatch_kind] = reason_counts.get(mismatch_kind, 0) + 1
+                    mismatch_material.append(
+                        {
+                            "as_of_date": selected_date,
+                            "nm_id": int(row["nm_id"]),
+                            "metric_key": metric_key,
+                            "actual": actual.get(metric_key),
+                            "expected": expected.get(metric_key),
+                            "kind": mismatch_kind,
+                        }
+                    )
+            rewrite = bool(row_has_mismatch and not incident)
+            if rewrite:
+                date_closed_rewrite += 1
+                reason_counts["closed_date_rewrite_without_new_version"] = (
+                    reason_counts.get(
+                        "closed_date_rewrite_without_new_version",
+                        0,
+                    )
+                    + 1
+                )
+        scope_count += len(selected_rows)
         mismatch_count += date_mismatches
         unbound_row_count += date_unbound
         numeric_to_missing_count += date_numeric_to_missing
+        cost_only_quantity_drift_count += date_quantity_drift
+        closed_date_rewrite_count += date_closed_rewrite
+        source_material.append(
+            {
+                "as_of_date": selected_date,
+                "functional_version_id": expected_version_id,
+                "source_digest": version_source_digests.get(expected_version_id, ""),
+            }
+        )
         date_results.append(
             {
                 "as_of_date": selected_date,
@@ -3144,15 +3539,21 @@ def reconcile_warehouse_business_projection(
                     else "historical_repair_required"
                 ),
                 "functional_version_id": expected_version_id,
-                "scope_count": len(current_rows),
+                "source_digest": version_source_digests.get(expected_version_id, ""),
+                "scope_count": len(selected_rows),
                 "mismatch_count": date_mismatches,
                 "unbound_row_count": date_unbound,
                 "numeric_to_missing_count": date_numeric_to_missing,
+                "cost_only_quantity_drift_count": date_quantity_drift,
+                "closed_date_rewrite_count": date_closed_rewrite,
+                "mismatch_digest": _fingerprint(mismatch_material),
             }
         )
     status = (
         "published_exact"
-        if not mismatch_count and not unbound_row_count
+        if not mismatch_count
+        and not unbound_row_count
+        and all(item.get("status") == "published_exact" for item in date_results)
         else "historical_repair_required"
     )
     return {
@@ -3164,8 +3565,104 @@ def reconcile_warehouse_business_projection(
         "mismatch_count": mismatch_count,
         "unbound_row_count": unbound_row_count,
         "numeric_to_missing_count": numeric_to_missing_count,
+        "cost_only_quantity_drift_count": cost_only_quantity_drift_count,
+        "closed_date_rewrite_count": closed_date_rewrite_count,
+        "source_digest": _fingerprint(source_material),
+        "reason_counts": dict(sorted(reason_counts.items())),
         "dates": date_results,
         "digest": _fingerprint(date_results),
+    }
+
+
+def materialize_warehouse_business_projection_reconciliation(
+    conn: sqlite3.Connection,
+    *,
+    materialized_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist one exhaustive bulk reconciliation in the owning transaction."""
+
+    result = reconcile_warehouse_business_projection(conn)
+    projection_state = conn.execute(
+        f"SELECT revision_no,revision_id FROM {STATE_TABLE} WHERE slot=1"
+    ).fetchone()
+    revision_no = int(projection_state["revision_no"] if projection_state else 0)
+    revision_id = str(projection_state["revision_id"] if projection_state else "")
+    timestamp = str(materialized_at or _now())
+    previous = conn.execute(
+        f"SELECT invalidation_count FROM {RECONCILIATION_STATE_TABLE} WHERE slot=1"
+    ).fetchone()
+    invalidation_count = int(previous["invalidation_count"] if previous else 0)
+    conn.execute(
+        f"""
+        INSERT INTO {RECONCILIATION_STATE_TABLE}(
+            slot,status,materialization_state,materialized_revision_no,
+            materialized_revision_id,materialized_at,invalidated_at,
+            invalidation_reason,invalidation_count,
+            dirty_projection_row_count,dirty_ready_snapshot_count,
+            date_count,scope_count,owned_metric_key_count,cell_count,
+            mismatch_count,unbound_row_count,numeric_to_missing_count,
+            cost_only_quantity_drift_count,closed_date_rewrite_count,
+            source_digest,digest,dates_json,reason_counts_json
+        ) VALUES(1,?,'current',?,?,?,NULL,'',?,0,0,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(slot) DO UPDATE SET
+            status=excluded.status,
+            materialization_state=excluded.materialization_state,
+            materialized_revision_no=excluded.materialized_revision_no,
+            materialized_revision_id=excluded.materialized_revision_id,
+            materialized_at=excluded.materialized_at,
+            invalidated_at=NULL,
+            invalidation_reason='',
+            invalidation_count=excluded.invalidation_count,
+            dirty_projection_row_count=0,
+            dirty_ready_snapshot_count=0,
+            date_count=excluded.date_count,
+            scope_count=excluded.scope_count,
+            owned_metric_key_count=excluded.owned_metric_key_count,
+            cell_count=excluded.cell_count,
+            mismatch_count=excluded.mismatch_count,
+            unbound_row_count=excluded.unbound_row_count,
+            numeric_to_missing_count=excluded.numeric_to_missing_count,
+            cost_only_quantity_drift_count=excluded.cost_only_quantity_drift_count,
+            closed_date_rewrite_count=excluded.closed_date_rewrite_count,
+            source_digest=excluded.source_digest,
+            digest=excluded.digest,
+            dates_json=excluded.dates_json,
+            reason_counts_json=excluded.reason_counts_json
+        """,
+        (
+            str(result["status"]),
+            revision_no,
+            revision_id,
+            timestamp,
+            invalidation_count,
+            int(result["date_count"]),
+            int(result["scope_count"]),
+            int(result["owned_metric_key_count"]),
+            int(result["cell_count"]),
+            int(result["mismatch_count"]),
+            int(result["unbound_row_count"]),
+            int(result["numeric_to_missing_count"]),
+            int(result["cost_only_quantity_drift_count"]),
+            int(result["closed_date_rewrite_count"]),
+            str(result["source_digest"]),
+            str(result["digest"]),
+            _json(result["dates"]),
+            _json(result["reason_counts"]),
+        ),
+    )
+    return {
+        **result,
+        "materialization_state": "current",
+        "counts_exact": True,
+        "materialized_revision_no": revision_no,
+        "materialized_revision_id": revision_id,
+        "materialized_at": timestamp,
+        "invalidated_at": None,
+        "invalidation_reason": "",
+        "invalidation_count": invalidation_count,
+        "dirty_projection_row_count": 0,
+        "dirty_ready_snapshot_count": 0,
+        "digest_role": "exact_current_materialization",
     }
 
 

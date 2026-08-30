@@ -591,6 +591,12 @@ provisional, incomplete or error state. A status/read failure leaves the
 last-good table rendered and exposes the exact retry warning instead of
 clearing data.
 
+The lightweight revision/status read consumes the compact persisted WBC0027
+product-capital reconciliation. Exhaustive date/SKU comparison belongs to the
+owning warehouse/ready-snapshot publication transaction; browser/status GET
+never performs it synchronously. Missing or invalidated materialization remains
+typed non-green while the last-good table stays visible.
+
 The warehouse FBS-orders header exposes two independent coverage panels. The
 Finance panel reads every published non-account SKU-week from
 `wb_finance_weekly_sku_aggregates` and shows uncovered realized-sales amount,

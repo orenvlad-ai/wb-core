@@ -89,6 +89,10 @@ def _text_digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _file_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _payload_digest(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         dict(value),
@@ -117,9 +121,15 @@ def _validate(plan: Mapping[str, Any]) -> None:
         and len(economics.get("evidence_blocked") or []) == 12
         and str(plan.get("product_operation_id") or "").startswith("recovery_")
         and str(plan.get("economics_operation_id") or "").startswith("recovery_")
+        and plan.get("product_operation_id") != plan.get("economics_operation_id")
+        and isinstance(plan.get("storage_generation"), Mapping)
+        and str((plan.get("storage_generation") or {}).get("generation_id") or "")
+        and str((plan.get("storage_generation") or {}).get("manifest_sha256") or "").startswith("sha256:")
     ):
         raise Wbc0027ReleaseError("query-only qualification differs from exact accepted scope")
     manifest = _read(MANIFEST)
+    if manifest.get("operation_id") != "wbc0027-product-capital-and-qualified-economics-v2":
+        raise Wbc0027ReleaseError("WBC0027 manifest operation is not the fresh v2 generation")
     pre_change_digest = _payload_digest(
         {
             "economics_before_digest": plan["functional_economics"]["before_digest"],
@@ -141,6 +151,9 @@ def dry_run() -> dict[str, Any]:
     state = {
         "status": "ready",
         "deployed_sha": plan["deployed_sha"],
+        "storage_generation": plan["storage_generation"],
+        "manifest_operation_id": _read(MANIFEST)["operation_id"],
+        "manifest_sha256": _file_digest(MANIFEST),
         "plan_path": str(plan_path),
         "plan_fingerprint": plan["plan_fingerprint"],
         "product_operation_id": plan["product_operation_id"],
@@ -158,6 +171,10 @@ def dry_run() -> dict[str, Any]:
                 "product_before_target_digest": plan["product_capital"]["before_target_digest"],
             }
         ),
+        "product_non_target_digest": plan["product_capital"]["non_target_digest"],
+        "economics_non_target_digest": plan["functional_economics"]["non_target_digest"],
+        "ready_snapshot_digest": plan["ready_snapshot_digest"],
+        "outbox_digest": plan["outbox_digest"],
         "product_submit_attempted": False,
         "economics_submit_attempted": False,
     }

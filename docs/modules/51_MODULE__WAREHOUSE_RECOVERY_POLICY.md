@@ -212,6 +212,12 @@ registry, expire reservations or create a writer lock. Missing initialization
 is reported explicitly; expired active reservations remain visible until the
 next policy writer reconciles them by CAS.
 
+WBC0027 product-capital reconciliation follows the same boundary. Its owning
+warehouse/ready-snapshot writer persists the exhaustive 42-key result with
+exact revision, counts and digests using bounded bulk SQL. Status GET never
+performs the historical reconciliation and never writes; it reports a missing
+or trigger-invalidated materialization as non-green until the next owning tick.
+
 The canonical production sequence is:
 
 1. deploy through the one-shot Release Runner from an exact successful PR Gate;

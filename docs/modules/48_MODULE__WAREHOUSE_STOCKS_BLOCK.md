@@ -786,8 +786,13 @@ the exact good functional version whose `business_effective_date` and official
 identity. Pending signals stay durably `pending_exact_functional` until that
 same transaction moves them to `published_exact`.
 
-The status contour exhaustively reconciles all 42 owned product-capital keys
-for every persisted date/scope against exact functional versions. Any unbound
-row, numeric-to-missing transition, cell mismatch or closed-date rewrite
-without a new exact version is `historical_repair_required`; enqueue alone can
-never make health green.
+The owning exact-functional/ready-snapshot publication transaction exhaustively
+reconciles all 42 owned product-capital keys for every persisted date/scope by
+bounded set/bulk reads and stores one compact revision/count/digest health row.
+Any unbound row, numeric-to-missing transition, cell mismatch, cost-only
+quantity drift or closed-date rewrite without a new exact version is
+`historical_repair_required`; enqueue alone can never make health green.
+Projection/ready-binding triggers only invalidate that durable materialization;
+the next owning publication recomputes it exactly. The synchronous status GET
+is query-only and reads the compact row with a fixed query count. A missing or
+invalidated materialization is never green and never replays history on GET.
