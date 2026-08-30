@@ -43,6 +43,7 @@
         ["python3", "apps/wbc0008_warm_archive_receipt_reconciliation_probe_smoke.py"],
         ["python3", "apps/wbc0010_autoanswers_budget_recovery_smoke.py"],
         ["python3", "apps/root_storage_policy_smoke.py"],
+        ["python3", "apps/registry_upload_http_entrypoint_public_routes_smoke.py"],
         ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"]
       ]
     },
@@ -86,6 +87,9 @@
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_auto_schedules_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_metric_retirement_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_cost_price_read_side_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_performance_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_page_composition_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_http_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"],
         ["python3", "apps/wb_incident_policy_legacy_readback_smoke.py"],
         ["python3", "apps/sales_funnel_history_detail_csv_smoke.py"],
@@ -179,6 +183,7 @@
         ["python3", "apps/ff_pool_surfaces_browser_smoke.py"],
         ["python3", "apps/ff_wb_supply_origins_browser_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_health_browser_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_performance_browser_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_stable_filters_layout_browser_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_sku_separator_font_browser_smoke.py"],
@@ -337,7 +342,7 @@
     },
     {
       "id": "web-vitrina",
-      "paths": ["apps/sheet_vitrina_v1_*", "apps/sku_inventory_balance_*", "apps/our_wb_costs*", "apps/inventory_cost*", "apps/promo_xlsx_collector*", "apps/sales_funnel*", "apps/stocks_*", "apps/wb_buyer_*", "apps/wb_incident_policy*", "apps/wb_prices_*", "apps/wb_spp_*", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/sales_funnel_history_block.py", "packages/adapters/seller_analytics_csv_report.py", "packages/adapters/stocks_block.py", "packages/adapters/wb_buyer_session.py", "packages/application/calculation_parameters*", "packages/application/inventory_cost_blend.py", "packages/application/our_wb_cost*", "packages/application/promo_xlsx_collector_block.py", "packages/application/proxy_v4*", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/sheet_vitrina_v1_*", "packages/application/sku_inventory_balance.py", "packages/application/sku_management.py", "packages/application/stocks_block.py", "packages/application/supply_calculation_registry.py", "packages/application/vitrina_incident_rematerialization.py", "packages/application/wb_buyer_session.py", "packages/application/wb_incident_policy.py", "packages/application/wb_prices_management.py", "packages/application/wb_spp_tester.py", "packages/application/web_vitrina_view_model.py", "packages/adapters/templates/sheet_vitrina_v1_*", "packages/contracts/stocks_block.py", "packages/contracts/wb_price_quarantine.py", "gas/sheet_vitrina_v1/**", "registry/**"],
+      "paths": ["apps/sheet_vitrina_v1_*", "apps/sku_inventory_balance_*", "apps/our_wb_costs*", "apps/inventory_cost*", "apps/promo_xlsx_collector*", "apps/sales_funnel*", "apps/stocks_*", "apps/wb_buyer_*", "apps/wb_incident_policy*", "apps/wb_prices_*", "apps/wb_spp_*", "packages/adapters/registry_upload_http_entrypoint.py", "packages/adapters/sales_funnel_history_block.py", "packages/adapters/seller_analytics_csv_report.py", "packages/adapters/stocks_block.py", "packages/adapters/wb_buyer_session.py", "packages/application/calculation_parameters*", "packages/application/inventory_cost_blend.py", "packages/application/our_wb_cost*", "packages/application/promo_xlsx_collector_block.py", "packages/application/proxy_v4*", "packages/application/registry_upload_db_backed_runtime.py", "packages/application/sheet_vitrina_v1_*", "packages/application/sku_inventory_balance.py", "packages/application/sku_management.py", "packages/application/stocks_block.py", "packages/application/supply_calculation_registry.py", "packages/application/vitrina_incident_rematerialization.py", "packages/application/wb_buyer_session.py", "packages/application/wb_incident_policy.py", "packages/application/wb_prices_management.py", "packages/application/wb_spp_tester.py", "packages/application/web_vitrina_performance.py", "packages/application/web_vitrina_view_model.py", "packages/adapters/templates/sheet_vitrina_v1_*", "packages/contracts/stocks_block.py", "packages/contracts/wb_price_quarantine.py", "gas/sheet_vitrina_v1/**", "registry/**"],
       "exclude_paths": ["apps/sheet_vitrina_v1_fbs_fulfillment_order_*", "apps/sheet_vitrina_v1_inventory_history*", "apps/sheet_vitrina_v1_inventory_planning*", "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill*", "apps/sheet_vitrina_v1_refresh_promo_artifact_gc*", "packages/application/sheet_vitrina_v1_inventory_history*", "packages/application/sheet_vitrina_v1_inventory_planning*"],
       "suites": ["web_vitrina"],
       "release": "live_runtime"

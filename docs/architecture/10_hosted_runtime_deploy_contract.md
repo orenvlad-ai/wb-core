@@ -56,6 +56,7 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
 - `GET /logout`
 - `POST /logout`
 - `GET /v1/sheet-vitrina-v1/web-vitrina`
+- `POST /v1/sheet-vitrina-v1/web-vitrina/performance`
 - `GET /v1/sheet-vitrina-v1/warehouses`
 - `GET /v1/sheet-vitrina-v1/warehouses/recovery`
 - `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`
