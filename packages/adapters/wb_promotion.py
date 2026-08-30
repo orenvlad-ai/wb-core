@@ -110,6 +110,12 @@ class WbPromotionSource(Protocol):
     def patch_bids(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         raise NotImplementedError("adapter skeleton only")
 
+    def start_campaign(self, advert_id: int) -> Mapping[str, Any]:
+        raise NotImplementedError("adapter skeleton only")
+
+    def pause_campaign(self, advert_id: int) -> Mapping[str, Any]:
+        raise NotImplementedError("adapter skeleton only")
+
 
 class HttpBackedWbPromotionSource:
     """HTTP adapter to official WB Promotion API.
@@ -249,6 +255,30 @@ class HttpBackedWbPromotionSource:
             token=runtime.token,
             timeout_seconds=runtime.timeout_seconds,
             payload=dict(payload),
+        )
+        return result if isinstance(result, Mapping) else {}
+
+    def start_campaign(self, advert_id: int) -> Mapping[str, Any]:
+        return self._campaign_state_request("start", advert_id)
+
+    def pause_campaign(self, advert_id: int) -> Mapping[str, Any]:
+        return self._campaign_state_request("pause", advert_id)
+
+    def _campaign_state_request(
+        self, action: str, advert_id: int
+    ) -> Mapping[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"start", "pause"}:
+            raise ValueError("unsupported WB campaign state action")
+        if isinstance(advert_id, bool) or not isinstance(advert_id, int) or advert_id <= 0:
+            raise ValueError("advert_id must be a positive integer")
+        runtime = self._runtime()
+        query = parse.urlencode({"id": advert_id})
+        result = self._request_json(
+            method="GET",
+            url=f"{runtime.base_url}/adv/v0/{normalized_action}?{query}",
+            token=runtime.token,
+            timeout_seconds=runtime.timeout_seconds,
         )
         return result if isinstance(result, Mapping) else {}
 

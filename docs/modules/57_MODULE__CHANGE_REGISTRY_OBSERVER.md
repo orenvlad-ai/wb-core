@@ -87,6 +87,12 @@ the primary failure is never replaced by the fallback exception.
   добавляет `expired` без fact/change. Значение, существовавшее до pending, не
   является match. Cardinality `0|many` не имеет exact bid observation и потому
   fail closed до создания pending.
+- Manual-pending lookup типизирован отдельно от live writer lookup: только
+  item, для которого существует append-only manual pending event/current
+  lifecycle, является pending candidate. Совпавший
+  `recommendation_item_id` у live bid или `campaign_state` writer item без
+  manual event не участвует в pending reconciliation и не может сломать
+  `GET latest`/Registry overview.
 
 ## Health and concurrency
 

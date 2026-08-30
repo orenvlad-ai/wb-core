@@ -16,7 +16,7 @@ related_modules:
 related_runners:
   - "apps/change_registry_baseline_engine_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Canonical baseline/checkpoint/diff/projection engine invoked by the active module-57 observer; the engine itself owns no scheduler, HTTP/UI, writer instrumentation, manual pending or WB mutation."
+update_note: "Canonical baseline/checkpoint/diff/projection engine remains read-only; exact module-58 campaign_state writer proof reconciles through the existing campaign field without duplicate facts."
 ---
 
 # 1. Activation and transaction boundary
@@ -102,7 +102,7 @@ complete checkpoint chain, comparable normalized observations and linked
 seller/account/target/field, so a cursor cannot be replayed against another
 projection.
 
-Unbound writer proof is inert for projection. After exact reconciliation the
+Unbound writer proof, including a confirmed Balance `campaign_state` item, is inert for projection. After exact reconciliation the
 same fact has one checkpoint link and is admitted when its writer transition
 start belongs to that checkpoint interval. The projector rejects missing or
 multiple checkpoint links, interval mismatch, before/after mismatch, unproven
@@ -116,8 +116,8 @@ causality, performance, recommendations or ML features.
 
 The engine itself does not own the scheduler/timer/manual HTTP scan or public
 API/UI; those belong to module 57. Excluded from the complete solution remain
-additional writer surfaces beyond module 58, manual-pending activation, Balance
-bridge, historical import/backfill, public API/UI, outcomes/analytics/ML,
+additional writer surfaces beyond module 58, historical import/backfill,
+public API/UI, outcomes/analytics/ML,
 campaign/price/bid WB writes, deletion facts and any production-data apply.
 
 # 7. Verification

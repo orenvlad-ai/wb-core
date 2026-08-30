@@ -2520,7 +2520,12 @@ class ChangeRegistryRepository:
                 )
                 for recommendation_id in exact_ids
                 if conn.execute(
-                    f"SELECT 1 FROM {ITEMS_TABLE} WHERE recommendation_item_id=?",
+                    f"""SELECT 1 FROM {ITEMS_TABLE} item
+                        WHERE item.recommendation_item_id=?
+                          AND EXISTS (
+                              SELECT 1 FROM {MANUAL_PENDING_EVENTS_TABLE} event
+                              WHERE event.change_item_id=item.change_item_id
+                          )""",
                     (recommendation_id,),
                 ).fetchone()
                 is not None

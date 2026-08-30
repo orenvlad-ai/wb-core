@@ -65,6 +65,8 @@ ACTIVE_ITEM_STATES = {
     "delayed",
 }
 SUPPORTED_CAMPAIGN_STATUSES = {4, 9, 11}
+CAMPAIGN_STATE_BY_STATUS = {4: "ready", 9: "active", 11: "paused"}
+CAMPAIGN_STATE_ACTION_BY_STATUS = {4: "start", 9: "pause", 11: "start"}
 EXCLUSION_POLICY_VERSION = "sku_inventory_balance_exclusions_v1"
 EXCLUDED_NM_IDS = {
     497413772: "iPhone Air glass is outside inventory-balance scope",
@@ -210,6 +212,33 @@ class LiveWbInventoryBalanceApplyAdapter:
                 http_status=403,
             )
         return self.sku_management_block.ads_block.submit_bid_targets(targets)
+
+    def preflight_state(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if not self.external_writes_enabled:
+            raise SkuInventoryBalanceError(
+                "live WB inventory-balance capability is disabled",
+                http_status=403,
+            )
+        return self.sku_management_block.ads_block.preflight_campaign_state_targets(
+            targets
+        )
+
+    def submit_state(self, target: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not self.external_writes_enabled:
+            raise SkuInventoryBalanceError(
+                "live WB inventory-balance capability is disabled",
+                http_status=403,
+            )
+        return self.sku_management_block.ads_block.submit_campaign_state(target)
+
+    def readback_state(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return self.sku_management_block.ads_block.read_campaign_state_targets(
+            targets
+        )
 
     def readback(
         self, targets: Sequence[Mapping[str, Any]]
@@ -1005,7 +1034,10 @@ class SkuInventoryBalanceBlock:
             row["old_cpm_campaigns"] = [
                 item for item in recommendations if item["campaign_group"] == "old_cpm"
             ]
-            row["select_available"] = any(item["can_apply"] for item in recommendations)
+            row["select_available"] = any(
+                item["can_apply"] or item.get("state_action_available")
+                for item in recommendations
+            )
             row["ads_evidence"] = campaign_meta
             row["outcome_observation"] = {
                 "status": "not_observed",
@@ -1230,31 +1262,157 @@ class SkuInventoryBalanceBlock:
         selected_target_keys = {
             str(item) for item in (payload.get("target_keys") or []) if str(item).strip()
         }
-        if not selected_nm_ids and not selected_target_keys:
+        raw_state_actions = payload.get("state_actions") or []
+        if not isinstance(raw_state_actions, Sequence) or isinstance(
+            raw_state_actions, (str, bytes)
+        ):
             raise SkuInventoryBalanceError(
-                "at least one selected nm_id or target_key is required",
+                "state_actions must be an array", http_status=422
+            )
+        if not selected_nm_ids and not selected_target_keys and not raw_state_actions:
+            raise SkuInventoryBalanceError(
+                "at least one selected bid or campaign state action is required",
                 http_status=422,
             )
-        targets = []
-        for row in calculation.get("rows") or []:
-            if selected_nm_ids and int(row["nm_id"]) not in selected_nm_ids:
-                continue
-            for target in row.get("campaign_recommendations") or []:
-                if selected_target_keys and str(target["target_key"]) not in selected_target_keys:
+        bid_targets = []
+        if selected_nm_ids or selected_target_keys:
+            for row in calculation.get("rows") or []:
+                if selected_nm_ids and int(row["nm_id"]) not in selected_nm_ids:
                     continue
-                if target.get("can_apply"):
-                    targets.append(dict(target))
+                for target in row.get("campaign_recommendations") or []:
+                    if selected_target_keys and str(target["target_key"]) not in selected_target_keys:
+                        continue
+                    if target.get("can_apply"):
+                        bid_targets.append(dict(target))
+        campaign_index: dict[tuple[int, int], dict[str, Any]] = {}
+        campaign_placements: dict[tuple[int, int], set[str]] = {}
+        for row in calculation.get("rows") or []:
+            for target in row.get("campaign_recommendations") or []:
+                identity = (int(target["nm_id"]), int(target["advert_id"]))
+                existing = campaign_index.get(identity)
+                if existing is not None and (
+                    int(existing.get("campaign_status") or 0)
+                    != int(target.get("campaign_status") or 0)
+                    or str(existing.get("payment_type") or "")
+                    != str(target.get("payment_type") or "")
+                ):
+                    raise SkuInventoryBalanceError(
+                        "calculation contains conflicting campaign identity evidence",
+                        http_status=409,
+                    )
+                campaign_index[identity] = dict(target)
+                placement_evidence = str(target.get("placement") or "")
+                if placement_evidence:
+                    campaign_placements.setdefault(identity, set()).add(
+                        placement_evidence
+                    )
+        state_targets: list[dict[str, Any]] = []
+        seen_state_adverts: set[int] = set()
+        for raw_action in raw_state_actions:
+            if not isinstance(raw_action, Mapping):
+                raise SkuInventoryBalanceError(
+                    "campaign state action must be an object", http_status=422
+                )
+            nm_id = _optional_int(raw_action.get("nm_id")) or 0
+            advert_id = _optional_int(raw_action.get("advert_id")) or 0
+            action = str(raw_action.get("action") or "").strip().lower()
+            if nm_id <= 0 or advert_id <= 0 or action not in {"start", "pause"}:
+                raise SkuInventoryBalanceError(
+                    "campaign state action identity is invalid", http_status=422
+                )
+            if advert_id in seen_state_adverts:
+                raise SkuInventoryBalanceError(
+                    "campaign state action is duplicated", http_status=422
+                )
+            seen_state_adverts.add(advert_id)
+            source_target = campaign_index.get((nm_id, advert_id))
+            if source_target is None or not source_target.get("identity_valid"):
+                raise SkuInventoryBalanceError(
+                    "campaign state action has no exact calculation identity",
+                    http_status=409,
+                )
+            current_status = int(source_target.get("campaign_status") or 0)
+            expected_action = CAMPAIGN_STATE_ACTION_BY_STATUS.get(current_status, "")
+            if action != expected_action:
+                raise SkuInventoryBalanceError(
+                    "campaign state action is unavailable from current state",
+                    http_status=409,
+                )
+            current_state = CAMPAIGN_STATE_BY_STATUS[current_status]
+            requested_state = "active" if action == "start" else "paused"
+            state_target_key = f"state:{nm_id}:{advert_id}"
+            recommendation_basis = {
+                "contract": "sku_inventory_balance_campaign_state_recommendation/v1",
+                "calculation_id": calculation_id,
+                "target": {
+                    "seller_id": self.seller_id,
+                    "account_scope": self.account_scope,
+                    "target_kind": "campaign",
+                    "nm_id": nm_id,
+                    "advert_id": advert_id,
+                    "placement": "",
+                    "parameter_field": "campaign_state",
+                },
+                "before_value": current_state,
+                "requested_value": requested_state,
+            }
+            state_targets.append(
+                {
+                    "action_type": "campaign_state",
+                    "target_key": state_target_key,
+                    "nm_id": nm_id,
+                    "advert_id": advert_id,
+                    "campaign_name": str(source_target.get("campaign_name") or ""),
+                    "payment_type": str(source_target.get("payment_type") or ""),
+                    "placement": "",
+                    "placement_evidence": sorted(campaign_placements[(nm_id, advert_id)])[0],
+                    "current_campaign_status": current_status,
+                    "current_campaign_state": current_state,
+                    "requested_campaign_state": requested_state,
+                    "state_action": action,
+                    "state_action_label": str(source_target.get("state_action_label") or action),
+                    "recommendation_item_id": "ibsr_"
+                    + sha256(
+                        json.dumps(
+                            recommendation_basis,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        targets = [
+            {**item, "action_type": "bid_change"} for item in bid_targets
+        ] + state_targets
         if not targets:
-            raise SkuInventoryBalanceError("selection has no available exact campaign targets", http_status=422)
+            raise SkuInventoryBalanceError(
+                "selection has no valid bid or campaign state changes",
+                http_status=422,
+            )
         selection = {
             "nm_ids": sorted({int(item["nm_id"]) for item in targets}),
             "target_keys": sorted(str(item["target_key"]) for item in targets),
+            "bid_target_keys": sorted(
+                str(item["target_key"])
+                for item in targets
+                if item["action_type"] == "bid_change"
+            ),
+            "campaign_state_target_keys": sorted(
+                str(item["target_key"])
+                for item in targets
+                if item["action_type"] == "campaign_state"
+            ),
         }
         confirmation_policy = self._balance_owner_confirmation_policy()
         job_targets = []
         manifest_targets = []
         for item in targets:
-            safety_warnings = self._balance_safety_threshold_warnings(item)
+            safety_warnings = (
+                self._balance_safety_threshold_warnings(item)
+                if item["action_type"] == "bid_change"
+                else []
+            )
             job_targets.append(
                 {
                     **item,
@@ -1264,8 +1422,9 @@ class SkuInventoryBalanceBlock:
                     "safety_warnings": safety_warnings,
                 }
             )
-            manifest_targets.append(
-                {
+            if item["action_type"] == "bid_change":
+                manifest_target = {
+                    "action_type": "bid_change",
                     "target_key": str(item["target_key"]),
                     "nm_id": int(item["nm_id"]),
                     "advert_id": int(item["advert_id"]),
@@ -1281,7 +1440,23 @@ class SkuInventoryBalanceBlock:
                     "override_updated_at": item.get("override_updated_at") or "",
                     "safety_warnings": safety_warnings,
                 }
-            )
+            else:
+                manifest_target = {
+                    "action_type": "campaign_state",
+                    "target_key": str(item["target_key"]),
+                    "nm_id": int(item["nm_id"]),
+                    "advert_id": int(item["advert_id"]),
+                    "placement": "",
+                    "placement_evidence": str(item["placement_evidence"]),
+                    "payment_type": str(item["payment_type"]),
+                    "current_campaign_status": int(item["current_campaign_status"]),
+                    "current_campaign_state": str(item["current_campaign_state"]),
+                    "requested_campaign_state": str(item["requested_campaign_state"]),
+                    "state_action": str(item["state_action"]),
+                    "recommendation_item_id": str(item["recommendation_item_id"]),
+                    "safety_warnings": [],
+                }
+            manifest_targets.append(manifest_target)
         manifest_targets.sort(key=lambda item: item["target_key"])
         apply_manifest = {
             "contract_name": "sheet_vitrina_v1_inventory_balance_apply_manifest/v1",
@@ -1304,14 +1479,16 @@ class SkuInventoryBalanceBlock:
         summary = {
             "sku_count": len(selection["nm_ids"]),
             "target_count": len(targets),
+            "bid_count": len(bid_targets),
+            "campaign_state_count": len(state_targets),
             "increase_count": sum(
-                1 for item in targets if float(item["final_target_bid_rub"]) > float(item["current_bid_rub"])
+                1 for item in bid_targets if float(item["final_target_bid_rub"]) > float(item["current_bid_rub"])
             ),
             "decrease_count": sum(
-                1 for item in targets if float(item["final_target_bid_rub"]) < float(item["current_bid_rub"])
+                1 for item in bid_targets if float(item["final_target_bid_rub"]) < float(item["current_bid_rub"])
             ),
             "unchanged_count": sum(
-                1 for item in targets if float(item["final_target_bid_rub"]) == float(item["current_bid_rub"])
+                1 for item in bid_targets if float(item["final_target_bid_rub"]) == float(item["current_bid_rub"])
             ),
             "external_writes": requested_mode == LIVE_MODE,
         }
@@ -1632,16 +1809,58 @@ class SkuInventoryBalanceBlock:
                 job_id,
                 [item["target_key"] for item in pending],
                 state="preflighting",
-                phase="Проверяем текущие и минимальные ставки",
+                phase="Проверяем текущие ставки и состояния кампаний",
             )
-            preflight = self.apply_adapter.preflight(
-                [self._transport_target(item) for item in pending],
-                min_bid_interval_seconds=self.min_bid_interval_seconds,
-                sleep=lambda seconds: self._sleep_with_lease(
-                    job_id, worker_token, seconds, phase="preflight"
-                ),
-                safety_threshold_policy=self._job_safety_threshold_policy(job_id),
-            )
+            pending_bid = [
+                item
+                for item in pending
+                if self._transport_target(item)["action_type"] == "bid_change"
+            ]
+            pending_state = [
+                item
+                for item in pending
+                if self._transport_target(item)["action_type"] == "campaign_state"
+            ]
+            preflight: list[dict[str, Any]] = []
+            if pending_bid:
+                preflight.extend(
+                    self.apply_adapter.preflight(
+                        [self._transport_target(item) for item in pending_bid],
+                        min_bid_interval_seconds=self.min_bid_interval_seconds,
+                        sleep=lambda seconds: self._sleep_with_lease(
+                            job_id, worker_token, seconds, phase="preflight"
+                        ),
+                        safety_threshold_policy=self._job_safety_threshold_policy(job_id),
+                    )
+                )
+            if pending_state:
+                state_transports = [
+                    self._transport_target(item) for item in pending_state
+                ]
+                try:
+                    preflight.extend(
+                        self.apply_adapter.preflight_state(state_transports)
+                    )
+                except WbPromotionApiError as exc:
+                    code = (
+                        "wb_rate_limited"
+                        if exc.http_status == 429
+                        else "campaign_state_preflight_unavailable"
+                    )
+                    message = (
+                        "WB ограничил частоту проверки состояния кампании."
+                        if exc.http_status == 429
+                        else "Не удалось подтвердить текущее состояние кампании до отправки."
+                    )
+                    preflight.extend(
+                        {
+                            **target,
+                            "ok": False,
+                            "error_code": code,
+                            "message": message,
+                        }
+                        for target in state_transports
+                    )
             self._renew_job_lease(job_id, worker_token, phase="preflight_result")
             for result in preflight:
                 if result.get("ok"):
@@ -1687,19 +1906,29 @@ class SkuInventoryBalanceBlock:
                     job_id,
                     [item["target_key"] for item in remaining],
                     state="skipped",
-                    phase="Не отправлено: контрольная ставка не подтверждена",
+                    phase="Не отправлено: контрольное изменение не подтверждено",
                     error_code="canary_not_confirmed",
-                    error="Остальные ставки не отправлены: контрольное изменение не подтверждено.",
+                    error="Остальные изменения не отправлены: контрольное изменение не подтверждено.",
                 )
                 self._refresh_job_state(job_id)
                 self._release_job_lease(job_id, worker_token)
                 return
 
         ready = self._load_job_items(job_id, states={"ready"})
+        ready_bid = [
+            item
+            for item in ready
+            if self._transport_target(item)["action_type"] == "bid_change"
+        ]
+        ready_state = [
+            item
+            for item in ready
+            if self._transport_target(item)["action_type"] == "campaign_state"
+        ]
         group_no = 2
         submitted_all: list[dict[str, Any]] = []
-        for offset in range(0, len(ready), self.live_batch_size):
-            batch = ready[offset : offset + self.live_batch_size]
+        for offset in range(0, len(ready_bid), self.live_batch_size):
+            batch = ready_bid[offset : offset + self.live_batch_size]
             self._renew_job_lease(job_id, worker_token, phase="batch_submit")
             submitted_all.extend(
                 self._submit_live_group(
@@ -1707,12 +1936,30 @@ class SkuInventoryBalanceBlock:
                 )
             )
             group_no += 1
-            if offset + self.live_batch_size < len(ready) and self.patch_interval_seconds:
+            if offset + self.live_batch_size < len(ready_bid) and self.patch_interval_seconds:
                 self._sleep_with_lease(
                     job_id,
                     worker_token,
                     self.patch_interval_seconds,
                     phase="batch_submit",
+                )
+        for state_index, item in enumerate(ready_state):
+            self._renew_job_lease(job_id, worker_token, phase="campaign_state_submit")
+            submitted_all.extend(
+                self._submit_live_group(
+                    job_id, worker_token, [item], group_no=group_no
+                )
+            )
+            group_no += 1
+            if (
+                state_index + 1 < len(ready_state)
+                and self.patch_interval_seconds
+            ):
+                self._sleep_with_lease(
+                    job_id,
+                    worker_token,
+                    self.patch_interval_seconds,
+                    phase="campaign_state_submit",
                 )
         if submitted_all:
             self._renew_job_lease(job_id, worker_token, phase="batch_verifying")
@@ -1756,6 +2003,18 @@ class SkuInventoryBalanceBlock:
         if not items:
             return []
         job = self._job_row(job_id)
+        action_types = {
+            self._transport_target(item)["action_type"] for item in items
+        }
+        if len(action_types) != 1:
+            raise SkuInventoryBalanceError(
+                "one submit group cannot mix bid and campaign state transports"
+            )
+        action_type = next(iter(action_types))
+        if action_type == "campaign_state" and len(items) != 1:
+            raise SkuInventoryBalanceError(
+                "campaign state submit group must contain exactly one campaign"
+            )
         prepared_by_key: dict[str, PreparedWriterOperation] = {}
         try:
             for item in items:
@@ -1763,22 +2022,32 @@ class SkuInventoryBalanceBlock:
                 receipt = f"inventory-balance:{job_id}:{target['target_key']}"
                 prepared = self._prepared_from_item(item)
                 if prepared is None:
-                    prepared = self.writer_registry.prepare_bid(
-                        source_surface="sku_inventory_balance",
-                        actor=str(job["created_by"]),
-                        native_operation_id=f"{job_id}:{target['target_key']}",
-                        nm_id=int(target["nm_id"]),
-                        advert_id=int(target["advert_id"]),
-                        placement=str(target["placement"]),
-                        before_bid_minor=int(target["current_bid_minor"]),
-                        requested_bid_minor=int(target["requested_bid_minor"]),
-                        requested_at=str(job["created_at"]),
-                        correlation_id=job_id,
-                        calculation_id=str(job["calculation_id"]),
-                        apply_operation_id=job_id,
-                        recommendation_item_id=str(target["recommendation_item_id"]),
-                        native_audit_reference=f"inventory-balance/apply-job/{job_id}",
-                    )
+                    common = {
+                        "source_surface": "sku_inventory_balance",
+                        "actor": str(job["created_by"]),
+                        "native_operation_id": f"{job_id}:{target['target_key']}",
+                        "nm_id": int(target["nm_id"]),
+                        "advert_id": int(target["advert_id"]),
+                        "requested_at": str(job["created_at"]),
+                        "correlation_id": job_id,
+                        "calculation_id": str(job["calculation_id"]),
+                        "apply_operation_id": job_id,
+                        "recommendation_item_id": str(target["recommendation_item_id"]),
+                        "native_audit_reference": f"inventory-balance/apply-job/{job_id}",
+                    }
+                    if action_type == "campaign_state":
+                        prepared = self.writer_registry.prepare_campaign_state(
+                            **common,
+                            before_state=str(target["current_campaign_state"]),
+                            requested_state=str(target["requested_campaign_state"]),
+                        )
+                    else:
+                        prepared = self.writer_registry.prepare_bid(
+                            **common,
+                            placement=str(target["placement"]),
+                            before_bid_minor=int(target["current_bid_minor"]),
+                            requested_bid_minor=int(target["requested_bid_minor"]),
+                        )
                 prepared_by_key[target["target_key"]] = prepared
                 self._update_item(
                     job_id,
@@ -1832,12 +2101,20 @@ class SkuInventoryBalanceBlock:
         response: Mapping[str, Any] = {}
         for attempt in range(2):
             try:
-                response = self.apply_adapter.submit_batch(transport_targets)
+                response = (
+                    self.apply_adapter.submit_state(transport_targets[0])
+                    if action_type == "campaign_state"
+                    else self.apply_adapter.submit_batch(transport_targets)
+                )
             except WbPromotionApiError as exc:
                 self._renew_job_lease(
                     job_id, worker_token, phase="submit_error_received"
                 )
-                if exc.http_status == 429 and attempt == 0:
+                if (
+                    action_type == "bid_change"
+                    and exc.http_status == 429
+                    and attempt == 0
+                ):
                     delay = max(float(exc.retry_after_seconds or 1.0), 0.0)
                     self._set_item_states(
                         job_id,
@@ -1897,6 +2174,7 @@ class SkuInventoryBalanceBlock:
             {
                 "job_id": job_id,
                 "submit_group": group_no,
+                "action_type": action_type,
                 "target_keys": keys,
                 "response": dict(response),
             }
@@ -1929,7 +2207,7 @@ class SkuInventoryBalanceBlock:
                 job_id,
                 key,
                 state="submitted",
-                phase="Отправлено, ожидаем подтверждение WB",
+                phase="Отправлено, ожидаем точное подтверждение WB",
                 submitted_at=submitted_at,
                 readback_deadline_at=deadline_at,
                 result={"transport_receipt_digest": receipt_digest},
@@ -2023,7 +2301,7 @@ class SkuInventoryBalanceBlock:
                 job_id,
                 key,
                 state="verifying",
-                phase="Ответ WB неясен, проверяем фактическую ставку",
+                phase="Ответ WB неясен, проверяем фактическое состояние",
                 submit_group=group_no,
                 submitted_at=submitted_at,
                 readback_deadline_at=deadline_at,
@@ -2045,7 +2323,7 @@ class SkuInventoryBalanceBlock:
                 job_id,
                 keys,
                 state="delayed",
-                phase="WB синхронизирует ставки, ожидаем проверку",
+                phase="WB синхронизирует изменения, ожидаем проверку",
             )
             self._sleep_with_lease(
                 job_id,
@@ -2066,12 +2344,32 @@ class SkuInventoryBalanceBlock:
                 job_id,
                 [item["target_key"] for item in current],
                 state="verifying",
-                phase="Проверяем фактические ставки в WB",
+                phase="Проверяем фактические ставки и состояния в WB",
             )
             try:
-                readbacks = self.apply_adapter.readback(
-                    [self._transport_target(item) for item in current]
-                )
+                current_bid = [
+                    item
+                    for item in current
+                    if self._transport_target(item)["action_type"] == "bid_change"
+                ]
+                current_state = [
+                    item
+                    for item in current
+                    if self._transport_target(item)["action_type"] == "campaign_state"
+                ]
+                readbacks: list[dict[str, Any]] = []
+                if current_bid:
+                    readbacks.extend(
+                        self.apply_adapter.readback(
+                            [self._transport_target(item) for item in current_bid]
+                        )
+                    )
+                if current_state:
+                    readbacks.extend(
+                        self.apply_adapter.readback_state(
+                            [self._transport_target(item) for item in current_state]
+                        )
+                    )
             except Exception as exc:
                 readbacks = [
                     {
@@ -2080,6 +2378,7 @@ class SkuInventoryBalanceBlock:
                         "error_code": "readback_unavailable",
                         "message": str(exc),
                         "observed_bid_minor": None,
+                        "observed_campaign_state": "",
                     }
                     for item in current
                 ]
@@ -2092,9 +2391,19 @@ class SkuInventoryBalanceBlock:
             for item in current:
                 key = str(item["target_key"])
                 result = by_key.get(key) or {}
-                observed = _optional_int(result.get("observed_bid_minor"))
-                requested = int(self._transport_target(item)["requested_bid_minor"])
-                if result.get("ok") and observed == requested:
+                transport = self._transport_target(item)
+                action_type = transport["action_type"]
+                observed_bid = _optional_int(result.get("observed_bid_minor"))
+                observed_state = str(result.get("observed_campaign_state") or "")
+                matched = (
+                    result.get("ok")
+                    and (
+                        observed_state == str(transport["requested_campaign_state"])
+                        if action_type == "campaign_state"
+                        else observed_bid == int(transport["requested_bid_minor"])
+                    )
+                )
+                if matched:
                     prepared = self._prepared_from_item(item)
                     if prepared is None:
                         self._update_item(
@@ -2103,30 +2412,46 @@ class SkuInventoryBalanceBlock:
                             state="ambiguous",
                             phase="Требуется проверка",
                             error_code="registry_operation_missing",
-                            error="Ставка совпала, но связь с реестром не восстановлена.",
-                            last_observed_bid_minor=observed,
+                            error="Результат совпал, но связь с реестром не восстановлена.",
+                            last_observed_bid_minor=observed_bid,
                         )
                         continue
                     try:
-                        self.writer_registry.confirm_bid(
-                            prepared,
-                            confirmed_bid_minor=observed,
-                            readback_basis={
-                                "job_id": job_id,
-                                "calculation_id": str(self._job_row(job_id)["calculation_id"]),
-                                "recommendation_item_id": str(
-                                    self._transport_target(item)["recommendation_item_id"]
-                                ),
-                                "nm_id": int(item["nm_id"]),
-                                "advert_id": int(self._transport_target(item)["advert_id"]),
-                                "placement": str(self._transport_target(item)["placement"]),
-                                "bid_minor": observed,
-                            },
-                            receipt_reference=str(item["registry_receipt_reference"]),
-                            native_audit_references=(
-                                f"inventory-balance/apply-job/{job_id}",
+                        readback_basis = {
+                            "job_id": job_id,
+                            "calculation_id": str(
+                                self._job_row(job_id)["calculation_id"]
                             ),
-                        )
+                            "recommendation_item_id": str(
+                                transport["recommendation_item_id"]
+                            ),
+                            "nm_id": int(item["nm_id"]),
+                            "advert_id": int(transport["advert_id"]),
+                            "action_type": action_type,
+                        }
+                        if action_type == "campaign_state":
+                            readback_basis["campaign_state"] = observed_state
+                            self.writer_registry.confirm_campaign_state(
+                                prepared,
+                                confirmed_state=observed_state,
+                                readback_basis=readback_basis,
+                                receipt_reference=str(item["registry_receipt_reference"]),
+                                native_audit_references=(
+                                    f"inventory-balance/apply-job/{job_id}",
+                                ),
+                            )
+                        else:
+                            readback_basis["placement"] = str(transport["placement"])
+                            readback_basis["bid_minor"] = observed_bid
+                            self.writer_registry.confirm_bid(
+                                prepared,
+                                confirmed_bid_minor=int(observed_bid),
+                                readback_basis=readback_basis,
+                                receipt_reference=str(item["registry_receipt_reference"]),
+                                native_audit_references=(
+                                    f"inventory-balance/apply-job/{job_id}",
+                                ),
+                            )
                     except InternalWriterRegistryError as exc:
                         self._update_item(
                             job_id,
@@ -2134,12 +2459,15 @@ class SkuInventoryBalanceBlock:
                             state="ambiguous",
                             phase="Требуется проверка",
                             error_code="registry_confirmation_failed",
-                            error="Ставка применена, но подтверждение реестра не завершено.",
-                            last_observed_bid_minor=observed,
+                            error="Изменение применено, но подтверждение реестра не завершено.",
+                            last_observed_bid_minor=observed_bid,
                             result={"registry_error": str(exc)},
                         )
                         continue
-                    self._persist_confirmed_bid_event(job_id, item, observed)
+                    if action_type == "bid_change":
+                        self._persist_confirmed_bid_event(
+                            job_id, item, int(observed_bid)
+                        )
                     self._update_item(
                         job_id,
                         key,
@@ -2147,8 +2475,12 @@ class SkuInventoryBalanceBlock:
                         phase="Применено",
                         error_code="",
                         error="",
-                        last_observed_bid_minor=observed,
-                        result={"readback_status": "matching", "confirmed_bid_minor": observed},
+                        last_observed_bid_minor=observed_bid,
+                        result={
+                            "readback_status": "matching",
+                            "confirmed_bid_minor": observed_bid,
+                            "confirmed_campaign_state": observed_state,
+                        },
                     )
                     continue
                 deadline = _parse_timestamp(str(item.get("readback_deadline_at") or ""))
@@ -2161,7 +2493,7 @@ class SkuInventoryBalanceBlock:
                             self.writer_registry.ambiguous(
                                 prepared,
                                 error_code="wb_readback_unconfirmed",
-                                error_message="Exact readback did not confirm the requested bid before deadline.",
+                                error_message="Exact readback did not confirm the requested change before deadline.",
                                 receipt_reference=str(item["registry_receipt_reference"]),
                             )
                         except InternalWriterRegistryError:
@@ -2172,8 +2504,8 @@ class SkuInventoryBalanceBlock:
                         state="ambiguous",
                         phase="Требуется проверка",
                         error_code=str(result.get("error_code") or "wb_readback_unconfirmed"),
-                        error="WB не подтвердил рекомендованную ставку в отведённое время.",
-                        last_observed_bid_minor=observed,
+                        error="WB не подтвердил запрошенное изменение в отведённое время.",
+                        last_observed_bid_minor=observed_bid,
                     )
                 else:
                     self._update_item(
@@ -2183,7 +2515,7 @@ class SkuInventoryBalanceBlock:
                         phase="WB задерживает подтверждение, продолжаем проверку",
                         error_code=str(result.get("error_code") or ""),
                         error="" if result.get("ok") else "Проверка временно недоступна.",
-                        last_observed_bid_minor=observed,
+                        last_observed_bid_minor=observed_bid,
                     )
                     pending.append(item)
             if not pending:
@@ -2262,15 +2594,30 @@ class SkuInventoryBalanceBlock:
 
     def _transport_target(self, item: Mapping[str, Any]) -> dict[str, Any]:
         target = json.loads(str(item["target_json"])) if "target_json" in item else dict(item)
-        return {
+        base = {
             **target,
             "target_key": str(target["target_key"]),
             "nm_id": int(target["nm_id"]),
             "advert_id": int(target["advert_id"]),
+            "action_type": str(target.get("action_type") or "bid_change"),
+            "recommendation_item_id": str(target["recommendation_item_id"]),
+        }
+        if base["action_type"] == "campaign_state":
+            return {
+                **base,
+                "placement": "",
+                "placement_evidence": str(target["placement_evidence"]),
+                "payment_type": str(target["payment_type"]),
+                "state_action": str(target["state_action"]),
+                "current_campaign_status": int(target["current_campaign_status"]),
+                "current_campaign_state": str(target["current_campaign_state"]),
+                "requested_campaign_state": str(target["requested_campaign_state"]),
+            }
+        return {
+            **base,
             "placement": str(target["placement"]),
             "current_bid_minor": int(target["current_bid_minor"]),
             "requested_bid_minor": int(target["final_target_bid_minor"]),
-            "recommendation_item_id": str(target["recommendation_item_id"]),
         }
 
     def _job_row(self, job_id: str) -> dict[str, Any]:
@@ -2514,7 +2861,16 @@ class SkuInventoryBalanceBlock:
             "stalled": stalled,
             "external_writes": str(job["mode"]) == LIVE_MODE,
             "wb_patch_called": str(job["mode"]) == LIVE_MODE and any(
-                int(item["submit_group"] or 0) > 0 for item in items
+                int(item["submit_group"] or 0) > 0
+                and str(json.loads(str(item["target_json"])).get("action_type") or "bid_change")
+                == "bid_change"
+                for item in items
+            ),
+            "wb_campaign_action_called": str(job["mode"]) == LIVE_MODE and any(
+                int(item["submit_group"] or 0) > 0
+                and str(json.loads(str(item["target_json"])).get("action_type") or "bid_change")
+                == "campaign_state"
+                for item in items
             ),
         }
 
@@ -2740,6 +3096,41 @@ class SkuInventoryBalanceBlock:
                         ).encode("utf-8")
                     ).hexdigest()
                 )
+                state_action = str(target.get("state_action") or "")
+                requested_campaign_state = (
+                    "active" if state_action == "start" else "paused"
+                    if state_action == "pause"
+                    else ""
+                )
+                target["state_target_key"] = (
+                    f"state:{int(target['nm_id'])}:{int(target['advert_id'])}"
+                )
+                target["requested_campaign_state"] = requested_campaign_state
+                state_basis = {
+                    "contract": "sku_inventory_balance_campaign_state_recommendation/v1",
+                    "calculation_id": str(row["calculation_id"]),
+                    "target": {
+                        "seller_id": self.seller_id,
+                        "account_scope": self.account_scope,
+                        "target_kind": "campaign",
+                        "nm_id": int(target["nm_id"]),
+                        "advert_id": int(target["advert_id"]),
+                        "placement": "",
+                        "parameter_field": "campaign_state",
+                    },
+                    "before_value": str(target.get("campaign_state") or ""),
+                    "requested_value": requested_campaign_state,
+                }
+                target["campaign_state_recommendation_item_id"] = (
+                    "ibsr_" + sha256(
+                        json.dumps(
+                            state_basis,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
                 target["manual_pending_available"] = bool(
                     target["can_apply"]
                     and self.manual_pending_registry is not None
@@ -2755,7 +3146,8 @@ class SkuInventoryBalanceBlock:
                 if item.get("campaign_group") == "old_cpm"
             ]
             balance_row["select_available"] = any(
-                item.get("can_apply") for item in balance_row.get("campaign_recommendations") or []
+                item.get("can_apply") or item.get("state_action_available")
+                for item in balance_row.get("campaign_recommendations") or []
             )
         payload["registry_immutable"] = True
         payload["overrides_are_separate"] = True
@@ -2837,6 +3229,12 @@ class SkuInventoryBalanceBlock:
             "external_writes_enabled": live,
             "guard_contract": "fresh batch current/min preflight -> canary -> micro-batches -> exact readback",
             "wb_patch_reachable": live,
+            "wb_campaign_state_reachable": live,
+            "campaign_state_actions": {
+                "9": "pause",
+                "4": "start",
+                "11": "start",
+            },
             "batch_size": self.live_batch_size,
             "canary_required": True,
             "reload_safe": True,
@@ -3180,6 +3578,8 @@ def _campaign_recommendation(
     orders = _optional_float(raw.get("orders"))
     cpo = spend / orders if spend is not None and orders and orders > 0 else None
     status = _optional_int(raw.get("status"))
+    campaign_state = CAMPAIGN_STATE_BY_STATUS.get(status or 0, "")
+    state_action = CAMPAIGN_STATE_ACTION_BY_STATUS.get(status or 0, "")
     identity_valid = bool(
         nm_id > 0
         and advert_id > 0
@@ -3197,6 +3597,18 @@ def _campaign_recommendation(
         "payment_type": payment_type,
         "placement": placement,
         "campaign_status": status,
+        "campaign_state": campaign_state,
+        "state_action_available": bool(identity_valid and state_action),
+        "state_action": state_action,
+        "state_action_label": (
+            "остановить"
+            if state_action == "pause"
+            else "возобновить"
+            if status == 11
+            else "запустить"
+            if state_action == "start"
+            else ""
+        ),
         "cpo_rub": round(cpo, 2) if cpo is not None else None,
         "orders": orders,
         "spend_rub": spend,
@@ -3266,6 +3678,8 @@ def _public_preflight_result(value: Mapping[str, Any]) -> dict[str, Any]:
         "error_code",
         "message",
         "observed_bid_minor",
+        "observed_campaign_status",
+        "observed_campaign_state",
         "minimum_bid_minor",
         "payment_type",
         "candidate_nm_ids",
@@ -3425,7 +3839,13 @@ def _sanitize_table_preferences(raw: Any) -> dict[str, Any]:
             order.append(key)
     visible = []
     requested_visible = source.get("visible_columns")
-    for item in (requested_visible if isinstance(requested_visible, Sequence) and not isinstance(requested_visible, str) else DEFAULT_VISIBLE_COLUMNS):
+    for item in (
+        requested_visible
+        if isinstance(requested_visible, Sequence)
+        and not isinstance(requested_visible, str)
+        and len(requested_visible) > 0
+        else DEFAULT_VISIBLE_COLUMNS
+    ):
         key = str(item)
         if key in allowed and key not in visible:
             visible.append(key)

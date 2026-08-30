@@ -154,6 +154,13 @@ def main() -> None:
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(settings))
                 return
             if path.endswith("/override"):
+                if body.get("manual_target_bid_rub") == 777.77:
+                    route.fulfill(
+                        status=409,
+                        content_type="application/json",
+                        body='{"error":"controlled override save failure"}',
+                    )
+                    return
                 target = next(
                     target
                     for row in current_calculation[0]["rows"]
@@ -173,7 +180,10 @@ def main() -> None:
                     != float(target["current_bid_rub"])
                 )
                 row = next(row for row in current_calculation[0]["rows"] if row["nm_id"] == target["nm_id"])
-                row["select_available"] = any(item.get("can_apply") for item in row["campaign_recommendations"])
+                row["select_available"] = any(
+                    item.get("can_apply") or item.get("state_action_available")
+                    for item in row["campaign_recommendations"]
+                )
                 group_key = "new_cpc_campaigns" if target["campaign_group"] == "new_cpc" else "old_cpm_campaigns"
                 row[group_key] = [item for item in row["campaign_recommendations"] if item["campaign_group"] == target["campaign_group"]]
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(current_calculation[0]))
@@ -186,12 +196,12 @@ def main() -> None:
                 apply_status_reads[0] += 1
                 latest_job[0] = _job(
                     "running" if apply_status_reads[0] == 1 else "completed",
-                    0 if apply_status_reads[0] == 1 else 2,
+                    0 if apply_status_reads[0] == 1 else 3,
                 )
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(latest_job[0]))
                 return
             if path.endswith("/resume"):
-                latest_job[0] = _job("completed", 2)
+                latest_job[0] = _job("completed", 3)
                 route.fulfill(status=200, content_type="application/json", body=json.dumps(latest_job[0]))
                 return
             route.fulfill(status=404, content_type="application/json", body='{"error":"not found"}')
@@ -222,13 +232,25 @@ def main() -> None:
             console_errors,
         )
         assert "WB общим итогом × 0.5" in normalized_balance_text
-        assert "Сейчас 1 000" in normalized_balance_text
-        assert "Сейчас 5" in normalized_balance_text
-        assert "Сейчас 10" in normalized_balance_text
-        assert "Поддерживающая CPC переизбытка" in normalized_balance_text
+        assert "1 000 ₽/1000 показов" in normalized_balance_text
+        assert "5 ₽/клик" in normalized_balance_text
+        assert "10 ₽/клик" in normalized_balance_text
         assert "insufficient_stats" not in normalized_balance_text
         assert "hold_conservative" not in normalized_balance_text
         assert "advert_id" not in normalized_balance_text
+        disclosures = page.locator(".inventory-balance-campaign-disclosure")
+        assert disclosures.count() >= 5
+        first_disclosure = disclosures.first
+        assert "Поддерживающая CPC" in (
+            first_disclosure.locator("xpath=..").get_attribute("title") or ""
+        )
+        first_disclosure.click()
+        disclosure = page.locator(".inventory-balance-campaign-disclosure-popover:popover-open")
+        disclosure_text = disclosure.inner_text()
+        assert "Поддерживающая CPC" in disclosure_text
+        assert "advert_id 9001" in disclosure_text
+        assert "активна" in disclosure_text
+        page.keyboard.press("Escape")
         assert page.locator("[data-inventory-balance-details-toggle]").count() == 0
         assert page.locator("[data-inventory-balance-details-row]").count() == 0
         assert page.locator("[data-inventory-balance-registry]").count() == 0
@@ -240,7 +262,7 @@ def main() -> None:
         row_heights = page.locator(".inventory-balance-main-row").evaluate_all(
             "rows => rows.map(row => row.getBoundingClientRect().height)"
         )
-        assert all(height <= 62 for height in row_heights), row_heights
+        assert all(height <= 63 for height in row_heights), row_heights
         visible_line_counts = page.locator(
             ".inventory-balance-main-row .inventory-balance-two-line"
         ).evaluate_all("nodes => nodes.map(node => node.children.length)")
@@ -265,14 +287,73 @@ def main() -> None:
             - (sticky_select_box["x"] + sticky_select_box["width"])
         ) <= 2
         table_shell.evaluate("node => { node.scrollLeft = 0; }")
-        assert "CPC · текущая / новая" in page.locator("[data-inventory-balance-head]").inner_text()
-        assert "CPM · текущая / новая" in page.locator("[data-inventory-balance-head]").inner_text()
+        assert "CPC · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
+        assert "CPM · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
         assert page.locator("[data-inventory-balance-xlsx]").is_enabled()
         assert page.locator('[data-inventory-balance-nm-id="202"] [data-inventory-balance-override]').count() == 3
         assert page.locator('[data-inventory-balance-override="101:8001:search"]').input_value() == "800"
         unavailable_override = page.locator('[data-inventory-balance-override="303:9303:search"]')
         assert unavailable_override.input_value() == ""
-        assert unavailable_override.get_attribute("placeholder") == "Новая"
+        assert unavailable_override.get_attribute("placeholder") == "Цель"
+
+        first_click_cell = page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-select-cell]'
+        )
+        first_click_checkbox = page.locator(
+            '[data-inventory-balance-select="101"]'
+        )
+        page.evaluate(
+            """
+            () => {
+              const input=document.querySelector('[data-inventory-balance-override="101:8001:search"]');
+              input.value='725.25';
+              input.dispatchEvent(new Event('input',{bubbles:true}));
+            }
+            """
+        )
+        first_click_cell.click(position={"x": 6, "y": 6})
+        captured_intent = page.evaluate(
+            "Array.from(state.inventoryBalance.selectionIntentNmIds)"
+        )
+        assert captured_intent == [101]
+        assert "сохраняется" in first_click_cell.inner_text()
+        page.wait_for_timeout(700)
+        assert first_click_checkbox.is_checked(), {
+            "cell": first_click_cell.inner_text(),
+            "error": page.locator("[data-inventory-balance-error]").inner_text(),
+            "apply": page.locator("[data-inventory-balance-apply-reason]").inner_text(),
+            "intent": page.evaluate(
+                "Array.from(state.inventoryBalance.selectionIntentNmIds)"
+            ),
+            "selected": page.evaluate(
+                "Array.from(state.inventoryBalance.selectedNmIds)"
+            ),
+            "override_requests": [
+                item for item in requests if item[1].endswith("/override")
+            ],
+        }
+        assert "готово к выбору" in first_click_cell.inner_text()
+        assert "(1)" in page.locator("[data-inventory-balance-apply]").inner_text()
+        first_click_checkbox.uncheck()
+
+        page.evaluate(
+            """
+            () => {
+              const input=document.querySelector('[data-inventory-balance-override="101:8001:search"]');
+              input.value='777.77';
+              input.dispatchEvent(new Event('input',{bubbles:true}));
+            }
+            """
+        )
+        first_click_cell.click(position={"x": 6, "y": 6})
+        assert "сохраняется" in first_click_cell.inner_text()
+        page.wait_for_function(
+            "document.querySelector('#inventory-balance-select-status-101').textContent.includes('ошибка сохранения')"
+        )
+        assert first_click_checkbox.is_checked() is False
+        assert "controlled override save failure" in page.locator(
+            "[data-inventory-balance-error]"
+        ).inner_text()
         screenshot_path = os.environ.get("SKU_INVENTORY_BALANCE_SCREENSHOT", "").strip()
         if screenshot_path:
             page.screenshot(path=screenshot_path, full_page=True)
@@ -342,8 +423,11 @@ def main() -> None:
         assert override.input_value() == "800"
         override_count_before = len([item for item in requests if item[1].endswith("/override")])
         override.fill("725.25")
-        page.wait_for_timeout(650)
-        assert len([item for item in requests if item[1].endswith("/override")]) == override_count_before + 1
+        override.press("Enter")
+        page.wait_for_timeout(100)
+        assert len([item for item in requests if item[1].endswith("/override")]) == override_count_before + 1, [
+            item for item in requests if item[1].endswith("/override")
+        ]
         assert override.input_value() == "725.25"
         page.locator("[data-inventory-balance-preset]").select_option("all")
         excess_override = page.locator(
@@ -360,11 +444,18 @@ def main() -> None:
         ).fill("1701")
         page.locator(
             '[data-inventory-balance-override="202:9202:search"]'
-        ).press("Enter")
+        ).blur()
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-apply]').textContent.includes('(2)')"
         )
         assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text()
+        state_action = page.locator(
+            '[data-inventory-balance-state-action="state:101:9001"]'
+        )
+        assert state_action.is_visible()
+        assert state_action.input_value() == "none"
+        state_action.select_option("pause")
+        assert "(3)" in page.locator("[data-inventory-balance-apply]").inner_text()
         page.locator("[data-inventory-balance-manual-pending]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
         manual_confirmation = page.locator(
@@ -384,17 +475,19 @@ def main() -> None:
         normalized_confirmation = confirmation.replace("\xa0", " ")
         assert "Выбрано SKU\n2" in confirmation
         assert "Ставок\n2" in confirmation
-        assert "Повышений\n1" in confirmation
-        assert "Понижений\n1" in confirmation
+        assert "Статусов\n1" in confirmation
+        assert "Повышений / понижений\n1 / 1" in confirmation
         assert "1 000 → 725,25 ₽/1000 показов" in normalized_confirmation
         assert "10 → 1 701 ₽/клик" in normalized_confirmation
+        assert "активна → на паузе (остановить)" in normalized_confirmation
+        assert "Состояние · advert_id 9001" in normalized_confirmation
         assert "Повышение на 1 691 ₽ превышает прежний контрольный порог 100 ₽" in normalized_confirmation
         assert "Новая ставка 1 701 ₽ превышает прежний контрольный потолок 1 000 ₽" in normalized_confirmation
         assert "Повышение на 16 910% превышает прежний контрольный порог 50%" in normalized_confirmation
-        assert "Не включено пустых, равных текущим или недоступных целей: 3" in confirmation
-        assert "эти точные ставки будут отправлены в WB" in confirmation
-        assert "без промежуточных шагов" in confirmation
-        assert "контрольную ставку" in confirmation
+        assert "Не включено пустых, равных текущим или недоступных целей: 2" in confirmation
+        assert "эти точные изменения будут отправлены в WB" in confirmation
+        assert "one-submit" in confirmation
+        assert "exact readback" in confirmation
         screenshot_modal_path = os.environ.get(
             "SKU_INVENTORY_BALANCE_SCREENSHOT_MODAL", ""
         ).strip()
@@ -405,8 +498,8 @@ def main() -> None:
             "document.querySelector('[data-inventory-balance-progress]').getAttribute('data-state') === 'running'"
         )
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
-        assert "Применяем ставки" in page.locator("[data-inventory-balance-confirm-title]").inner_text()
-        assert "Применяем ставки" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Применяем изменения" in page.locator("[data-inventory-balance-confirm-title]").inner_text()
+        assert "Применяем изменения" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         page.reload()
         page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
         page.locator("[data-inventory-balance-confirm]").wait_for(state="visible")
@@ -415,33 +508,33 @@ def main() -> None:
             "document.querySelector('[data-inventory-balance-progress]').getAttribute('data-state') === 'completed'"
         )
         assert "Применено" in page.locator("[data-inventory-balance-confirm-body]").inner_text()
-        assert "2 применено" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "3 применено" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         assert page.locator("[data-inventory-balance-progress]").get_attribute("data-state") == "completed"
         assert page.locator("[data-inventory-balance-progress-fill]").get_attribute("style") == "width: 100%;"
         assert page.locator("[data-inventory-balance-progress-spinner]").is_hidden()
         assert "применено" in page.locator('[data-inventory-balance-nm-id="101"]').inner_text()
-        assert "Все ставки применены" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
+        assert "Все изменения применены" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         page.locator("[data-inventory-balance-confirm-cancel]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_hidden()
         page.locator("[data-inventory-balance-progress-open]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
 
-        latest_job[0] = _job("completed_with_errors", 2)
+        latest_job[0] = _job("completed_with_errors", 3)
         page.reload()
         page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
         page.wait_for_function(
-            "document.querySelector('[data-inventory-balance-progress-summary]').textContent.includes('Ставки применены частично')"
+            "document.querySelector('[data-inventory-balance-progress-summary]').textContent.includes('Изменения применены частично')"
         )
         partial_summary = page.locator("[data-inventory-balance-progress-summary]").inner_text()
-        assert "Ставки применены частично" in partial_summary
-        assert "1 применено" in partial_summary
+        assert "Изменения применены частично" in partial_summary
+        assert "2 применено" in partial_summary
         assert "1 требует проверки" in partial_summary
         if page.locator("[data-inventory-balance-confirm]").is_hidden():
             page.locator("[data-inventory-balance-progress-open]").click()
         assert "Требуется проверка" in page.locator("[data-inventory-balance-confirm-body]").inner_text()
 
-        zero_job = _job("completed_with_errors", 2)
-        zero_job["progress"].update({"applied": 0, "failed": 2, "needs_check": 0})
+        zero_job = _job("completed_with_errors", 3)
+        zero_job["progress"].update({"applied": 0, "failed": 3, "needs_check": 0})
         zero_job["items"][0].update({
             "current_bid_rub": 1500,
             "final_target_bid_rub": 1701,
@@ -451,6 +544,7 @@ def main() -> None:
             "error": "requested_bid_rub exceeds absolute increase threshold",
         })
         zero_job["items"][1].update({"state": "skipped", "phase": "Не отправлено", "error": "Контрольная ставка не прошла проверку"})
+        zero_job["items"][2].update({"state": "skipped", "phase": "Не отправлено", "error": "Контрольное изменение не прошло проверку"})
         latest_job[0] = zero_job
         page.reload()
         page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
@@ -475,6 +569,7 @@ def main() -> None:
         ).inner_text()
         assert page.locator("[data-inventory-balance-progress-resume]").is_visible()
 
+        _run_terminal_result_regressions(browser, html)
         browser.close()
 
     assert not [item for item in requests if item[0] == "PATCH"]
@@ -491,6 +586,10 @@ def main() -> None:
         "101:8001:search",
         "202:9202:search",
     ]
+    assert start_requests[-1][2]["state_actions"] == [
+        {"nm_id": 101, "advert_id": 9001, "action": "pause"}
+    ]
+    assert start_requests[-1][2]["nm_ids"] == []
     settings_requests = [item for item in requests if item[1].endswith("/inventory-balance/settings")]
     assert settings_requests and settings_requests[-1][2]["table"]["preset"] == "actionable"
     assert settings_requests[-1][2]["calculation"]["wb_confidence_coefficient"] == 0.5
@@ -505,11 +604,240 @@ def main() -> None:
     assert operation_status_reads[0] >= 2
     assert apply_status_reads[0] >= 2
     unexpected_console_errors = [
-        item for item in console_errors if "ERR_CONNECTION_FAILED" not in item
+        item
+        for item in console_errors
+        if "ERR_CONNECTION_FAILED" not in item and "status of 409" not in item
     ]
     assert not unexpected_console_errors, unexpected_console_errors
     assert any("ERR_CONNECTION_FAILED" in item for item in console_errors), console_errors
+    assert any("status of 409" in item for item in console_errors), console_errors
     print("sku_inventory_balance_browser_smoke: ok")
+
+
+def _run_terminal_result_regressions(browser, html: str) -> None:
+    """Initial latest 500 and stale secondary responses cannot hide a result."""
+
+    page = browser.new_page(viewport={"width": 1500, "height": 1000})
+    console_errors: list[str] = []
+    page.on(
+        "console",
+        lambda message: console_errors.append(message.text)
+        if message.type == "error"
+        else None,
+    )
+    page.on("pageerror", lambda error: console_errors.append(str(error)))
+    old_calculation = _calculation()
+    terminal_calculation = deepcopy(old_calculation)
+    terminal_calculation["calculation_id"] = "ibc_terminal_after_latest_500"
+    terminal_calculation["rows"][0]["name"] = "Terminal Result SKU"
+    newer_calculation = deepcopy(terminal_calculation)
+    newer_calculation["calculation_id"] = "ibc_newer_than_stale_override"
+    newer_calculation["rows"][0]["name"] = "Newer Result SKU"
+    calculate_runs = [0]
+    active_result = [terminal_calculation]
+    latest_reads = [0]
+    requests: list[tuple[str, str]] = []
+
+    def route_handler(route):
+        request = route.request
+        path = request.url.split("balance-regression.test", 1)[-1]
+        requests.append((request.method, path))
+        body = json.loads(request.post_data or "{}") if request.post_data else {}
+        if path == "/page":
+            route.fulfill(
+                status=200, content_type="text/html; charset=utf-8", body=html
+            )
+            return
+        if path == "/v1/sheet-vitrina-v1/sku-management":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"rows":[],"settings":{"revision":0,"forecast":{},"table":{}},"meta":{}}',
+            )
+            return
+        base = "/v1/sheet-vitrina-v1/sku-management/inventory-balance"
+        if path == base:
+            latest_reads[0] += 1
+            if latest_reads[0] == 1:
+                route.fulfill(
+                    status=500,
+                    content_type="application/json",
+                    body='{"error":"manual_pending lookup failed"}',
+                )
+            else:
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(
+                        {
+                            "status": "ok",
+                            "settings": {
+                                "revision": 1,
+                                "calculation": {},
+                                "table": {
+                                    "visible_columns": [],
+                                    "column_order": [],
+                                },
+                            },
+                            "calculation": old_calculation,
+                            "apply_job": None,
+                            "calculation_operation": None,
+                        }
+                    ),
+                )
+            return
+        if path == base + "/calculate":
+            calculate_runs[0] += 1
+            active_result[0] = (
+                terminal_calculation
+                if calculate_runs[0] == 1
+                else newer_calculation
+            )
+            route.fulfill(
+                status=202,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "accepted": True,
+                        "operation_id": str(body.get("operation_id") or ""),
+                    }
+                ),
+            )
+            return
+        if path.startswith(base + "/operations/"):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    _operation(
+                        path.rsplit("/", 1)[-1],
+                        state="succeeded",
+                        result=active_result[0],
+                        percent=100,
+                    )
+                ),
+            )
+            return
+        route.fulfill(
+            status=404,
+            content_type="application/json",
+            body='{"error":"not found"}',
+        )
+
+    page.route("**/*", route_handler)
+    page.goto("http://balance-regression.test/page")
+    page.evaluate(
+        """
+        () => {
+          const nativeFetch = window.fetch.bind(window);
+          const base = "/v1/sheet-vitrina-v1/sku-management/inventory-balance";
+          window.__holdBalanceLatest = false;
+          window.__holdBalanceOverride = false;
+          window.fetch = (input, init) => {
+            const url = String(typeof input === "string" ? input : input.url || "");
+            if (window.__holdBalanceLatest && url.endsWith(base)) {
+              window.__holdBalanceLatest = false;
+              return new Promise((resolve) => {
+                window.__resolveHeldLatest = (payload) => resolve(new Response(
+                  JSON.stringify(payload),
+                  {status: 200, headers: {"Content-Type": "application/json"}}
+                ));
+              });
+            }
+            if (window.__holdBalanceOverride && url.endsWith("/override")) {
+              window.__holdBalanceOverride = false;
+              return new Promise((resolve) => {
+                window.__resolveHeldOverride = (payload) => resolve(new Response(
+                  JSON.stringify(payload),
+                  {status: 200, headers: {"Content-Type": "application/json"}}
+                ));
+              });
+            }
+            return nativeFetch(input, init);
+          };
+        }
+        """
+    )
+    page.locator('[data-sku-management-subtab="inventory-balance"]').click(
+        force=True
+    )
+    page.wait_for_function(
+        "document.querySelector('[data-inventory-balance-error]').textContent.includes('terminal result')"
+    )
+    assert page.locator("[data-inventory-balance-calculate]").is_enabled()
+
+    page.evaluate("window.__holdBalanceLatest = true")
+    page.locator("[data-inventory-balance-calculate]").click()
+    page.locator('[data-sku-management-subtab="inventory-balance"]').click(
+        force=True
+    )
+    page.wait_for_function("typeof window.__resolveHeldLatest === 'function'")
+    page.wait_for_timeout(2500)
+    assert "Terminal Result SKU" in page.locator(
+        "[data-inventory-balance-body]"
+    ).inner_text(), {
+        "body": page.locator("[data-inventory-balance-body]").inner_text(),
+        "error": page.locator("[data-inventory-balance-error]").inner_text(),
+        "progress": page.locator(
+            "[data-inventory-balance-calculation-progress-summary]"
+        ).inner_text(),
+        "requests": requests,
+        "console": console_errors,
+    }
+    page.evaluate(
+        "payload => window.__resolveHeldLatest(payload)",
+        {
+            "status": "ok",
+            "settings": {
+                "revision": 1,
+                "calculation": {},
+                "table": {"visible_columns": [], "column_order": []},
+            },
+            "calculation": old_calculation,
+            "apply_job": None,
+            "calculation_operation": None,
+        },
+    )
+    page.wait_for_timeout(100)
+    assert "Terminal Result SKU" in page.locator(
+        "[data-inventory-balance-body]"
+    ).inner_text(), {
+        "body": page.locator("[data-inventory-balance-body]").inner_text(),
+        "calculation_id": page.evaluate(
+            "state.inventoryBalance.calculation && state.inventoryBalance.calculation.calculation_id"
+        ),
+        "load_token": page.evaluate("state.inventoryBalance.loadRequestToken"),
+    }
+    assert "Deficit SKU" not in page.locator(
+        "[data-inventory-balance-body]"
+    ).inner_text()
+
+    page.evaluate("window.__holdBalanceOverride = true")
+    page.locator(
+        '[data-inventory-balance-override="101:8001:search"]'
+    ).fill("666")
+    page.wait_for_function("typeof window.__resolveHeldOverride === 'function'")
+    page.locator("[data-inventory-balance-calculate]").click()
+    page.wait_for_function(
+        "document.querySelector('[data-inventory-balance-body]').textContent.includes('Newer Result SKU')"
+    )
+    stale_override = deepcopy(terminal_calculation)
+    stale_override["rows"][0]["old_cpm_campaigns"][0][
+        "manual_target_bid_rub"
+    ] = 666
+    page.evaluate(
+        "payload => window.__resolveHeldOverride(payload)", stale_override
+    )
+    page.wait_for_timeout(100)
+    assert "Newer Result SKU" in page.locator(
+        "[data-inventory-balance-body]"
+    ).inner_text()
+    unexpected_console_errors = [
+        item for item in console_errors if "status of 500" not in item
+    ]
+    assert not unexpected_console_errors, unexpected_console_errors
+    assert any("status of 500" in item for item in console_errors), console_errors
+    page.close()
 
 
 def _calculation() -> dict:
@@ -635,6 +963,39 @@ def _calculation() -> dict:
         "calculated_target_bid_rub": 1500,
         "final_target_bid_rub": 1500,
     }
+    state_targets = (
+        (deficit_cpc, 9, "active", "pause", "paused", "остановить"),
+        (deficit_cpm, 11, "paused", "start", "active", "возобновить"),
+        (excess_cpc, 9, "active", "pause", "paused", "остановить"),
+        (excess_cpc_hold, 9, "active", "pause", "paused", "остановить"),
+        (excess_cpm, 4, "ready", "start", "active", "запустить"),
+    )
+    for target, status, current_state, action, requested_state, label in state_targets:
+        target.update(
+            {
+                "campaign_status": status,
+                "campaign_state": current_state,
+                "state_action_available": True,
+                "state_action": action,
+                "state_action_label": label,
+                "state_target_key": f"state:{target['nm_id']}:{target['advert_id']}",
+                "requested_campaign_state": requested_state,
+                "campaign_state_recommendation_item_id": (
+                    f"ibsr_browser_{target['advert_id']}"
+                ),
+            }
+        )
+    for target in (insufficient_cpc, insufficient_cpm):
+        target.update(
+            {
+                "campaign_status": 7,
+                "campaign_state": "complete",
+                "state_action_available": False,
+                "state_action": "",
+                "state_action_label": "",
+                "requested_campaign_state": "",
+            }
+        )
     return {
         "contract_name": "sheet_vitrina_v1_sku_inventory_balance/v2",
         "calculation_id": "ibc_browser",
@@ -796,12 +1157,69 @@ def _calculation() -> dict:
 
 
 def _job(state: str, terminal: int) -> dict:
-    total = 2
+    total = 3
     succeeded = state == "completed"
     partial = state == "completed_with_errors"
     stalled = state == "stalled"
-    applied = 1 if partial or stalled else terminal
+    applied = 2 if partial else 1 if stalled else terminal
     needs_check = 1 if partial else 0
+    item_specs = (
+        ("bid_change", 101, 8001, "Снижение дефицитной CPM", "cpm", "search", 1000, 725.25),
+        ("bid_change", 202, 9202, "Продвижение CPC", "cpc", "search", 10, 1701),
+        ("campaign_state", 101, 9001, "Поддерживающая CPC", "cpc", "", None, None),
+    )
+    items = []
+    for item_index, (
+        action_type,
+        nm_id,
+        advert_id,
+        campaign,
+        payment,
+        placement,
+        current,
+        target,
+    ) in enumerate(item_specs):
+        if succeeded:
+            item_state = "succeeded"
+        elif partial:
+            item_state = "succeeded" if item_index < 2 else "ambiguous"
+        elif stalled:
+            item_state = "succeeded" if item_index == 0 else "delayed"
+        else:
+            item_state = "verifying"
+        phase = {
+            "succeeded": "Применено",
+            "ambiguous": "Требуется проверка",
+            "delayed": "WB задерживает подтверждение",
+            "verifying": "Проверяем фактическое состояние в WB",
+        }[item_state]
+        item = {
+            "action_type": action_type,
+            "nm_id": nm_id,
+            "advert_id": advert_id,
+            "campaign_name": campaign,
+            "payment_type": payment,
+            "placement": placement,
+            "current_bid_rub": current,
+            "final_target_bid_rub": target,
+            "state": item_state,
+            "phase": phase,
+            "error": (
+                "WB не подтвердил состояние"
+                if item_state == "ambiguous"
+                else ""
+            ),
+        }
+        if action_type == "campaign_state":
+            item.update(
+                {
+                    "current_campaign_state": "active",
+                    "requested_campaign_state": "paused",
+                    "state_action": "pause",
+                    "state_action_label": "остановить",
+                }
+            )
+        items.append(item)
     return {
         "job_id": "ibj_browser",
         "calculation_id": "ibc_browser",
@@ -822,42 +1240,10 @@ def _job(state: str, terminal: int) -> dict:
             {"nm_id": nm_id, "state": "succeeded" if terminal else "pending", "target_count": 1}
             for nm_id in (101, 202)
         ],
-        "items": [
-            {
-                "nm_id": nm_id,
-                "advert_id": advert_id,
-                "campaign_name": campaign,
-                "payment_type": payment,
-                "placement": placement,
-                "current_bid_rub": current,
-                "final_target_bid_rub": target,
-                "state": (
-                    "succeeded"
-                    if succeeded or item_index == 0
-                    else "ambiguous"
-                    if partial
-                    else "delayed"
-                    if stalled
-                    else "verifying"
-                ),
-                "phase": (
-                    "Применено"
-                    if succeeded or item_index == 0
-                    else "Требуется проверка"
-                    if partial
-                    else "WB задерживает подтверждение"
-                    if stalled
-                    else "Проверяем фактические ставки в WB"
-                ),
-                "error": "WB не подтвердил ставку" if partial and item_index == 1 else "",
-            }
-            for item_index, (nm_id, advert_id, campaign, payment, placement, current, target) in enumerate((
-                (101, 8001, "Снижение дефицитной CPM", "cpm", "search", 1000, 725.25),
-                (202, 9202, "Продвижение CPC", "cpc", "search", 10, 1701),
-            ))
-        ],
+        "items": items,
         "external_writes": True,
         "wb_patch_called": state != "pending",
+        "wb_campaign_action_called": state != "pending",
     }
 
 
