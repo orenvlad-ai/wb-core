@@ -59,8 +59,12 @@ from packages.application.sheet_vitrina_v1_proxy_v4 import (  # noqa: E402
     PROXY_V4_TOTAL_PROFIT_RUB_METRIC_KEY,
     extend_metrics_with_proxy_v4,
 )
+from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _with_full_refresh_metadata,
+)
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
     HISTORICAL_REPAIR_METADATA_KEY,
+    TARGET_KEYS,
     _transform_snapshot,
     build_functional_economics_backfill_plan,
 )
@@ -69,7 +73,9 @@ from packages.contracts.registry_upload_bundle_v1 import (  # noqa: E402
     MetricV2Item,
 )
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
+    SheetVitrinaV1Envelope,
     SheetVitrinaV1TemporalSlot,
+    SheetVitrinaWriteTarget,
 )
 
 
@@ -88,6 +94,7 @@ def main() -> None:
     print("inventory_cost_blend_proxy_3_4_per_sku_total: ok")
     print("inventory_cost_blend_exact_provenance_decimal_tolerance: ok")
     print("inventory_cost_blend_ordinary_publisher_before_after_noop: ok")
+    print("inventory_cost_blend_full_refresh_closed_metadata_one_pass: ok")
 
 
 def _test_ordinary_functional_economics_publication() -> None:
@@ -510,6 +517,199 @@ def _test_ordinary_functional_economics_publication() -> None:
         and late_repeat["coverage_changes"] == 0
         and late_repeat["repair_signal_changes"] == 0,
         "repeated closed-history protection is idempotent",
+    )
+
+    overlapping_previous_plan = _economics_envelope(
+        deepcopy(late_after),
+        snapshot_id="overlapping-last-good",
+    )
+    previous_payload = deepcopy(late_after)
+    previous_marker = previous_payload["metadata"]["functional_economics_backfill"]
+    previous_marker["date_from"] = INVENTORY_COST_BLEND_EFFECTIVE_DATE
+    previous_marker["date_to"] = INVENTORY_COST_BLEND_EFFECTIVE_DATE
+    previous_marker["inventory_cost_publication"]["date_evidence"] = {
+        INVENTORY_COST_BLEND_EFFECTIVE_DATE: previous_marker[
+            "inventory_cost_publication"
+        ]["date_evidence"][INVENTORY_COST_BLEND_EFFECTIVE_DATE]
+    }
+    previous_plan = _economics_envelope(previous_payload, snapshot_id="closed-last-good")
+    closed_semantic_before_refresh = {
+        row[1]: deepcopy(row[3])
+        for row in previous_payload["sheets"][0]["rows"]
+        if "|" in str(row[1]) and str(row[1]).split("|", 1)[1] in TARGET_KEYS
+    }
+
+    candidate_payload = deepcopy(late_after)
+    candidate_rows = candidate_payload["sheets"][0]["rows"]
+    candidate_by_id = {row[1]: row for row in candidate_rows}
+    candidate_by_id["SKU:801|orderSum"][4] = 1100
+    candidate_by_id["SKU:801|ads_sum"][4] = 125
+    candidate_rows.append(
+        ["SKU 801 finance", "SKU:801|fin_buyout_rub", 500, 777, 888]
+    )
+    candidate_payload["metadata"] = {
+        "warehouse_history_coverage": {
+            current_day: {
+                "status": "live",
+                "functional_version_id": "whfv_candidate_current",
+            }
+        },
+        "server_cell_presentation": {
+            "SKU:801|our_wb_unit_cost_rub": {
+                current_day: {
+                    "state": "candidate_current",
+                    "source": "fresh ordinary refresh",
+                }
+            }
+        },
+        "refresh_diagnostics": {"ordinary_refresh": True},
+    }
+    candidate_plan = _economics_envelope(
+        candidate_payload,
+        snapshot_id="ordinary-full-refresh",
+    )
+    overlapping_carried = _with_full_refresh_metadata(
+        candidate_plan,
+        refreshed_at="2026-08-23T08:00:00Z",
+        previous_plan=overlapping_previous_plan,
+        previous_refreshed_at="2026-08-23T07:00:00Z",
+        business_date=current_day,
+    )
+    _assert(
+        "functional_economics_backfill" not in overlapping_carried.metadata,
+        "ordinary full refresh does not copy a marker overlapping the current date",
+    )
+    carried_plan = _with_full_refresh_metadata(
+        candidate_plan,
+        refreshed_at="2026-08-23T08:00:00Z",
+        previous_plan=previous_plan,
+        previous_refreshed_at="2026-08-23T07:00:00Z",
+        business_date=current_day,
+    )
+    carried_metadata = carried_plan.metadata
+    _assert(
+        carried_metadata["warehouse_history_coverage"][
+            INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        ]
+        == previous_plan.metadata["warehouse_history_coverage"][
+            INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        ]
+        and carried_metadata[HISTORICAL_REPAIR_METADATA_KEY]["dates"][
+            INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        ]
+        == previous_plan.metadata[HISTORICAL_REPAIR_METADATA_KEY]["dates"][
+            INVENTORY_COST_BLEND_EFFECTIVE_DATE
+        ]
+        and carried_metadata["functional_economics_backfill"]
+        == previous_plan.metadata["functional_economics_backfill"]
+        and carried_metadata["server_cell_presentation"][
+            "SKU:801|our_wb_unit_cost_rub"
+        ][INVENTORY_COST_BLEND_EFFECTIVE_DATE]
+        == previous_plan.metadata["server_cell_presentation"][
+            "SKU:801|our_wb_unit_cost_rub"
+        ][INVENTORY_COST_BLEND_EFFECTIVE_DATE],
+        "ordinary full refresh carries the exact closed functional evidence unit",
+    )
+    _assert(
+        carried_metadata["warehouse_history_coverage"][current_day][
+            "functional_version_id"
+        ]
+        == "whfv_candidate_current"
+        and carried_metadata["server_cell_presentation"][
+            "SKU:801|our_wb_unit_cost_rub"
+        ][current_day]["state"]
+        == "candidate_current",
+        "ordinary full refresh never copies current-date mutable metadata backward",
+    )
+    carried_snapshot = {
+        **late_snapshot,
+        "plan_json": json.dumps(
+            _economics_envelope_payload(carried_plan),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    after_refresh_once = _transform_snapshot(
+        carried_snapshot,
+        costs={
+            dates[0]: wb_compat,
+            dates[1]: mismatch_blended,
+            current_day: current_blended,
+        },
+        warehouse_metrics={
+            dates[0]: products,
+            dates[1]: mismatch_products,
+            current_day: current_products,
+        },
+        warehouse_exact_dates={*dates, current_day},
+        warehouse_covered_nm_ids={
+            day: {801, 802, 803} for day in [*dates, current_day]
+        },
+        warehouse_version_ids={
+            dates[0]: "whfv_exact_as_of",
+            dates[1]: "whfv_exact_as_of",
+            current_day: "whfv_current",
+        },
+        parameters={**v3, current_day: DEFAULT_PROXY_PARAMETERS},
+        proxy_v4_parameters={**v4, current_day: _proxy_v4_parameters()},
+        source_fingerprint="sha256:ordinary-refresh-followed-by-hourly",
+        cutover_business_date="2026-07-18",
+        operation_business_date=current_day,
+    )
+    once_payload = json.loads(after_refresh_once["after_plan_json"])
+    once_rows = {row[1]: row for row in once_payload["sheets"][0]["rows"]}
+    _assert(
+        after_refresh_once["repair_signal_changes"] == 0
+        and once_rows["SKU:801|fin_buyout_rub"][4] == 888
+        and once_rows["SKU:801|orderSum"][4] == 1100
+        and once_rows["SKU:801|ads_sum"][4] == 125
+        and once_rows["SKU:801|proxy_margin_4_pct"][3] == 0
+        and once_rows["SKU:803|our_wb_unit_cost_rub"][3] == "",
+        "hourly economics keeps fresh current order/ads/Finance rows outside its target",
+    )
+    closed_semantic_after_refresh = {
+        row_id: deepcopy(once_rows[row_id][3])
+        for row_id in closed_semantic_before_refresh
+    }
+    _assert(
+        closed_semantic_after_refresh == closed_semantic_before_refresh,
+        "ordinary refresh plus hourly economics preserves closed SKU/TOTAL semantic SHA inputs",
+    )
+    after_refresh_repeat = _transform_snapshot(
+        {**carried_snapshot, "plan_json": after_refresh_once["after_plan_json"]},
+        costs={
+            dates[0]: wb_compat,
+            dates[1]: mismatch_blended,
+            current_day: current_blended,
+        },
+        warehouse_metrics={
+            dates[0]: products,
+            dates[1]: mismatch_products,
+            current_day: current_products,
+        },
+        warehouse_exact_dates={*dates, current_day},
+        warehouse_covered_nm_ids={
+            day: {801, 802, 803} for day in [*dates, current_day]
+        },
+        warehouse_version_ids={
+            dates[0]: "whfv_exact_as_of",
+            dates[1]: "whfv_exact_as_of",
+            current_day: "whfv_current",
+        },
+        parameters={**v3, current_day: DEFAULT_PROXY_PARAMETERS},
+        proxy_v4_parameters={**v4, current_day: _proxy_v4_parameters()},
+        source_fingerprint="sha256:ordinary-refresh-followed-by-hourly",
+        cutover_business_date="2026-07-18",
+        operation_business_date=current_day,
+    )
+    _assert(
+        after_refresh_repeat["changed_cells"] == 0
+        and after_refresh_repeat["inserted_rows"] == 0
+        and after_refresh_repeat["presentation_changes"] == 0
+        and after_refresh_repeat["coverage_changes"] == 0
+        and after_refresh_repeat["repair_signal_changes"] == 0,
+        "ordinary full refresh then hourly economics converges in one pass",
     )
 
 
@@ -948,6 +1148,82 @@ def _metric(metric_key: str, scope: str) -> MetricV2Item:
         display_order=1,
         section="smoke",
     )
+
+
+def _economics_envelope(
+    payload: dict[str, object],
+    *,
+    snapshot_id: str,
+) -> SheetVitrinaV1Envelope:
+    raw_data = dict(list(payload.get("sheets") or [])[0])
+    header = list(raw_data.get("header") or [])
+    rows = deepcopy(list(raw_data.get("rows") or []))
+    data = SheetVitrinaWriteTarget(
+        sheet_name="DATA_VITRINA",
+        write_start_cell="A1",
+        write_rect=f"A1:{len(header)}x{len(rows) + 1}",
+        clear_range="DATA_VITRINA",
+        write_mode="values",
+        partial_update_allowed=False,
+        header=header,
+        rows=rows,
+        row_count=len(rows),
+        column_count=len(header),
+    )
+    status = SheetVitrinaWriteTarget(
+        sheet_name="STATUS",
+        write_start_cell="A1",
+        write_rect="A1:A1",
+        clear_range="STATUS",
+        write_mode="values",
+        partial_update_allowed=False,
+        header=["status"],
+        rows=[],
+        row_count=0,
+        column_count=1,
+    )
+    dates = [str(day) for day in payload.get("date_columns") or []]
+    return SheetVitrinaV1Envelope(
+        plan_version="economics-full-refresh-smoke/v1",
+        snapshot_id=snapshot_id,
+        as_of_date=dates[-1],
+        date_columns=dates,
+        temporal_slots=[
+            SheetVitrinaV1TemporalSlot(
+                slot_key="snapshot",
+                slot_label="snapshot",
+                column_date=dates[-1],
+            )
+        ],
+        source_temporal_policies={},
+        sheets=[data, status],
+        metadata=deepcopy(dict(payload.get("metadata") or {})),
+    )
+
+
+def _economics_envelope_payload(plan: SheetVitrinaV1Envelope) -> dict[str, object]:
+    return {
+        "plan_version": plan.plan_version,
+        "snapshot_id": plan.snapshot_id,
+        "as_of_date": plan.as_of_date,
+        "date_columns": list(plan.date_columns),
+        "metadata": deepcopy(plan.metadata),
+        "sheets": [
+            {
+                "sheet_name": sheet.sheet_name,
+                "write_start_cell": sheet.write_start_cell,
+                "write_rect": sheet.write_rect,
+                "clear_range": sheet.clear_range,
+                "write_mode": sheet.write_mode,
+                "partial_update_allowed": sheet.partial_update_allowed,
+                "header": list(sheet.header),
+                "rows": deepcopy(sheet.rows),
+                "row_count": sheet.row_count,
+                "column_count": sheet.column_count,
+            }
+            for sheet in plan.sheets
+        ],
+    }
 
 
 def _proxy_v4_parameters() -> ProxyV4Parameters:
