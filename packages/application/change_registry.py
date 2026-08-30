@@ -219,6 +219,15 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
     value_check_after = _value_storage_check("after_value")
     value_check_observed = _value_storage_check("value")
     target_check = _target_storage_check()
+    attempt_trigger = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+        ("change_registry_attempt_lifecycle",),
+    ).fetchone()
+    if attempt_trigger is not None and (
+        "('submitted','failed','rejected','cancelled','ambiguous')"
+        not in str(attempt_trigger[0] or "")
+    ):
+        conn.execute("DROP TRIGGER change_registry_attempt_lifecycle")
     conn.executescript(
         f"""
         CREATE TABLE IF NOT EXISTS {OPERATIONS_TABLE}(
@@ -866,7 +875,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
                   AND previous.sequence_no=NEW.sequence_no-1
                   AND (
                     (previous.state='created' AND NEW.state IN
-                        ('submitted','failed','rejected','cancelled'))
+                        ('submitted','failed','rejected','cancelled','ambiguous'))
                     OR (previous.state='submitted' AND NEW.state IN
                         ('confirmed','failed','rejected','cancelled','ambiguous'))
                     OR (previous.state='ambiguous' AND NEW.state='resolved')

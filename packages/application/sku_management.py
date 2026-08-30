@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -2209,6 +2210,74 @@ class SkuManagementBlock:
             parameter=str(params.get("parameter") or ""),
             status=str(params.get("status") or ""),
         )
+
+    def persist_balance_bid_result(
+        self,
+        *,
+        job_id: str,
+        calculation_id: str,
+        actor: str,
+        target: Mapping[str, Any],
+        confirmed_bid_minor: int,
+        requested_at: str,
+        confirmed_at: str,
+    ) -> dict[str, Any]:
+        """Project one proven Balance readback into the incumbent action history."""
+
+        old_minor = _integer(target.get("current_bid_minor"), "current_bid_minor", 0, 10**12)
+        requested_minor = _integer(
+            target.get("requested_bid_minor"), "requested_bid_minor", 0, 10**12
+        )
+        confirmed_minor = _integer(
+            confirmed_bid_minor, "confirmed_bid_minor", 0, 10**12
+        )
+        if confirmed_minor != requested_minor:
+            raise SkuManagementError(
+                "Balance action event requires exact matching readback",
+                http_status=409,
+            )
+        old_value = float(Decimal(old_minor) / Decimal(100))
+        requested_value = float(Decimal(requested_minor) / Decimal(100))
+        event_id = "iba_" + sha256(
+            f"{job_id}:{target['target_key']}".encode("utf-8")
+        ).hexdigest()
+        event = {
+            "event_id": event_id,
+            "nm_id": int(target["nm_id"]),
+            "parameter": BID_PARAMETER,
+            "old_value": old_value,
+            "requested_value": requested_value,
+            "confirmed_value": requested_value,
+            "delta": float(
+                (Decimal(requested_minor - old_minor) / Decimal(100)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            ),
+            "requested_at": str(requested_at),
+            "confirmed_at": str(confirmed_at),
+            "actor": str(actor),
+            "source": "sku_inventory_balance",
+            "advert_id": int(target["advert_id"]),
+            "campaign": str(target.get("campaign_name") or ""),
+            "placement": str(target["placement"]),
+            "preview_id": str(target.get("recommendation_item_id") or ""),
+            "correlation_id": str(job_id),
+            "commit_status": "confirmed",
+            "readback_status": "matching",
+            "readback": {
+                "calculation_id": str(calculation_id),
+                "apply_job_id": str(job_id),
+                "recommendation_item_id": str(
+                    target.get("recommendation_item_id") or ""
+                ),
+                "confirmed_bid_minor": confirmed_minor,
+            },
+            "warnings": [],
+            "stabilization_override": True,
+            "warning_override": True,
+            "error": "",
+        }
+        return self.runtime.create_sku_action_event(event)
 
     def _active_skus(self) -> list[dict[str, Any]]:
         current = self.runtime.load_current_state()

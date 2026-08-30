@@ -1059,7 +1059,7 @@ def main() -> None:
                 actor="operator",
             )
         except SkuInventoryBalanceError as exc:
-            assert exc.http_status == 403
+            assert exc.http_status == 503
         else:  # pragma: no cover
             raise AssertionError("live mode unexpectedly accepted")
 
@@ -1067,7 +1067,7 @@ def main() -> None:
         try:
             live.apply(overridden_cpm, actor="operator")
         except SkuInventoryBalanceError as exc:
-            assert exc.http_status == 403
+            assert exc.http_status == 409
         else:  # pragma: no cover
             raise AssertionError("disabled live adapter unexpectedly called")
         assert sku.preview_calls == 0

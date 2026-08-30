@@ -3,8 +3,8 @@ title: "Модуль: sku_inventory_balance"
 doc_id: "WB-CORE-MODULE-53-SKU-INVENTORY-BALANCE"
 doc_type: "module"
 status: "active"
-purpose: "Зафиксировать server-owned подраздел `Управление SKU → Баланс запасов`: immutable расчёты темпа и рекламных целей, раздельные ручные overrides, расширенный XLSX и durable dry-run apply jobs."
-scope: "Одна строка на active nmID поверх canonical SKU Management evidence; conservative stock pacing, old CPM/new CPC campaign groups, exact target recommendations and dry-run-only resumable application protocol."
+purpose: "Зафиксировать server-owned подраздел `Управление SKU → Баланс запасов`: immutable расчёты темпа и рекламных целей, раздельные ручные overrides, расширенный XLSX и durable подтверждаемое применение ставок."
+scope: "Одна строка на active nmID поверх canonical SKU Management evidence; conservative stock pacing, old CPM/new CPC campaign groups, exact target recommendations and reload-safe live WB application protocol."
 source_basis:
   - "packages/application/sku_inventory_balance.py"
   - "packages/application/sku_management.py"
@@ -39,7 +39,7 @@ related_runners:
   - "apps/sku_inventory_balance_smoke.py"
   - "apps/sku_inventory_balance_browser_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Основная строка стала компактной decision surface с русскими действиями по ставкам и раскрываемым technical provenance; durable operation v1, formula v2, immutable calculations и live WB boundaries не изменены."
+update_note: "Live CPC/CPM apply активирован через fresh preflight, canary, bounded batches, delayed exact readback и Change Registry; owner confirmation остаётся обязательной."
 ---
 
 # 1. Product surface and ownership
@@ -106,19 +106,25 @@ Editable control находится в detail row и подписан едини
 
 # 5. Selection, confirmation and durable apply
 
-Оператор выбирает строки либо `Выбрать все доступные`; selected count остаётся рядом с действием. Действие называется `Предпросмотр выбранных`. Одна SKU-строка разворачивается в список exact campaign targets. До job browser показывает selected SKU и atomic campaign targets с current→final и единицами, число повышений/понижений, исключённые targets и недоступные строки. Modal содержит буквальную границу `Только dry-run, ставки WB не изменятся` и не обещает live apply.
+Оператор выбирает строки либо `Выбрать все доступные`; selected count остаётся рядом с действием. Действие называется `Применить ставки`. Одна SKU-строка разворачивается в список exact campaign targets. До job browser показывает selected SKU и atomic campaign targets с current→final и единицами, число повышений/понижений и исключённые targets. Modal прямо сообщает, что после отдельного подтверждения ставки действительно изменятся в WB, и показывает canary/batch boundary.
 
-`sheet_vitrina_v1_inventory_balance_apply_jobs` и `..._apply_items` — durable server-backed state machine. Item states: `pending → running → succeeded|failed`; stale `running` после process interruption terminalize-ится как `ambiguous` и не повторяется blind retry. Job progress, animated progress bar/spinner, final success/error state и aggregate per-SKU terminal state читаются с сервера, поэтому reload не теряет состояние.
+`sheet_vitrina_v1_inventory_balance_apply_jobs` и `..._apply_items` — durable server-backed state machine с worker token/lease. Browser только создаёт job и читает status; закрытие/reload страницы не останавливает работу. Item phases различают `pending/preflighting/ready/submitting/submitted/verifying/delayed` и terminal `succeeded/failed/skipped/ambiguous`. Worker после restart не повторяет target на границе возможного submit: он переводит его в query-only reconciliation. Stalled worker виден явно и может быть возобновлён оператором без повторной отправки ambiguous target.
 
 Каждый job сохраняет canonical apply manifest и digest: calculation/mode плюс sorted exact target identity, current/calculated/manual/final bid и override timestamp. Same exact manifest дедуплицируется; manual override или иное изменение target создаёт новый manifest и новый связанный job, даже при той же selection.
 
-Current HTTP contract принимает только `mode=dry_run`. Default adapter возвращает `wb_patch_called=false` и не вызывает WB source. `mode=live_wb` возвращает fail-closed 403.
+Production runtime принимает `mode=live_wb` только при canonical seller binding, включённом guarded Ads writer и доступном `InternalWriterRegistry`. До первого write выполняется один fresh batched advert read, exact `advert_id → ровно один nmID` identity gate, exact current-bid CAS, safety threshold и подтверждение minimum bid. Ноль/несколько nmID, stale current, неизвестный placement/status/payment model, unavailable minimum или target ниже minimum fail closed до submit. Рубли переводятся в integer minor units ровно один раз в immutable apply manifest.
 
-Отдельное действие `Применить на портале` не является apply-протоколом и не вызывает WB. Для каждой выбранной exact bid-рекомендации payload содержит стабильный `recommendation_item_id`, typed target `seller/account/nmID/advert_id/placement/bid_minor`, наблюдаемое current и recommended target в копейках. После отдельного подтверждения Registry создаёт только append-only `manual_pending` на 24 часа. Confirmation дословно сообщает, что оператор меняет ставку самостоятельно на портале, а HTTP endpoint не выполняет `POST/PATCH` в WB. `campaign_state` этим release не активируется.
+Первый exact target отправляется как canary и обязан получить matching readback. Затем remaining targets отправляются configurable micro-batches (default 10, WB envelope не более 50) с отдельным durable item/registry change item на каждую ставку. Между ставками нет последовательного 30-секундного ожидания: один delayed query-only readback проверяет весь submitted batch после documented WB sync window. Explicit `429` до принятия допускает один bounded retry с `Retry-After`; transport/5xx uncertainty после вызова PATCH никогда не вызывает blind resubmit и разрешается только readback каждого target. Batch может завершиться частично.
+
+Перед каждым PATCH для каждого target Registry durable создаёт operation/change item/attempt=`created` с `calculation_id + apply_job_id + recommendation_item_id`. После доказанного submit добавляется `submitted`; только exact matching readback создаёт confirmation/fact/link. Transport uncertainty хранится как `ambiguous`, а совпавший последующий readback разрешает тот же attempt без duplicate fact. Native SKU action history получает событие только после того же matching readback.
+
+UI показывает живые числа `применено / проверяется / ожидает / не применено / требует проверки`, concise per-target status, итог полного/частичного результата и prominent animated progress. Human-readable ошибка находится в строке, technical detail — только под disclosure. Reopen страницы восстанавливает job и продолжает status polling.
+
+Отдельное действие `Изменить вручную на портале` не является live apply-протоколом и не вызывает WB. Для каждой выбранной exact bid-рекомендации payload содержит стабильный `recommendation_item_id`, typed target `seller/account/nmID/advert_id/placement/bid_minor`, наблюдаемое current и recommended target в копейках. После отдельного подтверждения Registry создаёт только append-only `manual_pending` на 24 часа. `campaign_state` этим release не активируется.
 
 Один exact target имеет максимум один active pending. Новая immutable рекомендация supersede-ит прежнюю через CAS pointer; replay того же `recommendation_item_id` idempotent, а divergent bytes fail closed. `Проверить изменения сейчас` переиспользует существующий authenticated observer manual scan; scheduled двухчасовой observer остаётся без изменений.
 
-Код содержит отдельную future live adapter boundary, но она не подключена к runtime. Даже прямой вызов запрещён default-false capability provider. Если отдельная будущая задача откроет capability, adapter обязан переиспользовать действующий exact single-target `SkuManagementBlock.preview_bid → commit_bid → matching readback`; отдельный bulk PATCH, обход preview, inferred success и blind retry запрещены.
+Default dry-run adapter остаётся доступен только как internal/test boundary и всегда возвращает `wb_patch_called=false`. Production operator surface использует Balance-owned batch transport поверх того же guarded Ads source; live capability не появляется без Registry binding и canonical seller identity.
 
 # 6. Workbook contract
 
@@ -134,10 +140,12 @@ Download строится из выбранного immutable calculation плю
 
 # 7. Verification and exclusions
 
-`apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`coefficient × WB + FF`), coefficient boundaries `0/1`, complete aggregate-only WB fallback with milestones, fail-closed partial/missing/malformed aggregate evidence, unchanged non-Balance strict stock field, before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency, registry/workbook provenance readback, durable progress and disabled live adapter without preview/commit calls. Тот же smoke разрывает клиентский socket до response, удерживает тяжёлый worker, доказывает быстрый соседний GET, byte-stable same-key `202`, later operation GET recovery и exact one operation/one calculation.
+`apps/sku_inventory_balance_smoke.py` проверяет all-fronts opening (`coefficient × WB + FF`), coefficient boundaries `0/1`, complete aggregate-only WB fallback with milestones, fail-closed partial/missing/malformed aggregate evidence, unchanged non-Balance strict stock field, before-arrival constraints, last-exact-supply horizon, no-supply unknown, 7/14-day demand evidence, empirical/fallback ETA contract, inbound dedupe, zero-sales launch boundary, CPO routing, exact iPhone Air glass exclusions, immutable schema/trigger, separated override, manifest-aware idempotency and registry/workbook provenance readback. Тот же smoke разрывает клиентский socket до response, удерживает тяжёлый worker, доказывает быстрый соседний GET, byte-stable same-key `202`, later operation GET recovery и exact one operation/one calculation.
 
-`apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings/columns, compact two-line primary rows, sticky identity, keyboard disclosure, Russian quality badges, deficit/overstock/balance and change/hold/insufficient campaign presentation, full warnings/lineage/digests/provenance in details, labelled effective/manual target controls, select-all/count, atomic dry-run confirmation with exclusions, disabled/working calculate button, animated operation progress, transport-loss readback without raw `Failed to fetch`, reload recovery, server-backed terminal result and отсутствие browser `PATCH`.
+`apps/sku_inventory_balance_live_apply_smoke.py` проверяет 33 mixed CPC/CPM targets, integer minor-unit contract, one-nmID identity/stale/minimum gates, canary + batch sizes `1/10/10/10/2`, exact one successful submit per target, explicit 429 retry, transport-after-submit ambiguity without resubmit, delayed/partial readback, durable restart recovery без submit, per-target Registry provenance и exact 33 facts/links без дублей.
+
+`apps/sku_inventory_balance_browser_smoke.py` проверяет subtabs, presets, server-owned settings/columns, compact two-line primary rows, sticky identity, keyboard disclosure, Russian quality badges, deficit/overstock/balance and change/hold/insufficient campaign presentation, full warnings/lineage/digests/provenance in details, labelled effective/manual target controls, select-all/count, explicit live confirmation current→new, animated real progress, reload recovery during active apply, full/partial/stalled summaries и отсутствие browser-side WB `PATCH`.
 
 Explicit exclusion policy `sku_inventory_balance_exclusions_v1` удаляет из calculation rows/UI/XLSX только exact nmID `497413772`, `497415593`, `497416931` с reason `iPhone Air glass is outside inventory-balance scope`; name substring matching запрещён. Policy version, полный configured list и matched rows сохраняются в lineage и `Источники`.
 
-В scope не входят production backfill, production-data mutation, live WB write enablement, automatic campaign management, ML/training, autonomous observation collection и изменение существующей логики `Общее`.
+В scope не входят production backfill, deployment-time WB mutation, automatic execution без owner confirmation, campaign pause/start/resume, campaign creation, prices, budgets/topups, ML/training, recommender changes, autonomous observation collection и изменение существующей логики `Общее`.

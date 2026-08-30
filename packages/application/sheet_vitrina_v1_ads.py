@@ -273,6 +273,303 @@ class SheetVitrinaV1AdsBlock:
             "read_scope": "exact_advert_placement_without_stats_min_recommendations",
         }
 
+    def preflight_bid_targets(
+        self,
+        targets: Sequence[Mapping[str, Any]],
+        *,
+        min_bid_interval_seconds: float = 3.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> list[dict[str, Any]]:
+        """Fresh, fail-closed bulk guard for Balance-owned bid targets.
+
+        Campaign details are fetched in documented batches. Minimum bids remain
+        advert-scoped in WB, so the first allowed burst is used and later calls
+        are paced at the documented three-second interval.
+        """
+
+        normalized = [_normalize_bulk_bid_target(item) for item in targets]
+        advert_ids = sorted({item["advert_id"] for item in normalized})
+        payload: Mapping[str, Any] = {}
+        for attempt in range(2):
+            try:
+                payload = self.source.fetch_adverts(
+                    advert_ids,
+                    statuses=sorted(SUPPORTED_BID_STATUSES),
+                )
+                break
+            except WbPromotionApiError as exc:
+                if exc.http_status != 429 or attempt > 0:
+                    raise
+                delay = max(float(exc.retry_after_seconds or 0.2), 0.0)
+                if delay:
+                    sleep(delay)
+        raw_adverts = payload.get("adverts") if isinstance(payload, Mapping) else []
+        campaigns = {
+            int(campaign["advert_id"]): campaign
+            for campaign in (
+                _parse_campaign(item)
+                for item in (raw_adverts or [])
+                if isinstance(item, Mapping)
+            )
+            if int(campaign["advert_id"]) > 0
+        }
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for item in normalized:
+            grouped.setdefault(item["advert_id"], []).append(item)
+
+        results: dict[str, dict[str, Any]] = {}
+        eligible_groups: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
+        for advert_id, group in sorted(grouped.items()):
+            campaign = campaigns.get(advert_id)
+            if campaign is None:
+                for item in group:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item, "campaign_not_found", "Кампания не найдена в WB."
+                    )
+                continue
+            candidate_nm_ids = sorted(
+                {
+                    int(value)
+                    for value in (
+                        _optional_int(row.get("nm_id"))
+                        for row in campaign.get("nm_settings", [])
+                        if isinstance(row, Mapping)
+                    )
+                    if value is not None
+                }
+            )
+            expected_nm_ids = sorted({item["nm_id"] for item in group})
+            if len(candidate_nm_ids) != 1 or candidate_nm_ids != expected_nm_ids:
+                for item in group:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item,
+                        "campaign_identity_incident",
+                        "Кампания должна однозначно принадлежать ровно одному SKU.",
+                        candidate_nm_ids=candidate_nm_ids,
+                    )
+                continue
+            status = _as_int(campaign.get("status"), default=0)
+            payment_type = str(campaign.get("payment_type") or "").strip().lower()
+            bid_type = str(campaign.get("bid_type") or "").strip().lower()
+            if status not in SUPPORTED_BID_STATUSES:
+                message = "Статус кампании не допускает изменение ставки."
+            elif payment_type not in {"cpm", "cpc"}:
+                message = "Тип оплаты кампании не поддерживается."
+            elif bid_type not in {"manual", "unified"}:
+                message = "Тип ставки кампании не поддерживается."
+            else:
+                message = ""
+            if message:
+                for item in group:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item, "campaign_not_actionable", message
+                    )
+                continue
+            rows = {
+                (int(row["nm_id"]), str(row["placement"])): row
+                for row in _campaign_placement_rows(campaign)
+            }
+            valid: list[dict[str, Any]] = []
+            for item in group:
+                row = rows.get((item["nm_id"], item["placement"]))
+                if row is None:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item,
+                        "placement_not_found",
+                        "Размещение кампании больше не найдено в WB.",
+                    )
+                    continue
+                current = _optional_int(row.get("current_bid_kopecks"))
+                if current is None or current != item["current_bid_minor"]:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item,
+                        "stale_current_bid",
+                        "Текущая ставка изменилась после расчёта.",
+                        observed_bid_minor=current,
+                    )
+                    continue
+                try:
+                    self._validate_safety_thresholds(
+                        old_bid_kopecks=current,
+                        new_bid_kopecks=item["requested_bid_minor"],
+                    )
+                except SheetVitrinaV1AdsError as exc:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item, "safety_guard", str(exc)
+                    )
+                    continue
+                valid.append({**item, "payment_type": payment_type})
+            if valid:
+                eligible_groups.append((advert_id, campaign, valid))
+
+        minimum_call_index = 0
+        burst = 5
+        for advert_id, _campaign, group in eligible_groups:
+            if minimum_call_index >= burst and min_bid_interval_seconds > 0:
+                sleep(float(min_bid_interval_seconds))
+            minimum_call_index += 1
+            placement_types = sorted(
+                {MIN_BID_PLACEMENT[item["placement"]] for item in group}
+            )
+            try:
+                minimum_payload: Mapping[str, Any] = {}
+                for attempt in range(2):
+                    try:
+                        minimum_payload = self.source.fetch_min_bids(
+                            advert_id=advert_id,
+                            nm_ids=[group[0]["nm_id"]],
+                            payment_type=group[0]["payment_type"],
+                            placement_types=placement_types,
+                        )
+                        break
+                    except WbPromotionApiError as exc:
+                        if exc.http_status != 429 or attempt > 0:
+                            raise
+                        delay = max(
+                            float(
+                                exc.retry_after_seconds
+                                if exc.retry_after_seconds is not None
+                                else min_bid_interval_seconds
+                            ),
+                            0.0,
+                        )
+                        if delay:
+                            sleep(delay)
+            except Exception as exc:
+                for item in group:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item,
+                        "minimum_bid_unavailable",
+                        "Не удалось подтвердить минимальную ставку WB.",
+                        detail=str(exc),
+                    )
+                continue
+            for item in group:
+                minimum = _extract_min_bid(
+                    minimum_payload,
+                    nm_id=item["nm_id"],
+                    placement=MIN_BID_PLACEMENT[item["placement"]],
+                )
+                if minimum is None:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item,
+                        "minimum_bid_unavailable",
+                        "WB не вернул минимальную ставку для размещения.",
+                    )
+                elif item["requested_bid_minor"] < minimum:
+                    results[item["target_key"]] = _bulk_preflight_error(
+                        item,
+                        "below_minimum_bid",
+                        "Рекомендованная ставка ниже текущего минимума WB.",
+                        minimum_bid_minor=minimum,
+                    )
+                else:
+                    results[item["target_key"]] = {
+                        **item,
+                        "ok": True,
+                        "payment_type": group[0]["payment_type"],
+                        "minimum_bid_minor": minimum,
+                        "observed_bid_minor": item["current_bid_minor"],
+                    }
+        return [results[item["target_key"]] for item in normalized]
+
+    def submit_bid_targets(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
+        """Submit one documented WB PATCH with at most fifty atomic targets."""
+
+        normalized = [_normalize_bulk_bid_target(item) for item in targets]
+        if not normalized or len(normalized) > 50:
+            raise SheetVitrinaV1AdsError(
+                "bulk bid PATCH requires 1..50 exact targets", http_status=422
+            )
+        grouped: dict[int, list[dict[str, int | str]]] = {}
+        for item in normalized:
+            grouped.setdefault(item["advert_id"], []).append(
+                {
+                    "nm_id": item["nm_id"],
+                    "bid_kopecks": item["requested_bid_minor"],
+                    "placement": item["placement"],
+                }
+            )
+        payload = {
+            "bids": [
+                {"advert_id": advert_id, "nm_bids": grouped[advert_id]}
+                for advert_id in sorted(grouped)
+            ]
+        }
+        return self.source.patch_bids(payload)
+
+    def read_bid_targets(
+        self, targets: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """One query-only batched readback projected to each exact target."""
+
+        normalized = [_normalize_bulk_bid_target(item) for item in targets]
+        advert_ids = sorted({item["advert_id"] for item in normalized})
+        payload = self.source.fetch_adverts(
+            advert_ids,
+            statuses=sorted(SUPPORTED_BID_STATUSES),
+        )
+        raw_adverts = payload.get("adverts") if isinstance(payload, Mapping) else []
+        campaigns = {
+            int(campaign["advert_id"]): campaign
+            for campaign in (
+                _parse_campaign(item)
+                for item in (raw_adverts or [])
+                if isinstance(item, Mapping)
+            )
+            if int(campaign["advert_id"]) > 0
+        }
+        results: list[dict[str, Any]] = []
+        for item in normalized:
+            campaign = campaigns.get(item["advert_id"])
+            candidate_nm_ids = sorted(
+                {
+                    int(value)
+                    for value in (
+                        _optional_int(row.get("nm_id"))
+                        for row in (campaign or {}).get("nm_settings", [])
+                        if isinstance(row, Mapping)
+                    )
+                    if value is not None
+                }
+            )
+            if candidate_nm_ids != [item["nm_id"]]:
+                results.append(
+                    _bulk_preflight_error(
+                        item,
+                        "campaign_identity_incident",
+                        "Кампания потеряла однозначную связь с SKU.",
+                        candidate_nm_ids=candidate_nm_ids,
+                    )
+                )
+                continue
+            row = next(
+                (
+                    row
+                    for row in _campaign_placement_rows(campaign or {})
+                    if int(row["nm_id"]) == item["nm_id"]
+                    and str(row["placement"]) == item["placement"]
+                ),
+                None,
+            )
+            results.append(
+                {
+                    **item,
+                    "ok": row is not None
+                    and _optional_int(row.get("current_bid_kopecks")) is not None,
+                    "observed_bid_minor": (
+                        _optional_int(row.get("current_bid_kopecks"))
+                        if row is not None
+                        else None
+                    ),
+                    "error_code": "" if row is not None else "placement_not_found",
+                    "message": "" if row is not None else "Размещение не найдено при проверке.",
+                }
+            )
+        return results
+
     def preview_bid_change(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         nm_id = _as_positive_int(payload.get("nm_id"), "nm_id")
         advert_id = _as_positive_int(payload.get("advert_id"), "advert_id")
@@ -1047,6 +1344,40 @@ def _build_patch_payload(*, advert_id: int, nm_id: int, placement: str, bid_kope
                 ],
             }
         ]
+    }
+
+
+def _normalize_bulk_bid_target(value: Mapping[str, Any]) -> dict[str, Any]:
+    target_key = str(value.get("target_key") or "").strip()
+    if not target_key:
+        raise SheetVitrinaV1AdsError("bulk bid target_key is required", http_status=422)
+    return {
+        **dict(value),
+        "target_key": target_key,
+        "nm_id": _as_positive_int(value.get("nm_id"), "nm_id"),
+        "advert_id": _as_positive_int(value.get("advert_id"), "advert_id"),
+        "placement": normalize_placement(value.get("placement")),
+        "current_bid_minor": _as_nonnegative_int(
+            value.get("current_bid_minor"), "current_bid_minor"
+        ),
+        "requested_bid_minor": _as_nonnegative_int(
+            value.get("requested_bid_minor"), "requested_bid_minor"
+        ),
+    }
+
+
+def _bulk_preflight_error(
+    item: Mapping[str, Any],
+    error_code: str,
+    message: str,
+    **details: Any,
+) -> dict[str, Any]:
+    return {
+        **dict(item),
+        "ok": False,
+        "error_code": str(error_code),
+        "message": str(message),
+        **details,
     }
 
 

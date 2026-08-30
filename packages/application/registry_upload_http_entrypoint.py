@@ -67,7 +67,10 @@ from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridg
 from packages.application.sqlite_contention import SQLiteContentionExhausted
 from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
-from packages.application.sku_inventory_balance import SkuInventoryBalanceBlock
+from packages.application.sku_inventory_balance import (
+    LiveWbInventoryBalanceApplyAdapter,
+    SkuInventoryBalanceBlock,
+)
 from packages.application.wb_incident_policy import get_policy_state
 from packages.application.sheet_vitrina_v1_load_bridge import (
     LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE,
@@ -1330,11 +1333,19 @@ class RegistryUploadHttpEntrypoint:
                 sku_management_block=self.sku_management_block,
                 now_factory=self.now_factory,
                 timestamp_factory=self.activated_at_factory,
+                apply_adapter=(
+                    LiveWbInventoryBalanceApplyAdapter(
+                        sku_management_block=self.sku_management_block
+                    )
+                    if writer_registry is not None and registry_seller_id
+                    else None
+                ),
                 manual_pending_registry=(
                     ChangeRegistryRepository(self.runtime.runtime_dir)
                     if registry_seller_id
                     else None
                 ),
+                writer_registry=writer_registry,
                 seller_id=registry_seller_id,
                 account_scope=registry_scope,
             )
