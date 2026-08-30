@@ -44,6 +44,7 @@ related_modules:
   - "apps/warehouse_fbs_historical_recovery.py"
   - "apps/wbc0013_fbs_recovery.py"
   - "apps/sheet_vitrina_v1_historical_cost_carry_forward.py"
+  - "apps/sheet_vitrina_v1_historical_missing_repair.py"
   - "apps/warehouse_cost_queue_replay.py"
   - "apps/sqlite_backup_archive.py"
   - "apps/ff_stage_7a_production.py"
@@ -61,7 +62,7 @@ related_endpoints:
   - "GET|POST /v1/sheet-vitrina-v1/settings/calculation-parameters"
   - "POST /v1/sheet-vitrina-v1/settings/calculation-parameters/preview"
 source_of_truth_level: "module_canonical"
-update_note: "Active truth remains versioned functional balances. Migration 163 adds an owner-gated analytical carry-forward for one historical Vitrina closure without reconstructing or changing warehouse truth; deploy remains inert."
+update_note: "Active truth remains versioned functional balances. Closed Vitrina repair is exact source-operation/as_of-date bound and cannot project the current warehouse state backward; deploy remains inert."
 ---
 
 # 1. Active warehouse contract
@@ -177,9 +178,21 @@ projection or capital-event revision cannot rewrite that date through ordinary
 hourly/current publication. Candidate drift or WB/FF evidence mismatch preserves
 the last-good warehouse/cost/Proxy values and emits typed
 `historical_repair_required` evidence. It never changes the exact historical
-version or silently replaces numbers/confirmed zero with blanks. Historical
+version or silently replaces numbers/confirmed zero with blanks. Any historical
 change requires a separate version-bound reconciliation contract; current-day
 warehouse publication remains independent.
+
+Repair for the WBC0010 incident uses only the retained verified T1 before-image
+of the first destructive publication. Each date is bound to the source row whose
+`as_of_date` is that exact date; the overlapping prior temporal bundle is not an
+equivalent source. One reviewed manifest enumerates 33 SKU × six cost/Proxy
+families plus six TOTAL values for each included date, applies all exact ready
+rows in one `BEGIN IMMEDIATE` CAS under the shared writer lock, and records a new
+T1 rollback operation. The independent `2026-08-26 / 428853741` cost-coverage
+invariant is excluded until its immutable event/version proof is sufficient;
+the repair never copies that known-bad before-image or claims full incident
+completion. Finance, functional versions, current/future projections and
+non-target ready cells are immutable acceptance boundaries.
 
 Full Vitrina refresh preserves that boundary by carrying the exact closed-date
 coverage, functional-economics marker, repair registry and target presentation

@@ -28,6 +28,7 @@ from apps.sheet_vitrina_v1_historical_cost_carry_forward import (
     _submit_once,
     run,
 )
+from apps import sheet_vitrina_v1_historical_missing_repair as missing_repair
 from apps.warehouse_fbs_material_rematerialization_smoke import (
     DAY,
     FACILITY_ID,
@@ -47,7 +48,82 @@ OWNER_APPROVAL_REFERENCE = "smoke:owner-authorized:" + OWNER_AUTHORIZATION_DIGES
 def main() -> None:
     _exercise_success_and_one_submit()
     _exercise_receipt_blocks_before_submit()
+    _exercise_exact_missing_repair_transform()
     print("sheet_vitrina_v1_historical_cost_carry_forward_smoke: OK")
+
+
+def _exercise_exact_missing_repair_transform() -> None:
+    day = missing_repair.TARGET_DATES[0]
+    rows: list[list[object]] = []
+    source_rows: list[list[object]] = []
+    for nm_id in range(1, missing_repair.EXPECTED_SKU_COUNT + 1):
+        for key in missing_repair.SKU_KEYS:
+            rows.append([f"SKU {nm_id}", f"SKU:{nm_id}|{key}", ""])
+            source_rows.append(
+                [f"SKU {nm_id}", f"SKU:{nm_id}|{key}", float(nm_id)]
+            )
+    for key in missing_repair.TOTAL_KEYS:
+        rows.append(["ИТОГО", f"TOTAL|{key}", ""])
+        source_rows.append(["ИТОГО", f"TOTAL|{key}", 99.0])
+    before = {
+        "date_columns": [day],
+        "sheets": [{"header": ["label", "key", day], "rows": rows}],
+        "metadata": {
+            "warehouse_history_coverage": {
+                day: {
+                    "status": "historical_repair_required",
+                    "functional_version_id": "whfv_fixture12345678",
+                }
+            },
+            "functional_economics_backfill": {
+                "inventory_cost_publication": {
+                    "date_evidence": {
+                        day: {
+                            "functional_version_id": "whfv_fixture12345678",
+                            "status": "missing",
+                        }
+                    }
+                }
+            },
+            "server_cell_presentation": {},
+            missing_repair.HISTORICAL_REPAIR_METADATA_KEY: {
+                "contract_name": "fixture",
+                "status": "historical_repair_required",
+                "dates": {day: {"status": "historical_repair_required"}},
+            },
+            "unrelated": {"preserved": True},
+        },
+    }
+    trusted = deepcopy(before)
+    trusted["sheets"][0]["rows"] = source_rows
+    trusted["metadata"]["warehouse_history_coverage"][day]["status"] = "exact"
+    trusted["metadata"]["functional_economics_backfill"][
+        "inventory_cost_publication"
+    ]["date_evidence"][day]["status"] = "exact"
+    after = missing_repair._repair_payload(
+        before_payload=deepcopy(before),
+        source={
+            "cells": missing_repair._target_cells(trusted, day),
+            "coverage": trusted["metadata"]["warehouse_history_coverage"][day],
+            "date_evidence": trusted["metadata"]["functional_economics_backfill"][
+                "inventory_cost_publication"
+            ]["date_evidence"][day],
+            "presentation": {},
+        },
+        business_date=day,
+    )
+    assert len(missing_repair._target_cells(after, day)) == 204
+    assert not any(
+        missing_repair._is_missing(value)
+        for value in missing_repair._target_cells(after, day).values()
+    )
+    assert day not in missing_repair._repair_dates(after)
+    assert missing_repair._strip_exact_target(
+        before, day
+    ) == missing_repair._strip_exact_target(after, day)
+    assert after["metadata"]["unrelated"] == {"preserved": True}
+    assert missing_repair.EXCLUDED_DATE not in missing_repair.TARGET_DATES
+    assert missing_repair.EXPECTED_LOGICAL_TARGET_COUNT == 1428
 
 
 def _exercise_success_and_one_submit() -> None:

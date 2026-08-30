@@ -203,6 +203,9 @@ OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
     "functional_economics_targeted_publication": _policy(
         "functional_economics_targeted_publication", RecoveryTier.T1, "sku_date"
     ),
+    "functional_economics_historical_repair": _policy(
+        "functional_economics_historical_repair", RecoveryTier.T1, "sku_date"
+    ),
     "calculation_parameters_update": _policy(
         "calculation_parameters_update", RecoveryTier.T1, "date"
     ),

@@ -54,6 +54,14 @@ HISTORICAL_COST_APPROVAL_DIGEST = "sha256:" + "9" * 64
 HISTORICAL_COST_APPROVAL_REFERENCE = (
     "github:fixture:" + HISTORICAL_COST_APPROVAL_DIGEST
 )
+HISTORICAL_MISSING_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0010 profile historical-missing-repair "
+    "target wb_core_eu_hosted_runtime_active "
+    "source-operation recovery_6b52b021d0d8302fdf87004487661709 "
+    "source-digest sha256:510138ca43f717751ebcbc85997bc66baec3f7c65bf89c041f52943a4eb59181 "
+    "dates 7 logical-targets 1428 snapshots 9 missing-before 1302 missing-after 0 "
+    "excluded-date 2026-08-26"
+)
 
 
 def _exercise_historical_cost_runner() -> None:
@@ -212,6 +220,133 @@ def _exercise_historical_cost_runner() -> None:
         apply.command_evidence = original_command
     assert blocked["state"] == "blocked" and blocked["apply_count"] == 0
     assert blocked["failure"]["code"] == "owner_fixed_input_invalid"
+
+
+def _exercise_historical_missing_runner() -> None:
+    goal = apply.validate_authorization(
+        authorization(body=HISTORICAL_MISSING_AUTH_BODY),
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+    )
+    assert goal["profile"] == apply.HISTORICAL_MISSING_REPAIR_GOAL_PROFILE
+    assert goal["expected_logical_target_count"] == 1428
+    operation = "production-goal-v1-" + "6" * 32
+    evidence_dir = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        + operation
+    )
+    manifest_path = (
+        evidence_dir + "/historical-missing-repair-plan-20260830T120000Z.json"
+    )
+    persistence = {
+        "owner": "production_apply_evidence",
+        "destination": manifest_path,
+        "evidence_dir": evidence_dir,
+        "evidence_dir_mode": "0700",
+        "file_mode": "0600",
+        "parent_mode": "0700",
+        "bounded_size": True,
+        "atomic_publish": True,
+        "no_overwrite": True,
+        "durable_file_fsync": True,
+        "durable_directory_fsync": True,
+        "root_storage_admission": {
+            "owner": "production_apply_evidence",
+            "allowed": True,
+        },
+    }
+    candidate = {
+        "status": "ready",
+        "query_only": True,
+        "database_written": False,
+        "source_operation_id": goal["source_operation_id"],
+        "source_digest": goal["source_digest"],
+        "target_dates": [
+            "2026-08-22",
+            "2026-08-23",
+            "2026-08-24",
+            "2026-08-25",
+            "2026-08-27",
+            "2026-08-28",
+            "2026-08-29",
+        ],
+        "excluded_date": "2026-08-26",
+        "logical_target_count": 1428,
+        "updated_ready_snapshot_count": 9,
+        "current_missing_count": 1302,
+        "after_missing_count": 0,
+        "would_change": True,
+        "target_generation_bound": True,
+        "barrier_inactive": True,
+        "timer_change_count": 0,
+        "target_binding": {
+            "validated": True,
+            "target_id": "wb_core_eu_hosted_runtime_active",
+            "deployed_sha": MERGE_SHA,
+        },
+        "manifest_path": manifest_path,
+        "manifest_sha256": "sha256:" + "1" * 64,
+        "material_qualification_digest": "sha256:" + "2" * 64,
+        "non_target_digest": "sha256:" + "3" * 64,
+        "other_ready_snapshots_digest": "sha256:" + "4" * 64,
+        "plan_persistence": persistence,
+    }
+    readback = {
+        "status": "reconciled",
+        "query_only": True,
+        "database_written": False,
+        "submit_count": 1,
+        "target_dates": candidate["target_dates"],
+        "excluded_date": "2026-08-26",
+        "source_operation_id": goal["source_operation_id"],
+        "source_digest": goal["source_digest"],
+        "logical_target_count": 1428,
+        "updated_ready_snapshot_count": 9,
+        "after_missing_count": 0,
+        "active_target_repair_dates": [],
+        "recovery_lifecycle": "retained",
+        "runtime_controls_changed": False,
+        "timer_change_count": 0,
+    }
+    common = {
+        "return_code": 0,
+        "transport_ambiguous": False,
+        "command_sha256": "a" * 64,
+        "stdout_sha256": "b" * 64,
+        "stderr_sha256": "c" * 64,
+    }
+    sequence = iter(
+        [
+            {**common, "result": candidate},
+            {**common, "result": candidate},
+            {**common, "result": {"status": "submitted", "submit_count": 1}},
+            {**common, "result": readback},
+        ]
+    )
+    original_command = apply.command_evidence
+    original_sleep = apply.time.sleep
+    apply.command_evidence = lambda *_args, **_kwargs: next(sequence)
+    apply.time.sleep = lambda *_args, **_kwargs: None
+    try:
+        result = apply.run_historical_missing_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "d" * 64,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert result["state"] == "done"
+    assert result["apply_count"] == result["submit_count"] == 1
+    assert [item["qualification_state"] for item in result["qualification_attempts"]] == [
+        "matching_witness",
+        "qualified",
+    ]
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
@@ -1138,6 +1273,7 @@ def main() -> None:
     _exercise_worker_mount_probe()
     _exercise_wbc0013_two_phase_runner()
     _exercise_historical_cost_runner()
+    _exercise_historical_missing_runner()
     goal = apply.validate_authorization(
         authorization(), repository="orenvlad-ai/wb-core", pr=1050
     )
