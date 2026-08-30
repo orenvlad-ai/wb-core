@@ -774,3 +774,20 @@ It appends exact status-pair transitions and query diagnostics but cannot feed
 the active six-stage warehouse projection.  `wbStatus=sorted` is a candidate,
 not an enabled trigger; the query-only readiness remains `NO_GO` without
 repeatable same-order transition evidence and a later owner-gated design.
+
+## Closed-date exact-functional invariant (WBC0027)
+
+After functional cutover, an outbox/event row is only a replay signal. It must
+never publish product-capital cells from `own_capital_daily_state` or preserve
+quantity from mutable projection `current_rows`. The only ordinary writer is
+the exact good functional version whose `business_effective_date` and official
+`snapshot_date` both equal the published date. Row provenance binds
+`functional_version_id`, `snapshot_date`, source digest and publication
+identity. Pending signals stay durably `pending_exact_functional` until that
+same transaction moves them to `published_exact`.
+
+The status contour exhaustively reconciles all 42 owned product-capital keys
+for every persisted date/scope against exact functional versions. Any unbound
+row, numeric-to-missing transition, cell mismatch or closed-date rewrite
+without a new exact version is `historical_repair_required`; enqueue alone can
+never make health green.

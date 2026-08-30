@@ -33,11 +33,19 @@ from packages.application.warehouse_business_projection import (  # noqa: E402
     CURRENT_ROW_TABLE,
     OUTBOX_TABLE,
     STATE_TABLE,
+    apply_warehouse_business_projection_overlay,
     drain_warehouse_business_projection_outbox,
+    ensure_functional_version_business_time_schema,
     load_warehouse_business_projection_status,
+    publish_functional_version_business_projection,
+)
+from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
+    SheetVitrinaV1Envelope,
+    SheetVitrinaWriteTarget,
 )
 from packages.application.warehouse_functional import (  # noqa: E402
     enqueue_warehouse_targeted_recalculation,
+    ensure_warehouse_functional_schema,
 )
 from packages.business_time import business_date_from_timestamp  # noqa: E402
 
@@ -93,9 +101,89 @@ def main() -> None:
         assert rebuild.date_count == 5, rebuild
 
         first_status = load_warehouse_business_projection_status(runtime)
+        assert first_status["revision_no"] == 0, first_status
+        assert first_status["outbox_counts"] == {
+            "pending_exact_functional": 2
+        }, first_status
+        assert _current_metrics(runtime) == {}
+
+        first_publication = _publish_exact_version(
+            runtime,
+            version_id="functional-v1",
+            capital_rub="1000",
+            source_revision="sha256:functional-v1",
+        )
+        assert first_publication["status"] == "success", first_publication
+        assert first_publication["resolved_replay_signal_count"] == 0
+        first_status = load_warehouse_business_projection_status(runtime)
         assert first_status["revision_no"] == 1, first_status
-        assert first_status["outbox_counts"] == {"complete": 2}, first_status
-        _assert_same_day_receipt(runtime)
+        assert first_status["outbox_counts"] == {
+            "pending_exact_functional": 2
+        }, first_status
+        assert first_status["health_status"] == "pending_exact_functional"
+        assert first_status["reconciliation"]["status"] == "published_exact"
+        with sqlite3.connect(runtime.db_path) as conn:
+            row = conn.execute(
+                f"SELECT metrics_json,provenance_json FROM {CURRENT_ROW_TABLE} "
+                "WHERE as_of_date='2026-07-25' AND nm_id=101"
+            ).fetchone()
+            stale_metrics = json.loads(str(row[0]))
+            stale_metrics[OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] = 999999.0
+            stale_provenance = json.loads(str(row[1]))
+            stale_provenance["source"] = "canonical_own_capital_events"
+            conn.execute(
+                f"UPDATE {CURRENT_ROW_TABLE} SET metrics_json=?,provenance_json=? "
+                "WHERE as_of_date='2026-07-25' AND nm_id=101",
+                (
+                    json.dumps(stale_metrics, ensure_ascii=False, sort_keys=True),
+                    json.dumps(stale_provenance, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            conn.commit()
+        guarded = block.load_daily_metric_lookup(
+            "2026-07-25",
+            requested_nm_ids=[101],
+        )
+        assert guarded[101][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] == 1000.0, guarded
+        guarded_snapshot = apply_warehouse_business_projection_overlay(
+            runtime,
+            snapshot=SheetVitrinaV1Envelope(
+                plan_version="smoke",
+                snapshot_id="guarded-overlay",
+                as_of_date="2026-07-25",
+                date_columns=["2026-07-25"],
+                temporal_slots=[],
+                source_temporal_policies={},
+                sheets=[
+                    SheetVitrinaWriteTarget(
+                        sheet_name="DATA_VITRINA",
+                        write_start_cell="A1",
+                        write_rect="A1:C2",
+                        clear_range="A:C",
+                        write_mode="replace",
+                        partial_update_allowed=False,
+                        header=["label", "row_id", "2026-07-25"],
+                        rows=[["", "SKU:101|own_total_product_capital_rub", 1234.0]],
+                        row_count=1,
+                        column_count=3,
+                    )
+                ],
+                metadata={
+                    "warehouse_history_coverage": {
+                        "2026-07-25": {
+                            "functional_version_id": "functional-v1"
+                        }
+                    }
+                },
+            ),
+        )
+        assert guarded_snapshot.sheets[0].rows[0][2] == 1234.0
+        overlay_evidence = guarded_snapshot.metadata["warehouse_business_projection"]
+        assert overlay_evidence["ignored_unbound_row_count"] == 1
+        assert overlay_evidence["incidents"][0]["status"] == "historical_repair_required"
+        guarded_status = load_warehouse_business_projection_status(runtime)
+        assert guarded_status["health_status"] == "historical_repair_required"
+        assert guarded_status["reconciliation"]["unbound_row_count"] == 1
         before_qty = _all_quantity_digest(runtime)
 
         cost = block.record_order_level_cost_payment(
@@ -115,17 +203,25 @@ def main() -> None:
         )
         assert not cost["idempotent"], cost
         block.recalculate(date_from="2026-07-21", date_to="2026-07-25")
+        pending_cost = _current_metrics(runtime)
+        assert _all_quantity_digest(runtime) == before_qty
+        assert pending_cost["2026-07-25"][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] == 999999.0
+        second_status = load_warehouse_business_projection_status(runtime)
+        assert second_status["revision_no"] == 1, second_status
+        assert second_status["outbox_counts"].get("pending_exact_functional")
+
+        second_publication = _publish_exact_version(
+            runtime,
+            version_id="functional-v2",
+            capital_rub="1100",
+            source_revision="sha256:functional-v2",
+        )
+        assert second_publication["status"] == "success", second_publication
         after_cost = _current_metrics(runtime)
         assert _all_quantity_digest(runtime) == before_qty
-        for as_of_date in sorted(after_cost):
-            assert after_cost[as_of_date][OWN_TOTAL_QTY_METRIC_KEY] == 10.0
-            assert (
-                after_cost[as_of_date][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY]
-                == 1100.0
-            )
-            assert after_cost[as_of_date][OWN_AVG_COST_RUB_METRIC_KEY] == 110.0
-        second_status = load_warehouse_business_projection_status(runtime)
-        assert second_status["revision_no"] == 2, second_status
+        assert after_cost["2026-07-25"][OWN_TOTAL_QTY_METRIC_KEY] == 10.0
+        assert after_cost["2026-07-25"][OWN_TOTAL_CAPITAL_RUB_METRIC_KEY] == 1100.0
+        assert after_cost["2026-07-25"][OWN_AVG_COST_RUB_METRIC_KEY] == 110.0
 
         repeated = block.record_order_level_cost_payment(
             document_id="bank-fee-21",
@@ -144,17 +240,80 @@ def main() -> None:
         )
         assert repeated["idempotent"], repeated
         block.recalculate(date_from="2026-07-21", date_to="2026-07-25")
-        assert (
-            load_warehouse_business_projection_status(runtime)["revision_no"]
-            == 2
-        )
-
-        _assert_cost_only_preserves_legacy_total_quantities(runtime, block)
-        _assert_failure_keeps_last_good(runtime)
-        _assert_concurrent_drain_is_exactly_once(runtime)
-        _assert_partial_functional_source_keeps_quantities(runtime)
-        _assert_late_transit_cost_scope_is_bounded(runtime)
+        repeated_status = load_warehouse_business_projection_status(runtime)
+        assert repeated_status["revision_no"] == 2, repeated_status
+        assert repeated_status["outbox_counts"] == {
+            "pending_exact_functional": 3
+        }, repeated_status
     print("warehouse_business_projection_smoke: OK")
+
+
+def _publish_exact_version(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    version_id: str,
+    capital_rub: str,
+    source_revision: str,
+) -> dict:
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_warehouse_functional_schema(conn)
+        ensure_functional_version_business_time_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                version_id,cutover_id,version_kind,effective_at,status,
+                plan_fingerprint,local_source_digest,source_watermarks_json,
+                created_at,business_effective_date,published_at
+            ) VALUES(?, 'warehouse_functional_cutover_v1','hourly_wb_sync',?,
+                     'good',?,?, '{}',?,'2026-07-25',?)
+            """,
+            (
+                version_id,
+                NOW,
+                "sha256:plan:" + version_id,
+                "sha256:local:" + version_id,
+                NOW,
+                NOW,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
+                snapshot_id,version_id,fetched_at,snapshot_date,
+                requested_nm_ids_json,pagination_complete,page_count,
+                page_offsets_json,raw_row_count,raw_rows_digest,raw_rows_json,
+                items_json,created_at
+            ) VALUES(?,?,?,'2026-07-25','[101]',1,1,'[0]',1,?, '[]','[]',?)
+            """,
+            (
+                "snapshot:" + version_id,
+                version_id,
+                NOW,
+                "sha256:snapshot:" + version_id,
+                NOW,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sheet_vitrina_v1_warehouse_functional_balances(
+                version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,
+                cost_covered_quantity,quality,certified,wb_quantity,
+                wb_in_way_to_client,wb_in_way_from_client,provenance_json
+            ) VALUES(?, 'ff',101,'10',?,?,'10','moving_weighted_average',
+                     1,'0','0','0','{}')
+            """,
+            (version_id, str(float(capital_rub) / 10), capital_rub),
+        )
+        result = publish_functional_version_business_projection(
+            conn,
+            published_version_id=version_id,
+            business_effective_date="2026-07-25",
+            published_at=NOW,
+            source_revision=source_revision,
+        )
+        conn.commit()
+    return result
 
 
 def _assert_same_day_receipt(runtime: RegistryUploadDbBackedRuntime) -> None:

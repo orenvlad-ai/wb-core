@@ -358,3 +358,13 @@ may update dependent WAC/capital/COGS/Finance/Proxy/Vitrina projections, but
 never quantity, reservation, FF debit or physical events and never performs a
 global/current-cost backcopy. An identical revision is T0; materialization or
 enqueue failure is durable and retryable.
+
+## WBC0027 incident recovery boundary
+
+Cost-only replay cannot source physical quantity from projection
+`current_rows`; quantity remains byte/Decimal-equivalent to the exact bound
+functional version. WBC0027 uses a separate T1 operation after product-capital
+recovery and fills only currently missing, source-proven cost/Proxy cells for
+26 and 29 August. The 26 August SKU `428853741` unit-cost invariant
+`117.537167` and its dependent unresolved cells stay separately explicit;
+unrelated 21 August Proxy V4 and Finance are non-targets.
