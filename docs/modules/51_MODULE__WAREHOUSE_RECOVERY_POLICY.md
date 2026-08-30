@@ -379,6 +379,13 @@ performs full before-image CAS. Target/deployment/generation/schema drift is
 only readback. Retained exact readback is `applied`. No phase ID, manifest SHA
 or authorization comment from the superseded operation is reusable.
 
+The StoreRegistry identity is the exact typed triple `generation_id`,
+`manifest_sha256`, and `schema_revision`. Both identifiers are non-empty opaque
+strings; no numeric conversion, ordering, or synthetic generation prefix is
+part of the contract. Consecutive witnesses, the selected private manifest,
+the writer-lock rebuild, submit, and readback must preserve byte-exact equality
+of that triple. Empty, non-string, or mismatched revisions fail before submit.
+
 Private phase plans use a pre-existing mode-0700 goal directory, mode-0600
 files, root-storage admission, `O_EXCL` temporary creation, file fsync,
 atomic no-overwrite publication and directory fsync. Product publication

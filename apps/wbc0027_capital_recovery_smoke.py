@@ -23,9 +23,9 @@ GOAL = "production-goal-v1-" + "a" * 32
 PRODUCT_OPERATION = "recovery_" + "b" * 32
 DEPLOYED = "c" * 40
 GENERATION = {
-    "generation_id": "operational-smoke",
+    "generation_id": "opaque-generation-smoke",
     "manifest_sha256": "sha256:" + "d" * 64,
-    "schema_version": 172,
+    "schema_revision": "operational_v1",
 }
 
 
@@ -130,6 +130,61 @@ def main() -> None:
     assert recovery.EXPECTED_SECONDARY_MISMATCHES == 1791
     assert recovery.EXPECTED_SPECIAL_NM_ID == 497413772
     assert recovery.EXPECTED_SEPARATE_MISMATCHES == 16
+
+    exact_generation = recovery._phase_generation(GENERATION)
+    assert exact_generation == GENERATION
+    for malformed_revision in ("", " operational_v1", 172, None):
+        malformed = {**GENERATION, "schema_revision": malformed_revision}
+        try:
+            recovery._phase_envelope(
+                phase="economics",
+                goal_operation_id=GOAL,
+                deployed_sha=DEPLOYED,
+                generation=malformed,
+                material={"phase": "economics"},
+            )
+        except recovery.Wbc0027RecoveryError:
+            pass
+        else:
+            raise AssertionError("malformed StoreRegistry schema revision was accepted")
+
+    reviewed = _candidate()
+    try:
+        recovery._validate_candidate(
+            reviewed,
+            phase="economics",
+            goal_operation_id=GOAL,
+            expected_sha=DEPLOYED,
+            generation={**GENERATION, "schema_revision": "operational_v2"},
+            phase_operation_id=str(reviewed["phase_operation_id"]),
+            phase_fingerprint=str(reviewed["phase_fingerprint"]),
+        )
+    except recovery.Wbc0027RecoveryError:
+        pass
+    else:
+        raise AssertionError("mismatched StoreRegistry schema revision was accepted")
+
+    malformed_counts = _economics("ordinary-publication-count-type")
+    malformed_counts["logical_repair_count"] = "298"
+    try:
+        recovery._economics_material(
+            malformed_counts, product_phase_operation_id=PRODUCT_OPERATION
+        )
+    except recovery.Wbc0027RecoveryError:
+        pass
+    else:
+        raise AssertionError("text economics count was accepted")
+
+    malformed_decimal = _economics("ordinary-publication-decimal-type")
+    malformed_decimal["protected_invariant"]["unit_cost_rub"] = 117.537167
+    try:
+        recovery._economics_material(
+            malformed_decimal, product_phase_operation_id=PRODUCT_OPERATION
+        )
+    except recovery.Wbc0027RecoveryError:
+        pass
+    else:
+        raise AssertionError("numeric protected Decimal/text identity was accepted")
 
     material_a = recovery._economics_material(
         _economics("ordinary-publication-a"),

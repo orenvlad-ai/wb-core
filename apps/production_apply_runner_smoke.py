@@ -397,9 +397,9 @@ def _exercise_wbc0027_two_phase_runner() -> None:
         + operation
     )
     generation = {
-        "generation_id": "operational-c540-smoke",
+        "generation_id": "opaque-c540-smoke",
         "manifest_sha256": "sha256:" + "8" * 64,
-        "schema_version": 172,
+        "schema_revision": "operational_v1",
     }
     phase_ids = {
         "product": "recovery_" + "1" * 32,
@@ -515,7 +515,9 @@ def _exercise_wbc0027_two_phase_runner() -> None:
             "target_id": "wb_core_eu_hosted_runtime_active",
             "goal_operation_id": operation,
             "phase_operation_id": phase_ids[phase],
+            "phase_fingerprint": candidate(phase)["phase_fingerprint"],
             "deployed_sha": MERGE_SHA,
+            "storage_generation": generation,
             "query_only": True,
             "database_written": False,
             "production_mutation_submit_count": 0,
@@ -584,6 +586,92 @@ def _exercise_wbc0027_two_phase_runner() -> None:
         == rows[-1]["material_qualification_digest"]
         for rows in result["qualification_attempts"].values()
     )
+
+    for malformed_revision in ("", " operational_v1", 172, None):
+        malformed = candidate("product")
+        malformed["storage_generation"] = {
+            **generation,
+            "schema_revision": malformed_revision,
+        }
+        invalid_sequence = iter([{**common, "result": malformed}])
+        invalid_calls = 0
+
+        def invalid_command(
+            _command: list[str], *, timeout_seconds: float = 3600.0
+        ) -> dict:
+            nonlocal invalid_calls
+            invalid_calls += 1
+            return next(invalid_sequence)
+
+        try:
+            apply.command_evidence = invalid_command
+            apply.time.sleep = lambda _seconds: None
+            invalid = apply.run_wbc0027_goal(
+                target={
+                    "target_dir": "/opt/wb-core-runtime/app",
+                    "ssh_destination": "wb-core-eu-root",
+                },
+                merge_sha=MERGE_SHA,
+                goal=goal,
+                operation=operation,
+                approval_reference="github:fixture:sha256:" + "d" * 64,
+            )
+        finally:
+            apply.command_evidence = original_command
+            apply.time.sleep = original_sleep
+        assert invalid_calls == 1
+        assert invalid["state"] == "blocked"
+        assert invalid["apply_count"] == 0
+        assert invalid["product_state"] == "not_applied"
+
+    drifting_sequence = []
+    for index, revision in enumerate(
+        (
+            "operational_v1",
+            "operational_v2",
+            "operational_v3",
+            "operational_v4",
+        ),
+        start=1,
+    ):
+        drifting = candidate("product")
+        drifting["storage_generation"] = {
+            **generation,
+            "schema_revision": revision,
+        }
+        drifting["phase_fingerprint"] = "sha256:" + str(index) * 64
+        drifting["phase_operation_id"] = "recovery_" + str(index) * 32
+        drifting_sequence.append({**common, "result": drifting})
+    drifting_results = iter(drifting_sequence)
+    drift_calls = 0
+
+    def drifting_command(
+        _command: list[str], *, timeout_seconds: float = 3600.0
+    ) -> dict:
+        nonlocal drift_calls
+        drift_calls += 1
+        return next(drifting_results)
+
+    try:
+        apply.command_evidence = drifting_command
+        apply.time.sleep = lambda _seconds: None
+        drifted = apply.run_wbc0027_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "d" * 64,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert drift_calls == apply.MAX_QUALIFICATION_CANDIDATES
+    assert drifted["state"] == "blocked"
+    assert drifted["apply_count"] == 0
+    assert drifted["product_state"] == "not_applied"
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
