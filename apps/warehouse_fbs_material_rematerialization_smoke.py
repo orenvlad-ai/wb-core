@@ -56,6 +56,7 @@ from packages.application.warehouse_fbs_material_rematerialization import (
     REPAIRED,
     RETRY_EXHAUSTED,
     UNSAFE_AMBIGUOUS,
+    WarehouseFbsMaterialError,
     WarehouseFbsMaterialRematerializer,
     _fingerprint,
     _functional_pool_mismatches,
@@ -105,12 +106,14 @@ def main() -> None:
     _test_shared_wac_precision_contract()
     _test_historical_precision38_event_arithmetic()
     _test_atomic_root_prevention()
+    _test_source_and_material_business_date_binding()
     _test_lifecycle_canonical_zero_shape()
     _test_incident_plan_apply_idempotency_and_bounds()
     _test_historical_bounded_recovery_preserves_current()
     _test_resume_before_and_after_commit_transport_loss()
     _test_drift_concurrency_and_fail_closed_boundaries()
     print("warehouse_fbs_material_atomic_1953_to_1952: OK")
+    print("warehouse_fbs_material_source_material_date_binding: OK")
     print("warehouse_fbs_material_wac_28_classification: OK")
     print("warehouse_fbs_material_single_sku_repair_resume: OK")
     print("warehouse_fbs_material_historical_bounded_recovery: OK")
@@ -171,6 +174,104 @@ def _test_historical_precision38_event_arithmetic() -> None:
         assert aggregate["quantity"] == "1"
         assert aggregate["capital_rub"] == canonical_decimal_text(frozen_wac)
         assert aggregate["locations"][0]["quantity"] == "1"
+
+
+def _test_source_and_material_business_date_binding() -> None:
+    source_day = "2026-08-25"
+    with tempfile.TemporaryDirectory(prefix="fbs-material-date-binding-") as temp_dir:
+        runtime = _seed(Path(temp_dir), mixed=False)
+        before = _fingerprints(runtime.db_path)
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                f"""UPDATE {BALANCES_TABLE}
+                    SET quantity=1952,capital_rub='19520',wac_rub='10',
+                        source_watermark='late-handoff',updated_at=?
+                    WHERE facility_id=? AND pool='FBS' AND nm_id=?""",
+                ("2026-08-26T12:03:00Z", FACILITY_ID, TARGET_NM_ID),
+            )
+            result = publish_fbs_pool_aggregate_revision(
+                conn,
+                affected_nm_ids=[TARGET_NM_ID],
+                source_kind="fbs_order_lifecycle_event",
+                source_id="late-handoff",
+                business_date=DAY,
+                published_at="2026-08-26T12:03:00Z",
+                source_business_date=source_day,
+            )
+            conn.commit()
+            assert result["business_date"] == DAY
+            assert result["source_business_date"] == source_day
+            active = conn.execute(
+                """SELECT version.business_effective_date,version.source_watermarks_json
+                   FROM sheet_vitrina_v1_warehouse_functional_active active
+                   JOIN sheet_vitrina_v1_warehouse_functional_versions version
+                     ON version.version_id=active.version_id
+                   WHERE active.slot=1"""
+            ).fetchone()
+            assert str(active["business_effective_date"]) == DAY
+            watermark = json.loads(str(active["source_watermarks_json"]))[
+                "fbs_material_revision"
+            ]
+            assert watermark["business_date"] == DAY
+            assert watermark["source_business_date"] == source_day
+            provenance = json.loads(
+                conn.execute(
+                    """SELECT balance.provenance_json
+                       FROM sheet_vitrina_v1_warehouse_functional_active active
+                       JOIN sheet_vitrina_v1_warehouse_functional_balances balance
+                         ON balance.version_id=active.version_id
+                       WHERE active.slot=1 AND balance.warehouse_key='ff'
+                         AND balance.nm_id=?""",
+                    (TARGET_NM_ID,),
+                ).fetchone()[0]
+            )["fbs_material_revision"]
+            assert provenance["business_date"] == source_day
+            assert provenance["material_business_date"] == DAY
+        after = _fingerprints(runtime.db_path)
+        assert after["non_target"] == before["non_target"]
+        assert after["source_history"] == before["source_history"]
+        assert after["ready_non_target_sentinel"] == before["ready_non_target_sentinel"]
+
+    for label, material_date, source_date, published_at, expected_code in (
+        (
+            "stale-active",
+            DAY,
+            DAY,
+            "2026-08-27T12:00:00Z",
+            "fbs_material_active_business_date_stale",
+        ),
+        (
+            "future-source",
+            DAY,
+            "2026-08-27",
+            "2026-08-26T12:00:00Z",
+            "fbs_material_source_business_date_future",
+        ),
+    ):
+        with tempfile.TemporaryDirectory(prefix=f"fbs-material-{label}-") as temp_dir:
+            runtime = _seed(Path(temp_dir), mixed=False)
+            before = _fingerprints(runtime.db_path)
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    publish_fbs_pool_aggregate_revision(
+                        conn,
+                        affected_nm_ids=[TARGET_NM_ID],
+                        source_kind="fbs_order_lifecycle_event",
+                        source_id=label,
+                        business_date=material_date,
+                        published_at=published_at,
+                        source_business_date=source_date,
+                    )
+                except WarehouseFbsMaterialError as exc:
+                    assert exc.code == expected_code, (exc.code, expected_code)
+                    conn.rollback()
+                else:
+                    raise AssertionError(f"{label} must fail closed")
+            assert _fingerprints(runtime.db_path) == before
 
 
 def _build_historical_plan(
@@ -420,7 +521,7 @@ def _test_lifecycle_canonical_zero_shape() -> None:
                 )
                 _apply_exact_physical_delta(
                     conn,
-                    manifest={"feature_epoch": 1, "business_date": DAY},
+                    manifest={"feature_epoch": 1, "business_date": "2026-08-14"},
                     order={
                         "order_id": 9003,
                         "facility_id": FACILITY_ID,
@@ -430,6 +531,7 @@ def _test_lifecycle_canonical_zero_shape() -> None:
                     quantity_delta=-1953,
                     wac=Decimal("10"),
                     occurred_at=occurred_at,
+                    source_business_date="2026-08-25",
                 )
                 conn.commit()
         with sqlite3.connect(runtime.db_path) as conn:
@@ -441,6 +543,20 @@ def _test_lifecycle_canonical_zero_shape() -> None:
             ).fetchone()
             assert tuple(physical) == (0, "0", None), tuple(physical)
             assert _active_ff(conn, TARGET_NM_ID) == ("0", "0", "0", None)
+            operation_date = conn.execute(
+                """SELECT business_date
+                   FROM sheet_vitrina_v1_warehouse_business_operations
+                   WHERE source_revision=?""",
+                (event_id,),
+            ).fetchone()[0]
+            queue_date = conn.execute(
+                """SELECT effective_date
+                   FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
+                   WHERE stable_source_id=?""",
+                (f"fbs_lifecycle:{event_id}",),
+            ).fetchone()[0]
+            assert operation_date == "2026-08-25"
+            assert queue_date == DAY
             assert (
                 conn.execute(
                     """SELECT status FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue
