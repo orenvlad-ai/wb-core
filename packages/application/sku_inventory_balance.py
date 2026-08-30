@@ -92,6 +92,9 @@ BALANCE_COLUMNS = (
 )
 MANDATORY_COLUMNS = ("select", "product")
 DEFAULT_VISIBLE_COLUMNS = BALANCE_COLUMNS
+CAMPAIGN_TABLE_COLUMNS = {"new_cpc_campaigns", "old_cpm_campaigns"}
+CAMPAIGN_TABLE_COLUMN_MIN_WIDTH = 350
+CAMPAIGN_TABLE_COLUMN_MAX_WIDTH = 360
 _OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _LOGGER = logging.getLogger(__name__)
 
@@ -3855,7 +3858,18 @@ def _sanitize_table_preferences(raw: Any) -> dict[str, Any]:
     widths = {}
     for key, value in (source.get("column_widths") or {}).items():
         if str(key) in allowed and _optional_int(value) is not None:
-            widths[str(key)] = min(max(int(value), 60), 600)
+            column = str(key)
+            minimum = (
+                CAMPAIGN_TABLE_COLUMN_MIN_WIDTH
+                if column in CAMPAIGN_TABLE_COLUMNS
+                else 60
+            )
+            maximum = (
+                CAMPAIGN_TABLE_COLUMN_MAX_WIDTH
+                if column in CAMPAIGN_TABLE_COLUMNS
+                else 600
+            )
+            widths[column] = min(max(int(value), minimum), maximum)
     filters = dict(source.get("filters") or {})
     preset = str(source.get("preset") or "all")
     if preset not in {"all", "deficit", "excess", "actionable"}:

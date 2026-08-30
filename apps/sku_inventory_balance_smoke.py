@@ -653,7 +653,14 @@ def main() -> None:
             {
                 "base_revision": 0,
                 "calculation": empty["settings"]["calculation"],
-                "table": {"visible_columns": [], "column_order": []},
+                "table": {
+                    "visible_columns": [],
+                    "column_order": [],
+                    "column_widths": {
+                        "new_cpc_campaigns": 999,
+                        "old_cpm_campaigns": 10,
+                    },
+                },
             },
             user_key="operator",
         )
@@ -662,6 +669,10 @@ def main() -> None:
             "select",
             "product",
         ]
+        assert empty_table_settings["table"]["column_widths"] == {
+            "new_cpc_campaigns": 360,
+            "old_cpm_campaigns": 350,
+        }
 
         settings = block.save_settings(
             {
