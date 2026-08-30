@@ -1689,22 +1689,31 @@ def render_nginx_public_route_block(
         modifier = "=" if route["match"] == "exact" else "^~"
         methods = ", ".join(route.get("methods") or [])
         route_proxy_pass_url = str(route.get("proxy_pass_url") or proxy_pass_url)
-        lines.extend(
-            [
-                f"    # {route['name']} ({methods})",
-                f"    location {modifier} {route['path']} {{",
-                f"        proxy_pass {route_proxy_pass_url};",
-                "        proxy_set_header Host $host;",
-                "        proxy_set_header X-Real-IP $remote_addr;",
-                "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
-                "        proxy_set_header X-Forwarded-Proto $scheme;",
-                f"        client_max_body_size {client_max_body_size};",
-                f"        proxy_read_timeout {read_timeout};",
-                f"        proxy_send_timeout {send_timeout};",
-                "    }",
-                "",
-            ]
-        )
+        route_lines = [
+            f"    # {route['name']} ({methods})",
+            f"    location {modifier} {route['path']} {{",
+            f"        proxy_pass {route_proxy_pass_url};",
+            "        proxy_set_header Host $host;",
+            "        proxy_set_header X-Real-IP $remote_addr;",
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "        proxy_set_header X-Forwarded-Proto $scheme;",
+            f"        client_max_body_size {client_max_body_size};",
+            f"        proxy_read_timeout {read_timeout};",
+            f"        proxy_send_timeout {send_timeout};",
+        ]
+        if route.get("response_compression"):
+            route_lines.extend(
+                [
+                    "        if ($request_method != GET) { return 405; }",
+                    "        gzip on;",
+                    "        gzip_comp_level 1;",
+                    "        gzip_min_length 1024;",
+                    "        gzip_types application/json;",
+                    "        gzip_vary on;",
+                ]
+            )
+        route_lines.extend(["    }", ""])
+        lines.extend(route_lines)
     lines.append(f"    # END {managed_block_label}")
     return "\n".join(lines) + "\n"
 
@@ -1842,6 +1851,18 @@ def _validated_public_routes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     for index, raw_route in enumerate(raw_routes):
         if not isinstance(raw_route, dict):
             raise ValueError(f"public route #{index + 1} must be a JSON object")
+        unknown_fields = set(raw_route) - {
+            "name",
+            "match",
+            "path",
+            "methods",
+            "proxy_pass_url",
+            "response_compression",
+        }
+        if unknown_fields:
+            raise ValueError(
+                f"public route #{index + 1} has unsupported fields: {sorted(unknown_fields)}"
+            )
         name = _safe_route_name(raw_route.get("name"))
         match = str(raw_route.get("match") or "").strip()
         path = _safe_nginx_path(raw_route.get("path"))
@@ -1865,6 +1886,13 @@ def _validated_public_routes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
         if key in seen:
             raise ValueError(f"duplicate public route location for {match} {path}")
         seen.add(key)
+        response_compression = _validated_public_route_response_compression(
+            raw_route.get("response_compression"),
+            name=name,
+            match=match,
+            path=path,
+            methods=normalized_methods,
+        )
         routes.append(
             {
                 "name": name,
@@ -1872,9 +1900,53 @@ def _validated_public_routes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
                 "path": path,
                 "methods": normalized_methods,
                 **({"proxy_pass_url": route_proxy_pass_url} if route_proxy_pass_url else {}),
+                **(
+                    {"response_compression": response_compression}
+                    if response_compression is not None
+                    else {}
+                ),
             }
         )
     return routes
+
+
+def _validated_public_route_response_compression(
+    raw_value: Any,
+    *,
+    name: str,
+    match: str,
+    path: str,
+    methods: list[str],
+) -> dict[str, Any] | None:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"public route {name} response_compression must be an object")
+    required_fields = {"kind", "level", "min_length", "content_types", "vary"}
+    if set(raw_value) != required_fields:
+        raise ValueError(
+            f"public route {name} response_compression must match the typed gzip contract"
+        )
+    expected = {
+        "kind": "gzip_json_v1",
+        "level": 1,
+        "min_length": 1024,
+        "content_types": ["application/json"],
+        "vary": True,
+    }
+    if raw_value != expected:
+        raise ValueError(
+            f"public route {name} response_compression must use bounded JSON gzip v1"
+        )
+    if (
+        match != "exact"
+        or path != "/v1/sheet-vitrina-v1/web-vitrina"
+        or methods != ["GET"]
+    ):
+        raise ValueError(
+            "bounded JSON gzip v1 is allowed only on the exact Web Vitrina GET route"
+        )
+    return expected
 
 
 def _safe_route_name(value: Any) -> str:

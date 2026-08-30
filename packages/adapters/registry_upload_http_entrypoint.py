@@ -13,11 +13,13 @@ import hmac
 import html
 import json
 import os
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import re
 import socketserver
+import sys
 import time
 from typing import Any, Mapping, Sequence
 from urllib import parse as urllib_parse
@@ -64,6 +66,11 @@ from packages.application.sqlite_contention import (
     emit_controlled_contention_response_event,
     is_sqlite_contention_error,
     set_sqlite_operation_context,
+)
+from packages.application.web_vitrina_performance import (
+    WEB_VITRINA_PERFORMANCE_MAX_REQUEST_BYTES,
+    emit_web_vitrina_performance_event,
+    normalize_web_vitrina_performance_envelope,
 )
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.wb_prices_management import WbPricesManagementError
@@ -133,6 +140,9 @@ DEFAULT_SHEET_PLAN_REPORT_BASELINE_TEMPLATE_PATH = "/v1/sheet-vitrina-v1/plan-re
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-upload"
 DEFAULT_SHEET_PLAN_REPORT_BASELINE_STATUS_PATH = "/v1/sheet-vitrina-v1/plan-report/baseline-status"
 DEFAULT_SHEET_WEB_VITRINA_READ_PATH = "/v1/sheet-vitrina-v1/web-vitrina"
+DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH = (
+    "/v1/sheet-vitrina-v1/web-vitrina/performance"
+)
 DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH = (
     "/v1/sheet-vitrina-v1/web-vitrina/business-projection/status"
 )
@@ -464,6 +474,11 @@ INSTRUCTIONS_UI_TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / 
 UI_SYSTEM_CSS_PATH = Path(__file__).resolve().parent / "templates" / "sheet_vitrina_v1_ui_system.css"
 
 
+@lru_cache(maxsize=1)
+def _sheet_vitrina_ui_system_css() -> str:
+    return UI_SYSTEM_CSS_PATH.read_text(encoding="utf-8")
+
+
 def _inject_sheet_vitrina_ui_system(template: str) -> str:
     """Append the shared visual-system cascade to a complete HTML document."""
 
@@ -472,11 +487,20 @@ def _inject_sheet_vitrina_ui_system(template: str) -> str:
         return template
     if "</head>" not in template:
         raise ValueError("sheet_vitrina_v1 HTML template must contain </head>")
-    css = UI_SYSTEM_CSS_PATH.read_text(encoding="utf-8")
+    css = _sheet_vitrina_ui_system_css()
     return template.replace(
         "</head>",
         f'  <style {marker}>\n{css}\n  </style>\n</head>',
         1,
+    )
+
+
+@lru_cache(maxsize=1)
+def _web_vitrina_ui_base_template() -> str:
+    """Cache source text only; request-owned config and barriers stay dynamic."""
+
+    return _inject_sheet_vitrina_ui_system(
+        WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
 
 
@@ -636,6 +660,31 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if parsed.path == DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH:
+                if not _ensure_web_vitrina_performance_same_origin(self):
+                    return
+                try:
+                    performance_payload = _load_web_vitrina_performance_payload(self)
+                    event = normalize_web_vitrina_performance_envelope(performance_payload)
+                except _WebVitrinaPerformanceRequestTooLarge as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        {"error": str(exc), "code": "performance_request_too_large"},
+                        extra_headers={"Cache-Control": "private, no-store"},
+                    )
+                    return
+                except ValueError as exc:
+                    _write_json_response(
+                        self,
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"error": str(exc), "code": "performance_envelope_invalid"},
+                        extra_headers={"Cache-Control": "private, no-store"},
+                    )
+                    return
+                emit_web_vitrina_performance_event(event)
+                _write_empty_private_response(self, HTTPStatus.NO_CONTENT)
                 return
             if not _ensure_business_data_write_allowed(self, parsed.path):
                 return
@@ -2951,6 +3000,7 @@ def _build_handler(
             return
 
         def do_GET(self) -> None:  # noqa: N802
+            request_started_perf = time.perf_counter()
             parsed = urllib_parse.urlparse(self.path)
             self._sqlite_request_started_at = time.monotonic()
             set_sqlite_operation_context(
@@ -3820,6 +3870,7 @@ def _build_handler(
                     return
 
                 if surface == DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE:
+                    build_started_perf = time.perf_counter()
                     try:
                         payload = entrypoint.handle_sheet_web_vitrina_page_composition_request(
                             page_route=DEFAULT_SHEET_WEB_VITRINA_UI_PATH,
@@ -3833,19 +3884,23 @@ def _build_handler(
                             include_table_data=include_table_data,
                         )
                     except Exception as exc:  # pragma: no cover - last-resort public JSON guard
-                        _write_json_response(
+                        _write_web_vitrina_page_composition_response(
                             self,
                             HTTPStatus.INTERNAL_SERVER_ERROR,
                             {
                                 "error": f"sheet_vitrina_v1 page composition failed: {exc}",
                                 "surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
                             },
+                            request_started_perf=request_started_perf,
+                            build_ms=(time.perf_counter() - build_started_perf) * 1000,
                         )
                         return
-                    _write_json_response(
+                    _write_web_vitrina_page_composition_response(
                         self,
                         HTTPStatus.OK,
                         payload,
+                        request_started_perf=request_started_perf,
+                        build_ms=(time.perf_counter() - build_started_perf) * 1000,
                     )
                     return
                 try:
@@ -7398,6 +7453,118 @@ def _write_response_body(handler: BaseHTTPRequestHandler, body: bytes) -> None:
         return
 
 
+_PAGE_COMPOSITION_PAYLOAD_BYTES_MARKER = b'"payload_bytes":0'
+_MAX_PAGE_COMPOSITION_BODY_BYTES = 128 * 1024 * 1024
+
+
+def _encode_web_vitrina_page_composition_body(
+    payload: Mapping[str, Any],
+    *,
+    dumps: Any = json.dumps,
+) -> bytes:
+    """Encode once, then patch the single bounded payload_bytes decimal in-place."""
+
+    diagnostics = (
+        (payload.get("meta") or {}).get("page_composition_diagnostics")
+        if isinstance(payload.get("meta"), Mapping)
+        else None
+    )
+    if not isinstance(diagnostics, Mapping) or diagnostics.get("payload_bytes") != 0:
+        raise ValueError("page composition payload_bytes placeholder must be integer zero")
+    body = dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(body) > _MAX_PAGE_COMPOSITION_BODY_BYTES:
+        raise ValueError("page composition response exceeds the bounded encoder limit")
+    if body.count(_PAGE_COMPOSITION_PAYLOAD_BYTES_MARKER) != 1:
+        raise ValueError("page composition payload_bytes marker must occur exactly once")
+
+    final_length = len(body)
+    for _ in range(8):
+        candidate = len(body) - 1 + len(str(final_length))
+        if candidate == final_length:
+            break
+        final_length = candidate
+    else:  # pragma: no cover - decimal digit growth converges in at most two steps
+        raise ValueError("page composition payload_bytes fixed point did not converge")
+
+    body = body.replace(
+        _PAGE_COMPOSITION_PAYLOAD_BYTES_MARKER,
+        b'"payload_bytes":' + str(final_length).encode("ascii"),
+        1,
+    )
+    if len(body) != final_length:
+        raise ValueError("page composition payload_bytes fixed point is invalid")
+    return body
+
+
+def _bounded_http_timing_ms(value: float) -> float:
+    return round(min(3_600_000.0, max(0.0, float(value))), 3)
+
+
+def _write_web_vitrina_page_composition_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    payload: Mapping[str, Any],
+    *,
+    request_started_perf: float,
+    build_ms: float,
+) -> None:
+    encode_started_perf = time.perf_counter()
+    encode_started_cpu = time.process_time()
+    if status == HTTPStatus.OK:
+        body = _encode_web_vitrina_page_composition_body(payload)
+    else:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    encode_cpu_ms = _bounded_http_timing_ms((time.process_time() - encode_started_cpu) * 1000)
+    encode_ms = _bounded_http_timing_ms((time.perf_counter() - encode_started_perf) * 1000)
+    normalized_build_ms = _bounded_http_timing_ms(build_ms)
+
+    handler.send_response(status.value)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header(
+        "Server-Timing",
+        f"build;dur={normalized_build_ms:.3f}, encode;dur={encode_ms:.3f}",
+    )
+    handler.end_headers()
+
+    disconnected = False
+    write_started_perf = time.perf_counter()
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):  # pragma: no cover - client disconnected
+        disconnected = True
+    write_ms = _bounded_http_timing_ms((time.perf_counter() - write_started_perf) * 1000)
+    request_ms = _bounded_http_timing_ms((time.perf_counter() - request_started_perf) * 1000)
+    event = {
+        "event": "web_vitrina_http_response_v1",
+        "route_kind": "web_vitrina_page_composition",
+        "status": int(status.value),
+        "request_ms": request_ms,
+        "build_ms": normalized_build_ms,
+        "encode_ms": encode_ms,
+        "write_ms": write_ms,
+        "encode_cpu_ms": encode_cpu_ms,
+        "logical_bytes": len(body),
+        "disconnected": disconnected,
+    }
+    print(
+        json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _write_empty_private_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+) -> None:
+    handler.send_response(status.value)
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
 def _write_json_response(
     handler: BaseHTTPRequestHandler,
     status: HTTPStatus,
@@ -7504,15 +7671,17 @@ def _write_html_response(
     status: HTTPStatus,
     body_text: str,
 ) -> None:
+    parsed_path = urllib_parse.urlparse(
+        str(getattr(handler, "path", "") or "")
+    ).path
     if status == HTTPStatus.OK:
-        parsed_path = urllib_parse.urlparse(
-            str(getattr(handler, "path", "") or "")
-        ).path
         if parsed_path != DEFAULT_WEB_AUTH_LOGIN_PATH:
             body_text = _inject_business_data_write_barrier_ui(body_text)
     body = body_text.encode("utf-8")
     handler.send_response(status.value)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
+    if parsed_path == DEFAULT_SHEET_WEB_VITRINA_UI_PATH:
+        handler.send_header("Cache-Control", "private, no-store")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     _write_response_body(handler, body)
@@ -8016,6 +8185,64 @@ def _ensure_autoanswers_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool
         {"error": "autoanswers CSRF validation failed", "code": "csrf_failed", "path": path},
     )
     return False
+
+
+def _ensure_web_vitrina_performance_same_origin(
+    handler: BaseHTTPRequestHandler,
+) -> bool:
+    """Keep RUM authenticated and same-origin without expanding auth semantics."""
+
+    content_type = str(handler.headers.get("Content-Type", "") or "").split(";", 1)[0].strip().lower()
+    marker = str(handler.headers.get("X-WB-Web-Vitrina-Performance", "") or "").strip()
+    origin = str(handler.headers.get("Origin", "") or "").strip().rstrip("/")
+    request_origin = _request_origin(handler).rstrip("/")
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").strip().lower()
+    valid = (
+        content_type == "application/json"
+        and marker == "1"
+        and bool(origin)
+        and hmac.compare_digest(origin, request_origin)
+        and fetch_site not in {"cross-site", "same-site"}
+    )
+    if valid:
+        return True
+    _write_json_response(
+        handler,
+        HTTPStatus.FORBIDDEN,
+        {"error": "web-vitrina performance same-origin validation failed", "code": "same_origin_failed"},
+        extra_headers={"Cache-Control": "private, no-store"},
+    )
+    return False
+
+
+class _WebVitrinaPerformanceRequestTooLarge(ValueError):
+    pass
+
+
+def _load_web_vitrina_performance_payload(
+    handler: BaseHTTPRequestHandler,
+) -> Mapping[str, Any]:
+    raw_length = handler.headers.get("Content-Length", "").strip()
+    if not raw_length:
+        raise ValueError("performance request body is required")
+    try:
+        content_length = int(raw_length)
+    except ValueError as exc:
+        raise ValueError("performance Content-Length must be integer") from exc
+    if content_length <= 0:
+        raise ValueError("performance request body must not be empty")
+    if content_length > WEB_VITRINA_PERFORMANCE_MAX_REQUEST_BYTES:
+        raise _WebVitrinaPerformanceRequestTooLarge(
+            "performance request exceeds the 4 KiB limit"
+        )
+    raw_body = handler.rfile.read(content_length)
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("performance request must be valid UTF-8 JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("performance request must be a JSON object")
+    return payload
 
 
 def _ensure_ff_pool_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool:
@@ -9135,6 +9362,7 @@ def _required_section_for_path(path: str) -> str:
     normalized = str(path or "").split("?", 1)[0]
     if normalized in {
         DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+        DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH,
         DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH,
         DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
         DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH,
@@ -10075,6 +10303,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "initial_tab": initial_tab,
         "initial_tab_is_route_explicit": bool(active_tab),
         "read_path": read_path,
+        "performance_path": DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH,
         "operator_path": operator_path,
         "auto_updates_path": DEFAULT_AUTO_UPDATES_MONITORING_PATH,
         "warehouses_path": DEFAULT_WAREHOUSES_PATH,
@@ -10171,9 +10400,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
             DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH
         ),
     }
-    template = _inject_sheet_vitrina_ui_system(
-        WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
-    )
+    template = _web_vitrina_ui_base_template()
     return (
         template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
