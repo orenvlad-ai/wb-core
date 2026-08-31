@@ -198,18 +198,44 @@ def main() -> int:
         ] == 4
         assert recovery["history"]["blockers"] == []
         before = _mapping_non_target_counts(runtime.db_path)
-        evidence_dir = root / "mapping-evidence"
-        evidence_dir.mkdir(mode=0o700)
+        evidence_dir = (
+            runtime.runtime_dir
+            / "backups/private-evidence/production-goals/synthetic-mapping-operation"
+        )
+        evidence_dir.mkdir(mode=0o700, parents=True)
+        mapping_operation = "synthetic-mapping-operation"
+        mapping_approval = "synthetic-mapping-gate"
         mapping_result = mapping_runner.apply(
             mapping_plan,
             fingerprint=str(mapping_plan["manifest_digest"]),
-            approval_reference="synthetic-mapping-gate",
+            operation_id=mapping_operation,
+            approval_reference=mapping_approval,
             actor="smoke",
             evidence_dir=evidence_dir,
         )
         assert mapping_result["mapping_insert_count"] == 1
+        mapping_files = sorted(evidence_dir.glob("*.json"))
+        assert {path.stat().st_mode & 0o777 for path in mapping_files} == {0o600}
+        mapping_replay = mapping_runner.apply(
+            mapping_plan,
+            fingerprint=str(mapping_plan["manifest_digest"]),
+            operation_id=mapping_operation,
+            approval_reference=mapping_approval,
+            actor="smoke",
+            evidence_dir=evidence_dir,
+        )
+        assert mapping_replay["idempotent"] is True
+        assert mapping_replay["repeat_submit_performed"] is False
+        assert sorted(evidence_dir.glob("*.json")) == mapping_files
+        assert mapping_runner.readback(
+            operation_id="foreign-mapping-operation",
+            approval_reference="foreign-gate",
+        )["status"] == "ambiguous_foreign_operation"
         assert _mapping_non_target_counts(runtime.db_path) == before
-        readback = mapping_runner.readback()
+        readback = mapping_runner.readback(
+            operation_id=mapping_operation,
+            approval_reference=mapping_approval,
+        )
         assert readback["status"] == "completed"
         assert readback["query_only"] is True
         recovery_runner = recovery_module.Wbc0027FbsLifecycleQualityRecovery(
@@ -218,25 +244,70 @@ def main() -> int:
             incident_passport=provisional,
             timestamp_factory=_Clock(),
         )
-        impact_after, recovery_after = recovery_runner.build_manifests(
+        impact_after = recovery_runner.build_impact_manifest(
             mapping_readback_digest=str(readback["readback_digest"])
+        )
+        impact_dir = (
+            runtime.runtime_dir
+            / "backups/private-evidence/production-goals/synthetic-impact-operation"
+        )
+        impact_dir.mkdir(mode=0o700, parents=True)
+        impact_path = impact_dir / "fbs-impact-manifest.json"
+        recovery_module._write_private(impact_path, impact_after)
+        assert recovery_module._sha256_file(impact_path).startswith("sha256:")
+        recovery_after = recovery_runner.build_plan(
+            mapping_readback_digest=str(readback["readback_digest"]),
+            reviewed_impact=impact_after,
         )
         assert impact_after["mapping_readback_digest"] == readback["readback_digest"]
         assert recovery_after["impact_digest"] == impact_after["impact_digest"]
         assert recovery_after["apply_allowed"] is True, recovery_after["blockers"]
+        qualification = recovery_runner.qualify(recovery_after, impact_after)
+        assert qualification["state"] == "qualified_no_submit"
+        assert qualification["submit_count"] == 0
         assert recovery_after["history"]["classification_counts"][
             "remain_missing_no_same_date_evidence"
         ] == 4
+        recovery_operation = "synthetic-recovery-operation"
+        recovery_approval = "synthetic-recovery-gate"
+        recovery_evidence = (
+            runtime.runtime_dir
+            / "backups/private-evidence/production-goals/synthetic-recovery-operation"
+        )
+        recovery_evidence.mkdir(mode=0o700, parents=True)
         result = recovery_runner.apply(
             recovery_after,
+            impact_after,
             fingerprint=str(recovery_after["recovery_digest"]),
-            approval_reference="synthetic-recovery-gate",
+            operation_id=recovery_operation,
+            approval_reference=recovery_approval,
             actor="smoke",
-            evidence_dir=root / "recovery-evidence",
+            evidence_dir=recovery_evidence,
         )
         assert result["status"] == "completed"
+        recovery_files = sorted(recovery_evidence.glob("*.json"))
+        assert {path.stat().st_mode & 0o777 for path in recovery_files} == {0o600}
+        recovery_replay = recovery_runner.apply(
+            recovery_after,
+            impact_after,
+            fingerprint=str(recovery_after["recovery_digest"]),
+            operation_id=recovery_operation,
+            approval_reference=recovery_approval,
+            actor="smoke",
+            evidence_dir=recovery_evidence,
+        )
+        assert recovery_replay["idempotent"] is True
+        assert recovery_replay["repeat_submit_performed"] is False
+        assert sorted(recovery_evidence.glob("*.json")) == recovery_files
+        assert recovery_runner.readback(
+            fingerprint=str(recovery_after["recovery_digest"]),
+            operation_id="foreign-recovery-operation",
+            approval_reference="foreign-gate",
+        )["status"] == "ambiguous_foreign_operation"
         receipt = recovery_runner.readback(
-            fingerprint=str(recovery_after["recovery_digest"])
+            fingerprint=str(recovery_after["recovery_digest"]),
+            operation_id=recovery_operation,
+            approval_reference=recovery_approval,
         )
         assert receipt["target_count"] == receipt["target_readback_count"] == 5
         with sqlite3.connect(runtime.db_path) as conn:
@@ -430,8 +501,34 @@ def _strict_parser_negatives() -> None:
         },
         "expectation": {"owner_count": 1, "active_mapping_count": 0, "all_mapping_count": 0, "insert_count": 1},
         "proposed_mapping": {"mapping_id": "mapping", "mapping_digest": tuple_value["tuple_digest"]},
-        "material_cas": {"component": "value"},
-        "safety": {},
+        "material_cas": {
+            "tuple_digest": tuple_value["tuple_digest"],
+            "mapping_digest": tuple_value["tuple_digest"],
+            "target_digest": "sha256:" + "7" * 64,
+            "storage_digest": "sha256:" + "8" * 64,
+            "cutover_digest": "sha256:" + "9" * 64,
+            "identity_digest": "sha256:" + "a" * 64,
+            "evidence_digest": "sha256:" + "b" * 64,
+        },
+        "safety": {
+            "default_mode": "query_only_dry_run",
+            "two_consecutive_material_witnesses_required": True,
+            "writer_lock": "warehouse_functional_write_lock",
+            "root_storage_admission": "production_apply_evidence",
+            "private_before_image": "mode_0600_exclusive_create_fsync",
+            "private_backup": "mode_0600_exclusive_create_fsync",
+            "operation_journal": "exact_operation_authorization_storage",
+            "one_submit": True,
+            "one_insert_max": 1,
+            "blind_retry": False,
+            "query_only_readback": True,
+            "lifecycle_debit_count": 0,
+            "balance_write_count": 0,
+            "history_write_count": 0,
+            "public_write_count": 0,
+            "outbox_write_count": 0,
+            "wb_write_count": 0,
+        },
         "apply_allowed": True,
         "blockers": [],
     }

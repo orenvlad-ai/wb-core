@@ -291,7 +291,7 @@
     },
     {
       "id": "wbc0027-fbs-lifecycle-quality-recovery",
-      "paths": ["apps/fbs_lifecycle_manifests_smoke.py", "apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_mapping_extension.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py", "packages/application/fbs_lifecycle_manifests.py", "release/production-mutations/wbc0027_fbs_lifecycle_incident.json", "migration/177_wbc0027_exact_fbs_sku_mapping_extension.md", "migration/178_wbc0027_general_fbs_manifest_recovery.md"],
+      "paths": ["apps/fbs_lifecycle_manifests_smoke.py", "apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_mapping_extension.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py", "packages/application/fbs_lifecycle_manifests.py", "packages/application/ff_pool_fbs_forward_recovery.py", "release/production-mutations/wbc0027_fbs_lifecycle_incident.json", "migration/177_wbc0027_exact_fbs_sku_mapping_extension.md", "migration/178_wbc0027_general_fbs_manifest_recovery.md"],
       "suites": ["fulfillment", "inventory_history", "release_safety"],
       "release": "live_runtime"
     },

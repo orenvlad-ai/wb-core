@@ -298,11 +298,70 @@ def parse_mapping_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     _identity(proposed["mapping_id"], "proposed_mapping.mapping_id")
     _digest(proposed["mapping_digest"], "proposed_mapping.mapping_digest")
     material_cas = _object(item["material_cas"], "material_cas")
+    _keys(
+        material_cas,
+        {
+            "tuple_digest",
+            "mapping_digest",
+            "target_digest",
+            "storage_digest",
+            "cutover_digest",
+            "identity_digest",
+            "evidence_digest",
+            "digest",
+        },
+        "material_cas",
+    )
+    for key in set(material_cas) - {"digest"}:
+        _digest(material_cas[key], f"material_cas.{key}")
     _digest(material_cas["digest"], "material_cas.digest")
     if material_cas["digest"] != digest(
         {key: raw for key, raw in material_cas.items() if key != "digest"}
     ):
         raise FbsManifestError("material_cas_digest_mismatch", "Material CAS digest differs")
+    safety = _object(item["safety"], "safety")
+    _keys(
+        safety,
+        {
+            "default_mode",
+            "two_consecutive_material_witnesses_required",
+            "writer_lock",
+            "root_storage_admission",
+            "private_before_image",
+            "private_backup",
+            "operation_journal",
+            "one_submit",
+            "one_insert_max",
+            "blind_retry",
+            "query_only_readback",
+            "lifecycle_debit_count",
+            "balance_write_count",
+            "history_write_count",
+            "public_write_count",
+            "outbox_write_count",
+            "wb_write_count",
+        },
+        "safety",
+    )
+    _literal(safety["default_mode"], "query_only_dry_run", "safety.default_mode")
+    _literal(safety["writer_lock"], "warehouse_functional_write_lock", "safety.writer_lock")
+    _literal(safety["root_storage_admission"], "production_apply_evidence", "safety.root_storage_admission")
+    _literal(safety["private_before_image"], "mode_0600_exclusive_create_fsync", "safety.private_before_image")
+    _literal(safety["private_backup"], "mode_0600_exclusive_create_fsync", "safety.private_backup")
+    _literal(safety["operation_journal"], "exact_operation_authorization_storage", "safety.operation_journal")
+    for key in ("two_consecutive_material_witnesses_required", "one_submit", "query_only_readback"):
+        _literal(safety[key], True, f"safety.{key}")
+    _literal(safety["blind_retry"], False, "safety.blind_retry")
+    _literal(safety["one_insert_max"], 1, "safety.one_insert_max")
+    for key in (
+        "lifecycle_debit_count",
+        "balance_write_count",
+        "history_write_count",
+        "public_write_count",
+        "outbox_write_count",
+        "wb_write_count",
+    ):
+        _literal(safety[key], 0, f"safety.{key}")
     _bool(item["apply_allowed"], "apply_allowed")
     _string_list(item["blockers"], "blockers")
     _digest(item["manifest_digest"], "manifest_digest")
@@ -336,10 +395,74 @@ def parse_impact_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     _literal(item["contract"], IMPACT_MANIFEST_CONTRACT, "contract")
     _identity(item["operation_id"], "operation_id", pattern=_OPERATION_RE)
     _digest(item["mapping_readback_digest"], "mapping_readback_digest")
-    _string_list(item["dependent_surfaces"], "dependent_surfaces", nonempty=True)
+    target = _object(item["target"], "target")
+    _keys(target, {"target_id", "runtime_sha"}, "target")
+    _identity(target["target_id"], "target.target_id")
+    _sha(target["runtime_sha"], "target.runtime_sha")
+    _parse_storage(item["storage"], "storage")
+    _parse_boundary(item["boundary"], "boundary")
+    scan = _object(item["unresolved_scan"], "unresolved_scan")
+    _keys(
+        scan,
+        {
+            "source_cursor_max",
+            "candidate_count",
+            "classified_count",
+            "full_scan",
+            "classifications",
+            "classification_digest",
+        },
+        "unresolved_scan",
+    )
+    _positive_int(scan["source_cursor_max"], "unresolved_scan.source_cursor_max")
+    candidate_count = _nonnegative_int(scan["candidate_count"], "unresolved_scan.candidate_count")
+    classified_count = _nonnegative_int(scan["classified_count"], "unresolved_scan.classified_count")
+    _bool(scan["full_scan"], "unresolved_scan.full_scan")
+    if scan["full_scan"] is True and candidate_count != classified_count:
+        raise FbsManifestError("unresolved_scan_count_mismatch", "Full unresolved scan counts differ")
+    classifications = _object_list(scan["classifications"], "unresolved_scan.classifications")
+    for index, row in enumerate(classifications):
+        _keys(
+            row,
+            {"facility_id", "nm_id", "classification", "earliest_business_date", "reasons", "sequence_count", "sequence_digest"},
+            f"unresolved_scan.classifications[{index}]",
+        )
+        _nonnegative_int(row["nm_id"], f"unresolved_scan.classifications[{index}].nm_id")
+        _literal(row["classification"] in {"resolvable_exact", "blocked_fail_closed"}, True, f"unresolved_scan.classifications[{index}].classification")
+        _string_list(row["reasons"], f"unresolved_scan.classifications[{index}].reasons")
+        _nonnegative_int(row["sequence_count"], f"unresolved_scan.classifications[{index}].sequence_count")
+        _digest(row["sequence_digest"], f"unresolved_scan.classifications[{index}].sequence_digest")
+    _digest(scan["classification_digest"], "unresolved_scan.classification_digest")
+    affected = _object_list(item["affected_groups"], "affected_groups")
+    for index, row in enumerate(affected):
+        _keys(row, {"scope_kind", "facility_id", "nm_id"}, f"affected_groups[{index}]")
+        if row["scope_kind"] not in {"FACILITY_SKU", "FACILITY_TOTAL", "GLOBAL_SKU", "GLOBAL_TOTAL"}:
+            raise FbsManifestError("invalid_literal", f"affected_groups[{index}].scope_kind is invalid")
+        _nonnegative_int(row["nm_id"], f"affected_groups[{index}].nm_id")
+    dependent_surfaces = _string_list(item["dependent_surfaces"], "dependent_surfaces", nonempty=True)
+    required_surfaces = {
+        "fbs_facility_sku",
+        "fbs_facility_total",
+        "fbs_global_sku",
+        "fbs_global_total",
+        "stock_total",
+        "own_product_capital",
+        "warehouse_wac",
+        "finance_partner_economics",
+        "inventory_history",
+    }
+    if set(dependent_surfaces) != required_surfaces:
+        raise FbsManifestError("dependent_surface_coverage_invalid", "Dependent surface coverage differs")
+    history = _object(item["history_evidence"], "history_evidence")
+    _keys(history, {"classification_counts", "cell_evidence", "digest"}, "history_evidence")
+    _parse_history_classifications(history["classification_counts"], "history_evidence.classification_counts")
+    _object_list(history["cell_evidence"], "history_evidence.cell_evidence")
+    _digest(history["digest"], "history_evidence.digest")
     _string_list(item["blockers"], "blockers")
-    _digest(_object(item["baselines"], "baselines")["non_target_digest"], "baselines.non_target_digest")
-    _digest(_object(item["baselines"], "baselines")["wb_digest"], "baselines.wb_digest")
+    baselines = _object(item["baselines"], "baselines")
+    _keys(baselines, {"non_target_digest", "wb_digest"}, "baselines")
+    _digest(baselines["non_target_digest"], "baselines.non_target_digest")
+    _digest(baselines["wb_digest"], "baselines.wb_digest")
     _digest(item["impact_digest"], "impact_digest")
     material = {key: raw for key, raw in item.items() if key != "impact_digest"}
     if item["impact_digest"] != digest(material):
@@ -371,29 +494,143 @@ def parse_recovery_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
     _literal(item["contract"], RECOVERY_MANIFEST_CONTRACT, "contract")
     _identity(item["operation_id"], "operation_id", pattern=_OPERATION_RE)
     _digest(item["impact_digest"], "impact_digest")
+    target = _object(item["target"], "target")
+    _keys(target, {"target_id", "runtime_sha"}, "target")
+    _identity(target["target_id"], "target.target_id")
+    _sha(target["runtime_sha"], "target.runtime_sha")
+    _parse_boundary(item["boundary"], "boundary")
     _bool(item["apply_allowed"], "apply_allowed")
     _string_list(item["blockers"], "blockers")
     scope = _object(item["scope"], "scope")
+    _keys(
+        scope,
+        {
+            "groups",
+            "business_dates",
+            "target_count",
+            "target_sequences",
+            "target_row_digests",
+            "stable_target_digest",
+            "target_rows",
+            "location_wac_evidence",
+            "resolved_scopes",
+            "mapping_re_evidence",
+            "typed_blocker_rows",
+            "coverage",
+        },
+        "scope",
+    )
+    groups = _object_list(scope["groups"], "scope.groups")
+    for index, row in enumerate(groups):
+        _keys(row, {"facility_id", "nm_id"}, f"scope.groups[{index}]")
+        _bounded_text(row["facility_id"], f"scope.groups[{index}].facility_id", maximum=200)
+        _positive_int(row["nm_id"], f"scope.groups[{index}].nm_id")
+    dates = _string_list(scope["business_dates"], "scope.business_dates", nonempty=True)
+    if dates != sorted(dates):
+        raise FbsManifestError("business_date_order_invalid", "scope.business_dates must be sorted")
+    target_count = _positive_int(scope["target_count"], "scope.target_count")
     sequences = _int_list(scope.get("target_sequences"), "scope.target_sequences")
     row_digests = _string_list(
         scope.get("target_row_digests"), "scope.target_row_digests"
     )
-    if len(sequences) != len(row_digests) or len(sequences) != len(set(sequences)):
+    if (
+        len(sequences) != len(row_digests)
+        or len(sequences) != len(set(sequences))
+        or len(sequences) != target_count
+    ):
         raise FbsManifestError(
             "target_sequence_coverage_invalid",
             "Recovery target sequence and row-digest coverage differs",
         )
     for index, raw in enumerate(row_digests):
         _digest(raw, f"scope.target_row_digests[{index}]")
-    history = _object(item["history"], "history")
-    classifications = _object(history.get("classification_counts"), "history.classification_counts")
+    _digest(scope["stable_target_digest"], "scope.stable_target_digest")
+    for field in ("target_rows", "location_wac_evidence", "resolved_scopes", "mapping_re_evidence", "typed_blocker_rows"):
+        _object_list(scope[field], f"scope.{field}")
+    coverage = _object(scope["coverage"], "scope.coverage")
     _keys(
-        classifications,
-        {"recoverable_exact", "remain_missing_no_same_date_evidence"},
-        "history.classification_counts",
+        coverage,
+        {"candidate_count", "resolved_groups", "blocked_groups", "covered_groups", "classified_count", "full_unresolved_scan", "all_groups_resolvable"},
+        "scope.coverage",
     )
-    for key, raw in classifications.items():
-        _nonnegative_int(raw, f"history.classification_counts.{key}")
+    for field in ("candidate_count", "classified_count"):
+        _nonnegative_int(coverage[field], f"scope.coverage.{field}")
+    for field in ("resolved_groups", "blocked_groups", "covered_groups"):
+        _object_list(coverage[field], f"scope.coverage.{field}")
+    _bool(coverage["full_unresolved_scan"], "scope.coverage.full_unresolved_scan")
+    _bool(coverage["all_groups_resolvable"], "scope.coverage.all_groups_resolvable")
+    effects = _object(item["predicted_effects"], "predicted_effects")
+    _keys(
+        effects,
+        {
+            "target_count",
+            "outcome_counts",
+            "lifecycle_summary",
+            "balance_deltas",
+            "total_quantity_delta",
+            "total_capital_delta_rub",
+            "target_result_digest",
+            "dependent_surface_plan",
+            "wb_write_count",
+        },
+        "predicted_effects",
+    )
+    _literal(effects["target_count"], target_count, "predicted_effects.target_count")
+    _object(effects["outcome_counts"], "predicted_effects.outcome_counts")
+    _object(effects["lifecycle_summary"], "predicted_effects.lifecycle_summary")
+    _object_list(effects["balance_deltas"], "predicted_effects.balance_deltas")
+    _digest(effects["target_result_digest"], "predicted_effects.target_result_digest")
+    _literal(effects["wb_write_count"], 0, "predicted_effects.wb_write_count")
+    surface_plan = _object(effects["dependent_surface_plan"], "predicted_effects.dependent_surface_plan")
+    _keys(surface_plan, {"contract", "surface_kinds", "before", "after", "before_digest", "after_digest"}, "predicted_effects.dependent_surface_plan")
+    _literal(surface_plan["contract"], "fbs_lifecycle_dependent_surface_plan/v1", "predicted_effects.dependent_surface_plan.contract")
+    surface_kinds = _string_list(surface_plan["surface_kinds"], "predicted_effects.dependent_surface_plan.surface_kinds", nonempty=True)
+    required_surface_kinds = {"FACILITY_SKU", "FACILITY_TOTAL", "GLOBAL_SKU", "GLOBAL_TOTAL", "FUNCTIONAL_ECONOMICS"}
+    if set(surface_kinds) != required_surface_kinds:
+        raise FbsManifestError("dependent_surface_coverage_invalid", "Recovery dependent surface plan differs")
+    for field in ("before", "after"):
+        _object_list(surface_plan[field], f"predicted_effects.dependent_surface_plan.{field}")
+    _digest(surface_plan["before_digest"], "predicted_effects.dependent_surface_plan.before_digest")
+    _digest(surface_plan["after_digest"], "predicted_effects.dependent_surface_plan.after_digest")
+    history = _object(item["history"], "history")
+    _keys(
+        history,
+        {"contract", "date_from", "date_to", "business_dates", "current_business_date", "event_evidence", "corrections", "captures", "cell_evidence", "classification_counts", "blockers", "evidence_digest", "digest"},
+        "history",
+    )
+    classifications = _object(history.get("classification_counts"), "history.classification_counts")
+    _parse_history_classifications(classifications, "history.classification_counts")
+    for field in ("event_evidence", "corrections", "captures", "cell_evidence"):
+        _object_list(history[field], f"history.{field}")
+    _string_list(history["business_dates"], "history.business_dates", nonempty=True)
+    _string_list(history["blockers"], "history.blockers")
+    _digest(history["evidence_digest"], "history.evidence_digest")
+    _digest(history["digest"], "history.digest")
+    baselines = _object(item["baselines"], "baselines")
+    _keys(baselines, {"non_target_digest", "wb_digest", "projection_schema_evidence", "canonical_write_seeds", "past_fulfilled_invariant"}, "baselines")
+    _digest(baselines["non_target_digest"], "baselines.non_target_digest")
+    _digest(baselines["wb_digest"], "baselines.wb_digest")
+    for field in ("projection_schema_evidence", "canonical_write_seeds", "past_fulfilled_invariant"):
+        _object(baselines[field], f"baselines.{field}")
+    safety = _object(item["safety"], "safety")
+    _keys(
+        safety,
+        {"default_mode", "one_submit", "writer_lock", "root_storage_admission", "target_cas", "before_image", "backup", "operation_journal", "ambiguous_transport", "current_retrocopy", "immutable_history_overwrite", "wb_writes", "mapping_writes", "hypothetical_mapping"},
+        "safety",
+    )
+    _literal(safety["default_mode"], "query_only_dry_run", "safety.default_mode")
+    _literal(safety["one_submit"], True, "safety.one_submit")
+    _literal(safety["writer_lock"], "warehouse_functional_write_lock", "safety.writer_lock")
+    _literal(safety["root_storage_admission"], "production_apply_evidence", "safety.root_storage_admission")
+    _literal(safety["before_image"], "private_mode_0600_exclusive_create_fsync", "safety.before_image")
+    _literal(safety["backup"], "private_mode_0600_exclusive_create_fsync", "safety.backup")
+    _literal(safety["operation_journal"], "exact_operation_authorization_storage", "safety.operation_journal")
+    _literal(safety["ambiguous_transport"], "query_only_readback_no_retry", "safety.ambiguous_transport")
+    for field in ("current_retrocopy", "immutable_history_overwrite"):
+        _literal(safety[field], False, f"safety.{field}")
+    for field in ("wb_writes", "mapping_writes"):
+        _literal(safety[field], 0, f"safety.{field}")
+    _bool(safety["hypothetical_mapping"], "safety.hypothetical_mapping")
     _digest(item["recovery_digest"], "recovery_digest")
     material = {key: raw for key, raw in item.items() if key != "recovery_digest"}
     if item["recovery_digest"] != digest(material):
@@ -539,6 +776,55 @@ def _int_list(value: Any, field: str) -> list[int]:
     if not isinstance(value, list):
         raise FbsManifestError("invalid_list", f"{field} must be an integer list")
     return [_positive_int(item, f"{field}[]") for item in value]
+
+
+def _object_list(value: Any, field: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise FbsManifestError("invalid_list", f"{field} must be an object list")
+    return [_object(item, f"{field}[]") for item in value]
+
+
+def _parse_storage(value: Any, field: str) -> dict[str, Any]:
+    item = _object(value, field)
+    _keys(
+        item,
+        {"manifest_sha256", "generation_epoch", "state", "operational_generation_id", "operational_schema_revision", "sqlite_schema_version", "manifest_contract"},
+        field,
+    )
+    _digest(item["manifest_sha256"], f"{field}.manifest_sha256")
+    _identity(item["generation_epoch"], f"{field}.generation_epoch")
+    _bounded_text(item["state"], f"{field}.state", maximum=80)
+    _identity(item["operational_generation_id"], f"{field}.operational_generation_id")
+    _identity(item["operational_schema_revision"], f"{field}.operational_schema_revision")
+    _positive_int(item["sqlite_schema_version"], f"{field}.sqlite_schema_version")
+    _identity(item["manifest_contract"], f"{field}.manifest_contract", pattern=_CONTRACT_RE)
+    return item
+
+
+def _parse_boundary(value: Any, field: str) -> dict[str, Any]:
+    item = _object(value, field)
+    _keys(
+        item,
+        {"storage", "cutover_id", "cutover_manifest_digest", "forward_generation_id", "forward_generation_manifest_digest", "forward_cursor_sequence", "source_cursor_max", "mapping_readback_digest"},
+        field,
+    )
+    _parse_storage(item["storage"], f"{field}.storage")
+    _identity(item["cutover_id"], f"{field}.cutover_id")
+    _digest(item["cutover_manifest_digest"], f"{field}.cutover_manifest_digest")
+    _identity(item["forward_generation_id"], f"{field}.forward_generation_id")
+    _digest(item["forward_generation_manifest_digest"], f"{field}.forward_generation_manifest_digest")
+    _nonnegative_int(item["forward_cursor_sequence"], f"{field}.forward_cursor_sequence")
+    _positive_int(item["source_cursor_max"], f"{field}.source_cursor_max")
+    _digest(item["mapping_readback_digest"], f"{field}.mapping_readback_digest")
+    return item
+
+
+def _parse_history_classifications(value: Any, field: str) -> dict[str, Any]:
+    item = _object(value, field)
+    _keys(item, {"recoverable_exact", "remain_missing_no_same_date_evidence"}, field)
+    for key, raw in item.items():
+        _nonnegative_int(raw, f"{field}.{key}")
+    return item
 
 
 def digest_rows(rows: Sequence[Mapping[str, Any]]) -> str:

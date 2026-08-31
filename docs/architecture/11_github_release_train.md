@@ -778,12 +778,28 @@ The default-off mapping grammar is:
 ```
 
 The runner parses `fbs_identity_mapping_manifest/v2`, obtains two matching
-query-only material-CAS witnesses and requires a successful hypothetical
+query-only stable-only material-CAS witnesses and requires a successful hypothetical
 mapping/readback plus global impact/recovery rehearsal.  Mapping Apply permits
 at most one canonical INSERT under the shared warehouse writer lock, writes a
 private before-image, cannot touch lifecycle/history/WB state and is never
 retried after an ambiguous transport result.  Its terminal query-only readback
 digest is a mandatory input to impact generation.
+
+Both real FBS Apply entrypoints require two separately validated release
+lineages: the source `production_mutation/awaiting_apply` receipt and the
+correction `live_runtime/done` receipt.  Each lineage binds exact PR
+base/head/merge, Gate run/plan, Release Runner, comment, downloaded artifact,
+archive/file digests and (for the source) incident manifest path/digest/
+operation.  The correction base must equal the source merge.  FBS passports
+are accepted only through the explicit `fbs-mapping-qualification`,
+`fbs-impact-generation`, `fbs-recovery-qualification`, `fbs-mapping-apply` and
+`fbs-recovery-apply` modes; the old generic `scope-goal` route rejects them.
+
+Qualification modes are default-off and terminate as
+`qualified_no_submit` after the native non-blocking shared-lock boundary.
+They perform zero submit, mapping, recovery, history and WB writes.  Mapping
+plans use a new immutable per-attempt candidate path, so A/B witnesses never
+overwrite each other.
 
 `fbs_lifecycle_impact_manifest/v2` scans the complete fresh unresolved set and
 derives every affected facility × SKU, facility total, global SKU and global
@@ -793,7 +809,7 @@ a mutation submit.
 The separate recovery grammar is:
 
 ```text
-/wb-core authorize-goal-v2 task WBC0027 profile fbs-lifecycle-recovery-v2 target <target-id> incident-passport sha256:<incident-passport> mapping-readback sha256:<terminal-mapping-readback> impact sha256:<impact-manifest> recovery sha256:<recovery-manifest> submits 1
+/wb-core authorize-goal-v2 task WBC0027 profile fbs-lifecycle-recovery-v2 target <target-id> incident-passport sha256:<incident-passport> mapping-operation production-goal-v2-<32hex> mapping-readback sha256:<terminal-mapping-readback> impact sha256:<impact-manifest> recovery sha256:<recovery-manifest> submits 1
 ```
 
 Two matching query-only witnesses must retain the exact runtime, four distinct
@@ -803,3 +819,10 @@ Apply has its own one-submit boundary and terminal query-only readback; it canno
 write mappings or WB state.  History cells classified
 `remain_missing_no_same_date_evidence` stay missing and do not block exact
 recovery of cells classified `recoverable_exact`.
+
+Only one OWNER/MEMBER comment may parse to an equivalent goal.  Duplicate
+passports fail closed.  Every terminal marker is a closed exact JSON schema;
+before publication the workflow uploads, downloads and hashes the canonical
+receipt artifact.  Replay returns `already_terminal` only after the marker and
+artifact validate exactly, and then performs no SSH, comment or workflow
+dispatch.

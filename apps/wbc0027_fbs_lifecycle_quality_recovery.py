@@ -46,6 +46,7 @@ from packages.application.ff_pool_fbs_forward_recovery import (  # noqa: E402
     _target_result_payload,
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
+    CURRENT_TABLE,
     EVENTS_TABLE,
     FORWARD_GENERATIONS_TABLE,
     FORWARD_STATE_TABLE,
@@ -63,9 +64,15 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
 from packages.application.ff_pool_foundation import (  # noqa: E402
     BALANCES_TABLE,
     FACILITIES_TABLE,
+    canonical_decimal_text,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
+)
+from packages.application.root_storage_policy import (  # noqa: E402
+    RootStoragePolicyError,
+    admit_root_write,
+    resolve_runtime_storage_destination,
 )
 from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E402
     CAPTURES_TABLE,
@@ -156,6 +163,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
         *,
         hypothetical_mapping: Mapping[str, Any] | None = None,
         mapping_readback_digest: str = "",
+        reviewed_impact: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         observed_at = str(self.timestamp_factory())
         _require_utc(observed_at)
@@ -266,6 +274,19 @@ class Wbc0027FbsLifecycleQualityRecovery:
         }
         impact = attach_digest(impact_material, "impact_digest")
         parse_impact_manifest(impact)
+        if reviewed_impact is not None:
+            try:
+                admitted_impact = parse_impact_manifest(reviewed_impact)
+            except FbsManifestError as exc:
+                raise Wbc0027RecoveryError(
+                    exc.code, str(exc), details=exc.details
+                ) from exc
+            if admitted_impact != impact:
+                raise Wbc0027RecoveryError(
+                    "reviewed_impact_drift",
+                    "Fresh query-only impact no longer matches the reviewed artifact",
+                )
+            impact = admitted_impact
         scope = {
             "groups": _group_rows(target_group_set),
             "business_dates": history["business_dates"],
@@ -305,9 +326,11 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "default_mode": "query_only_dry_run",
                 "one_submit": True,
                 "writer_lock": "warehouse_functional_write_lock",
+                "root_storage_admission": "production_apply_evidence",
                 "target_cas": "exact_source_rows_history_base_and_effect",
-                "before_image": "private_mode_0600_exclusive_create",
-                "backup": "sqlite_transaction_and_private_before_image",
+                "before_image": "private_mode_0600_exclusive_create_fsync",
+                "backup": "private_mode_0600_exclusive_create_fsync",
+                "operation_journal": "exact_operation_authorization_storage",
                 "ambiguous_transport": "query_only_readback_no_retry",
                 "current_retrocopy": False,
                 "immutable_history_overwrite": False,
@@ -338,17 +361,59 @@ class Wbc0027FbsLifecycleQualityRecovery:
         *,
         hypothetical_mapping: Mapping[str, Any] | None = None,
         mapping_readback_digest: str = "",
+        reviewed_impact: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.build_manifests(
             hypothetical_mapping=hypothetical_mapping,
             mapping_readback_digest=mapping_readback_digest,
+            reviewed_impact=reviewed_impact,
         )[1]
+
+    def qualify(
+        self,
+        reviewed_plan: Mapping[str, Any],
+        reviewed_impact: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Prove the native recovery submit boundary under the shared lock."""
+
+        try:
+            reviewed = parse_recovery_manifest(reviewed_plan)
+        except FbsManifestError as exc:
+            raise Wbc0027RecoveryError(exc.code, str(exc), details=exc.details) from exc
+        with warehouse_functional_write_lock(
+            self.runtime.runtime_dir,
+            blocking=False,
+        ) as lock:
+            fresh = self.build_plan(
+                mapping_readback_digest=str(
+                    dict(reviewed["boundary"])["mapping_readback_digest"]
+                ),
+                reviewed_impact=reviewed_impact,
+            )
+        if fresh.get("recovery_digest") != reviewed.get("recovery_digest"):
+            raise Wbc0027RecoveryError(
+                "qualification_material_drift",
+                "Recovery material changed at the native submit boundary",
+            )
+        return {
+            "contract": "fbs_lifecycle_recovery_qualification/v1",
+            "state": "qualified_no_submit",
+            "fingerprint": reviewed["recovery_digest"],
+            "lock": dict(lock),
+            "submit_count": 0,
+            "mapping_write_count": 0,
+            "recovery_write_count": 0,
+            "history_write_count": 0,
+            "wb_write_count": 0,
+        }
 
     def apply(
         self,
         reviewed_plan: Mapping[str, Any],
+        reviewed_impact: Mapping[str, Any],
         *,
         fingerprint: str,
+        operation_id: str,
         approval_reference: str,
         actor: str,
         evidence_dir: Path,
@@ -362,36 +427,67 @@ class Wbc0027FbsLifecycleQualityRecovery:
             raise Wbc0027RecoveryError(
                 "reviewed_fingerprint_mismatch", "Reviewed plan fingerprint differs"
             )
+        try:
+            admitted_impact = parse_impact_manifest(reviewed_impact)
+        except FbsManifestError as exc:
+            raise Wbc0027RecoveryError(exc.code, str(exc), details=exc.details) from exc
+        if admitted_impact.get("impact_digest") != reviewed.get("impact_digest"):
+            raise Wbc0027RecoveryError(
+                "reviewed_impact_binding_mismatch",
+                "Reviewed impact artifact differs from the recovery plan",
+            )
         if reviewed.get("apply_allowed") is not True or reviewed.get("blockers"):
             raise Wbc0027RecoveryError("reviewed_plan_blocked", "Blocked plan cannot apply")
         if str(dict(reviewed.get("target") or {}).get("runtime_sha") or "") != self.deployed_sha:
             raise Wbc0027RecoveryError("deployed_sha_drift", "Plan belongs to another SHA")
         approval = str(approval_reference or "").strip()
+        operation = str(operation_id or "").strip()
         operator = str(actor or "").strip()
-        if not approval or not operator:
+        if (
+            not approval
+            or not operator
+            or re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", operation) is None
+        ):
             raise Wbc0027RecoveryError(
-                "gate_identity_required", "approval_reference and actor are required"
+                "gate_identity_required",
+                "operation_id, approval_reference and actor are required",
             )
-        existing = self.readback(fingerprint=expected)
+        existing = self.readback(
+            fingerprint=expected,
+            operation_id=operation,
+            approval_reference=approval,
+        )
         if existing.get("status") == "completed":
             return {**existing, "idempotent": True, "repeat_submit_performed": False}
+        if existing.get("status") == "ambiguous_foreign_operation":
+            raise Wbc0027RecoveryError(
+                "existing_recovery_operation_ambiguous",
+                "An identical recovery exists without exact same-operation proof",
+            )
 
         # A fresh query-only witness must be byte-for-byte business-equivalent
         # to the reviewed plan immediately before the writer lock.
         fresh = self.build_plan(
             mapping_readback_digest=str(
                 dict(reviewed["boundary"])["mapping_readback_digest"]
-            )
+            ),
+            reviewed_impact=admitted_impact,
         )
         if fresh.get("recovery_digest") != expected:
             raise Wbc0027RecoveryError(
                 "target_source_drift", "Source/history/effect changed after review"
             )
-        evidence_root = Path(evidence_dir).expanduser().resolve()
-        evidence_root.mkdir(parents=True, exist_ok=True)
+        evidence_root = _admit_private_evidence_root(
+            runtime_dir=self.runtime.runtime_dir,
+            evidence_dir=Path(evidence_dir),
+            predicted_output_bytes=8 * 1024 * 1024,
+        )
         suffix = expected.removeprefix("sha256:")[:20]
-        before_path = evidence_root / f"wbc0027-fbs-quality-{suffix}.before.json"
-        evidence_path = evidence_root / f"wbc0027-fbs-quality-{suffix}.evidence.json"
+        operation_suffix = hashlib.sha256(operation.encode("utf-8")).hexdigest()[:16]
+        before_path = evidence_root / f"wbc0027-fbs-quality-{operation_suffix}-{suffix}.before.json"
+        backup_path = evidence_root / f"wbc0027-fbs-quality-{operation_suffix}-{suffix}.backup.json"
+        journal_path = evidence_root / f"wbc0027-fbs-quality-{operation_suffix}-{suffix}.journal.json"
+        evidence_path = evidence_root / f"wbc0027-fbs-quality-{operation_suffix}-{suffix}.evidence.json"
         now = str(self.timestamp_factory())
         _require_utc(now)
 
@@ -403,6 +499,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 )
             before_image = {
                 "contract_name": CONTRACT_NAME,
+                "operation_id": operation,
                 "fingerprint": expected,
                 "deployed_sha": self.deployed_sha,
                 "storage": locked_storage,
@@ -415,6 +512,29 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "created_at": now,
             }
             _write_private(before_path, before_image)
+            backup = {
+                "contract": "fbs_lifecycle_recovery_private_backup/v1",
+                "operation_id": operation,
+                "authorization_reference_digest": _fingerprint(approval),
+                "fingerprint": expected,
+                "boundary": reviewed["boundary"],
+                "target_rows": dict(reviewed["scope"])["target_rows"],
+                "history": reviewed["history"],
+                "baselines": reviewed["baselines"],
+            }
+            _write_private(backup_path, backup)
+            journal = {
+                "contract": "fbs_lifecycle_recovery_operation_journal/v1",
+                "operation_id": operation,
+                "authorization_reference_digest": _fingerprint(approval),
+                "fingerprint": expected,
+                "deployed_sha": self.deployed_sha,
+                "storage": locked_storage,
+                "before_image_sha256": _sha256_file(before_path),
+                "backup_sha256": _sha256_file(backup_path),
+                "submit_state": "prepared",
+            }
+            _write_private(journal_path, journal)
             conn = sqlite3.connect(self.runtime.db_path, timeout=120.0)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
@@ -437,6 +557,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 manifest = _active_manifest(conn)["manifest"]
                 sequences = tuple(int(value) for value in source["target_sequences"])
                 before_balances = _balance_payload(conn)
+                before_surfaces = _dependent_surface_snapshot(conn, source=source)
                 recovery = recover_pinned_fbs_lifecycle(
                     conn,
                     manifest=manifest,
@@ -444,6 +565,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                     occurred_at=now,
                 )
                 after_balances = _balance_payload(conn)
+                after_surfaces = _dependent_surface_snapshot(conn, source=source)
                 target_result = _target_result_payload(conn, sequences)
                 actual_effect = _preview_payload(
                     recovery=recovery,
@@ -451,10 +573,30 @@ class Wbc0027FbsLifecycleQualityRecovery:
                     after_balances=after_balances,
                     target_result=target_result,
                 )
+                actual_effect["dependent_surface_plan"] = {
+                    "contract": "fbs_lifecycle_dependent_surface_plan/v1",
+                    "surface_kinds": [
+                        "FACILITY_SKU",
+                        "FACILITY_TOTAL",
+                        "FUNCTIONAL_ECONOMICS",
+                        "GLOBAL_SKU",
+                        "GLOBAL_TOTAL",
+                    ],
+                    "before": before_surfaces,
+                    "after": after_surfaces,
+                    "before_digest": _fingerprint(before_surfaces),
+                    "after_digest": _fingerprint(after_surfaces),
+                }
                 if _fingerprint(actual_effect) != _fingerprint(reviewed["predicted_effects"]):
                     raise Wbc0027RecoveryError(
                         "target_after_image_drift",
                         "Writer after-image differs from reviewed prediction",
+                        details={
+                            "expected_digest": _fingerprint(reviewed["predicted_effects"]),
+                            "actual_digest": _fingerprint(actual_effect),
+                            "expected": reviewed["predicted_effects"],
+                            "actual": actual_effect,
+                        },
                     )
                 if any(str(row["outcome"]) == "identity_quarantine" for row in target_result):
                     raise Wbc0027RecoveryError(
@@ -522,6 +664,8 @@ class Wbc0027FbsLifecycleQualityRecovery:
                         result_digest,
                         _json(
                             {
+                                "operation_id": operation,
+                                "authorization_reference_digest": _fingerprint(approval),
                                 "effect": actual_effect,
                                 "history": history_receipts,
                                 "wb_write_count": 0,
@@ -592,7 +736,11 @@ class Wbc0027FbsLifecycleQualityRecovery:
             finally:
                 conn.close()
 
-        readback = self.readback(fingerprint=expected)
+        readback = self.readback(
+            fingerprint=expected,
+            operation_id=operation,
+            approval_reference=approval,
+        )
         if readback.get("status") != "completed":
             raise Wbc0027RecoveryError(
                 "post_apply_readback_failed", "Durable query-only readback is incomplete"
@@ -601,11 +749,16 @@ class Wbc0027FbsLifecycleQualityRecovery:
             "contract_name": CONTRACT_NAME,
             "status": "completed",
             "manifest_fingerprint": expected,
+            "operation_id": operation,
             "deployed_sha": self.deployed_sha,
             "approval_reference": approval,
             "actor": operator,
             "before_image_path": str(before_path),
             "before_image_sha256": _sha256_file(before_path),
+            "backup_path": str(backup_path),
+            "backup_sha256": _sha256_file(backup_path),
+            "operation_journal_path": str(journal_path),
+            "operation_journal_sha256": _sha256_file(journal_path),
             "readback": readback,
             "created_at": now,
         }
@@ -617,7 +770,13 @@ class Wbc0027FbsLifecycleQualityRecovery:
             "evidence_sha256": _sha256_file(evidence_path),
         }
 
-    def readback(self, *, fingerprint: str = "") -> dict[str, Any]:
+    def readback(
+        self,
+        *,
+        fingerprint: str = "",
+        operation_id: str = "",
+        approval_reference: str = "",
+    ) -> dict[str, Any]:
         with closing(_open_query_only(self.runtime.db_path)) as conn:
             tables = _table_names(conn)
             if QUALITY_RECOVERY_RUNS_TABLE not in tables:
@@ -637,6 +796,20 @@ class Wbc0027FbsLifecycleQualityRecovery:
             if row is None:
                 return {"contract_name": CONTRACT_NAME, "status": "not_applied"}
             recovery_id = str(row[0])
+            summary = json.loads(str(row[10]))
+            if (
+                not operation_id
+                or not approval_reference
+                or summary.get("operation_id") != str(operation_id)
+                or str(row[13]) != str(approval_reference)
+                or summary.get("authorization_reference_digest")
+                != _fingerprint(str(approval_reference))
+            ):
+                return {
+                    "contract_name": CONTRACT_NAME,
+                    "status": "ambiguous_foreign_operation",
+                    "query_only": True,
+                }
             targets = int(
                 conn.execute(
                     f"SELECT COUNT(*) FROM {QUALITY_RECOVERY_TARGETS_TABLE} WHERE recovery_id=?",
@@ -662,7 +835,11 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "manifest_fingerprint": str(row[7]),
                 "stable_target_digest": str(row[8]),
                 "result_digest": str(row[9]),
-                "summary": json.loads(str(row[10])),
+                "summary": summary,
+                "operation_id": summary.get("operation_id"),
+                "dependent_surface_digest": _fingerprint(
+                    dict(summary.get("effect") or {}).get("dependent_surface_plan") or {}
+                ),
                 "target_count": int(row[11]),
                 "target_readback_count": targets,
                 "history_capture_count": int(row[12]),
@@ -894,6 +1071,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 observed_at=at,
             )
             before = _balance_payload(scratch)
+            before_surfaces = _dependent_surface_snapshot(scratch, source=source)
             sequences = tuple(int(value) for value in source["target_sequences"])
             recovery = recover_pinned_fbs_lifecycle(
                 scratch,
@@ -902,14 +1080,30 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 occurred_at=at,
             )
             after = _balance_payload(scratch)
+            after_surfaces = _dependent_surface_snapshot(scratch, source=source)
             result = _target_result_payload(scratch, sequences)
+            preview = _preview_payload(
+                recovery=recovery,
+                before_balances=before,
+                after_balances=after,
+                target_result=result,
+            )
+            preview["dependent_surface_plan"] = {
+                "contract": "fbs_lifecycle_dependent_surface_plan/v1",
+                "surface_kinds": [
+                    "FACILITY_SKU",
+                    "FACILITY_TOTAL",
+                    "FUNCTIONAL_ECONOMICS",
+                    "GLOBAL_SKU",
+                    "GLOBAL_TOTAL",
+                ],
+                "before": before_surfaces,
+                "after": after_surfaces,
+                "before_digest": _fingerprint(before_surfaces),
+                "after_digest": _fingerprint(after_surfaces),
+            }
             return (
-                _preview_payload(
-                    recovery=recovery,
-                    before_balances=before,
-                    after_balances=after,
-                    target_result=result,
-                ),
+                preview,
                 result,
             )
         except FfPoolFbsForwardRecoveryError as exc:
@@ -1445,6 +1639,158 @@ def _affected_group_rows(
     )
     rows.append({"scope_kind": "GLOBAL_TOTAL", "facility_id": "", "nm_id": 0})
     return rows
+
+
+def _dependent_surface_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    source: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Closed exact projection for every surface affected by a lifecycle debit.
+
+    The projection is deliberately derived from the same transaction snapshot as
+    the recovery preview/apply.  It includes physical/reserved/available FBS,
+    facility/SKU/global aggregates, capital/WAC and the active functional
+    economics rows.  History has its own exact same-date manifest and is not
+    collapsed into these current-state rows.
+    """
+
+    groups = sorted(
+        {
+            (str(item["facility_id"]), int(item["nm_id"]))
+            for item in source.get("resolved_scopes") or []
+        }
+    )
+    facilities = sorted({facility_id for facility_id, _ in groups})
+    skus = sorted({nm_id for _, nm_id in groups})
+    cutover_id = str(source["cutover_id"])
+    balances = [
+        dict(row)
+        for row in conn.execute(
+            f"""SELECT facility_id,nm_id,quantity,capital_rub,wac_rub
+                FROM {BALANCES_TABLE} WHERE pool='FBS'
+                ORDER BY facility_id,nm_id"""
+        ).fetchall()
+    ]
+    reserved_rows = {
+        (str(row[0]), int(row[1])): int(row[2])
+        for row in conn.execute(
+            f"""SELECT facility_id,nm_id,COALESCE(SUM(quantity),0)
+                FROM {CURRENT_TABLE}
+                WHERE cutover_id=? AND pool='FBS' AND state='reserved'
+                GROUP BY facility_id,nm_id ORDER BY facility_id,nm_id""",
+            (cutover_id,),
+        ).fetchall()
+    }
+    by_key = {
+        (str(row["facility_id"]), int(row["nm_id"])): row for row in balances
+    }
+
+    def aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        physical = sum(int(row["quantity"]) for row in rows)
+        reserved = sum(
+            reserved_rows.get((str(row["facility_id"]), int(row["nm_id"])), 0)
+            for row in rows
+        )
+        capital = sum((Decimal(str(row["capital_rub"])) for row in rows), Decimal("0"))
+        covered = sum(
+            int(row["quantity"])
+            for row in rows
+            if row.get("wac_rub") is not None
+        )
+        wac = capital / Decimal(covered) if covered else None
+        return {
+            "physical_quantity": physical,
+            "reserved_quantity": reserved,
+            "available_quantity": physical - reserved,
+            "capital_rub": canonical_decimal_text(capital),
+            "wac_rub": canonical_decimal_text(wac) if wac is not None else None,
+        }
+
+    result: list[dict[str, Any]] = []
+    for facility_id, nm_id in groups:
+        row = by_key.get((facility_id, nm_id))
+        if row is None:
+            raise Wbc0027RecoveryError(
+                "dependent_facility_sku_missing",
+                f"FBS dependent surface is missing for {facility_id}/{nm_id}",
+            )
+        result.append(
+            {
+                "scope_kind": "FACILITY_SKU",
+                "facility_id": facility_id,
+                "nm_id": nm_id,
+                **aggregate([row]),
+            }
+        )
+    for facility_id in facilities:
+        rows = [row for row in balances if str(row["facility_id"]) == facility_id]
+        result.append(
+            {
+                "scope_kind": "FACILITY_TOTAL",
+                "facility_id": facility_id,
+                "nm_id": 0,
+                **aggregate(rows),
+            }
+        )
+    for nm_id in skus:
+        rows = [row for row in balances if int(row["nm_id"]) == nm_id]
+        result.append(
+            {
+                "scope_kind": "GLOBAL_SKU",
+                "facility_id": "",
+                "nm_id": nm_id,
+                **aggregate(rows),
+            }
+        )
+    result.append(
+        {
+            "scope_kind": "GLOBAL_TOTAL",
+            "facility_id": "",
+            "nm_id": 0,
+            **aggregate(balances),
+        }
+    )
+    active = conn.execute(
+        "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+    ).fetchone()
+    if active is None:
+        raise Wbc0027RecoveryError(
+            "functional_economics_active_missing",
+            "Active functional economics version is missing",
+        )
+    placeholders = ",".join("?" for _ in skus)
+    functional = conn.execute(
+        "SELECT version_id,warehouse_key,nm_id,quantity,wac_rub,capital_rub,"
+        "cost_covered_quantity,quality,certified FROM "
+        "sheet_vitrina_v1_warehouse_functional_balances "
+        f"WHERE version_id=? AND nm_id IN ({placeholders}) "
+        "ORDER BY warehouse_key,nm_id",
+        (str(active[0]), *skus),
+    ).fetchall()
+    for row in functional:
+        result.append(
+            {
+                "scope_kind": "FUNCTIONAL_ECONOMICS",
+                "facility_id": str(row[1]),
+                "nm_id": int(row[2]),
+                "version_id": str(row[0]),
+                "quantity": str(row[3]),
+                "wac_rub": (str(row[4]) if row[4] is not None else None),
+                "capital_rub": str(row[5]),
+                "cost_covered_quantity": str(row[6]),
+                "quality": str(row[7]),
+                "certified": bool(row[8]),
+            }
+        )
+    result.sort(
+        key=lambda item: (
+            str(item["scope_kind"]),
+            str(item["facility_id"]),
+            int(item["nm_id"]),
+        )
+    )
+    return result
 
 
 def _history_plan(
@@ -2133,10 +2479,50 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _admit_private_evidence_root(
+    *,
+    runtime_dir: Path,
+    evidence_dir: Path,
+    predicted_output_bytes: int,
+) -> Path:
+    runtime = Path(runtime_dir).resolve(strict=False)
+    canonical_root = resolve_runtime_storage_destination(
+        "production_apply_evidence",
+        runtime,
+        "production-goals",
+    ).resolve(strict=False)
+    output = Path(evidence_dir).expanduser().resolve(strict=False)
+    if canonical_root != output and canonical_root not in output.parents:
+        raise Wbc0027RecoveryError(
+            "evidence_directory_not_admitted",
+            "Private evidence path is outside production_apply_evidence",
+        )
+    output.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if output.stat().st_mode & 0o777 != 0o700:
+        raise Wbc0027RecoveryError(
+            "evidence_directory_mode_invalid",
+            "Private evidence directory must be mode 0700",
+        )
+    try:
+        admit_root_write(
+            owner="production_apply_evidence",
+            destination=output,
+            predicted_output_bytes=int(predicted_output_bytes),
+            predicted_temporary_bytes=0,
+            predicted_readback_bytes=int(predicted_output_bytes),
+        )
+    except RootStoragePolicyError as exc:
+        raise Wbc0027RecoveryError(
+            "root_storage_admission_failed",
+            f"RootStoragePolicyError: {exc}",
+        ) from exc
+    return output
+
+
 def _write_private(path: Path, payload: Mapping[str, Any]) -> None:
     output = Path(path).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -2148,6 +2534,11 @@ def _write_private(path: Path, payload: Mapping[str, Any]) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    directory = os.open(output.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _sha256_file(path: Path) -> str:
@@ -2175,13 +2566,24 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "apply":
         payload = runner.apply(
             _read_plan(args.plan_file),
+            parse_impact_manifest(read_manifest_json(Path(args.impact_file))),
             fingerprint=str(args.fingerprint),
+            operation_id=str(args.operation_id),
             approval_reference=str(args.approval_reference),
             actor=str(args.actor),
             evidence_dir=Path(args.evidence_dir),
         )
+    elif args.command == "qualification":
+        payload = runner.qualify(
+            _read_plan(args.plan_file),
+            parse_impact_manifest(read_manifest_json(Path(args.impact_file))),
+        )
     elif args.command == "readback":
-        payload = runner.readback(fingerprint=str(args.fingerprint or ""))
+        payload = runner.readback(
+            fingerprint=str(args.fingerprint or ""),
+            operation_id=str(args.operation_id or ""),
+            approval_reference=str(args.approval_reference or ""),
+        )
     elif args.command == "impact-dry-run":
         mapping_readback = read_manifest_json(Path(args.mapping_readback_file))
         mapping_digest = str(mapping_readback.get("readback_digest") or "")
@@ -2193,9 +2595,23 @@ def run(args: argparse.Namespace) -> int:
         if str(getattr(args, "mapping_readback_file", "") or ""):
             mapping_readback = read_manifest_json(Path(args.mapping_readback_file))
             mapping_digest = str(mapping_readback.get("readback_digest") or "")
-        payload = runner.build_plan(mapping_readback_digest=mapping_digest)
+        reviewed_impact = (
+            parse_impact_manifest(read_manifest_json(Path(args.impact_file)))
+            if str(getattr(args, "impact_file", "") or "")
+            else None
+        )
+        payload = runner.build_plan(
+            mapping_readback_digest=mapping_digest,
+            reviewed_impact=reviewed_impact,
+        )
     if args.output:
-        _write_private(Path(args.output), payload)
+        output_path = Path(args.output).expanduser().resolve(strict=False)
+        _admit_private_evidence_root(
+            runtime_dir=runner.runtime.runtime_dir,
+            evidence_dir=output_path.parent,
+            predicted_output_bytes=max(4096, len(_json(payload).encode("utf-8")) + 1),
+        )
+        _write_private(output_path, payload)
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return 0 if payload.get("status") not in {"blocked", "error"} else 2
 
@@ -2210,16 +2626,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     dry_run = sub.add_parser("dry-run")
     dry_run.add_argument("--mapping-readback-file", default="")
+    dry_run.add_argument("--impact-file", default="")
     impact = sub.add_parser("impact-dry-run")
     impact.add_argument("--mapping-readback-file", required=True)
     apply = sub.add_parser("apply")
     apply.add_argument("--plan-file", required=True)
+    apply.add_argument("--impact-file", required=True)
     apply.add_argument("--fingerprint", required=True)
+    apply.add_argument("--operation-id", required=True)
     apply.add_argument("--approval-reference", required=True)
     apply.add_argument("--actor", required=True)
     apply.add_argument("--evidence-dir", required=True)
+    qualification = sub.add_parser("qualification")
+    qualification.add_argument("--plan-file", required=True)
+    qualification.add_argument("--impact-file", required=True)
     readback = sub.add_parser("readback")
     readback.add_argument("--fingerprint", default="")
+    readback.add_argument("--operation-id", default="")
+    readback.add_argument("--approval-reference", default="")
     return parser
 
 
