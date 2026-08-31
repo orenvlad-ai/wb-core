@@ -1969,8 +1969,47 @@ puts JSON.generate(decode(Psych.parse_file(ARGV.fetch(0)).root))
     assert not any("inputs.reconciliation_attempt" in run for run in warm_runs)
 
 
+def _exercise_wbc0027_stdlib_dependency_isolation() -> None:
+    script = r'''
+import sys
+from copy import deepcopy
+from pathlib import Path
+
+root = Path.cwd()
+sys.path.insert(0, str(root))
+assert "openpyxl" not in sys.modules
+assert "apps.wbc0027_capital_recovery" not in sys.modules
+from apps import production_apply_runner as runner
+from apps.wbc0027_capital_recovery_runner_smoke import _context, _result
+
+blocked = runner.WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+assert blocked["run_id"] == 33370422066
+assert blocked["artifact_id"] == 9749833454
+assert blocked["receipt_sha256"] == "518fc39f3c7a17e84a247075f540ef393aed0110b827d276d322075de1000951"
+assert blocked["evidence_digest"] == "sha256:87017b579f91e8c49de9111a38098cfef5e02f401467ba1726fb15ed736f9e3b"
+context = _context()
+result = _result(context)
+result["source_recovery_row"]["after_digest"] = ""
+assert runner._valid_wbc0027_finalize_result(result, context=context)
+drifted = deepcopy(result)
+drifted["source_transaction"]["ordering"]["source_code_commit_before_retain"] = False
+assert not runner._valid_wbc0027_finalize_result(drifted, context=context)
+assert "openpyxl" not in sys.modules
+assert "apps.wbc0027_capital_recovery" not in sys.modules
+'''
+    completed = subprocess.run(
+        [sys.executable, "-S", "-c", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def main() -> None:
     _workflow_dispatch_contract()
+    _exercise_wbc0027_stdlib_dependency_isolation()
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
     _exercise_wbc0027_two_phase_runner()
