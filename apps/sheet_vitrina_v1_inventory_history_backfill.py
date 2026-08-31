@@ -61,6 +61,7 @@ from packages.application.warehouse_sync_lock import (  # noqa: E402
 )
 from packages.application.wb_fbs_orders import (  # noqa: E402
     OBSERVATIONS_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
     WAREHOUSE_MAPPINGS_TABLE,
 )
 from packages.business_time import current_business_date_iso  # noqa: E402
@@ -84,6 +85,7 @@ REQUIRED_SOURCE_TABLES = frozenset(
         LINES_TABLE,
         EVENTS_TABLE,
         OBSERVATIONS_TABLE,
+        STATUS_OBSERVATIONS_TABLE,
         WAREHOUSE_MAPPINGS_TABLE,
     }
 )
@@ -1357,6 +1359,7 @@ def _fbs_history(
             LINES_TABLE,
             EVENTS_TABLE,
             OBSERVATIONS_TABLE,
+            STATUS_OBSERVATIONS_TABLE,
             WAREHOUSE_MAPPINGS_TABLE,
         )
     }
@@ -1672,19 +1675,50 @@ def _fold_facility(
             },
         )
     raw_lifecycle_rows = conn.execute(
-        f"""SELECT event_sequence,event_id,order_id,event_type,source_revision,
-                   status_digest,facility_id,pool,nm_id,quantity,
-                   physical_quantity_delta,evidence_digest,occurred_at
-              FROM {EVENTS_TABLE}
-             WHERE facility_id=? AND pool='FBS'
-             ORDER BY occurred_at,event_sequence""",
+        f"""SELECT event.event_sequence,event.event_id,event.order_id,
+                   event.event_type,event.source_revision,event.status_digest,
+                   event.facility_id,event.pool,event.nm_id,event.quantity,
+                   event.physical_quantity_delta,event.evidence_digest,
+                   event.occurred_at,event.source_observed_at,
+                   event.source_order_observation_sequence,
+                   event.source_status_observation_sequence,
+                   source.source_created_at,
+                   status.observed_at AS status_observed_at,
+                   status.status_digest AS source_status_digest,
+                   status.supplier_status AS source_supplier_status,
+                   status.wb_status AS source_wb_status
+              FROM {EVENTS_TABLE} AS event
+              LEFT JOIN {OBSERVATIONS_TABLE} AS source
+                ON source.observation_sequence=
+                   event.source_order_observation_sequence
+              LEFT JOIN {STATUS_OBSERVATIONS_TABLE} AS status
+                ON status.observation_sequence=
+                   event.source_status_observation_sequence
+             WHERE event.facility_id=? AND event.pool='FBS'
+             ORDER BY event.event_sequence""",
         (facility_id,),
     ).fetchall()
     lifecycle_rows: list[tuple[sqlite3.Row, str]] = []
     for row in raw_lifecycle_rows:
-        event_date = _source_business_date(str(row["occurred_at"]))
+        event_type = str(row["event_type"])
+        exact_source_timestamp = (
+            str(row["source_created_at"] or "")
+            if event_type in {"opening_reserve", "reserve"}
+            else str(row["status_observed_at"] or row["source_observed_at"] or "")
+        )
+        event_date = _source_business_date(exact_source_timestamp)
         if not event_date:
-            blockers.append(f"invalid FBS lifecycle timestamp for {facility_id}")
+            # An event whose persisted source observation is already beyond
+            # the requested historical window cannot affect that window.  It
+            # may be ignored without inventing a business date.  Inside (or
+            # before) the window, however, only the exact order-created date
+            # is sufficient for reserve/opening reconstruction.
+            observed_date = _source_business_date(str(row["source_observed_at"] or ""))
+            if observed_date and observed_date > date_to:
+                continue
+            blockers.append(
+                f"missing exact source-date FBS lifecycle evidence for {facility_id}"
+            )
             continue
         if event_date > date_to:
             continue
@@ -1706,8 +1740,31 @@ def _fold_facility(
                 "physical_quantity_delta": int(row["physical_quantity_delta"]),
                 "evidence_digest": str(row["evidence_digest"]),
                 "occurred_at": str(row["occurred_at"]),
+                "source_order_observation_sequence": int(
+                    row["source_order_observation_sequence"]
+                ),
+                "source_status_observation_sequence": int(
+                    row["source_status_observation_sequence"]
+                ),
+                "source_business_timestamp": exact_source_timestamp,
             },
         )
+        if int(row["source_status_observation_sequence"]) > 0:
+            _record_source(
+                source_material,
+                table=STATUS_OBSERVATIONS_TABLE,
+                key=str(row["source_status_observation_sequence"]),
+                row={
+                    "observation_sequence": int(
+                        row["source_status_observation_sequence"]
+                    ),
+                    "order_id": int(row["order_id"]),
+                    "status_digest": str(row["source_status_digest"] or ""),
+                    "supplier_status": str(row["source_supplier_status"] or ""),
+                    "wb_status": str(row["source_wb_status"] or ""),
+                    "observed_at": str(row["status_observed_at"] or ""),
+                },
+            )
         lifecycle_rows.append((row, event_date))
         if (
             int(row["physical_quantity_delta"]) != 0

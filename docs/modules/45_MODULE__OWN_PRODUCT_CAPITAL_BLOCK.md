@@ -185,3 +185,13 @@ available: the other five stages and all-stage totals carry explicit
 unavailable presentation/provenance and remain blank. The facade never infers
 them from a neighboring or current snapshot and never converts missing to
 zero.
+
+## FBS lifecycle quality dependency
+
+Own-product capital consumes FBS only when lifecycle identity coverage is
+exact. A relevant unresolved facility × SKU group clears FF quantity, capital,
+unit cost/WAC, cost coverage and confirmed-share operands for that SKU. The SKU
+TOTAL and every dependent capital/economics presentation become unavailable;
+partial known capital is not published. The inventory-cost stage retains a
+typed `lifecycle_identity_coverage_pending` reason and no certified location
+evidence, so downstream economics cannot reinterpret the gap as zero.

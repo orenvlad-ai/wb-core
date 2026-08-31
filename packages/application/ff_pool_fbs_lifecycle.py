@@ -13,7 +13,7 @@ from decimal import Decimal, localcontext
 import hashlib
 import json
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
@@ -67,6 +67,13 @@ FORWARD_STATE_TABLE = "sheet_vitrina_v1_ff_pool_fbs_forward_state"
 BACKLOG_RECOVERY_RUNS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_runs"
 BACKLOG_RECOVERY_TARGETS_TABLE = (
     "sheet_vitrina_v1_ff_pool_fbs_backlog_recovery_targets"
+)
+QUALITY_RECOVERY_RUNS_TABLE = "sheet_vitrina_v1_ff_pool_fbs_quality_recovery_runs"
+QUALITY_RECOVERY_TARGETS_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_quality_recovery_targets"
+)
+QUALITY_RECOVERY_HISTORY_TABLE = (
+    "sheet_vitrina_v1_ff_pool_fbs_quality_recovery_history"
 )
 
 HANDOFF_SUPPLIER_STATUS = "complete"
@@ -396,6 +403,61 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(recovery_id,source_status_observation_sequence)
         );
 
+        CREATE TABLE IF NOT EXISTS {QUALITY_RECOVERY_RUNS_TABLE}(
+            recovery_id TEXT PRIMARY KEY,
+            generation_id TEXT NOT NULL REFERENCES
+                {FORWARD_GENERATIONS_TABLE}(generation_id),
+            cutover_id TEXT NOT NULL,
+            contract_version INTEGER NOT NULL CHECK(contract_version=1),
+            deployed_sha TEXT NOT NULL CHECK(length(deployed_sha)=40),
+            storage_generation_id TEXT NOT NULL,
+            storage_schema_revision TEXT NOT NULL,
+            sqlite_schema_version INTEGER NOT NULL,
+            source_cutoff_sequence INTEGER NOT NULL,
+            date_from TEXT NOT NULL,
+            date_to TEXT NOT NULL,
+            manifest_fingerprint TEXT NOT NULL UNIQUE,
+            stable_target_digest TEXT NOT NULL,
+            expected_effect_digest TEXT NOT NULL,
+            source_history_digest TEXT NOT NULL,
+            before_non_target_digest TEXT NOT NULL,
+            result_digest TEXT NOT NULL,
+            summary_json TEXT NOT NULL CHECK(json_valid(summary_json)),
+            target_count INTEGER NOT NULL CHECK(target_count>0),
+            history_capture_count INTEGER NOT NULL CHECK(history_capture_count>=0),
+            approval_reference TEXT NOT NULL,
+            applied_by TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status='completed'),
+            applied_at TEXT NOT NULL
+                CHECK(substr(applied_at,-1,1)='Z' AND julianday(applied_at) IS NOT NULL)
+        );
+
+        CREATE TABLE IF NOT EXISTS {QUALITY_RECOVERY_TARGETS_TABLE}(
+            recovery_id TEXT NOT NULL REFERENCES {QUALITY_RECOVERY_RUNS_TABLE}(recovery_id),
+            source_status_observation_sequence INTEGER NOT NULL,
+            order_id INTEGER NOT NULL,
+            facility_id TEXT NOT NULL,
+            nm_id INTEGER NOT NULL,
+            stable_business_digest TEXT NOT NULL,
+            before_state_digest TEXT NOT NULL,
+            after_state_digest TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN(
+                'event_applied','already_current','audit_noop'
+            )),
+            PRIMARY KEY(recovery_id,source_status_observation_sequence)
+        );
+
+        CREATE TABLE IF NOT EXISTS {QUALITY_RECOVERY_HISTORY_TABLE}(
+            recovery_id TEXT NOT NULL REFERENCES {QUALITY_RECOVERY_RUNS_TABLE}(recovery_id),
+            business_date TEXT NOT NULL,
+            capture_id TEXT NOT NULL,
+            source_digest TEXT NOT NULL,
+            finalization_id TEXT NOT NULL,
+            finalization_digest TEXT NOT NULL,
+            supersedes_finalization_digest TEXT NOT NULL,
+            PRIMARY KEY(recovery_id,business_date)
+        );
+
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_events_no_update
         BEFORE UPDATE ON {EVENTS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS lifecycle evidence is immutable'); END;
@@ -456,6 +518,24 @@ def ensure_ff_pool_fbs_lifecycle_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_recovery_target_no_delete
         BEFORE DELETE ON {BACKLOG_RECOVERY_TARGETS_TABLE}
         BEGIN SELECT RAISE(ABORT,'FBS backlog recovery targets are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_quality_recovery_run_no_update
+        BEFORE UPDATE ON {QUALITY_RECOVERY_RUNS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS quality recovery result is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_quality_recovery_run_no_delete
+        BEFORE DELETE ON {QUALITY_RECOVERY_RUNS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS quality recovery results are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_quality_recovery_target_no_update
+        BEFORE UPDATE ON {QUALITY_RECOVERY_TARGETS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS quality recovery target is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_quality_recovery_target_no_delete
+        BEFORE DELETE ON {QUALITY_RECOVERY_TARGETS_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS quality recovery targets are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_quality_recovery_history_no_update
+        BEFORE UPDATE ON {QUALITY_RECOVERY_HISTORY_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS quality recovery history is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS ff_pool_fbs_quality_recovery_history_no_delete
+        BEFORE DELETE ON {QUALITY_RECOVERY_HISTORY_TABLE}
+        BEGIN SELECT RAISE(ABORT,'FBS quality recovery history is append-only'); END;
         """
     )
     _ensure_column(
@@ -1135,6 +1215,24 @@ def drain_post_checkpoint_fbs_lifecycle(
             )
         except FbsApplicabilityError as exc:
             raise FfPoolFbsLifecycleError(exc.code, str(exc)) from exc
+        if is_pending_retry:
+            # Resolve the immutable quarantine inside the same transaction
+            # before any successor functional/economics materialization.  A
+            # failed lifecycle effect rolls this resolution back with it, while
+            # a successful effect cannot publish a false partial successor that
+            # still sees its own already-admitted status as unresolved.
+            summary["identity_resolved"] += _resolve_identity_pending(
+                conn,
+                cutover_id=cutover_id,
+                source_status_observation_sequence=status_sequence,
+                matched_identity_evidence_sequence=int(
+                    mapped["identity_evidence_sequence"]
+                ),
+                matched_identity_order_revision=str(
+                    mapped["identity_evidence_order_revision"]
+                ),
+                resolved_at=now,
+            )
         state_row = conn.execute(
             f"SELECT state,debit_event_id FROM {CURRENT_TABLE} WHERE cutover_id=? AND order_id=?",
             (cutover_id, order_id),
@@ -1181,19 +1279,6 @@ def drain_post_checkpoint_fbs_lifecycle(
                 )
                 if not event["idempotent"]:
                     summary["cancel_noop"] += 1
-                if is_pending_retry:
-                    summary["identity_resolved"] += _resolve_identity_pending(
-                        conn,
-                        cutover_id=cutover_id,
-                        source_status_observation_sequence=status_sequence,
-                        matched_identity_evidence_sequence=int(
-                            mapped["identity_evidence_sequence"]
-                        ),
-                        matched_identity_order_revision=str(
-                            mapped["identity_evidence_order_revision"]
-                        ),
-                        resolved_at=now,
-                    )
                 last_sequence = max(last_sequence, status_sequence)
                 continue
             reserve = _append_event(
@@ -1301,19 +1386,6 @@ def drain_post_checkpoint_fbs_lifecycle(
             )
             if not event["idempotent"]:
                 summary["cancel_noop"] += 1
-        if is_pending_retry:
-            summary["identity_resolved"] += _resolve_identity_pending(
-                conn,
-                cutover_id=cutover_id,
-                source_status_observation_sequence=status_sequence,
-                matched_identity_evidence_sequence=int(
-                    mapped["identity_evidence_sequence"]
-                ),
-                matched_identity_order_revision=str(
-                    mapped["identity_evidence_order_revision"]
-                ),
-                resolved_at=now,
-            )
         last_sequence = max(last_sequence, status_sequence)
 
     if pinned_sequences is not None:
@@ -1437,6 +1509,77 @@ def recover_pinned_fbs_lifecycle(
         limit=max(1, len(sequences)),
         pinned_status_observation_sequences=sequences,
     )
+
+
+def resolve_fbs_lifecycle_status_scope(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    status_observation_sequence: int,
+) -> dict[str, Any]:
+    """Resolve one unresolved status to its exact current canonical group.
+
+    Recovery planners use the same mapping path as the writer.  This helper is
+    query-only and refuses a resolved/non-pending row, a missing exact source
+    revision, or any missing/stale/ambiguous current identity.
+    """
+
+    cutover_id = str(manifest["cutover_id"])
+    row = conn.execute(
+        f"""SELECT status.observation_sequence,status.order_id,
+                   status.order_revision,status.status_digest,
+                   status.supplier_status,status.wb_status,
+                   status.positive_quantity,status.observed_at,
+                   source.observation_sequence,source.observation_id,
+                   source.source_revision,source.source_created_at,
+                   source.observed_at,source.warehouse_id,source.nm_id,
+                   source.chrt_id,source.skus_json,source.office_id,
+                   pending.deferred_identity_evidence_sequence
+            FROM {IDENTITY_PENDING_TABLE} AS pending
+            JOIN {STATUS_OBSERVATIONS_TABLE} AS status
+              ON status.observation_sequence=pending.source_status_observation_sequence
+            LEFT JOIN {OBSERVATIONS_TABLE} AS source
+              ON source.order_id=status.order_id
+             AND source.source_revision=status.order_revision
+            LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+              ON resolution.pending_id=pending.pending_id
+            WHERE pending.cutover_id=?
+              AND pending.source_status_observation_sequence=?
+              AND resolution.pending_id IS NULL""",
+        (cutover_id, int(status_observation_sequence)),
+    ).fetchone()
+    if row is None or row[8] is None:
+        raise FfPoolFbsLifecycleError(
+            "recovery_target_status_drift",
+            "Pinned status is resolved, missing, or lacks its exact source revision",
+        )
+    raw_order = (
+        str(row[9]),
+        int(row[1]),
+        str(row[10]),
+        str(row[11]),
+        str(row[12]),
+        row[13],
+        int(row[14]),
+        row[15],
+        str(row[16]),
+        row[17],
+    )
+    mapped = _map_order(
+        conn,
+        manifest,
+        raw_order,
+        allow_compatible_identity=True,
+        minimum_identity_evidence_sequence=int(row[18]),
+    )
+    return {
+        "status_observation_sequence": int(row[0]),
+        "order_id": int(row[1]),
+        "source_created_at": str(row[11]),
+        "source_status_observed_at": str(row[7]),
+        "facility_id": str(mapped["facility_id"]),
+        "nm_id": int(mapped["nm_id"]),
+    }
 
 
 def available_quantity(
@@ -1964,7 +2107,7 @@ def _map_order(
         identity_rows = conn.execute(
             f"""SELECT evidence_sequence,evidence_id,order_revision,outcome,
                        warehouse_id,nm_id,chrt_id,warehouse_mapping_id,
-                       identity_mapping_id
+                       identity_mapping_id,barcode,seller_sku
                 FROM {IDENTITY_EVIDENCE_TABLE}
                 WHERE order_id=? AND evidence_sequence>?
                 ORDER BY (order_revision=?) DESC,evidence_sequence DESC""",
@@ -1978,7 +2121,7 @@ def _map_order(
         identity_rows = conn.execute(
             f"""SELECT evidence_sequence,evidence_id,order_revision,outcome,
                        warehouse_id,nm_id,chrt_id,warehouse_mapping_id,
-                       identity_mapping_id
+                       identity_mapping_id,barcode,seller_sku
                 FROM {IDENTITY_EVIDENCE_TABLE}
                 WHERE order_id=? AND order_revision=?
                 ORDER BY evidence_sequence DESC""",
@@ -2002,103 +2145,488 @@ def _map_order(
             "order_identity_evidence_missing_or_drifted",
             f"Order {int(row[1])} lacks exact matched identity evidence",
         )
-    facility_by_warehouse = {
-        int(item["warehouse_id"]): str(item["facility_id"])
-        for item in manifest.get("seller_warehouse_mappings") or []
-    }
-    facility_id = facility_by_warehouse.get(warehouse_id)
     source_nm_id = int(row[6])
     chrt_id = int(row[7] or 0)
-    extension_id = ""
-    if facility_id:
-        mapping = next(
-            (
-                item
-                for item in manifest.get("sku_mappings") or []
-                if int(item["nm_id"]) == source_nm_id
-                and int(item["chrt_id"]) == chrt_id
-            ),
-            None,
-        )
-    else:
-        office_id = int(row[9] or 0)
-        extension_rows = conn.execute(
-            f"""SELECT extension.extension_id,extension.facility_id,
-                       extension.warehouse_mapping_id
-                FROM {MAPPING_EXTENSIONS_TABLE} AS extension
-                JOIN {WAREHOUSE_MAPPINGS_TABLE} AS warehouse
-                  ON warehouse.mapping_id=extension.warehouse_mapping_id
-                JOIN {FACILITIES_TABLE} AS facility
-                  ON facility.facility_id=extension.facility_id
-                WHERE extension.cutover_id=?
-                  AND extension.seller_warehouse_id=?
-                  AND extension.official_office_id=?
-                  AND warehouse.seller_warehouse_id=extension.seller_warehouse_id
-                  AND warehouse.facility_id=extension.facility_id
-                  AND warehouse.mapping_digest=extension.mapping_digest
-                  AND warehouse.official_office_id=extension.official_office_id
-                  AND warehouse.official_evidence_digest=
-                      extension.official_evidence_digest
-                  AND warehouse.active=1
-                  AND facility.active=1
-                ORDER BY extension.extension_id""",
-            (str(manifest["cutover_id"]), warehouse_id, office_id),
-        ).fetchall()
-        if len(extension_rows) != 1:
-            raise FfPoolFbsLifecycleError(
-                "order_identity_evidence_missing_or_drifted",
-                f"Order {int(row[1])} warehouse/office is unmapped or ambiguous",
-            )
-        extension = extension_rows[0]
-        if str(identity[7]) != str(extension[2]):
-            raise FfPoolFbsLifecycleError(
-                "order_identity_evidence_missing_or_drifted",
-                f"Order {int(row[1])} warehouse evidence predates the active extension",
-            )
-        identity_mapping = conn.execute(
-            f"""SELECT target_nm_id FROM {IDENTITY_MAPPINGS_TABLE}
-                WHERE mapping_id=? AND source_nm_id=? AND source_chrt_id=?
-                  AND active=1""",
-            (str(identity[8]), source_nm_id, chrt_id),
-        ).fetchall()
-        if len(identity_mapping) != 1:
-            raise FfPoolFbsLifecycleError(
-                "order_identity_evidence_missing_or_drifted",
-                f"Order {int(row[1])} exact SKU identity is unmapped or ambiguous",
-            )
-        facility_id = str(extension[1])
-        extension_id = str(extension[0])
-        target_nm_id = int(identity_mapping[0][0])
-        allocation_count = int(
-            conn.execute(
-                f"""SELECT COUNT(*)
-                    FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
-                    WHERE extension_id=? AND nm_id=?""",
-                (extension_id, target_nm_id),
-            ).fetchone()[0]
-        )
-        if allocation_count != 1:
-            raise FfPoolFbsLifecycleError(
-                "order_identity_evidence_missing_or_drifted",
-                f"Order {int(row[1])} has no exact extension allocation/WAC",
-            )
-        mapping = {
-            "target_nm_id": target_nm_id,
-            "nm_id": source_nm_id,
-            "chrt_id": chrt_id,
-        }
-    if mapping is None:
-        raise FfPoolFbsLifecycleError(
-            "order_sku_unmapped",
-            f"Order {int(row[1])} exact known-facility SKU is unmapped",
-        )
+    mapping = _canonical_mapping_for_identity(
+        conn,
+        manifest=manifest,
+        order_id=int(row[1]),
+        warehouse_id=warehouse_id,
+        office_id=int(row[9] or 0),
+        source_nm_id=source_nm_id,
+        source_chrt_id=chrt_id,
+        barcode=str(identity[9] or ""),
+        seller_sku=str(identity[10] or ""),
+        warehouse_mapping_id=str(identity[7]),
+        identity_mapping_id=str(identity[8]),
+    )
     return {
-        "facility_id": facility_id,
-        "nm_id": int(mapping.get("target_nm_id", mapping.get("nm_id", source_nm_id))),
-        "mapping_extension_id": extension_id,
+        "facility_id": str(mapping["facility_id"]),
+        "nm_id": int(mapping["target_nm_id"]),
+        "mapping_extension_id": str(mapping.get("mapping_extension_id") or ""),
         "identity_evidence_sequence": int(identity[0]),
         "identity_evidence_order_revision": str(identity[2]),
     }
+
+
+def _canonical_mapping_for_identity(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    order_id: int,
+    warehouse_id: int,
+    office_id: int,
+    source_nm_id: int,
+    source_chrt_id: int,
+    barcode: str,
+    seller_sku: str,
+    warehouse_mapping_id: str,
+    identity_mapping_id: str,
+) -> dict[str, Any]:
+    """Resolve the current canonical facility/SKU identity fail closed.
+
+    The Stage 7C manifest is immutable opening evidence, not a permanent live
+    identity registry.  Post-cutover orders therefore require the current
+    canonical mappings referenced by their immutable matched evidence.  A
+    missing or semantically ambiguous current mapping is quarantined; the
+    frozen manifest mapping is never used as a silent fallback.
+    """
+
+    warehouse_rows = conn.execute(
+        f"""SELECT mapping.mapping_id,mapping.facility_id
+            FROM {WAREHOUSE_MAPPINGS_TABLE} AS mapping
+            JOIN {FACILITIES_TABLE} AS facility
+              ON facility.facility_id=mapping.facility_id
+            WHERE mapping.seller_warehouse_id=?
+              AND mapping.active=1 AND facility.active=1
+            ORDER BY mapping.mapping_id""",
+        (int(warehouse_id),),
+    ).fetchall()
+    facilities = {str(item[1]) for item in warehouse_rows}
+    current_warehouse_ids = {
+        str(item[0]) for item in warehouse_rows if str(item[1]) in facilities
+    }
+    if len(facilities) != 1 or str(warehouse_mapping_id) not in current_warehouse_ids:
+        raise FfPoolFbsLifecycleError(
+            "order_identity_evidence_missing_or_drifted",
+            f"Order {int(order_id)} warehouse identity is missing, stale, or ambiguous",
+        )
+    facility_id = next(iter(facilities))
+
+    identity_rows = conn.execute(
+        f"""SELECT mapping_id,target_nm_id
+            FROM {IDENTITY_MAPPINGS_TABLE}
+            WHERE source_nm_id=? AND source_chrt_id=?
+              AND source_barcode=? AND source_sku=? AND active=1
+            ORDER BY mapping_id""",
+        (
+            int(source_nm_id),
+            int(source_chrt_id),
+            str(barcode),
+            str(seller_sku),
+        ),
+    ).fetchall()
+    target_nm_ids = {int(item[1]) for item in identity_rows}
+    current_identity_ids = {
+        str(item[0]) for item in identity_rows if int(item[1]) in target_nm_ids
+    }
+    if not target_nm_ids:
+        raise FfPoolFbsLifecycleError(
+            "order_sku_unmapped",
+            f"Order {int(order_id)} exact current SKU identity is unmapped",
+        )
+    if len(target_nm_ids) != 1 or str(identity_mapping_id) not in current_identity_ids:
+        raise FfPoolFbsLifecycleError(
+            "order_identity_evidence_missing_or_drifted",
+            f"Order {int(order_id)} SKU identity is missing, stale, or ambiguous",
+        )
+    target_nm_id = next(iter(target_nm_ids))
+    if not nomenclature_sku_active_or_unmanaged(conn, nm_id=target_nm_id):
+        raise FfPoolFbsLifecycleError(
+            "order_identity_evidence_missing_or_drifted",
+            f"Order {int(order_id)} target SKU is inactive or hidden",
+        )
+
+    extension_rows = conn.execute(
+        f"""SELECT extension.extension_id
+            FROM {MAPPING_EXTENSIONS_TABLE} AS extension
+            WHERE extension.cutover_id=?
+              AND extension.seller_warehouse_id=?
+              AND extension.official_office_id=?
+              AND extension.facility_id=?
+              AND extension.warehouse_mapping_id=?
+            ORDER BY extension.extension_id""",
+        (
+            str(manifest["cutover_id"]),
+            int(warehouse_id),
+            int(office_id),
+            facility_id,
+            str(warehouse_mapping_id),
+        ),
+    ).fetchall()
+    extension_id = str(extension_rows[0][0]) if len(extension_rows) == 1 else ""
+    physical_rows = conn.execute(
+        f"""SELECT 1 FROM {BALANCES_TABLE}
+            WHERE facility_id=? AND pool='FBS' AND nm_id=?
+              AND projection_epoch=?""",
+        (
+            facility_id,
+            target_nm_id,
+            int(manifest["feature_epoch"]),
+        ),
+    ).fetchall()
+    allocation_rows = (
+        conn.execute(
+            f"""SELECT 1 FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+                WHERE extension_id=? AND nm_id=?""",
+            (extension_id, target_nm_id),
+        ).fetchall()
+        if extension_id
+        else []
+    )
+    if len(physical_rows) != 1 and len(allocation_rows) != 1:
+        raise FfPoolFbsLifecycleError(
+            "order_identity_evidence_missing_or_drifted",
+            f"Order {int(order_id)} exact facility/SKU balance admission is missing",
+        )
+    return {
+        "facility_id": facility_id,
+        "target_nm_id": target_nm_id,
+        "mapping_extension_id": extension_id,
+    }
+
+
+def fbs_lifecycle_quality_coverage(
+    conn: sqlite3.Connection,
+    *,
+    as_of_date: str,
+    requested_nm_ids: Iterable[int] | None = None,
+) -> dict[str, Any]:
+    """Return group-scoped unresolved lifecycle/identity coverage.
+
+    Physical ledger rows alone are not complete FBS evidence while an admitted
+    source status is still quarantined or has not crossed the lifecycle cursor.
+    The result is query-only and deliberately conservative: an unresolved
+    facility or SKU identity expands only to the smallest currently provable
+    scope, and an unscopable identity makes the whole FBS operand incomplete.
+    """
+
+    target_date = str(as_of_date or "")[:10]
+    requested = {
+        int(value) for value in (requested_nm_ids or []) if int(value) > 0
+    }
+    required = {
+        IDENTITY_PENDING_TABLE,
+        IDENTITY_PENDING_RESOLUTIONS_TABLE,
+        STATUS_OBSERVATIONS_TABLE,
+        OBSERVATIONS_TABLE,
+        IDENTITY_EVIDENCE_TABLE,
+        WAREHOUSE_MAPPINGS_TABLE,
+        IDENTITY_MAPPINGS_TABLE,
+        FACILITIES_TABLE,
+        "sheet_vitrina_v1_ff_pool_cutover_manifests",
+    }
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if not required.issubset(tables):
+        material = {
+            "contract": "fbs_lifecycle_quality_coverage_v1",
+            "as_of_date": target_date,
+            "status": "not_applicable",
+            "groups": [],
+        }
+        return {**material, "digest": _fingerprint(material)}
+    manifest_row = conn.execute(
+        """SELECT manifest_json FROM sheet_vitrina_v1_ff_pool_cutover_manifests
+           ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1"""
+    ).fetchone()
+    if manifest_row is None:
+        material = {
+            "contract": "fbs_lifecycle_quality_coverage_v1",
+            "as_of_date": target_date,
+            "status": "not_applicable",
+            "groups": [],
+        }
+        return {**material, "digest": _fingerprint(material)}
+    manifest = json.loads(str(manifest_row[0]))
+    if not isinstance(manifest, Mapping) or not str(manifest.get("cutover_id") or ""):
+        material = {
+            "contract": "fbs_lifecycle_quality_coverage_v1",
+            "as_of_date": target_date,
+            "status": "not_applicable",
+            "groups": [],
+        }
+        return {**material, "digest": _fingerprint(material)}
+    cutover_id = str(manifest["cutover_id"])
+
+    pending_rows = conn.execute(
+        f"""SELECT status.observation_sequence,status.order_id,
+                   status.order_revision,status.status_digest,
+                   status.supplier_status,status.wb_status,
+                   status.positive_quantity,status.observed_at,
+                   source.observation_sequence,source.observation_id,
+                   source.source_revision,source.source_created_at,
+                   source.observed_at,source.warehouse_id,source.nm_id,
+                   source.chrt_id,source.skus_json,source.office_id,
+                   pending.deferred_identity_evidence_sequence,
+                   source.seller_sku
+            FROM {IDENTITY_PENDING_TABLE} AS pending
+            JOIN {STATUS_OBSERVATIONS_TABLE} AS status
+              ON status.observation_sequence=pending.source_status_observation_sequence
+            LEFT JOIN {OBSERVATIONS_TABLE} AS source
+              ON source.order_id=status.order_id
+             AND source.source_revision=status.order_revision
+            LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+              ON resolution.pending_id=pending.pending_id
+            WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
+            ORDER BY status.observation_sequence LIMIT 100001""",
+        (cutover_id,),
+    ).fetchall()
+    if len(pending_rows) > 100_000:
+        material = {
+            "contract": "fbs_lifecycle_quality_coverage_v1",
+            "as_of_date": target_date,
+            "status": "partial",
+            "groups": [
+                {
+                    "facility_id": "",
+                    "nm_id": None,
+                    "earliest_business_date": "",
+                    "reason_codes": ["lifecycle_quality_scope_too_large"],
+                    "status_sequence_digest": _fingerprint(["over_limit"]),
+                }
+            ],
+        }
+        return {**material, "digest": _fingerprint(material)}
+
+    cursor = _lifecycle_quality_cursor(conn, cutover_id=cutover_id, tables=tables)
+    new_rows = conn.execute(
+        f"""SELECT status.observation_sequence,status.order_id,
+                   status.order_revision,status.status_digest,
+                   status.supplier_status,status.wb_status,
+                   status.positive_quantity,status.observed_at,
+                   source.observation_sequence,source.observation_id,
+                   source.source_revision,source.source_created_at,
+                   source.observed_at,source.warehouse_id,source.nm_id,
+                   source.chrt_id,source.skus_json,source.office_id,
+                   0 AS deferred_identity_evidence_sequence,
+                   source.seller_sku
+            FROM {STATUS_OBSERVATIONS_TABLE} AS status
+            LEFT JOIN {OBSERVATIONS_TABLE} AS source
+              ON source.order_id=status.order_id
+             AND source.source_revision=status.order_revision
+            LEFT JOIN {IDENTITY_PENDING_TABLE} AS pending
+              ON pending.cutover_id=?
+             AND pending.source_status_observation_sequence=status.observation_sequence
+            WHERE status.observation_sequence>? AND pending.pending_id IS NULL
+            ORDER BY status.observation_sequence LIMIT 100001""",
+        (cutover_id, cursor),
+    ).fetchall()
+    if len(new_rows) > 100_000:
+        new_rows = []
+        pending_rows = []
+        overflow = True
+    else:
+        overflow = False
+
+    grouped: dict[tuple[str, int | None], dict[str, Any]] = {}
+    quality_rows = [
+        (item, "identity_or_lifecycle_pending", True) for item in pending_rows
+    ] + [
+        (item, "lifecycle_status_not_materialized", False) for item in new_rows
+    ]
+    for row, reason, retry in quality_rows:
+        # A quarantined order can affect FBS from its source creation date;
+        # using only the later status-observation date would let intervening
+        # historical cells retain a false exact claim.
+        observed_business_date = current_business_date(str(row[11] or row[7]))
+        if target_date and observed_business_date > target_date:
+            continue
+        scopes = _lifecycle_quality_scopes(
+            conn,
+            manifest=manifest,
+            row=row,
+            pending_retry=retry,
+        )
+        for facility_id, nm_id in scopes:
+            if requested and nm_id is not None and int(nm_id) not in requested:
+                continue
+            key = (str(facility_id or ""), None if nm_id is None else int(nm_id))
+            item = grouped.setdefault(
+                key,
+                {
+                    "facility_id": key[0],
+                    "nm_id": key[1],
+                    "earliest_business_date": observed_business_date,
+                    "reason_codes": set(),
+                    "status_sequences": [],
+                },
+            )
+            item["earliest_business_date"] = min(
+                str(item["earliest_business_date"]), observed_business_date
+            )
+            item["reason_codes"].add(reason)
+            item["status_sequences"].append(int(row[0]))
+    if overflow:
+        grouped[("", None)] = {
+            "facility_id": "",
+            "nm_id": None,
+            "earliest_business_date": "",
+            "reason_codes": {"lifecycle_quality_scope_too_large"},
+            "status_sequences": [],
+        }
+
+    groups = []
+    for item in grouped.values():
+        sequences = sorted(set(int(value) for value in item.pop("status_sequences")))
+        groups.append(
+            {
+                **item,
+                "reason_codes": sorted(item["reason_codes"]),
+                "status_sequence_count": len(sequences),
+                "status_sequence_digest": _fingerprint(sequences),
+            }
+        )
+    groups.sort(
+        key=lambda item: (
+            str(item["facility_id"]),
+            -1 if item["nm_id"] is None else int(item["nm_id"]),
+        )
+    )
+    material = {
+        "contract": "fbs_lifecycle_quality_coverage_v1",
+        "as_of_date": target_date,
+        "status": "partial" if groups else "exact",
+        "groups": groups,
+    }
+    return {**material, "digest": _fingerprint(material)}
+
+
+def fbs_lifecycle_group_blocked(
+    coverage: Mapping[str, Any],
+    *,
+    facility_id: str,
+    nm_id: int | None,
+) -> bool:
+    """Match one SKU or TOTAL facility scope against quality blockers."""
+
+    for raw in coverage.get("groups") or []:
+        item = dict(raw)
+        blocked_facility = str(item.get("facility_id") or "")
+        blocked_nm_id = item.get("nm_id")
+        if blocked_facility and blocked_facility != str(facility_id):
+            continue
+        if nm_id is None or blocked_nm_id is None or int(blocked_nm_id) == int(nm_id):
+            return True
+    return False
+
+
+def _lifecycle_quality_cursor(
+    conn: sqlite3.Connection,
+    *,
+    cutover_id: str,
+    tables: set[str],
+) -> int:
+    if {FORWARD_GENERATIONS_TABLE, FORWARD_STATE_TABLE}.issubset(tables):
+        row = conn.execute(
+            f"""SELECT state.last_status_observation_sequence
+                FROM {FORWARD_GENERATIONS_TABLE} AS generation
+                JOIN {FORWARD_STATE_TABLE} AS state
+                  ON state.generation_id=generation.generation_id
+                WHERE generation.cutover_id=?""",
+            (str(cutover_id),),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    if DRAIN_STATE_TABLE in tables:
+        row = conn.execute(
+            f"SELECT last_status_observation_sequence FROM {DRAIN_STATE_TABLE} "
+            "WHERE cutover_id=?",
+            (str(cutover_id),),
+        ).fetchone()
+        if row is not None:
+            return int(row[0])
+    return 0
+
+
+def _lifecycle_quality_scopes(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    row: sqlite3.Row | tuple[Any, ...],
+    pending_retry: bool,
+) -> list[tuple[str, int | None]]:
+    if row[8] is not None:
+        raw_order = (
+            str(row[9]),
+            int(row[1]),
+            str(row[10]),
+            str(row[11]),
+            str(row[12]),
+            row[13],
+            int(row[14]),
+            row[15],
+            str(row[16]),
+            row[17],
+        )
+        try:
+            mapped = _map_order(
+                conn,
+                manifest,
+                raw_order,
+                allow_compatible_identity=pending_retry,
+                minimum_identity_evidence_sequence=(int(row[18]) if pending_retry else 0),
+            )
+            return [(str(mapped["facility_id"]), int(mapped["nm_id"]))]
+        except FfPoolFbsLifecycleError:
+            pass
+
+    warehouse_id = int(row[13] or 0)
+    facilities = {
+        str(item[0])
+        for item in conn.execute(
+            f"""SELECT mapping.facility_id
+                FROM {WAREHOUSE_MAPPINGS_TABLE} AS mapping
+                JOIN {FACILITIES_TABLE} AS facility
+                  ON facility.facility_id=mapping.facility_id
+                WHERE mapping.seller_warehouse_id=?
+                  AND mapping.active=1 AND facility.active=1""",
+            (warehouse_id,),
+        ).fetchall()
+    }
+    facility_id = next(iter(facilities)) if len(facilities) == 1 else ""
+    source_nm_id = int(row[14] or 0)
+    source_chrt_id = int(row[15] or 0)
+    barcode = ""
+    try:
+        barcodes = json.loads(str(row[16] or "[]"))
+        if isinstance(barcodes, list) and len(barcodes) == 1:
+            barcode = str(barcodes[0] or "")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        barcode = ""
+    seller_sku = str(row[19] or "")
+    parameters: list[Any] = [source_nm_id, source_chrt_id]
+    identity_predicate = "source_nm_id=? AND source_chrt_id=?"
+    if barcode and seller_sku:
+        identity_predicate += " AND source_barcode=? AND source_sku=?"
+        parameters.extend([barcode, seller_sku])
+    target_nm_ids = {
+        int(item[0])
+        for item in conn.execute(
+            f"""SELECT target_nm_id FROM {IDENTITY_MAPPINGS_TABLE}
+                WHERE {identity_predicate} AND active=1""",
+            tuple(parameters),
+        ).fetchall()
+    }
+    if not target_nm_ids:
+        return [(facility_id, None)]
+    if len(target_nm_ids) > 64:
+        return [("", None)]
+    return [(facility_id, nm_id) for nm_id in sorted(target_nm_ids)]
 
 
 def _order_payload(
@@ -2135,6 +2663,22 @@ def _frozen_wac(
     )
     if match is not None and match.get("wac_rub") is not None:
         return Decimal(str(match["wac_rub"]))
+    current = conn.execute(
+        f"""SELECT quantity,capital_rub,wac_rub
+            FROM {BALANCES_TABLE}
+            WHERE facility_id=? AND pool='FBS' AND nm_id=?
+              AND projection_epoch=?""",
+        (
+            str(order["facility_id"]),
+            int(order["nm_id"]),
+            int(manifest["feature_epoch"]),
+        ),
+    ).fetchall()
+    if len(current) == 1:
+        quantity = int(current[0][0])
+        capital = Decimal(str(current[0][1]))
+        if quantity > 0 and capital > ZERO:
+            return _decimal_ratio(capital, quantity)
     extension_id = str(order.get("mapping_extension_id") or "")
     extension_rows = (
         conn.execute(

@@ -160,7 +160,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-          WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST: inventory-history-backfill,root-warm-archive-six,dense-fbs-historical-recovery,historical-analytical-cost-carry-forward,historical-missing-repair,product-capital-qualified-economics
+          WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST: inventory-history-backfill,root-warm-archive-six,dense-fbs-historical-recovery,historical-analytical-cost-carry-forward,historical-missing-repair,product-capital-qualified-economics,fbs-lifecycle-quality-recovery
         run: >-
           python3 apps/production_apply_runner.py
           --authorization-mode "${{ inputs.authorization_mode }}"

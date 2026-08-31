@@ -5565,6 +5565,47 @@ def _own_product_capital_cell_presentation(
                     "reason": total_reason,
                     "source": "WebCore",
                 }
+        unavailable_rows = {
+            item.nm_id: row
+            for item in enabled_config
+            if (row := lookup.own_product_capital_lookup.get(item.nm_id))
+            and str(row.get("presentation_state") or "") == "unavailable"
+        }
+        for item in enabled_config:
+            row = unavailable_rows.get(item.nm_id)
+            if row is None:
+                continue
+            reason = _warehouse_quality_reason_ru(
+                row.get("presentation_reason") or "lifecycle_identity_coverage_pending"
+            )
+            for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_SKU_METRIC_KEYS):
+                result.setdefault(f"SKU:{item.nm_id}|{metric_key}", {})[
+                    slot.column_date
+                ] = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": reason,
+                    "source": "WebCore",
+                }
+        if unavailable_rows and not missing_items:
+            total_reason = "; ".join(
+                sorted(
+                    {
+                        _warehouse_quality_reason_ru(
+                            row.get("presentation_reason")
+                            or "lifecycle_identity_coverage_pending"
+                        )
+                        for row in unavailable_rows.values()
+                    }
+                )
+            )
+            for metric_key in metric_keys & set(OWN_PRODUCT_CAPITAL_TOTAL_METRIC_KEYS):
+                result.setdefault(f"TOTAL|{metric_key}", {})[slot.column_date] = {
+                    "state": "unavailable",
+                    "tone": "neutral",
+                    "reason": total_reason,
+                    "source": "WebCore",
+                }
         unconfirmed_rows = {
             item.nm_id: row
             for item in enabled_config

@@ -189,3 +189,12 @@ missing facility and inapplicable pre-launch cells render as `—`, while exact
 zero renders as `0`. Current date uses the latest accepted capture and a closed
 date uses its latest immutable finalization. Older revisions remain stored but
 are not simultaneously rendered.
+
+## Lifecycle-aware inventory quality
+
+The facility FBS read model combines physical ledger applicability with
+`fbs_lifecycle_quality_coverage_v1`. For a blocked facility × SKU, physical,
+reserved and available are unavailable and quality is
+`partial_lifecycle_identity_coverage`; stock TOTAL cannot sum the remaining
+known operands into an exact value. Historical cells use the same blocker and
+facility TOTAL is missing whenever any child SKU in that facility is blocked.

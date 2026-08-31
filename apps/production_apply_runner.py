@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import io
 import json
@@ -65,6 +65,16 @@ GOAL_PROFILE = "inventory-history-backfill"
 WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 WBC0013_GOAL_PROFILE = "dense-fbs-historical-recovery"
 WBC0027_GOAL_PROFILE = "product-capital-qualified-economics"
+WBC0027_FBS_QUALITY_GOAL_PROFILE = "fbs-lifecycle-quality-recovery"
+WBC0027_FBS_QUALITY_SOURCE_SEQUENCE = 28_050_157
+WBC0027_FBS_QUALITY_DATE_FROM = "2026-08-17"
+WBC0027_FBS_QUALITY_DATE_TO = "2026-08-31"
+WBC0027_FBS_QUALITY_GROUPS = (
+    "fff_d67e8c823d5f81dd988d00dbfea6:210183919,"
+    "fff_d67e8c823d5f81dd988d00dbfea6:428855560,"
+    "fff_d67e8c823d5f81dd988d00dbfea6:428855758,"
+    "fff_2579bb2741ed4ab23b11bb4c4183:428855758"
+)
 WBC0027_LEGACY_MANIFEST_SHA256 = (
     "84a4bef9d6cba4c969988d880ab56bde06db307f3caf87a42305f7fe8c8680ee"
 )
@@ -458,6 +468,16 @@ WBC0027_AUTH_RE = re.compile(
     r"(?P<predecessor_product_phase>recovery_[0-9a-f]{32}) "
     r"predecessor-economics-phase "
     r"(?P<predecessor_economics_phase>recovery_[0-9a-f]{32})$"
+)
+WBC0027_FBS_QUALITY_AUTH_RE = re.compile(
+    r"^/wb-core authorize-goal-v1 task (?P<task>WBC0027) "
+    r"profile (?P<profile>fbs-lifecycle-quality-recovery) "
+    r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
+    r"source-sequence (?P<source_sequence>[1-9][0-9]*) "
+    r"dates (?P<date_from>[0-9]{4}-[0-9]{2}-[0-9]{2})\.\."
+    r"(?P<date_to>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    r"groups (?P<groups>[a-z0-9_:,]{1,400}) "
+    r"submits (?P<submits>1)$"
 )
 HISTORICAL_COST_AUTH_RE = re.compile(
     r"^/wb-core authorize-goal-v1 task (?P<task>WBC0013) "
@@ -1089,6 +1109,7 @@ def validate_authorization(
     warm_match = WARM_ARCHIVE_AUTH_RE.fullmatch(body)
     wbc0013_match = WBC0013_AUTH_RE.fullmatch(body)
     wbc0027_match = WBC0027_AUTH_RE.fullmatch(body)
+    wbc0027_fbs_quality_match = WBC0027_FBS_QUALITY_AUTH_RE.fullmatch(body)
     historical_cost_match = HISTORICAL_COST_AUTH_RE.fullmatch(body)
     historical_missing_match = HISTORICAL_MISSING_REPAIR_AUTH_RE.fullmatch(body)
     if (
@@ -1096,6 +1117,7 @@ def validate_authorization(
         and warm_match is None
         and wbc0013_match is None
         and wbc0027_match is None
+        and wbc0027_fbs_quality_match is None
         and historical_cost_match is None
         and historical_missing_match is None
     ):
@@ -1105,6 +1127,7 @@ def validate_authorization(
         or warm_match
         or wbc0013_match
         or wbc0027_match
+        or wbc0027_fbs_quality_match
         or historical_cost_match
         or historical_missing_match
     ).groupdict()
@@ -1252,6 +1275,32 @@ def validate_authorization(
             or predecessor != WBC0027_PREDECESSOR_BINDING
         ):
             raise ApplyError("WBC0027 authorization scope is not exact")
+        return goal
+    if wbc0027_fbs_quality_match is not None:
+        goal = {
+            "contract": "wb-core.production-goal-passport/v1",
+            "task": "WBC0027",
+            "profile": WBC0027_FBS_QUALITY_GOAL_PROFILE,
+            "target_id": raw["target"],
+            "source_cutoff_sequence": int(raw["source_sequence"]),
+            "date_from": raw["date_from"],
+            "date_to": raw["date_to"],
+            "groups": raw["groups"],
+            "max_mutation_submits": int(raw["submits"]),
+            "max_pre_submit_regenerations": MAX_QUALIFICATION_CANDIDATES - 1,
+            "timer_changes_allowed": False,
+            "wb_writes_allowed": False,
+            "reversible": True,
+        }
+        if (
+            goal["source_cutoff_sequence"]
+            != WBC0027_FBS_QUALITY_SOURCE_SEQUENCE
+            or goal["date_from"] != WBC0027_FBS_QUALITY_DATE_FROM
+            or goal["date_to"] != WBC0027_FBS_QUALITY_DATE_TO
+            or goal["groups"] != WBC0027_FBS_QUALITY_GROUPS
+            or goal["max_mutation_submits"] != 1
+        ):
+            raise ApplyError("WBC0027 FBS quality authorization scope is not exact")
         return goal
     if historical_cost_match is not None:
         goal = {
@@ -2549,6 +2598,83 @@ def _validate_wbc0027_candidate(
             and (payload.get("product_predecessor") or {}).get("reconciled") is True
         ):
             raise ApplyError("WBC0027 economics qualification is not exact")
+
+
+def _wbc0027_fbs_quality_remote_command(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    operation: str,
+    evidence_dir: str,
+    action: str,
+    manifest_path: str = "",
+    fingerprint: str = "",
+    approval_reference: str = "",
+) -> list[str]:
+    if action not in {"plan", "apply", "readback"}:
+        raise ApplyError("unsupported WBC0027 FBS quality recovery action")
+    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation) is None:
+        raise ApplyError("WBC0027 FBS quality operation namespace is invalid")
+    target_dir = str(target["target_dir"])
+    canonical_manifest = f"{evidence_dir}/wbc0027-fbs-quality-plan.json"
+    if action in {"apply", "readback"} and (
+        manifest_path != canonical_manifest
+        or posixpath.normpath(manifest_path) != manifest_path
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
+    ):
+        raise ApplyError("WBC0027 FBS quality reviewed plan binding is invalid")
+    parts = [
+        "python3",
+        f"{target_dir}/apps/wbc0027_fbs_lifecycle_quality_recovery.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--deployed-sha",
+        merge_sha,
+        "--scratch-dir",
+        f"{evidence_dir}/scratch",
+    ]
+    if action == "plan":
+        parts.extend(["--output", canonical_manifest, "dry-run"])
+    elif action == "apply":
+        if not approval_reference or len(approval_reference) > 500:
+            raise ApplyError("WBC0027 FBS quality approval reference is invalid")
+        parts.extend(
+            [
+                "apply",
+                "--plan-file",
+                manifest_path,
+                "--fingerprint",
+                fingerprint,
+                "--approval-reference",
+                approval_reference,
+                "--actor",
+                "production-apply-runner",
+                "--evidence-dir",
+                evidence_dir,
+            ]
+        )
+    else:
+        parts.extend(["readback", "--fingerprint", fingerprint])
+    setup = (
+        "install -d -m 0700 " + shlex.quote(evidence_dir)
+        if action == "plan"
+        else "test -d "
+        + shlex.quote(evidence_dir)
+        + ' && test "$(stat -c %a '
+        + shlex.quote(evidence_dir)
+        + ')" = 700'
+    )
+    shell = (
+        "set -eu; umask 077; "
+        + setup
+        + "; cd "
+        + shlex.quote(target_dir)
+        + "; export PYTHONPATH="
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
 
 
 def _validate_wbc0013_candidate(
@@ -4073,6 +4199,211 @@ def run_wbc0027_goal(
         "product_readback": product_readback,
         "economics_apply": economics_apply,
         "economics_readback": economics_readback,
+    }
+
+
+def run_wbc0027_fbs_quality_goal(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    goal: Mapping[str, Any],
+    operation: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / operation
+    )
+    manifest_path = f"{evidence_dir}/wbc0027-fbs-quality-plan.json"
+    attempts: list[dict[str, Any]] = []
+    prior_witness: dict[str, Any] | None = None
+    candidate: Mapping[str, Any] | None = None
+    for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
+        evidence = command_evidence(
+            _wbc0027_fbs_quality_remote_command(
+                target=target,
+                merge_sha=merge_sha,
+                operation=operation,
+                evidence_dir=evidence_dir,
+                action="plan",
+            )
+        )
+        payload = evidence.get("result")
+        if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
+            return {
+                "state": "blocked",
+                "reason": "wbc0027-fbs-quality-query-only-qualification-failed",
+                "apply_count": 0,
+                "qualification_attempts": [*attempts, evidence],
+            }
+        boundary = payload.get("boundary")
+        scope = payload.get("scope")
+        history = payload.get("history")
+        safety = payload.get("safety")
+        expected_groups = [
+            {"facility_id": raw.split(":", 1)[0], "nm_id": int(raw.split(":", 1)[1])}
+            for raw in WBC0027_FBS_QUALITY_GROUPS.split(",")
+        ]
+        valid = bool(
+            payload.get("contract_name")
+            == "wbc0027_fbs_lifecycle_quality_recovery_v1"
+            and payload.get("contract_version") == 1
+            and payload.get("mode") == "dry_run"
+            and payload.get("deployed_sha") == merge_sha
+            and payload.get("apply_allowed") is True
+            and payload.get("blockers") == []
+            and isinstance(boundary, Mapping)
+            and boundary.get("source_cutoff_sequence")
+            == goal["source_cutoff_sequence"]
+            and boundary.get("date_from") == goal["date_from"]
+            and boundary.get("date_to") == goal["date_to"]
+            and isinstance(scope, Mapping)
+            and scope.get("groups") == expected_groups
+            and scope.get("dates")
+            == [
+                (date.fromisoformat(goal["date_from"]) + timedelta(days=index)).isoformat()
+                for index in range(15)
+            ]
+            and isinstance(scope.get("target_count"), int)
+            and not isinstance(scope.get("target_count"), bool)
+            and 0 < scope["target_count"] <= 10_000
+            and len(scope.get("status_observation_sequences") or [])
+            == scope["target_count"]
+            and isinstance(history, Mapping)
+            and history.get("date_from") == goal["date_from"]
+            and history.get("date_to") == goal["date_to"]
+            and len(history.get("captures") or []) == 15
+            and history.get("blockers") == []
+            and isinstance(safety, Mapping)
+            and safety.get("one_submit") is True
+            and safety.get("current_retrocopy") is False
+            and safety.get("immutable_history_overwrite") is False
+            and safety.get("wb_writes") == 0
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(payload.get("fingerprint") or "")
+            )
+            is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(scope.get("stable_target_digest") or "")
+            )
+            is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(history.get("digest") or "")
+            )
+            is not None
+        )
+        if not valid:
+            return {
+                "state": "blocked",
+                "reason": "wbc0027-fbs-quality-candidate-escaped-exact-goal",
+                "apply_count": 0,
+                "qualification_attempts": [*attempts, evidence],
+            }
+        witness = {
+            "fingerprint": payload["fingerprint"],
+            "storage": payload["storage"],
+            "boundary": boundary,
+            "stable_target_digest": scope["stable_target_digest"],
+            "history_digest": history["digest"],
+            "predicted_effect_digest": payload_digest(payload["predicted_effects"]),
+        }
+        attempts.append(
+            {
+                **{key: value for key, value in evidence.items() if key != "result"},
+                "attempt": attempt,
+                "manifest_path": manifest_path,
+                **witness,
+                "qualification_state": "candidate",
+            }
+        )
+        if prior_witness is not None and witness == prior_witness:
+            attempts[-2]["qualification_state"] = "matching_witness"
+            attempts[-1]["qualification_state"] = "qualified"
+            candidate = payload
+            break
+        if len(attempts) > 1:
+            attempts[-2]["qualification_state"] = "superseded_material_drift"
+        prior_witness = witness
+        if attempt < MAX_QUALIFICATION_CANDIDATES:
+            time.sleep(1.1)
+    if candidate is None:
+        if attempts:
+            attempts[-1]["qualification_state"] = "unstable_at_bound"
+        return {
+            "state": "blocked",
+            "reason": "wbc0027-fbs-quality-cas-not-qualified",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+        }
+    fingerprint = str(candidate["fingerprint"])
+    apply_evidence = command_evidence(
+        _wbc0027_fbs_quality_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            action="apply",
+            manifest_path=manifest_path,
+            fingerprint=fingerprint,
+            approval_reference=approval_reference,
+        )
+    )
+    # The one submit is consumed once this command is issued; ambiguity is
+    # reconciled by readback and never by a second apply command.
+    readback_evidence = command_evidence(
+        _wbc0027_fbs_quality_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            action="readback",
+            manifest_path=manifest_path,
+            fingerprint=fingerprint,
+        )
+    )
+    readback = readback_evidence.get("result")
+    target_count = int(dict(candidate["scope"])["target_count"])
+    reconciled = bool(
+        readback_evidence.get("return_code") == 0
+        and isinstance(readback, Mapping)
+        and readback.get("status") == "completed"
+        and readback.get("query_only") is True
+        and readback.get("mutates_wb") is False
+        and readback.get("deployed_sha") == merge_sha
+        and readback.get("manifest_fingerprint") == fingerprint
+        and readback.get("source_cutoff_sequence")
+        == goal["source_cutoff_sequence"]
+        and readback.get("date_from") == goal["date_from"]
+        and readback.get("date_to") == goal["date_to"]
+        and readback.get("target_count") == target_count
+        and readback.get("target_readback_count") == target_count
+        and readback.get("history_capture_count") == 15
+        and readback.get("history_readback_count") == 15
+    )
+    return {
+        "state": "done" if reconciled else "blocked",
+        "reason": (
+            "reconciled"
+            if reconciled
+            else "wbc0027-fbs-quality-query-only-readback-not-reconciled"
+        ),
+        "apply_count": 1,
+        "qualification_attempts": attempts,
+        "candidate": {
+            "manifest_path": manifest_path,
+            "fingerprint": fingerprint,
+            "storage": candidate["storage"],
+            "boundary": candidate["boundary"],
+            "scope": {
+                "groups": candidate["scope"]["groups"],
+                "target_count": target_count,
+                "stable_target_digest": candidate["scope"]["stable_target_digest"],
+            },
+            "history_digest": candidate["history"]["digest"],
+        },
+        "apply": apply_evidence,
+        "readback": readback_evidence,
     }
 
 
@@ -10045,6 +10376,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="wb-core-production-goal-") as directory:
         configure_deploy_environment(Path(directory))
         result = (
+            run_wbc0027_fbs_quality_goal(
+                target=target,
+                merge_sha=merge_sha,
+                goal=goal,
+                operation=operation,
+                approval_reference=approval_reference,
+            )
+            if goal["profile"] == WBC0027_FBS_QUALITY_GOAL_PROFILE
+            else
             run_wbc0027_goal(
                 target=target,
                 merge_sha=merge_sha,

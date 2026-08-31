@@ -67,6 +67,14 @@ WBC0027_AUTH_BODY = (
     "predecessor-product-phase recovery_303ece915dfb8e89b615a84dc8f14d70 "
     "predecessor-economics-phase recovery_8fe6bf612bde74c0dec9cb3b441944b2"
 )
+WBC0027_FBS_QUALITY_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0027 "
+    "profile fbs-lifecycle-quality-recovery "
+    "target wb_core_eu_hosted_runtime_active "
+    "source-sequence 28050157 dates 2026-08-17..2026-08-31 groups "
+    + apply.WBC0027_FBS_QUALITY_GROUPS
+    + " submits 1"
+)
 HISTORICAL_COST_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 "
     "profile historical-analytical-cost-carry-forward "
@@ -825,6 +833,137 @@ def _exercise_wbc0027_two_phase_runner() -> None:
     assert drifted["state"] == "blocked"
     assert drifted["apply_count"] == 0
     assert drifted["product_state"] == "not_applied"
+
+
+def _exercise_wbc0027_fbs_quality_runner() -> None:
+    goal = apply.validate_authorization(
+        authorization(body=WBC0027_FBS_QUALITY_AUTH_BODY),
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+    )
+    assert goal["profile"] == apply.WBC0027_FBS_QUALITY_GOAL_PROFILE
+    assert goal["source_cutoff_sequence"] == 28_050_157
+    assert goal["max_mutation_submits"] == 1
+    changed = WBC0027_FBS_QUALITY_AUTH_BODY.replace("28050157", "28050158")
+    try:
+        apply.validate_authorization(
+            authorization(body=changed), repository="orenvlad-ai/wb-core", pr=1050
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("drifted WBC0027 FBS source boundary was accepted")
+
+    operation = "production-goal-v1-" + "5" * 32
+    groups = [
+        {"facility_id": raw.split(":", 1)[0], "nm_id": int(raw.split(":", 1)[1])}
+        for raw in apply.WBC0027_FBS_QUALITY_GROUPS.split(",")
+    ]
+    candidate = {
+        "contract_name": "wbc0027_fbs_lifecycle_quality_recovery_v1",
+        "contract_version": 1,
+        "mode": "dry_run",
+        "deployed_sha": MERGE_SHA,
+        "storage": {
+            "operational_generation_id": "generation-smoke",
+            "operational_schema_revision": "operational_v1",
+            "manifest_sha256": "sha256:" + "a" * 64,
+        },
+        "boundary": {
+            "cutover_id": "cutover-smoke",
+            "cutover_manifest_digest": "sha256:" + "b" * 64,
+            "forward_generation_id": "fbsgen_smoke",
+            "forward_generation_manifest_fingerprint": "sha256:" + "c" * 64,
+            "forward_cursor_sequence": 28_060_000,
+            "source_cutoff_sequence": 28_050_157,
+            "date_from": "2026-08-17",
+            "date_to": "2026-08-31",
+        },
+        "scope": {
+            "groups": groups,
+            "dates": [f"2026-08-{day:02d}" for day in range(17, 32)],
+            "target_count": 3083,
+            "status_observation_sequences": list(range(1, 3084)),
+            "stable_target_digest": "sha256:" + "d" * 64,
+        },
+        "predicted_effects": {"wb_write_count": 0, "balance_deltas": []},
+        "history": {
+            "date_from": "2026-08-17",
+            "date_to": "2026-08-31",
+            "captures": [{} for _ in range(15)],
+            "blockers": [],
+            "digest": "sha256:" + "e" * 64,
+        },
+        "safety": {
+            "one_submit": True,
+            "current_retrocopy": False,
+            "immutable_history_overwrite": False,
+            "wb_writes": 0,
+        },
+        "apply_allowed": True,
+        "blockers": [],
+        "fingerprint": "sha256:" + "f" * 64,
+    }
+    command_results = iter(
+        [
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {"status": "completed"},
+            },
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {
+                    "status": "completed",
+                    "query_only": True,
+                    "mutates_wb": False,
+                    "deployed_sha": MERGE_SHA,
+                    "manifest_fingerprint": candidate["fingerprint"],
+                    "source_cutoff_sequence": 28_050_157,
+                    "date_from": "2026-08-17",
+                    "date_to": "2026-08-31",
+                    "target_count": 3083,
+                    "target_readback_count": 3083,
+                    "history_capture_count": 15,
+                    "history_readback_count": 15,
+                },
+            },
+        ]
+    )
+    original_command = apply.command_evidence
+    original_sleep = apply.time.sleep
+    calls: list[list[str]] = []
+
+    def fake_command(command: list[str], *, timeout_seconds: float = 3600.0) -> dict:
+        del timeout_seconds
+        calls.append(command)
+        return next(command_results)
+
+    try:
+        apply.command_evidence = fake_command
+        apply.time.sleep = lambda _seconds: None
+        result = apply.run_wbc0027_fbs_quality_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "1" * 64,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert result["state"] == "done"
+    assert result["apply_count"] == 1
+    assert len(calls) == 4
+    rendered = [" ".join(command) for command in calls]
+    assert sum(" apply " in value for value in rendered) == 1
+    assert sum(" readback " in value for value in rendered) == 1
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
@@ -2013,6 +2152,7 @@ def main() -> None:
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
     _exercise_wbc0027_two_phase_runner()
+    _exercise_wbc0027_fbs_quality_runner()
     _exercise_wbc0013_two_phase_runner()
     _exercise_historical_cost_runner()
     _exercise_historical_missing_runner()

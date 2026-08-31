@@ -763,3 +763,18 @@ non-target invariants остаются plan/apply guards, но не queue owners
 
 `user-artifact` не входит в GitHub PR/release flow. Historical Actions logs,
 comments и branches сохраняются как audit evidence.
+
+### WBC0027 FBS lifecycle quality recovery
+
+Release Runner deploys the recovery code as ordinary `live_runtime` and performs
+no business-data mutation. The separate Production Apply passport is exact:
+
+`/wb-core authorize-goal-v1 task WBC0027 profile fbs-lifecycle-quality-recovery target wb_core_eu_hosted_runtime_active source-sequence 28050157 dates 2026-08-17..2026-08-31 groups fff_d67e8c823d5f81dd988d00dbfea6:210183919,fff_d67e8c823d5f81dd988d00dbfea6:428855560,fff_d67e8c823d5f81dd988d00dbfea6:428855758,fff_2579bb2741ed4ab23b11bb4c4183:428855758 submits 1`
+
+The trusted runner obtains two consecutive query-only witnesses with the same
+deployed SHA, StoreRegistry generation/schema, active cutover/forward
+generation, exact source rows, derived effects, history bases and non-target
+digest. Only then may it issue one apply command. It always performs query-only
+readback afterward and never retries the mutation command after an ambiguous
+transport result. The durable terminal receipt must reconcile the derived
+target count, all 15 same-date captures, four exact groups and `mutates_wb=false`.

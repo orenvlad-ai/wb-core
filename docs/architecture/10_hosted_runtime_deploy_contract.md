@@ -1339,3 +1339,11 @@ mismatch set. Its deterministic event timestamp yields material-identical JIT
 witnesses; readback proves 1952/1952, exact three-location/provenance, own cost,
 six TOTAL dependencies, current state and all A zeros preserved. The deployed
 CLI retains bounded typed failures. Release itself executes neither A nor B.
+
+Migration 176 follows the same separation. Live deploy may install the
+lifecycle-quality schema, query/presentation guards and default-dry-run CLI,
+but it does not resolve pending identities or append history. The only business
+write path is the exact `fbs-lifecycle-quality-recovery` Production Apply
+profile: two query-only JIT witnesses, one shared-lock/one-transaction submit,
+private before-image, target/non-target CAS and query-only terminal readback.
+It changes no service/timer, performs no blanket stop and never writes WB stock.

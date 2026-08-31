@@ -164,6 +164,7 @@
         ["python3", "apps/ff_pool_fbs_lifecycle_smoke.py"],
         ["python3", "apps/warehouse_fbs_material_rematerialization_smoke.py"],
         ["python3", "apps/ff_pool_fbs_forward_recovery_smoke.py"],
+        ["python3", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py"],
         ["python3", "apps/russian_payment_orders_smoke.py"],
         ["python3", "apps/ff_pool_overhead_backfill_smoke.py"],
         ["python3", "apps/ff_fbs_mapping_extension_production_smoke.py"],
@@ -285,6 +286,12 @@
       "id": "inventory-history",
       "paths": ["apps/inventory_planning_*", "apps/sheet_vitrina_v1_inventory_history*", "apps/sheet_vitrina_v1_inventory_planning*", "packages/application/inventory_planning*", "packages/application/sheet_vitrina_v1_inventory_history*", "packages/application/sheet_vitrina_v1_inventory_planning*"],
       "suites": ["inventory_history"],
+      "release": "live_runtime"
+    },
+    {
+      "id": "wbc0027-fbs-lifecycle-quality-recovery",
+      "paths": ["apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py"],
+      "suites": ["fulfillment", "inventory_history", "release_safety"],
       "release": "live_runtime"
     },
     {

@@ -1040,19 +1040,29 @@ class WbFbsOrdersCollector:
             barcodes = json.loads(str(row["skus_json"]))
             barcode = str(barcodes[0] or "") if isinstance(barcodes, list) and len(barcodes) == 1 else ""
             seller_sku = str(row.get("seller_sku") or "")
-            warehouse_mapping = conn.execute(
-                f"""SELECT mapping_id FROM {WAREHOUSE_MAPPINGS_TABLE}
+            warehouse_candidates = conn.execute(
+                f"""SELECT mapping_id,facility_id FROM {WAREHOUSE_MAPPINGS_TABLE}
                     WHERE seller_warehouse_id=? AND active=1
-                    ORDER BY created_at DESC,mapping_id DESC LIMIT 1""",
+                    ORDER BY created_at DESC,mapping_id DESC""",
                 (warehouse_id,),
-            ).fetchone() if warehouse_id else None
-            identity_mapping = conn.execute(
-                f"""SELECT mapping_id FROM {IDENTITY_MAPPINGS_TABLE}
+            ).fetchall() if warehouse_id else []
+            warehouse_mapping = (
+                warehouse_candidates[0]
+                if len({str(item[1]) for item in warehouse_candidates}) == 1
+                else None
+            )
+            identity_candidates = conn.execute(
+                f"""SELECT mapping_id,target_nm_id FROM {IDENTITY_MAPPINGS_TABLE}
                     WHERE source_nm_id=? AND source_chrt_id=? AND source_barcode=?
                       AND source_sku=? AND active=1
-                    ORDER BY created_at DESC,mapping_id DESC LIMIT 1""",
+                    ORDER BY created_at DESC,mapping_id DESC""",
                 (row["nm_id"], row.get("chrt_id") or 0, barcode, seller_sku),
-            ).fetchone() if row.get("chrt_id") and barcode and seller_sku else None
+            ).fetchall() if row.get("chrt_id") and barcode and seller_sku else []
+            identity_mapping = (
+                identity_candidates[0]
+                if len({int(item[1]) for item in identity_candidates}) == 1
+                else None
+            )
             outcome = "unmatched_warehouse" if warehouse_mapping is None else (
                 "deferred" if not row.get("chrt_id") or not barcode or not seller_sku else
                 "unmatched_identity" if identity_mapping is None else "matched"

@@ -2179,6 +2179,7 @@ class OwnProductCapitalBlock:
             "wb": "WB",
             "wb_acceptance_discrepancy": "WB_ACCEPTANCE_DISCREPANCY",
         }
+        lifecycle_quality: dict[str, Any] = {"status": "not_applicable", "groups": []}
         with _connect(self.runtime.db_path) as conn:
             tables = {
                 str(row[0])
@@ -2243,6 +2244,15 @@ class OwnProductCapitalBlock:
                    WHERE version_id=? ORDER BY nm_id,warehouse_key""",
                 (version["version_id"],),
             ).fetchall()
+            from packages.application.ff_pool_fbs_lifecycle import (
+                fbs_lifecycle_quality_coverage,
+            )
+
+            lifecycle_quality = fbs_lifecycle_quality_coverage(
+                conn,
+                as_of_date=as_of_date,
+                requested_nm_ids=requested_nm_ids,
+            )
             active = (
                 conn.execute(
                     "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
@@ -2435,6 +2445,10 @@ class OwnProductCapitalBlock:
             target["_warehouse_source_watermarks"] = _json_loads(
                 version["source_watermarks_json"]
             )
+        _apply_fbs_lifecycle_quality_to_product_lookup(
+            result,
+            coverage=lifecycle_quality,
+        )
         return result
 
     def _load_canonical_daily_metric_lookup(self, as_of_date: str) -> dict[int, dict[str, Any]]:
@@ -3543,6 +3557,75 @@ def _json_array(value: Any) -> list[Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     return list(parsed) if isinstance(parsed, list) else []
+
+
+def _apply_fbs_lifecycle_quality_to_product_lookup(
+    lookup: dict[int, dict[str, Any]],
+    *,
+    coverage: Mapping[str, Any],
+) -> None:
+    """Fail closed FF capital/WAC and dependent totals for blocked groups."""
+
+    groups = [dict(item) for item in coverage.get("groups") or []]
+    if not groups:
+        return
+    reason = (
+        "Неполная lifecycle/identity coverage FBS: ожидается точная каноническая "
+        "привязка и материализация статусов; частичный капитал не публикуется."
+    )
+    for nm_id, target in lookup.items():
+        blocked = any(
+            item.get("nm_id") is None or int(item["nm_id"]) == int(nm_id)
+            for item in groups
+        )
+        if not blocked:
+            continue
+        for field in (
+            "qty",
+            "paid_equivalent_qty",
+            "capital_rub",
+            "unit_cost_rub",
+            "cost_coverage_pct",
+            "confirmed_share_pct",
+            "confirmed_qty",
+            "cost_covered_qty",
+        ):
+            target[own_stage_metric_key("FF", field)] = None
+        for key in (
+            OWN_TOTAL_QTY_METRIC_KEY,
+            OWN_TOTAL_PAID_EQUIVALENT_QTY_METRIC_KEY,
+            OWN_TOTAL_CAPITAL_RUB_METRIC_KEY,
+            OWN_AVG_COST_RUB_METRIC_KEY,
+            OWN_TOTAL_CONFIRMED_SHARE_PCT_METRIC_KEY,
+        ):
+            target[key] = None
+        stage_presentation = target.setdefault("stage_presentation", {})
+        stage_presentation["FF"] = {"state": "unavailable", "reason": reason}
+        target["presentation_state"] = "unavailable"
+        target["presentation_reason"] = reason
+        target["presentation_reasons"] = sorted(
+            set([*(target.get("presentation_reasons") or []), reason])
+        )
+        stages = target.setdefault("_inventory_cost_stages", {})
+        ff_stage = dict(stages.get("FF") or {})
+        ff_stage.update(
+            {
+                "quantity": None,
+                "capital_rub": None,
+                "cost_covered_quantity": None,
+                "wac_rub": None,
+                "quality": "lifecycle_identity_coverage_pending",
+                "certified": False,
+                "location_status": "lifecycle_identity_coverage_pending",
+                "locations": [],
+            }
+        )
+        stages["FF"] = ff_stage
+        target["_fbs_lifecycle_quality"] = {
+            "status": str(coverage.get("status") or "partial"),
+            "digest": str(coverage.get("digest") or ""),
+            "groups": groups,
+        }
 
 
 def _inventory_cost_stage_evidence(
