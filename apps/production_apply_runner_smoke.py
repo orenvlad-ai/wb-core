@@ -53,7 +53,17 @@ WBC0027_AUTH_BODY = (
     "special-date 2026-08-21 special-nm 497413772 special-cells 16 "
     "blocked-date 2026-08-15 hard-non-target-from 2026-08-30 "
     "economics-logical 298 economics-persisted 472 economics-blocked 12 "
-    "protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2"
+    "protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2 "
+    "predecessor-pr 1128 "
+    "predecessor-release-operation release-v2-52c958d066816e6e7b2fec7b419fc530 "
+    "predecessor-release-comment 5471998411 "
+    "predecessor-authorization-comment 5472023099 "
+    "predecessor-apply-run 33343193199 predecessor-apply-comment 5472070488 "
+    "predecessor-receipt "
+    "sha256:2e65b37d7a44027928143d0f8b4ab71c43638450f659c4875faf3b0d80f7b9d5 "
+    "predecessor-operation production-goal-v1-89bfdc5e4e4bffcbc9f6f6aea677e389 "
+    "predecessor-product-phase recovery_303ece915dfb8e89b615a84dc8f14d70 "
+    "predecessor-economics-phase recovery_8fe6bf612bde74c0dec9cb3b441944b2"
 )
 HISTORICAL_COST_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 "
@@ -361,6 +371,127 @@ def _exercise_historical_missing_runner() -> None:
     ]
 
 
+def _exercise_wbc0027_predecessor_binding(goal: dict[str, object]) -> None:
+    binding = apply.WBC0027_PREDECESSOR_BINDING
+    release_payload = {
+        "state": "done",
+        "operation_id": binding["release_operation_id"],
+        "pull_request": binding["pull_request"],
+        "merge_sha": "68426769aa7dffec495eac66a8f502e2903c769b",
+        "deployed_sha": "68426769aa7dffec495eac66a8f502e2903c769b",
+        "release_kind": "live_runtime",
+    }
+    apply_summary = {
+        "schema": apply.APPLY_COMMENT_SUMMARY_SCHEMA,
+        "state": "blocked",
+        "reason": "wbc0027-product-query-only-readback-not-reconciled",
+        "operation_id": binding["goal_operation_id"],
+        "release_operation_id": binding["release_operation_id"],
+        "pull_request": binding["pull_request"],
+        "apply_count": 0,
+        "artifact": {
+            "name": binding["artifact_name"],
+            "sha256": binding["receipt_sha256"],
+        },
+    }
+    comments = [
+        {
+            "id": binding["release_comment_id"],
+            "user": {"login": "github-actions[bot]"},
+            "body": (
+                f"<!-- {apply.RECEIPT_MARKER} "
+                f"operation={binding['release_operation_id']} -->\n```json\n"
+                + json.dumps(release_payload, sort_keys=True)
+                + "\n```"
+            ),
+        },
+        {
+            "id": binding["authorization_comment_id"],
+            "author_association": "OWNER",
+            "body": apply.WBC0027_PREDECESSOR_AUTH_BODY,
+        },
+        {
+            "id": binding["apply_comment_id"],
+            "user": {"login": "github-actions[bot]"},
+            "body": apply.marker(str(binding["goal_operation_id"]))
+            + "\n```json\n"
+            + json.dumps(apply_summary, sort_keys=True)
+            + "\n```",
+        },
+    ]
+    qualification = [
+        {
+            "material_qualification_digest": "sha256:" + "0" * 64,
+            "phase_operation_id": binding["product_phase_operation_id"],
+        },
+        {
+            "material_qualification_digest": "sha256:" + "0" * 64,
+            "phase_operation_id": binding["product_phase_operation_id"],
+        },
+    ]
+    receipt = {
+        "schema": apply.APPLY_RECEIPT_SCHEMA,
+        "state": "blocked",
+        "operation_id": binding["goal_operation_id"],
+        "pull_request": binding["pull_request"],
+        "release_operation_id": binding["release_operation_id"],
+        "authorization_comment_id": binding["authorization_comment_id"],
+        "authorization_body_sha256": apply.digest(
+            apply.WBC0027_PREDECESSOR_AUTH_BODY.encode("utf-8")
+        ),
+        "goal": {
+            key: value
+            for key, value in goal.items()
+            if key != "supersedes_terminal_predecessor"
+        },
+        "apply_count": 0,
+        "evidence": {
+            "state": "blocked",
+            "product_state": "not_applied",
+            "economics_state": "not_applied",
+            "qualification_attempts": {
+                "product": qualification,
+                "economics": [],
+            },
+            "product_apply": {
+                "result": {
+                    "error_type": "TypeError",
+                    "error": (
+                        "warehouse_sync_lock() got an unexpected keyword argument "
+                        "'operation'"
+                    ),
+                    "phase_operation_id": binding["product_phase_operation_id"],
+                    "production_mutation_submit_count": 0,
+                }
+            },
+        },
+    }
+    predecessor = apply._validate_wbc0027_predecessor_evidence(
+        goal=goal,
+        comments=comments,
+        run={"validated_artifact": {"id": binding["artifact_id"]}},
+        receipt=receipt,
+    )
+    assert predecessor["state"] == "blocked"
+    assert predecessor["apply_count"] == 0
+    assert predecessor["private_manifests_reusable"] is False
+    assert predecessor["terminal_operation_reusable"] is False
+
+    changed = json.loads(json.dumps(receipt))
+    changed["apply_count"] = 1
+    try:
+        apply._validate_wbc0027_predecessor_evidence(
+            goal=goal,
+            comments=comments,
+            run={"validated_artifact": {"id": binding["artifact_id"]}},
+            receipt=changed,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("mutated WBC0027 predecessor evidence was accepted")
+
+
 def _exercise_wbc0027_two_phase_runner() -> None:
     goal = apply.validate_authorization(
         authorization(body=WBC0027_AUTH_BODY),
@@ -369,6 +500,26 @@ def _exercise_wbc0027_two_phase_runner() -> None:
     )
     assert goal["profile"] == apply.WBC0027_GOAL_PROFILE
     assert goal["max_product_submits"] == goal["max_economics_submits"] == 1
+    assert goal["supersedes_terminal_predecessor"] == apply.WBC0027_PREDECESSOR_BINDING
+    _exercise_wbc0027_predecessor_binding(goal)
+    old_unbound_body = WBC0027_AUTH_BODY.split(" predecessor-pr ", 1)[0]
+    try:
+        apply.validate_authorization(
+            authorization(body=old_unbound_body),
+            repository="orenvlad-ai/wb-core",
+            pr=1050,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("terminal WBC0027 passport grammar was blindly reused")
+    fresh_operation = apply.operation_id(
+        "orenvlad-ai/wb-core", 1130, 5473000000, goal
+    )
+    assert fresh_operation != apply.WBC0027_PREDECESSOR_BINDING["goal_operation_id"]
+    assert fresh_operation != apply.operation_id(
+        "orenvlad-ai/wb-core", 1130, 5473000001, goal
+    )
     legacy_body = (
         "/wb-core apply-v2 pr 1126 merge "
         + MERGE_SHA
@@ -2481,6 +2632,7 @@ def main() -> None:
         "\n  warm_archive_receipt_reconciliation:\n", 1
     )
     assert "pull-requests: write" in apply_job
+    assert "actions: read" in apply_job
     assert "--authorization-mode warm-archive-readiness" in apply_job
     assert "--authorization-mode warm-archive-mount-probe" in apply_job
     assert "--authorization-comment-id" in apply_job

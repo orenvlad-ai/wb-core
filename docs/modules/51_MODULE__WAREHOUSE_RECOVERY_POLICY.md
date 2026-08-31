@@ -379,6 +379,15 @@ performs full before-image CAS. Target/deployment/generation/schema drift is
 only readback. Retained exact readback is `applied`. No phase ID, manifest SHA
 or authorization comment from the superseded operation is reusable.
 
+PR #1128 terminalized before the first T1 submit with `apply_count=0`: goal
+`production-goal-v1-89bfdc5e4e4bffcbc9f6f6aea677e389`, product phase
+`recovery_303ece915dfb8e89b615a84dc8f14d70` and derived economics phase
+`recovery_8fe6bf612bde74c0dec9cb3b441944b2` remain non-reusable predecessor
+evidence. A correction passport exactly binds that blocked receipt but derives
+fresh goal/phase identities from its own PR/comment/deployed code. The old
+mode-0700 directory and mode-0600 product witnesses remain retained audit files
+and are never opened as the new reviewed candidate.
+
 The StoreRegistry identity is the exact typed triple `generation_id`,
 `manifest_sha256`, and `schema_revision`. Both identifiers are non-empty opaque
 strings; no numeric conversion, ordering, or synthetic generation prefix is
@@ -394,3 +403,12 @@ updates only the qualified ready-snapshot rows/cells. Finance, unrelated
 21-August Proxy V4, 30 August and later, and protected 26-August SKU
 `428853741` cost `117.537167` remain hard non-target/invariant evidence. A
 transport ambiguity is never blindly resubmitted.
+
+WBC0027 acquires the shared compatibility wrapper only by its canonical public
+contract `warehouse_sync_lock(runtime_dir, blocking=False)`. Operation labels
+and timeout keywords do not belong to that wrapper. Both apply phases rebuild
+their exact candidate under this real re-entrant writer boundary; contention
+fails before T1 with zero submit, and context exit releases process/file locks
+after success or exception. The deployed `preflight --phase product` command
+uses the same boundary and rebuild path but stops before T1, requires a missing
+recovery lifecycle and reports query-only/no-create zero-mutation evidence.
