@@ -63,20 +63,23 @@ def _fixture(root: Path, *, goal_suffix: str) -> tuple[RuntimeFixture, dict]:
             "CREATE TABLE sheet_vitrina_v1_ready_snapshots("
             "bundle_version TEXT NOT NULL,as_of_date TEXT NOT NULL,"
             "snapshot_id TEXT NOT NULL,plan_json TEXT NOT NULL,"
+            "refreshed_at TEXT NOT NULL DEFAULT '',"
             "PRIMARY KEY(bundle_version,as_of_date,snapshot_id))"
         )
         patches = []
-        for index, day in enumerate(("2026-08-26", "2026-08-29", "2026-08-29")):
-            identity = ["bundle", day, f"target-{index}"]
+        source = recovery.LEGACY_SOURCE_TRANSACTION_BINDING
+        for index, day in enumerate(("2026-08-26", "2026-08-26", "2026-08-29")):
+            identity = list(source["target_identities"][index])
             before = _payload(day=day, target="", ordinary=f"target-{index}")
             after = _payload(day=day, target=f"117.53716{index + 7}", ordinary=f"target-{index}")
             before_json = recovery._json(before)
             after_json = recovery._json(after)
             conn.execute(
-                "INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?)",
+                "INSERT INTO sheet_vitrina_v1_ready_snapshots("
+                "bundle_version,as_of_date,snapshot_id,plan_json) VALUES(?,?,?,?)",
                 (*identity, before_json),
             )
-            cell_count = (160, 160, 152)[index]
+            cell_count = (174, 174, 124)[index]
             patches.append(
                 {
                     "identity": identity,
@@ -93,8 +96,14 @@ def _fixture(root: Path, *, goal_suffix: str) -> tuple[RuntimeFixture, dict]:
                 day="2026-08-30", target="stable", ordinary=f"ordinary-{index}"
             )
             conn.execute(
-                "INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?)",
-                ("bundle", "2026-08-30", f"ordinary-{index:03d}", recovery._json(payload)),
+                "INSERT INTO sheet_vitrina_v1_ready_snapshots("
+                "bundle_version,as_of_date,snapshot_id,plan_json) VALUES(?,?,?,?)",
+                (
+                    "bundle",
+                    "2026-08-24",
+                    f"ordinary-{index:03d}",
+                    recovery._json(payload),
+                ),
             )
         conn.commit()
         rows = conn.execute(
@@ -356,6 +365,21 @@ def _exercise_false_quarantine_finalize() -> None:
         assert _target_json(runtime, candidate) == [
             item["after_plan_json"] for item in economics["patches"]
         ]
+        del economics["semantic_non_target"]
+        del candidate["material"]["semantic_non_target_contract"]
+        assert "semantic_non_target" not in economics
+        assert "semantic_non_target_contract" not in candidate["material"]
+        try:
+            recovery._economics_material(
+                economics,
+                product_phase_operation_id=candidate["material"][
+                    "product_phase_operation_id"
+                ],
+            )
+        except recovery.Wbc0027RecoveryError as exc:
+            assert "canonical semantic non-target witness is invalid" in str(exc)
+        else:
+            raise AssertionError("future Apply accepted the legacy source shape")
         with sqlite3.connect(runtime.db_path) as conn:
             later = _payload(
                 day="2026-08-30",
@@ -364,8 +388,16 @@ def _exercise_false_quarantine_finalize() -> None:
             )
             later["metadata"]["refreshed_at"] = "2026-08-30T01:39:50Z"
             conn.execute(
-                "INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?)",
-                ("bundle", "2026-08-30", "ordinary-future", recovery._json(later)),
+                "INSERT INTO sheet_vitrina_v1_ready_snapshots("
+                "bundle_version,as_of_date,snapshot_id,plan_json,refreshed_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    "bundle",
+                    "2026-08-30",
+                    "ordinary-future",
+                    recovery._json(later),
+                    "2026-08-30T01:39:50Z",
+                ),
             )
             conn.commit()
 
@@ -383,6 +415,8 @@ def _exercise_false_quarantine_finalize() -> None:
         original_product = recovery.reconcile_warehouse_business_projection
         original_hard = recovery._hard_non_target_semantics
         original_target_cells = recovery._target_cells
+        original_validate_candidate = recovery._validate_candidate
+        original_source_binding = recovery.LEGACY_SOURCE_TRANSACTION_BINDING
         recovery.RegistryUploadDbBackedRuntime = RuntimeFixture
         recovery._generation = lambda _runtime_dir: dict(GENERATION)
         recovery.reconcile_warehouse_business_projection = lambda *_args, **_kwargs: {
@@ -406,6 +440,44 @@ def _exercise_false_quarantine_finalize() -> None:
             return {**actual, **{f"exact-{index}": "1" for index in range(12)}}
 
         recovery._target_cells = production_shape
+        source_patches = economics["patches"]
+        target_removed = tuple(
+            recovery._digest(
+                recovery._strip_economics_targets(
+                    json.loads(str(patch["before_plan_json"])),
+                    list(patch["business_dates"]),
+                )
+            )
+            for patch in source_patches
+        )
+        fixture_source = {
+            **original_source_binding,
+            "goal_operation_id": candidate["goal_operation_id"],
+            "product_phase_operation_id": candidate["material"][
+                "product_phase_operation_id"
+            ],
+            "economics_phase_operation_id": candidate["phase_operation_id"],
+            "source_deployed_sha": OLD_SHA,
+            "manifest_sha256": recovery._file_digest(manifest),
+            "phase_fingerprint": candidate["phase_fingerprint"],
+            "storage_generation": dict(GENERATION),
+            "source_raw_non_target_digest": economics["non_target_digest"],
+            "target_identities": tuple(
+                tuple(patch["identity"]) for patch in source_patches
+            ),
+            "target_before_hashes": tuple(
+                patch["before_sha256"] for patch in source_patches
+            ),
+            "target_before_digest": economics["before_digest"],
+            "target_after_hashes": tuple(
+                patch["after_sha256"] for patch in source_patches
+            ),
+            "target_after_digest": economics["after_digest"],
+            "target_removed_digests": target_removed,
+            "target_changed_cell_counts": (174, 174, 124),
+        }
+        recovery.LEGACY_SOURCE_TRANSACTION_BINDING = fixture_source
+        recovery._validate_candidate = lambda *_args, **_kwargs: None
         try:
             db_digest_before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
             kwargs = {
@@ -422,16 +494,21 @@ def _exercise_false_quarantine_finalize() -> None:
                 "source_run_id": 33345644125,
                 "source_artifact_id": 9741910399,
                 "source_artifact_name": "production-apply-receipt-pr-1129-run-33345644125",
-                "source_receipt_sha256": "sha256:" + "8" * 64,
+                "source_receipt_sha256": fixture_source["receipt_sha256"],
                 "source_comment_id": 5472359912,
                 "reconciliation_pr": 1130,
                 "reconciliation_release_operation_id": "release-v2-" + "e" * 32,
-                "authorization_reference": "github:orenvlad-ai/wb-core:pr:1129:comment:5472278622:sha256:" + "f" * 64,
+                "authorization_reference": (
+                    "github:orenvlad-ai/wb-core:pr:1129:comment:5472278622:sha256:"
+                    + fixture_source["authorization_body_sha256"]
+                ),
             }
             first = recovery.finalize_existing_economics_operation(**kwargs)
             second = recovery.finalize_existing_economics_operation(**kwargs)
             assert first == second
             assert first["status"] == "reconciled_existing_operation"
+            assert first["qualification_status"] == "qualified"
+            assert first["repeat_disposition"] == "already_qualifiable"
             assert first["query_only"] is True
             assert first["database_written"] is False
             assert first["production_mutation_count"] == 0
@@ -441,13 +518,23 @@ def _exercise_false_quarantine_finalize() -> None:
             source = first["source_transaction"]
             drift = first["temporal_non_target_drift"]
             assert source["source_ready_row_count"] == 224
-            assert source["source_raw_non_target_row_count"] == 221
-            assert source["source_raw_non_target_digest"] == economics["non_target_digest"]
+            assert source["source_raw_non_target"] == {
+                "contract_name": "wbc0027_legacy_raw_non_target_aggregate/v1",
+                "row_count": 221,
+                "digest": economics["non_target_digest"],
+                "binding": "exact_source_manifest_and_recovery_row",
+            }
+            assert source["source_semantic_components_reconstructable"] is False
+            assert source["source_adapter_rehearsal_digest"] == (
+                "sha256:3598233834edfdc236bff126dfd9a25f432d36e44a1ed97abad9123d079cf4aa"
+            )
             assert source["write_set"] == {
                 "row_count": 3,
                 "cell_count": 472,
                 "undo_row_count": 3,
                 "undo_rows_verified": True,
+                "undo_artifact_verified": True,
+                "expected_after_image_count": 3,
             }
             assert all(
                 row["target_removed_before_digest"]
@@ -455,15 +542,130 @@ def _exercise_false_quarantine_finalize() -> None:
                 for row in source["target_rows"]
             )
             assert drift["changed"] is True
-            assert drift["source_row_count"] == 224
-            assert drift["current_row_count"] == 225
+            assert drift["source_ready_row_count"] == 224
+            assert drift["current_ready_row_count"] == 225
+            assert drift["source_raw_non_target_row_count"] == 221
+            assert drift["current_raw_non_target_row_count"] == 222
+            assert drift["source_semantic_components_available"] is False
+            assert drift["source_semantic_reconstruction_permitted"] is False
+            assert drift["equality_gate"] is False
             assert drift["classification"] == "later_non_target_evolution"
             assert drift["diff_derivation"] == "unique_added_row_from_source_raw_aggregate"
             assert drift["derived_added_rows"][0]["identity"][-1] == "ordinary-future"
+            assert drift["observed_late_ordinary_rows"] == [
+                {
+                    "identity": ["bundle", "2026-08-30", "ordinary-future"],
+                    "plan_sha256": recovery._sha_text(recovery._json(later)),
+                    "refreshed_at": "2026-08-30T01:39:50Z",
+                }
+            ]
             assert drift["effect"] == "receipt_evidence_only_not_target_approval"
-            assert hashlib.sha256(runtime.db_path.read_bytes()).hexdigest() == db_digest_before
+
+            def assert_binding_blocked(**overrides: object) -> None:
+                changed = {**kwargs, **overrides}
+                try:
+                    recovery.finalize_existing_economics_operation(**changed)
+                except recovery.Wbc0027RecoveryError as exc:
+                    assert "binding drifted" in str(exc)
+                else:
+                    raise AssertionError(f"legacy binding accepted {sorted(overrides)}")
+
+            assert_binding_blocked(source_receipt_sha256="sha256:" + "0" * 64)
+            assert_binding_blocked(source_deployed_sha="0" * 40)
+            assert_binding_blocked(source_manifest_sha256="sha256:" + "0" * 64)
+            assert_binding_blocked(
+                source_storage_generation={**GENERATION, "schema_revision": "wrong"}
+            )
+            assert_binding_blocked(goal_operation_id="production-goal-v1-" + "0" * 32)
+            assert_binding_blocked(source_phase_operation_id="recovery_" + "0" * 32)
+
+            manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+            for field in ("before_sha256", "after_sha256"):
+                changed_manifest = json.loads(json.dumps(manifest_value))
+                changed_manifest["functional_economics"]["patches"][0][field] = (
+                    "sha256:" + "0" * 64
+                )
+                manifest.write_bytes(recovery._json(changed_manifest).encode("utf-8"))
+                changed_digest = recovery._file_digest(manifest)
+                recovery.LEGACY_SOURCE_TRANSACTION_BINDING = {
+                    **fixture_source,
+                    "manifest_sha256": changed_digest,
+                }
+                try:
+                    recovery.finalize_existing_economics_operation(
+                        **{
+                            **kwargs,
+                            "source_manifest_sha256": changed_digest,
+                        }
+                    )
+                except recovery.Wbc0027RecoveryError as exc:
+                    assert "before/planned-after equality drifted" in str(exc)
+                else:
+                    raise AssertionError(f"source target {field} mismatch was accepted")
+            manifest.write_bytes(recovery._json(manifest_value).encode("utf-8"))
+            recovery.LEGACY_SOURCE_TRANSACTION_BINDING = fixture_source
+            assert (
+                hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+                == db_digest_before
+            )
             after = registry.get_operation(candidate["phase_operation_id"])
             assert after == quarantined
+
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_recovery_operations "
+                    "SET quarantine_reason='wrong' WHERE operation_id=?",
+                    (candidate["phase_operation_id"],),
+                )
+                conn.commit()
+            try:
+                recovery.finalize_existing_economics_operation(**kwargs)
+            except recovery.Wbc0027RecoveryError as exc:
+                assert "quarantine reason drifted" in str(exc)
+            else:
+                raise AssertionError("wrong quarantine reason was accepted")
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_recovery_operations "
+                    "SET quarantine_reason='non_target_digest_drift_after_mutation' "
+                    "WHERE operation_id=?",
+                    (candidate["phase_operation_id"],),
+                )
+                deleted = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_recovery_undo_rows "
+                    "WHERE operation_id=? ORDER BY sequence_no DESC LIMIT 1",
+                    (candidate["phase_operation_id"],),
+                ).fetchone()
+                columns = [
+                    item[1]
+                    for item in conn.execute(
+                        "PRAGMA table_info(sheet_vitrina_v1_recovery_undo_rows)"
+                    )
+                ]
+                conn.execute(
+                    "DELETE FROM sheet_vitrina_v1_recovery_undo_rows "
+                    "WHERE operation_id=? AND sequence_no=?",
+                    (candidate["phase_operation_id"], deleted["sequence_no"]),
+                )
+                conn.commit()
+            try:
+                recovery.finalize_existing_economics_operation(**kwargs)
+            except recovery.Wbc0027RecoveryError as exc:
+                assert "undo row count drifted" in str(exc)
+            else:
+                raise AssertionError("missing undo row was accepted")
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO sheet_vitrina_v1_recovery_undo_rows("
+                    + ",".join(columns)
+                    + ") VALUES("
+                    + ",".join("?" for _ in columns)
+                    + ")",
+                    tuple(deleted[column] for column in columns),
+                )
+                conn.commit()
 
             target_patch = economics["patches"][0]
             with sqlite3.connect(runtime.db_path) as conn:
@@ -479,6 +681,26 @@ def _exercise_false_quarantine_finalize() -> None:
                 assert "current after-image drifted" in str(exc)
             else:
                 raise AssertionError("later target drift was accepted")
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
+                    "WHERE bundle_version=? AND as_of_date=? AND snapshot_id=?",
+                    (target_patch["after_plan_json"], *target_patch["identity"]),
+                )
+                partial = json.loads(str(target_patch["after_plan_json"]))
+                partial["metadata"]["ordinary_publication"] = "partial-target-drift"
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
+                    "WHERE bundle_version=? AND as_of_date=? AND snapshot_id=?",
+                    (recovery._json(partial), *target_patch["identity"]),
+                )
+                conn.commit()
+            try:
+                recovery.finalize_existing_economics_operation(**kwargs)
+            except recovery.Wbc0027RecoveryError as exc:
+                assert "current after-image drifted" in str(exc)
+            else:
+                raise AssertionError("partial current target drift was accepted")
             with sqlite3.connect(runtime.db_path) as conn:
                 conn.execute(
                     "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
@@ -508,6 +730,8 @@ def _exercise_false_quarantine_finalize() -> None:
             recovery.reconcile_warehouse_business_projection = original_product
             recovery._hard_non_target_semantics = original_hard
             recovery._target_cells = original_target_cells
+            recovery._validate_candidate = original_validate_candidate
+            recovery.LEGACY_SOURCE_TRANSACTION_BINDING = original_source_binding
 
 
 def main() -> None:

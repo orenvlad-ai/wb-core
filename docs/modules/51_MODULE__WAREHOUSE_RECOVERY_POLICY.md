@@ -436,8 +436,17 @@ manifest/fingerprint, three undo rows, mutation-running→quarantined transition
 current exact target hashes and a historic source transaction reconstructed
 from the 221-row raw aggregate plus three target-removed T1 before/planned-after
 rows. Later current non-target evolution is recorded with source/current row
-counts and component digests, not required to equal source; target drift still
-fails closed. It writes no recovery transition or business row. The
+counts, the source raw digest and current semantic component digests; no
+unavailable source semantic component is invented or compared. Target drift
+still fails closed. It writes no recovery transition or business row. The
 separate Apply workflow uploads one immutable receipt and then one compact
 supersession marker; exact repeat is `already_terminal`, while missing/foreign/
 duplicate evidence fails closed before SSH.
+
+“Reconstructed” here does not mean reconstructing unavailable historical
+semantic components. The exact adapter emits only the source raw aggregate,
+three row equality witnesses, undo/artifact proof and source-code ordering
+contract. Current semantic component digests are typed observation only and
+have no historical equality predicate. Absence of the semantic fields is
+accepted only for the exact PR-1129 lineage; canonical future Apply validation
+remains unchanged and fail-closed.
