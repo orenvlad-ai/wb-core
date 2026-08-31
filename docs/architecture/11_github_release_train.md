@@ -441,6 +441,29 @@ current target after-images остаются exact equality gate.
 hashes всё равно обязаны точно совпасть. Для любого другого source пустое поле,
 а для exact legacy source любое непустое неравное значение, fail closed.
 
+После terminal blocked run `33370422066` эта exception проверяется только pure
+stdlib-модулем `apps/wbc0027_capital_recovery_source_binding.py`. Apply Runner
+не импортирует full recovery runtime и не зависит от `openpyxl` либо другой
+business-runtime dependency для receipt validation. Пустой `after_digest`
+допускается лишь при одновременном exact source allowlist и полном legacy proof:
+raw `221`, три exact target rows с removed-target equality, write set `3/472`,
+undo/order и source-code binding. Модуль входит в собственный closed runtime
+source set, поэтому его drift требует нового `live_runtime` release.
+
+Следующая reconciliation generation exact-bind оба terminal predecessor:
+artifact-less failed run `33363863580` и artifact-bearing blocked run
+`33370422066` / artifact `9749833454` / receipt
+`sha256:518fc39f3c7a17e84a247075f540ef393aed0110b827d276d322075de1000951` /
+evidence
+`sha256:87017b579f91e8c49de9111a38098cfef5e02f401467ba1726fb15ed736f9e3b`.
+Receipt и compact summary используют generation v3 с одним consolidated
+`wbc0027_reconciliation_terminal_predecessors/v1`; старые artifacts и markers
+не переписываются. Input surface workflow не расширяется: первый run остаётся
+caller-bound через `prior_reconciliation_run_id`, второй immutable predecessor
+выводится и проверяется server-side. Новый release по-прежнему не dispatch-ит
+`finalize-only`; отдельный default-off query-only continuation сохраняет
+mutation/replay count zero.
+
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:
 

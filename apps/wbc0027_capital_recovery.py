@@ -32,6 +32,12 @@ from apps.sheet_vitrina_v1_historical_missing_repair import (  # noqa: E402
 from apps.ff_pool_dense_fbs import _write_private  # noqa: E402
 from apps.wbc0027_capital_recovery_source_binding import (  # noqa: E402
     CONTRACT_NAME as RECONCILIATION_RUNTIME_SOURCE_BINDING_CONTRACT,
+    LEGACY_SOURCE_CODE_ORDER_CONTRACT,
+    LEGACY_SOURCE_RAW_NON_TARGET_CONTRACT,
+    LEGACY_SOURCE_TRANSACTION_BINDING,
+    LEGACY_SOURCE_TRANSACTION_CONTRACT,
+    SourceBindingError,
+    validate_legacy_source_transaction_binding,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
@@ -75,11 +81,6 @@ ECONOMICS_NON_TARGET_CONTRACT = (
 )
 ECONOMICS_NON_TARGET_SCOPE_VERSION = "ready_snapshot_target_slices_removed_v1"
 FINALIZE_ONLY_CONTRACT = "wbc0027_existing_operation_reconciliation/v1"
-LEGACY_SOURCE_TRANSACTION_CONTRACT = (
-    "wbc0027_source_economics_transaction_legacy_adapter/v1"
-)
-LEGACY_SOURCE_RAW_NON_TARGET_CONTRACT = "wbc0027_legacy_raw_non_target_aggregate/v1"
-LEGACY_SOURCE_CODE_ORDER_CONTRACT = "wbc0027_source_economics_code_order/v1"
 PROFILE = "product-capital-qualified-economics"
 CANONICAL_TARGET_ID = "wb_core_eu_hosted_runtime_active"
 MUTATION_KIND_PRODUCT = "wbc0027_product_capital_version_bound_recovery"
@@ -128,87 +129,6 @@ LEGACY_MANIFEST_SHA256 = (
 LEGACY_APPROVAL_REFERENCE = (
     "https://github.com/orenvlad-ai/wb-core/issues/1126#issuecomment-5471418411"
 )
-LEGACY_SOURCE_TRANSACTION_BINDING = {
-    "pull_request": 1129,
-    "run_id": 33345644125,
-    "artifact_id": 9741910399,
-    "artifact_name": "production-apply-receipt-pr-1129-run-33345644125",
-    "receipt_sha256": (
-        "sha256:843d1eb81d92ac16a51bc21fb92256916e4c9c3a353d3221ebc1a82df80bf9f5"
-    ),
-    "blocked_comment_id": 5472359912,
-    "authorization_comment_id": 5472278622,
-    "authorization_body_sha256": (
-        "b2cfb8bf9f20ecfe7a9075f42ff443a144d4550ee07c8418482988ad2542d3ad"
-    ),
-    "goal_operation_id": "production-goal-v1-5024719a64fa9707b72d938ebf8a2127",
-    "product_phase_operation_id": "recovery_9b9d1d2ad66035d080ec2bced855201e",
-    "economics_phase_operation_id": "recovery_ae66a56f72d90b469b75d8adb893c51f",
-    "source_deployed_sha": "876f5f307a2053d66544dd1c8950f94f77f92ddb",
-    "source_phase_contract": PHASE_CONTRACT,
-    "manifest_sha256": (
-        "sha256:675fcb98fdcc74ce2d30c4e907c9c5330f7878fee929027c536b5a6f03ec47c4"
-    ),
-    "phase_fingerprint": (
-        "sha256:2d6004dcd37b8d3becd31231d6d2a77e4ab1c5262757f355ddf1413f1d24b542"
-    ),
-    "storage_generation": {
-        "generation_id": "operational-c54072027f14f90b374b",
-        "manifest_sha256": (
-            "sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb"
-        ),
-        "schema_revision": "operational_v1",
-    },
-    "source_ready_row_count": 224,
-    "source_raw_non_target_row_count": 221,
-    "source_raw_non_target_digest": (
-        "sha256:55e057f0f18109cc01b4f78583c96facc78e5e4ef09f205c80d2c1991d57a858"
-    ),
-    "target_identities": (
-        (
-            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
-            "2026-08-25",
-            "2026-08-25__2026-08-26__sheet_vitrina_v1_temporal_live_v1__current",
-        ),
-        (
-            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
-            "2026-08-26",
-            "2026-08-26__partial_group_wb_api__2026-08-28T04:59:24Z",
-        ),
-        (
-            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
-            "2026-08-29",
-            "2026-08-29__2026-08-30__sheet_vitrina_v1_temporal_live_v1__current",
-        ),
-    ),
-    "target_before_hashes": (
-        "sha256:a20d88e0208dd0ebec804c8f9a61f9734f6e43880ad3908f48bb63aaa340d3c7",
-        "sha256:baee41dea0e85ae958b5149f6c944af7e77d6f42cd3b46f868ddea0038912fd4",
-        "sha256:bddbad60bdfa0cb99668d2d0ab663ae5fa10f021ad169c692fc0804a9978272e",
-    ),
-    "target_before_digest": (
-        "sha256:edca64a735d30abad44c5b31a0603baf06932ecdad8b3cedba0af9dcd980b67e"
-    ),
-    "target_after_hashes": (
-        "sha256:d186a89de1910576b20b86c707056b85f72e5b7a69e175db8ef6d041a1432f1d",
-        "sha256:54b0bdd0d36564c884071ec2e848945d0c1152113571fc7bb7ef2608a6d69c2e",
-        "sha256:ef848227b66e26ebe37643e752abac252c9a63c85fe0957a9bcae78736392c68",
-    ),
-    "target_after_digest": (
-        "sha256:359736666b74cc4b4b87eb5a6b4bce6e309a29f35b64d2548966a13fbfc58424"
-    ),
-    "target_removed_digests": (
-        "sha256:9d01f65d8e87705cae5aaf4eb1b5599312ca4bb05a02e0826c46d89899ea90a8",
-        "sha256:a593fb1b110178d9d2bffc2476191c9fb6bc34878ce1692fafee42f5c40a63f7",
-        "sha256:6f108a3bc53fb737a51ebd1cb9fe5e264aef155d7f5f11cac605ddb3c56d886c",
-    ),
-    "target_changed_cell_counts": (174, 174, 124),
-    "rehearsal_result_digest": (
-        "sha256:3598233834edfdc236bff126dfd9a25f432d36e44a1ed97abad9123d079cf4aa"
-    ),
-}
-
-
 class Wbc0027RecoveryError(RuntimeError):
     pass
 
@@ -2181,43 +2101,24 @@ def _validate_legacy_source_transaction_binding(
     authorization_reference: str,
 ) -> None:
     """Admit the missing-semantic exception for exactly one immutable source."""
-
-    source = LEGACY_SOURCE_TRANSACTION_BINDING
-    expected_authorization = (
-        "github:orenvlad-ai/wb-core:pr:1129:comment:"
-        f"{source['authorization_comment_id']}:sha256:"
-        f"{source['authorization_body_sha256']}"
-    )
-    observed = {
-        "goal_operation_id": goal_operation_id,
-        "source_deployed_sha": source_deployed_sha,
-        "source_manifest_sha256": source_manifest_sha256,
-        "source_phase_operation_id": source_phase_operation_id,
-        "source_phase_fingerprint": source_phase_fingerprint,
-        "source_storage_generation": _phase_generation(source_storage_generation),
-        "source_run_id": source_run_id,
-        "source_artifact_id": source_artifact_id,
-        "source_artifact_name": source_artifact_name,
-        "source_receipt_sha256": source_receipt_sha256,
-        "source_comment_id": source_comment_id,
-        "authorization_reference": authorization_reference,
-    }
-    expected = {
-        "goal_operation_id": source["goal_operation_id"],
-        "source_deployed_sha": source["source_deployed_sha"],
-        "source_manifest_sha256": source["manifest_sha256"],
-        "source_phase_operation_id": source["economics_phase_operation_id"],
-        "source_phase_fingerprint": source["phase_fingerprint"],
-        "source_storage_generation": source["storage_generation"],
-        "source_run_id": source["run_id"],
-        "source_artifact_id": source["artifact_id"],
-        "source_artifact_name": source["artifact_name"],
-        "source_receipt_sha256": source["receipt_sha256"],
-        "source_comment_id": source["blocked_comment_id"],
-        "authorization_reference": expected_authorization,
-    }
-    if observed != expected:
-        raise Wbc0027RecoveryError("WBC0027 legacy source transaction binding drifted")
+    try:
+        validate_legacy_source_transaction_binding(
+            goal_operation_id=goal_operation_id,
+            source_deployed_sha=source_deployed_sha,
+            source_manifest_sha256=source_manifest_sha256,
+            source_phase_operation_id=source_phase_operation_id,
+            source_phase_fingerprint=source_phase_fingerprint,
+            source_storage_generation=_phase_generation(source_storage_generation),
+            source_run_id=source_run_id,
+            source_artifact_id=source_artifact_id,
+            source_artifact_name=source_artifact_name,
+            source_receipt_sha256=source_receipt_sha256,
+            source_comment_id=source_comment_id,
+            authorization_reference=authorization_reference,
+            binding=LEGACY_SOURCE_TRANSACTION_BINDING,
+        )
+    except SourceBindingError as exc:
+        raise Wbc0027RecoveryError(str(exc)) from exc
 
 
 def _source_economics_transaction_proof(

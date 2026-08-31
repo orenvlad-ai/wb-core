@@ -172,17 +172,6 @@ class _BridgeClient:
 
 
 def _exercise_workflow_bridge_binding() -> None:
-    historical_integrity = runner._wbc0027_runtime_source_integrity(
-        deployed_sha=LIVE_SHA,
-        bridge_sha=BRIDGE_SHA,
-    )
-    assert (
-        historical_integrity["comparison"]
-        == "byte_identical_repo_only_bridge"
-    )
-    assert historical_integrity["paths"] == sorted(
-        historical_integrity["paths"], key=lambda item: item["path"]
-    )
     client = _BridgeClient()
     live = runner._wbc0027_trusted_release(
         client,  # type: ignore[arg-type]
@@ -232,6 +221,17 @@ def _exercise_workflow_bridge_binding() -> None:
         )
         runner._git_checkout_head = lambda: os.environ["GITHUB_SHA"]
         runner._git_blob_binding = blob
+        integrity = runner._wbc0027_runtime_source_integrity(
+            deployed_sha=LIVE_SHA,
+            bridge_sha=BRIDGE_SHA,
+        )
+        assert integrity["comparison"] == "byte_identical_repo_only_bridge"
+        assert integrity["paths"] == sorted(
+            integrity["paths"], key=lambda item: item["path"]
+        )
+        assert "apps/wbc0027_capital_recovery_source_binding.py" in {
+            item["path"] for item in integrity["paths"]
+        }
         bridge = runner._wbc0027_workflow_bridge(
             client=client,  # type: ignore[arg-type]
             deployed_release=live,
@@ -325,6 +325,31 @@ def _exercise_workflow_bridge_binding() -> None:
 def _context() -> dict:
     source = runner.WBC0027_RECONCILIATION_SOURCE
     predecessor = runner.WBC0027_FAILED_RECONCILIATION_PREDECESSOR
+    blocked = runner.WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+    failed_evidence = {
+        "run_id": predecessor["run_id"],
+        "job_id": predecessor["job_id"],
+        "workflow": predecessor["workflow_path"],
+        "event": predecessor["event"],
+        "run_attempt": predecessor["run_attempt"],
+        "head_sha": predecessor["head_sha"],
+        "conclusion": "failure",
+        "failure_step": "Execute one fixed query-only finalize probe",
+        "failure_signature": "WBC0027 query-only reconciliation proof is not exact",
+        "artifact_count": 0,
+        "marker_count_at_completion": 0,
+        "source_inputs": {},
+        "preflight": {
+            "state": "ready_for_probe",
+            "query_only": True,
+            "database_written": False,
+            "production_mutation_count": 0,
+            "product_replay_count": 0,
+            "economics_replay_count": 0,
+        },
+        "job_log_size_bytes": 123,
+        "job_log_sha256": "sha256:" + "8" * 64,
+    }
     return {
         "source": {
             "pull_request": source["pull_request"],
@@ -394,31 +419,39 @@ def _context() -> dict:
             "release_kind": "repo_only",
             "merge_sha": "7" * 40,
         },
-        "diagnosed_predecessor": {
-            "run_id": predecessor["run_id"],
-            "job_id": predecessor["job_id"],
-            "workflow": predecessor["workflow_path"],
-            "event": predecessor["event"],
-            "run_attempt": predecessor["run_attempt"],
-            "head_sha": predecessor["head_sha"],
-            "conclusion": "failure",
-            "failure_step": "Execute one fixed query-only finalize probe",
-            "failure_signature": (
-                "WBC0027 query-only reconciliation proof is not exact"
-            ),
-            "artifact_count": 0,
-            "marker_count_at_completion": 0,
-            "source_inputs": {},
-            "preflight": {
-                "state": "ready_for_probe",
+        "predecessor_evidence": {
+            "contract_name": runner.WBC0027_RECONCILIATION_PREDECESSORS_CONTRACT,
+            "failed_without_artifact": failed_evidence,
+            "blocked_with_artifact": {
+                "run_id": blocked["run_id"],
+                "job_id": blocked["job_id"],
+                "head_sha": blocked["head_sha"],
+                "conclusion": "failure",
+                "failure_step": "Execute one fixed query-only finalize probe",
+                "reason": "wbc0027-reconciliation-validator-failed",
+                "validator": {
+                    "valid": False,
+                    "predicate_failures": ["source_recovery_binding"],
+                },
+                "artifact": {
+                    "id": blocked["artifact_id"],
+                    "name": blocked["artifact_name"],
+                    "archive_digest": blocked["artifact_archive_digest"],
+                    "receipt_sha256": "sha256:" + blocked["receipt_sha256"],
+                    "evidence_digest": blocked["evidence_digest"],
+                },
+                "reconciliation_release": {
+                    "pull_request": blocked["reconciliation_pr"],
+                    "operation_id": blocked["reconciliation_release_operation_id"],
+                    "deployed_sha": blocked["head_sha"],
+                },
                 "query_only": True,
                 "database_written": False,
                 "production_mutation_count": 0,
                 "product_replay_count": 0,
                 "economics_replay_count": 0,
+                "marker_count_at_completion": 0,
             },
-            "job_log_size_bytes": 123,
-            "job_log_sha256": "sha256:" + "8" * 64,
         },
     }
 
@@ -486,6 +519,11 @@ def _result(context: dict) -> dict:
             "target_rows": [
                 {
                     "identity": identity,
+                    "business_dates": [
+                        identity[1]
+                        if identity[1] == "2026-08-29"
+                        else "2026-08-26"
+                    ],
                     "changed_cell_count": changed,
                     "before_sha256": before,
                     "planned_after_sha256": after,
@@ -501,6 +539,11 @@ def _result(context: dict) -> dict:
                     strict=True,
                 )
             ],
+            "target_identities_digest": (
+                "sha256:d834c5886f2c529799e2595f24b9f2563e59661685d30eb1817fee7f324fda88"
+            ),
+            "target_before_digest": source["economics_target_before_digest"],
+            "target_planned_after_digest": source["economics_target_after_digest"],
             "write_set": {
                 "row_count": 3,
                 "cell_count": 472,
@@ -794,6 +837,199 @@ def _exercise_failed_predecessor_binding() -> None:
         raise AssertionError("predecessor with an existing marker was accepted")
 
 
+class _BlockedPredecessorClient:
+    def __init__(self) -> None:
+        predecessor = runner.WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+        repository = {"full_name": runner.CANONICAL_REPOSITORY}
+        self.run = {
+            "id": predecessor["run_id"],
+            "name": predecessor["workflow_name"],
+            "path": predecessor["workflow_path"],
+            "event": predecessor["event"],
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": predecessor["run_attempt"],
+            "head_branch": predecessor["head_branch"],
+            "head_sha": predecessor["head_sha"],
+            "updated_at": "2026-08-31T07:54:51Z",
+            "repository": repository,
+            "head_repository": repository,
+        }
+        self.job = {
+            "id": predecessor["job_id"],
+            "name": predecessor["job_name"],
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": predecessor["run_attempt"],
+            "head_sha": predecessor["head_sha"],
+            "steps": [
+                {"name": name, "conclusion": conclusion}
+                for name, conclusion in (
+                    (
+                        "Checkout exact trusted-main WBC0027 reconciliation runner",
+                        "success",
+                    ),
+                    (
+                        "Validate exact source and suppress an already terminal operation",
+                        "success",
+                    ),
+                    ("Execute one fixed query-only finalize probe", "failure"),
+                    (
+                        "Upload full immutable WBC0027 reconciliation evidence first",
+                        "success",
+                    ),
+                    (
+                        "Verify uploaded evidence and publish one supersession marker",
+                        "skipped",
+                    ),
+                )
+            ],
+        }
+
+    def get(self, path: str):
+        predecessor = runner.WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+        if path == f"/actions/runs/{predecessor['run_id']}":
+            return self.run
+        if path == f"/actions/runs/{predecessor['run_id']}/jobs?per_page=100":
+            return {"total_count": 1, "jobs": [self.job]}
+        raise AssertionError(f"unexpected blocked predecessor read: {path}")
+
+
+def _blocked_predecessor_receipt(
+    failed_predecessor: dict[str, object],
+) -> dict[str, object]:
+    predecessor = runner.WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+    context = _context()
+    source = context["source"]
+    release = {
+        "pull_request": predecessor["reconciliation_pr"],
+        "operation_id": predecessor["reconciliation_release_operation_id"],
+        "merge_sha": predecessor["head_sha"],
+        "deployed_sha": predecessor["head_sha"],
+    }
+    result_context = {
+        "source": source,
+        "reconciliation_release": release,
+    }
+    result = _result(result_context)
+    result["source_recovery_row"]["after_digest"] = ""
+    receipt: dict[str, object] = {
+        "schema": runner.WBC0027_LEGACY_RECONCILIATION_RECEIPT_SCHEMA,
+        "state": "blocked",
+        "reason": "wbc0027-reconciliation-validator-failed",
+        "terminal_disposition": "blocked/failure-evidence-only",
+        "query_only": True,
+        "database_written": False,
+        "production_mutation_count": 0,
+        "product_replay_count": 0,
+        "economics_replay_count": 0,
+        "source": source,
+        "reconciliation_release": release,
+        "workflow_bridge": {
+            "merge_sha": predecessor["head_sha"],
+            "dispatch": {"workflow_run_id": predecessor["run_id"]},
+        },
+        "diagnosed_predecessor": failed_predecessor,
+        "probe": {"result": result},
+        "validator": {
+            "valid": False,
+            "predicate_failures": ["source_recovery_binding"],
+        },
+    }
+    receipt["evidence_digest"] = runner.payload_digest(receipt)
+    return receipt
+
+
+def _exercise_blocked_predecessor_binding() -> None:
+    failed_client = _FailedPredecessorClient()
+    failed = runner._validate_wbc0027_failed_reconciliation_predecessor(
+        args=_predecessor_args(),
+        client=failed_client,  # type: ignore[arg-type]
+        source_comments=[],
+    )
+    predecessor = runner.WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+    original_evidence_digest = predecessor["evidence_digest"]
+    original_verify = runner._verify_uploaded_wbc0027_reconciliation_artifact
+    receipt = _blocked_predecessor_receipt(failed)
+
+    def verified(*_args, **_kwargs):
+        return {
+            "metadata": {
+                "id": predecessor["artifact_id"],
+                "digest": predecessor["artifact_archive_digest"],
+                "size_in_bytes": predecessor["artifact_size_bytes"],
+            },
+            "receipt": receipt,
+        }
+
+    try:
+        predecessor["evidence_digest"] = receipt["evidence_digest"]
+        runner._verify_uploaded_wbc0027_reconciliation_artifact = verified
+        binding = runner._validate_wbc0027_blocked_reconciliation_predecessor(
+            client=_BlockedPredecessorClient(),  # type: ignore[arg-type]
+            source_comments=[],
+            failed_predecessor=failed,
+        )
+        assert binding["run_id"] == 33370422066
+        assert binding["artifact"]["id"] == 9749833454
+        assert binding["validator"]["predicate_failures"] == [
+            "source_recovery_binding"
+        ]
+        assert binding["production_mutation_count"] == 0
+
+        wrong_identity = _BlockedPredecessorClient()
+        wrong_identity.run["head_sha"] = "f" * 40
+        try:
+            runner._validate_wbc0027_blocked_reconciliation_predecessor(
+                client=wrong_identity,  # type: ignore[arg-type]
+                source_comments=[],
+                failed_predecessor=failed,
+            )
+        except runner.ApplyError as exc:
+            assert "run drifted" in str(exc)
+        else:
+            raise AssertionError("blocked predecessor identity drift was accepted")
+
+        def wrong_artifact(*_args, **_kwargs):
+            value = verified()
+            value["metadata"]["digest"] = "sha256:" + "0" * 64
+            return value
+
+        runner._verify_uploaded_wbc0027_reconciliation_artifact = wrong_artifact
+        try:
+            runner._validate_wbc0027_blocked_reconciliation_predecessor(
+                client=_BlockedPredecessorClient(),  # type: ignore[arg-type]
+                source_comments=[],
+                failed_predecessor=failed,
+            )
+        except runner.ApplyError as exc:
+            assert "artifact identity drifted" in str(exc)
+        else:
+            raise AssertionError("blocked predecessor artifact drift was accepted")
+
+        drifted_receipt = deepcopy(receipt)
+        drifted_receipt["validator"]["predicate_failures"] = ["foreign"]
+        runner._verify_uploaded_wbc0027_reconciliation_artifact = (
+            lambda *_args, **_kwargs: {
+                "metadata": verified()["metadata"],
+                "receipt": drifted_receipt,
+            }
+        )
+        try:
+            runner._validate_wbc0027_blocked_reconciliation_predecessor(
+                client=_BlockedPredecessorClient(),  # type: ignore[arg-type]
+                source_comments=[],
+                failed_predecessor=failed,
+            )
+        except runner.ApplyError as exc:
+            assert "receipt contract drifted" in str(exc)
+        else:
+            raise AssertionError("blocked predecessor receipt drift was accepted")
+    finally:
+        predecessor["evidence_digest"] = original_evidence_digest
+        runner._verify_uploaded_wbc0027_reconciliation_artifact = original_verify
+
+
 def _command_probe(
     *,
     result: object,
@@ -983,6 +1219,7 @@ def _exercise_failure_receipt_materialization() -> None:
 def main() -> None:
     _exercise_workflow_bridge_binding()
     _exercise_failed_predecessor_binding()
+    _exercise_blocked_predecessor_binding()
     _exercise_structured_command_evidence()
     _exercise_failure_receipt_materialization()
     context = _context()
@@ -1097,7 +1334,7 @@ def main() -> None:
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
         "workflow_bridge": context["workflow_bridge"],
-        "diagnosed_predecessor": context["diagnosed_predecessor"],
+        "predecessor_evidence": context["predecessor_evidence"],
         "probe": {
             "return_code": 0,
             "transport_ambiguous": False,

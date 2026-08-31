@@ -47,6 +47,7 @@ from apps.wbc0027_capital_recovery_source_binding import (  # noqa: E402
     CONTRACT_NAME as WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT,
     PATHS as WBC0027_RUNTIME_SOURCE_PATHS,
     WORKFLOW_PATH as PRODUCTION_APPLY_WORKFLOW_PATH,
+    valid_source_recovery_after_digest,
 )
 from packages.application.root_storage_policy import (  # noqa: E402
     storage_destination_root,
@@ -102,10 +103,16 @@ WBC0027_PREDECESSOR_AUTH_BODY = (
     "protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2"
 )
 WBC0027_RECONCILIATION_RECEIPT_SCHEMA = (
-    "wb-core.wbc0027-existing-operation-reconciliation-receipt/v2"
+    "wb-core.wbc0027-existing-operation-reconciliation-receipt/v3"
 )
 WBC0027_RECONCILIATION_SUMMARY_SCHEMA = (
-    "wb-core.wbc0027-existing-operation-reconciliation-summary/v2"
+    "wb-core.wbc0027-existing-operation-reconciliation-summary/v3"
+)
+WBC0027_LEGACY_RECONCILIATION_RECEIPT_SCHEMA = (
+    "wb-core.wbc0027-existing-operation-reconciliation-receipt/v2"
+)
+WBC0027_RECONCILIATION_PREDECESSORS_CONTRACT = (
+    "wbc0027_reconciliation_terminal_predecessors/v1"
 )
 WBC0027_RECONCILIATION_MARKER = (
     "wb-core-wbc0027-existing-operation-reconciliation"
@@ -214,6 +221,35 @@ WBC0027_FAILED_RECONCILIATION_PREDECESSOR = {
     "reconciliation_pr": 1136,
     "reconciliation_release_operation_id": (
         "release-v2-d10e2683f5d1090ff8c102941283d559"
+    ),
+}
+WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR = {
+    "run_id": 33370422066,
+    "job_id": 99420021737,
+    "workflow_name": "Production Apply Runner",
+    "workflow_path": PRODUCTION_APPLY_WORKFLOW_PATH,
+    "event": "workflow_dispatch",
+    "run_attempt": 1,
+    "head_branch": "main",
+    "head_sha": "4e068cada7dbf41aa70486a2694f9ba78c16470b",
+    "job_name": "Query-only finalize of the existing WBC0027 economics operation",
+    "reconciliation_pr": 1137,
+    "reconciliation_release_operation_id": (
+        "release-v2-ebad9034fc4c5eb13d6b8a0a078aa4de"
+    ),
+    "artifact_id": 9749833454,
+    "artifact_name": (
+        "wbc0027-existing-operation-reconciliation-pr-1129-run-33370422066"
+    ),
+    "artifact_archive_digest": (
+        "sha256:9f7780777ce73ae2901d1519192a63dd25cc55621756fce0668a6656dabcfcd6"
+    ),
+    "artifact_size_bytes": 7152,
+    "receipt_sha256": (
+        "518fc39f3c7a17e84a247075f540ef393aed0110b827d276d322075de1000951"
+    ),
+    "evidence_digest": (
+        "sha256:87017b579f91e8c49de9111a38098cfef5e02f401467ba1726fb15ed736f9e3b"
     ),
 }
 WBC0027_RECONCILIATION_FAILURE_REASONS = frozenset(
@@ -7847,6 +7883,184 @@ def _validate_wbc0027_failed_reconciliation_predecessor(
     }
 
 
+def _validate_wbc0027_blocked_reconciliation_predecessor(
+    *,
+    client: GitHubClient,
+    source_comments: list[Mapping[str, Any]],
+    failed_predecessor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the immutable artifact-bearing successor to the failed attempt."""
+
+    predecessor = WBC0027_BLOCKED_RECONCILIATION_PREDECESSOR
+    run_id = int(predecessor["run_id"])
+    run = client.get(f"/actions/runs/{run_id}")
+    repository = run.get("repository") if isinstance(run, Mapping) else None
+    head_repository = run.get("head_repository") if isinstance(run, Mapping) else None
+    expected_run = {
+        "id": run_id,
+        "name": predecessor["workflow_name"],
+        "path": predecessor["workflow_path"],
+        "event": predecessor["event"],
+        "status": "completed",
+        "conclusion": "failure",
+        "run_attempt": predecessor["run_attempt"],
+        "head_branch": predecessor["head_branch"],
+        "head_sha": predecessor["head_sha"],
+    }
+    if not isinstance(run, Mapping):
+        raise ApplyError("WBC0027 blocked predecessor run is invalid")
+    for field, value in expected_run.items():
+        if run.get(field) != value:
+            raise ApplyError(f"WBC0027 blocked predecessor run drifted: {field}")
+    if not (
+        isinstance(repository, Mapping)
+        and repository.get("full_name") == CANONICAL_REPOSITORY
+        and isinstance(head_repository, Mapping)
+        and head_repository.get("full_name") == CANONICAL_REPOSITORY
+    ):
+        raise ApplyError("WBC0027 blocked predecessor repository drifted")
+
+    jobs_payload = client.get(f"/actions/runs/{run_id}/jobs?per_page=100")
+    jobs = jobs_payload.get("jobs") if isinstance(jobs_payload, Mapping) else None
+    matching_jobs = [
+        item
+        for item in jobs or []
+        if isinstance(item, Mapping) and item.get("id") == predecessor["job_id"]
+    ]
+    if len(matching_jobs) != 1:
+        raise ApplyError("WBC0027 blocked predecessor job is missing or ambiguous")
+    job = matching_jobs[0]
+    if not (
+        job.get("name") == predecessor["job_name"]
+        and job.get("status") == "completed"
+        and job.get("conclusion") == "failure"
+        and job.get("run_attempt") == predecessor["run_attempt"]
+        and job.get("head_sha") == predecessor["head_sha"]
+    ):
+        raise ApplyError("WBC0027 blocked predecessor job binding drifted")
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        raise ApplyError("WBC0027 blocked predecessor steps are missing")
+    step_conclusions = {
+        str(item.get("name") or ""): item.get("conclusion")
+        for item in steps
+        if isinstance(item, Mapping)
+    }
+    expected_steps = {
+        "Checkout exact trusted-main WBC0027 reconciliation runner": "success",
+        "Validate exact source and suppress an already terminal operation": "success",
+        "Execute one fixed query-only finalize probe": "failure",
+        "Upload full immutable WBC0027 reconciliation evidence first": "success",
+        "Verify uploaded evidence and publish one supersession marker": "skipped",
+    }
+    if any(step_conclusions.get(name) != value for name, value in expected_steps.items()):
+        raise ApplyError("WBC0027 blocked predecessor step outcome drifted")
+
+    verified = _verify_uploaded_wbc0027_reconciliation_artifact(
+        client,
+        run_id=run_id,
+        artifact_name=str(predecessor["artifact_name"]),
+        receipt_sha256=str(predecessor["receipt_sha256"]),
+        code_sha=str(predecessor["head_sha"]),
+    )
+    artifact = verified["metadata"]
+    receipt = verified["receipt"]
+    if not (
+        artifact.get("id") == predecessor["artifact_id"]
+        and artifact.get("digest") == predecessor["artifact_archive_digest"]
+        and artifact.get("size_in_bytes") == predecessor["artifact_size_bytes"]
+    ):
+        raise ApplyError("WBC0027 blocked predecessor artifact identity drifted")
+    result = (receipt.get("probe") or {}).get("result")
+    source_row = result.get("source_recovery_row") if isinstance(result, Mapping) else None
+    source = receipt.get("source")
+    release = receipt.get("reconciliation_release")
+    workflow_bridge = receipt.get("workflow_bridge")
+    if not (
+        receipt.get("schema") == WBC0027_LEGACY_RECONCILIATION_RECEIPT_SCHEMA
+        and receipt.get("state") == "blocked"
+        and receipt.get("reason") == "wbc0027-reconciliation-validator-failed"
+        and receipt.get("terminal_disposition") == "blocked/failure-evidence-only"
+        and receipt.get("query_only") is True
+        and receipt.get("database_written") is False
+        and receipt.get("production_mutation_count") == 0
+        and receipt.get("product_replay_count") == 0
+        and receipt.get("economics_replay_count") == 0
+        and receipt.get("validator")
+        == {"valid": False, "predicate_failures": ["source_recovery_binding"]}
+        and receipt.get("evidence_digest") == predecessor["evidence_digest"]
+        and receipt.get("evidence_digest")
+        == payload_digest(
+            {key: value for key, value in receipt.items() if key != "evidence_digest"}
+        )
+        and receipt.get("diagnosed_predecessor") == failed_predecessor
+        and isinstance(source, Mapping)
+        and source.get("run_id") == WBC0027_RECONCILIATION_SOURCE["run_id"]
+        and source.get("artifact_id") == WBC0027_RECONCILIATION_SOURCE["artifact_id"]
+        and source.get("operation_id") == WBC0027_RECONCILIATION_SOURCE["operation_id"]
+        and isinstance(release, Mapping)
+        and release.get("pull_request") == predecessor["reconciliation_pr"]
+        and release.get("operation_id")
+        == predecessor["reconciliation_release_operation_id"]
+        and release.get("merge_sha") == predecessor["head_sha"]
+        and release.get("deployed_sha") == predecessor["head_sha"]
+        and isinstance(workflow_bridge, Mapping)
+        and (workflow_bridge.get("dispatch") or {}).get("workflow_run_id") == run_id
+        and workflow_bridge.get("merge_sha") == predecessor["head_sha"]
+        and isinstance(source_row, Mapping)
+        and source_row.get("after_digest") == ""
+    ):
+        raise ApplyError("WBC0027 blocked predecessor receipt contract drifted")
+
+    try:
+        completed_at = datetime.fromisoformat(
+            str(run.get("updated_at") or "").replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ApplyError("WBC0027 blocked predecessor completion time is invalid") from exc
+    marker_count_at_completion = 0
+    for comment in source_comments:
+        if WBC0027_RECONCILIATION_MARKER not in str(comment.get("body") or ""):
+            continue
+        try:
+            created_at = datetime.fromisoformat(
+                str(comment.get("created_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ApplyError("WBC0027 blocked predecessor marker chronology is invalid") from exc
+        if created_at <= completed_at:
+            marker_count_at_completion += 1
+    if marker_count_at_completion != 0:
+        raise ApplyError("WBC0027 blocked predecessor already had a supersession marker")
+    return {
+        "run_id": run_id,
+        "job_id": int(predecessor["job_id"]),
+        "head_sha": str(predecessor["head_sha"]),
+        "conclusion": "failure",
+        "failure_step": "Execute one fixed query-only finalize probe",
+        "reason": "wbc0027-reconciliation-validator-failed",
+        "validator": {"valid": False, "predicate_failures": ["source_recovery_binding"]},
+        "artifact": {
+            "id": int(predecessor["artifact_id"]),
+            "name": str(predecessor["artifact_name"]),
+            "archive_digest": str(predecessor["artifact_archive_digest"]),
+            "receipt_sha256": "sha256:" + str(predecessor["receipt_sha256"]),
+            "evidence_digest": str(predecessor["evidence_digest"]),
+        },
+        "reconciliation_release": {
+            "pull_request": int(predecessor["reconciliation_pr"]),
+            "operation_id": str(predecessor["reconciliation_release_operation_id"]),
+            "deployed_sha": str(predecessor["head_sha"]),
+        },
+        "query_only": True,
+        "database_written": False,
+        "production_mutation_count": 0,
+        "product_replay_count": 0,
+        "economics_replay_count": 0,
+        "marker_count_at_completion": 0,
+    }
+
+
 def _wbc0027_reconciliation_context(
     *,
     args: argparse.Namespace,
@@ -7855,11 +8069,21 @@ def _wbc0027_reconciliation_context(
     source_comments: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     source = WBC0027_RECONCILIATION_SOURCE
-    diagnosed_predecessor = _validate_wbc0027_failed_reconciliation_predecessor(
+    failed_predecessor = _validate_wbc0027_failed_reconciliation_predecessor(
         args=args,
         client=client,
         source_comments=source_comments,
     )
+    blocked_predecessor = _validate_wbc0027_blocked_reconciliation_predecessor(
+        client=client,
+        source_comments=source_comments,
+        failed_predecessor=failed_predecessor,
+    )
+    predecessor_evidence = {
+        "contract_name": WBC0027_RECONCILIATION_PREDECESSORS_CONTRACT,
+        "failed_without_artifact": failed_predecessor,
+        "blocked_with_artifact": blocked_predecessor,
+    }
     required = {
         "source_run_id": args.source_run_id,
         "source_artifact_id": args.source_artifact_id,
@@ -8062,7 +8286,7 @@ def _wbc0027_reconciliation_context(
         },
         "reconciliation_release": release,
         "workflow_bridge": workflow_bridge,
-        "diagnosed_predecessor": diagnosed_predecessor,
+        "predecessor_evidence": predecessor_evidence,
     }
 
 
@@ -8151,43 +8375,11 @@ def _valid_wbc0027_source_recovery_after_digest(
     source: Mapping[str, Any],
     source_transaction: Mapping[str, Any],
 ) -> bool:
-    expected = source.get("economics_target_after_digest")
-    observed = source_row.get("after_digest")
-    if isinstance(expected, str) and expected and observed == expected:
-        return True
-    if observed != "":
-        return False
-    try:
-        from apps.wbc0027_capital_recovery import (
-            LEGACY_SOURCE_TRANSACTION_CONTRACT,
-            Wbc0027RecoveryError,
-            _validate_legacy_source_transaction_binding,
-        )
-    except ImportError:
-        return False
-    if (
-        source_transaction.get("contract_name")
-        != LEGACY_SOURCE_TRANSACTION_CONTRACT
-    ):
-        return False
-    try:
-        _validate_legacy_source_transaction_binding(
-            goal_operation_id=str(source["operation_id"]),
-            source_deployed_sha=str(source["deployed_sha"]),
-            source_manifest_sha256=str(source["economics_manifest_sha256"]),
-            source_phase_operation_id=str(source["economics_phase_operation_id"]),
-            source_phase_fingerprint=str(source["economics_phase_fingerprint"]),
-            source_storage_generation=source["storage_generation"],
-            source_run_id=int(source["run_id"]),
-            source_artifact_id=int(source["artifact_id"]),
-            source_artifact_name=str(source["artifact_name"]),
-            source_receipt_sha256=str(source["receipt_sha256"]),
-            source_comment_id=int(source["blocked_comment_id"]),
-            authorization_reference=str(source["authorization_reference"]),
-        )
-    except (KeyError, TypeError, ValueError, Wbc0027RecoveryError):
-        return False
-    return True
+    return valid_source_recovery_after_digest(
+        source_row,
+        source=source,
+        source_transaction=source_transaction,
+    )
 
 
 def _valid_wbc0027_finalize_result(
@@ -8667,8 +8859,8 @@ def _validate_wbc0027_reconciliation_receipt(
         and receipt.get("reconciliation_release")
         == context["reconciliation_release"]
         and receipt.get("workflow_bridge") == context["workflow_bridge"]
-        and receipt.get("diagnosed_predecessor")
-        == context["diagnosed_predecessor"]
+        and receipt.get("predecessor_evidence")
+        == context["predecessor_evidence"]
         and receipt.get("validator")
         == _explain_wbc0027_finalize_result(
             (receipt.get("probe") or {}).get("result"), context=context
@@ -8720,8 +8912,8 @@ def _validate_wbc0027_blocked_reconciliation_receipt(
         and receipt.get("reconciliation_release")
         == context["reconciliation_release"]
         and receipt.get("workflow_bridge") == context["workflow_bridge"]
-        and receipt.get("diagnosed_predecessor")
-        == context["diagnosed_predecessor"]
+        and receipt.get("predecessor_evidence")
+        == context["predecessor_evidence"]
         and isinstance(probe.get("stdout"), Mapping)
         and isinstance(probe.get("stderr"), Mapping)
         and probe["stdout"].get("sha256")
@@ -8772,8 +8964,8 @@ def _existing_wbc0027_reconciliation_marker(
         and payload.get("reconciliation_release")
         == context["reconciliation_release"]
         and payload.get("workflow_bridge") == context["workflow_bridge"]
-        and payload.get("diagnosed_predecessor")
-        == context["diagnosed_predecessor"]
+        and payload.get("predecessor_evidence")
+        == context["predecessor_evidence"]
         and isinstance(artifact, Mapping)
         and artifact.get("file") == WBC0027_RECONCILIATION_ARTIFACT_FILE
         and artifact.get("retention_days") == 90
@@ -8828,7 +9020,7 @@ def _run_wbc0027_reconciliation_preflight(
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
         "workflow_bridge": context["workflow_bridge"],
-        "diagnosed_predecessor": context["diagnosed_predecessor"],
+        "predecessor_evidence": context["predecessor_evidence"],
         "comment_id": int(existing.get("id") or 0) if existing is not None else 0,
     }
     _write_receipt(args.output, receipt)
@@ -8883,7 +9075,7 @@ def _run_wbc0027_reconciliation_collect(
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
         "workflow_bridge": context["workflow_bridge"],
-        "diagnosed_predecessor": context["diagnosed_predecessor"],
+        "predecessor_evidence": context["predecessor_evidence"],
         "probe": probe,
         "validator": validator,
     }
@@ -8947,7 +9139,7 @@ def _run_wbc0027_reconciliation_publish(
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
         "workflow_bridge": context["workflow_bridge"],
-        "diagnosed_predecessor": context["diagnosed_predecessor"],
+        "predecessor_evidence": context["predecessor_evidence"],
         "qualification": {
             "source_recovery_row_digest": result["source_recovery_row_digest"],
             "transition_digest": result["transition_digest"],
