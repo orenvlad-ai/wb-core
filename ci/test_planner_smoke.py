@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -555,8 +556,31 @@ def main() -> None:
         "send_message_to_thread",
     ):
         assert forbidden_thread_tool in protocol_text
-    assert "istoriya-ostatkov" in protocol_text
+    task_name_pattern_text = r"wbc_[0-9]{4}_[0-9]{3}_[a-z0-9_]{1,20}"
+    assert task_name_pattern_text in protocol_text
+    task_name_pattern = re.compile(rf"\A{task_name_pattern_text}\Z")
+    for task_name in (
+        "wbc_0028_001_karta_propuskov",
+        "wbc_0028_002_svyaz_s_0027",
+        "wbc_0028_003_vosstanovlenie",
+    ):
+        assert task_name_pattern.fullmatch(task_name), task_name
+    for obsolete_task_name in (
+        "wbc 0028 001 karta-propuskov",
+        "wbc-0028-001-karta-propuskov",
+    ):
+        assert task_name_pattern.fullmatch(obsolete_task_name) is None
+    assert "wbc NNNN SSS <latin transliteration>" not in protocol_text
+    assert "istoriya-ostatkov" not in protocol_text
     compact_protocol_text = " ".join(protocol_text.split())
+    assert (
+        "prod_gap_map` и `recovery_architecture` не являются каноническими slug"
+        in compact_protocol_text
+    )
+    assert (
+        "Машинный `task_name` не заменяет русский compact passport и user-facing семантику блока"
+        in compact_protocol_text
+    )
     assert (
         "active не более одного mutating/implementation subagent"
         in compact_protocol_text
