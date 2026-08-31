@@ -615,7 +615,8 @@ generation. Они не переписываются и не становятс�
 следовал canonical paired classifier.
 
 Только исправляющий этот defect новый merged `repo_only/done` release создаёт
-отдельную generation `v2` с единственным attempt `v2-a01`. Generation exact-
+отдельную generation `v2` с единственным attempt `v2-a01`; workflow передаёт
+этот closed literal и не принимает attempt как dispatch input. Generation exact-
 bind original source receipt/operation/job, legacy a01 и a02 run/artifact
 archive/receipt/marker digests и exact code-delta release. `v2-a02`, `v2-a03`,
 queue, retry и PR-identity nonce отсутствуют; exact existing `v2-a01` проверяет

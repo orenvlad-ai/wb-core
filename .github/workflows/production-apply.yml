@@ -76,10 +76,6 @@ on:
         description: Exact repo-only Release Runner operation for reconciliation code
         required: false
         type: string
-      reconciliation_attempt:
-        description: Exact bounded same-operation reconciliation attempt
-        required: false
-        type: string
       prior_reconciliation_run_id:
         description: Exact immutable legacy reconciliation a01 run
         required: false
@@ -342,7 +338,7 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --reconciliation-attempt "${{ inputs.reconciliation_attempt }}"
+          --reconciliation-attempt v2-a01
           --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
           --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
           --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
@@ -375,7 +371,7 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --reconciliation-attempt "${{ inputs.reconciliation_attempt }}"
+          --reconciliation-attempt v2-a01
           --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
           --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
           --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
@@ -414,7 +410,7 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --reconciliation-attempt "${{ inputs.reconciliation_attempt }}"
+          --reconciliation-attempt v2-a01
           --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
           --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
           --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"

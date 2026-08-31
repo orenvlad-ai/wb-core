@@ -7,6 +7,8 @@ import argparse
 import io
 import json
 import os
+import re
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -1744,7 +1746,230 @@ def _exercise_worker_mount_probe() -> None:
             os.environ["GITHUB_RUN_ID"] = original_run_id
 
 
+def _workflow_dispatch_contract() -> None:
+    workflow_path = ROOT / ".github" / "workflows" / "production-apply.yml"
+    ruby_decoder = r"""
+def decode(node)
+  case node
+  when Psych::Nodes::Mapping
+    node.children.each_slice(2).to_h { |key, value| [decode(key), decode(value)] }
+  when Psych::Nodes::Sequence
+    node.children.map { |value| decode(value) }
+  when Psych::Nodes::Scalar
+    node.value
+  else
+    raise "unsupported YAML node #{node.class}"
+  end
+end
+puts JSON.generate(decode(Psych.parse_file(ARGV.fetch(0)).root))
+"""
+    parsed = subprocess.run(
+        ["ruby", "-rjson", "-ryaml", "-e", ruby_decoder, str(workflow_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    workflow = json.loads(parsed.stdout)
+    dispatch_inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    if len(dispatch_inputs) > 25:
+        raise AssertionError(
+            "production-apply workflow_dispatch exceeds GitHub's 25-input limit: "
+            f"{len(dispatch_inputs)}"
+        )
+    expected_input_names = (
+        "authorization_mode",
+        "pr",
+        "release_operation_id",
+        "merge_sha",
+        "deployed_sha",
+        "manifest_sha256",
+        "operation_id",
+        "source_run_id",
+        "source_artifact_id",
+        "source_artifact_name",
+        "source_receipt_sha256",
+        "authorization_comment_id",
+        "blocked_comment_id",
+        "reconciliation_pr",
+        "reconciliation_release_operation_id",
+        "prior_reconciliation_run_id",
+        "prior_reconciliation_artifact_id",
+        "prior_reconciliation_artifact_name",
+        "prior_reconciliation_receipt_sha256",
+        "prior_reconciliation_comment_id",
+        "prior_reconciliation_a02_run_id",
+        "prior_reconciliation_a02_artifact_id",
+        "prior_reconciliation_a02_artifact_name",
+        "prior_reconciliation_a02_receipt_sha256",
+        "prior_reconciliation_a02_comment_id",
+    )
+    assert tuple(dispatch_inputs) == expected_input_names
+    assert all("description" in item for item in dispatch_inputs.values())
+    assert {
+        name: item["required"] for name, item in dispatch_inputs.items()
+    } == {
+        name: "true" if name in {"authorization_mode", "pr"} else "false"
+        for name in expected_input_names
+    }
+    number_inputs = {
+        "pr",
+        "source_run_id",
+        "source_artifact_id",
+        "authorization_comment_id",
+        "blocked_comment_id",
+        "reconciliation_pr",
+        "prior_reconciliation_run_id",
+        "prior_reconciliation_artifact_id",
+        "prior_reconciliation_comment_id",
+        "prior_reconciliation_a02_run_id",
+        "prior_reconciliation_a02_artifact_id",
+        "prior_reconciliation_a02_comment_id",
+    }
+    assert {name: item["type"] for name, item in dispatch_inputs.items()} == {
+        name: (
+            "choice"
+            if name == "authorization_mode"
+            else "number"
+            if name in number_inputs
+            else "string"
+        )
+        for name in expected_input_names
+    }
+    zero_default_inputs = {
+        "source_artifact_id",
+        "authorization_comment_id",
+        "blocked_comment_id",
+        "reconciliation_pr",
+        "prior_reconciliation_run_id",
+        "prior_reconciliation_artifact_id",
+        "prior_reconciliation_comment_id",
+        "prior_reconciliation_a02_run_id",
+        "prior_reconciliation_a02_artifact_id",
+        "prior_reconciliation_a02_comment_id",
+    }
+    assert {
+        name: item["default"]
+        for name, item in dispatch_inputs.items()
+        if "default" in item
+    } == {
+        "authorization_mode": "scope-goal",
+        **{name: "0" for name in zero_default_inputs},
+    }
+    assert dispatch_inputs["authorization_mode"]["options"] == [
+        "scope-goal",
+        "exact-manifest",
+        "receipt-recovery",
+        "warm-archive-readiness",
+        "warm-archive-mount-probe",
+        "warm-archive-receipt-reconciliation",
+        "wbc0027-receipt-reconciliation",
+    ]
+    assert all(
+        "options" not in item
+        for name, item in dispatch_inputs.items()
+        if name != "authorization_mode"
+    )
+
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [item for child in value for item in strings(child)]
+        if isinstance(value, dict):
+            return [item for child in value.values() for item in strings(child)]
+        return []
+
+    expected_job_inputs = {
+        "apply_once": {
+            "authorization_comment_id",
+            "authorization_mode",
+            "deployed_sha",
+            "manifest_sha256",
+            "merge_sha",
+            "operation_id",
+            "pr",
+            "release_operation_id",
+        },
+        "warm_archive_mount_probe": {
+            "authorization_mode",
+            "pr",
+            "release_operation_id",
+        },
+        "warm_archive_readiness": {
+            "authorization_comment_id",
+            "authorization_mode",
+            "pr",
+            "release_operation_id",
+        },
+        "recover_receipt": {
+            "authorization_comment_id",
+            "authorization_mode",
+            "operation_id",
+            "pr",
+            "source_artifact_name",
+            "source_receipt_sha256",
+            "source_run_id",
+        },
+        "warm_archive_receipt_reconciliation": {
+            "authorization_comment_id",
+            "authorization_mode",
+            "blocked_comment_id",
+            "operation_id",
+            "pr",
+            "prior_reconciliation_a02_artifact_id",
+            "prior_reconciliation_a02_artifact_name",
+            "prior_reconciliation_a02_comment_id",
+            "prior_reconciliation_a02_receipt_sha256",
+            "prior_reconciliation_a02_run_id",
+            "prior_reconciliation_artifact_id",
+            "prior_reconciliation_artifact_name",
+            "prior_reconciliation_comment_id",
+            "prior_reconciliation_receipt_sha256",
+            "prior_reconciliation_run_id",
+            "reconciliation_pr",
+            "reconciliation_release_operation_id",
+            "source_artifact_name",
+            "source_receipt_sha256",
+            "source_run_id",
+        },
+        "wbc0027_receipt_reconciliation": {
+            "authorization_comment_id",
+            "authorization_mode",
+            "blocked_comment_id",
+            "operation_id",
+            "pr",
+            "reconciliation_pr",
+            "reconciliation_release_operation_id",
+            "source_artifact_id",
+            "source_artifact_name",
+            "source_receipt_sha256",
+            "source_run_id",
+        },
+    }
+    jobs = workflow["jobs"]
+    actual_job_inputs = {
+        job_name: {
+            match
+            for value in strings(job)
+            for match in re.findall(r"inputs\.([a-z0-9_]+)", value)
+        }
+        for job_name, job in jobs.items()
+    }
+    assert actual_job_inputs == expected_job_inputs
+    assert set().union(*actual_job_inputs.values()) == set(expected_input_names)
+    warm_runs = [
+        step["run"]
+        for step in jobs["warm_archive_receipt_reconciliation"]["steps"]
+        if "run" in step
+    ]
+    assert sum(
+        "--reconciliation-attempt v2-a01" in run for run in warm_runs
+    ) == 3
+    assert not any("inputs.reconciliation_attempt" in run for run in warm_runs)
+
+
 def main() -> None:
+    _workflow_dispatch_contract()
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
     _exercise_wbc0027_two_phase_runner()
