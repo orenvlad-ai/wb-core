@@ -105,16 +105,28 @@ effects не меняются. Owner confirmation не нужен; exact new fin
 
 `Read-only` задаёт mutation/authority boundary, но не actor routing. Каждый
 bounded technical execution block выполняет ровно один fresh visible internal
-subagent с internal/task name:
+subagent. Непосредственно перед `collaboration.spawn_agent` owning main
+атомарно резервирует следующий `SSS` в уже существующем task passport и
+передаёт машинный `task_name` exact вида:
 
-`wbc NNNN SSS <latin transliteration>`
+`wbc_NNNN_SSS_<translit_slug>`
 
-`SSS` начинается с `001` и растёт внутри main task; semantic часть —
-детерминированная латинская транслитерация русского названия, не английский
-перевод, максимум 20 символов (`istoriya-ostatkov`, не `inventory-history`).
-Subagent не pin-ится. Ровно один actor на block — ownership boundary, а не
-общий concurrency cap main task. Model и reasoning tier автоматически не
-выбираются.
+Исполнимый invariant поля:
+`wbc_[0-9]{4}_[0-9]{3}_[a-z0-9_]{1,20}`. `NNNN` — номер owning main task;
+`SSS` начинается с `001` и последовательно растёт внутри неё, в том числе при
+параллельном dispatch независимых read-only blocks. `<translit_slug>` —
+детерминированная транслитерация короткого русского названия блока, не
+английский перевод; допускаются только lowercase `a-z`, digits и underscore,
+максимум 20 символов. Поэтому `prod_gap_map` и `recovery_architecture` не
+являются каноническими slug даже при формальной совместимости с alphabet.
+
+Один параллельный dispatch трёх blocks получает соответственно
+`wbc_0028_001_karta_propuskov`, `wbc_0028_002_svyaz_s_0027` и
+`wbc_0028_003_vosstanovlenie`. Машинный `task_name` не заменяет русский compact
+passport и user-facing семантику блока. Дополнительный registry, роль либо
+human gate не создаётся. Subagent не pin-ится. Ровно один actor на block —
+ownership boundary, а не общий concurrency cap main task. Model и reasoning
+tier автоматически не выбираются.
 
 Внутри одной owning main task одновременно может быть active не более одного
 mutating/implementation subagent: к нему относится любой actor, способный
