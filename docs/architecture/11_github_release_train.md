@@ -285,8 +285,17 @@ WBC0027 использует отдельный consolidated JIT profile и не
 исторический exact-manifest/comment/phase identity из PR #1126:
 
 ```text
-/wb-core authorize-goal-v1 task WBC0027 profile product-capital-qualified-economics target wb_core_eu_hosted_runtime_active product-rows 1152 product-cells 24192 product-mismatches 9446 primary-rows 936 primary-cells 19656 primary-mismatches 7655 secondary-rows 216 secondary-mismatches 1791 special-date 2026-08-21 special-nm 497413772 special-cells 16 blocked-date 2026-08-15 hard-non-target-from 2026-08-30 economics-logical 298 economics-persisted 472 economics-blocked 12 protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2
+/wb-core authorize-goal-v1 task WBC0027 profile product-capital-qualified-economics target wb_core_eu_hosted_runtime_active product-rows 1152 product-cells 24192 product-mismatches 9446 primary-rows 936 primary-cells 19656 primary-mismatches 7655 secondary-rows 216 secondary-mismatches 1791 special-date 2026-08-21 special-nm 497413772 special-cells 16 blocked-date 2026-08-15 hard-non-target-from 2026-08-30 economics-logical 298 economics-persisted 472 economics-blocked 12 protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2 predecessor-pr 1128 predecessor-release-operation release-v2-52c958d066816e6e7b2fec7b419fc530 predecessor-release-comment 5471998411 predecessor-authorization-comment 5472023099 predecessor-apply-run 33343193199 predecessor-apply-comment 5472070488 predecessor-receipt sha256:2e65b37d7a44027928143d0f8b4ab71c43638450f659c4875faf3b0d80f7b9d5 predecessor-operation production-goal-v1-89bfdc5e4e4bffcbc9f6f6aea677e389 predecessor-product-phase recovery_303ece915dfb8e89b615a84dc8f14d70 predecessor-economics-phase recovery_8fe6bf612bde74c0dec9cb3b441944b2
 ```
+
+Новая correction-authority точно связывает terminal blocked predecessor: trusted
+release/comment, OWNER passport, Apply run/comment/artifact/receipt, zero submit
+и обе non-reusable phase identity. Runner проверяет immutable GitHub/Actions
+evidence до SSH. Predecessor остаётся только superseded audit evidence: его
+goal/phase ids и private manifests не могут дать `already_terminal`, стать
+новым namespace или участвовать в submit. Новый PR и новый comment id входят в
+derivation свежего goal operation; старый passport без predecessor binding
+больше не является допустимой WBC0027 grammar.
 
 Runner выводит deployed SHA только из единственного trusted
 `live_runtime/done`, создаёт две consecutive нормализованные material
@@ -317,6 +326,15 @@ exact non-empty opaque strings: Runner не выводит из них prefix, �
 binding; private manifest, writer-lock rebuild, submit и readback проверяют его
 exact equality. Empty, non-string или изменившийся revision блокирует phase до
 submit с нулём business mutation.
+
+Перед следующим Production Apply release можно квалифицировать deployed profile
+только query-only/no-create: два consecutive product witness должны совпасть по
+material/phase/generation/deployed binding, после чего `preflight --phase
+product` входит в реальный `warehouse_sync_lock(runtime_dir, blocking=False)`,
+повторяет JIT candidate под lock и останавливается перед T1. Preflight требует
+`recovery_lifecycle=missing`, не создаёт private directory/manifest и возвращает
+`production_mutation_submit_count=0`. Это release qualification, не Apply
+dispatch и не authorization marker.
 
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:

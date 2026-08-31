@@ -66,6 +66,34 @@ WBC0027_LEGACY_MANIFEST_OPERATIONS = frozenset(
         "wbc0027-product-capital-and-qualified-economics-v2",
     }
 )
+WBC0027_PREDECESSOR_BINDING = {
+    "pull_request": 1128,
+    "release_operation_id": "release-v2-52c958d066816e6e7b2fec7b419fc530",
+    "release_comment_id": 5471998411,
+    "authorization_comment_id": 5472023099,
+    "apply_run_id": 33343193199,
+    "apply_comment_id": 5472070488,
+    "artifact_id": 9741186908,
+    "artifact_name": "production-apply-receipt-pr-1128-run-33343193199",
+    "receipt_sha256": (
+        "sha256:2e65b37d7a44027928143d0f8b4ab71c43638450f659c4875faf3b0d80f7b9d5"
+    ),
+    "goal_operation_id": "production-goal-v1-89bfdc5e4e4bffcbc9f6f6aea677e389",
+    "product_phase_operation_id": "recovery_303ece915dfb8e89b615a84dc8f14d70",
+    "economics_phase_operation_id": "recovery_8fe6bf612bde74c0dec9cb3b441944b2",
+}
+WBC0027_PREDECESSOR_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0027 "
+    "profile product-capital-qualified-economics "
+    "target wb_core_eu_hosted_runtime_active "
+    "product-rows 1152 product-cells 24192 product-mismatches 9446 "
+    "primary-rows 936 primary-cells 19656 primary-mismatches 7655 "
+    "secondary-rows 216 secondary-mismatches 1791 "
+    "special-date 2026-08-21 special-nm 497413772 special-cells 16 "
+    "blocked-date 2026-08-15 hard-non-target-from 2026-08-30 "
+    "economics-logical 298 economics-persisted 472 economics-blocked 12 "
+    "protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2"
+)
 HISTORICAL_COST_GOAL_PROFILE = "historical-analytical-cost-carry-forward"
 HISTORICAL_MISSING_REPAIR_GOAL_PROFILE = "historical-missing-repair"
 WARM_ARCHIVE_LEGACY_EVIDENCE_BASE = (
@@ -248,7 +276,22 @@ WBC0027_AUTH_RE = re.compile(
     r"economics-blocked (?P<economics_blocked>[1-9][0-9]*) "
     r"protected-nm (?P<protected_nm>[1-9][0-9]*) "
     r"protected-unit-cost-rub (?P<protected_cost>[1-9][0-9]*\.[0-9]{6}) "
-    r"submits (?P<submits>[1-9][0-9]*)$"
+    r"submits (?P<submits>[1-9][0-9]*) "
+    r"predecessor-pr (?P<predecessor_pr>[1-9][0-9]*) "
+    r"predecessor-release-operation "
+    r"(?P<predecessor_release_operation>release-v2-[0-9a-f]{32}) "
+    r"predecessor-release-comment (?P<predecessor_release_comment>[1-9][0-9]*) "
+    r"predecessor-authorization-comment "
+    r"(?P<predecessor_authorization_comment>[1-9][0-9]*) "
+    r"predecessor-apply-run (?P<predecessor_apply_run>[1-9][0-9]*) "
+    r"predecessor-apply-comment (?P<predecessor_apply_comment>[1-9][0-9]*) "
+    r"predecessor-receipt (?P<predecessor_receipt>sha256:[0-9a-f]{64}) "
+    r"predecessor-operation "
+    r"(?P<predecessor_operation>production-goal-v1-[0-9a-f]{32}) "
+    r"predecessor-product-phase "
+    r"(?P<predecessor_product_phase>recovery_[0-9a-f]{32}) "
+    r"predecessor-economics-phase "
+    r"(?P<predecessor_economics_phase>recovery_[0-9a-f]{32})$"
 )
 HISTORICAL_COST_AUTH_RE = re.compile(
     r"^/wb-core authorize-goal-v1 task (?P<task>WBC0013) "
@@ -971,6 +1014,22 @@ def validate_authorization(
             raise ApplyError("WBC0013 authorization scope is not exact SSS017")
         return goal
     if wbc0027_match is not None:
+        predecessor = {
+            "pull_request": int(raw["predecessor_pr"]),
+            "release_operation_id": raw["predecessor_release_operation"],
+            "release_comment_id": int(raw["predecessor_release_comment"]),
+            "authorization_comment_id": int(
+                raw["predecessor_authorization_comment"]
+            ),
+            "apply_run_id": int(raw["predecessor_apply_run"]),
+            "apply_comment_id": int(raw["predecessor_apply_comment"]),
+            "artifact_id": WBC0027_PREDECESSOR_BINDING["artifact_id"],
+            "artifact_name": WBC0027_PREDECESSOR_BINDING["artifact_name"],
+            "receipt_sha256": raw["predecessor_receipt"],
+            "goal_operation_id": raw["predecessor_operation"],
+            "product_phase_operation_id": raw["predecessor_product_phase"],
+            "economics_phase_operation_id": raw["predecessor_economics_phase"],
+        }
         goal = {
             "contract": "wb-core.production-goal-passport/v1",
             "task": "WBC0027",
@@ -999,6 +1058,7 @@ def validate_authorization(
             "max_pre_submit_regenerations": MAX_QUALIFICATION_CANDIDATES - 1,
             "timer_changes_allowed": False,
             "reversible": True,
+            "supersedes_terminal_predecessor": predecessor,
         }
         exact = {
             "expected_product_row_count": 1152,
@@ -1020,9 +1080,11 @@ def validate_authorization(
             "protected_nm_id": 428853741,
             "protected_unit_cost_rub": "117.537167",
         }
-        if any(goal.get(key) != value for key, value in exact.items()) or int(
-            raw["submits"]
-        ) != 2:
+        if (
+            any(goal.get(key) != value for key, value in exact.items())
+            or int(raw["submits"]) != 2
+            or predecessor != WBC0027_PREDECESSOR_BINDING
+        ):
             raise ApplyError("WBC0027 authorization scope is not exact")
         return goal
     if historical_cost_match is not None:
@@ -1137,6 +1199,169 @@ def operation_id(
         }
     )
     return "production-goal-v1-" + digest(material)[:32]
+
+
+def _comment_with_id(
+    comments: list[Mapping[str, Any]], comment_id: int
+) -> Mapping[str, Any]:
+    matches = [item for item in comments if item.get("id") == int(comment_id)]
+    if len(matches) != 1:
+        raise ApplyError("WBC0027 predecessor comment is missing or ambiguous")
+    return matches[0]
+
+
+def _validate_wbc0027_predecessor_evidence(
+    *,
+    goal: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+    run: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    binding = goal.get("supersedes_terminal_predecessor")
+    if binding != WBC0027_PREDECESSOR_BINDING:
+        raise ApplyError("WBC0027 predecessor binding is not exact")
+
+    release_comment = _comment_with_id(
+        comments, int(WBC0027_PREDECESSOR_BINDING["release_comment_id"])
+    )
+    authorization_comment = _comment_with_id(
+        comments, int(WBC0027_PREDECESSOR_BINDING["authorization_comment_id"])
+    )
+    apply_comment = _comment_with_id(
+        comments, int(WBC0027_PREDECESSOR_BINDING["apply_comment_id"])
+    )
+    release_operation = str(WBC0027_PREDECESSOR_BINDING["release_operation_id"])
+    old_operation = str(WBC0027_PREDECESSOR_BINDING["goal_operation_id"])
+    if not (
+        is_actions_bot_comment(release_comment)
+        and f"<!-- {RECEIPT_MARKER} operation={release_operation} -->"
+        in str(release_comment.get("body") or "")
+        and str(authorization_comment.get("author_association") or "").upper()
+        in {"OWNER", "MEMBER"}
+        and str(authorization_comment.get("body") or "").strip()
+        == WBC0027_PREDECESSOR_AUTH_BODY
+        and is_actions_bot_comment(apply_comment)
+        and marker(old_operation) in str(apply_comment.get("body") or "")
+    ):
+        raise ApplyError("WBC0027 predecessor comments are not exact immutable evidence")
+    try:
+        release_payload = json.loads(
+            str(release_comment.get("body") or "")
+            .split("```json", 1)[1]
+            .split("```", 1)[0]
+        )
+        apply_summary = json.loads(
+            str(apply_comment.get("body") or "")
+            .split("```json", 1)[1]
+            .split("```", 1)[0]
+        )
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise ApplyError("WBC0027 predecessor comment payload is malformed") from exc
+    expected_release = {
+        "state": "done",
+        "operation_id": release_operation,
+        "pull_request": WBC0027_PREDECESSOR_BINDING["pull_request"],
+        "merge_sha": "68426769aa7dffec495eac66a8f502e2903c769b",
+        "deployed_sha": "68426769aa7dffec495eac66a8f502e2903c769b",
+        "release_kind": "live_runtime",
+    }
+    if any(release_payload.get(key) != value for key, value in expected_release.items()):
+        raise ApplyError("WBC0027 predecessor release receipt binding is invalid")
+    artifact = apply_summary.get("artifact")
+    if not (
+        apply_summary.get("schema") == APPLY_COMMENT_SUMMARY_SCHEMA
+        and apply_summary.get("state") == "blocked"
+        and apply_summary.get("reason")
+        == "wbc0027-product-query-only-readback-not-reconciled"
+        and apply_summary.get("operation_id") == old_operation
+        and apply_summary.get("release_operation_id") == release_operation
+        and apply_summary.get("pull_request")
+        == WBC0027_PREDECESSOR_BINDING["pull_request"]
+        and apply_summary.get("apply_count") == 0
+        and isinstance(artifact, Mapping)
+        and artifact.get("name") == WBC0027_PREDECESSOR_BINDING["artifact_name"]
+        and artifact.get("sha256") == WBC0027_PREDECESSOR_BINDING["receipt_sha256"]
+    ):
+        raise ApplyError("WBC0027 predecessor blocked marker binding is invalid")
+
+    validated_artifact = run.get("validated_artifact")
+    evidence = receipt.get("evidence")
+    predecessor_goal = dict(goal)
+    predecessor_goal.pop("supersedes_terminal_predecessor", None)
+    product_apply = evidence.get("product_apply") if isinstance(evidence, Mapping) else None
+    product_result = (
+        product_apply.get("result") if isinstance(product_apply, Mapping) else None
+    )
+    qualifications = (
+        (evidence.get("qualification_attempts") or {}).get("product")
+        if isinstance(evidence, Mapping)
+        else None
+    )
+    if not (
+        isinstance(validated_artifact, Mapping)
+        and validated_artifact.get("id") == WBC0027_PREDECESSOR_BINDING["artifact_id"]
+        and receipt.get("schema") == APPLY_RECEIPT_SCHEMA
+        and receipt.get("state") == "blocked"
+        and receipt.get("operation_id") == old_operation
+        and receipt.get("pull_request") == WBC0027_PREDECESSOR_BINDING["pull_request"]
+        and receipt.get("release_operation_id") == release_operation
+        and receipt.get("authorization_comment_id")
+        == WBC0027_PREDECESSOR_BINDING["authorization_comment_id"]
+        and receipt.get("authorization_body_sha256")
+        == digest(WBC0027_PREDECESSOR_AUTH_BODY.encode("utf-8"))
+        and receipt.get("goal") == predecessor_goal
+        and receipt.get("apply_count") == 0
+        and isinstance(evidence, Mapping)
+        and evidence.get("state") == "blocked"
+        and evidence.get("product_state") == "not_applied"
+        and evidence.get("economics_state") == "not_applied"
+        and isinstance(product_result, Mapping)
+        and product_result.get("error_type") == "TypeError"
+        and product_result.get("error")
+        == "warehouse_sync_lock() got an unexpected keyword argument 'operation'"
+        and product_result.get("phase_operation_id")
+        == WBC0027_PREDECESSOR_BINDING["product_phase_operation_id"]
+        and product_result.get("production_mutation_submit_count") == 0
+        and isinstance(qualifications, list)
+        and len(qualifications) == 2
+        and qualifications[0].get("material_qualification_digest")
+        == qualifications[1].get("material_qualification_digest")
+        and not (evidence.get("qualification_attempts") or {}).get("economics")
+    ):
+        raise ApplyError("WBC0027 predecessor receipt is not exact zero-submit evidence")
+    return {
+        "binding": dict(WBC0027_PREDECESSOR_BINDING),
+        "state": "blocked",
+        "apply_count": 0,
+        "product_lifecycle": "missing",
+        "economics_lifecycle": "missing",
+        "private_manifests_reusable": False,
+        "terminal_operation_reusable": False,
+    }
+
+
+def _collect_wbc0027_predecessor_evidence(
+    client: GitHubClient, goal: Mapping[str, Any]
+) -> dict[str, Any]:
+    comments = list_comments(
+        client, int(WBC0027_PREDECESSOR_BINDING["pull_request"])
+    )
+    run, receipt = _collect_recovery_receipt(
+        client,
+        pr=int(WBC0027_PREDECESSOR_BINDING["pull_request"]),
+        run_id=int(WBC0027_PREDECESSOR_BINDING["apply_run_id"]),
+        artifact_name=str(WBC0027_PREDECESSOR_BINDING["artifact_name"]),
+        receipt_sha256=str(WBC0027_PREDECESSOR_BINDING["receipt_sha256"]).removeprefix(
+            "sha256:"
+        ),
+        expected_conclusion="success",
+    )
+    return _validate_wbc0027_predecessor_evidence(
+        goal=goal,
+        comments=comments,
+        run=run,
+        receipt=receipt,
+    )
 
 
 def _canonical_target() -> dict[str, Any]:
@@ -4403,6 +4628,18 @@ def _validate_recovery_receipt(
         if evidence.get(field) != value:
             raise ApplyError(f"recovery receipt evidence mismatch: {field}")
     if goal.get("profile") == WBC0027_GOAL_PROFILE:
+        predecessor = receipt.get("superseded_predecessor_evidence")
+        if not (
+            isinstance(predecessor, Mapping)
+            and predecessor.get("binding") == WBC0027_PREDECESSOR_BINDING
+            and predecessor.get("state") == "blocked"
+            and predecessor.get("apply_count") == 0
+            and predecessor.get("product_lifecycle") == "missing"
+            and predecessor.get("economics_lifecycle") == "missing"
+            and predecessor.get("private_manifests_reusable") is False
+            and predecessor.get("terminal_operation_reusable") is False
+        ):
+            raise ApplyError("WBC0027 terminal predecessor evidence is invalid")
         if not (
             evidence.get("product_submit_count") == 1
             and evidence.get("economics_submit_count") == 1
@@ -7362,6 +7599,13 @@ def main() -> int:
         args.authorization_comment_id,
         goal,
     )
+    predecessor_binding = goal.get("supersedes_terminal_predecessor")
+    if (
+        goal["profile"] == WBC0027_GOAL_PROFILE
+        and isinstance(predecessor_binding, Mapping)
+        and operation == predecessor_binding.get("goal_operation_id")
+    ):
+        raise ApplyError("WBC0027 correction operation reused terminal predecessor")
     warm_readiness = (
         parse_warm_readiness_receipt(
             comments,
@@ -7393,6 +7637,12 @@ def main() -> int:
         _write_receipt(args.output, receipt)
         print(json.dumps(receipt, sort_keys=True))
         return 0
+
+    predecessor_evidence = (
+        _collect_wbc0027_predecessor_evidence(client, goal)
+        if goal["profile"] == WBC0027_GOAL_PROFILE
+        else None
+    )
 
     subprocess.run(
         ["git", "fetch", "--no-tags", "origin", merge_sha], cwd=ROOT, check=True
@@ -7461,6 +7711,11 @@ def main() -> int:
         "authorization_body_sha256": digest(approval_body.encode("utf-8")),
         "goal": goal,
         "warm_archive_readiness": warm_readiness,
+        **(
+            {"superseded_predecessor_evidence": predecessor_evidence}
+            if predecessor_evidence is not None
+            else {}
+        ),
         "apply_count": result["apply_count"],
         "evidence": result,
     }

@@ -805,3 +805,8 @@ on 21 August contributes exactly 16 separately qualified cells. Apply rebuilds
 the candidate beneath the shared writer lock, checks every target row's exact
 before image and the ready pointer, then publishes once through T1. Events and
 outbox are audit-only and are not acknowledged or rewritten by this recovery.
+Its query-only deployed qualification runs two no-create semantic witnesses,
+then exercises the same real non-blocking shared-lock candidate rebuild and
+stops before T1. A missing recovery lifecycle, zero submit, zero database write
+and release of the lock are required; the qualification never creates or
+reuses a private phase plan.

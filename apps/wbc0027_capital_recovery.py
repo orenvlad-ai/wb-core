@@ -60,7 +60,10 @@ from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
     recovery_operation_id,
 )
-from packages.application.warehouse_sync_lock import warehouse_sync_lock  # noqa: E402
+from packages.application.warehouse_sync_lock import (  # noqa: E402
+    WarehouseSyncBusyError,
+    warehouse_sync_lock,
+)
 
 
 PHASE_CONTRACT = "wbc0027_capital_recovery_phase_v3"
@@ -95,12 +98,15 @@ LEGACY_RELEASE_OPERATION_IDS = frozenset(
         "wbc0027-product-capital-and-qualified-economics-v2",
         "release-v2-cc4ad52ab06962a66265f76cc3df20e9",
         "release-v2-adf15aa6d2ab81803f88b38cedc6f883",
+        "production-goal-v1-89bfdc5e4e4bffcbc9f6f6aea677e389",
     }
 )
 LEGACY_PHASE_OPERATION_IDS = frozenset(
     {
         "recovery_1d51ce2f15a001b6cfe241008b8b7232",
         "recovery_76e81cc53831c2f6bbb3148efe8a9aa8",
+        "recovery_303ece915dfb8e89b615a84dc8f14d70",
+        "recovery_8fe6bf612bde74c0dec9cb3b441944b2",
     }
 )
 LEGACY_MANIFEST_SHA256 = (
@@ -1549,6 +1555,185 @@ def _failure_state(runtime: RegistryUploadDbBackedRuntime, operation_id: str) ->
     return "not_applied"
 
 
+def _fresh_candidate_under_writer_lock(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    candidate: Mapping[str, Any],
+    deployed_sha_file: Path,
+    expected_sha: str,
+    phase: str,
+    goal_operation_id: str,
+) -> dict[str, Any]:
+    if phase == "product":
+        fresh = build_product_candidate(
+            runtime_dir=runtime.runtime_dir,
+            deployed_sha_file=deployed_sha_file,
+            expected_sha=expected_sha,
+            goal_operation_id=goal_operation_id,
+        )
+    else:
+        predecessor_id = str(
+            (candidate.get("material") or {}).get("product_phase_operation_id")
+            or ""
+        )
+        fresh = build_economics_candidate(
+            runtime_dir=runtime.runtime_dir,
+            deployed_sha_file=deployed_sha_file,
+            expected_sha=expected_sha,
+            goal_operation_id=goal_operation_id,
+            product_phase_operation_id=predecessor_id,
+            require_product_reconciled=True,
+        )
+    if any(
+        fresh.get(key) != candidate.get(key)
+        for key in (
+            "material_qualification_digest",
+            "phase_fingerprint",
+            "phase_operation_id",
+            "storage_generation",
+            "deployed_sha",
+        )
+    ):
+        raise Wbc0027RecoveryError(
+            "fresh writer-lock candidate no longer matches reviewed material"
+        )
+    return fresh
+
+
+def _run_phase_writer_boundary(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    candidate: Mapping[str, Any],
+    deployed_sha_file: Path,
+    expected_sha: str,
+    phase: str,
+    goal_operation_id: str,
+    submit: bool,
+) -> dict[str, Any]:
+    """Acquire the real shared writer boundary; optionally stop before T1."""
+
+    # The public compatibility wrapper intentionally accepts only runtime_dir and
+    # blocking.  WBC0027 must not pass private operation/timeout assumptions into it.
+    with warehouse_sync_lock(runtime.runtime_dir, blocking=False):
+        fresh = _fresh_candidate_under_writer_lock(
+            runtime=runtime,
+            candidate=candidate,
+            deployed_sha_file=deployed_sha_file,
+            expected_sha=expected_sha,
+            phase=phase,
+            goal_operation_id=goal_operation_id,
+        )
+        if not submit:
+            existing = WarehouseRecoveryRegistry(
+                runtime_dir=runtime.runtime_dir, db_path=runtime.db_path
+            ).get_operation(str(fresh["phase_operation_id"]))
+            lifecycle = (
+                str(existing.get("lifecycle") or "unknown")
+                if isinstance(existing, Mapping)
+                else "missing"
+            )
+            if lifecycle != "missing":
+                raise Wbc0027RecoveryError(
+                    "fresh WBC0027 phase operation namespace is not free"
+                )
+            return {
+                "status": "ready",
+                "phase_operation_id": fresh["phase_operation_id"],
+                "phase_fingerprint": fresh["phase_fingerprint"],
+                "material_qualification_digest": fresh[
+                    "material_qualification_digest"
+                ],
+                "storage_generation": fresh["storage_generation"],
+                "deployed_sha": fresh["deployed_sha"],
+                "recovery_lifecycle": lifecycle,
+                "lock_acquired": True,
+                "submit_boundary_reached": True,
+                "submit_executed": False,
+                "query_only": True,
+                "database_written": False,
+                "production_mutation_submit_count": 0,
+            }
+        return (
+            _t1_product(runtime, fresh, _now())
+            if phase == "product"
+            else _t1_economics(runtime, fresh)
+        )
+
+
+def preflight_phase(
+    *,
+    runtime_dir: Path,
+    deployed_sha_file: Path,
+    expected_sha: str,
+    phase: str,
+    goal_operation_id: str,
+) -> dict[str, Any]:
+    """Query-only/no-create qualification through the actual writer boundary."""
+
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir.resolve())
+    operation_id = ""
+    try:
+        if phase != "product":
+            raise Wbc0027RecoveryError(
+                "WBC0027 no-submit lock preflight currently owns product phase only"
+            )
+        candidate = build_product_candidate(
+            runtime_dir=runtime.runtime_dir,
+            deployed_sha_file=deployed_sha_file,
+            expected_sha=expected_sha,
+            goal_operation_id=goal_operation_id,
+        )
+        operation_id = str(candidate["phase_operation_id"])
+        deployed_sha = _deployed_sha(deployed_sha_file.resolve(), expected_sha)
+        generation = _generation(runtime.runtime_dir)
+        _validate_candidate(
+            candidate,
+            phase=phase,
+            goal_operation_id=goal_operation_id,
+            expected_sha=deployed_sha,
+            generation=generation,
+            phase_operation_id=operation_id,
+            phase_fingerprint=str(candidate["phase_fingerprint"]),
+        )
+        boundary = _run_phase_writer_boundary(
+            runtime=runtime,
+            candidate=candidate,
+            deployed_sha_file=deployed_sha_file,
+            expected_sha=expected_sha,
+            phase=phase,
+            goal_operation_id=goal_operation_id,
+            submit=False,
+        )
+        return {
+            "contract_name": PHASE_CONTRACT,
+            "status": "ready",
+            "phase": phase,
+            "profile": PROFILE,
+            "target_id": CANONICAL_TARGET_ID,
+            "goal_operation_id": goal_operation_id,
+            **boundary,
+            "lock_released": True,
+        }
+    except Exception as exc:
+        return {
+            "contract_name": PHASE_CONTRACT,
+            "status": "not_applied",
+            "phase": phase,
+            "profile": PROFILE,
+            "target_id": CANONICAL_TARGET_ID,
+            "goal_operation_id": goal_operation_id,
+            "phase_operation_id": operation_id,
+            "query_only": True,
+            "database_written": False,
+            "production_mutation_submit_count": 0,
+            "submit_executed": False,
+            "lock_acquired": False,
+            "lock_released": isinstance(exc, WarehouseSyncBusyError),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+
+
 def apply_phase(
     *,
     runtime_dir: Path,
@@ -1587,50 +1772,15 @@ def apply_phase(
             phase_operation_id=phase_operation_id,
             phase_fingerprint=phase_fingerprint,
         )
-        lock_operation = f"wbc0027-{phase}-jit-recovery"
-        with warehouse_sync_lock(
-            runtime.runtime_dir, operation=lock_operation, timeout_seconds=30
-        ):
-            if phase == "product":
-                fresh = build_product_candidate(
-                    runtime_dir=runtime.runtime_dir,
-                    deployed_sha_file=deployed_sha_file,
-                    expected_sha=expected_sha,
-                    goal_operation_id=goal_operation_id,
-                )
-            else:
-                predecessor_id = str(
-                    (candidate.get("material") or {}).get(
-                        "product_phase_operation_id"
-                    )
-                    or ""
-                )
-                fresh = build_economics_candidate(
-                    runtime_dir=runtime.runtime_dir,
-                    deployed_sha_file=deployed_sha_file,
-                    expected_sha=expected_sha,
-                    goal_operation_id=goal_operation_id,
-                    product_phase_operation_id=predecessor_id,
-                    require_product_reconciled=True,
-                )
-            if any(
-                fresh.get(key) != candidate.get(key)
-                for key in (
-                    "material_qualification_digest",
-                    "phase_fingerprint",
-                    "phase_operation_id",
-                    "storage_generation",
-                    "deployed_sha",
-                )
-            ):
-                raise Wbc0027RecoveryError(
-                    "fresh writer-lock candidate no longer matches reviewed material"
-                )
-            result = (
-                _t1_product(runtime, fresh, _now())
-                if phase == "product"
-                else _t1_economics(runtime, fresh)
-            )
+        result = _run_phase_writer_boundary(
+            runtime=runtime,
+            candidate=candidate,
+            deployed_sha_file=deployed_sha_file,
+            expected_sha=expected_sha,
+            phase=phase,
+            goal_operation_id=goal_operation_id,
+            submit=True,
+        )
         idempotent = result.get("status") == "idempotent"
         return {
             "contract_name": PHASE_CONTRACT,
@@ -1788,6 +1938,8 @@ def main() -> int:
     plan_parser.add_argument("--phase", choices=("product", "economics"), required=True)
     plan_parser.add_argument("--product-phase-operation-id", default="")
     plan_parser.add_argument("--no-create", action="store_true")
+    preflight_parser = commands.add_parser("preflight")
+    preflight_parser.add_argument("--phase", choices=("product",), required=True)
     apply_parser = commands.add_parser("apply")
     apply_parser.add_argument("--phase", choices=("product", "economics"), required=True)
     apply_parser.add_argument("--manifest", type=Path, required=True)
@@ -1827,6 +1979,14 @@ def main() -> int:
                 candidate=candidate,
                 evidence_dir=args.evidence_dir,
                 no_create=args.no_create,
+            )
+        elif args.command == "preflight":
+            result = preflight_phase(
+                runtime_dir=args.runtime_dir,
+                deployed_sha_file=args.deployed_sha_file,
+                expected_sha=args.expected_deployed_sha,
+                phase=args.phase,
+                goal_operation_id=args.operation_id,
             )
         elif args.command == "apply":
             result = apply_phase(

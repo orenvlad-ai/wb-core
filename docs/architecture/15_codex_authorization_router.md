@@ -163,6 +163,17 @@ authorization comment и derived goal operation; каждый attempt terminal �
 immutable, а exhaustion не создаёт queue/retry. Новый PR нужен только для
 реального code/runtime delta, не как identity nonce.
 
+Для WBC0027 terminal blocked pre-submit attempt из PR #1128 остаётся
+неизменяемым predecessor evidence. Реальная correction release использует
+новые PR/comment/release bindings и fresh derived goal/phase identities; её
+OWNER/MEMBER passport точно связывает старые release/passport/run/receipt и обе
+старые phase identities только как superseded zero-submit evidence. Старый
+passport, marker, operation или private manifest никогда не даёт
+`already_terminal` новой release и не переиспользуется для submit. До следующего
+отдельного Production Apply допустима deployed query-only/no-create
+qualification с двумя witnesses и реальным non-blocking shared-lock preflight,
+который останавливается до T1 и требует свободный recovery namespace.
+
 Unrelated warning записывается, stale warning refresh-ится. Они не создают
 gate и не расширяют scope.
 

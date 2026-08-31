@@ -129,6 +129,7 @@ jobs:
     name: Exact bounded production goal apply and reconciliation
     if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation'
     permissions:
+      actions: read
       contents: read
       issues: write
       pull-requests: write
