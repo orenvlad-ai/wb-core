@@ -18,7 +18,13 @@ import sqlite3
 from typing import Any, Mapping
 
 from packages.application.ff_pool_cutover import MANIFESTS_TABLE
-from packages.application.ff_pool_fbs_lifecycle import CURRENT_TABLE
+from packages.application.ff_pool_fbs_lifecycle import (
+    CURRENT_TABLE,
+    IDENTITY_PENDING_RESOLUTIONS_TABLE,
+    IDENTITY_PENDING_TABLE,
+    fbs_lifecycle_group_blocked,
+    fbs_lifecycle_quality_coverage,
+)
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -30,7 +36,13 @@ from packages.application.ff_pool_fbs_applicability import (
     fbs_physical_component,
     stock_managed_nomenclature,
 )
-from packages.application.wb_fbs_orders import WAREHOUSE_MAPPINGS_TABLE
+from packages.application.wb_fbs_orders import (
+    IDENTITY_EVIDENCE_TABLE,
+    IDENTITY_MAPPINGS_TABLE,
+    OBSERVATIONS_TABLE,
+    STATUS_OBSERVATIONS_TABLE,
+    WAREHOUSE_MAPPINGS_TABLE,
+)
 from packages.application.wb_incident_policy import canonical_seller_id
 
 
@@ -414,6 +426,13 @@ def _fbs_required_tables() -> set[str]:
         BALANCES_TABLE,
         MANIFESTS_TABLE,
         CURRENT_TABLE,
+        IDENTITY_PENDING_TABLE,
+        IDENTITY_PENDING_RESOLUTIONS_TABLE,
+        OBSERVATIONS_TABLE,
+        STATUS_OBSERVATIONS_TABLE,
+        IDENTITY_EVIDENCE_TABLE,
+        IDENTITY_MAPPINGS_TABLE,
+        WAREHOUSE_MAPPINGS_TABLE,
     }
 
 
@@ -691,6 +710,11 @@ def _fbs_facilities(
         int(item["nm_id"]) for item in stock_managed_nomenclature(conn)
     }
     coverage_nm_ids = active_stock_nm_ids | sku_scope
+    lifecycle_quality = fbs_lifecycle_quality_coverage(
+        conn,
+        as_of_date=canonical_as_of_date,
+        requested_nm_ids=coverage_nm_ids,
+    )
     if epoch_ready:
         for balance in conn.execute(
             f"""SELECT facility_id,nm_id,SUM(quantity) quantity,
@@ -759,12 +783,24 @@ def _fbs_facilities(
                     sku_active=nm_id in active_stock_nm_ids,
                 )
                 reservation_value = facility_reservations.get(nm_id)
-                sku_physical = component["quantity"]
-                sku_reserved = int(reservation_value["quantity"]) if reservation_value else 0
+                lifecycle_blocked = fbs_lifecycle_group_blocked(
+                    lifecycle_quality,
+                    facility_id=facility_id,
+                    nm_id=nm_id,
+                )
+                sku_physical = None if lifecycle_blocked else component["quantity"]
+                sku_reserved = (
+                    None
+                    if lifecycle_blocked
+                    else int(reservation_value["quantity"])
+                    if reservation_value
+                    else 0
+                )
                 sku_available = (
                     None
-                    if component["state"] in {"missing", "inapplicable"}
-                    else sku_physical - sku_reserved
+                    if lifecycle_blocked
+                    or component["state"] in {"missing", "inapplicable"}
+                    else int(sku_physical) - int(sku_reserved)
                 )
                 official_sku = readback_by_facility_nm_id.get((facility_id, nm_id))
                 typed = {
@@ -775,21 +811,42 @@ def _fbs_facilities(
                     "available_is_signed": True,
                     # exact_zero describes the physical row, never a positive
                     # physical quantity fully offset by reservations.
-                    "state": str(component["state"]),
+                    "state": (
+                        "missing" if lifecycle_blocked else str(component["state"])
+                    ),
                     "quality": (
+                        "partial_lifecycle_identity_coverage"
+                        if lifecycle_blocked
+                        else
                         "inapplicable"
                         if component["state"] == "inapplicable"
                         else "missing"
                         if component["state"] == "missing"
                         else "exact_ledger"
                     ),
-                    "reason": str(component["reason"]),
+                    "reason": (
+                        "lifecycle_identity_coverage_pending"
+                        if lifecycle_blocked
+                        else str(component["reason"])
+                    ),
                     "reason_ru": (
                         ""
                         if sku_available is not None or component["state"] == "inapplicable"
-                        else "Отсутствует exact physical FBS component для SKU."
+                        else (
+                            "Неполная lifecycle/identity coverage FBS для SKU."
+                            if lifecycle_blocked
+                            else "Отсутствует exact physical FBS component для SKU."
+                        )
                     ),
-                    "provenance": dict(component["provenance"]),
+                    "provenance": {
+                        **dict(component["provenance"]),
+                        "lifecycle_quality_digest": str(
+                            lifecycle_quality.get("digest") or ""
+                        ),
+                        "lifecycle_quality_status": str(
+                            lifecycle_quality.get("status") or ""
+                        ),
+                    },
                     "seller_stock": {
                         "quantity": official_sku,
                         "delta_to_ledger_physical": (
@@ -1031,6 +1088,7 @@ def _fbs_facilities(
             "feature_epoch": int(manifest["feature_epoch"]) if manifest is not None else None,
             "effective_from": str(manifest["business_date"]) if manifest is not None else None,
         },
+        "lifecycle_quality": lifecycle_quality,
     }
 
 

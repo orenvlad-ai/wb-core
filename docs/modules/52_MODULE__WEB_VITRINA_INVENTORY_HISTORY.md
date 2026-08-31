@@ -238,3 +238,20 @@ selected facility, missing/exact-zero semantics and its apply identity are
 hard non-targets. The shared Production Apply tests additionally prove two
 separate one-submit phases, transport-ambiguous readback-only convergence and
 `already_terminal` before remote execution.
+
+WBC0027 FBS lifecycle recovery is a separate, narrower history supersession.
+While any relevant lifecycle/identity row is unresolved, the history reader
+overlays the stored FBS facility SKU and facility TOTAL component as missing;
+an older immutable capture therefore cannot keep a false full-quality claim.
+The overlay starts from the exact source order creation date, not from the
+later recovery timestamp.
+
+The guarded recovery never copies a current balance into a past date. It folds
+the recovered order events at their exact source dates: reservations use the
+source order creation time and release/handoff effects use the source status
+observation time. For each date `2026-08-17..2026-08-31`, it appends a new full
+capture by preserving every prior component and applying only the proven four
+group corrections plus their two facility TOTAL corrections. Closed days get
+append-only superseding finalizations; the current open day gets a capture only.
+The original captures/finalizations remain immutable and readback binds all 15
+new capture identities to the lifecycle recovery receipt.

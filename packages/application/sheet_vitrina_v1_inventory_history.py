@@ -18,6 +18,10 @@ from packages.application.inventory_planning_read_model import (
     FORMULA_VERSION,
     _fbs_facilities,
 )
+from packages.application.ff_pool_fbs_lifecycle import (
+    fbs_lifecycle_group_blocked,
+    fbs_lifecycle_quality_coverage,
+)
 from packages.application.wb_incident_policy import canonical_seller_id
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
 
@@ -541,9 +545,42 @@ def read_inventory_history_window(
                     ORDER BY scope_kind,scope_key,component_kind,component_id""",
                 (str(capture["capture_id"]),),
             ).fetchall()
+            lifecycle_quality = fbs_lifecycle_quality_coverage(
+                conn,
+                as_of_date=business_date,
+                requested_nm_ids={
+                    int(row["nm_id"])
+                    for row in rows
+                    if row["nm_id"] is not None and int(row["nm_id"]) > 0
+                },
+            )
             scopes: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
-                scopes.setdefault(str(row["scope_key"]), []).append(dict(row))
+                component = dict(row)
+                if (
+                    str(component["component_kind"]) == "FBS_FACILITY"
+                    and fbs_lifecycle_group_blocked(
+                        lifecycle_quality,
+                        facility_id=str(component["component_id"]),
+                        nm_id=(
+                            None
+                            if component["nm_id"] is None
+                            else int(component["nm_id"])
+                        ),
+                    )
+                ):
+                    component.update(
+                        {
+                            "state": "missing",
+                            "quantity": None,
+                            "source_revision": "lifecycle_identity_coverage_pending",
+                            "source_digest": str(
+                                lifecycle_quality.get("digest") or ""
+                            ),
+                            "source_watermark": "",
+                        }
+                    )
+                scopes.setdefault(str(row["scope_key"]), []).append(component)
             result_dates[business_date] = {
                 "capture_id": str(capture["capture_id"]),
                 "source_digest": str(capture["source_digest"]),

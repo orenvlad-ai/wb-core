@@ -841,3 +841,28 @@ three patches and three semantic patches but no `semantic_non_target` or
 to the immutable source lineage and proves non-target preservation through the
 three target-removed row equalities plus the source CAS/readback/COMMIT/retain
 order. It never synthesizes historical component digests.
+
+## WBC0027 lifecycle identity completeness and bounded recovery
+
+The immutable Stage 7C manifest is opening evidence, not a permanent live SKU
+roster. Every suffix order is admitted through its immutable matched identity
+evidence plus the current active warehouse/facility and exact SKU mapping. A
+mapping added after cutover is therefore usable; a missing, stale or ambiguous
+mapping remains in append-only identity quarantine and has no lifecycle,
+physical, capital or WAC effect. The writer never falls back silently to an
+older manifest mapping.
+
+`fbs_lifecycle_quality_coverage_v1` folds unresolved identity rows and statuses
+above the durable lifecycle cursor into the smallest provable facility × SKU
+scope. A blocked group is `missing/partial`, never `exact_ledger`; FBS,
+`stock_total`, own-product capital, WAC and dependent economics all fail closed.
+An unscopable identity blocks the whole FBS operand.
+
+The WBC0027 recovery CLI is dry-run by default. Its immutable business scope is
+source sequence `28050157`, dates `2026-08-17..2026-08-31` and exactly the four
+canonical Moscow/Orenburg × SKU groups recorded in migration 176. It derives
+target cardinality and quantity/capital effects from coherent source evidence,
+uses one writer lock and one SQLite submit, persists a private 0600 before
+image, enforces exact target/non-target CAS and reconciles only by query-only
+readback after ambiguous transport. Release deploys this capability inertly;
+Production Apply is a separate owner-authorized operation and never writes WB.
