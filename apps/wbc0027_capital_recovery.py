@@ -2729,7 +2729,7 @@ def finalize_existing_economics_operation(
             )
     if not (
         product.get("status") == "published_exact"
-        and int(product.get("row_count") or 0) == EXPECTED_PRODUCT_ROWS
+        and int(product.get("scope_count") or 0) == EXPECTED_PRODUCT_ROWS
         and int(product.get("cell_count") or 0) == EXPECTED_PRODUCT_CELLS
         and int(product.get("mismatch_count") or 0) == 0
         and hard.get("all_exact") is True

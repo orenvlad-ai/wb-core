@@ -244,7 +244,7 @@ def _result(context: dict) -> dict:
         "evidence_blocked": [f"2026-08-26|blocked-{index}" for index in range(12)],
         "product_capital": {
             "status": "published_exact",
-            "row_count": 1152,
+            "scope_count": 1152,
             "cell_count": 24192,
             "mismatch_count": 0,
         },
@@ -266,6 +266,17 @@ def main() -> None:
     context = _context()
     result = _result(context)
     assert runner._valid_wbc0027_finalize_result(result, context=context)
+    for scope_count in (None, 1151):
+        scope_drift = deepcopy(result)
+        if scope_count is None:
+            del scope_drift["product_capital"]["scope_count"]
+        else:
+            scope_drift["product_capital"]["scope_count"] = scope_count
+        assert not runner._valid_wbc0027_finalize_result(scope_drift, context=context)
+    row_count_only = deepcopy(result)
+    del row_count_only["product_capital"]["scope_count"]
+    row_count_only["product_capital"]["row_count"] = 1152
+    assert not runner._valid_wbc0027_finalize_result(row_count_only, context=context)
     for field, foreign in (
         ("production_mutation_count", 1),
         ("product_replay_count", 1),

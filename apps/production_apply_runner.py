@@ -7570,7 +7570,7 @@ def _valid_wbc0027_finalize_result(
         and len(result.get("evidence_blocked")) == 12
         and isinstance(product, Mapping)
         and product.get("status") == "published_exact"
-        and int(product.get("row_count") or 0) == 1152
+        and int(product.get("scope_count") or 0) == 1152
         and int(product.get("cell_count") or 0) == 24192
         and int(product.get("mismatch_count") or 0) == 0
         and isinstance(hard, Mapping)
