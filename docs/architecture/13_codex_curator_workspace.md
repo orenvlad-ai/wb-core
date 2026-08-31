@@ -21,18 +21,22 @@ owner-facing gate нужен valid receipt
 
 Каждый technical execution block получает один fresh visible internal subagent
 через `collaboration.spawn_agent`. Он виден в `Subagents`/`Activity`, не
-pin-ится и не создаёт sidebar task или `::created-thread`; default concurrency
-— one. Exact naming, compact passport, `fork_turns:"none"`, diagnostic/
-implementation boundaries и one-branch/one-PR ownership задаёт execution
-protocol, а не workspace UI.
+pin-ится и не создаёт sidebar task или `::created-thread`. Одновременно active
+допустим максимум один mutating/implementation subagent и zero-or-more
+независимых bounded diagnostic/read-only subagents; WBC не задаёт read-only
+blocks numeric cap сверх capacity platform. Exact naming, compact passport,
+`fork_turns:"none"`, diagnostic/implementation boundaries и one-branch/one-PR
+ownership задаёт execution protocol, а не workspace UI.
 
 После successful spawn main сохраняет текущий turn активным до meaningful
 callback либо terminal handoff и держит ровно один outstanding event/terminal
-wait. Quiet mode не завершает turn. Progress публикуется только на meaningful
-transitions: tool timeout разрешает немедленно и молча re-arm тот же wait, но не
-является progress evidence и не разрешает heartbeat, duplicate monitor либо
-status polling. Subagent возвращает terminal payload ровно один раз и становится
-`Done`; это terminal state блока, не automatic acceptance всей main task.
+wait, покрывающий весь active set subagents. Quiet mode не завершает turn.
+Meaningful callbacks обрабатываются без потери других handoffs; при оставшемся
+active set один wait re-arm-ится на него. Tool timeout разрешает немедленно и
+молча re-arm того же wait, но не является progress evidence и не разрешает
+heartbeat, duplicate monitor либо status polling. Каждый subagent возвращает
+terminal payload ровно один раз и становится `Done`; это terminal state блока,
+не automatic acceptance всей main task.
 
 Вся видимая внутренняя работа subagent-а — progress, рабочие пояснения,
 сообщения и technical handoff — по умолчанию ведётся на русском. Исключения:
@@ -41,8 +45,10 @@ target language. Правило относится только к видимы�
 
 ## One owner surface and continuation
 
-После handoff только owning main task публикует итог, задаёт допустимый
-business-вопрос и dispatch-ит continuation. Другой main curator может один раз
+Diagnostic handoff возвращается только owning main task; read-only block не
+передаёт его sibling executor-у и не запускает mutating continuation. После
+handoff только owning main task публикует итог, задаёт допустимый business-вопрос
+и dispatch-ит continuation. Другой main curator может один раз
 передать owner-у structured evidence и exact pointer, но не ведёт параллельный
 monitoring или управление той же целью, не пишет исполнителю повторно и не
 публикует второй status либо question. Duplicate pending/answered gate и subset

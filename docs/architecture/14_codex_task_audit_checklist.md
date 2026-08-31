@@ -55,13 +55,14 @@ tightening. Любое замедление допустимо только дл
 5. **Contour.** Отнеси наблюдение ровно к одному execution contour из таблицы
    ниже. Если наблюдений несколько, раздели их на независимые findings.
 6. **Wait review.** Нормой является ровно один outstanding bounded
-   terminal/event wait, сохраняющий main turn активным, пока subagent
-   non-terminal. Чистый tool timeout разрешает немедленный silent re-arm того
-   же wait как renewal lease/subscription; это не polling и не evidence
-   прогресса. Любой status read (`list_agents`, worktree/Git/CI/status) либо
-   heartbeat/user-facing «ещё идёт» на timeout остаётся нарушением. После
-   meaningful callback/event wait можно повторить; кроме silent timeout re-arm,
-   иных повторов без нового event быть не должно.
+   terminal/event wait, покрывающий весь active set subagents и сохраняющий main
+   turn активным, пока хотя бы один из них non-terminal. Чистый tool timeout
+   разрешает немедленный silent re-arm того же wait как renewal lease/
+   subscription; это не polling и не evidence прогресса. Любой status read
+   (`list_agents`, worktree/Git/CI/status`) либо heartbeat/user-facing «ещё идёт»
+   на timeout остаётся нарушением. После meaningful callback wait можно
+   повторить на оставшийся active set; кроме silent timeout re-arm, иных
+   повторов без нового event быть не должно.
 7. **Classification.** Пройди decision order и назначь finding ровно один code.
 8. **Cost test.** Для любой предлагаемой protocol/documentation change заполни
    все delta fields. Если данных недостаточно, оставь `NO_CHANGE`; не добавляй
@@ -73,7 +74,7 @@ tightening. Любое замедление допустимо только дл
 
 | Contour | Process treatment |
 | --- | --- |
-| Diagnostic/read-only technical execution | Audit отличает fresh-subagent сбор нового substantive domain evidence от curator-control reads. Main-owned substantive сбор является actor/context finding и проходит обычный cost-first decision order, а не автоматически `TIGHTEN`. |
+| Diagnostic/read-only technical execution | Audit отличает отдельные fresh-subagent blocks с неповторяющимися bounded evidence questions от curator-control reads. Независимые read-only blocks могут идти параллельно; main-owned substantive сбор, mutating capability внутри diagnostic block или duplicate question является actor/context finding и проходит обычный cost-first decision order, а не автоматически `TIGHTEN`. |
 | Standard OS maintenance | Использовать штатную OS-процедуру в accepted scope с proportional target/recovery/readback evidence. Сам факт production host не создаёт blanket PR requirement. |
 | Bounded reversible one-off infrastructure maintenance | Допустимо выполнить быстро без PR, только если заранее exact scope/identity, recovery, один mutation submit, non-target protection, post-action readback и durable receipt. Local `/tmp` допустим как working evidence, но никогда не как единственное terminal evidence destructive/production operation. |
 | Recurring automation | Implementation должна быть repo-owned и проходить обычный repository/release flow. Audit не проектирует и не запускает automation. |
