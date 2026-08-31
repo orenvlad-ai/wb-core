@@ -6,7 +6,9 @@ The immutable source diagnosis remains bound to runtime
 `999c53285ca684bd3b1d2caa5992594f8870ffc7`, StoreRegistry generation
 `operational-c54072027f14f90b374b`, manifest
 `sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb`,
-schema revision `987` and cutover `ffcut_d2816d894a75390dcaa6514c0a96`.
+SQLite `PRAGMA schema_version=987` and cutover
+`ffcut_d2816d894a75390dcaa6514c0a96`. The generation label
+`operational_v1` is independent metadata and is not the numeric schema binding.
 Its external source-snapshot identity
 `sha256:ca2117e1c33a81df62d9de68c0f6e7f652d755fef828a91a88a8592ae69db6f7`
 is an accepted opaque binding. Its unavailable preimage is not reconstructed or

@@ -246,7 +246,7 @@ def main() -> int:
             mapping_original = (
                 mapping_module.EXPECTED_OPERATIONAL_GENERATION_ID,
                 mapping_module.EXPECTED_MANIFEST_SHA256,
-                mapping_module.EXPECTED_SCHEMA_REVISION,
+                mapping_module.EXPECTED_SQLITE_SCHEMA_VERSION,
                 mapping_module.EXPECTED_CUTOVER_ID,
                 mapping_module.EXPECTED_TARGET_NM_ID,
                 mapping_module.EXPECTED_BLOCKER_CARDINALITY,
@@ -255,8 +255,8 @@ def main() -> int:
                 storage["operational_generation_id"]
             )
             mapping_module.EXPECTED_MANIFEST_SHA256 = str(storage["manifest_sha256"])
-            mapping_module.EXPECTED_SCHEMA_REVISION = str(
-                storage["operational_schema_revision"]
+            mapping_module.EXPECTED_SQLITE_SCHEMA_VERSION = int(
+                storage["sqlite_schema_version"]
             )
             mapping_module.EXPECTED_CUTOVER_ID = str(active["cutover_id"])
             mapping_module.EXPECTED_TARGET_NM_ID = 103
@@ -337,7 +337,7 @@ def main() -> int:
                 (
                     mapping_module.EXPECTED_OPERATIONAL_GENERATION_ID,
                     mapping_module.EXPECTED_MANIFEST_SHA256,
-                    mapping_module.EXPECTED_SCHEMA_REVISION,
+                    mapping_module.EXPECTED_SQLITE_SCHEMA_VERSION,
                     mapping_module.EXPECTED_CUTOVER_ID,
                     mapping_module.EXPECTED_TARGET_NM_ID,
                     mapping_module.EXPECTED_BLOCKER_CARDINALITY,
@@ -784,7 +784,7 @@ def _assert_mapping_negative_guards(
     changed["operational_generation_id"] = "foreign-generation"
     assert "storage_generation_drift" in codes(storage_value=changed)
     changed = dict(storage)
-    changed["operational_schema_revision"] = "foreign-schema"
+    changed["sqlite_schema_version"] = int(storage["sqlite_schema_version"]) + 1
     assert "storage_schema_revision_drift" in codes(storage_value=changed)
     changed_source = dict(source)
     changed_source["cutover_id"] = "foreign-cutover"
