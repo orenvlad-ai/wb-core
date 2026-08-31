@@ -460,10 +460,12 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
           --github-output "$GITHUB_OUTPUT"
           --output "$RUNNER_TEMP/wbc0027-reconciliation-preflight.json"
 
       - name: Execute one fixed query-only finalize probe
+        id: collect
         if: steps.preflight.outputs.probe_required == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -483,10 +485,14 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
+          --github-output "$GITHUB_OUTPUT"
           --output "$RUNNER_TEMP/wbc0027-existing-operation-reconciliation-receipt.json"
 
       - name: Upload full immutable WBC0027 reconciliation evidence first
-        if: steps.preflight.outputs.probe_required == 'true'
+        if: >-
+          ${{ always() && steps.preflight.outcome == 'success' &&
+          steps.preflight.outputs.probe_required == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: wbc0027-existing-operation-reconciliation-pr-${{ inputs.pr }}-run-${{ github.run_id }}
@@ -495,7 +501,9 @@ jobs:
           retention-days: 90
 
       - name: Verify uploaded evidence and publish one supersession marker
-        if: steps.preflight.outputs.probe_required == 'true'
+        if: >-
+          ${{ success() && steps.preflight.outputs.probe_required == 'true' &&
+          steps.collect.outputs.receipt_qualified == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
@@ -512,4 +520,5 @@ jobs:
           --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
           --output "$RUNNER_TEMP/wbc0027-existing-operation-reconciliation-receipt.json"

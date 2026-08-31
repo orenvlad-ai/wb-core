@@ -406,6 +406,19 @@ product/economics/outbox и не повторяет ни один submit. Full c
 валидирует этот artifact и возвращает `already_terminal` до SSH. Missing,
 foreign, duplicated или drifted evidence fail closed.
 
+После failure run `33363863580` continuation обязана передать его только через
+существующий `prior_reconciliation_run_id`; остальные prior artifact/comment/a02
+поля остаются zero/empty. Runner source-specifically проверяет exact main SHA,
+workflow/event/attempt, job `99400411103`, failed collect, skipped upload/publish,
+artifacts=0, marker chronology, исходные logged source inputs и preflight
+query-only/mutation0. Collect после успешного preflight всегда материализует
+canonical `done` или `blocked` receipt. Transport failure, remote nonzero,
+invalid JSON и validator failure имеют разные closed reason codes, bounded
+redacted output плюс digests/parse error и named predicate failures. Workflow
+upload использует `always()` и предшествует marker; blocked artifact никогда не
+публикует done marker. Это exact WBC0027 continuation, не generic failed-run
+bypass; 25-input surface и warm-mode prior semantics не меняются.
+
 Source manifest PR #1129 имеет ровно legacy shape: raw `non_target_digest`,
 три `functional_economics.patches` и три `material.semantic_patches`; полей
 `functional_economics.semantic_non_target` и
