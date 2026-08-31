@@ -67,6 +67,11 @@ from packages.application.warehouse_sync_lock import (  # noqa: E402
 
 
 PHASE_CONTRACT = "wbc0027_capital_recovery_phase_v3"
+ECONOMICS_NON_TARGET_CONTRACT = (
+    "wbc0027_economics_semantic_non_target_digest/v1"
+)
+ECONOMICS_NON_TARGET_SCOPE_VERSION = "ready_snapshot_target_slices_removed_v1"
+FINALIZE_ONLY_CONTRACT = "wbc0027_existing_operation_reconciliation/v1"
 PROFILE = "product-capital-qualified-economics"
 CANONICAL_TARGET_ID = "wb_core_eu_hosted_runtime_active"
 MUTATION_KIND_PRODUCT = "wbc0027_product_capital_version_bound_recovery"
@@ -449,6 +454,10 @@ def _economics_plan(conn: sqlite3.Connection) -> dict[str, Any]:
             if _ready_identity(row) not in patch_identities
         ]
     )
+    semantic_patches = _economics_semantic_patches({"patches": patches})
+    semantic_non_target = _economics_semantic_non_target_snapshot(
+        current_rows, semantic_patches
+    )
     return {
         "target_dates": list(ECONOMICS_DATES),
         "logical_repair_count": logical_repairs,
@@ -467,6 +476,7 @@ def _economics_plan(conn: sqlite3.Connection) -> dict[str, Any]:
         "before_digest": _digest([item["before_sha256"] for item in patches]),
         "after_digest": _digest([item["after_sha256"] for item in patches]),
         "non_target_digest": non_target_digest,
+        "semantic_non_target": semantic_non_target,
     }
 
 
@@ -792,6 +802,59 @@ def _strip_economics_targets(payload: Mapping[str, Any], days: list[str]) -> dic
     return stripped
 
 
+def _economics_semantic_non_target_snapshot(
+    rows: list[Mapping[str, Any]] | list[sqlite3.Row],
+    semantic_patches: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build the one canonical WBC0027 economics non-target witness."""
+
+    patches_by_identity = {
+        tuple(str(value) for value in patch["identity"]): patch
+        for patch in semantic_patches
+    }
+    identities: list[list[str]] = []
+    payload_digests: list[str] = []
+    row_components: list[dict[str, Any]] = []
+    for raw in sorted(rows, key=_ready_identity):
+        identity = _ready_identity(raw)
+        payload = json.loads(str(raw["plan_json"]))
+        patch = patches_by_identity.get(identity)
+        if patch is not None:
+            payload = _strip_economics_targets(
+                payload, [str(day) for day in patch["business_dates"]]
+            )
+        identity_list = list(identity)
+        payload_digest = _digest(payload)
+        identities.append(identity_list)
+        payload_digests.append(payload_digest)
+        row_components.append(
+            {"identity": identity_list, "semantic_payload_digest": payload_digest}
+        )
+    material = {
+        "contract_name": ECONOMICS_NON_TARGET_CONTRACT,
+        "scope_version": ECONOMICS_NON_TARGET_SCOPE_VERSION,
+        "row_count": len(row_components),
+        "target_row_count": len(patches_by_identity),
+        "component_digests": {
+            "identities": _digest(identities),
+            "semantic_payloads": _digest(payload_digests),
+            "rows": _digest(row_components),
+        },
+    }
+    return {**material, "digest": _digest(material)}
+
+
+def _economics_semantic_non_target_snapshot_from_conn(
+    conn: sqlite3.Connection, semantic_patches: list[Mapping[str, Any]]
+) -> dict[str, Any]:
+    rows = conn.execute(
+        "SELECT bundle_version,as_of_date,snapshot_id,plan_json "
+        "FROM sheet_vitrina_v1_ready_snapshots "
+        "ORDER BY bundle_version,as_of_date,snapshot_id"
+    ).fetchall()
+    return _economics_semantic_non_target_snapshot(rows, semantic_patches)
+
+
 def _economics_semantic_patches(economics: Mapping[str, Any]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for patch in economics["patches"]:
@@ -823,6 +886,23 @@ def _economics_material(
     economics: Mapping[str, Any], *, product_phase_operation_id: str
 ) -> dict[str, Any]:
     semantic_patches = _economics_semantic_patches(economics)
+    semantic_non_target = economics.get("semantic_non_target")
+    if not (
+        isinstance(semantic_non_target, Mapping)
+        and semantic_non_target.get("contract_name")
+        == ECONOMICS_NON_TARGET_CONTRACT
+        and semantic_non_target.get("scope_version")
+        == ECONOMICS_NON_TARGET_SCOPE_VERSION
+        and isinstance(semantic_non_target.get("row_count"), int)
+        and not isinstance(semantic_non_target.get("row_count"), bool)
+        and isinstance(semantic_non_target.get("component_digests"), Mapping)
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(semantic_non_target.get("digest") or "")
+        )
+    ):
+        raise Wbc0027RecoveryError(
+            "WBC0027 canonical semantic non-target witness is invalid"
+        )
     source_operation_id = _stable_opaque_identifier(
         economics.get("source_operation_id"), field="source_operation_id"
     )
@@ -863,6 +943,12 @@ def _economics_material(
         "exact_target_after_digest": _digest(
             [item["exact_after_cells"] for item in semantic_patches]
         ),
+        "semantic_non_target_contract": {
+            "contract_name": ECONOMICS_NON_TARGET_CONTRACT,
+            "scope_version": ECONOMICS_NON_TARGET_SCOPE_VERSION,
+            "row_count": int(semantic_non_target["row_count"]),
+            "target_row_count": int(semantic_non_target["target_row_count"]),
+        },
         "product_phase_operation_id": product_phase_operation_id,
         "unrelated_20260821_proxy_v4": "preserve_current_semantic_value",
         "finance": "hard_non_target",
@@ -950,6 +1036,7 @@ def build_economics_candidate(
             "product_predecessor": predecessor,
             "audit_observations": {
                 "raw_non_target_digest": str(economics["non_target_digest"]),
+                "semantic_non_target": dict(economics["semantic_non_target"]),
                 "role": "audit_only_not_apply_cas",
             },
         }
@@ -1292,6 +1379,12 @@ def _t1_product(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any],
         )
         if current_non_target_after != current_non_target_before:
             raise Wbc0027RecoveryError("product semantic non-target changed in transaction")
+        registry.record_mutation_commit(
+            conn,
+            operation_id,
+            after_digest=str(product["after_target_digest"]),
+            non_target_digest=current_non_target_before,
+        )
         conn.commit()
     registry.retain(
         operation_id,
@@ -1310,6 +1403,8 @@ def _t1_product(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any],
 
 def _t1_economics(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any]) -> dict[str, Any]:
     economics = dict(plan["functional_economics"])
+    semantic_patches = list(plan["material"]["semantic_patches"])
+    semantic_non_target = dict(economics["semantic_non_target"])
     fingerprint = str(plan["phase_fingerprint"])
     registry = WarehouseRecoveryRegistry(runtime_dir=runtime.runtime_dir, db_path=runtime.db_path)
     before_images = [
@@ -1343,7 +1438,7 @@ def _t1_economics(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any
         before_images=before_images,
         expected_after_images=[item["after"] for item in before_images],
         source_digest=str(plan["material_qualification_digest"]),
-        non_target_digest=str(economics["non_target_digest"]),
+        non_target_digest=str(semantic_non_target["digest"]),
         read_bytes=len(_json(before_images).encode("utf-8")),
     )
     operation_id = str(recovery["operation_id"])
@@ -1362,32 +1457,13 @@ def _t1_economics(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any
         conn.row_factory = sqlite3.Row
         ensure_warehouse_business_projection_schema(conn)
         conn.execute("BEGIN IMMEDIATE")
-        patch_identities = {tuple(item["identity"]) for item in economics["patches"]}
-        patches_by_identity = {
-            tuple(item["identity"]): item for item in economics["patches"]
-        }
-
-        def semantic_non_target_digest() -> str:
-            rows = conn.execute(
-                "SELECT bundle_version,as_of_date,snapshot_id,plan_json "
-                "FROM sheet_vitrina_v1_ready_snapshots "
-                "ORDER BY bundle_version,as_of_date,snapshot_id"
-            ).fetchall()
-            material: list[dict[str, Any]] = []
-            for row in rows:
-                identity = _ready_identity(row)
-                payload = json.loads(str(row["plan_json"]))
-                if identity in patch_identities:
-                    patch = patches_by_identity[identity]
-                    payload = _strip_economics_targets(
-                        payload, list(patch["business_dates"])
-                    )
-                material.append(
-                    {"identity": list(identity), "semantic_payload": payload}
-                )
-            return _digest(material)
-
-        current_non_target_before = semantic_non_target_digest()
+        current_non_target_before = _economics_semantic_non_target_snapshot_from_conn(
+            conn, semantic_patches
+        )
+        if current_non_target_before != semantic_non_target:
+            raise Wbc0027RecoveryError(
+                "economics semantic non-target changed before submit"
+            )
         for patch in economics["patches"]:
             changed = conn.execute(
                 "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE bundle_version=? AND as_of_date=? AND snapshot_id=? AND plan_json=?",
@@ -1408,22 +1484,32 @@ def _t1_economics(runtime: RegistryUploadDbBackedRuntime, plan: Mapping[str, Any
             conn,
             materialized_at=_now(),
         )
-        current_non_target_after = semantic_non_target_digest()
+        current_non_target_after = _economics_semantic_non_target_snapshot_from_conn(
+            conn, semantic_patches
+        )
         if current_non_target_after != current_non_target_before:
             raise Wbc0027RecoveryError(
                 "economics semantic non-target changed in transaction"
             )
+        registry.record_mutation_commit(
+            conn,
+            operation_id,
+            after_digest=str(economics["after_digest"]),
+            non_target_digest=str(current_non_target_before["digest"]),
+        )
         conn.commit()
     registry.retain(
         operation_id,
         after_digest=str(economics["after_digest"]),
-        non_target_digest=current_non_target_before,
+        non_target_digest=str(current_non_target_before["digest"]),
     )
     return {
         "status": "submitted",
         "operation_id": operation_id,
         "submit_count": 1,
         "updated_snapshot_count": len(economics["patches"]),
+        "updated_cell_count": int(economics["persisted_repair_count"]),
+        "semantic_non_target": current_non_target_before,
         "semantic_non_target_preserved": True,
     }
 
@@ -1540,19 +1626,43 @@ def _validate_candidate(
             raise Wbc0027RecoveryError("reviewed economics qualification drifted")
 
 
-def _failure_state(runtime: RegistryUploadDbBackedRuntime, operation_id: str) -> str:
+def _submission_truth(
+    runtime: RegistryUploadDbBackedRuntime, operation_id: str
+) -> dict[str, Any]:
     recovery = WarehouseRecoveryRegistry(
         runtime_dir=runtime.runtime_dir, db_path=runtime.db_path
     ).get_operation(operation_id)
     lifecycle = str(recovery.get("lifecycle") or "") if isinstance(recovery, Mapping) else ""
     if lifecycle == RecoveryState.RETAINED.value:
-        return "applied"
+        return {
+            "status": "applied",
+            "database_written": True,
+            "submit_count": 1,
+            "recovery_lifecycle": lifecycle,
+        }
+    if isinstance(recovery, Mapping) and str(recovery.get("after_digest") or ""):
+        return {
+            "status": "applied_pending_reconciliation",
+            "database_written": True,
+            "submit_count": 1,
+            "recovery_lifecycle": lifecycle,
+        }
     if lifecycle in {
         RecoveryState.MUTATION_RUNNING.value,
         RecoveryState.FAILED_RECOVERABLE.value,
     }:
-        return "ambiguous"
-    return "not_applied"
+        return {
+            "status": "ambiguous",
+            "database_written": False,
+            "submit_count": 1,
+            "recovery_lifecycle": lifecycle,
+        }
+    return {
+        "status": "not_applied",
+        "database_written": False,
+        "submit_count": 0,
+        "recovery_lifecycle": lifecycle or "missing",
+    }
 
 
 def _fresh_candidate_under_writer_lock(
@@ -1799,22 +1909,33 @@ def apply_phase(
             "approval_reference": approval_reference,
         }
     except Exception as exc:
-        state = "not_applied"
+        truth = {
+            "status": "not_applied",
+            "database_written": False,
+            "submit_count": 0,
+            "recovery_lifecycle": "missing",
+        }
         if re.fullmatch(r"recovery_[0-9a-f]{32}", operation_id):
             try:
-                state = _failure_state(runtime, operation_id)
+                truth = _submission_truth(runtime, operation_id)
             except Exception:
-                state = "ambiguous"
+                truth = {
+                    "status": "ambiguous",
+                    "database_written": False,
+                    "submit_count": 1,
+                    "recovery_lifecycle": "unknown",
+                }
         return {
             "contract_name": PHASE_CONTRACT,
-            "status": state,
+            "status": truth["status"],
             "phase": phase,
             "profile": PROFILE,
             "target_id": CANONICAL_TARGET_ID,
             "goal_operation_id": goal_operation_id,
             "phase_operation_id": operation_id,
-            "database_written": state != "not_applied",
-            "production_mutation_submit_count": 0,
+            "database_written": truth["database_written"],
+            "production_mutation_submit_count": truth["submit_count"],
+            "recovery_lifecycle": truth["recovery_lifecycle"],
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
@@ -1861,8 +1982,20 @@ def readback_phase(
         hard = _hard_non_target_semantics(conn)
         economics_missing: dict[str, int] = {}
         economics_target_exact = True
+        economics_semantic_non_target: dict[str, Any] | None = None
+        economics_non_target_exact = True
         if phase == "economics":
             semantic_patches = list((candidate.get("material") or {}).get("semantic_patches") or [])
+            economics_semantic_non_target = (
+                _economics_semantic_non_target_snapshot_from_conn(
+                    conn, semantic_patches
+                )
+            )
+            economics_non_target_exact = bool(
+                isinstance(recovery, Mapping)
+                and recovery.get("non_target_digest")
+                == economics_semantic_non_target["digest"]
+            )
             for patch in semantic_patches:
                 identity = tuple(patch["identity"])
                 row = conn.execute(
@@ -1897,6 +2030,7 @@ def readback_phase(
             product_exact
             if phase == "product"
             else economics_target_exact
+            and economics_non_target_exact
             and economics_missing == {"2026-08-26": 12, "2026-08-29": 0}
         )
     )
@@ -1919,8 +2053,339 @@ def readback_phase(
         "product_capital": product,
         "hard_non_target": hard,
         "economics_target_exact": economics_target_exact,
+        "economics_semantic_non_target": economics_semantic_non_target,
+        "economics_non_target_exact": economics_non_target_exact,
         "functional_economics_missing": economics_missing,
         "evidence_blocked": (candidate.get("material") or {}).get("evidence_blocked"),
+    }
+
+
+def _ready_rows_with_patch_images(
+    rows: list[Mapping[str, Any]] | list[sqlite3.Row],
+    patches: list[Mapping[str, Any]],
+    *,
+    image: str,
+) -> list[dict[str, Any]]:
+    field = f"{image}_plan_json"
+    by_identity = {
+        tuple(str(value) for value in patch["identity"]): str(patch[field])
+        for patch in patches
+    }
+    result: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        replacement = by_identity.get(_ready_identity(raw))
+        if replacement is not None:
+            row["plan_json"] = replacement
+        result.append(row)
+    return result
+
+
+def _raw_unpatched_ready_digest(
+    rows: list[Mapping[str, Any]] | list[sqlite3.Row],
+    patch_identities: set[tuple[str, str, str]],
+) -> str:
+    return _digest(
+        [
+            {
+                "identity": list(_ready_identity(row)),
+                "plan_sha256": _sha_text(str(row["plan_json"])),
+            }
+            for row in rows
+            if _ready_identity(row) not in patch_identities
+        ]
+    )
+
+
+def finalize_existing_economics_operation(
+    *,
+    runtime_dir: Path,
+    deployed_sha_file: Path,
+    expected_sha: str,
+    goal_operation_id: str,
+    source_deployed_sha: str,
+    source_manifest_path: Path,
+    source_manifest_sha256: str,
+    source_phase_operation_id: str,
+    source_phase_fingerprint: str,
+    source_storage_generation: Mapping[str, Any],
+    source_run_id: int,
+    source_artifact_id: int,
+    source_artifact_name: str,
+    source_receipt_sha256: str,
+    source_comment_id: int,
+    reconciliation_pr: int,
+    reconciliation_release_operation_id: str,
+    authorization_reference: str,
+) -> dict[str, Any]:
+    """Query-only proof for the already committed quarantined economics phase."""
+
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir.resolve())
+    reconciliation_sha = _deployed_sha(deployed_sha_file.resolve(), expected_sha)
+    operation_id = _validate_goal_namespace(goal_operation_id)
+    phase_operation_id = _validate_phase_operation_id(source_phase_operation_id)
+    if not (
+        source_deployed_sha != reconciliation_sha
+        and re.fullmatch(r"[0-9a-f]{40}", source_deployed_sha)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", source_receipt_sha256)
+        and source_run_id > 0
+        and source_artifact_id > 0
+        and source_comment_id > 0
+        and reconciliation_pr > 0
+        and source_artifact_name
+        and reconciliation_release_operation_id
+        and authorization_reference
+    ):
+        raise Wbc0027RecoveryError(
+            "WBC0027 finalize-only provenance binding is incomplete"
+        )
+    generation = _phase_generation(_generation(runtime.runtime_dir))
+    expected_generation = _phase_generation(source_storage_generation)
+    if generation != expected_generation:
+        raise Wbc0027RecoveryError(
+            "WBC0027 finalize-only StoreRegistry generation drifted"
+        )
+    candidate = _load_reviewed_candidate(
+        manifest_path=source_manifest_path,
+        manifest_sha256=source_manifest_sha256,
+        goal_operation_id=operation_id,
+    )
+    _validate_candidate(
+        candidate,
+        phase="economics",
+        goal_operation_id=operation_id,
+        expected_sha=source_deployed_sha,
+        generation=expected_generation,
+        phase_operation_id=phase_operation_id,
+        phase_fingerprint=source_phase_fingerprint,
+    )
+    economics = dict(candidate["functional_economics"])
+    patches = list(economics["patches"])
+    semantic_patches = list(candidate["material"]["semantic_patches"])
+    if not (
+        len(patches) == 3
+        and int(economics["logical_repair_count"])
+        == EXPECTED_ECONOMICS_LOGICAL_REPAIRS
+        and int(economics["persisted_repair_count"])
+        == EXPECTED_ECONOMICS_PERSISTED_REPAIRS
+    ):
+        raise Wbc0027RecoveryError(
+            "WBC0027 committed economics cardinality is not exact"
+        )
+    registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir, db_path=runtime.db_path
+    )
+    recovery = registry.get_operation(phase_operation_id)
+    product_operation_id = str(
+        candidate["material"].get("product_phase_operation_id") or ""
+    )
+    product_recovery = registry.get_operation(product_operation_id)
+    if not isinstance(recovery, Mapping) or not isinstance(product_recovery, Mapping):
+        raise Wbc0027RecoveryError("WBC0027 source recovery operations are missing")
+    if not (
+        recovery.get("operation_kind") == MUTATION_KIND_ECONOMICS
+        and recovery.get("closure_kind") == "sku_date"
+        and recovery.get("tier") == "T1"
+        and recovery.get("lifecycle") == RecoveryState.QUARANTINED.value
+        and recovery.get("plan_fingerprint") == source_phase_fingerprint
+        and recovery.get("source_digest")
+        == candidate["material_qualification_digest"]
+        and recovery.get("quarantine_reason")
+        == "non_target_digest_drift_after_mutation"
+        and product_recovery.get("lifecycle") == RecoveryState.RETAINED.value
+    ):
+        raise Wbc0027RecoveryError(
+            "WBC0027 source recovery lifecycle or quarantine reason drifted"
+        )
+    with _query_only(runtime.db_path) as conn:
+        current_rows = conn.execute(
+            "SELECT bundle_version,as_of_date,snapshot_id,plan_json "
+            "FROM sheet_vitrina_v1_ready_snapshots "
+            "ORDER BY bundle_version,as_of_date,snapshot_id"
+        ).fetchall()
+        patch_identities = {
+            tuple(str(value) for value in patch["identity"]) for patch in patches
+        }
+        current_by_identity = {_ready_identity(row): row for row in current_rows}
+        current_hashes: list[str] = []
+        for patch in patches:
+            identity = tuple(str(value) for value in patch["identity"])
+            current = current_by_identity.get(identity)
+            if current is None or str(current["plan_json"]) != str(
+                patch["after_plan_json"]
+            ):
+                raise Wbc0027RecoveryError(
+                    "WBC0027 committed economics current after-image drifted"
+                )
+            current_hashes.append(_sha_text(str(current["plan_json"])))
+        current_target_digest = _digest(current_hashes)
+        if current_target_digest != str(economics["after_digest"]):
+            raise Wbc0027RecoveryError(
+                "WBC0027 committed economics aggregate after digest drifted"
+            )
+        undo_rows = conn.execute(
+            "SELECT sequence_no,table_name,key_json,before_json,after_json,status "
+            "FROM sheet_vitrina_v1_recovery_undo_rows "
+            "WHERE operation_id=? ORDER BY sequence_no",
+            (phase_operation_id,),
+        ).fetchall()
+        if len(undo_rows) != len(patches):
+            raise Wbc0027RecoveryError("WBC0027 economics T1 undo row count drifted")
+        for undo, patch in zip(undo_rows, patches, strict=True):
+            before = json.loads(str(undo["before_json"]))
+            after = json.loads(str(undo["after_json"]))
+            expected_identity = {
+                "bundle_version": patch["identity"][0],
+                "as_of_date": patch["identity"][1],
+                "snapshot_id": patch["identity"][2],
+            }
+            if not (
+                str(undo["table_name"]) == "sheet_vitrina_v1_ready_snapshots"
+                and str(undo["status"]) == "verified"
+                and json.loads(str(undo["key_json"])) == expected_identity
+                and before == {**expected_identity, "plan_json": patch["before_plan_json"]}
+                and after == {**expected_identity, "plan_json": patch["after_plan_json"]}
+            ):
+                raise Wbc0027RecoveryError(
+                    "WBC0027 economics T1 before/after journal drifted"
+                )
+        transitions = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT from_state,to_state,state_version,detail_json "
+                "FROM sheet_vitrina_v1_recovery_transitions "
+                "WHERE operation_id=? ORDER BY state_version",
+                (phase_operation_id,),
+            ).fetchall()
+        ]
+        if not any(
+            item["from_state"] == RecoveryState.MUTATION_RUNNING.value
+            and item["to_state"] == RecoveryState.QUARANTINED.value
+            for item in transitions
+        ):
+            raise Wbc0027RecoveryError(
+                "WBC0027 quarantine transition did not follow mutation_running"
+            )
+        before_rows = _ready_rows_with_patch_images(
+            current_rows, patches, image="before"
+        )
+        after_rows = _ready_rows_with_patch_images(
+            current_rows, patches, image="after"
+        )
+        semantic_before = _economics_semantic_non_target_snapshot(
+            before_rows, semantic_patches
+        )
+        semantic_after = _economics_semantic_non_target_snapshot(
+            after_rows, semantic_patches
+        )
+        semantic_current = _economics_semantic_non_target_snapshot(
+            current_rows, semantic_patches
+        )
+        if not (
+            semantic_before == semantic_after == semantic_current
+            and semantic_current["row_count"] == len(current_rows)
+        ):
+            raise Wbc0027RecoveryError(
+                "WBC0027 canonical semantic non-target reconciliation failed"
+            )
+        raw_unpatched = _raw_unpatched_ready_digest(
+            current_rows, patch_identities
+        )
+        if raw_unpatched != str(recovery.get("non_target_digest") or ""):
+            raise Wbc0027RecoveryError(
+                "WBC0027 legacy raw non-target digest no longer matches source operation"
+            )
+        product = reconcile_warehouse_business_projection(
+            conn, target_dates=PRODUCT_DATES
+        )
+        hard = _hard_non_target_semantics(conn)
+        economics_missing: dict[str, int] = {}
+        for day in ECONOMICS_DATES:
+            day_rows = conn.execute(
+                "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                "WHERE as_of_date=?",
+                (day,),
+            ).fetchall()
+            economics_missing[day] = sum(
+                sum(
+                    _is_missing(value)
+                    for value in _target_cells(
+                        json.loads(str(row["plan_json"])), day
+                    ).values()
+                )
+                for row in day_rows
+            )
+    if not (
+        product.get("status") == "published_exact"
+        and int(product.get("mismatch_count") or 0) == 0
+        and hard.get("all_exact") is True
+        and economics_missing == {"2026-08-26": 12, "2026-08-29": 0}
+    ):
+        raise Wbc0027RecoveryError(
+            "WBC0027 current product/economics readback is not exact"
+        )
+    source_row = {
+        key: recovery.get(key)
+        for key in (
+            "operation_id",
+            "operation_kind",
+            "closure_kind",
+            "tier",
+            "lifecycle",
+            "state_version",
+            "plan_fingerprint",
+            "source_digest",
+            "after_digest",
+            "non_target_digest",
+            "quarantine_reason",
+            "last_error",
+        )
+    }
+    return {
+        "contract_name": FINALIZE_ONLY_CONTRACT,
+        "status": "reconciled_existing_operation",
+        "terminal_disposition": "supersede_false_quarantine_receipt",
+        "profile": PROFILE,
+        "target_id": CANONICAL_TARGET_ID,
+        "goal_operation_id": operation_id,
+        "product_phase_operation_id": product_operation_id,
+        "economics_phase_operation_id": phase_operation_id,
+        "source_deployed_sha": source_deployed_sha,
+        "reconciliation_deployed_sha": reconciliation_sha,
+        "storage_generation": generation,
+        "source_apply": {
+            "run_id": source_run_id,
+            "artifact_id": source_artifact_id,
+            "artifact_name": source_artifact_name,
+            "receipt_sha256": source_receipt_sha256,
+            "comment_id": source_comment_id,
+            "authorization_reference": authorization_reference,
+        },
+        "reconciliation_release": {
+            "pull_request": reconciliation_pr,
+            "operation_id": reconciliation_release_operation_id,
+        },
+        "source_recovery_row": source_row,
+        "source_recovery_row_digest": _digest(source_row),
+        "transition_digest": _digest(transitions),
+        "undo_row_count": len(undo_rows),
+        "undo_digest": _digest([dict(row) for row in undo_rows]),
+        "target_before_digest": str(economics["before_digest"]),
+        "target_after_digest": str(economics["after_digest"]),
+        "current_target_digest": current_target_digest,
+        "current_target_hashes": current_hashes,
+        "legacy_raw_non_target_digest": raw_unpatched,
+        "semantic_non_target_before": semantic_before,
+        "semantic_non_target_after": semantic_after,
+        "semantic_non_target_current": semantic_current,
+        "product_capital": product,
+        "hard_non_target": hard,
+        "functional_economics_missing": economics_missing,
+        "query_only": True,
+        "database_written": False,
+        "production_mutation_count": 0,
+        "product_replay_count": 0,
+        "economics_replay_count": 0,
     }
 
 
@@ -1953,6 +2418,23 @@ def main() -> int:
     readback_parser.add_argument("--manifest-sha256", required=True)
     readback_parser.add_argument("--phase-operation-id", required=True)
     readback_parser.add_argument("--phase-fingerprint", required=True)
+    finalize_parser = commands.add_parser("finalize-only")
+    finalize_parser.add_argument("--source-deployed-sha", required=True)
+    finalize_parser.add_argument("--source-manifest", type=Path, required=True)
+    finalize_parser.add_argument("--source-manifest-sha256", required=True)
+    finalize_parser.add_argument("--source-phase-operation-id", required=True)
+    finalize_parser.add_argument("--source-phase-fingerprint", required=True)
+    finalize_parser.add_argument("--source-storage-generation-json", required=True)
+    finalize_parser.add_argument("--source-run-id", type=int, required=True)
+    finalize_parser.add_argument("--source-artifact-id", type=int, required=True)
+    finalize_parser.add_argument("--source-artifact-name", required=True)
+    finalize_parser.add_argument("--source-receipt-sha256", required=True)
+    finalize_parser.add_argument("--source-comment-id", type=int, required=True)
+    finalize_parser.add_argument("--reconciliation-pr", type=int, required=True)
+    finalize_parser.add_argument(
+        "--reconciliation-release-operation-id", required=True
+    )
+    finalize_parser.add_argument("--authorization-reference", required=True)
     args = parser.parse_args()
     try:
         if args.profile != PROFILE or args.target_id != CANONICAL_TARGET_ID:
@@ -2001,7 +2483,7 @@ def main() -> int:
                 phase_fingerprint=args.phase_fingerprint,
                 approval_reference=args.approval_reference,
             )
-        else:
+        elif args.command == "readback":
             result = readback_phase(
                 runtime_dir=args.runtime_dir,
                 deployed_sha_file=args.deployed_sha_file,
@@ -2013,8 +2495,41 @@ def main() -> int:
                 phase_operation_id=args.phase_operation_id,
                 phase_fingerprint=args.phase_fingerprint,
             )
+        else:
+            generation = json.loads(args.source_storage_generation_json)
+            if not isinstance(generation, dict):
+                raise Wbc0027RecoveryError(
+                    "source StoreRegistry generation must be one JSON object"
+                )
+            result = finalize_existing_economics_operation(
+                runtime_dir=args.runtime_dir,
+                deployed_sha_file=args.deployed_sha_file,
+                expected_sha=args.expected_deployed_sha,
+                goal_operation_id=args.operation_id,
+                source_deployed_sha=args.source_deployed_sha,
+                source_manifest_path=args.source_manifest,
+                source_manifest_sha256=args.source_manifest_sha256,
+                source_phase_operation_id=args.source_phase_operation_id,
+                source_phase_fingerprint=args.source_phase_fingerprint,
+                source_storage_generation=generation,
+                source_run_id=args.source_run_id,
+                source_artifact_id=args.source_artifact_id,
+                source_artifact_name=args.source_artifact_name,
+                source_receipt_sha256=args.source_receipt_sha256,
+                source_comment_id=args.source_comment_id,
+                reconciliation_pr=args.reconciliation_pr,
+                reconciliation_release_operation_id=(
+                    args.reconciliation_release_operation_id
+                ),
+                authorization_reference=args.authorization_reference,
+            )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"ready", "applied", "reconciled"} else 1
+        return (
+            0
+            if result.get("status")
+            in {"ready", "applied", "reconciled", "reconciled_existing_operation"}
+            else 1
+        )
     except Exception as exc:
         print(
             json.dumps(

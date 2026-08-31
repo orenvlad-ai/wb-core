@@ -15,6 +15,7 @@ on:
           - warm-archive-readiness
           - warm-archive-mount-probe
           - warm-archive-receipt-reconciliation
+          - wbc0027-receipt-reconciliation
       pr:
         description: Exact merged PR number
         required: true
@@ -42,6 +43,11 @@ on:
       source_run_id:
         description: Failed Production Apply run containing the immutable done receipt
         required: false
+        type: number
+      source_artifact_id:
+        description: Exact immutable source receipt artifact id
+        required: false
+        default: 0
         type: number
       source_artifact_name:
         description: Exact immutable receipt artifact name for recovery
@@ -127,7 +133,7 @@ permissions:
 jobs:
   apply_once:
     name: Exact bounded production goal apply and reconciliation
-    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation'
+    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation' && inputs.authorization_mode != 'wbc0027-receipt-reconciliation'
     permissions:
       actions: read
       contents: read
@@ -420,3 +426,94 @@ jobs:
           --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
           --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
           --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
+
+  wbc0027_receipt_reconciliation:
+    name: Query-only finalize of the existing WBC0027 economics operation
+    if: inputs.authorization_mode == 'wbc0027-receipt-reconciliation'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    steps:
+      - name: Checkout exact trusted-main WBC0027 reconciliation runner
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact source and suppress an already terminal operation
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode wbc0027-receipt-reconciliation
+          --reconciliation-phase preflight
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-id "${{ inputs.source_artifact_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --github-output "$GITHUB_OUTPUT"
+          --output "$RUNNER_TEMP/wbc0027-reconciliation-preflight.json"
+
+      - name: Execute one fixed query-only finalize probe
+        if: steps.preflight.outputs.probe_required == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode wbc0027-receipt-reconciliation
+          --reconciliation-phase collect
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-id "${{ inputs.source_artifact_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --output "$RUNNER_TEMP/wbc0027-existing-operation-reconciliation-receipt.json"
+
+      - name: Upload full immutable WBC0027 reconciliation evidence first
+        if: steps.preflight.outputs.probe_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wbc0027-existing-operation-reconciliation-pr-${{ inputs.pr }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/wbc0027-existing-operation-reconciliation-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Verify uploaded evidence and publish one supersession marker
+        if: steps.preflight.outputs.probe_required == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode wbc0027-receipt-reconciliation
+          --reconciliation-phase publish
+          --pr "${{ inputs.pr }}"
+          --operation-id "${{ inputs.operation_id }}"
+          --source-run-id "${{ inputs.source_run_id }}"
+          --source-artifact-id "${{ inputs.source_artifact_id }}"
+          --source-artifact-name "${{ inputs.source_artifact_name }}"
+          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --output "$RUNNER_TEMP/wbc0027-existing-operation-reconciliation-receipt.json"

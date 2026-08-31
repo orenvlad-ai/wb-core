@@ -62,7 +62,7 @@ def _payload(*, ordinary: str, target: str) -> dict:
 def _economics(ordinary: str) -> dict:
     before = _payload(ordinary=ordinary, target="")
     after = _payload(ordinary=ordinary, target="117.537167")
-    return {
+    economics = {
         "target_dates": ["2026-08-26", "2026-08-29"],
         "logical_repair_count": 298,
         "persisted_repair_count": 472,
@@ -91,6 +91,20 @@ def _economics(ordinary: str) -> dict:
         "after_digest": recovery._digest(after),
         "non_target_digest": recovery._digest({"ordinary": ordinary}),
     }
+    economics["semantic_non_target"] = (
+        recovery._economics_semantic_non_target_snapshot(
+            [
+                {
+                    "bundle_version": "bundle",
+                    "as_of_date": "2026-08-26",
+                    "snapshot_id": "snapshot",
+                    "plan_json": economics["patches"][0]["before_plan_json"],
+                }
+            ],
+            recovery._economics_semantic_patches(economics),
+        )
+    )
+    return economics
 
 
 def _candidate() -> dict:
@@ -445,6 +459,11 @@ def main() -> None:
     assert wrapper.returncode == 1
     assert blocked["reason"] == "historical_superseded_non_runnable"
     assert blocked["production_mutation_submit_count"] == 0
+    from apps import wbc0027_capital_recovery_lifecycle_smoke
+    from apps import wbc0027_capital_recovery_runner_smoke
+
+    wbc0027_capital_recovery_lifecycle_smoke.main()
+    wbc0027_capital_recovery_runner_smoke.main()
     print("wbc0027_capital_recovery_smoke: OK")
 
 

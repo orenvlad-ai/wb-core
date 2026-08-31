@@ -412,3 +412,29 @@ fails before T1 with zero submit, and context exit releases process/file locks
 after success or exception. The deployed `preflight --phase product` command
 uses the same boundary and rebuild path but stops before T1, requires a missing
 recovery lifecycle and reports query-only/no-create zero-mutation evidence.
+
+WBC0027 economics stores one canonical semantic non-target witness contract at
+every phase boundary. Its scope is all ready snapshots with only reviewed
+target slices removed, and the receipt stores scope version, all/target row
+counts and component digests. Semantic rebase is allowed only while rebuilding
+the candidate before submit; exact target before-images remain T1 CAS and any
+genuine non-target change after that point fails closed.
+
+`record_mutation_commit` is called inside the same SQLite transaction after
+target/non-target readback and immediately before COMMIT. It CAS-records exact
+after/non-target digests, `writer_state=committed_pending_reconciliation` and
+the same-operation next action. Thus a later exception cannot erase database
+write truth: the public state is `applied_pending_reconciliation`, submit=1,
+database-written=true. An operation without durable after digest retains the
+pre-submit/ambiguous classification.
+
+The source economics operation
+`recovery_ae66a56f72d90b469b75d8adb893c51f` remains immutable quarantined audit
+evidence. Its canonical reconciliation opens SQLite query-only and validates
+the exact source run/artifact/receipt/authorization, deployed generation,
+manifest/fingerprint, three undo rows, mutation-running→quarantined transition,
+current target hashes, legacy raw digest and canonical semantic
+before=after=current. It writes no recovery transition or business row. The
+separate Apply workflow uploads one immutable receipt and then one compact
+supersession marker; exact repeat is `already_terminal`, while missing/foreign/
+duplicate evidence fails closed before SSH.

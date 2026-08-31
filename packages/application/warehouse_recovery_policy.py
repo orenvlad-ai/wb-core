@@ -1389,6 +1389,71 @@ class WarehouseRecoveryRegistry:
             raise RecoveryPolicyError("recovery operation disappeared after retain")
         return result
 
+    def record_mutation_commit(
+        self,
+        conn: sqlite3.Connection,
+        operation_id: str,
+        *,
+        after_digest: str,
+        non_target_digest: str,
+    ) -> None:
+        """Persist exact post-COMMIT truth in the business transaction itself.
+
+        The caller invokes this after its in-transaction target/non-target
+        readback and immediately before ``commit()``.  Therefore these fields
+        can become durable only together with the business rows.  A later
+        retain/readback failure must not erase the fact that one submit wrote
+        the database.
+        """
+
+        exact_after = str(after_digest or "").strip()
+        exact_non_target = str(non_target_digest or "").strip()
+        if not exact_after or not exact_non_target:
+            raise RecoveryPolicyError(
+                "committed mutation requires exact after and non-target digests"
+            )
+        row = conn.execute(
+            "SELECT lifecycle_state,after_digest,non_target_digest "
+            "FROM sheet_vitrina_v1_recovery_operations WHERE operation_id=?",
+            (str(operation_id),),
+        ).fetchone()
+        if row is None:
+            raise RecoveryPolicyError("unknown recovery operation at commit boundary")
+        current = dict(row)
+        if str(current["lifecycle_state"]) != RecoveryState.MUTATION_RUNNING.value:
+            raise RecoveryPolicyError(
+                "recovery operation is not mutation-running at commit boundary"
+            )
+        if str(current.get("non_target_digest") or "") != exact_non_target:
+            raise RecoveryPolicyError(
+                "recovery non-target digest drifted before committed mutation"
+            )
+        prior_after = str(current.get("after_digest") or "")
+        if prior_after and prior_after != exact_after:
+            raise RecoveryPolicyError("recovery after digest already owns another commit")
+        now = self._now()
+        cursor = conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_recovery_operations
+            SET after_digest=?,next_action='same_operation_query_only_reconciliation',
+                writer_state='committed_pending_reconciliation',
+                updated_at=?,last_heartbeat_at=?
+            WHERE operation_id=? AND lifecycle_state=?
+              AND non_target_digest=? AND (after_digest='' OR after_digest=?)
+            """,
+            (
+                exact_after,
+                now,
+                now,
+                str(operation_id),
+                RecoveryState.MUTATION_RUNNING.value,
+                exact_non_target,
+                exact_after,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RecoveryPolicyError("committed mutation truth CAS update lost")
+
     def fail_recoverable(
         self,
         operation_id: str,
