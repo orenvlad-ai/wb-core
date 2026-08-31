@@ -304,6 +304,16 @@ correction, merge/deploy и query-only deployed qualification, но не под�
 следующим действием. Исторические manifest/comment/operation bindings не
 расширяют эту авторизацию и fail closed.
 
+Для exact FBS SKU mapping correction release также разрешает только inert
+capability и deployed query-only/no-create hypothetical rehearsal. Отдельный
+`exact-fbs-sku-mapping-extension` OWNER/MEMBER passport exact-bind новый
+deployed runtime, diagnosis runtime, StoreRegistry generation/manifest/schema,
+cutover, opaque external identity digest, independently computed tuple digest,
+counts `1 tuple / 1 owner / 0 mappings`, target `428855758` и один submit.
+Mapping Apply может сделать только один canonical mapping insert; lifecycle и
+history остаются другим future Apply. Release, rehearsal и подготовка exact
+passport body не являются authorization или dispatch обоих Apply.
+
 Query-only WBC0027 same-operation finalization не является новым Production
 Apply business submit и не требует нового OWNER passport: она использует exact
 digest существующего accepted passport как immutable predecessor authorization.
