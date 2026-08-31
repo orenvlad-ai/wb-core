@@ -7044,8 +7044,10 @@ def _wbc0027_trusted_release(
         raise ApplyError("WBC0027 trusted release receipt is missing or ambiguous")
     receipt = matches[0]
     gate = client.get(f"/actions/runs/{int(receipt['workflow_run_id'])}")
-    repository = gate.get("repository") or {}
-    head_repository = gate.get("head_repository") or {}
+    if not isinstance(gate, Mapping):
+        raise ApplyError("WBC0027 exact PR Gate response is invalid")
+    repository = gate.get("repository")
+    head_repository = gate.get("head_repository")
     if not (
         isinstance(gate, Mapping)
         and isinstance(repository, Mapping)
@@ -7196,8 +7198,20 @@ def _wbc0027_workflow_bridge(
     ):
         raise ApplyError("WBC0027 workflow bridge is not an exact main dispatch")
     dispatch_run = client.get(f"/actions/runs/{run_id}")
-    dispatch_repository = dispatch_run.get("repository") or {}
-    dispatch_head_repository = dispatch_run.get("head_repository") or {}
+    if not isinstance(dispatch_run, Mapping):
+        raise ApplyError("WBC0027 workflow dispatch response is invalid")
+    dispatch_repository = dispatch_run.get("repository")
+    dispatch_head_repository = dispatch_run.get("head_repository")
+    dispatch_terminal_valid = bool(
+        (
+            dispatch_run.get("status") == "in_progress"
+            and dispatch_run.get("conclusion") is None
+        )
+        or (
+            dispatch_run.get("status") == "completed"
+            and dispatch_run.get("conclusion") == "success"
+        )
+    )
     if not (
         isinstance(dispatch_run, Mapping)
         and isinstance(dispatch_repository, Mapping)
@@ -7209,8 +7223,7 @@ def _wbc0027_workflow_bridge(
         and dispatch_run.get("head_branch") == "main"
         and dispatch_run.get("head_sha") == bridge_sha
         and dispatch_run.get("run_attempt") == 1
-        and dispatch_run.get("status") in {"in_progress", "completed"}
-        and dispatch_run.get("conclusion") in {None, "success"}
+        and dispatch_terminal_valid
         and dispatch_repository.get("full_name") == CANONICAL_REPOSITORY
         and dispatch_head_repository.get("full_name") == CANONICAL_REPOSITORY
     ):
@@ -7223,6 +7236,7 @@ def _wbc0027_workflow_bridge(
         for item in associated
         if isinstance(item, Mapping)
         and isinstance(item.get("number"), int)
+        and not isinstance(item.get("number"), bool)
         and item.get("merged_at")
         and item.get("merge_commit_sha") == bridge_sha
         and (item.get("base") or {}).get("ref") == "main"
@@ -7272,10 +7286,15 @@ def _wbc0027_workflow_bridge(
             and isinstance(commits, list)
             and compare.get("status") == "ahead"
             and isinstance(compare.get("ahead_by"), int)
+            and not isinstance(compare.get("ahead_by"), bool)
             and int(compare["ahead_by"]) > 0
             and compare.get("behind_by") == 0
             and merge_base.get("sha") == deployed_sha
             and len(commit_shas) == int(compare["ahead_by"])
+            and all(
+                re.fullmatch(r"[0-9a-f]{40}", str(sha or "")) is not None
+                for sha in commit_shas
+            )
             and commit_shas[-1:] == [bridge_sha]
         ):
             raise ApplyError("WBC0027 workflow bridge ancestry is invalid")
