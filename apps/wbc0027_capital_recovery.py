@@ -2060,27 +2060,6 @@ def readback_phase(
     }
 
 
-def _ready_rows_with_patch_images(
-    rows: list[Mapping[str, Any]] | list[sqlite3.Row],
-    patches: list[Mapping[str, Any]],
-    *,
-    image: str,
-) -> list[dict[str, Any]]:
-    field = f"{image}_plan_json"
-    by_identity = {
-        tuple(str(value) for value in patch["identity"]): str(patch[field])
-        for patch in patches
-    }
-    result: list[dict[str, Any]] = []
-    for raw in rows:
-        row = dict(raw)
-        replacement = by_identity.get(_ready_identity(raw))
-        if replacement is not None:
-            row["plan_json"] = replacement
-        result.append(row)
-    return result
-
-
 def _raw_unpatched_ready_digest(
     rows: list[Mapping[str, Any]] | list[sqlite3.Row],
     patch_identities: set[tuple[str, str, str]],
@@ -2095,6 +2074,212 @@ def _raw_unpatched_ready_digest(
             if _ready_identity(row) not in patch_identities
         ]
     )
+
+
+def _source_economics_transaction_proof(
+    *,
+    economics: Mapping[str, Any],
+    semantic_patches: list[Mapping[str, Any]],
+    recovery: Mapping[str, Any],
+    undo_rows: list[sqlite3.Row],
+    transitions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    patches = list(economics["patches"])
+    source_semantic = economics.get("semantic_non_target")
+    if not isinstance(source_semantic, Mapping):
+        raise Wbc0027RecoveryError("WBC0027 source semantic T1 witness is missing")
+    source_semantic = dict(source_semantic)
+    source_semantic_material = {
+        key: source_semantic[key]
+        for key in (
+            "contract_name",
+            "scope_version",
+            "row_count",
+            "target_row_count",
+            "component_digests",
+        )
+    }
+    source_raw_digest = str(economics.get("non_target_digest") or "")
+    source_raw_row_count = int(source_semantic.get("row_count") or 0) - len(patches)
+    if not (
+        source_semantic.get("contract_name") == ECONOMICS_NON_TARGET_CONTRACT
+        and source_semantic.get("scope_version") == ECONOMICS_NON_TARGET_SCOPE_VERSION
+        and source_semantic.get("target_row_count") == len(patches) == 3
+        and source_raw_row_count >= 0
+        and source_semantic.get("digest") == _digest(source_semantic_material)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", source_raw_digest)
+        and recovery.get("non_target_digest") == source_raw_digest
+    ):
+        raise Wbc0027RecoveryError("WBC0027 source T1 aggregate witness drifted")
+
+    target_rows: list[dict[str, Any]] = []
+    for patch, semantic_patch in zip(patches, semantic_patches, strict=True):
+        identity = [str(value) for value in patch["identity"]]
+        days = [str(day) for day in patch["business_dates"]]
+        before_json = str(patch["before_plan_json"])
+        after_json = str(patch["after_plan_json"])
+        before = json.loads(before_json)
+        after = json.loads(after_json)
+        before_normalized = _strip_economics_targets(before, days)
+        after_normalized = _strip_economics_targets(after, days)
+        before_normalized_digest = _digest(before_normalized)
+        after_normalized_digest = _digest(after_normalized)
+        if not (
+            list(semantic_patch.get("identity") or []) == identity
+            and list(semantic_patch.get("business_dates") or []) == days
+            and semantic_patch.get("semantic_non_target_preserved") is True
+            and patch.get("before_sha256") == _sha_text(before_json)
+            and patch.get("after_sha256") == _sha_text(after_json)
+            and before_normalized_digest == after_normalized_digest
+        ):
+            raise Wbc0027RecoveryError(
+                "WBC0027 source T1 before/planned-after equality drifted"
+            )
+        target_rows.append(
+            {
+                "identity": identity,
+                "business_dates": days,
+                "changed_cell_count": len(patch["changed_cells"]),
+                "before_sha256": str(patch["before_sha256"]),
+                "planned_after_sha256": str(patch["after_sha256"]),
+                "target_removed_before_digest": before_normalized_digest,
+                "target_removed_planned_after_digest": after_normalized_digest,
+            }
+        )
+    before_hashes = [item["before_sha256"] for item in target_rows]
+    after_hashes = [item["planned_after_sha256"] for item in target_rows]
+    if not (
+        _digest(before_hashes) == economics.get("before_digest")
+        and _digest(after_hashes) == economics.get("after_digest")
+        and sum(item["changed_cell_count"] for item in target_rows)
+        == EXPECTED_ECONOMICS_PERSISTED_REPAIRS
+    ):
+        raise Wbc0027RecoveryError("WBC0027 source T1 target write-set drifted")
+
+    mutation_index = next(
+        (
+            index
+            for index, item in enumerate(transitions)
+            if item["to_state"] == RecoveryState.MUTATION_RUNNING.value
+        ),
+        -1,
+    )
+    quarantine_index = next(
+        (
+            index
+            for index, item in enumerate(transitions)
+            if item["from_state"] == RecoveryState.MUTATION_RUNNING.value
+            and item["to_state"] == RecoveryState.QUARANTINED.value
+        ),
+        -1,
+    )
+    if not (
+        mutation_index >= 0
+        and quarantine_index > mutation_index
+        and len(undo_rows) == 3
+        and all(str(row["status"]) == "verified" for row in undo_rows)
+    ):
+        raise Wbc0027RecoveryError("WBC0027 source T1 CAS/commit ordering drifted")
+    return {
+        "contract_name": "wbc0027_source_economics_transaction/v1",
+        "source_ready_row_count": int(source_semantic["row_count"]),
+        "source_raw_non_target_row_count": source_raw_row_count,
+        "source_raw_non_target_digest": source_raw_digest,
+        "source_semantic_non_target": source_semantic,
+        "target_rows": target_rows,
+        "target_identities_digest": _digest(
+            [item["identity"] for item in target_rows]
+        ),
+        "target_before_digest": str(economics["before_digest"]),
+        "target_planned_after_digest": str(economics["after_digest"]),
+        "write_set": {
+            "row_count": len(target_rows),
+            "cell_count": sum(item["changed_cell_count"] for item in target_rows),
+            "undo_row_count": len(undo_rows),
+            "undo_rows_verified": True,
+        },
+        "ordering": {
+            "cas_before_images_verified": True,
+            "mutation_running_transition_index": mutation_index,
+            "quarantine_after_committed_target_index": quarantine_index,
+            "committed_target_readback_required": True,
+        },
+    }
+
+
+def _current_temporal_non_target_drift(
+    *,
+    current_rows: list[sqlite3.Row],
+    patch_identities: set[tuple[str, str, str]],
+    semantic_patches: list[Mapping[str, Any]],
+    source_transaction: Mapping[str, Any],
+) -> dict[str, Any]:
+    current_semantic = _economics_semantic_non_target_snapshot(
+        current_rows, semantic_patches
+    )
+    source_semantic = dict(source_transaction["source_semantic_non_target"])
+    raw_components = [
+        {
+            "identity": list(_ready_identity(row)),
+            "plan_sha256": _sha_text(str(row["plan_json"])),
+        }
+        for row in current_rows
+        if _ready_identity(row) not in patch_identities
+    ]
+    current_raw_digest = _digest(raw_components)
+    source_raw_digest = str(source_transaction["source_raw_non_target_digest"])
+    derived_added: list[dict[str, Any]] = []
+    if current_raw_digest != source_raw_digest:
+        matches = [
+            index
+            for index in range(len(raw_components))
+            if _digest(raw_components[:index] + raw_components[index + 1 :])
+            == source_raw_digest
+        ]
+        if len(matches) == 1:
+            component = raw_components[matches[0]]
+            row = next(
+                item
+                for item in current_rows
+                if list(_ready_identity(item)) == component["identity"]
+            )
+            payload = json.loads(str(row["plan_json"]))
+            derived_added.append(
+                {
+                    **component,
+                    "semantic_payload_digest": _digest(payload),
+                    "as_of_date": component["identity"][1],
+                }
+            )
+    changed = current_semantic != source_semantic
+    return {
+        "contract_name": "wbc0027_temporal_non_target_drift/v1",
+        "classification": (
+            "later_non_target_evolution" if changed else "no_later_non_target_evolution"
+        ),
+        "changed": changed,
+        "source_row_count": int(source_semantic["row_count"]),
+        "current_row_count": int(current_semantic["row_count"]),
+        "source_target_row_count": int(source_semantic["target_row_count"]),
+        "current_target_row_count": int(current_semantic["target_row_count"]),
+        "source_component_digests": dict(source_semantic["component_digests"]),
+        "current_component_digests": dict(current_semantic["component_digests"]),
+        "source_semantic_digest": str(source_semantic["digest"]),
+        "current_semantic_digest": str(current_semantic["digest"]),
+        "source_raw_non_target_digest": source_raw_digest,
+        "current_raw_non_target_digest": current_raw_digest,
+        "derived_added_rows": derived_added,
+        "diff_derivation": (
+            "unique_added_row_from_source_raw_aggregate"
+            if derived_added
+            else (
+                "not_applicable"
+                if not changed
+                else "not_derivable_from_source_aggregate_digest"
+            )
+        ),
+        "effect": "receipt_evidence_only_not_target_approval",
+    }
 
 
 def finalize_existing_economics_operation(
@@ -2266,35 +2451,19 @@ def finalize_existing_economics_operation(
             raise Wbc0027RecoveryError(
                 "WBC0027 quarantine transition did not follow mutation_running"
             )
-        before_rows = _ready_rows_with_patch_images(
-            current_rows, patches, image="before"
+        source_transaction = _source_economics_transaction_proof(
+            economics=economics,
+            semantic_patches=semantic_patches,
+            recovery=recovery,
+            undo_rows=list(undo_rows),
+            transitions=transitions,
         )
-        after_rows = _ready_rows_with_patch_images(
-            current_rows, patches, image="after"
+        temporal_drift = _current_temporal_non_target_drift(
+            current_rows=list(current_rows),
+            patch_identities=patch_identities,
+            semantic_patches=semantic_patches,
+            source_transaction=source_transaction,
         )
-        semantic_before = _economics_semantic_non_target_snapshot(
-            before_rows, semantic_patches
-        )
-        semantic_after = _economics_semantic_non_target_snapshot(
-            after_rows, semantic_patches
-        )
-        semantic_current = _economics_semantic_non_target_snapshot(
-            current_rows, semantic_patches
-        )
-        if not (
-            semantic_before == semantic_after == semantic_current
-            and semantic_current["row_count"] == len(current_rows)
-        ):
-            raise Wbc0027RecoveryError(
-                "WBC0027 canonical semantic non-target reconciliation failed"
-            )
-        raw_unpatched = _raw_unpatched_ready_digest(
-            current_rows, patch_identities
-        )
-        if raw_unpatched != str(recovery.get("non_target_digest") or ""):
-            raise Wbc0027RecoveryError(
-                "WBC0027 legacy raw non-target digest no longer matches source operation"
-            )
         product = reconcile_warehouse_business_projection(
             conn, target_dates=PRODUCT_DATES
         )
@@ -2374,10 +2543,10 @@ def finalize_existing_economics_operation(
         "target_after_digest": str(economics["after_digest"]),
         "current_target_digest": current_target_digest,
         "current_target_hashes": current_hashes,
-        "legacy_raw_non_target_digest": raw_unpatched,
-        "semantic_non_target_before": semantic_before,
-        "semantic_non_target_after": semantic_after,
-        "semantic_non_target_current": semantic_current,
+        "source_transaction": source_transaction,
+        "temporal_non_target_drift": temporal_drift,
+        "protected_invariant": dict(economics["protected_invariant"]),
+        "evidence_blocked": list(economics["evidence_blocked"]),
         "product_capital": product,
         "hard_non_target": hard,
         "functional_economics_missing": economics_missing,
@@ -2419,6 +2588,11 @@ def main() -> int:
     readback_parser.add_argument("--phase-operation-id", required=True)
     readback_parser.add_argument("--phase-fingerprint", required=True)
     finalize_parser = commands.add_parser("finalize-only")
+    finalize_parser.add_argument(
+        "--no-create",
+        action="store_true",
+        help="Required explicit proof that finalize-only may not create state.",
+    )
     finalize_parser.add_argument("--source-deployed-sha", required=True)
     finalize_parser.add_argument("--source-manifest", type=Path, required=True)
     finalize_parser.add_argument("--source-manifest-sha256", required=True)
@@ -2496,6 +2670,10 @@ def main() -> int:
                 phase_fingerprint=args.phase_fingerprint,
             )
         else:
+            if not args.no_create:
+                raise Wbc0027RecoveryError(
+                    "WBC0027 finalize-only requires explicit --no-create"
+                )
             generation = json.loads(args.source_storage_generation_json)
             if not isinstance(generation, dict):
                 raise Wbc0027RecoveryError(

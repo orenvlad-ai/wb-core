@@ -138,6 +138,44 @@ WBC0027_RECONCILIATION_SOURCE = {
     "economics_phase_fingerprint": (
         "sha256:2d6004dcd37b8d3becd31231d6d2a77e4ab1c5262757f355ddf1413f1d24b542"
     ),
+    "economics_source_ready_row_count": 224,
+    "economics_source_raw_non_target_row_count": 221,
+    "economics_source_raw_non_target_digest": (
+        "sha256:55e057f0f18109cc01b4f78583c96facc78e5e4ef09f205c80d2c1991d57a858"
+    ),
+    "economics_target_identities": [
+        [
+            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+            "2026-08-25",
+            "2026-08-25__2026-08-26__sheet_vitrina_v1_temporal_live_v1__current",
+        ],
+        [
+            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+            "2026-08-26",
+            "2026-08-26__partial_group_wb_api__2026-08-28T04:59:24Z",
+        ],
+        [
+            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+            "2026-08-29",
+            "2026-08-29__2026-08-30__sheet_vitrina_v1_temporal_live_v1__current",
+        ],
+    ],
+    "economics_target_before_hashes": [
+        "sha256:a20d88e0208dd0ebec804c8f9a61f9734f6e43880ad3908f48bb63aaa340d3c7",
+        "sha256:baee41dea0e85ae958b5149f6c944af7e77d6f42cd3b46f868ddea0038912fd4",
+        "sha256:bddbad60bdfa0cb99668d2d0ab663ae5fa10f021ad169c692fc0804a9978272e",
+    ],
+    "economics_target_before_digest": (
+        "sha256:edca64a735d30abad44c5b31a0603baf06932ecdad8b3cedba0af9dcd980b67e"
+    ),
+    "economics_target_after_hashes": [
+        "sha256:d186a89de1910576b20b86c707056b85f72e5b7a69e175db8ef6d041a1432f1d",
+        "sha256:54b0bdd0d36564c884071ec2e848945d0c1152113571fc7bb7ef2608a6d69c2e",
+        "sha256:ef848227b66e26ebe37643e752abac252c9a63c85fe0957a9bcae78736392c68",
+    ],
+    "economics_target_after_digest": (
+        "sha256:359736666b74cc4b4b87eb5a6b4bce6e309a29f35b64d2548966a13fbfc58424"
+    ),
     "storage_generation": {
         "generation_id": "operational-c54072027f14f90b374b",
         "manifest_sha256": (
@@ -7181,6 +7219,28 @@ def _wbc0027_reconciliation_context(
             "material_qualification_digest": candidate_binding[
                 "economics_candidate"
             ]["material_qualification_digest"],
+            "economics_source_ready_row_count": source[
+                "economics_source_ready_row_count"
+            ],
+            "economics_source_raw_non_target_row_count": source[
+                "economics_source_raw_non_target_row_count"
+            ],
+            "economics_source_raw_non_target_digest": source[
+                "economics_source_raw_non_target_digest"
+            ],
+            "economics_target_identities": source["economics_target_identities"],
+            "economics_target_before_hashes": source[
+                "economics_target_before_hashes"
+            ],
+            "economics_target_before_digest": source[
+                "economics_target_before_digest"
+            ],
+            "economics_target_after_hashes": source[
+                "economics_target_after_hashes"
+            ],
+            "economics_target_after_digest": source[
+                "economics_target_after_digest"
+            ],
         },
         "reconciliation_release": {
             "pull_request": int(args.reconciliation_pr),
@@ -7256,6 +7316,7 @@ def _wbc0027_finalize_remote_command(
         str(release["operation_id"]),
         "--authorization-reference",
         str(source["authorization_reference"]),
+        "--no-create",
     ]
     shell = (
         "set -eu; umask 077; test -d "
@@ -7284,9 +7345,13 @@ def _valid_wbc0027_finalize_result(
     source_row = result.get("source_recovery_row") or {}
     product = result.get("product_capital") or {}
     hard = result.get("hard_non_target") or {}
-    semantic_before = result.get("semantic_non_target_before")
-    semantic_after = result.get("semantic_non_target_after")
-    semantic_current = result.get("semantic_non_target_current")
+    source_transaction = result.get("source_transaction") or {}
+    source_semantic = source_transaction.get("source_semantic_non_target") or {}
+    source_target_rows = source_transaction.get("target_rows") or []
+    source_write_set = source_transaction.get("write_set") or {}
+    source_ordering = source_transaction.get("ordering") or {}
+    temporal_drift = result.get("temporal_non_target_drift") or {}
+    protected = result.get("protected_invariant") or {}
     hashes = result.get("current_target_hashes")
     return bool(
         result.get("contract_name")
@@ -7324,35 +7389,97 @@ def _valid_wbc0027_finalize_result(
         and source_row.get("quarantine_reason")
         == "non_target_digest_drift_after_mutation"
         and result.get("undo_row_count") == 3
-        and isinstance(hashes, list)
-        and len(hashes) == 3
+        and hashes == source["economics_target_after_hashes"]
+        and result.get("target_before_digest")
+        == source["economics_target_before_digest"]
+        and result.get("target_after_digest")
+        == source["economics_target_after_digest"]
+        and result.get("current_target_digest")
+        == source["economics_target_after_digest"]
+        and isinstance(source_transaction, Mapping)
+        and source_transaction.get("contract_name")
+        == "wbc0027_source_economics_transaction/v1"
+        and source_transaction.get("source_ready_row_count")
+        == source["economics_source_ready_row_count"]
+        and source_transaction.get("source_raw_non_target_row_count")
+        == source["economics_source_raw_non_target_row_count"]
+        and source_transaction.get("source_raw_non_target_digest")
+        == source["economics_source_raw_non_target_digest"]
+        and isinstance(source_semantic, Mapping)
+        and source_semantic.get("contract_name")
+        == "wbc0027_economics_semantic_non_target_digest/v1"
+        and source_semantic.get("scope_version")
+        == "ready_snapshot_target_slices_removed_v1"
+        and source_semantic.get("row_count")
+        == source["economics_source_ready_row_count"]
+        and source_semantic.get("target_row_count") == 3
+        and isinstance(source_target_rows, list)
+        and [item.get("identity") for item in source_target_rows]
+        == source["economics_target_identities"]
+        and [item.get("before_sha256") for item in source_target_rows]
+        == source["economics_target_before_hashes"]
+        and [item.get("planned_after_sha256") for item in source_target_rows]
+        == source["economics_target_after_hashes"]
+        and all(
+            item.get("target_removed_before_digest")
+            == item.get("target_removed_planned_after_digest")
+            for item in source_target_rows
+        )
+        and source_write_set
+        == {
+            "row_count": 3,
+            "cell_count": 472,
+            "undo_row_count": 3,
+            "undo_rows_verified": True,
+        }
+        and source_ordering.get("cas_before_images_verified") is True
+        and source_ordering.get("committed_target_readback_required") is True
+        and int(source_ordering.get("mutation_running_transition_index", -1)) >= 0
+        and int(source_ordering.get("quarantine_after_committed_target_index", -1))
+        > int(source_ordering.get("mutation_running_transition_index", -1))
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(source_semantic.get("digest") or ""),
+        )
+        is not None
+        and isinstance(temporal_drift, Mapping)
+        and temporal_drift.get("contract_name")
+        == "wbc0027_temporal_non_target_drift/v1"
+        and temporal_drift.get("classification")
+        in {"later_non_target_evolution", "no_later_non_target_evolution"}
+        and temporal_drift.get("source_row_count")
+        == source["economics_source_ready_row_count"]
+        and isinstance(temporal_drift.get("current_row_count"), int)
+        and temporal_drift.get("current_row_count") >= 3
+        and temporal_drift.get("source_target_row_count") == 3
+        and temporal_drift.get("current_target_row_count") == 3
+        and temporal_drift.get("source_component_digests")
+        == source_semantic.get("component_digests")
+        and temporal_drift.get("effect")
+        == "receipt_evidence_only_not_target_approval"
         and all(
             re.fullmatch(r"sha256:[0-9a-f]{64}", str(value or ""))
-            for value in hashes
+            for value in (
+                temporal_drift.get("source_semantic_digest"),
+                temporal_drift.get("current_semantic_digest"),
+                temporal_drift.get("source_raw_non_target_digest"),
+                temporal_drift.get("current_raw_non_target_digest"),
+            )
         )
-        and semantic_before == semantic_after == semantic_current
-        and isinstance(semantic_current, Mapping)
-        and semantic_current.get("contract_name")
-        == "wbc0027_economics_semantic_non_target_digest/v1"
-        and semantic_current.get("scope_version")
-        == "ready_snapshot_target_slices_removed_v1"
-        and semantic_current.get("row_count") == 224
-        and semantic_current.get("target_row_count") == 3
-        and re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(semantic_current.get("digest") or ""),
-        )
-        is not None
-        and re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            str(result.get("legacy_raw_non_target_digest") or ""),
-        )
-        is not None
+        and isinstance(protected, Mapping)
+        and protected.get("nm_id") == 428853741
+        and protected.get("unit_cost_rub") == "117.537167"
+        and isinstance(result.get("evidence_blocked"), list)
+        and len(result.get("evidence_blocked")) == 12
         and isinstance(product, Mapping)
         and product.get("status") == "published_exact"
+        and int(product.get("row_count") or 0) == 1152
+        and int(product.get("cell_count") or 0) == 24192
         and int(product.get("mismatch_count") or 0) == 0
         and isinstance(hard, Mapping)
         and hard.get("all_exact") is True
+        and hard.get("from_date") == "2026-08-30"
+        and int(hard.get("observed_date_count") or 0) >= 1
         and result.get("functional_economics_missing")
         == {"2026-08-26": 12, "2026-08-29": 0}
         and result.get("query_only") is True
@@ -7661,12 +7788,16 @@ def _run_wbc0027_reconciliation_publish(
             "source_recovery_row_digest": result["source_recovery_row_digest"],
             "transition_digest": result["transition_digest"],
             "undo_digest": result["undo_digest"],
-            "legacy_raw_non_target_digest": result[
-                "legacy_raw_non_target_digest"
+            "source_raw_non_target_digest": result["source_transaction"][
+                "source_raw_non_target_digest"
             ],
-            "semantic_non_target_digest": result[
-                "semantic_non_target_current"
+            "source_semantic_non_target_digest": result["source_transaction"][
+                "source_semantic_non_target"
             ]["digest"],
+            "current_semantic_non_target_digest": result[
+                "temporal_non_target_drift"
+            ]["current_semantic_digest"],
+            "temporal_non_target_drift": result["temporal_non_target_drift"],
             "current_target_digest": result["current_target_digest"],
             "current_target_hashes": result["current_target_hashes"],
             "functional_economics_missing": result[

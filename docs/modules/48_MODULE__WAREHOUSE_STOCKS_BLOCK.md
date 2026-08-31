@@ -827,4 +827,8 @@ transaction itself, so later exceptions report one written submit as
 same operation is strictly query-only and mutation-incapable: it validates the
 immutable source receipt and T1 journal, proves product 1,152/24,192/mismatch0,
 economics 12/0 and hard non-target exactness, preserves the quarantined row,
-and never replays product, economics, events, outbox, timers or services.
+and never replays product, economics, events, outbox, timers or services. Its
+source proof binds the historic 224-row/221-unpatched transaction and exact
+target after-images. A later ordinary ready-snapshot publication may change the
+current non-target digest; finalize records that temporal drift, while any
+current target after-image change remains blocking.

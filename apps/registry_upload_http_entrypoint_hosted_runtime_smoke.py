@@ -301,11 +301,96 @@ def _assert_fbs_status_probe_uses_public_contract() -> None:
         )
 
 
+def _assert_page_composition_compact_probe_contract() -> None:
+    components = {
+        "identity": {
+            "composition_name": "web_vitrina_page_composition",
+            "composition_version": "v1",
+            "source_contract_name": "sheet_vitrina_v1",
+            "source_contract_version": "v1",
+        },
+        "snapshot": {
+            "snapshot_id": "snapshot-2026-08-30",
+            "as_of_date": "2026-08-30",
+            "snapshot_as_of_date": "2026-08-30",
+        },
+        "table": {
+            "current_state": "ready",
+            "table_data_state": "ready",
+            "total_row_count": 1000,
+            "returned_row_count": 1000,
+        },
+        "activity": {
+            "loading_table_present": True,
+            "update_summary_present": False,
+        },
+        "full_payload": {
+            "payload_bytes": 1_126_680,
+            "payload_sha256": "sha256:" + "1" * 64,
+        },
+    }
+    proof = {
+        "contract_name": hosted_runtime.PAGE_COMPOSITION_PROBE_CONTRACT,
+        "contract_version": 1,
+        "status": "ok",
+        **components,
+        "component_digests": {
+            key: hosted_runtime._canonical_probe_component_digest(value)
+            for key, value in components.items()
+        },
+    }
+    raw = json.dumps(
+        proof, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8") + b"\n"
+    valid = {
+        "route": "web_vitrina_page_composition",
+        "http_status": 200,
+        "content_type": "application/json",
+        "content_length_count": 1,
+        "content_length": str(len(raw)),
+        "body_bytes_read": len(raw),
+        "body_truncated": False,
+        "body_eof": True,
+        "json_body": proof,
+        "json_error": None,
+        "network_error": None,
+    }
+    if hosted_runtime._validate_web_vitrina_page_composition_probe_result(valid)[0] is not True:
+        raise AssertionError("compact proof must accept a valid >768 KiB logical full response")
+
+    invalid_cases = []
+    html = dict(valid, content_type="text/html")
+    invalid_cases.append(html)
+    malformed = dict(valid, json_body=None, json_error="JSONDecodeError: malformed")
+    invalid_cases.append(malformed)
+    invalid_cases.append(dict(valid, body_truncated=True, body_eof=False))
+    invalid_cases.append(
+        dict(
+            valid,
+            content_length=str(hosted_runtime.PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES + 1),
+            body_bytes_read=hosted_runtime.PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES + 1,
+        )
+    )
+    wrong_digest_proof = json.loads(json.dumps(proof))
+    wrong_digest_proof["component_digests"]["table"] = "sha256:" + "0" * 64
+    invalid_cases.append(dict(valid, json_body=wrong_digest_proof))
+    unknown_field_proof = json.loads(json.dumps(proof))
+    unknown_field_proof["unexpected"] = True
+    invalid_cases.append(dict(valid, json_body=unknown_field_proof))
+    invalid_cases.append(dict(valid, body_bytes_read=len(raw) - 1))
+    if any(hosted_runtime._validate_web_vitrina_page_composition_probe_result(case)[0] for case in invalid_cases):
+        raise AssertionError("malformed/truncated/oversized/drifted compact proof must fail closed")
+    duplicate, duplicate_error = hosted_runtime._strict_json_object(b'{"status":"ok","status":"bad"}')
+    if duplicate is not None or "duplicate JSON field" not in str(duplicate_error):
+        raise AssertionError("strict compact JSON reader must reject duplicate fields")
+
+
 def main() -> None:
     _assert_deploy_status_readback_retry()
     _assert_pre_prepare_abort_skips_stale_restore()
     _assert_wbc0027_opaque_schema_revision_contract()
     _assert_fbs_status_probe_uses_public_contract()
+    _assert_page_composition_compact_probe_contract()
     with TemporaryDirectory(
         prefix="finance-canonical-process-bindings-"
     ) as bindings_temp_dir:

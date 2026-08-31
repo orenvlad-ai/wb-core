@@ -216,7 +216,12 @@ Durable `after_digest`/`committed_pending_reconciliation` означает submi
 retain/readback выбросил exception. Automatic continuation может вызвать только
 deployed `finalize-only` contour, exact-bound к source run `33345644125`, artifact
 `9741910399`, receipt/blocked marker/authorization и original T1 journal. Contour
-query-only, mutation0/replay0 и сохраняет quarantined row immutable; единственный
+query-only, mutation0/replay0 и сохраняет quarantined row immutable. Исторический
+source transaction доказывается независимо от current: source raw scope и три
+T1 before/planned-after rows после удаления target slices обязаны совпасть,
+тогда как поздняя ordinary non-target evolution допускается и записывается
+typed source/current digests. Это receipt evidence, а не разрешение target
+изменения; current target after-image drift всегда блокирует. Единственный
 новый effect — uploaded receipt и compact supersession marker. Любой mismatch
 остаётся `EVIDENCE_BLOCKED`, не разрешением на повтор product/economics Apply.
 

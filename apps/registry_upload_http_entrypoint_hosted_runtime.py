@@ -35,6 +35,8 @@ from packages.application.root_storage_policy import (  # noqa: E402
 )
 
 PROBE_BODY_LIMIT_BYTES = 768 * 1024
+PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES = 64 * 1024
+PAGE_COMPOSITION_PROBE_CONTRACT = "web_vitrina_page_composition_probe/v1"
 WAREHOUSE_OPENING_READ_TIMEOUT_SECONDS = 300.0
 WAREHOUSE_OPENING_MUTATION_TIMEOUT_SECONDS = 1800.0
 AUTOANSWERS_READONLY_TIMEOUT_SECONDS = 7200.0
@@ -753,10 +755,12 @@ def collect_public_surface(
                 {
                     "as_of_date": as_of_date,
                     "surface": DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE,
+                    "probe_shape": "1",
                 },
             ),
             timeout_seconds=timeout_seconds,
             auth_cookie=auth_cookie,
+            strict_compact_json=True,
         ),
         _collect_http_probe(
             name="web_vitrina_user_config",
@@ -13780,6 +13784,7 @@ def _collect_http_probe(
     timeout_seconds: float,
     json_payload: dict[str, Any] | None = None,
     auth_cookie: str | None = None,
+    strict_compact_json: bool = False,
 ) -> dict[str, Any]:
     timeout_seconds = _validate_probe_timeout_seconds(timeout_seconds)
     request = urllib_request.Request(
@@ -13796,31 +13801,59 @@ def _collect_http_probe(
         request.add_header("Cookie", auth_cookie)
     try:
         with _open_request(request, timeout_seconds=timeout_seconds) as response:
-            body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
+            if strict_compact_json:
+                body = _read_compact_json_probe_response(response)
+            else:
+                body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
+                body = {
+                    "body_excerpt": body_text,
+                    "body_truncated": body_truncated,
+                    "body_bytes_read": body_bytes_read,
+                    "body_eof": not body_truncated,
+                    "content_length": str(response.headers.get("Content-Length", "")),
+                    "content_length_count": len(
+                        response.headers.get_all("Content-Length", [])
+                        if hasattr(response.headers, "get_all")
+                        else ([response.headers.get("Content-Length")] if response.headers.get("Content-Length") else [])
+                    ),
+                    "json_body": _try_load_json(body_text),
+                    "json_error": None,
+                }
             return {
                 "route": name,
                 "method": method,
                 "url": url,
                 "http_status": response.getcode(),
                 "content_type": response.headers.get("Content-Type", ""),
-                "body_excerpt": body_text,
-                "body_truncated": body_truncated,
-                "body_bytes_read": body_bytes_read,
-                "json_body": _try_load_json(body_text),
+                **body,
                 "network_error": None,
             }
     except urllib_error.HTTPError as exc:
-        body_text, body_truncated, body_bytes_read = _read_probe_response_body(exc)
+        if strict_compact_json:
+            body = _read_compact_json_probe_response(exc)
+        else:
+            body_text, body_truncated, body_bytes_read = _read_probe_response_body(exc)
+            body = {
+                "body_excerpt": body_text,
+                "body_truncated": body_truncated,
+                "body_bytes_read": body_bytes_read,
+                "body_eof": not body_truncated,
+                "content_length": str(exc.headers.get("Content-Length", "")),
+                "content_length_count": len(
+                    exc.headers.get_all("Content-Length", [])
+                    if hasattr(exc.headers, "get_all")
+                    else ([exc.headers.get("Content-Length")] if exc.headers.get("Content-Length") else [])
+                ),
+                "json_body": _try_load_json(body_text),
+                "json_error": None,
+            }
         return {
             "route": name,
             "method": method,
             "url": url,
             "http_status": exc.code,
             "content_type": exc.headers.get("Content-Type", ""),
-            "body_excerpt": body_text,
-            "body_truncated": body_truncated,
-            "body_bytes_read": body_bytes_read,
-            "json_body": _try_load_json(body_text),
+            **body,
             "network_error": None,
         }
     except urllib_error.URLError as exc:
@@ -14113,20 +14146,8 @@ def _evaluate_route_result(result: dict[str, Any], *, route_paths: dict[str, str
         "plan_report_baseline_template",
     }:
         if route == "web_vitrina_page_composition":
-            json_body = result.get("json_body") or {}
-            evaluation["ok"] = (
-                status == 200
-                and "application/json" in content_type
-                and json_body.get("composition_name") == "web_vitrina_page_composition"
-                and json_body.get("composition_version") == "v1"
-                and isinstance(json_body.get("table_surface"), dict)
-                and isinstance((json_body.get("activity_surface") or {}).get("loading_table"), dict)
-                and "update_summary" not in (json_body.get("activity_surface") or {})
-            )
-            evaluation["detail"] = (
-                "web-vitrina page composition surface ok"
-                if evaluation["ok"]
-                else "expected 200 JSON page composition surface on web-vitrina read route"
+            evaluation["ok"], evaluation["detail"] = (
+                _validate_web_vitrina_page_composition_probe_result(result)
             )
             return evaluation
         if route == "web_vitrina_user_config":
@@ -14766,6 +14787,193 @@ def _read_probe_response_body(response: Any) -> tuple[str, bool, int]:
     return raw.decode("utf-8", errors="replace"), body_truncated, len(raw)
 
 
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+def _strict_json_object(raw: bytes) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+
+        def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise _DuplicateJsonKey(f"duplicate JSON field: {key}")
+                result[key] = value
+            return result
+
+        payload = json.loads(text, object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateJsonKey) as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"expected JSON object, got {type(payload).__name__}"
+    return payload, None
+
+
+def _header_values(headers: Any, name: str) -> list[str]:
+    if hasattr(headers, "get_all"):
+        return [str(value) for value in headers.get_all(name, [])]
+    value = headers.get(name, "")
+    return [str(value)] if value not in {None, ""} else []
+
+
+def _read_compact_json_probe_response(response: Any) -> dict[str, Any]:
+    chunks: list[bytes] = []
+    remaining = PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES + 1
+    while remaining > 0:
+        chunk = response.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    overflow = len(raw) > PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES
+    body_eof = False if overflow else response.read(1) == b""
+    retained = raw[:PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES]
+    payload, json_error = _strict_json_object(retained)
+    content_lengths = _header_values(response.headers, "Content-Length")
+    return {
+        "body_excerpt": retained.decode("utf-8", errors="replace"),
+        "body_truncated": overflow,
+        "body_bytes_read": len(retained),
+        "body_eof": body_eof,
+        "content_length": content_lengths[0] if len(content_lengths) == 1 else "",
+        "content_length_count": len(content_lengths),
+        "json_body": payload,
+        "json_error": json_error,
+    }
+
+
+def _canonical_probe_component_digest(value: Mapping[str, Any]) -> str:
+    raw = json.dumps(
+        dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _validate_web_vitrina_page_composition_probe_result(
+    result: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """Fail closed on the bounded page-composition proof and its transport."""
+
+    if result.get("http_status") != 200:
+        return False, "expected HTTP 200 compact page-composition proof"
+    if str(result.get("content_type") or "").strip().lower() != "application/json":
+        return False, "expected exact application/json content type"
+    if result.get("content_length_count") != 1:
+        return False, "expected exactly one Content-Length header"
+    content_length = str(result.get("content_length") or "")
+    if not re.fullmatch(r"[1-9][0-9]*", content_length):
+        return False, "expected canonical positive Content-Length"
+    declared_length = int(content_length)
+    if declared_length > PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES:
+        return False, "compact proof exceeded hard body cap"
+    if result.get("body_truncated") is not False or result.get("body_eof") is not True:
+        return False, "compact proof was truncated or EOF was not observed"
+    if result.get("body_bytes_read") != declared_length:
+        return False, "compact proof Content-Length/read length mismatch"
+    if result.get("json_error") is not None:
+        return False, f"strict JSON decode failed: {result.get('json_error')}"
+    payload = result.get("json_body")
+    if not isinstance(payload, Mapping):
+        return False, "compact proof body must be a JSON object"
+
+    exact_keys = {
+        "contract_name",
+        "contract_version",
+        "status",
+        "identity",
+        "snapshot",
+        "table",
+        "activity",
+        "full_payload",
+        "component_digests",
+    }
+    if set(payload) != exact_keys:
+        return False, "compact proof root schema drifted"
+    nested_keys = {
+        "identity": {
+            "composition_name",
+            "composition_version",
+            "source_contract_name",
+            "source_contract_version",
+        },
+        "snapshot": {"snapshot_id", "as_of_date", "snapshot_as_of_date"},
+        "table": {
+            "current_state",
+            "table_data_state",
+            "total_row_count",
+            "returned_row_count",
+        },
+        "activity": {"loading_table_present", "update_summary_present"},
+        "full_payload": {"payload_bytes", "payload_sha256"},
+        "component_digests": {
+            "identity",
+            "snapshot",
+            "table",
+            "activity",
+            "full_payload",
+        },
+    }
+    for key, expected in nested_keys.items():
+        value = payload.get(key)
+        if not isinstance(value, Mapping) or set(value) != expected:
+            return False, f"compact proof {key} schema drifted"
+
+    identity = payload["identity"]
+    snapshot = payload["snapshot"]
+    table = payload["table"]
+    activity = payload["activity"]
+    full_payload = payload["full_payload"]
+    digests = payload["component_digests"]
+    if (
+        payload.get("contract_name") != PAGE_COMPOSITION_PROBE_CONTRACT
+        or payload.get("contract_version") != 1
+        or payload.get("status") != "ok"
+        or identity.get("composition_name") != "web_vitrina_page_composition"
+        or identity.get("composition_version") != "v1"
+    ):
+        return False, "compact proof identity/status contract drifted"
+    if not all(
+        isinstance(identity.get(key), str) and bool(identity.get(key))
+        for key in ("source_contract_name", "source_contract_version")
+    ):
+        return False, "compact proof source contract identity is missing"
+    if (
+        not isinstance(snapshot.get("snapshot_id"), str)
+        or not all(
+            isinstance(snapshot.get(key), str) and bool(snapshot.get(key))
+            for key in ("as_of_date", "snapshot_as_of_date")
+        )
+    ):
+        return False, "compact proof snapshot identity is missing"
+    for key in ("current_state", "table_data_state"):
+        if not isinstance(table.get(key), str) or not table.get(key):
+            return False, "compact proof table state is missing"
+    counts = (table.get("total_row_count"), table.get("returned_row_count"))
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+        return False, "compact proof table counts are invalid"
+    if counts[1] > counts[0]:
+        return False, "compact proof returned count exceeds total count"
+    if (
+        activity.get("loading_table_present") is not True
+        or activity.get("update_summary_present") is not False
+    ):
+        return False, "compact proof activity surface is invalid"
+    payload_bytes = full_payload.get("payload_bytes")
+    if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes <= 0:
+        return False, "compact proof logical payload size is invalid"
+    digest_pattern = re.compile(r"sha256:[0-9a-f]{64}")
+    digest_values = [full_payload.get("payload_sha256"), *digests.values()]
+    if any(not isinstance(value, str) or digest_pattern.fullmatch(value) is None for value in digest_values):
+        return False, "compact proof digest format is invalid"
+    for key in ("identity", "snapshot", "table", "activity", "full_payload"):
+        if digests.get(key) != _canonical_probe_component_digest(payload[key]):
+            return False, f"compact proof {key} digest mismatch"
+    return True, "bounded page-composition proof ok"
+
+
 def _synthetic_payload_from_truncated_json(body: str) -> dict[str, Any]:
     return {
         match.group(1): True
@@ -14963,6 +15171,7 @@ from urllib import request as urllib_request
 
 PAYLOAD = json.loads({payload_json!r})
 PROBE_BODY_LIMIT_BYTES = {PROBE_BODY_LIMIT_BYTES!r}
+PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES = {PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES!r}
 
 def _append_as_of_date(url, as_of_date):
     if not as_of_date:
@@ -15025,6 +15234,58 @@ def _read_probe_response_body(response):
         raw = raw[:PROBE_BODY_LIMIT_BYTES]
     return raw.decode("utf-8", errors="replace"), body_truncated, len(raw)
 
+class _DuplicateJsonKey(ValueError):
+    pass
+
+def _strict_json_object(raw):
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        def reject_duplicates(pairs):
+            result = {{}}
+            for key, value in pairs:
+                if key in result:
+                    raise _DuplicateJsonKey(f"duplicate JSON field: {{key}}")
+                result[key] = value
+            return result
+        payload = json.loads(text, object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateJsonKey) as exc:
+        return None, f"{{type(exc).__name__}}: {{exc}}"
+    if not isinstance(payload, dict):
+        return None, f"expected JSON object, got {{type(payload).__name__}}"
+    return payload, None
+
+def _header_values(headers, name):
+    if hasattr(headers, "get_all"):
+        return [str(value) for value in headers.get_all(name, [])]
+    value = headers.get(name, "")
+    return [str(value)] if value not in {{None, ""}} else []
+
+def _read_compact_json_probe_response(response):
+    chunks = []
+    remaining = PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES + 1
+    while remaining > 0:
+        chunk = response.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    overflow = len(raw) > PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES
+    body_eof = False if overflow else response.read(1) == b""
+    retained = raw[:PAGE_COMPOSITION_PROBE_BODY_LIMIT_BYTES]
+    payload, json_error = _strict_json_object(retained)
+    content_lengths = _header_values(response.headers, "Content-Length")
+    return {{
+        "body_excerpt": retained.decode("utf-8", errors="replace"),
+        "body_truncated": overflow,
+        "body_bytes_read": len(retained),
+        "body_eof": body_eof,
+        "content_length": content_lengths[0] if len(content_lengths) == 1 else "",
+        "content_length_count": len(content_lengths),
+        "json_body": payload,
+        "json_error": json_error,
+    }}
+
 
 def _open_request(request: urllib_request.Request, *, timeout_seconds: float):
     try:
@@ -15042,7 +15303,7 @@ def _open_request(request: urllib_request.Request, *, timeout_seconds: float):
             )
         raise
 
-def _collect(name, method, url, json_payload=None):
+def _collect(name, method, url, json_payload=None, strict_compact_json=False):
     request = urllib_request.Request(url=url, method=method, headers={{"Accept": "application/json, text/html;q=0.9"}})
     if PAYLOAD.get("auth_cookie"):
         request.add_header("Cookie", PAYLOAD["auth_cookie"])
@@ -15053,31 +15314,53 @@ def _collect(name, method, url, json_payload=None):
         request.add_header("Content-Length", str(len(body)))
     try:
         with _open_request(request, timeout_seconds=PAYLOAD["timeout_seconds"]) as response:
-            body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
+            if strict_compact_json:
+                body = _read_compact_json_probe_response(response)
+            else:
+                body_text, body_truncated, body_bytes_read = _read_probe_response_body(response)
+                content_lengths = _header_values(response.headers, "Content-Length")
+                body = {{
+                    "body_excerpt": body_text,
+                    "body_truncated": body_truncated,
+                    "body_bytes_read": body_bytes_read,
+                    "body_eof": not body_truncated,
+                    "content_length": content_lengths[0] if len(content_lengths) == 1 else "",
+                    "content_length_count": len(content_lengths),
+                    "json_body": _try_load_json(body_text),
+                    "json_error": None,
+                }}
             return {{
                 "route": name,
                 "method": method,
                 "url": url,
                 "http_status": response.getcode(),
                 "content_type": response.headers.get("Content-Type", ""),
-                "body_excerpt": body_text,
-                "body_truncated": body_truncated,
-                "body_bytes_read": body_bytes_read,
-                "json_body": _try_load_json(body_text),
+                **body,
                 "network_error": None,
             }}
     except urllib_error.HTTPError as exc:
-        body_text, body_truncated, body_bytes_read = _read_probe_response_body(exc)
+        if strict_compact_json:
+            body = _read_compact_json_probe_response(exc)
+        else:
+            body_text, body_truncated, body_bytes_read = _read_probe_response_body(exc)
+            content_lengths = _header_values(exc.headers, "Content-Length")
+            body = {{
+                "body_excerpt": body_text,
+                "body_truncated": body_truncated,
+                "body_bytes_read": body_bytes_read,
+                "body_eof": not body_truncated,
+                "content_length": content_lengths[0] if len(content_lengths) == 1 else "",
+                "content_length_count": len(content_lengths),
+                "json_body": _try_load_json(body_text),
+                "json_error": None,
+            }}
         return {{
             "route": name,
             "method": method,
             "url": url,
             "http_status": exc.code,
             "content_type": exc.headers.get("Content-Type", ""),
-            "body_excerpt": body_text,
-            "body_truncated": body_truncated,
-            "body_bytes_read": body_bytes_read,
-            "json_body": _try_load_json(body_text),
+            **body,
             "network_error": None,
         }}
     except urllib_error.URLError as exc:
@@ -15116,7 +15399,7 @@ results = [
     _collect("status", "GET", _append_as_of_date(PAYLOAD["base_url"] + PAYLOAD["route_paths"]["SHEET_VITRINA_STATUS_HTTP_PATH"], PAYLOAD["as_of_date"])),
     _collect("own_product_capital_status", "GET", PAYLOAD["base_url"] + {DEFAULT_OWN_PRODUCT_CAPITAL_STATUS_PATH!r}),
     _collect("web_vitrina_read", "GET", _append_as_of_date(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, PAYLOAD["as_of_date"])),
-    _collect("web_vitrina_page_composition", "GET", _append_query_params(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, {{"as_of_date": PAYLOAD["as_of_date"], "surface": {DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE!r}}})),
+    _collect("web_vitrina_page_composition", "GET", _append_query_params(PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_READ_PATH!r}, {{"as_of_date": PAYLOAD["as_of_date"], "surface": {DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE!r}, "probe_shape": "1"}}), strict_compact_json=True),
     _collect("web_vitrina_user_config", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH!r}),
     _collect("web_vitrina_business_projection_status", "GET", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_BUSINESS_PROJECTION_STATUS_PATH!r}),
     _collect("web_vitrina_group_refresh_missing_group", "POST", PAYLOAD["base_url"] + {DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH!r}, {{}}),
