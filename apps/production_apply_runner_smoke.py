@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import json
 import os
@@ -75,11 +76,14 @@ FBS_PASSPORT_DIGEST = apply.fbs_file_digest(
 FBS_MAPPING_READBACK_DIGEST = "sha256:" + "8" * 64
 FBS_IMPACT_DIGEST = "sha256:" + "9" * 64
 FBS_RECOVERY_DIGEST = "sha256:" + "a" * 64
+FBS_MAPPING_OPERATION = "production-goal-v2-" + "6" * 32
 WBC0027_FBS_QUALITY_AUTH_BODY = (
     "/wb-core authorize-goal-v2 task WBC0027 "
     "profile fbs-lifecycle-recovery-v2 "
     "target wb_core_eu_hosted_runtime_active incident-passport "
     + FBS_PASSPORT_DIGEST
+    + " mapping-operation "
+    + FBS_MAPPING_OPERATION
     + " mapping-readback "
     + FBS_MAPPING_READBACK_DIGEST
     + " impact "
@@ -858,8 +862,14 @@ def _exercise_wbc0027_two_phase_runner() -> None:
 
 
 def _exercise_wbc0027_fbs_quality_runner() -> None:
+    storage = {
+        **FBS_PASSPORT["storage"],
+        "generation_epoch": "generation-smoke",
+        "state": "ready",
+        "manifest_contract": "storage_registry_v1",
+    }
     boundary = {
-        "storage": FBS_PASSPORT["storage"],
+        "storage": storage,
         "cutover_id": FBS_PASSPORT["cutover"]["cutover_id"],
         "cutover_manifest_digest": "sha256:" + "1" * 64,
         "forward_generation_id": FBS_PASSPORT["cutover"]["forward_generation_id"],
@@ -880,20 +890,35 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
         "resolved_scopes": [],
         "mapping_re_evidence": [],
         "typed_blocker_rows": [],
-        "coverage": {},
+        "coverage": {
+            "candidate_count": 1,
+            "resolved_groups": [{"facility_id": "facility-smoke", "nm_id": 1001}],
+            "blocked_groups": [],
+            "covered_groups": [{"facility_id": "facility-smoke", "nm_id": 1001}],
+            "classified_count": 1,
+            "full_unresolved_scan": True,
+            "all_groups_resolvable": True,
+        },
     }
     history = {
+        "contract": "fbs_lifecycle_same_date_history_recovery/v2",
         "date_from": "2026-08-31",
         "date_to": "2026-08-31",
         "business_dates": ["2026-08-31"],
         "captures": [{}],
+        "event_evidence": [],
+        "corrections": [],
+        "cell_evidence": [],
+        "current_business_date": "2026-08-31",
         "classification_counts": {
             "recoverable_exact": 1,
             "remain_missing_no_same_date_evidence": 4,
         },
         "blockers": [],
+        "evidence_digest": "sha256:" + "b" * 64,
         "digest": "sha256:" + "5" * 64,
     }
+    surface_rows = [{"scope_kind": "FACILITY_SKU", "facility_id": "facility-smoke", "nm_id": 1001}]
     candidate = attach_digest(
         {
             "contract": "fbs_lifecycle_recovery_manifest/v2",
@@ -905,17 +930,47 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
             "impact_digest": FBS_IMPACT_DIGEST,
             "boundary": boundary,
             "scope": scope,
-            "predicted_effects": {"wb_write_count": 0},
+            "predicted_effects": {
+                "target_count": 1,
+                "outcome_counts": {},
+                "lifecycle_summary": {},
+                "balance_deltas": [],
+                "total_quantity_delta": -1,
+                "total_capital_delta_rub": "-1",
+                "target_result_digest": "sha256:" + "c" * 64,
+                "dependent_surface_plan": {
+                    "contract": "fbs_lifecycle_dependent_surface_plan/v1",
+                    "surface_kinds": ["FACILITY_SKU", "FACILITY_TOTAL", "FUNCTIONAL_ECONOMICS", "GLOBAL_SKU", "GLOBAL_TOTAL"],
+                    "before": surface_rows,
+                    "after": surface_rows,
+                    "before_digest": digest(surface_rows),
+                    "after_digest": digest(surface_rows),
+                },
+                "wb_write_count": 0,
+            },
             "history": history,
-            "baselines": {},
+            "baselines": {
+                "non_target_digest": "sha256:" + "d" * 64,
+                "wb_digest": "sha256:" + "e" * 64,
+                "projection_schema_evidence": {},
+                "canonical_write_seeds": {},
+                "past_fulfilled_invariant": {},
+            },
             "safety": {
+                "default_mode": "query_only_dry_run",
                 "one_submit": True,
                 "writer_lock": "warehouse_functional_write_lock",
-                "before_image": "private_mode_0600_exclusive_create",
+                "root_storage_admission": "production_apply_evidence",
+                "target_cas": "exact_source_rows_history_base_and_effect",
+                "before_image": "private_mode_0600_exclusive_create_fsync",
+                "backup": "private_mode_0600_exclusive_create_fsync",
+                "operation_journal": "exact_operation_authorization_storage",
+                "ambiguous_transport": "query_only_readback_no_retry",
                 "current_retrocopy": False,
                 "immutable_history_overwrite": False,
                 "wb_writes": 0,
                 "mapping_writes": 0,
+                "hypothetical_mapping": False,
             },
             "apply_allowed": True,
             "blockers": [],
@@ -941,11 +996,24 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
     except apply.ApplyError:
         raise AssertionError("versioned recovery digest grammar was rejected")
 
-    operation = "production-goal-v1-" + "5" * 32
+    operation = "production-goal-v2-" + "5" * 32
     command_results = iter(
         [
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {
+                    "state": "qualified_no_submit",
+                    "fingerprint": candidate["recovery_digest"],
+                    "submit_count": 0,
+                    "mapping_write_count": 0,
+                    "recovery_write_count": 0,
+                    "history_write_count": 0,
+                    "wb_write_count": 0,
+                },
+            },
             {
                 "return_code": 0,
                 "transport_ambiguous": False,
@@ -960,6 +1028,12 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
                     "mutates_wb": False,
                     "deployed_sha": MERGE_SHA,
                     "manifest_fingerprint": candidate["recovery_digest"],
+                    "summary": {
+                        "operation_id": operation,
+                        "authorization_reference_digest": digest(
+                            "github:fixture:sha256:" + "1" * 64
+                        ),
+                    },
                     "source_cutoff_sequence": 28_461_627,
                     "date_from": "2026-08-31",
                     "date_to": "2026-08-31",
@@ -998,10 +1072,54 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
         apply.time.sleep = original_sleep
     assert result["state"] == "done"
     assert result["apply_count"] == 1
-    assert len(calls) == 4
+    assert len(calls) == 5
     rendered = [" ".join(command) for command in calls]
     assert sum(" apply " in value for value in rendered) == 1
     assert sum(" readback " in value for value in rendered) == 1
+    no_submit_results = iter(
+        [
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {
+                    "state": "qualified_no_submit",
+                    "fingerprint": candidate["recovery_digest"],
+                    "submit_count": 0,
+                    "mapping_write_count": 0,
+                    "recovery_write_count": 0,
+                    "history_write_count": 0,
+                    "wb_write_count": 0,
+                },
+            },
+        ]
+    )
+    no_submit_calls: list[list[str]] = []
+
+    def fake_no_submit(command: list[str], *, timeout_seconds: float = 3600.0) -> dict:
+        del timeout_seconds
+        no_submit_calls.append(command)
+        return next(no_submit_results)
+
+    try:
+        apply.command_evidence = fake_no_submit
+        apply.time.sleep = lambda _seconds: None
+        qualified = apply.run_wbc0027_fbs_quality_goal(
+            target={"target_dir": "/opt/wb-core-runtime/app", "ssh_destination": "wb-core-eu-root"},
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "1" * 64,
+            qualification_only=True,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert qualified["state"] == "qualified_no_submit"
+    assert qualified["apply_count"] == 0
+    assert len(no_submit_calls) == 3
+    assert all(" apply " not in " ".join(command) for command in no_submit_calls)
 
 
 def _exercise_wbc0027_fbs_mapping_runner() -> None:
@@ -1012,6 +1130,19 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
     )
     assert goal["profile"] == apply.WBC0027_FBS_MAPPING_GOAL_PROFILE
     assert goal["incident_operation_id"] == FBS_PASSPORT["operation_id"]
+    first = authorization(id=501, body=WBC0027_FBS_MAPPING_AUTH_BODY)
+    duplicate = authorization(id=502, body=WBC0027_FBS_MAPPING_AUTH_BODY)
+    try:
+        apply.validate_unique_authorization(
+            [first, duplicate],
+            comment_id=501,
+            repository="orenvlad-ai/wb-core",
+            pr=1050,
+        )
+    except apply.ApplyError as exc:
+        assert "not unique" in str(exc)
+    else:
+        raise AssertionError("duplicate equivalent OWNER passports were accepted")
     changed = WBC0027_FBS_MAPPING_AUTH_BODY.replace(
         "inserts 1", "inserts 2"
     )
@@ -1024,8 +1155,16 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
     else:
         raise AssertionError("drifted WBC0027 FBS mapping count was accepted")
 
-    operation = "production-goal-v1-" + "6" * 32
-    material_cas = {"snapshot_digest": "sha256:" + "6" * 64}
+    operation = FBS_MAPPING_OPERATION
+    material_cas = {
+        "tuple_digest": FBS_PASSPORT["tuple"]["tuple_digest"],
+        "mapping_digest": "sha256:" + "7" * 64,
+        "target_digest": "sha256:" + "2" * 64,
+        "storage_digest": "sha256:" + "6" * 64,
+        "cutover_digest": "sha256:" + "5" * 64,
+        "identity_digest": "sha256:" + "4" * 64,
+        "evidence_digest": "sha256:" + "3" * 64,
+    }
     material_cas["digest"] = digest(material_cas)
     proposed_mapping = {
         "mapping_id": "mapping-smoke",
@@ -1057,8 +1196,17 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
         "proposed_mapping": proposed_mapping,
         "material_cas": material_cas,
         "safety": {
+            "default_mode": "query_only_dry_run",
+            "two_consecutive_material_witnesses_required": True,
+            "writer_lock": "warehouse_functional_write_lock",
+            "root_storage_admission": "production_apply_evidence",
+            "private_before_image": "mode_0600_exclusive_create_fsync",
+            "private_backup": "mode_0600_exclusive_create_fsync",
+            "operation_journal": "exact_operation_authorization_storage",
             "one_submit": True,
             "one_insert_max": 1,
+            "blind_retry": False,
+            "query_only_readback": True,
             "lifecycle_debit_count": 0,
             "balance_write_count": 0,
             "history_write_count": 0,
@@ -1097,6 +1245,8 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
                     "query_only": True,
                     "target_id": "wb_core_eu_hosted_runtime_active",
                     "deployed_sha": MERGE_SHA,
+                    "operation_id": operation,
+                    "operation_proof_exact": True,
                     "exact_mapping_row_count": 1,
                     "mapping": {
                         "target_nm_id": FBS_PASSPORT["tuple"]["target_nm_id"],
@@ -1142,6 +1292,48 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
     rendered = [" ".join(command) for command in calls]
     assert sum(" mapping-apply " in value for value in rendered) == 1
     assert sum(" mapping-readback" in value for value in rendered) == 1
+    no_submit_results = iter(
+        [
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {
+                    "accepted": True,
+                    "mapping_insert_count": 0,
+                    "recovery_write_count": 0,
+                    "history_write_count": 0,
+                    "source_database_query_only": True,
+                },
+            },
+        ]
+    )
+    no_submit_calls: list[list[str]] = []
+
+    def fake_no_submit(command: list[str], *, timeout_seconds: float = 3600.0) -> dict:
+        del timeout_seconds
+        no_submit_calls.append(command)
+        return next(no_submit_results)
+
+    try:
+        apply.command_evidence = fake_no_submit
+        apply.time.sleep = lambda _seconds: None
+        qualified = apply.run_wbc0027_fbs_mapping_goal(
+            target={"target_dir": "/opt/wb-core-runtime/app", "ssh_destination": "wb-core-eu-root"},
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "2" * 64,
+            qualification_only=True,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert qualified["state"] == "qualified_no_submit"
+    assert qualified["apply_count"] == 0
+    assert len(no_submit_calls) == 3
+    assert all("mapping-apply" not in " ".join(command) for command in no_submit_calls)
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
@@ -2063,6 +2255,270 @@ def _exercise_worker_mount_probe() -> None:
             os.environ["GITHUB_RUN_ID"] = original_run_id
 
 
+def _exact_pr1143_release_binding_contract() -> None:
+    base_sha = "3a3b7b31b38a1670c4409bb534677b81b0b02168"
+    head_sha = "fca1c66d1d5f010e762b3fc94505448c90aa6c23"
+    merge_sha = "1d3a4c6074157d4f5e040846da3c61f5506e8797"
+    operation = "release-v2-b3cbca1ace1f88413a5da5be0c7ce4dd"
+    manifest_path = "release/production-mutations/wbc0027_fbs_lifecycle_incident.json"
+    manifest_raw = (ROOT / manifest_path).read_bytes()
+    manifest_sha = apply.digest(manifest_raw)
+    manifest = {
+        "operation_id": "wbc0027-fbs-identity-428855758-v2",
+        "path": manifest_path,
+        "sha256": manifest_sha,
+    }
+    receipt = {
+        "base_sha": base_sha,
+        "deployed_sha": merge_sha,
+        "head_sha": head_sha,
+        "manifest": manifest,
+        "merge_sha": merge_sha,
+        "operation_id": operation,
+        "plan_hash": "b63a646506e5051aa214b007a99e4494850a4f7665352a914d87452110b9a261",
+        "pull_request": 1143,
+        "reason_codes": [],
+        "release_kind": "production_mutation",
+        "repository": "orenvlad-ai/wb-core",
+        "schema": "wb-core.release-receipt/v2",
+        "state": "awaiting_apply",
+        "workflow_run_id": 33414596664,
+    }
+    raw_receipt = apply.canonical_json_bytes(receipt) + b"\n"
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("release-receipt.json", raw_receipt)
+    raw_zip = archive_buffer.getvalue()
+    comment = {
+        "id": 5481503347,
+        "user": {"login": "github-actions[bot]"},
+        "body": (
+            f"<!-- wb-core-release-receipt operation={operation} -->\n"
+            "Protocol-v2 one-shot release receipt:\n```json\n"
+            + json.dumps(receipt, indent=2, sort_keys=True)
+            + "\n```"
+        ),
+    }
+
+    class Client:
+        repository = "orenvlad-ai/wb-core"
+
+        def __init__(self) -> None:
+            self.comments = [comment]
+            self.archive_digest = "sha256:" + apply.digest(raw_zip)
+
+        def get(self, path: str):
+            if path == "/pulls/1143":
+                return {"merged": True, "base": {"sha": base_sha}, "head": {"sha": head_sha}, "merge_commit_sha": merge_sha}
+            if path.startswith("/issues/1143/comments?"):
+                return self.comments
+            if path == "/actions/runs/33414596664":
+                return {"name": "PR Gate", "path": ".github/workflows/pr-gate.yml", "event": "pull_request", "status": "completed", "conclusion": "success", "head_sha": head_sha}
+            if path.startswith("/actions/artifacts?"):
+                return {"artifacts": [{"id": 9767013211, "name": "release-receipt-33414596664", "size_in_bytes": len(raw_zip), "digest": self.archive_digest, "expired": False, "workflow_run": {"id": 33415566222, "head_sha": base_sha}}]}
+            if path == "/actions/runs/33415566222":
+                return {"name": "Release Runner", "path": ".github/workflows/release-runner.yml", "event": "workflow_run", "status": "completed", "conclusion": "success", "head_sha": base_sha}
+            if path == f"/contents/{manifest_path}?ref={merge_sha}":
+                return {"content": base64.b64encode(manifest_raw).decode("ascii")}
+            raise AssertionError(path)
+
+        def request(self, method: str, path: str, **_kwargs):
+            assert method == "GET"
+            assert path == "/actions/artifacts/9767013211/zip"
+            return raw_zip
+
+    client = Client()
+    binding = apply.collect_exact_release_binding(
+        client,
+        pr=1143,
+        release_operation=operation,
+        expected_kind="production_mutation",
+        expected_state="awaiting_apply",
+        expected_manifest=manifest,
+    )
+    assert binding["comment_id"] == 5481503347
+    assert binding["gate_run_id"] == 33414596664
+    assert binding["release_run_id"] == 33415566222
+    assert binding["artifact_file_sha256"] == "sha256:" + apply.digest(raw_receipt)
+    client.comments = [comment, {**comment, "id": 5481503348}]
+    try:
+        apply.collect_exact_release_binding(
+            client,
+            pr=1143,
+            release_operation=operation,
+            expected_kind="production_mutation",
+            expected_state="awaiting_apply",
+            expected_manifest=manifest,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("duplicate exact release receipts were accepted")
+    client.comments = [comment]
+    client.archive_digest = "sha256:" + "0" * 64
+    try:
+        apply.collect_exact_release_binding(
+            client,
+            pr=1143,
+            release_operation=operation,
+            expected_kind="production_mutation",
+            expected_state="awaiting_apply",
+            expected_manifest=manifest,
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("drifted release artifact archive was accepted")
+
+
+def _correction_base_ancestry_contract() -> None:
+    source_merge = "1" * 40
+    correction_base = "2" * 40
+    intervening_head = "3" * 40
+    operation = "release-v2-" + "4" * 32
+    receipt = {
+        "schema": apply.RELEASE_RECEIPT_SCHEMA,
+        "state": "done",
+        "operation_id": operation,
+        "pull_request": 1144,
+        "release_kind": "repo_only",
+        "base_sha": source_merge,
+        "head_sha": intervening_head,
+        "merge_sha": correction_base,
+        "deployed_sha": None,
+    }
+    comment = {
+        "id": 55,
+        "user": {"login": "github-actions[bot]"},
+        "body": (
+            f"<!-- wb-core-release-receipt operation={operation} -->\n"
+            "Protocol-v2 one-shot release receipt:\n```json\n"
+            + json.dumps(receipt, sort_keys=True)
+            + "\n```"
+        ),
+    }
+    files = [
+        {
+            "filename": "docs/architecture/07_codex_execution_protocol.md",
+            "status": "modified",
+            "sha": "5" * 40,
+            "additions": 22,
+            "deletions": 10,
+            "changes": 32,
+        },
+        {
+            "filename": "ci/test_planner_smoke.py",
+            "status": "modified",
+            "sha": "6" * 40,
+            "additions": 25,
+            "deletions": 1,
+            "changes": 26,
+        },
+    ]
+
+    class Client:
+        repository = "orenvlad-ai/wb-core"
+
+        def get(self, path: str):
+            if path == f"/compare/{source_merge}...{correction_base}":
+                return {
+                    "status": "ahead",
+                    "ahead_by": 1,
+                    "behind_by": 0,
+                    "merge_base_commit": {"sha": source_merge},
+                    "commits": [{"sha": correction_base}],
+                }
+            if path == f"/commits/{correction_base}/pulls?per_page=100":
+                return [
+                    {
+                        "number": 1144,
+                        "merged_at": "2026-08-31T18:53:07Z",
+                        "merge_commit_sha": correction_base,
+                        "base": {"ref": "main"},
+                    }
+                ]
+            if path == "/pulls/1144":
+                return {
+                    "number": 1144,
+                    "merged": True,
+                    "draft": False,
+                    "state": "closed",
+                    "merge_commit_sha": correction_base,
+                    "changed_files": 2,
+                    "base": {
+                        "ref": "main",
+                        "sha": source_merge,
+                        "repo": {"full_name": "orenvlad-ai/wb-core"},
+                    },
+                    "head": {
+                        "sha": intervening_head,
+                        "repo": {"full_name": "orenvlad-ai/wb-core"},
+                    },
+                }
+            if path.startswith("/issues/1144/comments?"):
+                return [comment]
+            if path == "/pulls/1144/files?per_page=100&page=1":
+                return files
+            raise AssertionError(path)
+
+    source = {"receipt": {"merge_sha": source_merge}}
+    correction = {"receipt": {"base_sha": correction_base}}
+    original_collect = apply.collect_exact_release_binding
+    try:
+        apply.collect_exact_release_binding = lambda *_args, **kwargs: {
+            "receipt": receipt,
+            "gate_run_id": 101,
+            "release_run_id": 102,
+            "artifact_id": 103,
+            "artifact_archive_digest": "sha256:" + "7" * 64,
+            "artifact_file_sha256": "sha256:" + "8" * 64,
+        } if kwargs == {
+            "pr": 1144,
+            "release_operation": operation,
+            "expected_kind": "repo_only",
+            "expected_state": "done",
+            "expected_manifest": None,
+        } else (_ for _ in ()).throw(AssertionError(kwargs))
+        proof = apply.collect_correction_base_ancestry(
+            Client(), source_release=source, correction_release=correction
+        )
+        assert proof["status"] == "trusted_non_interfering_descendant"
+        assert proof["source_merge_sha"] == source_merge
+        assert proof["correction_base_sha"] == correction_base
+        assert len(proof["intervening_releases"]) == 1
+        assert proof["intervening_releases"][0]["pull_request"] == 1144
+        assert {
+            row["path"]
+            for row in proof["intervening_releases"][0]["path_proof"]["changed_files"]
+        } == {row["filename"] for row in files}
+        direct = apply.collect_correction_base_ancestry(
+            Client(),
+            source_release=source,
+            correction_release={"receipt": {"base_sha": source_merge}},
+        )
+        assert direct["status"] == "direct"
+        files.append(
+            {
+                "filename": ".github/workflows/production-apply.yml",
+                "status": "modified",
+                "sha": "9" * 40,
+                "additions": 1,
+                "deletions": 1,
+                "changes": 2,
+            }
+        )
+        try:
+            apply._collect_non_interfering_pr_files(
+                Client(), pr_number=1144, pr={"changed_files": 3}
+            )
+        except apply.ApplyError:
+            pass
+        else:
+            raise AssertionError("interfering workflow bridge was accepted")
+    finally:
+        apply.collect_exact_release_binding = original_collect
+
+
 def _workflow_dispatch_contract() -> None:
     workflow_path = ROOT / ".github" / "workflows" / "production-apply.yml"
     ruby_decoder = r"""
@@ -2180,6 +2636,11 @@ puts JSON.generate(decode(Psych.parse_file(ARGV.fetch(0)).root))
         "warm-archive-mount-probe",
         "warm-archive-receipt-reconciliation",
         "wbc0027-receipt-reconciliation",
+        "fbs-mapping-qualification",
+        "fbs-impact-generation",
+        "fbs-recovery-qualification",
+        "fbs-mapping-apply",
+        "fbs-recovery-apply",
     ]
     assert all(
         "options" not in item
@@ -2205,6 +2666,15 @@ puts JSON.generate(decode(Psych.parse_file(ARGV.fetch(0)).root))
             "merge_sha",
             "operation_id",
             "pr",
+            "release_operation_id",
+        },
+        "fbs_v2": {
+            "authorization_comment_id",
+            "authorization_mode",
+            "manifest_sha256",
+            "pr",
+            "reconciliation_pr",
+            "reconciliation_release_operation_id",
             "release_operation_id",
         },
         "warm_archive_mount_probe": {
@@ -2325,6 +2795,8 @@ assert "apps.wbc0027_capital_recovery" not in sys.modules
 
 
 def main() -> None:
+    _exact_pr1143_release_binding_contract()
+    _correction_base_ancestry_contract()
     _workflow_dispatch_contract()
     _exercise_wbc0027_stdlib_dependency_isolation()
     _exercise_compact_oversized_blocked_receipt()
@@ -3210,7 +3682,12 @@ def main() -> None:
     workflow = (ROOT / ".github" / "workflows" / "production-apply.yml").read_text(
         encoding="utf-8"
     )
-    assert "pull-requests: read" not in workflow
+    assert "pull-requests: read" in workflow
+    assert "if-no-files-found: error" in workflow
+    assert "Upload immutable FBS receipt before marker" in workflow
+    assert workflow.index("Upload immutable FBS receipt before marker") < workflow.index(
+        "Verify downloaded artifact and publish exact marker"
+    )
     apply_job, recovery_and_reconciliation = workflow.split("\n  recover_receipt:\n", 1)
     recovery_job, reconciliation_job = recovery_and_reconciliation.split(
         "\n  warm_archive_receipt_reconciliation:\n", 1

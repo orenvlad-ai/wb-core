@@ -56,6 +56,7 @@ from packages.application.fbs_lifecycle_manifests import (  # noqa: E402
     FbsManifestError,
     file_digest as fbs_file_digest,
     parse_incident_passport,
+    parse_impact_manifest,
     parse_mapping_manifest,
     parse_recovery_manifest,
     read_json as read_fbs_json,
@@ -285,6 +286,8 @@ RECOVERY_WORKFLOW_NAME = "Production Apply Runner"
 RECOVERY_WORKFLOW_PATH = ".github/workflows/production-apply.yml"
 RECOVERY_ARTIFACT_FILE = "production-apply-receipt.json"
 MAX_RECOVERY_ARTIFACT_BYTES = 8 * 1024 * 1024
+RELEASE_ARTIFACT_FILE = "release-receipt.json"
+MAX_RELEASE_ARTIFACT_BYTES = 1024 * 1024
 WARM_RECONCILIATION_RECEIPT_SCHEMA = (
     "wb-core.root-warm-archive-reconciliation-receipt/v3"
 )
@@ -477,6 +480,7 @@ WBC0027_FBS_QUALITY_AUTH_RE = re.compile(
     r"profile (?P<profile>fbs-lifecycle-recovery-v2) "
     r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
     r"incident-passport (?P<incident_passport>sha256:[0-9a-f]{64}) "
+    r"mapping-operation (?P<mapping_operation>production-goal-v2-[0-9a-f]{32}) "
     r"mapping-readback (?P<mapping_readback>sha256:[0-9a-f]{64}) "
     r"impact (?P<impact>sha256:[0-9a-f]{64}) "
     r"recovery (?P<recovery>sha256:[0-9a-f]{64}) "
@@ -671,6 +675,386 @@ def parse_release_receipt(
     if len(matches) != 1:
         raise ApplyError("exact live-runtime release receipt is missing or ambiguous")
     return matches[0]
+
+
+def collect_exact_release_binding(
+    client: GitHubClient,
+    *,
+    pr: int,
+    release_operation: str,
+    expected_kind: str,
+    expected_state: str,
+    expected_manifest: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate one release comment, Gate, Release run and downloaded artifact.
+
+    A comment is only an index.  The authoritative binding is the exact same
+    canonical receipt downloaded from the unique artifact produced by the
+    successful Release Runner for the receipt's exact-head Gate.
+    """
+
+    if re.fullmatch(r"release-v2-[0-9a-f]{32}", release_operation) is None:
+        raise ApplyError("release operation id is invalid")
+    release_pr = client.get(f"/pulls/{pr}")
+    if not isinstance(release_pr, Mapping) or release_pr.get("merged") is not True:
+        raise ApplyError("release pull request is not merged")
+    base_sha = exact_sha((release_pr.get("base") or {}).get("sha"), "release-base")
+    head_sha = exact_sha((release_pr.get("head") or {}).get("sha"), "release-head")
+    merge_sha = exact_sha(release_pr.get("merge_commit_sha"), "release-merge")
+    marker_text = f"<!-- {RECEIPT_MARKER} operation={release_operation} -->"
+    matches: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+    for comment in list_comments(client, pr):
+        body = str(comment.get("body") or "")
+        if not is_actions_bot_comment(comment) or not body.startswith(marker_text + "\n"):
+            continue
+        if body.count(marker_text) != 1 or body.count("```json") != 1:
+            raise ApplyError("release receipt marker shape is invalid")
+        try:
+            value = json.loads(body.split("```json\n", 1)[1].split("\n```", 1)[0])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise ApplyError("release receipt comment JSON is invalid") from exc
+        if isinstance(value, dict) and value.get("operation_id") == release_operation:
+            matches.append((comment, value))
+    if len(matches) != 1:
+        raise ApplyError("exact release receipt is missing, duplicated or ambiguous")
+    comment, receipt = matches[0]
+    expected_keys = {
+        "base_sha", "deployed_sha", "head_sha", "manifest", "merge_sha",
+        "operation_id", "plan_hash", "pull_request", "reason_codes",
+        "release_kind", "repository", "schema", "state", "workflow_run_id",
+    }
+    expected_deployed = None if expected_kind == "repo_only" else merge_sha
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("schema") != RELEASE_RECEIPT_SCHEMA
+        or receipt.get("state") != expected_state
+        or receipt.get("operation_id") != release_operation
+        or receipt.get("repository") != client.repository
+        or receipt.get("pull_request") != pr
+        or receipt.get("release_kind") != expected_kind
+        or receipt.get("base_sha") != base_sha
+        or receipt.get("head_sha") != head_sha
+        or receipt.get("merge_sha") != merge_sha
+        or receipt.get("deployed_sha") != expected_deployed
+        or receipt.get("manifest") != (
+            dict(expected_manifest) if expected_manifest is not None else None
+        )
+        or receipt.get("reason_codes") != []
+        or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("plan_hash") or "")) is None
+        or not isinstance(receipt.get("workflow_run_id"), int)
+    ):
+        raise ApplyError("release receipt PR/base/head/manifest binding is invalid")
+    gate_run_id = int(receipt["workflow_run_id"])
+    gate = client.get(f"/actions/runs/{gate_run_id}")
+    if (
+        not isinstance(gate, Mapping)
+        or gate.get("name") != "PR Gate"
+        or gate.get("path") != ".github/workflows/pr-gate.yml"
+        or gate.get("event") != "pull_request"
+        or gate.get("status") != "completed"
+        or gate.get("conclusion") != "success"
+        or gate.get("head_sha") != head_sha
+    ):
+        raise ApplyError("release receipt exact-head Gate binding is invalid")
+    artifact_name = f"release-receipt-{gate_run_id}"
+    artifacts: list[Mapping[str, Any]] = []
+    for page in range(1, 11):
+        listing = client.get(f"/actions/artifacts?per_page=100&page={page}&name={artifact_name}")
+        values = listing.get("artifacts") if isinstance(listing, Mapping) else None
+        if not isinstance(values, list):
+            raise ApplyError("release artifact listing shape is invalid")
+        artifacts.extend(
+            item for item in values
+            if isinstance(item, Mapping) and item.get("name") == artifact_name
+        )
+        if len(values) < 100:
+            break
+    if len(artifacts) != 1:
+        raise ApplyError("release receipt artifact is missing or ambiguous")
+    artifact = artifacts[0]
+    artifact_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is not False
+        or not isinstance(artifact.get("id"), int)
+        or not isinstance(artifact.get("size_in_bytes"), int)
+        or not 0 < int(artifact["size_in_bytes"]) <= MAX_RELEASE_ARTIFACT_BYTES
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("digest") or "")) is None
+        or not isinstance(artifact_run, Mapping)
+        or not isinstance(artifact_run.get("id"), int)
+    ):
+        raise ApplyError("release receipt artifact provenance is invalid")
+    release_run_id = int(artifact_run["id"])
+    release_run = client.get(f"/actions/runs/{release_run_id}")
+    if (
+        not isinstance(release_run, Mapping)
+        or release_run.get("name") != "Release Runner"
+        or release_run.get("path") != ".github/workflows/release-runner.yml"
+        or release_run.get("event") != "workflow_run"
+        or release_run.get("status") != "completed"
+        or release_run.get("conclusion") != "success"
+        or release_run.get("head_sha") != artifact_run.get("head_sha")
+    ):
+        raise ApplyError("release receipt Release Runner binding is invalid")
+    raw_zip = client.request(
+        "GET", f"/actions/artifacts/{int(artifact['id'])}/zip",
+        accept="application/vnd.github+json", raw=True,
+    )
+    if not isinstance(raw_zip, bytes) or (
+        "sha256:" + digest(raw_zip) != str(artifact["digest"])
+    ):
+        raise ApplyError("release receipt archive digest is invalid")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            if len(files) != 1 or files[0].filename != RELEASE_ARTIFACT_FILE:
+                raise ApplyError("release receipt artifact shape is invalid")
+            raw_receipt = archive.read(files[0])
+    except zipfile.BadZipFile as exc:
+        raise ApplyError("release receipt artifact ZIP is invalid") from exc
+    if raw_receipt != canonical_json_bytes(receipt) + b"\n":
+        raise ApplyError("release comment and artifact receipt differ")
+    if expected_manifest is not None:
+        manifest_path = str(expected_manifest["path"])
+        content = client.get(f"/contents/{manifest_path}?ref={merge_sha}")
+        try:
+            manifest_bytes = base64.b64decode(str(content["content"]))
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ApplyError("release manifest content is unavailable") from exc
+        if digest(manifest_bytes) != str(expected_manifest["sha256"]):
+            raise ApplyError("release manifest bytes digest mismatch")
+        try:
+            manifest_payload = json.loads(manifest_bytes)
+        except json.JSONDecodeError as exc:
+            raise ApplyError("release manifest JSON is invalid") from exc
+        if manifest_payload.get("operation_id") != expected_manifest["operation_id"]:
+            raise ApplyError("release manifest operation binding mismatch")
+    return {
+        "receipt": receipt,
+        "comment_id": int(comment.get("id") or 0),
+        "gate_run_id": gate_run_id,
+        "release_run_id": release_run_id,
+        "artifact_id": int(artifact["id"]),
+        "artifact_name": artifact_name,
+        "artifact_archive_digest": str(artifact["digest"]),
+        "artifact_file_sha256": "sha256:" + digest(raw_receipt),
+    }
+
+
+def _intervening_release_path_is_non_interfering(path: str) -> bool:
+    """Allow only documentation and executable-test-only paths in a base bridge."""
+
+    if (
+        not path
+        or path.startswith("/")
+        or "//" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return False
+    if path.startswith("docs/"):
+        return True
+    return re.fullmatch(r"(?:apps|ci|packages)/(?:[^/]+/)*[^/]+_smoke\.py", path) is not None
+
+
+def _collect_non_interfering_pr_files(
+    client: GitHubClient,
+    *,
+    pr_number: int,
+    pr: Mapping[str, Any],
+) -> dict[str, Any]:
+    changed_files = pr.get("changed_files")
+    if (
+        not isinstance(changed_files, int)
+        or isinstance(changed_files, bool)
+        or not 0 < changed_files <= 100
+    ):
+        raise ApplyError("intervening release changed-file cardinality is invalid")
+    files = client.get(f"/pulls/{pr_number}/files?per_page=100&page=1")
+    if not isinstance(files, list) or len(files) != changed_files:
+        raise ApplyError("intervening release changed-file listing is incomplete")
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, Mapping):
+            raise ApplyError("intervening release changed-file row is invalid")
+        path = str(item.get("filename") or "")
+        previous = item.get("previous_filename")
+        status = str(item.get("status") or "")
+        additions = item.get("additions")
+        deletions = item.get("deletions")
+        changes = item.get("changes")
+        blob_sha = str(item.get("sha") or "")
+        if (
+            path in seen
+            or status not in {"added", "modified", "removed", "renamed"}
+            or re.fullmatch(r"[0-9a-f]{40}", blob_sha) is None
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                for value in (additions, deletions, changes)
+            )
+            or int(additions) + int(deletions) != int(changes)
+            or not _intervening_release_path_is_non_interfering(path)
+            or (
+                status == "renamed"
+                and (
+                    not isinstance(previous, str)
+                    or not _intervening_release_path_is_non_interfering(previous)
+                )
+            )
+            or (status != "renamed" and previous is not None)
+        ):
+            raise ApplyError(
+                "intervening release touches a code/workflow/runtime/data surface"
+            )
+        seen.add(path)
+        row = {
+            "path": path,
+            "status": status,
+            "blob_sha": blob_sha,
+            "additions": int(additions),
+            "deletions": int(deletions),
+            "changes": int(changes),
+        }
+        if status == "renamed":
+            row["previous_path"] = str(previous)
+        rows.append(row)
+    rows.sort(key=lambda row: (str(row["path"]), str(row["status"])))
+    payload = {"pull_request": pr_number, "changed_files": rows}
+    return {**payload, "digest": payload_digest(payload)}
+
+
+def collect_correction_base_ancestry(
+    client: GitHubClient,
+    *,
+    source_release: Mapping[str, Any],
+    correction_release: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove an exact, non-production, non-interfering linear base bridge."""
+
+    source_receipt = source_release.get("receipt")
+    correction_receipt = correction_release.get("receipt")
+    if not isinstance(source_receipt, Mapping) or not isinstance(
+        correction_receipt, Mapping
+    ):
+        raise ApplyError("source/correction release binding is incomplete")
+    source_merge = exact_sha(source_receipt.get("merge_sha"), "source-release-merge")
+    correction_base = exact_sha(
+        correction_receipt.get("base_sha"), "correction-release-base"
+    )
+    if correction_base == source_merge:
+        payload = {
+            "status": "direct",
+            "source_merge_sha": source_merge,
+            "correction_base_sha": correction_base,
+            "intervening_releases": [],
+        }
+        return {**payload, "digest": payload_digest(payload)}
+
+    compare = client.get(f"/compare/{source_merge}...{correction_base}")
+    merge_base = compare.get("merge_base_commit") if isinstance(compare, Mapping) else None
+    commits = compare.get("commits") if isinstance(compare, Mapping) else None
+    if not (
+        isinstance(compare, Mapping)
+        and isinstance(merge_base, Mapping)
+        and isinstance(commits, list)
+        and compare.get("status") == "ahead"
+        and isinstance(compare.get("ahead_by"), int)
+        and not isinstance(compare.get("ahead_by"), bool)
+        and 0 < int(compare["ahead_by"]) <= 20
+        and compare.get("behind_by") == 0
+        and merge_base.get("sha") == source_merge
+        and len(commits) == int(compare["ahead_by"])
+    ):
+        raise ApplyError("correction base is not an exact bounded source descendant")
+
+    previous_sha = source_merge
+    releases: list[dict[str, Any]] = []
+    for commit in commits:
+        if not isinstance(commit, Mapping):
+            raise ApplyError("intervening release commit row is invalid")
+        commit_sha = exact_sha(commit.get("sha"), "intervening-release-merge")
+        associated = client.get(f"/commits/{commit_sha}/pulls?per_page=100")
+        candidates = [
+            item
+            for item in associated
+            if isinstance(item, Mapping)
+            and isinstance(item.get("number"), int)
+            and not isinstance(item.get("number"), bool)
+            and item.get("merged_at")
+            and item.get("merge_commit_sha") == commit_sha
+            and (item.get("base") or {}).get("ref") == "main"
+        ] if isinstance(associated, list) else []
+        if len(candidates) != 1:
+            raise ApplyError("intervening release PR is missing or ambiguous")
+        pr_number = int(candidates[0]["number"])
+        pr = client.get(f"/pulls/{pr_number}")
+        base = pr.get("base") if isinstance(pr, Mapping) else None
+        head = pr.get("head") if isinstance(pr, Mapping) else None
+        base_repo = base.get("repo") if isinstance(base, Mapping) else None
+        head_repo = head.get("repo") if isinstance(head, Mapping) else None
+        if not (
+            isinstance(pr, Mapping)
+            and isinstance(base, Mapping)
+            and isinstance(head, Mapping)
+            and isinstance(base_repo, Mapping)
+            and isinstance(head_repo, Mapping)
+            and pr.get("number") == pr_number
+            and pr.get("merged") is True
+            and pr.get("draft") is False
+            and pr.get("state") == "closed"
+            and pr.get("merge_commit_sha") == commit_sha
+            and base.get("ref") == "main"
+            and base.get("sha") == previous_sha
+            and base_repo.get("full_name") == CANONICAL_REPOSITORY
+            and head_repo.get("full_name") == CANONICAL_REPOSITORY
+        ):
+            raise ApplyError("intervening release is not an exact linear main PR")
+        comments = list_comments(client, pr_number)
+        receipt_payloads = _wbc0027_release_comment_payloads(comments)
+        if len(receipt_payloads) != 1:
+            raise ApplyError("intervening release receipt is missing or ambiguous")
+        operation = str(receipt_payloads[0].get("operation_id") or "")
+        release = collect_exact_release_binding(
+            client,
+            pr=pr_number,
+            release_operation=operation,
+            expected_kind="repo_only",
+            expected_state="done",
+            expected_manifest=None,
+        )
+        if (
+            release["receipt"].get("base_sha") != previous_sha
+            or release["receipt"].get("merge_sha") != commit_sha
+            or release["receipt"].get("deployed_sha") is not None
+        ):
+            raise ApplyError("intervening release terminal receipt chain drifted")
+        path_proof = _collect_non_interfering_pr_files(
+            client, pr_number=pr_number, pr=pr
+        )
+        releases.append(
+            {
+                "pull_request": pr_number,
+                "base_sha": previous_sha,
+                "head_sha": str(release["receipt"]["head_sha"]),
+                "merge_sha": commit_sha,
+                "release_operation_id": operation,
+                "gate_run_id": int(release["gate_run_id"]),
+                "release_run_id": int(release["release_run_id"]),
+                "artifact_id": int(release["artifact_id"]),
+                "artifact_archive_digest": str(release["artifact_archive_digest"]),
+                "artifact_file_sha256": str(release["artifact_file_sha256"]),
+                "path_proof": path_proof,
+            }
+        )
+        previous_sha = commit_sha
+    if previous_sha != correction_base:
+        raise ApplyError("intervening release chain does not reach correction base")
+    payload = {
+        "status": "trusted_non_interfering_descendant",
+        "source_merge_sha": source_merge,
+        "correction_base_sha": correction_base,
+        "intervening_releases": releases,
+    }
+    return {**payload, "digest": payload_digest(payload)}
 
 
 def parse_repo_only_release_receipt(
@@ -1293,11 +1677,12 @@ def validate_authorization(
     if wbc0027_fbs_quality_match is not None:
         passport = _load_fbs_incident_passport()
         goal = {
-            "contract": "wb-core.production-goal-passport/v1",
+            "contract": "wb-core.production-goal-passport/v2",
             "task": raw["task"],
             "profile": WBC0027_FBS_QUALITY_GOAL_PROFILE,
             "target_id": raw["target"],
             "incident_passport_digest": raw["incident_passport"],
+            "mapping_operation_id": raw["mapping_operation"],
             "mapping_readback_digest": raw["mapping_readback"],
             "impact_digest": raw["impact"],
             "recovery_digest": raw["recovery"],
@@ -1319,7 +1704,7 @@ def validate_authorization(
     if wbc0027_fbs_mapping_match is not None:
         passport = _load_fbs_incident_passport()
         goal = {
-            "contract": "wb-core.production-goal-passport/v1",
+            "contract": "wb-core.production-goal-passport/v2",
             "task": raw["task"],
             "profile": WBC0027_FBS_MAPPING_GOAL_PROFILE,
             "target_id": raw["target"],
@@ -1462,7 +1847,37 @@ def operation_id(
             "goal": goal,
         }
     )
-    return "production-goal-v1-" + digest(material)[:32]
+    version = "v2" if goal.get("contract") == "wb-core.production-goal-passport/v2" else "v1"
+    return f"production-goal-{version}-" + digest(material)[:32]
+
+
+def validate_unique_authorization(
+    comments: list[Mapping[str, Any]],
+    *,
+    comment_id: int,
+    repository: str,
+    pr: int,
+) -> tuple[dict[str, Any], Mapping[str, Any], str]:
+    selected = [item for item in comments if item.get("id") == comment_id]
+    if len(selected) != 1:
+        raise ApplyError("selected OWNER passport is missing or duplicated")
+    goal = validate_authorization(selected[0], repository=repository, pr=pr)
+    body = str(selected[0].get("body") or "").strip()
+    body_digest = "sha256:" + digest(body.encode("utf-8"))
+    equivalent: list[int] = []
+    for item in comments:
+        try:
+            candidate = validate_authorization(item, repository=repository, pr=pr)
+        except ApplyError:
+            continue
+        if candidate == goal:
+            equivalent.append(int(item.get("id") or 0))
+    if equivalent != [comment_id]:
+        raise ApplyError(
+            "OWNER passport is not unique; equivalent comment ids: "
+            + ",".join(str(value) for value in equivalent)
+        )
+    return goal, selected[0], body_digest
 
 
 def _comment_with_id(
@@ -2657,26 +3072,36 @@ def _wbc0027_fbs_quality_remote_command(
     evidence_dir: str,
     action: str,
     manifest_path: str = "",
+    impact_path: str = "",
+    mapping_readback_path: str = "",
     fingerprint: str = "",
     approval_reference: str = "",
 ) -> list[str]:
-    if action not in {"plan", "apply", "readback"}:
+    if action not in {"impact", "plan", "qualification", "apply", "readback"}:
         raise ApplyError("unsupported WBC0027 FBS quality recovery action")
-    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation) is None:
+    if re.fullmatch(r"production-goal-v2-[0-9a-f]{32}", operation) is None:
         raise ApplyError("WBC0027 FBS quality operation namespace is invalid")
     target_dir = str(target["target_dir"])
     passport_path = (
         f"{target_dir}/release/production-mutations/"
         "wbc0027_fbs_lifecycle_incident.json"
     )
-    canonical_manifest = f"{evidence_dir}/wbc0027-fbs-quality-plan.json"
-    mapping_readback_path = f"{evidence_dir}/fbs-mapping-readback.json"
-    impact_path = f"{evidence_dir}/fbs-impact-manifest.json"
-    if action in {"apply", "readback"} and (
-        manifest_path != canonical_manifest
+    if action in {"plan", "qualification", "apply", "readback"} and (
+        not manifest_path.startswith(evidence_dir + "/wbc0027-fbs-quality-candidate-a")
+        or not manifest_path.endswith(".json")
         or posixpath.normpath(manifest_path) != manifest_path
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None
     ):
+        raise ApplyError("WBC0027 FBS quality reviewed plan path is invalid")
+    if action in {"impact", "plan", "qualification"} and (
+        posixpath.normpath(mapping_readback_path) != mapping_readback_path
+        or not mapping_readback_path.endswith("/fbs-mapping-terminal-readback.json")
+        or posixpath.normpath(impact_path) != impact_path
+        or not impact_path.endswith("/fbs-impact-manifest.json")
+    ):
+        raise ApplyError("WBC0027 FBS quality input artifact path is invalid")
+    if action in {"apply", "readback"} and re.fullmatch(
+        r"sha256:[0-9a-f]{64}", fingerprint
+    ) is None:
         raise ApplyError("WBC0027 FBS quality reviewed plan binding is invalid")
     parts = [
         "python3",
@@ -2690,14 +3115,30 @@ def _wbc0027_fbs_quality_remote_command(
         "--scratch-dir",
         f"{evidence_dir}/scratch",
     ]
-    if action == "plan":
+    if action == "impact":
+        parts.extend(
+            [
+                "--output", impact_path,
+                "impact-dry-run", "--mapping-readback-file", mapping_readback_path,
+            ]
+        )
+    elif action == "plan":
         parts.extend(
             [
                 "--output",
-                canonical_manifest,
+                manifest_path,
                 "dry-run",
                 "--mapping-readback-file",
                 mapping_readback_path,
+                "--impact-file",
+                impact_path,
+            ]
+        )
+    elif action == "qualification":
+        parts.extend(
+            [
+                "qualification", "--plan-file", manifest_path,
+                "--impact-file", impact_path,
             ]
         )
     elif action == "apply":
@@ -2708,8 +3149,12 @@ def _wbc0027_fbs_quality_remote_command(
                 "apply",
                 "--plan-file",
                 manifest_path,
+                "--impact-file",
+                impact_path,
                 "--fingerprint",
                 fingerprint,
+                "--operation-id",
+                operation,
                 "--approval-reference",
                 approval_reference,
                 "--actor",
@@ -2719,10 +3164,16 @@ def _wbc0027_fbs_quality_remote_command(
             ]
         )
     else:
-        parts.extend(["readback", "--fingerprint", fingerprint])
+        parts.extend(
+            [
+                "readback", "--fingerprint", fingerprint,
+                "--operation-id", operation,
+                "--approval-reference", approval_reference,
+            ]
+        )
     setup = (
         "install -d -m 0700 " + shlex.quote(evidence_dir)
-        if action == "plan"
+        if action in {"impact", "plan"}
         else "test -d "
         + shlex.quote(evidence_dir)
         + ' && test "$(stat -c %a '
@@ -2737,31 +3188,6 @@ def _wbc0027_fbs_quality_remote_command(
         + "; export PYTHONPATH="
         + shlex.quote(target_dir)
         + "; "
-        + (
-            "python3 "
-            + shlex.quote(f"{target_dir}/apps/wbc0027_fbs_mapping_extension.py")
-            + " --runtime-dir /opt/wb-core-runtime/state --deployed-sha "
-            + shlex.quote(merge_sha)
-            + " --target-id "
-            + shlex.quote(CANONICAL_PRODUCTION_TARGET_ID)
-            + " --passport-file "
-            + shlex.quote(passport_path)
-            + " --output "
-            + shlex.quote(mapping_readback_path)
-            + " mapping-readback >/dev/null; python3 "
-            + shlex.quote(f"{target_dir}/apps/wbc0027_fbs_lifecycle_quality_recovery.py")
-            + " --runtime-dir /opt/wb-core-runtime/state --deployed-sha "
-            + shlex.quote(merge_sha)
-            + " --passport-file "
-            + shlex.quote(passport_path)
-            + " --output "
-            + shlex.quote(impact_path)
-            + " impact-dry-run --mapping-readback-file "
-            + shlex.quote(mapping_readback_path)
-            + " >/dev/null; "
-            if action == "plan"
-            else ""
-        )
         + " ".join(shlex.quote(part) for part in parts)
     )
     return _ssh_command() + [str(target["ssh_destination"]), shell]
@@ -2780,7 +3206,7 @@ def _wbc0027_fbs_mapping_remote_command(
 ) -> list[str]:
     if action not in {"plan", "apply", "readback", "rehearsal"}:
         raise ApplyError("unsupported WBC0027 FBS mapping action")
-    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation) is None:
+    if re.fullmatch(r"production-goal-v2-[0-9a-f]{32}", operation) is None:
         raise ApplyError("WBC0027 FBS mapping operation namespace is invalid")
     target_dir = str(target["target_dir"])
     passport_path = (
@@ -2829,6 +3255,8 @@ def _wbc0027_fbs_mapping_remote_command(
                 candidate_path,
                 "--fingerprint",
                 fingerprint,
+                "--operation-id",
+                operation,
                 "--approval-reference",
                 approval_reference,
                 "--actor",
@@ -2840,7 +3268,13 @@ def _wbc0027_fbs_mapping_remote_command(
     elif action == "rehearsal":
         parts.append("mapping-rehearsal")
     else:
-        parts.append("mapping-readback")
+        parts.extend(
+            [
+                "--output", f"{evidence_dir}/fbs-mapping-terminal-readback.json",
+                "mapping-readback", "--operation-id", operation,
+                "--approval-reference", approval_reference,
+            ]
+        )
     setup = (
         "install -d -m 0700 " + shlex.quote(evidence_dir)
         if action == "plan"
@@ -4397,6 +4831,7 @@ def run_wbc0027_fbs_quality_goal(
     goal: Mapping[str, Any],
     operation: str,
     approval_reference: str,
+    qualification_only: bool = False,
 ) -> dict[str, Any]:
     passport = _load_fbs_incident_passport()
     evidence_dir = str(
@@ -4404,11 +4839,19 @@ def run_wbc0027_fbs_quality_goal(
         / "production-goals"
         / operation
     )
-    manifest_path = f"{evidence_dir}/wbc0027-fbs-quality-plan.json"
+    mapping_evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / str(goal["mapping_operation_id"])
+    )
+    mapping_readback_path = f"{mapping_evidence_dir}/fbs-mapping-terminal-readback.json"
+    impact_path = f"{mapping_evidence_dir}/fbs-impact-manifest.json"
+    manifest_path = ""
     attempts: list[dict[str, Any]] = []
     prior_witness: dict[str, Any] | None = None
     candidate: Mapping[str, Any] | None = None
     for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
+        current_path = f"{evidence_dir}/wbc0027-fbs-quality-candidate-a{attempt:02d}.json"
         evidence = command_evidence(
             _wbc0027_fbs_quality_remote_command(
                 target=target,
@@ -4416,6 +4859,9 @@ def run_wbc0027_fbs_quality_goal(
                 operation=operation,
                 evidence_dir=evidence_dir,
                 action="plan",
+                manifest_path=current_path,
+                impact_path=impact_path,
+                mapping_readback_path=mapping_readback_path,
             )
         )
         payload = evidence.get("result")
@@ -4456,7 +4902,11 @@ def run_wbc0027_fbs_quality_goal(
             and isinstance(boundary, Mapping)
             and boundary.get("mapping_readback_digest")
             == goal["mapping_readback_digest"]
-            and boundary.get("storage") == passport["storage"]
+            and isinstance(boundary.get("storage"), Mapping)
+            and all(
+                boundary["storage"].get(key) == value
+                for key, value in dict(passport["storage"]).items()
+            )
             and boundary.get("cutover_id") == passport["cutover"]["cutover_id"]
             and boundary.get("forward_generation_id")
             == passport["cutover"]["forward_generation_id"]
@@ -4483,7 +4933,9 @@ def run_wbc0027_fbs_quality_goal(
             and isinstance(safety, Mapping)
             and safety.get("one_submit") is True
             and safety.get("writer_lock") == "warehouse_functional_write_lock"
-            and safety.get("before_image") == "private_mode_0600_exclusive_create"
+            and safety.get("before_image") == "private_mode_0600_exclusive_create_fsync"
+            and safety.get("backup") == "private_mode_0600_exclusive_create_fsync"
+            and safety.get("operation_journal") == "exact_operation_authorization_storage"
             and safety.get("current_retrocopy") is False
             and safety.get("immutable_history_overwrite") is False
             and safety.get("wb_writes") == 0
@@ -4521,7 +4973,7 @@ def run_wbc0027_fbs_quality_goal(
             {
                 **{key: value for key, value in evidence.items() if key != "result"},
                 "attempt": attempt,
-                "manifest_path": manifest_path,
+                "manifest_path": current_path,
                 **witness,
                 "qualification_state": "candidate",
             }
@@ -4530,6 +4982,7 @@ def run_wbc0027_fbs_quality_goal(
             attempts[-2]["qualification_state"] = "matching_witness"
             attempts[-1]["qualification_state"] = "qualified"
             candidate = payload
+            manifest_path = current_path
             break
         if len(attempts) > 1:
             attempts[-2]["qualification_state"] = "superseded_material_drift"
@@ -4546,6 +4999,54 @@ def run_wbc0027_fbs_quality_goal(
             "qualification_attempts": attempts,
         }
     fingerprint = str(candidate["recovery_digest"])
+    native_qualification = command_evidence(
+        _wbc0027_fbs_quality_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            action="qualification",
+            manifest_path=manifest_path,
+            impact_path=impact_path,
+            mapping_readback_path=mapping_readback_path,
+        )
+    )
+    qualified = native_qualification.get("result")
+    if not (
+        native_qualification.get("return_code") == 0
+        and isinstance(qualified, Mapping)
+        and qualified.get("state") == "qualified_no_submit"
+        and qualified.get("fingerprint") == fingerprint
+        and qualified.get("submit_count") == 0
+        and qualified.get("mapping_write_count") == 0
+        and qualified.get("recovery_write_count") == 0
+        and qualified.get("history_write_count") == 0
+        and qualified.get("wb_write_count") == 0
+    ):
+        return {
+            "state": "blocked",
+            "reason": "fbs-recovery-native-boundary-not-qualified",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+            "native_qualification": native_qualification,
+        }
+    if qualification_only:
+        return {
+            "state": "qualified_no_submit",
+            "reason": "submit-boundary-proven",
+            "apply_count": 0,
+            "production_mutation_count": 0,
+            "github_comment_count": 0,
+            "workflow_dispatch_count": 0,
+            "qualification_attempts": attempts,
+            "native_qualification": native_qualification,
+            "candidate": {
+                "manifest_path": manifest_path,
+                "fingerprint": fingerprint,
+                "impact_path": impact_path,
+                "impact_digest": candidate["impact_digest"],
+            },
+        }
     apply_evidence = command_evidence(
         _wbc0027_fbs_quality_remote_command(
             target=target,
@@ -4554,6 +5055,8 @@ def run_wbc0027_fbs_quality_goal(
             evidence_dir=evidence_dir,
             action="apply",
             manifest_path=manifest_path,
+            impact_path=impact_path,
+            mapping_readback_path=mapping_readback_path,
             fingerprint=fingerprint,
             approval_reference=approval_reference,
         )
@@ -4568,7 +5071,10 @@ def run_wbc0027_fbs_quality_goal(
             evidence_dir=evidence_dir,
             action="readback",
             manifest_path=manifest_path,
+            impact_path=impact_path,
+            mapping_readback_path=mapping_readback_path,
             fingerprint=fingerprint,
+            approval_reference=approval_reference,
         )
     )
     readback = readback_evidence.get("result")
@@ -4577,6 +5083,9 @@ def run_wbc0027_fbs_quality_goal(
     candidate_history = dict(candidate["history"])
     target_count = int(candidate_scope["target_count"])
     history_capture_count = len(candidate_history.get("captures") or [])
+    readback_summary = (
+        readback.get("summary") if isinstance(readback, Mapping) else None
+    )
     reconciled = bool(
         readback_evidence.get("return_code") == 0
         and isinstance(readback, Mapping)
@@ -4585,6 +5094,10 @@ def run_wbc0027_fbs_quality_goal(
         and readback.get("mutates_wb") is False
         and readback.get("deployed_sha") == merge_sha
         and readback.get("manifest_fingerprint") == fingerprint
+        and isinstance(readback_summary, Mapping)
+        and readback_summary.get("operation_id") == operation
+        and readback_summary.get("authorization_reference_digest")
+        == payload_digest(approval_reference)
         and readback.get("source_cutoff_sequence")
         == candidate_boundary["source_cursor_max"]
         and readback.get("date_from") == candidate_history["date_from"]
@@ -4603,6 +5116,7 @@ def run_wbc0027_fbs_quality_goal(
         ),
         "apply_count": 1,
         "qualification_attempts": attempts,
+        "native_qualification": native_qualification,
         "candidate": {
             "manifest_path": manifest_path,
             "fingerprint": fingerprint,
@@ -4624,6 +5138,69 @@ def run_wbc0027_fbs_quality_goal(
     }
 
 
+def run_wbc0027_fbs_impact_generation(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    mapping_operation: str,
+    mapping_readback_digest: str,
+) -> dict[str, Any]:
+    evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / mapping_operation
+    )
+    mapping_readback_path = f"{evidence_dir}/fbs-mapping-terminal-readback.json"
+    impact_path = f"{evidence_dir}/fbs-impact-manifest.json"
+    evidence = command_evidence(
+        _wbc0027_fbs_quality_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=mapping_operation,
+            evidence_dir=evidence_dir,
+            action="impact",
+            impact_path=impact_path,
+            mapping_readback_path=mapping_readback_path,
+        )
+    )
+    payload = evidence.get("result")
+    try:
+        impact = parse_impact_manifest(payload) if isinstance(payload, Mapping) else None
+    except FbsManifestError:
+        impact = None
+    if not (
+        evidence.get("return_code") == 0
+        and isinstance(impact, Mapping)
+        and impact.get("mapping_readback_digest") == mapping_readback_digest
+        and dict(impact.get("target") or {}).get("runtime_sha") == merge_sha
+        and impact.get("blockers") == []
+    ):
+        return {
+            "state": "blocked",
+            "reason": "independent-impact-generation-failed",
+            "apply_count": 0,
+            "evidence": evidence,
+        }
+    return {
+        "state": "qualified_no_submit",
+        "reason": "independent-impact-generated",
+        "apply_count": 0,
+        "production_mutation_count": 0,
+        "github_comment_count": 0,
+        "workflow_dispatch_count": 0,
+        "mapping_write_count": 0,
+        "recovery_write_count": 0,
+        "history_write_count": 0,
+        "wb_write_count": 0,
+        "impact": {
+            "path": impact_path,
+            "digest": impact["impact_digest"],
+            "mapping_readback_digest": impact["mapping_readback_digest"],
+        },
+        "evidence": evidence,
+    }
+
+
 def run_wbc0027_fbs_mapping_goal(
     *,
     target: Mapping[str, Any],
@@ -4631,6 +5208,7 @@ def run_wbc0027_fbs_mapping_goal(
     goal: Mapping[str, Any],
     operation: str,
     approval_reference: str,
+    qualification_only: bool = False,
 ) -> dict[str, Any]:
     passport = _load_fbs_incident_passport()
     evidence_dir = str(
@@ -4785,6 +5363,27 @@ def run_wbc0027_fbs_mapping_goal(
             "rehearsal": rehearsal_evidence,
         }
     fingerprint = str(candidate["manifest_digest"])
+    if qualification_only:
+        return {
+            "state": "qualified_no_submit",
+            "reason": "submit-boundary-proven",
+            "apply_count": 0,
+            "production_mutation_count": 0,
+            "github_comment_count": 0,
+            "workflow_dispatch_count": 0,
+            "mapping_insert_count": 0,
+            "recovery_write_count": 0,
+            "history_write_count": 0,
+            "wb_write_count": 0,
+            "qualification_attempts": attempts,
+            "rehearsal": rehearsal_evidence,
+            "candidate": {
+                "path": candidate_path,
+                "fingerprint": fingerprint,
+                "material_cas_digest": candidate["material_cas"]["digest"],
+                "tuple_digest": candidate["tuple"]["tuple_digest"],
+            },
+        }
     apply_evidence = command_evidence(
         _wbc0027_fbs_mapping_remote_command(
             target=target,
@@ -4806,6 +5405,7 @@ def run_wbc0027_fbs_mapping_goal(
             operation=operation,
             evidence_dir=evidence_dir,
             action="readback",
+            approval_reference=approval_reference,
         )
     )
     readback = readback_evidence.get("result")
@@ -4817,6 +5417,8 @@ def run_wbc0027_fbs_mapping_goal(
         and readback.get("query_only") is True
         and readback.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
         and readback.get("deployed_sha") == merge_sha
+        and readback.get("operation_id") == operation
+        and readback.get("operation_proof_exact") is True
         and readback.get("exact_mapping_row_count") == 1
         and isinstance(mapping, Mapping)
         and mapping.get("target_nm_id") == candidate["tuple"]["target_nm_id"]
@@ -5322,6 +5924,103 @@ def _publish_compact_apply_receipt(
     if not isinstance(published, Mapping) or published.get("body") != body:
         raise ApplyError("compact apply receipt publication response mismatch")
     return published
+
+
+def _parse_exact_apply_marker(
+    comment: Mapping[str, Any], *, operation: str, pr: int
+) -> dict[str, Any]:
+    marker_text = marker(operation)
+    body = str(comment.get("body") or "")
+    prefix = marker_text + "\nCompact terminal production apply summary; full immutable evidence is in the bound Actions artifact.\n```json\n"
+    if (
+        not is_actions_bot_comment(comment)
+        or not body.startswith(prefix)
+        or not body.endswith("\n```")
+        or body.count(marker_text) != 1
+        or body.count("```json") != 1
+    ):
+        raise ApplyError("closed terminal apply marker shape is invalid")
+    try:
+        payload = json.loads(body[len(prefix) : -4])
+    except json.JSONDecodeError as exc:
+        raise ApplyError("closed terminal apply marker JSON is invalid") from exc
+    expected_keys = {
+        "schema", "state", "operation_id", "pull_request",
+        "release_operation_id", "merge_sha", "deployed_sha", "apply_count",
+        "reason", "job", "error", "component_diff_summary", "artifact",
+        "full_receipt",
+    }
+    artifact = payload.get("artifact") if isinstance(payload, Mapping) else None
+    full = payload.get("full_receipt") if isinstance(payload, Mapping) else None
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload.get("schema") != APPLY_COMMENT_SUMMARY_SCHEMA
+        or payload.get("operation_id") != operation
+        or payload.get("pull_request") != pr
+        or payload.get("state") not in {"done", "qualified_no_submit", "blocked"}
+        or not isinstance(payload.get("apply_count"), int)
+        or not isinstance(artifact, Mapping)
+        or set(artifact) != {"name", "file", "sha256", "size_bytes", "retention_days"}
+        or artifact.get("file") != RECOVERY_ARTIFACT_FILE
+        or artifact.get("retention_days") != 90
+        or re.fullmatch(r"production-apply-receipt-pr-[1-9][0-9]*-run-[1-9][0-9]*", str(artifact.get("name") or "")) is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("sha256") or "")) is None
+        or not isinstance(artifact.get("size_bytes"), int)
+        or int(artifact["size_bytes"]) <= 0
+        or not isinstance(full, Mapping)
+        or full.get("schema") != APPLY_RECEIPT_SCHEMA
+        or full.get("sha256") != artifact.get("sha256")
+    ):
+        raise ApplyError("closed terminal apply marker contract is invalid")
+    return payload
+
+
+def _verify_apply_artifact(
+    client: GitHubClient,
+    *,
+    run_id: int,
+    artifact_name: str,
+    expected_receipt_sha256: str,
+    expected_receipt_size: int,
+) -> dict[str, Any]:
+    matches: list[Mapping[str, Any]] = []
+    for page in range(1, 11):
+        listing = client.get(f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}")
+        values = listing.get("artifacts") if isinstance(listing, Mapping) else None
+        if not isinstance(values, list):
+            raise ApplyError("apply artifact listing shape is invalid")
+        matches.extend(
+            item for item in values
+            if isinstance(item, Mapping) and item.get("name") == artifact_name
+        )
+        if len(values) < 100:
+            break
+    if len(matches) != 1:
+        raise ApplyError("apply artifact is missing, duplicated or foreign")
+    artifact = matches[0]
+    artifact_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is not False
+        or not isinstance(artifact.get("id"), int)
+        or not isinstance(artifact_run, Mapping)
+        or artifact_run.get("id") != run_id
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("digest") or "")) is None
+    ):
+        raise ApplyError("apply artifact provenance is invalid")
+    raw_zip = client.request(
+        "GET", f"/actions/artifacts/{int(artifact['id'])}/zip",
+        accept="application/vnd.github+json", raw=True,
+    )
+    if not isinstance(raw_zip, bytes) or "sha256:" + digest(raw_zip) != artifact["digest"]:
+        raise ApplyError("apply artifact archive digest is invalid")
+    receipt = _extract_recovery_receipt(
+        raw_zip, expected_receipt_sha256.removeprefix("sha256:")
+    )
+    raw_receipt = canonical_json_bytes(receipt) + b"\n"
+    if len(raw_receipt) != expected_receipt_size:
+        raise ApplyError("apply artifact receipt size is invalid")
+    return {"metadata": dict(artifact), "receipt": receipt}
 
 
 def _warm_readiness_artifact_name(pr: int, run_id: int) -> str:
@@ -5942,6 +6641,13 @@ def _run_receipt_recovery(
         repository=args.repository,
         pr=args.pr,
     )
+    if goal.get("profile") in {
+        WBC0027_FBS_MAPPING_GOAL_PROFILE,
+        WBC0027_FBS_QUALITY_GOAL_PROFILE,
+    }:
+        raise ApplyError(
+            "FBS v2 passports require the explicit dual-release FBS workflow modes"
+        )
     configured_profiles = {
         item.strip()
         for item in os.environ.get("WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST", "").split(",")
@@ -10627,6 +11333,236 @@ def _run_warm_mount_probe_mode(
     return 0
 
 
+def _run_wbc0027_fbs_v2_mode(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    comments: list[Mapping[str, Any]],
+) -> int:
+    if not args.release_operation_id or not args.reconciliation_release_operation_id:
+        raise ApplyError("FBS v2 requires separate source and correction release operations")
+    if args.reconciliation_pr <= 0:
+        raise ApplyError("FBS v2 requires the exact correction release PR")
+    passport = _load_fbs_incident_passport()
+    source_manifest = {
+        "operation_id": str(passport["operation_id"]),
+        "path": str(WBC0027_FBS_INCIDENT_PASSPORT_PATH.relative_to(ROOT)),
+        "sha256": fbs_file_digest(WBC0027_FBS_INCIDENT_PASSPORT_PATH).removeprefix(
+            "sha256:"
+        ),
+    }
+    source_release = collect_exact_release_binding(
+        client,
+        pr=args.pr,
+        release_operation=str(args.release_operation_id),
+        expected_kind="production_mutation",
+        expected_state="awaiting_apply",
+        expected_manifest=source_manifest,
+    )
+    correction_release = collect_exact_release_binding(
+        client,
+        pr=int(args.reconciliation_pr),
+        release_operation=str(args.reconciliation_release_operation_id),
+        expected_kind="live_runtime",
+        expected_state="done",
+        expected_manifest=None,
+    )
+    correction_merge_sha = str(correction_release["receipt"]["merge_sha"])
+    correction_release["source_ancestry"] = collect_correction_base_ancestry(
+        client,
+        source_release=source_release,
+        correction_release=correction_release,
+    )
+    if args.authorization_comment_id <= 0:
+        raise ApplyError("FBS v2 mode requires the exact OWNER passport comment")
+    goal, authorization, authorization_digest = validate_unique_authorization(
+        comments,
+        comment_id=args.authorization_comment_id,
+        repository=args.repository,
+        pr=args.pr,
+    )
+    mapping_modes = {
+        "fbs-mapping-qualification",
+        "fbs-mapping-apply",
+        "fbs-impact-generation",
+    }
+    recovery_modes = {"fbs-recovery-qualification", "fbs-recovery-apply"}
+    if args.authorization_mode in mapping_modes and goal.get("profile") != WBC0027_FBS_MAPPING_GOAL_PROFILE:
+        raise ApplyError("FBS mapping/impact mode requires the mapping v2 passport")
+    if args.authorization_mode in recovery_modes and goal.get("profile") != WBC0027_FBS_QUALITY_GOAL_PROFILE:
+        raise ApplyError("FBS recovery mode requires the recovery v2 passport")
+    operation = operation_id(args.repository, args.pr, args.authorization_comment_id, goal)
+    if goal.get("profile") == WBC0027_FBS_QUALITY_GOAL_PROFILE and (
+        str(goal.get("mapping_operation_id")) == operation
+    ):
+        raise ApplyError("mapping and recovery operations must be distinct")
+    marker_candidates = [
+        item for item in comments if marker(operation) in str(item.get("body") or "")
+    ]
+    if len(marker_candidates) > 1:
+        raise ApplyError("duplicate terminal apply markers")
+    if marker_candidates:
+        terminal = _parse_exact_apply_marker(
+            marker_candidates[0], operation=operation, pr=args.pr
+        )
+        artifact = dict(terminal["artifact"])
+        match = re.fullmatch(
+            r"production-apply-receipt-pr-[1-9][0-9]*-run-([1-9][0-9]*)",
+            str(artifact["name"]),
+        )
+        assert match is not None
+        verified = _verify_apply_artifact(
+            client,
+            run_id=int(match.group(1)),
+            artifact_name=str(artifact["name"]),
+            expected_receipt_sha256=str(artifact["sha256"]),
+            expected_receipt_size=int(artifact["size_bytes"]),
+        )
+        prior_receipt = dict(verified["receipt"])
+        if (
+            prior_receipt.get("operation_id") != operation
+            or prior_receipt.get("mode") != args.authorization_mode
+            or prior_receipt.get("authorization_comment_id")
+            != args.authorization_comment_id
+            or prior_receipt.get("source_release") != source_release
+            or prior_receipt.get("correction_release") != correction_release
+            or terminal.get("state") != prior_receipt.get("state")
+            or terminal.get("apply_count") != prior_receipt.get("apply_count")
+        ):
+            raise ApplyError("terminal marker artifact binding is foreign or drifted")
+        receipt = {
+            "schema": APPLY_RECEIPT_SCHEMA,
+            "state": "already_terminal",
+            "operation_id": operation,
+            "pull_request": args.pr,
+            "validated_terminal_state": prior_receipt["state"],
+            "validated_artifact": verified["metadata"],
+            "submit_count": 0,
+            "ssh_command_count": 0,
+            "comment_count": 0,
+        }
+        _write_receipt(args.output, receipt)
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.execution_phase == "publish":
+        if not args.output.is_file():
+            raise ApplyError("publish phase lacks the collected immutable receipt")
+        try:
+            receipt = json.loads(args.output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ApplyError("collected immutable receipt is invalid") from exc
+        raw = args.output.read_bytes()
+        if (
+            not isinstance(receipt, dict)
+            or raw != canonical_json_bytes(receipt) + b"\n"
+            or receipt.get("operation_id") != operation
+            or receipt.get("mode") != args.authorization_mode
+            or receipt.get("source_release") != source_release
+            or receipt.get("correction_release") != correction_release
+        ):
+            raise ApplyError("collected receipt binding drifted before publication")
+        run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+        if run_id <= 0:
+            raise ApplyError("publish phase lacks GitHub run identity")
+        artifact_name = _receipt_artifact_name(args.pr, run_id)
+        _verify_apply_artifact(
+            client,
+            run_id=run_id,
+            artifact_name=artifact_name,
+            expected_receipt_sha256="sha256:" + digest(raw),
+            expected_receipt_size=len(raw),
+        )
+        _publish_compact_apply_receipt(
+            client,
+            pr=args.pr,
+            receipt=receipt,
+            receipt_path=args.output,
+            artifact_name=artifact_name,
+        )
+        print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+        return 0 if receipt.get("state") in {"done", "qualified_no_submit"} else 2
+    subprocess.run(
+        ["git", "fetch", "--no-tags", "origin", correction_merge_sha],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "--detach", correction_merge_sha],
+        cwd=ROOT,
+        check=True,
+    )
+    target = _canonical_target()
+    approval_reference = (
+        f"github:{args.repository}:pr:{args.pr}:comment:{args.authorization_comment_id}:"
+        f"{authorization_digest}"
+    )
+    with tempfile.TemporaryDirectory(prefix="wb-core-fbs-v2-") as directory:
+        configure_deploy_environment(Path(directory))
+        if args.authorization_mode == "fbs-impact-generation":
+            mapping_readback_digest = str(args.manifest_sha256 or "")
+            if re.fullmatch(r"[0-9a-f]{64}", mapping_readback_digest):
+                mapping_readback_digest = "sha256:" + mapping_readback_digest
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", mapping_readback_digest) is None:
+                raise ApplyError(
+                    "impact generation requires the exact mapping readback digest"
+                )
+            result = run_wbc0027_fbs_impact_generation(
+                target=target,
+                merge_sha=correction_merge_sha,
+                mapping_operation=operation,
+                mapping_readback_digest=mapping_readback_digest,
+            )
+        elif args.authorization_mode in mapping_modes:
+            result = run_wbc0027_fbs_mapping_goal(
+                target=target,
+                merge_sha=correction_merge_sha,
+                goal=goal,
+                operation=operation,
+                approval_reference=approval_reference,
+                qualification_only=args.authorization_mode == "fbs-mapping-qualification",
+            )
+        else:
+            result = run_wbc0027_fbs_quality_goal(
+                target=target,
+                merge_sha=correction_merge_sha,
+                goal=goal,
+                operation=operation,
+                approval_reference=approval_reference,
+                qualification_only=args.authorization_mode == "fbs-recovery-qualification",
+            )
+    receipt = {
+        "schema": APPLY_RECEIPT_SCHEMA,
+        "state": result["state"],
+        "operation_id": operation,
+        "mode": args.authorization_mode,
+        "repository": args.repository,
+        "pull_request": args.pr,
+        "correction_pull_request": args.reconciliation_pr,
+        "release_operation_id": str(args.reconciliation_release_operation_id),
+        "source_release": source_release,
+        "correction_release": correction_release,
+        "merge_sha": correction_merge_sha,
+        "deployed_sha": correction_merge_sha,
+        "authorization_comment_id": args.authorization_comment_id,
+        "authorization_body_sha256": authorization_digest,
+        "authorization_body": str(authorization.get("body") or "").strip(),
+        "goal": goal,
+        "apply_count": int(result.get("apply_count") or 0),
+        "evidence": result,
+    }
+    _write_receipt(args.output, receipt)
+    if args.github_output:
+        _write_github_output(
+            args.github_output,
+            {
+                "publication_required": "true",
+                "terminal_state": str(result["state"]),
+            },
+        )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -10639,6 +11575,11 @@ def main() -> int:
             "warm-archive-mount-probe",
             "warm-archive-receipt-reconciliation",
             "wbc0027-receipt-reconciliation",
+            "fbs-mapping-qualification",
+            "fbs-impact-generation",
+            "fbs-recovery-qualification",
+            "fbs-mapping-apply",
+            "fbs-recovery-apply",
         ),
         default="scope-goal",
     )
@@ -10673,6 +11614,11 @@ def main() -> int:
         choices=("preflight", "collect", "publish"),
         default="preflight",
     )
+    parser.add_argument(
+        "--execution-phase",
+        choices=("collect", "publish"),
+        default="collect",
+    )
     parser.add_argument("--github-output")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -10684,6 +11630,12 @@ def main() -> int:
     if pr.get("merged") is not True:
         raise ApplyError("pull request is not merged")
     comments = list_comments(client, args.pr)
+    if args.authorization_mode.startswith("fbs-"):
+        return _run_wbc0027_fbs_v2_mode(
+            args=args,
+            client=client,
+            comments=comments,
+        )
     if args.authorization_mode == "wbc0027-receipt-reconciliation":
         return _run_wbc0027_reconciliation_mode(
             args=args,
@@ -10758,6 +11710,13 @@ def main() -> int:
         repository=args.repository,
         pr=args.pr,
     )
+    if goal.get("profile") in {
+        WBC0027_FBS_MAPPING_GOAL_PROFILE,
+        WBC0027_FBS_QUALITY_GOAL_PROFILE,
+    }:
+        raise ApplyError(
+            "FBS v2 passports require the explicit dual-release FBS workflow modes"
+        )
     configured_profiles = {
         item.strip()
         for item in os.environ.get("WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST", "").split(",")

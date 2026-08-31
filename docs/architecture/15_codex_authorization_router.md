@@ -313,13 +313,36 @@ StoreRegistry/schema, cutover/forward generation, arbitrary exact tuple,
 external/owner/warehouse/facility-admission evidence и material CAS. Orders,
 statuses, groups и dates в mapping manifest запрещены.
 
+Перед любым FBS qualification/Apply router требует две разные complete
+release lineage: source `production_mutation/awaiting_apply` и correction
+`live_runtime/done`. Проверяются exact PR base/head/merge, Gate, Release
+Runner, comment, downloaded artifact archive/file digest и source manifest;
+correction base обычно обязан совпасть с source merge. Если `main` успел
+продвинуться, допускается только bounded exact linear ancestry: каждый
+промежуточный merge имеет downloaded/hash-verified `repo_only/done` receipt и
+меняет исключительно `docs/**` или executable `*_smoke.py`; workflow/runtime/
+registry/migration/manifest/business-data path блокирует lineage. Exact
+commit/PR/Gate/Release/artifact/path proof включается в correction binding.
+Один parsed goal может иметь
+ровно один OWNER/MEMBER comment. Equivalent duplicate — `EVIDENCE_BLOCKED`, а
+не выбор первого комментария.
+
 Terminal mapping readback открывает только подготовку fresh
 `fbs_lifecycle_impact_manifest/v2`; он сам не является recovery authorization.
 Отдельный `fbs-lifecycle-recovery-v2` passport exact-bind incident passport,
-terminal mapping readback, impact digest, recovery digest и один submit.
+mapping operation, terminal mapping readback, impact digest, recovery digest и
+один submit.
 Mapping Apply может сделать только один canonical mapping insert; recovery
 Apply не может писать mapping или WB. Release, rehearsal и подготовка обоих
 passport body не являются authorization или dispatch обоих Apply.
+
+Default-off modes `fbs-mapping-qualification`, `fbs-impact-generation` и
+`fbs-recovery-qualification` завершаются `qualified_no_submit` до remote apply
+command. Реальные submits доступны только через `fbs-mapping-apply` и
+`fbs-recovery-apply`; generic `scope-goal` FBS passports не принимает. Terminal
+marker публикуется только после upload/download/hash canonical artifact.
+`already_terminal` возможен лишь после exact marker+artifact validation и
+означает SSH/comment/dispatch count `0`.
 
 Query-only WBC0027 same-operation finalization не является новым Production
 Apply business submit и не требует нового OWNER passport: она использует exact

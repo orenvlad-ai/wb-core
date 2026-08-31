@@ -1301,7 +1301,6 @@ def _build_preview_projection(
         OBSERVATIONS_TABLE,
         IDENTITY_EVIDENCE_TABLE,
         EVENTS_TABLE,
-        CURRENT_TABLE,
         RECONCILIATION_TABLE,
         LATE_EVIDENCE_TABLE,
         CUTOVER_ORDERS_TABLE,
@@ -1315,6 +1314,20 @@ def _build_preview_projection(
             order_ids,
             tracker,
         )
+    # Reserved/available quantities on FACILITY_TOTAL, GLOBAL_SKU and
+    # GLOBAL_TOTAL are dependent surfaces of a target lifecycle transition.
+    # Copying only the target orders makes the scratch apply internally valid
+    # but cannot reproduce those aggregates.  Keep the projection bounded to
+    # the active cutover and FBS pool while admitting every row that
+    # contributes to the exact dependent readback.
+    _copy_projection_rows(
+        source_conn,
+        scratch,
+        CURRENT_TABLE,
+        tracker,
+        where="cutover_id=? AND pool='FBS'",
+        parameters=(cutover_id,),
+    )
     for table in (IDENTITY_PENDING_TABLE, IDENTITY_PENDING_RESOLUTIONS_TABLE):
         _copy_projection_in(
             source_conn,

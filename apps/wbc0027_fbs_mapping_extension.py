@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -118,13 +119,10 @@ class Wbc0027ExactFbsSkuMappingExtension:
     def build_plan(self) -> dict[str, Any]:
         external_digest = str(self.incident_passport["evidence"]["external_identity_digest"])
         storage = self.recovery._storage_identity()
-        current_source, admission_source, identity_snapshot = self._current_snapshot(
-            storage=storage
-        )
+        admission_source, identity_snapshot = self._current_snapshot(storage=storage)
         blockers = _binding_blockers(
             passport=self.incident_passport,
             storage=storage,
-            source=current_source,
             admission_source=admission_source,
             identity_snapshot=identity_snapshot,
         )
@@ -142,15 +140,32 @@ class Wbc0027ExactFbsSkuMappingExtension:
             "external_identity_digest": external_digest,
             "owner_digest": str(identity_snapshot["owner_digest"]),
             "warehouse_evidence_digest": manifest_digest(
-                list(admission_source["mapping_re_evidence"])
+                {
+                    "contract": "fbs_mapping_warehouse_evidence_deferred/v1",
+                    "tuple_digest": self.incident_passport["tuple"]["tuple_digest"],
+                    "admission": "recovery_phase_only",
+                }
             ),
             "facility_admission_digest": manifest_digest(
-                list(admission_source["location_wac_evidence"])
+                {
+                    "contract": "fbs_mapping_facility_admission_deferred/v1",
+                    "target_nm_id": self.incident_passport["tuple"]["target_nm_id"],
+                    "admission": "recovery_phase_only",
+                }
             ),
         }
         material_cas = {
             "tuple_digest": self.incident_passport["tuple"]["tuple_digest"],
             "mapping_digest": mapping["mapping_digest"],
+            "target_digest": manifest_digest(
+                {
+                    "target_id": self.target_id,
+                    "runtime_sha": self.deployed_sha,
+                    "source_runtime_sha": self.incident_passport["target"][
+                        "source_runtime_sha"
+                    ],
+                }
+            ),
             "storage_digest": manifest_digest(storage_binding),
             "cutover_digest": manifest_digest(
                 {
@@ -162,7 +177,9 @@ class Wbc0027ExactFbsSkuMappingExtension:
                     ],
                 }
             ),
-            "identity_digest": manifest_digest(identity_snapshot),
+            "identity_digest": manifest_digest(
+                _identity_admission_material(identity_snapshot)
+            ),
             "evidence_digest": manifest_digest(evidence),
         }
         material_cas["digest"] = manifest_digest(material_cas)
@@ -197,7 +214,10 @@ class Wbc0027ExactFbsSkuMappingExtension:
                 "default_mode": "query_only_dry_run",
                 "two_consecutive_material_witnesses_required": True,
                 "writer_lock": "warehouse_functional_write_lock",
-                "private_before_image": "mode_0600_exclusive_create",
+                "root_storage_admission": "production_apply_evidence",
+                "private_before_image": "mode_0600_exclusive_create_fsync",
+                "private_backup": "mode_0600_exclusive_create_fsync",
+                "operation_journal": "exact_operation_authorization_storage",
                 "one_submit": True,
                 "one_insert_max": 1,
                 "blind_retry": False,
@@ -432,6 +452,7 @@ class Wbc0027ExactFbsSkuMappingExtension:
         reviewed_plan: Mapping[str, Any],
         *,
         fingerprint: str,
+        operation_id: str,
         approval_reference: str,
         actor: str,
         evidence_dir: Path,
@@ -455,29 +476,55 @@ class Wbc0027ExactFbsSkuMappingExtension:
                 "external_identity_digest_drift", "Accepted diagnosis digest changed"
             )
         approval = str(approval_reference or "").strip()
+        operation = str(operation_id or "").strip()
         operator = str(actor or "").strip()
-        if not approval or not operator:
+        if (
+            not approval
+            or not operator
+            or re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", operation) is None
+        ):
             raise Wbc0027MappingError(
-                "gate_identity_required", "approval_reference and actor are required"
+                "gate_identity_required",
+                "operation_id, approval_reference and actor are required",
             )
-        existing = self.readback()
+        operation_proof = _operation_proof(
+            operation_id=operation,
+            approval_reference=approval,
+            actor=operator,
+        )
+        existing = self.readback(
+            operation_id=operation,
+            approval_reference=approval,
+        )
         if existing.get("status") == "completed":
             return {**existing, "idempotent": True, "repeat_submit_performed": False}
+        if existing.get("status") == "ambiguous_foreign_operation":
+            raise Wbc0027MappingError(
+                "existing_mapping_operation_ambiguous",
+                "An identical mapping exists without exact same-operation proof",
+            )
 
         fresh = self.build_plan()
         if fresh.get("manifest_digest") != expected:
             raise Wbc0027MappingError(
                 "mapping_material_cas_drift", "Mapping material changed before lock"
             )
-        evidence_root = Path(evidence_dir).expanduser().resolve()
-        if not evidence_root.is_dir():
-            raise Wbc0027MappingError(
-                "evidence_directory_missing", "Private evidence directory is missing"
-            )
+        evidence_root = recovery_module._admit_private_evidence_root(
+            runtime_dir=self.recovery.runtime.runtime_dir,
+            evidence_dir=Path(evidence_dir),
+            predicted_output_bytes=2 * 1024 * 1024,
+        )
         now = str(self.timestamp_factory())
         recovery_module._require_utc(now)
+        operation_suffix = hashlib.sha256(operation.encode("utf-8")).hexdigest()[:16]
         before_path = evidence_root / (
-            "wbc0027-fbs-mapping-" + expected.removeprefix("sha256:")[:20] + ".before.json"
+            "wbc0027-fbs-mapping-" + operation_suffix + "-" + expected.removeprefix("sha256:")[:20] + ".before.json"
+        )
+        backup_path = evidence_root / (
+            "wbc0027-fbs-mapping-" + operation_suffix + "-" + expected.removeprefix("sha256:")[:20] + ".backup.json"
+        )
+        journal_path = evidence_root / (
+            "wbc0027-fbs-mapping-" + operation_suffix + "-" + expected.removeprefix("sha256:")[:20] + ".journal.json"
         )
         mapping = self.mapping
         with warehouse_functional_write_lock(
@@ -489,15 +536,9 @@ class Wbc0027ExactFbsSkuMappingExtension:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 storage = self.recovery._storage_identity(conn=conn)
-                current_source = self.recovery._source_snapshot(conn, storage=storage)
-                admission_source = self.recovery._source_snapshot(
+                admission_source = _mapping_admission_snapshot(
                     conn,
-                    storage=storage,
-                    hypothetical_mapping={
-                        **mapping,
-                        "tuple_digest": self.incident_passport["tuple"]["tuple_digest"],
-                        "external_identity_digest": external_digest,
-                    },
+                    recovery=self.recovery,
                 )
                 identity_snapshot = _identity_snapshot(
                     conn,
@@ -505,8 +546,12 @@ class Wbc0027ExactFbsSkuMappingExtension:
                 )
                 locked_material = _locked_material(
                     external_identity_digest=external_digest,
+                    target_id=self.target_id,
+                    deployed_sha=self.deployed_sha,
+                    source_runtime_sha=str(
+                        self.incident_passport["target"]["source_runtime_sha"]
+                    ),
                     storage=storage,
-                    source=current_source,
                     admission_source=admission_source,
                     identity_snapshot=identity_snapshot,
                     mapping=mapping,
@@ -517,9 +562,17 @@ class Wbc0027ExactFbsSkuMappingExtension:
                     raise Wbc0027MappingError(
                         "mapping_material_cas_drift",
                         "Mapping material changed inside writer lock",
+                        details={
+                            "expected": str(dict(reviewed["material_cas"])["digest"]),
+                            "actual": manifest_digest(locked_material),
+                            "locked": locked_material,
+                            "reviewed": dict(reviewed["material_cas"]),
+                        },
                     )
                 before_image = {
                     "contract_name": CONTRACT_NAME,
+                    "operation_id": operation,
+                    "authorization_reference_digest": manifest_digest(approval),
                     "fingerprint": expected,
                     "target_id": self.target_id,
                     "deployed_sha": self.deployed_sha,
@@ -533,6 +586,34 @@ class Wbc0027ExactFbsSkuMappingExtension:
                     "created_at": now,
                 }
                 _write_private_exclusive(before_path, before_image)
+                _write_private_exclusive(
+                    backup_path,
+                    {
+                        "contract": "fbs_identity_mapping_private_backup/v1",
+                        "operation_id": operation,
+                        "authorization_reference_digest": manifest_digest(approval),
+                        "fingerprint": expected,
+                        "storage": storage,
+                        "cutover": reviewed["cutover"],
+                        "identity_snapshot": identity_snapshot,
+                        "mapping_before": None,
+                    },
+                )
+                _write_private_exclusive(
+                    journal_path,
+                    {
+                        "contract": "fbs_identity_mapping_operation_journal/v1",
+                        "operation_id": operation,
+                        "authorization_reference_digest": manifest_digest(approval),
+                        "fingerprint": expected,
+                        "deployed_sha": self.deployed_sha,
+                        "storage": storage,
+                        "operation_proof": operation_proof,
+                        "before_image_sha256": recovery_module._sha256_file(before_path),
+                        "backup_sha256": recovery_module._sha256_file(backup_path),
+                        "submit_state": "prepared",
+                    },
+                )
                 before_changes = int(conn.total_changes)
                 conn.set_authorizer(_mapping_only_authorizer)
                 conn.execute(
@@ -550,7 +631,7 @@ class Wbc0027ExactFbsSkuMappingExtension:
                         int(mapping["target_nm_id"]),
                         str(mapping["mapping_digest"]),
                         now,
-                        operator,
+                        operation_proof,
                     ),
                 )
                 inserted = int(conn.total_changes) - before_changes
@@ -576,7 +657,10 @@ class Wbc0027ExactFbsSkuMappingExtension:
             finally:
                 conn.set_authorizer(None)
                 conn.close()
-        readback = self.readback()
+        readback = self.readback(
+            operation_id=operation,
+            approval_reference=approval,
+        )
         if readback.get("status") != "completed":
             raise Wbc0027MappingError(
                 "mapping_readback_not_reconciled", "Query-only mapping readback failed"
@@ -584,10 +668,15 @@ class Wbc0027ExactFbsSkuMappingExtension:
         return {
             **readback,
             "fingerprint": expected,
+            "operation_id": operation,
             "approval_reference": approval,
             "applied_by": operator,
             "before_image_path": str(before_path),
             "before_image_sha256": recovery_module._sha256_file(before_path),
+            "backup_path": str(backup_path),
+            "backup_sha256": recovery_module._sha256_file(backup_path),
+            "operation_journal_path": str(journal_path),
+            "operation_journal_sha256": recovery_module._sha256_file(journal_path),
             "apply_count": 1,
             "mapping_insert_count": 1,
             "lifecycle_debit_count": 0,
@@ -599,12 +688,18 @@ class Wbc0027ExactFbsSkuMappingExtension:
             "query_only_terminal_readback": True,
         }
 
-    def readback(self) -> dict[str, Any]:
+    def readback(
+        self,
+        *,
+        operation_id: str = "",
+        approval_reference: str = "",
+    ) -> dict[str, Any]:
         mapping = self.mapping
         with closing(recovery_module._open_query_only(self.recovery.runtime.db_path)) as conn:
             exact_rows = conn.execute(
                 f"""SELECT mapping_id,source_nm_id,source_chrt_id,source_barcode,
-                           source_sku,target_nm_id,mapping_digest,active
+                           source_sku,target_nm_id,mapping_digest,active,
+                           created_at,created_by
                     FROM {IDENTITY_MAPPINGS_TABLE}
                     WHERE source_nm_id=? AND source_chrt_id=?
                       AND source_barcode=? AND source_sku=?
@@ -618,12 +713,32 @@ class Wbc0027ExactFbsSkuMappingExtension:
             ).fetchall()
         expected = _mapping_row_from_plan(mapping)
         exact = len(exact_rows) == 1 and _mapping_row(exact_rows[0]) == expected
+        proof = (
+            _operation_proof(
+                operation_id=str(operation_id),
+                approval_reference=str(approval_reference),
+                actor="production-apply-runner",
+            )
+            if operation_id and approval_reference
+            else ""
+        )
+        exact_operation = bool(exact and proof and str(exact_rows[0][9]) == proof)
+        status = (
+            "completed"
+            if exact_operation
+            else "ambiguous_foreign_operation"
+            if exact
+            else "not_applied"
+        )
         return {
             "contract_name": CONTRACT_NAME,
-            "status": "completed" if exact else "not_applied",
+            "status": status,
             "target_id": self.target_id,
             "deployed_sha": self.deployed_sha,
             "mapping": expected if exact else None,
+            "operation_id": str(operation_id or ""),
+            "operation_proof_exact": exact_operation if proof else None,
+            "created_at": str(exact_rows[0][8]) if exact else "",
             "exact_mapping_row_count": len(exact_rows),
             "query_only": True,
             "mapping_insert_count": 0,
@@ -636,6 +751,8 @@ class Wbc0027ExactFbsSkuMappingExtension:
                     "target_id": self.target_id,
                     "runtime_sha": self.deployed_sha,
                     "mapping": expected if exact else None,
+                    "operation_id": str(operation_id or ""),
+                    "operation_proof_exact": exact_operation if proof else None,
                     "exact_mapping_row_count": len(exact_rows),
                     "query_only": True,
                 }
@@ -644,21 +761,13 @@ class Wbc0027ExactFbsSkuMappingExtension:
 
     def _current_snapshot(
         self, *, storage: Mapping[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         with closing(recovery_module._open_query_only(self.recovery.runtime.db_path)) as conn:
             conn.execute("BEGIN")
             try:
-                source = self.recovery._source_snapshot(conn, storage=storage)
-                admission_source = self.recovery._source_snapshot(
+                admission_source = _mapping_admission_snapshot(
                     conn,
-                    storage=storage,
-                    hypothetical_mapping={
-                        **self.mapping,
-                        "tuple_digest": self.incident_passport["tuple"]["tuple_digest"],
-                        "external_identity_digest": self.incident_passport["evidence"][
-                            "external_identity_digest"
-                        ],
-                    },
+                    recovery=self.recovery,
                 )
                 identity = _identity_snapshot(
                     conn,
@@ -671,7 +780,7 @@ class Wbc0027ExactFbsSkuMappingExtension:
             finally:
                 if conn.in_transaction:
                     conn.rollback()
-        return source, admission_source, identity
+        return admission_source, identity
 
     def _hypothetical_recovery_plan(
         self, mapping: Mapping[str, Any]
@@ -735,11 +844,56 @@ def _identity_snapshot(
     }
 
 
+def _mapping_admission_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    recovery: recovery_module.Wbc0027FbsLifecycleQualityRecovery,
+) -> dict[str, Any]:
+    """Return only stable topology needed to admit one identity mapping.
+
+    Order/status/group/date/WAC/cardinality evidence belongs to the later impact
+    and recovery phases.  Mapping CAS intentionally excludes it.
+    """
+
+    active = recovery_module._active_manifest(conn)
+    cutover_id = str(active["cutover_id"])
+    rows = conn.execute(
+        f"""SELECT generation.generation_id,generation.manifest_fingerprint
+            FROM {recovery_module.FORWARD_GENERATIONS_TABLE} AS generation
+            JOIN {recovery_module.FORWARD_STATE_TABLE} AS state USING(generation_id)
+            WHERE generation.cutover_id=?""",
+        (cutover_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise Wbc0027MappingError(
+            "forward_generation_missing_or_ambiguous",
+            "Exactly one active forward generation is required",
+        )
+    return {
+        "cutover_id": cutover_id,
+        "cutover_manifest_digest": recovery_module._fingerprint(active["manifest"]),
+        "generation_id": str(rows[0][0]),
+        "generation_manifest_fingerprint": str(rows[0][1]),
+    }
+
+
+def _identity_admission_material(
+    identity_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Stable owner and mapping-absence evidence without cardinality fields."""
+
+    return {
+        "tuple_digest": str(identity_snapshot["tuple_digest"]),
+        "owner_digest": str(identity_snapshot["owner_digest"]),
+        "active_mapping_digest": str(identity_snapshot["active_mapping_digest"]),
+        "all_mapping_digest": str(identity_snapshot["all_mapping_digest"]),
+    }
+
+
 def _binding_blockers(
     *,
     passport: Mapping[str, Any],
     storage: Mapping[str, Any],
-    source: Mapping[str, Any],
     admission_source: Mapping[str, Any],
     identity_snapshot: Mapping[str, Any],
 ) -> list[str]:
@@ -758,8 +912,8 @@ def _binding_blockers(
         == expected_storage["operational_schema_revision"],
         "sqlite_schema_version_drift": storage.get("sqlite_schema_version")
         == expected_storage["sqlite_schema_version"],
-        "cutover_drift": source.get("cutover_id") == expected_cutover["cutover_id"],
-        "forward_generation_drift": source.get("generation_id")
+        "cutover_drift": admission_source.get("cutover_id") == expected_cutover["cutover_id"],
+        "forward_generation_drift": admission_source.get("generation_id")
         == expected_cutover["forward_generation_id"],
         "tuple_digest_drift": identity_snapshot.get("tuple_digest")
         == passport["tuple"]["tuple_digest"],
@@ -769,22 +923,20 @@ def _binding_blockers(
         == expectation["active_mapping_count"],
         "duplicate_mapping_present": identity_snapshot.get("all_mapping_count")
         == expectation["all_mapping_count"],
-        "current_source_expected_blocked": bool(source.get("typed_blocker_rows")),
-        "hypothetical_admission_resolves_all": not admission_source.get("blockers"),
     }
     for code, passed in checks.items():
         if not passed:
             blockers.append(code)
-    if dict(admission_source.get("coverage") or {}).get("full_unresolved_scan") is not True:
-        blockers.append("full_unresolved_scan_not_proven")
     return blockers
 
 
 def _locked_material(
     *,
     external_identity_digest: str,
+    target_id: str,
+    deployed_sha: str,
+    source_runtime_sha: str,
     storage: Mapping[str, Any],
-    source: Mapping[str, Any],
     admission_source: Mapping[str, Any],
     identity_snapshot: Mapping[str, Any],
     mapping: Mapping[str, Any],
@@ -802,15 +954,30 @@ def _locked_material(
         "external_identity_digest": external_identity_digest,
         "owner_digest": str(identity_snapshot["owner_digest"]),
         "warehouse_evidence_digest": manifest_digest(
-            list(admission_source["mapping_re_evidence"])
+            {
+                "contract": "fbs_mapping_warehouse_evidence_deferred/v1",
+                "tuple_digest": str(mapping["mapping_digest"]),
+                "admission": "recovery_phase_only",
+            }
         ),
         "facility_admission_digest": manifest_digest(
-            list(admission_source["location_wac_evidence"])
+            {
+                "contract": "fbs_mapping_facility_admission_deferred/v1",
+                "target_nm_id": int(mapping["target_nm_id"]),
+                "admission": "recovery_phase_only",
+            }
         ),
     }
     return {
         "tuple_digest": str(mapping["mapping_digest"]),
         "mapping_digest": str(mapping["mapping_digest"]),
+        "target_digest": manifest_digest(
+            {
+                "target_id": str(target_id),
+                "runtime_sha": str(deployed_sha),
+                "source_runtime_sha": str(source_runtime_sha),
+            }
+        ),
         "storage_digest": manifest_digest(storage_binding),
         "cutover_digest": manifest_digest(
             {
@@ -822,9 +989,26 @@ def _locked_material(
                 ],
             }
         ),
-        "identity_digest": manifest_digest(identity_snapshot),
+        "identity_digest": manifest_digest(
+            _identity_admission_material(identity_snapshot)
+        ),
         "evidence_digest": manifest_digest(evidence),
     }
+
+
+def _operation_proof(
+    *,
+    operation_id: str,
+    approval_reference: str,
+    actor: str,
+) -> str:
+    del actor  # actor remains receipt evidence; idempotency binds operation+authorization.
+    material = {
+        "contract": "fbs_identity_mapping_operation_proof/v1",
+        "operation_id": str(operation_id),
+        "authorization_reference_digest": manifest_digest(str(approval_reference)),
+    }
+    return "production-apply-runner:" + manifest_digest(material)
 
 
 def _mapping_only_authorizer(
@@ -886,6 +1070,11 @@ def _write_private_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    directory = os.open(output.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _utc_now() -> str:
@@ -911,21 +1100,34 @@ def run(args: argparse.Namespace) -> int:
         payload = runner.apply(
             _read_plan(args.plan_file),
             fingerprint=str(args.fingerprint),
+            operation_id=str(args.operation_id),
             approval_reference=str(args.approval_reference),
             actor=str(args.actor),
             evidence_dir=Path(args.evidence_dir),
         )
     elif args.command == "mapping-readback":
-        payload = runner.readback()
+        payload = runner.readback(
+            operation_id=str(args.operation_id or ""),
+            approval_reference=str(args.approval_reference or ""),
+        )
     elif args.command == "mapping-rehearsal":
         payload = runner.rehearse()
     else:
         payload = runner.build_plan()
     if args.output:
+        output_path = Path(args.output).expanduser().resolve(strict=False)
+        recovery_module._admit_private_evidence_root(
+            runtime_dir=runner.recovery.runtime.runtime_dir,
+            evidence_dir=output_path.parent,
+            predicted_output_bytes=max(
+                4096,
+                len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) + 1,
+            ),
+        )
         if args.command in {"mapping-dry-run", "mapping-rehearsal"}:
-            _write_private_exclusive(Path(args.output), payload)
+            _write_private_exclusive(output_path, payload)
         else:
-            recovery_module._write_private(Path(args.output), payload)
+            recovery_module._write_private(output_path, payload)
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     blocked = bool(payload.get("blockers")) or payload.get("status") in {
         "blocked",
@@ -952,10 +1154,13 @@ def build_parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("mapping-apply")
     apply.add_argument("--plan-file", required=True)
     apply.add_argument("--fingerprint", required=True)
+    apply.add_argument("--operation-id", required=True)
     apply.add_argument("--approval-reference", required=True)
     apply.add_argument("--actor", required=True)
     apply.add_argument("--evidence-dir", required=True)
-    sub.add_parser("mapping-readback")
+    readback = sub.add_parser("mapping-readback")
+    readback.add_argument("--operation-id", default="")
+    readback.add_argument("--approval-reference", default="")
     return parser
 
 

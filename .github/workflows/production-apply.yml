@@ -16,6 +16,11 @@ on:
           - warm-archive-mount-probe
           - warm-archive-receipt-reconciliation
           - wbc0027-receipt-reconciliation
+          - fbs-mapping-qualification
+          - fbs-impact-generation
+          - fbs-recovery-qualification
+          - fbs-mapping-apply
+          - fbs-recovery-apply
       pr:
         description: Exact merged PR number
         required: true
@@ -33,7 +38,7 @@ on:
         required: false
         type: string
       manifest_sha256:
-        description: Legacy exact reviewed manifest SHA-256 without prefix
+        description: Legacy manifest SHA-256 or exact FBS mapping readback digest
         required: false
         type: string
       operation_id:
@@ -129,7 +134,7 @@ permissions:
 jobs:
   apply_once:
     name: Exact bounded production goal apply and reconciliation
-    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation' && inputs.authorization_mode != 'wbc0027-receipt-reconciliation'
+    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation' && inputs.authorization_mode != 'wbc0027-receipt-reconciliation' && inputs.authorization_mode != 'fbs-mapping-qualification' && inputs.authorization_mode != 'fbs-impact-generation' && inputs.authorization_mode != 'fbs-recovery-qualification' && inputs.authorization_mode != 'fbs-mapping-apply' && inputs.authorization_mode != 'fbs-recovery-apply'
     permissions:
       actions: read
       contents: read
@@ -160,7 +165,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-          WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST: inventory-history-backfill,root-warm-archive-six,dense-fbs-historical-recovery,historical-analytical-cost-carry-forward,historical-missing-repair,product-capital-qualified-economics,fbs-lifecycle-recovery-v2,fbs-identity-mapping-v2
+          WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST: inventory-history-backfill,root-warm-archive-six,dense-fbs-historical-recovery,historical-analytical-cost-carry-forward,historical-missing-repair,product-capital-qualified-economics
         run: >-
           python3 apps/production_apply_runner.py
           --authorization-mode "${{ inputs.authorization_mode }}"
@@ -181,6 +186,75 @@ jobs:
           path: ${{ runner.temp }}/production-apply-receipt.json
           if-no-files-found: warn
           retention-days: 90
+
+  fbs_v2:
+    name: WBC0027 FBS closed qualification or one-submit Apply
+    if: inputs.authorization_mode == 'fbs-mapping-qualification' || inputs.authorization_mode == 'fbs-impact-generation' || inputs.authorization_mode == 'fbs-recovery-qualification' || inputs.authorization_mode == 'fbs-mapping-apply' || inputs.authorization_mode == 'fbs-recovery-apply'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    environment: production
+    steps:
+      - name: Checkout trusted main FBS runner
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install canonical apply dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
+      - name: Validate both releases and collect closed FBS receipt
+        id: collect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode "${{ inputs.authorization_mode }}"
+          --execution-phase collect
+          --pr "${{ inputs.pr }}"
+          --release-operation-id "${{ inputs.release_operation_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --manifest-sha256 "${{ inputs.manifest_sha256 }}"
+          --github-output "$GITHUB_OUTPUT"
+          --output "$RUNNER_TEMP/production-apply-receipt.json"
+
+      - name: Upload immutable FBS receipt before marker
+        if: steps.collect.outputs.publication_required == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-apply-receipt-pr-${{ inputs.pr }}-run-${{ github.run_id }}
+          path: ${{ runner.temp }}/production-apply-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Verify downloaded artifact and publish exact marker
+        if: steps.collect.outputs.publication_required == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python3 apps/production_apply_runner.py
+          --authorization-mode "${{ inputs.authorization_mode }}"
+          --execution-phase publish
+          --pr "${{ inputs.pr }}"
+          --release-operation-id "${{ inputs.release_operation_id }}"
+          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
+          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
+          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --manifest-sha256 "${{ inputs.manifest_sha256 }}"
+          --output "$RUNNER_TEMP/production-apply-receipt.json"
 
   warm_archive_mount_probe:
     name: Exact-worker query-only mount candidate probe

@@ -26,9 +26,12 @@ canonical digest to:
   expectation, proposed mapping id/digest and material CAS.
 
 Orders, statuses, groups and dates are forbidden anywhere in this mapping
-contract.  Apply rechecks CAS under the shared warehouse writer lock, writes a
-private before-image, authorizes at most one canonical mapping INSERT and then
-uses query-only readback without a retry.
+contract.  Material CAS is stable-only: tuple, mapping absence, owner,
+storage, cutover and external identity. It deliberately excludes order/status/
+group/date/WAC/cardinality observations. Apply rechecks CAS under the shared
+warehouse writer lock, writes immutable `O_EXCL` fsynced before-image, backup
+and operation/auth/storage journal, authorizes at most one canonical mapping
+INSERT and then uses exact same-operation query-only readback without a retry.
 
 `fbs_lifecycle_impact_manifest/v2` is generated only from a terminal mapping
 readback digest and a fresh storage/cutover/generation/cursor snapshot.  It
@@ -37,10 +40,14 @@ facility × SKU plus facility/SKU/global totals, earliest evidence dates and
 sequence digests, dependent FBS/capital/WAC/economics/history surfaces,
 same-date history evidence, non-target/WB baselines and its own digest.
 
-`fbs_lifecycle_recovery_manifest/v2` exact-binds the impact digest and complete
+`fbs_lifecycle_recovery_manifest/v2` exact-binds the independently generated
+and admitted impact artifact digest and complete
 current target sequence/row digests.  It predicts lifecycle, balance, capital
-and same-date history append/supersession effects and carries writer-lock,
-private before-image, backup, CAS, one-submit and query-only readback guards.
+and same-date history append/supersession effects plus physical/reserved/
+available facility × SKU, facility totals, global SKU/total, capital, WAC and
+functional economics after-images. It carries writer-lock, RootStorage
+admission, immutable before-image/backup/journal, CAS, one-submit and exact
+same-operation query-only readback guards.
 It cannot write mapping or WB state.
 
 History evidence is explicitly split into `recoverable_exact` and
@@ -61,13 +68,30 @@ rehearsal; it does not require SKU-specific code.
 
 ## Staged production acceptance
 
-1. Release the generic code after a full candidate rehearsal passes; mutation
-   count remains zero.
+1. Validate the source `production_mutation/awaiting_apply` and correction
+   `live_runtime/done` releases independently through exact PR/base/head/Gate/
+   plan/Release/comment/downloaded-artifact/file/manifest bindings. Release the
+   generic code after a full candidate rehearsal passes; mutation count remains
+   zero. The normal correction base is the source merge. A moved main is
+   admissible only through a bounded linear chain of exact trusted
+   `repo_only/done` receipts whose downloaded artifacts verify and whose exact
+   paths are restricted to `docs/**` and executable `*_smoke.py`; all other
+   paths fail closed.
 2. A separate `fbs-identity-mapping-v2` passport may authorize one mapping
-   insert.  Its terminal query-only readback digest becomes the next input.
-3. Generate and review one fresh `fbs_lifecycle_impact_manifest/v2`.
+   insert. It must be the unique equivalent OWNER/MEMBER passport. Its terminal
+   query-only exact-operation readback digest becomes the next input.
+3. Generate and review one fresh immutable
+   `fbs_lifecycle_impact_manifest/v2` outside the recovery command.
 4. A separate `fbs-lifecycle-recovery-v2` passport exact-binds the mapping
-   readback, impact and recovery digests and may authorize one recovery submit.
+   operation/readback, impact and recovery digests and may authorize one
+   recovery submit.
+
+Mapping and recovery qualification modes stop at the native shared-lock
+boundary with `qualified_no_submit`; they never invoke the remote Apply
+command. Every attempt uses a distinct private admitted plan path. Workflow
+publication uploads the canonical receipt first, then downloads and hashes it,
+then publishes a closed marker. Exact replay validates both marker and artifact
+before returning `already_terminal` with no SSH/comment/dispatch.
 
 No deployment receipt, rehearsal artifact or prepared passport text is itself
 authorization for either Apply.
