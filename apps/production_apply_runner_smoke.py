@@ -2371,6 +2371,154 @@ def _exact_pr1143_release_binding_contract() -> None:
         raise AssertionError("drifted release artifact archive was accepted")
 
 
+def _correction_base_ancestry_contract() -> None:
+    source_merge = "1" * 40
+    correction_base = "2" * 40
+    intervening_head = "3" * 40
+    operation = "release-v2-" + "4" * 32
+    receipt = {
+        "schema": apply.RELEASE_RECEIPT_SCHEMA,
+        "state": "done",
+        "operation_id": operation,
+        "pull_request": 1144,
+        "release_kind": "repo_only",
+        "base_sha": source_merge,
+        "head_sha": intervening_head,
+        "merge_sha": correction_base,
+        "deployed_sha": None,
+    }
+    comment = {
+        "id": 55,
+        "user": {"login": "github-actions[bot]"},
+        "body": (
+            f"<!-- wb-core-release-receipt operation={operation} -->\n"
+            "Protocol-v2 one-shot release receipt:\n```json\n"
+            + json.dumps(receipt, sort_keys=True)
+            + "\n```"
+        ),
+    }
+    files = [
+        {
+            "filename": "docs/architecture/07_codex_execution_protocol.md",
+            "status": "modified",
+            "sha": "5" * 40,
+            "additions": 22,
+            "deletions": 10,
+            "changes": 32,
+        },
+        {
+            "filename": "ci/test_planner_smoke.py",
+            "status": "modified",
+            "sha": "6" * 40,
+            "additions": 25,
+            "deletions": 1,
+            "changes": 26,
+        },
+    ]
+
+    class Client:
+        repository = "orenvlad-ai/wb-core"
+
+        def get(self, path: str):
+            if path == f"/compare/{source_merge}...{correction_base}":
+                return {
+                    "status": "ahead",
+                    "ahead_by": 1,
+                    "behind_by": 0,
+                    "merge_base_commit": {"sha": source_merge},
+                    "commits": [{"sha": correction_base}],
+                }
+            if path == f"/commits/{correction_base}/pulls?per_page=100":
+                return [
+                    {
+                        "number": 1144,
+                        "merged_at": "2026-08-31T18:53:07Z",
+                        "merge_commit_sha": correction_base,
+                        "base": {"ref": "main"},
+                    }
+                ]
+            if path == "/pulls/1144":
+                return {
+                    "number": 1144,
+                    "merged": True,
+                    "draft": False,
+                    "state": "closed",
+                    "merge_commit_sha": correction_base,
+                    "changed_files": 2,
+                    "base": {
+                        "ref": "main",
+                        "sha": source_merge,
+                        "repo": {"full_name": "orenvlad-ai/wb-core"},
+                    },
+                    "head": {
+                        "sha": intervening_head,
+                        "repo": {"full_name": "orenvlad-ai/wb-core"},
+                    },
+                }
+            if path.startswith("/issues/1144/comments?"):
+                return [comment]
+            if path == "/pulls/1144/files?per_page=100&page=1":
+                return files
+            raise AssertionError(path)
+
+    source = {"receipt": {"merge_sha": source_merge}}
+    correction = {"receipt": {"base_sha": correction_base}}
+    original_collect = apply.collect_exact_release_binding
+    try:
+        apply.collect_exact_release_binding = lambda *_args, **kwargs: {
+            "receipt": receipt,
+            "gate_run_id": 101,
+            "release_run_id": 102,
+            "artifact_id": 103,
+            "artifact_archive_digest": "sha256:" + "7" * 64,
+            "artifact_file_sha256": "sha256:" + "8" * 64,
+        } if kwargs == {
+            "pr": 1144,
+            "release_operation": operation,
+            "expected_kind": "repo_only",
+            "expected_state": "done",
+            "expected_manifest": None,
+        } else (_ for _ in ()).throw(AssertionError(kwargs))
+        proof = apply.collect_correction_base_ancestry(
+            Client(), source_release=source, correction_release=correction
+        )
+        assert proof["status"] == "trusted_non_interfering_descendant"
+        assert proof["source_merge_sha"] == source_merge
+        assert proof["correction_base_sha"] == correction_base
+        assert len(proof["intervening_releases"]) == 1
+        assert proof["intervening_releases"][0]["pull_request"] == 1144
+        assert {
+            row["path"]
+            for row in proof["intervening_releases"][0]["path_proof"]["changed_files"]
+        } == {row["filename"] for row in files}
+        direct = apply.collect_correction_base_ancestry(
+            Client(),
+            source_release=source,
+            correction_release={"receipt": {"base_sha": source_merge}},
+        )
+        assert direct["status"] == "direct"
+        files.append(
+            {
+                "filename": ".github/workflows/production-apply.yml",
+                "status": "modified",
+                "sha": "9" * 40,
+                "additions": 1,
+                "deletions": 1,
+                "changes": 2,
+            }
+        )
+        try:
+            apply._collect_non_interfering_pr_files(
+                Client(), pr_number=1144, pr={"changed_files": 3}
+            )
+        except apply.ApplyError:
+            pass
+        else:
+            raise AssertionError("interfering workflow bridge was accepted")
+    finally:
+        apply.collect_exact_release_binding = original_collect
+
+
 def _workflow_dispatch_contract() -> None:
     workflow_path = ROOT / ".github" / "workflows" / "production-apply.yml"
     ruby_decoder = r"""
@@ -2648,6 +2796,7 @@ assert "apps.wbc0027_capital_recovery" not in sys.modules
 
 def main() -> None:
     _exact_pr1143_release_binding_contract()
+    _correction_base_ancestry_contract()
     _workflow_dispatch_contract()
     _exercise_wbc0027_stdlib_dependency_isolation()
     _exercise_compact_oversized_blocked_receipt()

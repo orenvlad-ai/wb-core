@@ -317,7 +317,13 @@ statuses, groups и dates в mapping manifest запрещены.
 release lineage: source `production_mutation/awaiting_apply` и correction
 `live_runtime/done`. Проверяются exact PR base/head/merge, Gate, Release
 Runner, comment, downloaded artifact archive/file digest и source manifest;
-correction base обязан совпасть с source merge. Один parsed goal может иметь
+correction base обычно обязан совпасть с source merge. Если `main` успел
+продвинуться, допускается только bounded exact linear ancestry: каждый
+промежуточный merge имеет downloaded/hash-verified `repo_only/done` receipt и
+меняет исключительно `docs/**` или executable `*_smoke.py`; workflow/runtime/
+registry/migration/manifest/business-data path блокирует lineage. Exact
+commit/PR/Gate/Release/artifact/path proof включается в correction binding.
+Один parsed goal может иметь
 ровно один OWNER/MEMBER comment. Equivalent duplicate — `EVIDENCE_BLOCKED`, а
 не выбор первого комментария.
 

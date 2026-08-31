@@ -723,7 +723,7 @@ def collect_exact_release_binding(
         "operation_id", "plan_hash", "pull_request", "reason_codes",
         "release_kind", "repository", "schema", "state", "workflow_run_id",
     }
-    expected_deployed = merge_sha if expected_kind == "live_runtime" else merge_sha
+    expected_deployed = None if expected_kind == "repo_only" else merge_sha
     if (
         set(receipt) != expected_keys
         or receipt.get("schema") != RELEASE_RECEIPT_SCHEMA
@@ -838,6 +838,223 @@ def collect_exact_release_binding(
         "artifact_archive_digest": str(artifact["digest"]),
         "artifact_file_sha256": "sha256:" + digest(raw_receipt),
     }
+
+
+def _intervening_release_path_is_non_interfering(path: str) -> bool:
+    """Allow only documentation and executable-test-only paths in a base bridge."""
+
+    if (
+        not path
+        or path.startswith("/")
+        or "//" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return False
+    if path.startswith("docs/"):
+        return True
+    return re.fullmatch(r"(?:apps|ci|packages)/(?:[^/]+/)*[^/]+_smoke\.py", path) is not None
+
+
+def _collect_non_interfering_pr_files(
+    client: GitHubClient,
+    *,
+    pr_number: int,
+    pr: Mapping[str, Any],
+) -> dict[str, Any]:
+    changed_files = pr.get("changed_files")
+    if (
+        not isinstance(changed_files, int)
+        or isinstance(changed_files, bool)
+        or not 0 < changed_files <= 100
+    ):
+        raise ApplyError("intervening release changed-file cardinality is invalid")
+    files = client.get(f"/pulls/{pr_number}/files?per_page=100&page=1")
+    if not isinstance(files, list) or len(files) != changed_files:
+        raise ApplyError("intervening release changed-file listing is incomplete")
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, Mapping):
+            raise ApplyError("intervening release changed-file row is invalid")
+        path = str(item.get("filename") or "")
+        previous = item.get("previous_filename")
+        status = str(item.get("status") or "")
+        additions = item.get("additions")
+        deletions = item.get("deletions")
+        changes = item.get("changes")
+        blob_sha = str(item.get("sha") or "")
+        if (
+            path in seen
+            or status not in {"added", "modified", "removed", "renamed"}
+            or re.fullmatch(r"[0-9a-f]{40}", blob_sha) is None
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                for value in (additions, deletions, changes)
+            )
+            or int(additions) + int(deletions) != int(changes)
+            or not _intervening_release_path_is_non_interfering(path)
+            or (
+                status == "renamed"
+                and (
+                    not isinstance(previous, str)
+                    or not _intervening_release_path_is_non_interfering(previous)
+                )
+            )
+            or (status != "renamed" and previous is not None)
+        ):
+            raise ApplyError(
+                "intervening release touches a code/workflow/runtime/data surface"
+            )
+        seen.add(path)
+        row = {
+            "path": path,
+            "status": status,
+            "blob_sha": blob_sha,
+            "additions": int(additions),
+            "deletions": int(deletions),
+            "changes": int(changes),
+        }
+        if status == "renamed":
+            row["previous_path"] = str(previous)
+        rows.append(row)
+    rows.sort(key=lambda row: (str(row["path"]), str(row["status"])))
+    payload = {"pull_request": pr_number, "changed_files": rows}
+    return {**payload, "digest": payload_digest(payload)}
+
+
+def collect_correction_base_ancestry(
+    client: GitHubClient,
+    *,
+    source_release: Mapping[str, Any],
+    correction_release: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove an exact, non-production, non-interfering linear base bridge."""
+
+    source_receipt = source_release.get("receipt")
+    correction_receipt = correction_release.get("receipt")
+    if not isinstance(source_receipt, Mapping) or not isinstance(
+        correction_receipt, Mapping
+    ):
+        raise ApplyError("source/correction release binding is incomplete")
+    source_merge = exact_sha(source_receipt.get("merge_sha"), "source-release-merge")
+    correction_base = exact_sha(
+        correction_receipt.get("base_sha"), "correction-release-base"
+    )
+    if correction_base == source_merge:
+        payload = {
+            "status": "direct",
+            "source_merge_sha": source_merge,
+            "correction_base_sha": correction_base,
+            "intervening_releases": [],
+        }
+        return {**payload, "digest": payload_digest(payload)}
+
+    compare = client.get(f"/compare/{source_merge}...{correction_base}")
+    merge_base = compare.get("merge_base_commit") if isinstance(compare, Mapping) else None
+    commits = compare.get("commits") if isinstance(compare, Mapping) else None
+    if not (
+        isinstance(compare, Mapping)
+        and isinstance(merge_base, Mapping)
+        and isinstance(commits, list)
+        and compare.get("status") == "ahead"
+        and isinstance(compare.get("ahead_by"), int)
+        and not isinstance(compare.get("ahead_by"), bool)
+        and 0 < int(compare["ahead_by"]) <= 20
+        and compare.get("behind_by") == 0
+        and merge_base.get("sha") == source_merge
+        and len(commits) == int(compare["ahead_by"])
+    ):
+        raise ApplyError("correction base is not an exact bounded source descendant")
+
+    previous_sha = source_merge
+    releases: list[dict[str, Any]] = []
+    for commit in commits:
+        if not isinstance(commit, Mapping):
+            raise ApplyError("intervening release commit row is invalid")
+        commit_sha = exact_sha(commit.get("sha"), "intervening-release-merge")
+        associated = client.get(f"/commits/{commit_sha}/pulls?per_page=100")
+        candidates = [
+            item
+            for item in associated
+            if isinstance(item, Mapping)
+            and isinstance(item.get("number"), int)
+            and not isinstance(item.get("number"), bool)
+            and item.get("merged_at")
+            and item.get("merge_commit_sha") == commit_sha
+            and (item.get("base") or {}).get("ref") == "main"
+        ] if isinstance(associated, list) else []
+        if len(candidates) != 1:
+            raise ApplyError("intervening release PR is missing or ambiguous")
+        pr_number = int(candidates[0]["number"])
+        pr = client.get(f"/pulls/{pr_number}")
+        base = pr.get("base") if isinstance(pr, Mapping) else None
+        head = pr.get("head") if isinstance(pr, Mapping) else None
+        base_repo = base.get("repo") if isinstance(base, Mapping) else None
+        head_repo = head.get("repo") if isinstance(head, Mapping) else None
+        if not (
+            isinstance(pr, Mapping)
+            and isinstance(base, Mapping)
+            and isinstance(head, Mapping)
+            and isinstance(base_repo, Mapping)
+            and isinstance(head_repo, Mapping)
+            and pr.get("number") == pr_number
+            and pr.get("merged") is True
+            and pr.get("draft") is False
+            and pr.get("state") == "closed"
+            and pr.get("merge_commit_sha") == commit_sha
+            and base.get("ref") == "main"
+            and base.get("sha") == previous_sha
+            and base_repo.get("full_name") == CANONICAL_REPOSITORY
+            and head_repo.get("full_name") == CANONICAL_REPOSITORY
+        ):
+            raise ApplyError("intervening release is not an exact linear main PR")
+        comments = list_comments(client, pr_number)
+        receipt_payloads = _wbc0027_release_comment_payloads(comments)
+        if len(receipt_payloads) != 1:
+            raise ApplyError("intervening release receipt is missing or ambiguous")
+        operation = str(receipt_payloads[0].get("operation_id") or "")
+        release = collect_exact_release_binding(
+            client,
+            pr=pr_number,
+            release_operation=operation,
+            expected_kind="repo_only",
+            expected_state="done",
+            expected_manifest=None,
+        )
+        if (
+            release["receipt"].get("base_sha") != previous_sha
+            or release["receipt"].get("merge_sha") != commit_sha
+            or release["receipt"].get("deployed_sha") is not None
+        ):
+            raise ApplyError("intervening release terminal receipt chain drifted")
+        path_proof = _collect_non_interfering_pr_files(
+            client, pr_number=pr_number, pr=pr
+        )
+        releases.append(
+            {
+                "pull_request": pr_number,
+                "base_sha": previous_sha,
+                "head_sha": str(release["receipt"]["head_sha"]),
+                "merge_sha": commit_sha,
+                "release_operation_id": operation,
+                "gate_run_id": int(release["gate_run_id"]),
+                "release_run_id": int(release["release_run_id"]),
+                "artifact_id": int(release["artifact_id"]),
+                "artifact_archive_digest": str(release["artifact_archive_digest"]),
+                "artifact_file_sha256": str(release["artifact_file_sha256"]),
+                "path_proof": path_proof,
+            }
+        )
+        previous_sha = commit_sha
+    if previous_sha != correction_base:
+        raise ApplyError("intervening release chain does not reach correction base")
+    payload = {
+        "status": "trusted_non_interfering_descendant",
+        "source_merge_sha": source_merge,
+        "correction_base_sha": correction_base,
+        "intervening_releases": releases,
+    }
+    return {**payload, "digest": payload_digest(payload)}
 
 
 def parse_repo_only_release_receipt(
@@ -11150,10 +11367,12 @@ def _run_wbc0027_fbs_v2_mode(
         expected_state="done",
         expected_manifest=None,
     )
-    source_merge_sha = str(source_release["receipt"]["merge_sha"])
     correction_merge_sha = str(correction_release["receipt"]["merge_sha"])
-    if str(correction_release["receipt"]["base_sha"]) != source_merge_sha:
-        raise ApplyError("correction release does not descend from the source release")
+    correction_release["source_ancestry"] = collect_correction_base_ancestry(
+        client,
+        source_release=source_release,
+        correction_release=correction_release,
+    )
     if args.authorization_comment_id <= 0:
         raise ApplyError("FBS v2 mode requires the exact OWNER passport comment")
     goal, authorization, authorization_digest = validate_unique_authorization(

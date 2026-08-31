@@ -72,7 +72,11 @@ rehearsal; it does not require SKU-specific code.
    `live_runtime/done` releases independently through exact PR/base/head/Gate/
    plan/Release/comment/downloaded-artifact/file/manifest bindings. Release the
    generic code after a full candidate rehearsal passes; mutation count remains
-   zero.
+   zero. The normal correction base is the source merge. A moved main is
+   admissible only through a bounded linear chain of exact trusted
+   `repo_only/done` receipts whose downloaded artifacts verify and whose exact
+   paths are restricted to `docs/**` and executable `*_smoke.py`; all other
+   paths fail closed.
 2. A separate `fbs-identity-mapping-v2` passport may authorize one mapping
    insert. It must be the unique equivalent OWNER/MEMBER passport. Its terminal
    query-only exact-operation readback digest becomes the next input.

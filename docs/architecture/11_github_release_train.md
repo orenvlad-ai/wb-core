@@ -790,8 +790,14 @@ lineages: the source `production_mutation/awaiting_apply` receipt and the
 correction `live_runtime/done` receipt.  Each lineage binds exact PR
 base/head/merge, Gate run/plan, Release Runner, comment, downloaded artifact,
 archive/file digests and (for the source) incident manifest path/digest/
-operation.  The correction base must equal the source merge.  FBS passports
-are accepted only through the explicit `fbs-mapping-qualification`,
+operation.  The correction base normally equals the source merge.  A moving
+`main` is accepted only as a bounded exact descendant: every intervening merge
+must form a linear main chain, have a fully downloaded and hash-verified
+`repo_only/done` Release receipt, and touch only `docs/**` or executable
+`*_smoke.py` test files.  Any workflow, runtime, registry, migration, manifest
+or business-data surface makes the lineage `EVIDENCE_BLOCKED`.  The complete
+commit/PR/Gate/Release/artifact/path proof and its digest become part of the
+correction binding.  FBS passports are accepted only through the explicit `fbs-mapping-qualification`,
 `fbs-impact-generation`, `fbs-recovery-qualification`, `fbs-mapping-apply` and
 `fbs-recovery-apply` modes; the old generic `scope-goal` route rejects them.
 
