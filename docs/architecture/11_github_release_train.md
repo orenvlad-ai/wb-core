@@ -422,6 +422,12 @@ builder остаётся versioned и strict для любого будущег�
 non-target evolution сохраняется только typed receipt evidence, тогда как
 current target after-images остаются exact equality gate.
 
+У этой же immutable legacy source recovery row поле `after_digest` исторически
+пустое. Wrapper принимает пустую строку только после exact allowlist binding и
+полного `legacy_adapter/v1` transaction proof; current target digest и три row
+hashes всё равно обязаны точно совпасть. Для любого другого source пустое поле,
+а для exact legacy source любое непустое неравное значение, fail closed.
+
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:
 

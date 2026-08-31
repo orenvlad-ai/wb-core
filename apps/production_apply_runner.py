@@ -43,6 +43,11 @@ from apps.release_protocol import (  # noqa: E402
     CANONICAL_REPOSITORY,
     validate_production_manifest,
 )
+from apps.wbc0027_capital_recovery import (  # noqa: E402
+    LEGACY_SOURCE_TRANSACTION_CONTRACT,
+    Wbc0027RecoveryError,
+    _validate_legacy_source_transaction_binding,
+)
 from apps.wbc0027_capital_recovery_source_binding import (  # noqa: E402
     CONTRACT_NAME as WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT,
     PATHS as WBC0027_RUNTIME_SOURCE_PATHS,
@@ -7758,6 +7763,41 @@ def _wbc0027_finalize_remote_command(
     return _ssh_command() + [str(target["ssh_destination"]), shell]
 
 
+def _valid_wbc0027_source_recovery_after_digest(
+    source_row: Mapping[str, Any],
+    *,
+    source: Mapping[str, Any],
+    source_transaction: Mapping[str, Any],
+) -> bool:
+    expected = source.get("economics_target_after_digest")
+    observed = source_row.get("after_digest")
+    if isinstance(expected, str) and expected and observed == expected:
+        return True
+    if observed != "" or (
+        source_transaction.get("contract_name")
+        != LEGACY_SOURCE_TRANSACTION_CONTRACT
+    ):
+        return False
+    try:
+        _validate_legacy_source_transaction_binding(
+            goal_operation_id=str(source["operation_id"]),
+            source_deployed_sha=str(source["deployed_sha"]),
+            source_manifest_sha256=str(source["economics_manifest_sha256"]),
+            source_phase_operation_id=str(source["economics_phase_operation_id"]),
+            source_phase_fingerprint=str(source["economics_phase_fingerprint"]),
+            source_storage_generation=source["storage_generation"],
+            source_run_id=int(source["run_id"]),
+            source_artifact_id=int(source["artifact_id"]),
+            source_artifact_name=str(source["artifact_name"]),
+            source_receipt_sha256=str(source["receipt_sha256"]),
+            source_comment_id=int(source["blocked_comment_id"]),
+            authorization_reference=str(source["authorization_reference"]),
+        )
+    except (KeyError, TypeError, ValueError, Wbc0027RecoveryError):
+        return False
+    return True
+
+
 def _valid_wbc0027_finalize_result(
     result: Any, *, context: Mapping[str, Any]
 ) -> bool:
@@ -7866,7 +7906,11 @@ def _valid_wbc0027_finalize_result(
         and source_row.get("lifecycle") == "quarantined"
         and source_row.get("quarantine_reason")
         == "non_target_digest_drift_after_mutation"
-        and source_row.get("after_digest") == source["economics_target_after_digest"]
+        and _valid_wbc0027_source_recovery_after_digest(
+            source_row,
+            source=source,
+            source_transaction=source_transaction,
+        )
         and source_row.get("non_target_digest")
         == source["economics_source_raw_non_target_digest"]
         and result.get("undo_row_count") == 3
