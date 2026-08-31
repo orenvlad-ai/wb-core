@@ -137,8 +137,10 @@ Owning main применяет те же closed outcomes до implementation spa
 существующий compact task passport и exact available evidence, а не новый
 artifact или gate. Однозначный accepted outcome/acceptance/boundary и dominant
 technical path дают `AUTO_CONTINUE`. Недостающее substantive technical
-evidence даёт `EVIDENCE_BLOCKED` и один automatic bounded diagnostic/read-only
-block без human gate; diagnostic dispatch сам эту проверку не требует.
+evidence даёт `EVIDENCE_BLOCKED` и отдельный automatic bounded diagnostic/
+read-only block на каждый независимый compact evidence question без human gate;
+один question параллельно не дублируется, а diagnostic dispatch сам эту
+проверку не требует.
 
 `HUMAN_REQUIRED` возникает только когда exact evidence оставляет два или
 более различных допустимых business outcomes без dominant technical choice,

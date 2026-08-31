@@ -87,10 +87,12 @@ test suite: outcome/effects отражаются в уже существующ�
   сразу dispatch-ит implementation block;
 - `EVIDENCE_BLOCKED`, если связи/эффекты нельзя однозначно определить без
   нового substantive technical evidence: без human gate автоматически
-  dispatch-ится один bounded diagnostic/read-only block. Его собственный
-  dispatch этой проверки не требует; после terminal diagnosis owning main
-  повторяет resolution и либо запускает следующий implementation block, либо
-  применяет router без второго автоматического preflight diagnostic;
+  dispatch-ится отдельный bounded diagnostic/read-only block на каждый
+  независимый compact evidence question. Один и тот же question параллельно не
+  дублируется. Собственный dispatch этих проверок не требует ещё одной такой
+  проверки; после terminal diagnoses owning main повторяет resolution и либо
+  запускает следующий implementation block, либо применяет router без второго
+  автоматического preflight diagnostic по уже закрытому question;
 - `HUMAN_REQUIRED`, только если exact evidence оставляет два или более
   различных допустимых business outcomes и dominant technical choice нет. Main
   задаёт ровно один конкретный business question, кратко объясняет
@@ -101,7 +103,7 @@ Required technical dependency автоматически включается в
 effects не меняются. Owner confirmation не нужен; exact new final/effect delta
 применяет doc15 и не маскируется как dependency.
 
-`Read-only` задаёт mutation/authority boundary, но не actor routing. Один
+`Read-only` задаёт mutation/authority boundary, но не actor routing. Каждый
 bounded technical execution block выполняет ровно один fresh visible internal
 subagent с internal/task name:
 
@@ -110,9 +112,16 @@ subagent с internal/task name:
 `SSS` начинается с `001` и растёт внутри main task; semantic часть —
 детерминированная латинская транслитерация русского названия, не английский
 перевод, максимум 20 символов (`istoriya-ostatkov`, не `inventory-history`).
-Subagent не pin-ится. Project-local
-`[agents].max_concurrent_threads_per_session = 1` ограничивает одну spawned
-task одновременно. Model и reasoning tier автоматически не выбираются.
+Subagent не pin-ится. Ровно один actor на block — ownership boundary, а не
+общий concurrency cap main task. Model и reasoning tier автоматически не
+выбираются.
+
+Внутри одной owning main task одновременно может быть active не более одного
+mutating/implementation subagent: к нему относится любой actor, способный
+менять files/code/runtime/data/external state либо создавать branch/worktree/PR.
+Параллельно могут быть active zero-or-more независимых bounded diagnostic/
+read-only subagents. WBC не задаёт им произвольный numeric limit; фактическая
+конкурентность ограничивается только capacity текущей platform.
 
 Technical execution имеет два вида:
 
@@ -120,6 +129,15 @@ Technical execution имеет два вида:
   branch/worktree/PR/mutation;
 - implementation block использует одну branch и, без explicit stop-line, один
   non-draft PR по обычному repository/release flow.
+
+Каждый diagnostic/read-only block получает отдельный compact passport с одним
+bounded evidence question. Он не выполняет mutation, не создаёт branch/worktree/
+PR, не становится monitor/reviewer/recovery duplicate и не запускает
+implementation либо другого mutating actor. Два active block не исследуют один
+и тот же evidence question. Если question касается resource, который меняет
+active implementation executor, diagnostic читает только immutable/exact
+snapshot boundary либо ждёт stable boundary; conclusion из дрейфующего state
+запрещён.
 
 Если owner-facing технический вывод требует нового evidence из repository/code,
 logs, server, database, external API либо длительного ожидания, это technical
@@ -163,15 +181,16 @@ Spawn получает compact task passport и минимальный bounded c
 
 Без explicit stop-line implementation subagent владеет ровно одной branch и
 одним non-draft PR; branch/draft stop-line завершает его на выбранной boundary.
-Diagnostic subagent branch/worktree/PR не создаёт. Terminal diagnosis завершает
-этот block. Если accepted goal сохранился и terminal diagnosis сняла
+Diagnostic subagent branch/worktree/PR не создаёт и возвращает handoff только
+owning main, не sibling executor-у и не другой owner surface. Terminal diagnosis
+завершает этот block. Если accepted goal сохранился и terminal diagnosis сняла
 `EVIDENCE_BLOCKED`, owning main после повторной pre-dispatch resolution автономно
 запускает следующий bounded block с новым subagent и следующим
-последовательным `SSS`. Same-scope
-review finding, test failure или correction в текущем block/PR возвращается
-тому же subagent. Любой новый PR, включая infrastructure recovery, требует
-terminal handoff предыдущего блока. Новый subagent не служит monitor/reviewer/
-recovery duplicate.
+последовательным `SSS`. Same-scope review finding, test failure или correction
+в текущем implementation block/PR возвращается тому же mutating subagent.
+Новый mutating scope или PR, включая infrastructure recovery, ждёт terminal
+handoff предыдущего implementation block. Новый subagent не служит monitor/
+reviewer/recovery duplicate.
 
 Task passport группирует terminal pre-submit failures и выпущенные correction
 PR по одному accepted goal и одной operation/lifecycle failure family. После
@@ -211,13 +230,15 @@ Subagent либо:
   немедленный terminal transition, не неопределённый `Active`.
 
 После successful internal spawn main curator **MUST** сохранять текущий turn
-активным до meaningful callback либо terminal handoff. Пока subagent
-non-terminal, main **MUST NOT** публиковать final, становиться idle или
-возвращать управление пользователю. Он держит ровно один outstanding
-event/terminal wait. Quiet mode означает отсутствие heartbeat/status-текста,
-а не completion turn.
+активным до meaningful callback либо terminal handoff. Пока хотя бы один
+subagent active, main **MUST NOT** публиковать final, становиться idle или
+возвращать управление пользователю. Он держит ровно один outstanding event/
+terminal wait, покрывающий весь текущий active set subagents. Meaningful
+callback одного block обрабатывается без потери handoff остальных; если после
+него active set не пуст, один wait re-arm-ится уже на актуальный set. Quiet mode
+означает отсутствие heartbeat/status-текста, а не completion turn.
 
-Main и subagent сообщают только meaningful state transitions. «Ещё идёт»,
+Main и subagents сообщают только meaningful state transitions. «Ещё идёт»,
 heartbeat и polling неизменного CI запрещены полностью. Timeout tool-level wait
 разрешает только немедленный silent re-arm того же event wait. Это renewal
 lease/subscription, а не progress evidence; на timeout **MUST NOT** выполняться

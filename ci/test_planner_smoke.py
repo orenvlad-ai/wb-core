@@ -544,6 +544,7 @@ def main() -> None:
             "docs/architecture/07_codex_execution_protocol.md",
             "docs/architecture/12_codex_global_orchestration.md",
             "docs/architecture/13_codex_curator_workspace.md",
+            "docs/architecture/15_codex_authorization_router.md",
         )
     )
     assert "collaboration.spawn_agent" in protocol_text
@@ -555,6 +556,24 @@ def main() -> None:
     ):
         assert forbidden_thread_tool in protocol_text
     assert "istoriya-ostatkov" in protocol_text
+    compact_protocol_text = " ".join(protocol_text.split())
+    assert (
+        "active не более одного mutating/implementation subagent"
+        in compact_protocol_text
+    )
+    assert (
+        "zero-or-more независимых bounded diagnostic/read-only subagents"
+        in compact_protocol_text
+    )
+    assert (
+        "Один и тот же question параллельно не дублируется"
+        in compact_protocol_text
+    )
+    assert (
+        "immutable/exact snapshot boundary либо ждёт stable boundary"
+        in compact_protocol_text
+    )
+    assert "покрывающий весь текущий active set subagents" in compact_protocol_text
     release_protocol_text = (
         ROOT / "docs/architecture/11_github_release_train.md"
     ).read_text(encoding="utf-8")
@@ -563,8 +582,7 @@ def main() -> None:
     baseline_text = (ROOT / ".github/workflows/baseline-ci.yml").read_text(encoding="utf-8")
     assert "codex/process-cutover-pr-gate" not in baseline_text
     assert "codex/pr-gate-rollback-" in baseline_text
-    config_text = (ROOT / ".codex/config.toml").read_text(encoding="utf-8")
-    assert "max_concurrent_threads_per_session = 1" in config_text
+    assert not (ROOT / ".codex/config.toml").exists()
     core_only = {
         tuple(entry["command"])
         for entry in real_registry["protocol"]["core_only_commands"]

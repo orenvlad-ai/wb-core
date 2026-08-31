@@ -84,8 +84,8 @@ against its exact applicable rule pointer, never an optimization proposal.
 | `PC-01` | Exact WBC task and technical-block identities are present, and the block start/activation boundary is bound to an exact applicable protocol revision. |
 | `PC-02` | Before execution, the owning main task held the accepted goal, compact passport, included/excluded scope, acceptance predicate and applicable stop-line. |
 | `PC-03` | Before implementation dispatch, substantive ambiguity and known outcome-changing dependencies were resolved through the applicable pre-dispatch/router path without speculative scope expansion. |
-| `PC-04` | Actor routing, one fresh visible internal subagent, allowed concurrency, internal naming and visible Russian communication conformed where each rule applied. |
-| `PC-05` | One owning owner-facing surface was preserved; event wait/callback/wakeup handling was used where applicable, without heartbeat, unchanged-status polling or a duplicate monitor. |
+| `PC-04` | Actor routing, at most one active mutating/implementation subagent, separate non-duplicated bounded read-only evidence questions, platform-bounded read-only concurrency, internal naming and visible Russian communication conformed where each rule applied. |
+| `PC-05` | One owning owner-facing surface was preserved; diagnostic handoffs returned only there, and one event wait covered the active subagent set without lost callbacks, heartbeat, unchanged-status polling or a duplicate monitor. |
 | `PC-06` | Any human gate was legal, uniquely routed and deduplicated; accepted goal, business meaning or routine technical decisions were not requested again. |
 | `PC-07` | Same-scope corrections stayed with the owning block, one branch/PR boundary was preserved where applicable, scope drift was not introduced and the applicable loop-breaker was followed. |
 | `PC-08` | Verification was proportional and relevant; repository work used the exact PR Gate/Release Runner contour, and any production mutation used the separate exact Apply Runner contour. |

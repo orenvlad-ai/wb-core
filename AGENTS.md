@@ -49,18 +49,26 @@ compatibility не является blocker, current canonical source acquisitio
   существующих полях compact passport exact outcome/acceptance,
   included/excluded boundary и только известные связанные final effects,
   способные изменить acceptance/business outcome. Однозначность даёт
-  `AUTO_CONTINUE`; missing substantive evidence — один automatic diagnostic,
-  exact unresolved business fork — один вопрос по doc15. Required technical
-  dependency внутри accepted final meaning включается автоматически;
-  новый artifact/gate и ordinary-task overhead запрещены.
-- `Read-only` задаёт mutation boundary, не actor. Новое substantive technical
-  evidence или long wait выполняет один fresh visible internal subagent;
-  curator-control read ограничен exact immutable receipt/status readback без
-  нового domain evidence или inference. Exact routing определяет doc07.
-- Один bounded implementation block владеет одной branch и, без stop-line,
-  одним non-draft PR. Same-scope correction продолжает тот же block/PR; новый
-  scope или PR требует terminal предыдущего block. Internal execution создаётся
-  только через `collaboration.spawn_agent`, не через user-owned sidebar task.
+  `AUTO_CONTINUE`; missing substantive evidence — отдельный bounded automatic
+  diagnostic на каждый независимый evidence question, exact unresolved
+  business fork — один вопрос по doc15. Required technical dependency внутри
+  accepted final meaning включается автоматически; новый artifact/gate и
+  ordinary-task overhead запрещены.
+- `Read-only` задаёт mutation boundary, не actor. Каждый новый compact evidence
+  question или long wait получает отдельный fresh visible internal subagent без
+  branch/worktree/PR/mutation. Независимые diagnostic/read-only blocks могут
+  идти параллельно без WBC numeric cap; один question не дублируется. Если
+  implementation меняет затронутый resource, diagnostic использует immutable/
+  exact snapshot boundary либо ждёт stable boundary. Curator-control read
+  ограничен exact immutable receipt/status readback без нового domain evidence
+  или inference. Exact routing определяет doc07.
+- В одной main task одновременно active не более одного subagent, способного
+  менять files/code/runtime/data/external state либо создавать branch/PR. Этот
+  bounded implementation block владеет одной branch и, без stop-line, одним
+  non-draft PR. Same-scope correction продолжает тот же block/PR; новый
+  mutating scope или PR требует terminal предыдущего implementation block.
+  Internal execution создаётся только через `collaboration.spawn_agent`, не
+  через user-owned sidebar task.
 - После двух terminal pre-submit failures или двух sequential correction
   releases одной family третий narrow retry запрещён. Применяется consolidated
   terminal query-only/no-submit rehearsal и следующий consolidated correction
@@ -69,6 +77,10 @@ compatibility не является blocker, current canonical source acquisitio
 - Evidence read обязан разрешать acceptance predicate, blocker или current
   failure hypothesis. Full logs/manifests/receipts остаются durable; active
   context и handoff используют bounded conclusion и exact pointers/digests.
+- Diagnostic handoff возвращается только owning main. Пока active один или
+  несколько subagents, main держит один event/terminal wait, покрывающий их
+  active set; meaningful callbacks обрабатываются без heartbeat, unchanged
+  polling, duplicate monitor или потери handoff.
 - Пользователь не подтверждает повторно accepted goal, business meaning, exact
   plan или routine technical decisions. Любой owner-facing gate проходит
   closed router из doc15; discretionary permission questions запрещены.
