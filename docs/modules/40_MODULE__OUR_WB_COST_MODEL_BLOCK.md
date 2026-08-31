@@ -385,14 +385,16 @@ slice removed. It records total/target row counts plus identity, semantic
 payload and row component digests. The same builder is used by planning,
 writer-lock rebase, T1, retain and readback; the legacy digest of only 221
 unpatched rows is audit evidence and cannot be compared with the 224-row
-semantic witness. A genuine ordinary semantic change after the submit boundary
-still fails closed.
+semantic witness. During real Apply, any genuine non-target change across the
+T1/pre-submit/post-submit/retain boundary still fails closed.
 
 Source operation `recovery_ae66a56f72d90b469b75d8adb893c51f` committed its
 three ready rows / 472 persisted cells before that legacy cross-contract
 comparison quarantined it. Its product predecessor is exact and is never
 replayed. The canonical `finalize-only` reconciliation proves current target
 after-images, original undo before/after rows, transition/quarantine reason,
-semantic before=after=current, the protected `117.537167` invariant, 12/0
-missing partition and hard non-targets using query-only SQLite. It writes no
+historic source equality after target-slice removal, the protected `117.537167`
+invariant, 12/0 missing partition and hard non-targets using query-only SQLite.
+It separately records later current non-target row/component drift without
+requiring equality to source; that evidence cannot approve target drift. It writes no
 cost, Proxy, Finance, product, economics, outbox or recovery row.

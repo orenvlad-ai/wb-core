@@ -90,8 +90,20 @@ def _check_single_encode_and_exact_payload_bytes() -> None:
 
     representative = {
         "composition_name": "web_vitrina_page_composition",
-        "meta": {"page_composition_diagnostics": {"payload_bytes": 0}},
+        "composition_version": "v1",
+        "meta": {
+            "snapshot_id": "representative-snapshot",
+            "as_of_date": "2026-08-30",
+            "snapshot_as_of_date": "2026-08-30",
+            "source_contract_name": "sheet_vitrina_v1",
+            "source_contract_version": "v1",
+            "page_composition_diagnostics": {"payload_bytes": 0},
+        },
         "table_surface": {
+            "state_surface": {"current_state": "ready"},
+            "table_data_state": "ready",
+            "total_row_count": 1000,
+            "returned_row_count": 1000,
             "columns": [{"id": f"date:{index}"} for index in range(14)],
             "rows": [
                 {
@@ -115,8 +127,11 @@ def _check_single_encode_and_exact_payload_bytes() -> None:
                 for index in range(1000)
             ],
         },
+        "activity_surface": {"loading_table": {"visible": False}},
     }
     representative_body = _encode_web_vitrina_page_composition_body(representative)
+    if len(representative_body) <= 768 * 1024:
+        raise AssertionError("representative full composition must exceed the former 768 KiB probe cap")
     compressed = gzip.compress(representative_body, compresslevel=1, mtime=0)
     if len(compressed) > len(representative_body) * 0.10:
         raise AssertionError(
@@ -124,6 +139,29 @@ def _check_single_encode_and_exact_payload_bytes() -> None:
         )
     if gzip.decompress(compressed) != representative_body:
         raise AssertionError("gzip transport must preserve logical response bytes exactly")
+
+    probe_handler = _FakeHtmlHandler()
+    with redirect_stderr(StringIO()):
+        _write_web_vitrina_page_composition_response(
+            probe_handler,
+            HTTPStatus.OK,
+            representative,
+            request_started_perf=time.perf_counter(),
+            build_ms=12.5,
+            probe_shape=True,
+        )
+    probe_body = probe_handler.wfile.getvalue()
+    probe = json.loads(probe_body)
+    if len(probe_body) > 64 * 1024:
+        raise AssertionError("compact proof must remain within its 64 KiB hard cap")
+    if probe_handler.response_headers.get("Content-Type") != "application/json":
+        raise AssertionError("compact proof must use exact application/json")
+    if probe_handler.response_headers.get("Content-Length") != str(len(probe_body)):
+        raise AssertionError("compact proof must publish exact Content-Length")
+    if probe["full_payload"]["payload_bytes"] != len(representative_body):
+        raise AssertionError("compact proof must bind the logical full payload size")
+    if "update_summary" in representative["activity_surface"] or not probe["activity"]["loading_table_present"]:
+        raise AssertionError("compact proof must bind the canonical activity surface semantics")
 
     handler = _FakeHtmlHandler()
     stderr = StringIO()

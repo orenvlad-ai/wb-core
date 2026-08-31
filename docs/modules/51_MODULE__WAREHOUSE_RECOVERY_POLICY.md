@@ -433,8 +433,11 @@ The source economics operation
 evidence. Its canonical reconciliation opens SQLite query-only and validates
 the exact source run/artifact/receipt/authorization, deployed generation,
 manifest/fingerprint, three undo rows, mutation-running→quarantined transition,
-current target hashes, legacy raw digest and canonical semantic
-before=after=current. It writes no recovery transition or business row. The
+current exact target hashes and a historic source transaction reconstructed
+from the 221-row raw aggregate plus three target-removed T1 before/planned-after
+rows. Later current non-target evolution is recorded with source/current row
+counts and component digests, not required to equal source; target drift still
+fails closed. It writes no recovery transition or business row. The
 separate Apply workflow uploads one immutable receipt and then one compact
 supersession marker; exact repeat is `already_terminal`, while missing/foreign/
 duplicate evidence fails closed before SSH.

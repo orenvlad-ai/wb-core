@@ -72,6 +72,9 @@ from packages.application.web_vitrina_performance import (
     emit_web_vitrina_performance_event,
     normalize_web_vitrina_performance_envelope,
 )
+from packages.application.web_vitrina_page_composition import (
+    build_web_vitrina_page_composition_probe,
+)
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.application.wb_prices_management import WbPricesManagementError
 from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
@@ -3855,6 +3858,7 @@ def _build_handler(
                     surface = _resolve_sheet_web_vitrina_surface_from_query(parsed.query)
                     include_source_status = _resolve_optional_query_bool(parsed.query, "include_source_status")
                     include_table_data = _resolve_optional_query_bool(parsed.query, "include_table_data")
+                    probe_shape = _resolve_optional_query_bool(parsed.query, "probe_shape")
                     as_of_date = _resolve_web_vitrina_as_of_date_from_query(
                         parsed.query,
                         surface=surface,
@@ -3893,6 +3897,7 @@ def _build_handler(
                             },
                             request_started_perf=request_started_perf,
                             build_ms=(time.perf_counter() - build_started_perf) * 1000,
+                            probe_shape=bool(probe_shape),
                         )
                         return
                     _write_web_vitrina_page_composition_response(
@@ -3901,6 +3906,7 @@ def _build_handler(
                         payload,
                         request_started_perf=request_started_perf,
                         build_ms=(time.perf_counter() - build_started_perf) * 1000,
+                        probe_shape=bool(probe_shape),
                     )
                     return
                 try:
@@ -7507,11 +7513,28 @@ def _write_web_vitrina_page_composition_response(
     *,
     request_started_perf: float,
     build_ms: float,
+    probe_shape: bool = False,
 ) -> None:
     encode_started_perf = time.perf_counter()
     encode_started_cpu = time.process_time()
     if status == HTTPStatus.OK:
-        body = _encode_web_vitrina_page_composition_body(payload)
+        full_body = _encode_web_vitrina_page_composition_body(payload)
+        if probe_shape:
+            proof = build_web_vitrina_page_composition_probe(
+                json.loads(full_body.decode("utf-8")),
+                full_payload_bytes=full_body,
+            )
+            body = (
+                json.dumps(
+                    proof,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+        else:
+            body = full_body
     else:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
     encode_cpu_ms = _bounded_http_timing_ms((time.process_time() - encode_started_cpu) * 1000)
@@ -7519,7 +7542,10 @@ def _write_web_vitrina_page_composition_response(
     normalized_build_ms = _bounded_http_timing_ms(build_ms)
 
     handler.send_response(status.value)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header(
+        "Content-Type",
+        "application/json" if probe_shape else "application/json; charset=utf-8",
+    )
     handler.send_header("Cache-Control", "private, no-store")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header(
@@ -7538,7 +7564,11 @@ def _write_web_vitrina_page_composition_response(
     request_ms = _bounded_http_timing_ms((time.perf_counter() - request_started_perf) * 1000)
     event = {
         "event": "web_vitrina_http_response_v1",
-        "route_kind": "web_vitrina_page_composition",
+        "route_kind": (
+            "web_vitrina_page_composition_probe"
+            if probe_shape
+            else "web_vitrina_page_composition"
+        ),
         "status": int(status.value),
         "request_ms": request_ms,
         "build_ms": normalized_build_ms,
@@ -7548,6 +7578,8 @@ def _write_web_vitrina_page_composition_response(
         "logical_bytes": len(body),
         "disconnected": disconnected,
     }
+    if probe_shape:
+        event["full_payload_bytes"] = len(full_body) if status == HTTPStatus.OK else 0
     print(
         json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         file=sys.stderr,

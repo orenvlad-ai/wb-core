@@ -356,6 +356,18 @@ def _exercise_false_quarantine_finalize() -> None:
         assert _target_json(runtime, candidate) == [
             item["after_plan_json"] for item in economics["patches"]
         ]
+        with sqlite3.connect(runtime.db_path) as conn:
+            later = _payload(
+                day="2026-08-30",
+                target="stable",
+                ordinary="ordinary-publication-2026-08-30T01:39:50Z",
+            )
+            later["metadata"]["refreshed_at"] = "2026-08-30T01:39:50Z"
+            conn.execute(
+                "INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?)",
+                ("bundle", "2026-08-30", "ordinary-future", recovery._json(later)),
+            )
+            conn.commit()
 
         evidence_dir = root / "production-goals" / candidate["goal_operation_id"]
         evidence_dir.mkdir(parents=True, mode=0o700)
@@ -426,13 +438,70 @@ def _exercise_false_quarantine_finalize() -> None:
             assert first["product_replay_count"] == 0
             assert first["economics_replay_count"] == 0
             assert first["undo_row_count"] == 3
-            assert first["semantic_non_target_before"] == first["semantic_non_target_after"]
-            assert first["semantic_non_target_after"] == first["semantic_non_target_current"]
-            assert first["semantic_non_target_current"]["row_count"] == 224
-            assert first["legacy_raw_non_target_digest"] == economics["non_target_digest"]
+            source = first["source_transaction"]
+            drift = first["temporal_non_target_drift"]
+            assert source["source_ready_row_count"] == 224
+            assert source["source_raw_non_target_row_count"] == 221
+            assert source["source_raw_non_target_digest"] == economics["non_target_digest"]
+            assert source["write_set"] == {
+                "row_count": 3,
+                "cell_count": 472,
+                "undo_row_count": 3,
+                "undo_rows_verified": True,
+            }
+            assert all(
+                row["target_removed_before_digest"]
+                == row["target_removed_planned_after_digest"]
+                for row in source["target_rows"]
+            )
+            assert drift["changed"] is True
+            assert drift["source_row_count"] == 224
+            assert drift["current_row_count"] == 225
+            assert drift["classification"] == "later_non_target_evolution"
+            assert drift["diff_derivation"] == "unique_added_row_from_source_raw_aggregate"
+            assert drift["derived_added_rows"][0]["identity"][-1] == "ordinary-future"
+            assert drift["effect"] == "receipt_evidence_only_not_target_approval"
             assert hashlib.sha256(runtime.db_path.read_bytes()).hexdigest() == db_digest_before
             after = registry.get_operation(candidate["phase_operation_id"])
             assert after == quarantined
+
+            target_patch = economics["patches"][0]
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
+                    "WHERE bundle_version=? AND as_of_date=? AND snapshot_id=?",
+                    (target_patch["before_plan_json"], *target_patch["identity"]),
+                )
+                conn.commit()
+            try:
+                recovery.finalize_existing_economics_operation(**kwargs)
+            except recovery.Wbc0027RecoveryError as exc:
+                assert "current after-image drifted" in str(exc)
+            else:
+                raise AssertionError("later target drift was accepted")
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
+                    "WHERE bundle_version=? AND as_of_date=? AND snapshot_id=?",
+                    (target_patch["after_plan_json"], *target_patch["identity"]),
+                )
+                undo = conn.execute(
+                    "SELECT sequence_no,before_json FROM sheet_vitrina_v1_recovery_undo_rows "
+                    "WHERE operation_id=? ORDER BY sequence_no LIMIT 1",
+                    (candidate["phase_operation_id"],),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE sheet_vitrina_v1_recovery_undo_rows SET before_json=? "
+                    "WHERE operation_id=? AND sequence_no=?",
+                    ("{}", candidate["phase_operation_id"], undo[0]),
+                )
+                conn.commit()
+            try:
+                recovery.finalize_existing_economics_operation(**kwargs)
+            except recovery.Wbc0027RecoveryError as exc:
+                assert "before/after journal drifted" in str(exc)
+            else:
+                raise AssertionError("source T1 mismatch was accepted")
         finally:
             recovery.RegistryUploadDbBackedRuntime = original_runtime
             recovery._generation = original_generation

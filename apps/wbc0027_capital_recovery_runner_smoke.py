@@ -48,6 +48,28 @@ def _context() -> dict:
             "economics_phase_fingerprint": source["economics_phase_fingerprint"],
             "storage_generation": dict(source["storage_generation"]),
             "material_qualification_digest": "sha256:" + "2" * 64,
+            "economics_source_ready_row_count": source[
+                "economics_source_ready_row_count"
+            ],
+            "economics_source_raw_non_target_row_count": source[
+                "economics_source_raw_non_target_row_count"
+            ],
+            "economics_source_raw_non_target_digest": source[
+                "economics_source_raw_non_target_digest"
+            ],
+            "economics_target_identities": source["economics_target_identities"],
+            "economics_target_before_hashes": source[
+                "economics_target_before_hashes"
+            ],
+            "economics_target_before_digest": source[
+                "economics_target_before_digest"
+            ],
+            "economics_target_after_hashes": source[
+                "economics_target_after_hashes"
+            ],
+            "economics_target_after_digest": source[
+                "economics_target_after_digest"
+            ],
         },
         "reconciliation_release": {
             "pull_request": 1130,
@@ -62,7 +84,7 @@ def _context() -> dict:
 
 
 def _result(context: dict) -> dict:
-    semantic = {
+    source_semantic = {
         "contract_name": "wbc0027_economics_semantic_non_target_digest/v1",
         "scope_version": "ready_snapshot_target_slices_removed_v1",
         "row_count": 224,
@@ -109,14 +131,79 @@ def _result(context: dict) -> dict:
         "transition_digest": "sha256:" + "b" * 64,
         "undo_row_count": 3,
         "undo_digest": "sha256:" + "c" * 64,
-        "current_target_digest": "sha256:" + "d" * 64,
-        "current_target_hashes": ["sha256:" + value * 64 for value in "ef0"],
-        "legacy_raw_non_target_digest": "sha256:" + "1" * 64,
-        "semantic_non_target_before": semantic,
-        "semantic_non_target_after": semantic,
-        "semantic_non_target_current": semantic,
-        "product_capital": {"status": "published_exact", "mismatch_count": 0},
-        "hard_non_target": {"all_exact": True},
+        "target_before_digest": source["economics_target_before_digest"],
+        "target_after_digest": source["economics_target_after_digest"],
+        "current_target_digest": source["economics_target_after_digest"],
+        "current_target_hashes": source["economics_target_after_hashes"],
+        "source_transaction": {
+            "contract_name": "wbc0027_source_economics_transaction/v1",
+            "source_ready_row_count": source["economics_source_ready_row_count"],
+            "source_raw_non_target_row_count": source["economics_source_raw_non_target_row_count"],
+            "source_raw_non_target_digest": source["economics_source_raw_non_target_digest"],
+            "source_semantic_non_target": source_semantic,
+            "target_rows": [
+                {
+                    "identity": identity,
+                    "before_sha256": before,
+                    "planned_after_sha256": after,
+                    "target_removed_before_digest": "sha256:" + "a" * 64,
+                    "target_removed_planned_after_digest": "sha256:" + "a" * 64,
+                }
+                for identity, before, after in zip(
+                    source["economics_target_identities"],
+                    source["economics_target_before_hashes"],
+                    source["economics_target_after_hashes"],
+                    strict=True,
+                )
+            ],
+            "write_set": {
+                "row_count": 3,
+                "cell_count": 472,
+                "undo_row_count": 3,
+                "undo_rows_verified": True,
+            },
+            "ordering": {
+                "cas_before_images_verified": True,
+                "mutation_running_transition_index": 4,
+                "quarantine_after_committed_target_index": 5,
+                "committed_target_readback_required": True,
+            },
+        },
+        "temporal_non_target_drift": {
+            "contract_name": "wbc0027_temporal_non_target_drift/v1",
+            "classification": "later_non_target_evolution",
+            "changed": True,
+            "source_row_count": 224,
+            "current_row_count": 225,
+            "source_target_row_count": 3,
+            "current_target_row_count": 3,
+            "source_component_digests": source_semantic["component_digests"],
+            "current_component_digests": {
+                "identities": "sha256:" + "a" * 64,
+                "semantic_payloads": "sha256:" + "b" * 64,
+                "rows": "sha256:" + "c" * 64,
+            },
+            "source_semantic_digest": source_semantic["digest"],
+            "current_semantic_digest": "sha256:" + "d" * 64,
+            "source_raw_non_target_digest": source["economics_source_raw_non_target_digest"],
+            "current_raw_non_target_digest": "sha256:" + "e" * 64,
+            "derived_added_rows": [],
+            "diff_derivation": "not_derivable_from_source_aggregate_digest",
+            "effect": "receipt_evidence_only_not_target_approval",
+        },
+        "protected_invariant": {"nm_id": 428853741, "unit_cost_rub": "117.537167"},
+        "evidence_blocked": [f"2026-08-26|blocked-{index}" for index in range(12)],
+        "product_capital": {
+            "status": "published_exact",
+            "row_count": 1152,
+            "cell_count": 24192,
+            "mismatch_count": 0,
+        },
+        "hard_non_target": {
+            "all_exact": True,
+            "from_date": "2026-08-30",
+            "observed_date_count": 2,
+        },
         "functional_economics_missing": {"2026-08-26": 12, "2026-08-29": 0},
         "query_only": True,
         "database_written": False,
@@ -145,6 +232,14 @@ def main() -> None:
     foreign = deepcopy(result)
     foreign["source_apply"]["artifact_id"] += 1
     assert not runner._valid_wbc0027_finalize_result(foreign, context=context)
+    target_drift = deepcopy(result)
+    target_drift["current_target_hashes"][0] = "sha256:" + "f" * 64
+    assert not runner._valid_wbc0027_finalize_result(target_drift, context=context)
+    source_drift = deepcopy(result)
+    source_drift["source_transaction"]["target_rows"][0]["before_sha256"] = (
+        "sha256:" + "f" * 64
+    )
+    assert not runner._valid_wbc0027_finalize_result(source_drift, context=context)
 
     receipt = {
         "schema": runner.WBC0027_RECONCILIATION_RECEIPT_SCHEMA,
@@ -174,6 +269,7 @@ def main() -> None:
     )
     shell = command[-1]
     assert "finalize-only" in shell
+    assert "--no-create" in shell
     assert " production apply " not in shell
     assert "/apps/wbc0027_capital_recovery.py" in shell
 

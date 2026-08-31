@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime, timedelta
+import hashlib
+import json
 from typing import Any, Mapping
 
 from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME, current_business_date_iso
@@ -13,10 +15,88 @@ from packages.contracts.web_vitrina_view_model import WebVitrinaViewModelV1
 
 WEB_VITRINA_PAGE_COMPOSITION_NAME = "web_vitrina_page_composition"
 WEB_VITRINA_PAGE_COMPOSITION_VERSION = "v1"
+WEB_VITRINA_PAGE_COMPOSITION_PROBE_CONTRACT = (
+    "web_vitrina_page_composition_probe/v1"
+)
+WEB_VITRINA_PAGE_COMPOSITION_PROBE_VERSION = 1
 WEB_VITRINA_PAGE_STATE_NAMESPACE = "wb-core:sheet-vitrina-v1:web-vitrina:page-state:v1"
 WEB_VITRINA_DEFAULT_PRESET_ID = "two_weeks"
 WEB_VITRINA_DEFAULT_PRESET_LABEL = "2 недели"
 _ALL_OPTION_VALUE = "__all__"
+
+
+def _probe_component_digest(value: Mapping[str, Any]) -> str:
+    raw = json.dumps(
+        dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def build_web_vitrina_page_composition_probe(
+    payload: Mapping[str, Any], *, full_payload_bytes: bytes
+) -> dict[str, Any]:
+    """Build a bounded proof from the canonical full composition semantics."""
+
+    meta = payload.get("meta")
+    table = payload.get("table_surface")
+    activity = payload.get("activity_surface")
+    if not all(isinstance(value, Mapping) for value in (meta, table, activity)):
+        raise ValueError("page composition probe requires canonical full surfaces")
+    assert isinstance(meta, Mapping)
+    assert isinstance(table, Mapping)
+    assert isinstance(activity, Mapping)
+    state_surface = table.get("state_surface")
+    diagnostics = meta.get("page_composition_diagnostics")
+    if not isinstance(state_surface, Mapping) or not isinstance(
+        diagnostics, Mapping
+    ):
+        raise ValueError("page composition probe requires canonical state diagnostics")
+    if int(diagnostics.get("payload_bytes") or 0) != len(full_payload_bytes):
+        raise ValueError("page composition probe full payload length drifted")
+
+    identity = {
+        "composition_name": str(payload.get("composition_name") or ""),
+        "composition_version": str(payload.get("composition_version") or ""),
+        "source_contract_name": str(meta.get("source_contract_name") or ""),
+        "source_contract_version": str(meta.get("source_contract_version") or ""),
+    }
+    snapshot = {
+        "snapshot_id": str(meta.get("snapshot_id") or ""),
+        "as_of_date": str(meta.get("as_of_date") or ""),
+        "snapshot_as_of_date": str(meta.get("snapshot_as_of_date") or ""),
+    }
+    table_proof = {
+        "current_state": str(state_surface.get("current_state") or ""),
+        "table_data_state": str(table.get("table_data_state") or ""),
+        "total_row_count": int(table.get("total_row_count") or 0),
+        "returned_row_count": int(table.get("returned_row_count") or 0),
+    }
+    activity_proof = {
+        "loading_table_present": isinstance(activity.get("loading_table"), Mapping),
+        "update_summary_present": "update_summary" in activity,
+    }
+    full_payload = {
+        "payload_bytes": len(full_payload_bytes),
+        "payload_sha256": "sha256:"
+        + hashlib.sha256(full_payload_bytes).hexdigest(),
+    }
+    components = {
+        "identity": identity,
+        "snapshot": snapshot,
+        "table": table_proof,
+        "activity": activity_proof,
+        "full_payload": full_payload,
+    }
+    return {
+        "contract_name": WEB_VITRINA_PAGE_COMPOSITION_PROBE_CONTRACT,
+        "contract_version": WEB_VITRINA_PAGE_COMPOSITION_PROBE_VERSION,
+        "status": "ok",
+        **components,
+        "component_digests": {
+            key: _probe_component_digest(value)
+            for key, value in components.items()
+        },
+    }
 
 
 @dataclass(frozen=True)

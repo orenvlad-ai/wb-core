@@ -164,6 +164,18 @@ poll-ит, не sync-ит branch, не enqueue-ит и не resubmit-ит.
 `--target-file <canonical-target>` до subcommand. Вызов legacy/default target
 «для проверки guard» не является target discovery или acceptance evidence.
 
+Web-vitrina page-composition acceptance использует тот же canonical read route
+с `surface=page_composition&probe_shape=1`. Сервер сначала строит обычную full
+composition, оставляя её публичный контракт без изменений, а затем возвращает
+bounded closed-schema proof с identity/as-of, table state/counts, наличием
+loading table, отсутствием update summary, logical full bytes/SHA-256 и
+component digests. Probe принимает только HTTP 200, exact `application/json`,
+один совпадающий `Content-Length`, observed EOF, strict UTF-8/JSON без duplicate
+или unknown fields и body не более 64 KiB. HTML, malformed/truncated response,
+digest drift или overflow fail closed; JSON-prefix extraction для этого route
+запрещён. Поэтому корректный full payload больше прежнего 768 KiB transport cap
+не является release failure.
+
 ## One action and one receipt
 
 При admission success Runner вызывает GitHub squash merge с expected head SHA,
@@ -318,6 +330,14 @@ query-only readback используют один и тот же all-ready-row s
 target-row count и component digests identities/semantic payloads/rows.
 Допустима только ordinary semantic rebase до submit; exact target before-images
 остаются CAS, а реальное изменение semantic non-target fail closed.
+
+Эта строгость сохраняется для реального Apply между T1 before-image,
+pre-submit, post-submit и retain. Отложенный `finalize-only` — иной temporal
+boundary: он не пишет business data и не требует равенства позднего current
+non-target историческому source digest. Receipt отдельно сохраняет
+source/current row counts, identity/payload/row component digests и derivable
+changed identities/hashes. Поздняя ordinary evolution — только evidence, не
+approval target changes; current target after-images остаются exact.
 
 Факт business write сохраняется внутри той же SQLite transaction непосредственно
 перед COMMIT как `committed_pending_reconciliation` с exact after/non-target
