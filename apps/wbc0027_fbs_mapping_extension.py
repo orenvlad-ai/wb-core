@@ -54,7 +54,7 @@ EXPECTED_OPERATIONAL_GENERATION_ID = "operational-c54072027f14f90b374b"
 EXPECTED_MANIFEST_SHA256 = (
     "sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb"
 )
-EXPECTED_SCHEMA_REVISION = "987"
+EXPECTED_SQLITE_SCHEMA_VERSION = 987
 EXPECTED_CUTOVER_ID = "ffcut_d2816d894a75390dcaa6514c0a96"
 EXPECTED_EXTERNAL_IDENTITY_DIGEST = (
     recovery_module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST
@@ -175,7 +175,7 @@ class Wbc0027ExactFbsSkuMappingExtension:
                 "runtime_sha": DIAGNOSIS_RUNTIME_SHA,
                 "operational_generation_id": EXPECTED_OPERATIONAL_GENERATION_ID,
                 "manifest_sha256": EXPECTED_MANIFEST_SHA256,
-                "schema_revision": EXPECTED_SCHEMA_REVISION,
+                "sqlite_schema_version": EXPECTED_SQLITE_SCHEMA_VERSION,
                 "cutover_id": EXPECTED_CUTOVER_ID,
                 "external_identity_digest": EXPECTED_EXTERNAL_IDENTITY_DIGEST,
             },
@@ -539,10 +539,8 @@ def _binding_blockers(
         == EXPECTED_MANIFEST_SHA256,
         "storage_generation_drift": storage.get("operational_generation_id")
         == EXPECTED_OPERATIONAL_GENERATION_ID,
-        "storage_schema_revision_drift": str(
-            storage.get("operational_schema_revision") or ""
-        )
-        == EXPECTED_SCHEMA_REVISION,
+        "storage_schema_revision_drift": storage.get("sqlite_schema_version")
+        == EXPECTED_SQLITE_SCHEMA_VERSION,
         "cutover_drift": source.get("cutover_id") == EXPECTED_CUTOVER_ID,
         "tuple_count_drift": identity_snapshot.get("tuple_count")
         == EXPECTED_TUPLE_COUNT,
