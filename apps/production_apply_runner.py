@@ -94,6 +94,58 @@ WBC0027_PREDECESSOR_AUTH_BODY = (
     "economics-logical 298 economics-persisted 472 economics-blocked 12 "
     "protected-nm 428853741 protected-unit-cost-rub 117.537167 submits 2"
 )
+WBC0027_RECONCILIATION_RECEIPT_SCHEMA = (
+    "wb-core.wbc0027-existing-operation-reconciliation-receipt/v1"
+)
+WBC0027_RECONCILIATION_SUMMARY_SCHEMA = (
+    "wb-core.wbc0027-existing-operation-reconciliation-summary/v1"
+)
+WBC0027_RECONCILIATION_MARKER = (
+    "wb-core-wbc0027-existing-operation-reconciliation"
+)
+WBC0027_RECONCILIATION_ARTIFACT_FILE = (
+    "wbc0027-existing-operation-reconciliation-receipt.json"
+)
+WBC0027_RECONCILIATION_SOURCE = {
+    "pull_request": 1129,
+    "run_id": 33345644125,
+    "artifact_id": 9741910399,
+    "artifact_name": "production-apply-receipt-pr-1129-run-33345644125",
+    "artifact_archive_digest": (
+        "sha256:4149736a3ec3c24a369d8b6ca819aae6565fdeae49f80ddd6588baa048ee8807"
+    ),
+    "receipt_sha256": (
+        "843d1eb81d92ac16a51bc21fb92256916e4c9c3a353d3221ebc1a82df80bf9f5"
+    ),
+    "blocked_comment_id": 5472359912,
+    "authorization_comment_id": 5472278622,
+    "authorization_body_sha256": (
+        "b2cfb8bf9f20ecfe7a9075f42ff443a144d4550ee07c8418482988ad2542d3ad"
+    ),
+    "operation_id": "production-goal-v1-5024719a64fa9707b72d938ebf8a2127",
+    "deployed_sha": "876f5f307a2053d66544dd1c8950f94f77f92ddb",
+    "release_operation_id": "release-v2-6da7932622d180ce46e9e6770de148fa",
+    "product_phase_operation_id": "recovery_9b9d1d2ad66035d080ec2bced855201e",
+    "economics_phase_operation_id": "recovery_ae66a56f72d90b469b75d8adb893c51f",
+    "economics_manifest_path": (
+        "/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        "production-goal-v1-5024719a64fa9707b72d938ebf8a2127/"
+        "wbc0027-economics-plan-20260831T004927088748Z-6906446fda0d.json"
+    ),
+    "economics_manifest_sha256": (
+        "sha256:675fcb98fdcc74ce2d30c4e907c9c5330f7878fee929027c536b5a6f03ec47c4"
+    ),
+    "economics_phase_fingerprint": (
+        "sha256:2d6004dcd37b8d3becd31231d6d2a77e4ab1c5262757f355ddf1413f1d24b542"
+    ),
+    "storage_generation": {
+        "generation_id": "operational-c54072027f14f90b374b",
+        "manifest_sha256": (
+            "sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb"
+        ),
+        "schema_revision": "operational_v1",
+    },
+}
 HISTORICAL_COST_GOAL_PROFILE = "historical-analytical-cost-carry-forward"
 HISTORICAL_MISSING_REPAIR_GOAL_PROFILE = "historical-missing-repair"
 WARM_ARCHIVE_LEGACY_EVIDENCE_BASE = (
@@ -3725,7 +3777,8 @@ def run_wbc0027_goal(
         product_state = (
             str(product_payload.get("status"))
             if isinstance(product_payload, Mapping)
-            and product_payload.get("status") in {"not_applied", "ambiguous"}
+            and product_payload.get("status")
+            in {"not_applied", "ambiguous", "applied_pending_reconciliation"}
             else "ambiguous"
             if product_apply.get("transport_ambiguous") is True or product_submits
             else "not_applied"
@@ -3769,7 +3822,8 @@ def run_wbc0027_goal(
         if economics_exact
         else str(economics_payload.get("status"))
         if isinstance(economics_payload, Mapping)
-        and economics_payload.get("status") in {"not_applied", "ambiguous"}
+        and economics_payload.get("status")
+        in {"not_applied", "ambiguous", "applied_pending_reconciliation"}
         else "ambiguous"
         if economics_apply.get("transport_ambiguous") is True or economics_submits
         else "not_applied"
@@ -6824,6 +6878,844 @@ def _run_warm_reconciliation_mode(
     raise ApplyError("warm archive reconciliation phase is invalid")
 
 
+def _wbc0027_reconciliation_marker(operation: str) -> str:
+    return f"<!-- {WBC0027_RECONCILIATION_MARKER} operation={operation} -->"
+
+
+def _wbc0027_reconciliation_artifact_name(run_id: int) -> str:
+    return (
+        "wbc0027-existing-operation-reconciliation-pr-1129-run-"
+        + str(run_id)
+    )
+
+
+def _validate_wbc0027_reconciliation_source_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    goal: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = WBC0027_RECONCILIATION_SOURCE
+    expected = {
+        "schema": APPLY_RECEIPT_SCHEMA,
+        "state": "blocked",
+        "operation_id": source["operation_id"],
+        "repository": CANONICAL_REPOSITORY,
+        "pull_request": source["pull_request"],
+        "release_operation_id": source["release_operation_id"],
+        "merge_sha": source["deployed_sha"],
+        "deployed_sha": source["deployed_sha"],
+        "authorization_comment_id": source["authorization_comment_id"],
+        "authorization_body_sha256": source["authorization_body_sha256"],
+        "apply_count": 1,
+    }
+    for field, value in expected.items():
+        if receipt.get(field) != value:
+            raise ApplyError(
+                f"WBC0027 reconciliation source receipt drifted: {field}"
+            )
+    if receipt.get("goal") != dict(goal):
+        raise ApplyError("WBC0027 reconciliation source goal drifted")
+    evidence = receipt.get("evidence")
+    if not isinstance(evidence, Mapping):
+        raise ApplyError("WBC0027 reconciliation source evidence is missing")
+    expected_evidence = {
+        "state": "blocked",
+        "reason": "wbc0027-economics-query-only-readback-not-reconciled",
+        "apply_count": 1,
+        "product_state": "applied",
+        "economics_state": "not_applied",
+        "product_submit_count": 1,
+        "economics_submit_count": 0,
+    }
+    for field, value in expected_evidence.items():
+        if evidence.get(field) != value:
+            raise ApplyError(
+                f"WBC0027 reconciliation source phase evidence drifted: {field}"
+            )
+    product_candidate = evidence.get("product_candidate")
+    economics_candidate = evidence.get("economics_candidate")
+    if not isinstance(product_candidate, Mapping) or not isinstance(
+        economics_candidate, Mapping
+    ):
+        raise ApplyError("WBC0027 reconciliation source candidates are missing")
+    expected_economics = {
+        "manifest_path": source["economics_manifest_path"],
+        "manifest_sha256": source["economics_manifest_sha256"],
+        "phase_fingerprint": source["economics_phase_fingerprint"],
+        "phase_operation_id": source["economics_phase_operation_id"],
+        "storage_generation": source["storage_generation"],
+    }
+    for field, value in expected_economics.items():
+        if economics_candidate.get(field) != value:
+            raise ApplyError(
+                f"WBC0027 reconciliation economics candidate drifted: {field}"
+            )
+    if (
+        product_candidate.get("phase_operation_id")
+        != source["product_phase_operation_id"]
+        or product_candidate.get("storage_generation")
+        != source["storage_generation"]
+    ):
+        raise ApplyError("WBC0027 reconciliation product candidate drifted")
+    product_apply = evidence.get("product_apply")
+    economics_apply = evidence.get("economics_apply")
+    economics_readback = evidence.get("economics_readback")
+    product_result = (
+        (product_apply.get("result") or {})
+        if isinstance(product_apply, Mapping)
+        else {}
+    )
+    economics_result = (
+        (economics_apply.get("result") or {})
+        if isinstance(economics_apply, Mapping)
+        else {}
+    )
+    readback_result = (
+        (economics_readback.get("result") or {})
+        if isinstance(economics_readback, Mapping)
+        else {}
+    )
+    product_capital = readback_result.get("product_capital") or {}
+    hard_non_target = readback_result.get("hard_non_target") or {}
+    if not (
+        isinstance(product_result, Mapping)
+        and product_result.get("status") == "applied"
+        and product_result.get("phase_operation_id")
+        == source["product_phase_operation_id"]
+        and product_result.get("database_written") is True
+        and product_result.get("production_mutation_submit_count") == 1
+        and isinstance(economics_result, Mapping)
+        and economics_result.get("status") == "not_applied"
+        and economics_result.get("error_type") == "RecoveryPolicyError"
+        and economics_result.get("error")
+        == "non-target digest changed after mutation"
+        and economics_result.get("database_written") is False
+        and economics_result.get("production_mutation_submit_count") == 0
+        and isinstance(readback_result, Mapping)
+        and readback_result.get("status") == "pending_reconciliation"
+        and readback_result.get("recovery_lifecycle") == "quarantined"
+        and readback_result.get("economics_target_exact") is True
+        and readback_result.get("functional_economics_missing")
+        == {"2026-08-26": 12, "2026-08-29": 0}
+        and isinstance(product_capital, Mapping)
+        and product_capital.get("status") == "published_exact"
+        and int(product_capital.get("mismatch_count") or 0) == 0
+        and isinstance(hard_non_target, Mapping)
+        and hard_non_target.get("all_exact") is True
+    ):
+        raise ApplyError(
+            "WBC0027 source does not prove the exact after-COMMIT false quarantine"
+        )
+    return {
+        "product_candidate": dict(product_candidate),
+        "economics_candidate": dict(economics_candidate),
+    }
+
+
+def _wbc0027_reconciliation_context(
+    *,
+    args: argparse.Namespace,
+    client: GitHubClient,
+    source_pr: Mapping[str, Any],
+    source_comments: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    source = WBC0027_RECONCILIATION_SOURCE
+    required = {
+        "source_run_id": args.source_run_id,
+        "source_artifact_id": args.source_artifact_id,
+        "source_artifact_name": args.source_artifact_name,
+        "source_receipt_sha256": args.source_receipt_sha256,
+        "authorization_comment_id": args.authorization_comment_id,
+        "blocked_comment_id": args.blocked_comment_id,
+        "operation_id": args.operation_id,
+        "reconciliation_pr": args.reconciliation_pr,
+        "reconciliation_release_operation_id": args.reconciliation_release_operation_id,
+    }
+    missing = sorted(field for field, value in required.items() if not value)
+    if missing:
+        raise ApplyError(
+            "WBC0027 receipt reconciliation inputs are missing: "
+            + ", ".join(missing)
+        )
+    exact_inputs = {
+        "pr": args.pr,
+        "source_run_id": args.source_run_id,
+        "source_artifact_id": args.source_artifact_id,
+        "source_artifact_name": args.source_artifact_name,
+        "source_receipt_sha256": args.source_receipt_sha256,
+        "authorization_comment_id": args.authorization_comment_id,
+        "blocked_comment_id": args.blocked_comment_id,
+        "operation_id": args.operation_id,
+    }
+    expected_inputs = {
+        "pr": source["pull_request"],
+        "source_run_id": source["run_id"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_name": source["artifact_name"],
+        "source_receipt_sha256": source["receipt_sha256"],
+        "authorization_comment_id": source["authorization_comment_id"],
+        "blocked_comment_id": source["blocked_comment_id"],
+        "operation_id": source["operation_id"],
+    }
+    if exact_inputs != expected_inputs:
+        raise ApplyError("WBC0027 exact source lineage input drifted")
+    source_merge_sha = exact_sha(source_pr.get("merge_commit_sha"), "source-pr-merge")
+    if source_merge_sha != source["deployed_sha"]:
+        raise ApplyError("WBC0027 exact source PR merge drifted")
+    run, receipt = _collect_recovery_receipt(
+        client,
+        pr=args.pr,
+        run_id=int(args.source_run_id),
+        artifact_name=str(args.source_artifact_name),
+        receipt_sha256=str(args.source_receipt_sha256),
+        expected_conclusion="success",
+    )
+    artifact = run.get("validated_artifact")
+    if not isinstance(artifact, Mapping) or (
+        artifact.get("id") != source["artifact_id"]
+        or artifact.get("digest") != source["artifact_archive_digest"]
+    ):
+        raise ApplyError("WBC0027 source artifact immutable identity drifted")
+    authorization = client.get(
+        f"/issues/comments/{int(args.authorization_comment_id)}"
+    )
+    goal = validate_authorization(
+        authorization,
+        repository=args.repository,
+        pr=args.pr,
+    )
+    authorization_body = str(authorization.get("body") or "").strip()
+    if (
+        digest(authorization_body.encode("utf-8"))
+        != source["authorization_body_sha256"]
+        or operation_id(
+            args.repository, args.pr, int(args.authorization_comment_id), goal
+        )
+        != source["operation_id"]
+    ):
+        raise ApplyError("WBC0027 source authorization bytes drifted")
+    candidate_binding = _validate_wbc0027_reconciliation_source_receipt(
+        receipt, goal=goal
+    )
+    parse_release_receipt(
+        source_comments,
+        pr=args.pr,
+        release_operation=str(source["release_operation_id"]),
+        merge_sha=source_merge_sha,
+    )
+    source_markers = [
+        item
+        for item in source_comments
+        if marker(str(source["operation_id"])) in str(item.get("body") or "")
+    ]
+    if len(source_markers) != 1 or source_markers[0].get("id") != source[
+        "blocked_comment_id"
+    ]:
+        raise ApplyError("WBC0027 source blocked marker is missing or ambiguous")
+    blocked_comment = source_markers[0]
+    if not is_actions_bot_comment(blocked_comment):
+        raise ApplyError("WBC0027 source blocked marker author is foreign")
+    blocked_payload = _comment_payload(
+        blocked_comment, str(source["operation_id"])
+    )
+    blocked_artifact = blocked_payload.get("artifact") or {}
+    if not (
+        blocked_payload.get("schema") == APPLY_COMMENT_SUMMARY_SCHEMA
+        and blocked_payload.get("state") == "blocked"
+        and blocked_payload.get("operation_id") == source["operation_id"]
+        and blocked_payload.get("pull_request") == source["pull_request"]
+        and blocked_payload.get("deployed_sha") == source["deployed_sha"]
+        and blocked_payload.get("reason")
+        == "wbc0027-economics-query-only-readback-not-reconciled"
+        and blocked_payload.get("apply_count") == 1
+        and isinstance(blocked_artifact, Mapping)
+        and blocked_artifact.get("name") == source["artifact_name"]
+        and blocked_artifact.get("sha256")
+        == "sha256:" + str(source["receipt_sha256"])
+    ):
+        raise ApplyError("WBC0027 source blocked marker binding drifted")
+    correction_pr = client.get(f"/pulls/{int(args.reconciliation_pr)}")
+    if not isinstance(correction_pr, Mapping) or correction_pr.get("merged") is not True:
+        raise ApplyError("WBC0027 reconciliation release PR is not merged")
+    correction_sha = exact_sha(
+        correction_pr.get("merge_commit_sha"), "reconciliation-pr-merge"
+    )
+    code_sha = exact_sha(os.environ.get("GITHUB_SHA"), "reconciliation-code")
+    if correction_sha != code_sha or correction_sha == source_merge_sha:
+        raise ApplyError("WBC0027 trusted reconciliation checkout is not exact")
+    correction_comments = list_comments(client, int(args.reconciliation_pr))
+    release = parse_release_receipt(
+        correction_comments,
+        pr=int(args.reconciliation_pr),
+        release_operation=str(args.reconciliation_release_operation_id),
+        merge_sha=correction_sha,
+    )
+    return {
+        "source": {
+            "pull_request": source["pull_request"],
+            "run_id": source["run_id"],
+            "run_head_sha": source_merge_sha,
+            "artifact_id": source["artifact_id"],
+            "artifact_name": source["artifact_name"],
+            "artifact_archive_digest": source["artifact_archive_digest"],
+            "receipt_file": RECOVERY_ARTIFACT_FILE,
+            "receipt_sha256": "sha256:" + str(source["receipt_sha256"]),
+            "blocked_comment_id": source["blocked_comment_id"],
+            "blocked_comment_digest": payload_digest(blocked_payload),
+            "authorization_comment_id": source["authorization_comment_id"],
+            "authorization_body_sha256": source["authorization_body_sha256"],
+            "authorization_reference": (
+                f"github:{args.repository}:pr:{args.pr}:comment:"
+                f"{args.authorization_comment_id}:sha256:"
+                f"{source['authorization_body_sha256']}"
+            ),
+            "operation_id": source["operation_id"],
+            "release_operation_id": source["release_operation_id"],
+            "deployed_sha": source["deployed_sha"],
+            "product_phase_operation_id": source["product_phase_operation_id"],
+            "economics_phase_operation_id": source["economics_phase_operation_id"],
+            "economics_manifest_path": source["economics_manifest_path"],
+            "economics_manifest_sha256": source["economics_manifest_sha256"],
+            "economics_phase_fingerprint": source["economics_phase_fingerprint"],
+            "storage_generation": dict(source["storage_generation"]),
+            "material_qualification_digest": candidate_binding[
+                "economics_candidate"
+            ]["material_qualification_digest"],
+        },
+        "reconciliation_release": {
+            "pull_request": int(args.reconciliation_pr),
+            "operation_id": str(args.reconciliation_release_operation_id),
+            "release_kind": "live_runtime",
+            "merge_sha": correction_sha,
+            "deployed_sha": correction_sha,
+            "workflow_run_id": release.get("workflow_run_id"),
+            "plan_hash": release.get("plan_hash"),
+        },
+    }
+
+
+def _wbc0027_finalize_remote_command(
+    *, target: Mapping[str, Any], context: Mapping[str, Any]
+) -> list[str]:
+    source = context["source"]
+    release = context["reconciliation_release"]
+    target_dir = str(target["target_dir"])
+    evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / str(source["operation_id"])
+    )
+    parts = [
+        "python3",
+        f"{target_dir}/apps/wbc0027_capital_recovery.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--deployed-sha-file",
+        f"{target_dir}/.wb-core-runtime-sha",
+        "--expected-deployed-sha",
+        str(release["merge_sha"]),
+        "--profile",
+        WBC0027_GOAL_PROFILE,
+        "--target-id",
+        CANONICAL_PRODUCTION_TARGET_ID,
+        "--operation-id",
+        str(source["operation_id"]),
+        "--evidence-dir",
+        evidence_dir,
+        "finalize-only",
+        "--source-deployed-sha",
+        str(source["deployed_sha"]),
+        "--source-manifest",
+        str(source["economics_manifest_path"]),
+        "--source-manifest-sha256",
+        str(source["economics_manifest_sha256"]),
+        "--source-phase-operation-id",
+        str(source["economics_phase_operation_id"]),
+        "--source-phase-fingerprint",
+        str(source["economics_phase_fingerprint"]),
+        "--source-storage-generation-json",
+        json.dumps(
+            source["storage_generation"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "--source-run-id",
+        str(source["run_id"]),
+        "--source-artifact-id",
+        str(source["artifact_id"]),
+        "--source-artifact-name",
+        str(source["artifact_name"]),
+        "--source-receipt-sha256",
+        str(source["receipt_sha256"]),
+        "--source-comment-id",
+        str(source["blocked_comment_id"]),
+        "--reconciliation-pr",
+        str(release["pull_request"]),
+        "--reconciliation-release-operation-id",
+        str(release["operation_id"]),
+        "--authorization-reference",
+        str(source["authorization_reference"]),
+    ]
+    shell = (
+        "set -eu; umask 077; test -d "
+        + shlex.quote(evidence_dir)
+        + '; test "$(stat -c %a '
+        + shlex.quote(evidence_dir)
+        + ')" = 700; cd '
+        + shlex.quote(target_dir)
+        + "; export PYTHONPATH="
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _valid_wbc0027_finalize_result(
+    result: Any, *, context: Mapping[str, Any]
+) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    source = context["source"]
+    release = context["reconciliation_release"]
+    source_apply = result.get("source_apply") or {}
+    result_release = result.get("reconciliation_release") or {}
+    source_row = result.get("source_recovery_row") or {}
+    product = result.get("product_capital") or {}
+    hard = result.get("hard_non_target") or {}
+    semantic_before = result.get("semantic_non_target_before")
+    semantic_after = result.get("semantic_non_target_after")
+    semantic_current = result.get("semantic_non_target_current")
+    hashes = result.get("current_target_hashes")
+    return bool(
+        result.get("contract_name")
+        == "wbc0027_existing_operation_reconciliation/v1"
+        and result.get("status") == "reconciled_existing_operation"
+        and result.get("terminal_disposition")
+        == "supersede_false_quarantine_receipt"
+        and result.get("profile") == WBC0027_GOAL_PROFILE
+        and result.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
+        and result.get("goal_operation_id") == source["operation_id"]
+        and result.get("product_phase_operation_id")
+        == source["product_phase_operation_id"]
+        and result.get("economics_phase_operation_id")
+        == source["economics_phase_operation_id"]
+        and result.get("source_deployed_sha") == source["deployed_sha"]
+        and result.get("reconciliation_deployed_sha") == release["merge_sha"]
+        and result.get("storage_generation") == source["storage_generation"]
+        and isinstance(source_apply, Mapping)
+        and source_apply.get("run_id") == source["run_id"]
+        and source_apply.get("artifact_id") == source["artifact_id"]
+        and source_apply.get("artifact_name") == source["artifact_name"]
+        and source_apply.get("receipt_sha256") == source["receipt_sha256"]
+        and source_apply.get("comment_id") == source["blocked_comment_id"]
+        and source_apply.get("authorization_reference")
+        == source["authorization_reference"]
+        and result_release
+        == {
+            "pull_request": release["pull_request"],
+            "operation_id": release["operation_id"],
+        }
+        and isinstance(source_row, Mapping)
+        and source_row.get("operation_id")
+        == source["economics_phase_operation_id"]
+        and source_row.get("lifecycle") == "quarantined"
+        and source_row.get("quarantine_reason")
+        == "non_target_digest_drift_after_mutation"
+        and result.get("undo_row_count") == 3
+        and isinstance(hashes, list)
+        and len(hashes) == 3
+        and all(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(value or ""))
+            for value in hashes
+        )
+        and semantic_before == semantic_after == semantic_current
+        and isinstance(semantic_current, Mapping)
+        and semantic_current.get("contract_name")
+        == "wbc0027_economics_semantic_non_target_digest/v1"
+        and semantic_current.get("scope_version")
+        == "ready_snapshot_target_slices_removed_v1"
+        and semantic_current.get("row_count") == 224
+        and semantic_current.get("target_row_count") == 3
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(semantic_current.get("digest") or ""),
+        )
+        is not None
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(result.get("legacy_raw_non_target_digest") or ""),
+        )
+        is not None
+        and isinstance(product, Mapping)
+        and product.get("status") == "published_exact"
+        and int(product.get("mismatch_count") or 0) == 0
+        and isinstance(hard, Mapping)
+        and hard.get("all_exact") is True
+        and result.get("functional_economics_missing")
+        == {"2026-08-26": 12, "2026-08-29": 0}
+        and result.get("query_only") is True
+        and result.get("database_written") is False
+        and result.get("production_mutation_count") == 0
+        and result.get("product_replay_count") == 0
+        and result.get("economics_replay_count") == 0
+    )
+
+
+def _extract_wbc0027_reconciliation_artifact(
+    raw_zip: bytes, *, expected_sha256: str
+) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            if (
+                len(files) != 1
+                or files[0].filename != WBC0027_RECONCILIATION_ARTIFACT_FILE
+                or files[0].file_size <= 0
+                or files[0].file_size > MAX_RECOVERY_ARTIFACT_BYTES
+            ):
+                raise ApplyError("WBC0027 reconciliation artifact shape is invalid")
+            raw = archive.read(files[0])
+    except zipfile.BadZipFile as exc:
+        raise ApplyError("WBC0027 reconciliation artifact ZIP is invalid") from exc
+    if digest(raw) != expected_sha256:
+        raise ApplyError("WBC0027 reconciliation artifact digest mismatch")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApplyError("WBC0027 reconciliation artifact JSON is invalid") from exc
+    if not isinstance(payload, dict) or raw != canonical_json_bytes(payload) + b"\n":
+        raise ApplyError("WBC0027 reconciliation artifact bytes are not canonical")
+    return payload
+
+
+def _verify_uploaded_wbc0027_reconciliation_artifact(
+    client: GitHubClient,
+    *,
+    run_id: int,
+    artifact_name: str,
+    receipt_sha256: str,
+    code_sha: str,
+) -> dict[str, Any]:
+    matches: list[Mapping[str, Any]] = []
+    for attempt in range(6):
+        payload = client.get(f"/actions/runs/{run_id}/artifacts?per_page=100")
+        values = payload.get("artifacts") if isinstance(payload, Mapping) else None
+        if not isinstance(values, list):
+            raise ApplyError("WBC0027 reconciliation artifact listing is invalid")
+        matches = [
+            item
+            for item in values
+            if isinstance(item, Mapping) and item.get("name") == artifact_name
+        ]
+        if matches or attempt == 5:
+            break
+        time.sleep(2.0)
+    if len(matches) != 1:
+        raise ApplyError("uploaded WBC0027 reconciliation artifact is ambiguous")
+    artifact = matches[0]
+    workflow_run = artifact.get("workflow_run")
+    if (
+        artifact.get("expired") is True
+        or not isinstance(artifact.get("id"), int)
+        or not isinstance(workflow_run, Mapping)
+        or workflow_run.get("id") != run_id
+        or workflow_run.get("head_branch") != "main"
+        or workflow_run.get("head_sha") != code_sha
+    ):
+        raise ApplyError("uploaded WBC0027 artifact provenance mismatch")
+    raw_zip = client.request(
+        "GET",
+        f"/actions/artifacts/{int(artifact['id'])}/zip",
+        accept="application/vnd.github+json",
+        raw=True,
+    )
+    if not isinstance(raw_zip, bytes):
+        raise ApplyError("uploaded WBC0027 artifact download failed")
+    return {
+        "metadata": dict(artifact),
+        "receipt": _extract_wbc0027_reconciliation_artifact(
+            raw_zip, expected_sha256=receipt_sha256
+        ),
+    }
+
+
+def _validate_wbc0027_reconciliation_receipt(
+    receipt: Any, *, context: Mapping[str, Any]
+) -> bool:
+    if not isinstance(receipt, Mapping):
+        return False
+    return bool(
+        receipt.get("schema") == WBC0027_RECONCILIATION_RECEIPT_SCHEMA
+        and receipt.get("state") == "done"
+        and receipt.get("terminal_disposition")
+        == "done/reconciled_existing_operation"
+        and receipt.get("query_only") is True
+        and receipt.get("database_written") is False
+        and receipt.get("production_mutation_count") == 0
+        and receipt.get("product_replay_count") == 0
+        and receipt.get("economics_replay_count") == 0
+        and receipt.get("source") == context["source"]
+        and receipt.get("reconciliation_release")
+        == context["reconciliation_release"]
+        and _valid_wbc0027_finalize_result(
+            (receipt.get("probe") or {}).get("result"), context=context
+        )
+        and receipt.get("evidence_digest")
+        == payload_digest(
+            {key: value for key, value in receipt.items() if key != "evidence_digest"}
+        )
+    )
+
+
+def _existing_wbc0027_reconciliation_marker(
+    comments: list[Mapping[str, Any]],
+    *,
+    context: Mapping[str, Any],
+    client: GitHubClient,
+) -> Mapping[str, Any] | None:
+    markers = [
+        item
+        for item in comments
+        if WBC0027_RECONCILIATION_MARKER in str(item.get("body") or "")
+    ]
+    if not markers:
+        return None
+    if len(markers) != 1:
+        raise ApplyError("WBC0027 reconciliation marker is duplicate or ambiguous")
+    marker_comment = markers[0]
+    payload = _parse_reconciliation_comment_payload(
+        marker_comment,
+        expected_marker=_wbc0027_reconciliation_marker(
+            str(context["source"]["operation_id"])
+        ),
+    )
+    artifact = payload.get("artifact") or {}
+    if not (
+        payload.get("schema") == WBC0027_RECONCILIATION_SUMMARY_SCHEMA
+        and payload.get("state") == "done"
+        and payload.get("terminal_disposition")
+        == "done/reconciled_existing_operation"
+        and payload.get("query_only") is True
+        and payload.get("production_mutation_count") == 0
+        and payload.get("product_replay_count") == 0
+        and payload.get("economics_replay_count") == 0
+        and payload.get("source") == context["source"]
+        and payload.get("reconciliation_release")
+        == context["reconciliation_release"]
+        and isinstance(artifact, Mapping)
+        and artifact.get("file") == WBC0027_RECONCILIATION_ARTIFACT_FILE
+        and artifact.get("retention_days") == 90
+        and re.fullmatch(
+            r"wbc0027-existing-operation-reconciliation-pr-1129-run-([1-9][0-9]*)",
+            str(artifact.get("name") or ""),
+        )
+        is not None
+        and re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(artifact.get("sha256") or "")
+        )
+        is not None
+    ):
+        raise ApplyError("preexisting WBC0027 reconciliation marker drifted")
+    run_id = int(str(artifact["name"]).rsplit("-", 1)[1])
+    verified = _verify_uploaded_wbc0027_reconciliation_artifact(
+        client,
+        run_id=run_id,
+        artifact_name=str(artifact["name"]),
+        receipt_sha256=str(artifact["sha256"])[len("sha256:") :],
+        code_sha=str(context["reconciliation_release"]["merge_sha"]),
+    )
+    receipt = verified["receipt"]
+    if not _validate_wbc0027_reconciliation_receipt(receipt, context=context):
+        raise ApplyError("preexisting WBC0027 reconciliation receipt drifted")
+    raw = canonical_json_bytes(receipt) + b"\n"
+    if (
+        artifact.get("size_bytes") != len(raw)
+        or artifact.get("sha256") != "sha256:" + digest(raw)
+    ):
+        raise ApplyError("preexisting WBC0027 artifact metadata drifted")
+    return marker_comment
+
+
+def _run_wbc0027_reconciliation_preflight(
+    *, args: argparse.Namespace, client: GitHubClient, pr: Mapping[str, Any], comments: list[Mapping[str, Any]]
+) -> int:
+    context = _wbc0027_reconciliation_context(
+        args=args, client=client, source_pr=pr, source_comments=comments
+    )
+    existing = _existing_wbc0027_reconciliation_marker(
+        comments, context=context, client=client
+    )
+    receipt = {
+        "schema": WBC0027_RECONCILIATION_RECEIPT_SCHEMA,
+        "state": "already_terminal" if existing is not None else "ready_for_probe",
+        "query_only": True,
+        "database_written": False,
+        "production_mutation_count": 0,
+        "product_replay_count": 0,
+        "economics_replay_count": 0,
+        "source": context["source"],
+        "reconciliation_release": context["reconciliation_release"],
+        "comment_id": int(existing.get("id") or 0) if existing is not None else 0,
+    }
+    _write_receipt(args.output, receipt)
+    if args.github_output:
+        _write_github_output(
+            args.github_output,
+            {
+                "probe_required": existing is None,
+                "state": receipt["state"],
+                "comment_id": receipt["comment_id"],
+            },
+        )
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _run_wbc0027_reconciliation_collect(
+    *, args: argparse.Namespace, client: GitHubClient, pr: Mapping[str, Any], comments: list[Mapping[str, Any]]
+) -> int:
+    context = _wbc0027_reconciliation_context(
+        args=args, client=client, source_pr=pr, source_comments=comments
+    )
+    if _existing_wbc0027_reconciliation_marker(
+        comments, context=context, client=client
+    ) is not None:
+        raise ApplyError("WBC0027 reconciliation became terminal before collect")
+    target = _canonical_target()
+    with tempfile.TemporaryDirectory(prefix="wbc0027-reconciliation-") as directory:
+        configure_deploy_environment(Path(directory))
+        probe = command_evidence(
+            _wbc0027_finalize_remote_command(target=target, context=context),
+            timeout_seconds=900.0,
+        )
+    if not (
+        probe.get("return_code") == 0
+        and probe.get("transport_ambiguous") is False
+        and _valid_wbc0027_finalize_result(probe.get("result"), context=context)
+    ):
+        raise ApplyError("WBC0027 query-only reconciliation proof is not exact")
+    receipt: dict[str, Any] = {
+        "schema": WBC0027_RECONCILIATION_RECEIPT_SCHEMA,
+        "state": "done",
+        "terminal_disposition": "done/reconciled_existing_operation",
+        "query_only": True,
+        "database_written": False,
+        "production_mutation_count": 0,
+        "product_replay_count": 0,
+        "economics_replay_count": 0,
+        "source": context["source"],
+        "reconciliation_release": context["reconciliation_release"],
+        "probe": probe,
+    }
+    receipt["evidence_digest"] = payload_digest(receipt)
+    _write_receipt(args.output, receipt)
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _run_wbc0027_reconciliation_publish(
+    *, args: argparse.Namespace, client: GitHubClient, pr: Mapping[str, Any], comments: list[Mapping[str, Any]]
+) -> int:
+    context = _wbc0027_reconciliation_context(
+        args=args, client=client, source_pr=pr, source_comments=comments
+    )
+    if _existing_wbc0027_reconciliation_marker(
+        comments, context=context, client=client
+    ) is not None:
+        raise ApplyError("WBC0027 reconciliation became terminal before publish")
+    raw = args.output.read_bytes()
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ApplyError("WBC0027 reconciliation receipt is unreadable") from exc
+    if (
+        raw != canonical_json_bytes(receipt) + b"\n"
+        or not _validate_wbc0027_reconciliation_receipt(receipt, context=context)
+    ):
+        raise ApplyError("WBC0027 reconciliation receipt contract is invalid")
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    if run_id <= 0:
+        raise ApplyError("WBC0027 reconciliation publication lacks run identity")
+    artifact_name = _wbc0027_reconciliation_artifact_name(run_id)
+    _verify_uploaded_wbc0027_reconciliation_artifact(
+        client,
+        run_id=run_id,
+        artifact_name=artifact_name,
+        receipt_sha256=digest(raw),
+        code_sha=str(context["reconciliation_release"]["merge_sha"]),
+    )
+    result = receipt["probe"]["result"]
+    summary = {
+        "schema": WBC0027_RECONCILIATION_SUMMARY_SCHEMA,
+        "state": "done",
+        "terminal_disposition": "done/reconciled_existing_operation",
+        "query_only": True,
+        "production_mutation_count": 0,
+        "product_replay_count": 0,
+        "economics_replay_count": 0,
+        "source": context["source"],
+        "reconciliation_release": context["reconciliation_release"],
+        "qualification": {
+            "source_recovery_row_digest": result["source_recovery_row_digest"],
+            "transition_digest": result["transition_digest"],
+            "undo_digest": result["undo_digest"],
+            "legacy_raw_non_target_digest": result[
+                "legacy_raw_non_target_digest"
+            ],
+            "semantic_non_target_digest": result[
+                "semantic_non_target_current"
+            ]["digest"],
+            "current_target_digest": result["current_target_digest"],
+            "current_target_hashes": result["current_target_hashes"],
+            "functional_economics_missing": result[
+                "functional_economics_missing"
+            ],
+        },
+        "evidence_digest": receipt["evidence_digest"],
+        "artifact": {
+            "name": artifact_name,
+            "file": WBC0027_RECONCILIATION_ARTIFACT_FILE,
+            "sha256": "sha256:" + digest(raw),
+            "size_bytes": len(raw),
+            "retention_days": 90,
+        },
+    }
+    body = (
+        _wbc0027_reconciliation_marker(str(context["source"]["operation_id"]))
+        + "\nCompact immutable supersession receipt for the already committed WBC0027 economics operation; no business data was replayed."
+        + "\n```json\n"
+        + json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n```"
+    )
+    if len(body.encode("utf-8")) >= MAX_GITHUB_COMMENT_BYTES:
+        raise ApplyError("WBC0027 reconciliation marker exceeds GitHub limit")
+    published = client.post(f"/issues/{args.pr}/comments", {"body": body})
+    if not isinstance(published, Mapping) or published.get("body") != body:
+        raise ApplyError("WBC0027 reconciliation marker publication mismatch")
+    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _run_wbc0027_reconciliation_mode(
+    *, args: argparse.Namespace, client: GitHubClient, pr: Mapping[str, Any], comments: list[Mapping[str, Any]]
+) -> int:
+    if args.reconciliation_phase == "preflight":
+        return _run_wbc0027_reconciliation_preflight(
+            args=args, client=client, pr=pr, comments=comments
+        )
+    if args.reconciliation_phase == "collect":
+        return _run_wbc0027_reconciliation_collect(
+            args=args, client=client, pr=pr, comments=comments
+        )
+    if args.reconciliation_phase == "publish":
+        return _run_wbc0027_reconciliation_publish(
+            args=args, client=client, pr=pr, comments=comments
+        )
+    raise ApplyError("WBC0027 reconciliation phase is invalid")
+
+
 def _load_legacy_manifest(path: Path, expected_sha: str) -> dict[str, Any]:
     raw = path.read_bytes()
     if digest(raw) != expected_sha:
@@ -7475,6 +8367,7 @@ def main() -> int:
             "warm-archive-readiness",
             "warm-archive-mount-probe",
             "warm-archive-receipt-reconciliation",
+            "wbc0027-receipt-reconciliation",
         ),
         default="scope-goal",
     )
@@ -7487,6 +8380,7 @@ def main() -> int:
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--operation-id")
     parser.add_argument("--source-run-id", type=int)
+    parser.add_argument("--source-artifact-id", type=int, default=0)
     parser.add_argument("--source-artifact-name")
     parser.add_argument("--source-receipt-sha256")
     parser.add_argument("--blocked-comment-id", type=int, default=0)
@@ -7519,6 +8413,13 @@ def main() -> int:
     if pr.get("merged") is not True:
         raise ApplyError("pull request is not merged")
     comments = list_comments(client, args.pr)
+    if args.authorization_mode == "wbc0027-receipt-reconciliation":
+        return _run_wbc0027_reconciliation_mode(
+            args=args,
+            client=client,
+            pr=pr,
+            comments=comments,
+        )
     if args.authorization_mode == "warm-archive-receipt-reconciliation":
         return _run_warm_reconciliation_mode(
             args=args,

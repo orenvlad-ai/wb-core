@@ -810,3 +810,21 @@ then exercises the same real non-blocking shared-lock candidate rebuild and
 stops before T1. A missing recovery lifecycle, zero submit, zero database write
 and release of the lock are required; the qualification never creates or
 reuses a private phase plan.
+
+Economics uses canonical semantic non-target contract
+`wbc0027_economics_semantic_non_target_digest/v1`: all 224 ready snapshots are
+covered, while the exact three reviewed target slices are normalized away.
+Row counts and identity/payload/row component digests are retained at plan,
+writer-lock T1, post-write, retain and readback. Ordinary publication may be
+rebased only before submit; a real concurrent non-target mutation is blocked
+and target CAS remains exact.
+
+The 31-August source Apply committed three economics rows / 472 cells, then the
+legacy 221-row raw digest was compared with the 224-row semantic digest and
+caused a false quarantine. Post-COMMIT truth is now recorded in the business
+transaction itself, so later exceptions report one written submit as
+`applied_pending_reconciliation`. The bounded `finalize-only` path for that
+same operation is strictly query-only and mutation-incapable: it validates the
+immutable source receipt and T1 journal, proves product 1,152/24,192/mismatch0,
+economics 12/0 and hard non-target exactness, preserves the quarantined row,
+and never replays product, economics, events, outbox, timers or services.

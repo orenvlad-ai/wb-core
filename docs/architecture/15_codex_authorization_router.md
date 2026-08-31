@@ -210,6 +210,16 @@ supersession завершает evidence/receipt того же operation id; о�
 preexisting supersession marker остаётся fail-closed и требует обычной fresh
 route decision.
 
+WBC0027 after-COMMIT false quarantine — частный allowlisted случай этой нормы.
+Durable `after_digest`/`committed_pending_reconciliation` означает submit=1,
+`database_written=true` и `applied_pending_reconciliation`, даже если последующий
+retain/readback выбросил exception. Automatic continuation может вызвать только
+deployed `finalize-only` contour, exact-bound к source run `33345644125`, artifact
+`9741910399`, receipt/blocked marker/authorization и original T1 journal. Contour
+query-only, mutation0/replay0 и сохраняет quarantined row immutable; единственный
+новый effect — uploaded receipt и compact supersession marker. Любой mismatch
+остаётся `EVIDENCE_BLOCKED`, не разрешением на повтор product/economics Apply.
+
 Для WBC0008 terminal-receipt contour legacy reconciliation `a01` также является
 immutable terminal evidence. После exact validation его run/artifact/receipt/
 marker, того же source operation/job, zero mutation и единственного timer-
@@ -265,6 +275,13 @@ correction, merge/deploy и query-only deployed qualification, но не под�
 сам Production Apply dispatch и его business-data submit остаются отдельным
 следующим действием. Исторические manifest/comment/operation bindings не
 расширяют эту авторизацию и fail closed.
+
+Query-only WBC0027 same-operation finalization не является новым Production
+Apply business submit и не требует нового OWNER passport: она использует exact
+digest существующего accepted passport как immutable predecessor authorization.
+Release block может выполнить только deployed no-submit qualification и передать
+точные inputs mode `wbc0027-receipt-reconciliation`; dispatch этого default-off
+mode остаётся отдельным terminal handoff.
 
 Validator pure: он не пишет GitHub, runtime, database или owner surface и не
 выполняет proposed action. Repository test registry исполняет smoke contract;

@@ -205,7 +205,9 @@ production-data mutation is admitted by this deploy binding.
 Apply workflow имеет только manual `workflow_dispatch` и production
 environment. Он поддерживает fail-closed scope-goal, exact-manifest,
 warm-archive-mount-probe, warm-archive-readiness, receipt-recovery и
-warm-archive-receipt-reconciliation modes.
+warm-archive-receipt-reconciliation modes. Source-specific
+`wbc0027-receipt-reconciliation` is the mutation-incapable finalize-only mode
+for the one already committed WBC0027 economics operation.
 
 Legacy `exact-manifest` inputs bind PR, merge/deployed SHA, manifest SHA-256,
 durable operation id и exact authorization comment id. Authorization comment
@@ -308,6 +310,21 @@ transport/terminal uncertainty — `ambiguous`; exact retained readback —
 `applied`. Existing terminal Apply receipt возвращает `already_terminal` до
 SSH, private directory или нового файла.
 
+Economics non-target CAS теперь имеет один versioned contract
+`wbc0027_economics_semantic_non_target_digest/v1` со scope
+`ready_snapshot_target_slices_removed_v1`. Planner, consecutive witness,
+writer-lock rebuild, T1 pre-submit, in-transaction post-submit, retain и
+query-only readback используют один и тот же all-ready-row snapshot: row count,
+target-row count и component digests identities/semantic payloads/rows.
+Допустима только ordinary semantic rebase до submit; exact target before-images
+остаются CAS, а реальное изменение semantic non-target fail closed.
+
+Факт business write сохраняется внутри той же SQLite transaction непосредственно
+перед COMMIT как `committed_pending_reconciliation` с exact after/non-target
+digests. Поэтому exception после COMMIT никогда не превращается в `submit=0` или
+`database_written=false`: receipt возвращает `applied_pending_reconciliation`,
+один submit и только same-operation readback/finalization.
+
 Каждый фактический candidate хранится только в mode-0700 goal directory и
 mode-0600 no-overwrite файле через `O_EXCL`, file fsync, atomic publish и
 directory fsync; storage admission входит в receipt. Обычная публикация вне
@@ -335,6 +352,19 @@ product` входит в реальный `warehouse_sync_lock(runtime_dir, bloc
 `recovery_lifecycle=missing`, не создаёт private directory/manifest и возвращает
 `production_mutation_submit_count=0`. Это release qualification, не Apply
 dispatch и не authorization marker.
+
+Для уже committed economics operation
+`recovery_ae66a56f72d90b469b75d8adb893c51f`, ошибочно quarantined после source
+Apply run `33345644125`, существует отдельный default-off mode
+`wbc0027-receipt-reconciliation`. Он exact-bind source PR/run/artifact/receipt/
+blocked marker/OWNER passport, исходные T1 before/after rows и quarantine reason,
+а также новый `live_runtime/done` release. Fixed remote command способен вызвать
+только `finalize-only`: он открывает production SQLite query-only, не создаёт
+manifest или recovery row, не пишет product/economics/outbox и не повторяет ни
+один submit. Full canonical receipt загружается до единственного compact
+supersession marker; exact repeat валидирует этот artifact и возвращает
+`already_terminal` до SSH. Missing, foreign, duplicated или drifted evidence
+fail closed.
 
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:

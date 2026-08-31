@@ -378,3 +378,21 @@ slice neither becomes an economics target nor creates false stale-plan drift.
 The 29-August missing target closes to zero, the twelve 26-August gaps remain
 explicit `EVIDENCE_BLOCKED`, and no Finance or unrelated Proxy value is
 cleared or copied.
+
+The economics ready-snapshot guard is the versioned canonical semantic
+non-target digest over all ready rows with only each reviewed target date/row
+slice removed. It records total/target row counts plus identity, semantic
+payload and row component digests. The same builder is used by planning,
+writer-lock rebase, T1, retain and readback; the legacy digest of only 221
+unpatched rows is audit evidence and cannot be compared with the 224-row
+semantic witness. A genuine ordinary semantic change after the submit boundary
+still fails closed.
+
+Source operation `recovery_ae66a56f72d90b469b75d8adb893c51f` committed its
+three ready rows / 472 persisted cells before that legacy cross-contract
+comparison quarantined it. Its product predecessor is exact and is never
+replayed. The canonical `finalize-only` reconciliation proves current target
+after-images, original undo before/after rows, transition/quarantine reason,
+semantic before=after=current, the protected `117.537167` invariant, 12/0
+missing partition and hard non-targets using query-only SQLite. It writes no
+cost, Proxy, Finance, product, economics, outbox or recovery row.
