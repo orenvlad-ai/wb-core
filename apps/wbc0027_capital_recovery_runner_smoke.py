@@ -6,6 +6,7 @@ from __future__ import annotations
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import zipfile
@@ -16,6 +17,306 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import production_apply_runner as runner  # noqa: E402
+
+
+LIVE_SHA = "41dd22a0e81a6c08c416ac35db8173431ed22808"
+BRIDGE_SHA = "4f321035ca530338340d482983165699d450a1ef"
+LIVE_HEAD = "8934656b96a041985747190ecd8180dbcf924a29"
+BRIDGE_HEAD = "f57519a8528bd6c701384cd24e8f67af83313167"
+LIVE_OPERATION = "release-v2-5e79ed4d8b65d482eae1e12ce4252e4b"
+BRIDGE_OPERATION = "release-v2-76c450066ef7b2e662b6735ce09185a3"
+
+
+def _pr(
+    number: int, *, base_sha: str, head_sha: str, merge_sha: str
+) -> dict[str, object]:
+    repository = {"full_name": runner.CANONICAL_REPOSITORY}
+    return {
+        "number": number,
+        "state": "closed",
+        "draft": False,
+        "merged": True,
+        "merged_at": "2026-08-31T05:00:00Z",
+        "merge_commit_sha": merge_sha,
+        "base": {"ref": "main", "sha": base_sha, "repo": repository},
+        "head": {"sha": head_sha, "repo": repository},
+    }
+
+
+def _release_comment(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "user": {"login": "github-actions[bot]"},
+        "body": (
+            "<!-- wb-core-release-receipt operation="
+            + str(payload["operation_id"])
+            + " -->\n```json\n"
+            + json.dumps(payload, sort_keys=True)
+            + "\n```"
+        ),
+    }
+
+
+def _gate(run_id: int, head_sha: str) -> dict[str, object]:
+    repository = {"full_name": runner.CANONICAL_REPOSITORY}
+    return {
+        "id": run_id,
+        "name": "PR Gate",
+        "path": ".github/workflows/pr-gate.yml",
+        "event": "pull_request",
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
+        "head_sha": head_sha,
+        "repository": repository,
+        "head_repository": repository,
+    }
+
+
+class _BridgeClient:
+    def __init__(self) -> None:
+        self.live_pr = _pr(
+            1133,
+            base_sha="30ee64a8003f35837a0a273716ec86c699ea826c",
+            head_sha=LIVE_HEAD,
+            merge_sha=LIVE_SHA,
+        )
+        self.bridge_pr = _pr(
+            1134,
+            base_sha=LIVE_SHA,
+            head_sha=BRIDGE_HEAD,
+            merge_sha=BRIDGE_SHA,
+        )
+        self.live_receipt = {
+            "schema": runner.RELEASE_RECEIPT_SCHEMA,
+            "state": "done",
+            "operation_id": LIVE_OPERATION,
+            "repository": runner.CANONICAL_REPOSITORY,
+            "workflow_run_id": 33357398128,
+            "pull_request": 1133,
+            "base_sha": "30ee64a8003f35837a0a273716ec86c699ea826c",
+            "head_sha": LIVE_HEAD,
+            "plan_hash": (
+                "f73975454e36767094d4bb2f08e5ada68ec7325ef20ac224d431c3b2bbad2b2e"
+            ),
+            "release_kind": "live_runtime",
+            "merge_sha": LIVE_SHA,
+            "deployed_sha": LIVE_SHA,
+            "manifest": None,
+            "reason_codes": [],
+        }
+        self.bridge_receipt = {
+            "schema": runner.RELEASE_RECEIPT_SCHEMA,
+            "state": "done",
+            "operation_id": BRIDGE_OPERATION,
+            "repository": runner.CANONICAL_REPOSITORY,
+            "workflow_run_id": 33359034259,
+            "pull_request": 1134,
+            "base_sha": LIVE_SHA,
+            "head_sha": BRIDGE_HEAD,
+            "plan_hash": (
+                "c63426aa535c0b1e69cd0960d6487436c4cbb839cbb263a04308997d3b225808"
+            ),
+            "release_kind": "repo_only",
+            "merge_sha": BRIDGE_SHA,
+            "deployed_sha": None,
+            "manifest": None,
+            "reason_codes": [],
+        }
+        self.bridge_comments = [_release_comment(self.bridge_receipt)]
+        self.compare_status = "ahead"
+        self.calls: list[str] = []
+
+    def get(self, path: str):
+        self.calls.append(path)
+        if path == "/actions/runs/33357398128":
+            return _gate(33357398128, LIVE_HEAD)
+        if path == "/actions/runs/33359034259":
+            return _gate(33359034259, BRIDGE_HEAD)
+        if path == "/actions/runs/777":
+            repository = {"full_name": runner.CANONICAL_REPOSITORY}
+            return {
+                "id": 777,
+                "name": "Production Apply Runner",
+                "path": runner.PRODUCTION_APPLY_WORKFLOW_PATH,
+                "event": "workflow_dispatch",
+                "head_branch": "main",
+                "head_sha": os.environ["GITHUB_SHA"],
+                "run_attempt": 1,
+                "status": "in_progress",
+                "conclusion": None,
+                "repository": repository,
+                "head_repository": repository,
+            }
+        if path == f"/commits/{BRIDGE_SHA}/pulls?per_page=100":
+            return [self.bridge_pr]
+        if path == f"/commits/{LIVE_SHA}/pulls?per_page=100":
+            return [self.live_pr]
+        if path == "/pulls/1134":
+            return self.bridge_pr
+        if path == "/pulls/1133":
+            return self.live_pr
+        if path == "/issues/1134/comments?per_page=100&page=1":
+            return self.bridge_comments
+        if path == f"/compare/{LIVE_SHA}...{BRIDGE_SHA}":
+            return {
+                "status": self.compare_status,
+                "ahead_by": 1,
+                "behind_by": 0,
+                "merge_base_commit": {"sha": LIVE_SHA},
+                "commits": [{"sha": BRIDGE_SHA}],
+            }
+        raise AssertionError(f"unexpected GitHub read: {path}")
+
+
+def _exercise_workflow_bridge_binding() -> None:
+    historical_integrity = runner._wbc0027_runtime_source_integrity(
+        deployed_sha=LIVE_SHA,
+        bridge_sha=BRIDGE_SHA,
+    )
+    assert (
+        historical_integrity["comparison"]
+        == "byte_identical_repo_only_bridge"
+    )
+    assert historical_integrity["paths"] == sorted(
+        historical_integrity["paths"], key=lambda item: item["path"]
+    )
+    client = _BridgeClient()
+    live = runner._wbc0027_trusted_release(
+        client,  # type: ignore[arg-type]
+        pr_number=1133,
+        pr=client.live_pr,
+        comments=[_release_comment(client.live_receipt)],
+        merge_sha=LIVE_SHA,
+        release_kind="live_runtime",
+        operation=LIVE_OPERATION,
+    )
+    names = (
+        "GITHUB_EVENT_NAME",
+        "GITHUB_REF",
+        "GITHUB_REPOSITORY",
+        "GITHUB_RUN_ATTEMPT",
+        "GITHUB_RUN_ID",
+        "GITHUB_SHA",
+    )
+    previous = {name: os.environ.get(name) for name in names}
+    original_head = runner._git_checkout_head
+    original_blob = runner._git_blob_binding
+    changed_path = ""
+
+    def blob(commit: str, path: str) -> dict[str, object]:
+        blob_sha = "a" * 40
+        if path == runner.PRODUCTION_APPLY_WORKFLOW_PATH:
+            blob_sha = "b" * 40
+        if path == changed_path and commit == BRIDGE_SHA:
+            blob_sha = "c" * 40
+        return {
+            "path": path,
+            "mode": "100644",
+            "git_blob_sha": blob_sha,
+            "size_bytes": 123,
+        }
+
+    try:
+        os.environ.update(
+            {
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_REPOSITORY": runner.CANONICAL_REPOSITORY,
+                "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_RUN_ID": "777",
+                "GITHUB_SHA": BRIDGE_SHA,
+            }
+        )
+        runner._git_checkout_head = lambda: os.environ["GITHUB_SHA"]
+        runner._git_blob_binding = blob
+        bridge = runner._wbc0027_workflow_bridge(
+            client=client,  # type: ignore[arg-type]
+            deployed_release=live,
+        )
+        assert bridge["pull_request"] == 1134
+        assert bridge["operation_id"] == BRIDGE_OPERATION
+        assert bridge["state"] == "done"
+        assert bridge["release_kind"] == "repo_only"
+        assert bridge["merge_sha"] == BRIDGE_SHA
+        assert bridge["ancestry"]["status"] == "ahead"
+        assert (
+            bridge["runtime_source_integrity"]["comparison"]
+            == "byte_identical_repo_only_bridge"
+        )
+
+        changed_path = "apps/production_apply_runner.py"
+        try:
+            runner._wbc0027_workflow_bridge(
+                client=client,  # type: ignore[arg-type]
+                deployed_release=live,
+            )
+        except runner.ApplyError as exc:
+            assert "runtime source changed" in str(exc)
+        else:
+            raise AssertionError("changed reconciliation app blob was accepted")
+        changed_path = ""
+
+        client.compare_status = "diverged"
+        try:
+            runner._wbc0027_workflow_bridge(
+                client=client,  # type: ignore[arg-type]
+                deployed_release=live,
+            )
+        except runner.ApplyError as exc:
+            assert "ancestry" in str(exc)
+        else:
+            raise AssertionError("non-descendant workflow bridge was accepted")
+        client.compare_status = "ahead"
+
+        saved_comments = client.bridge_comments
+        client.bridge_comments = []
+        try:
+            runner._wbc0027_workflow_bridge(
+                client=client,  # type: ignore[arg-type]
+                deployed_release=live,
+            )
+        except runner.ApplyError as exc:
+            assert "missing or ambiguous" in str(exc)
+        else:
+            raise AssertionError("workflow bridge without exact receipt was accepted")
+        client.bridge_comments = saved_comments
+
+        wrong_receipt = dict(client.bridge_receipt)
+        wrong_receipt["plan_hash"] = "0" * 64
+        client.bridge_comments = [_release_comment(wrong_receipt)]
+        try:
+            runner._wbc0027_workflow_bridge(
+                client=client,  # type: ignore[arg-type]
+                deployed_release=live,
+            )
+        except runner.ApplyError as exc:
+            assert "receipt binding is invalid" in str(exc)
+        else:
+            raise AssertionError("workflow bridge with wrong receipt was accepted")
+        client.bridge_comments = saved_comments
+
+        os.environ["GITHUB_SHA"] = LIVE_SHA
+        direct = runner._wbc0027_workflow_bridge(
+            client=client,  # type: ignore[arg-type]
+            deployed_release=live,
+        )
+        assert direct["pull_request"] == 1133
+        assert direct["operation_id"] == LIVE_OPERATION
+        assert direct["release_kind"] == "live_runtime"
+        assert direct["ancestry"]["status"] == "identical"
+        assert (
+            direct["runtime_source_integrity"]["comparison"]
+            == "direct_deployed_checkout"
+        )
+        assert not any(call.startswith("POST ") for call in client.calls)
+    finally:
+        runner._git_checkout_head = original_head
+        runner._git_blob_binding = original_blob
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _context() -> dict:
@@ -82,6 +383,13 @@ def _context() -> dict:
             "workflow_run_id": 123,
             "plan_hash": "sha256:" + "5" * 64,
         },
+        "workflow_bridge": {
+            "pull_request": 1131,
+            "operation_id": "release-v2-" + "6" * 32,
+            "state": "done",
+            "release_kind": "repo_only",
+            "merge_sha": "7" * 40,
+        },
     }
 
 
@@ -90,6 +398,9 @@ def _result(context: dict) -> dict:
     release = context["reconciliation_release"]
     return {
         "contract_name": "wbc0027_existing_operation_reconciliation/v1",
+        "runtime_source_binding_contract": (
+            runner.WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT
+        ),
         "status": "reconciled_existing_operation",
         "qualification_status": "qualified",
         "repeat_disposition": "already_qualifiable",
@@ -263,6 +574,7 @@ def _result(context: dict) -> dict:
 
 
 def main() -> None:
+    _exercise_workflow_bridge_binding()
     context = _context()
     result = _result(context)
     assert runner._valid_wbc0027_finalize_result(result, context=context)
@@ -333,6 +645,7 @@ def main() -> None:
         "economics_replay_count": 0,
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
+        "workflow_bridge": context["workflow_bridge"],
         "probe": {
             "return_code": 0,
             "transport_ambiguous": False,

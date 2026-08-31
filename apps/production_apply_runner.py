@@ -30,16 +30,23 @@ if str(ROOT) not in sys.path:
 from apps.github_release_runner import (  # noqa: E402
     GitHubClient,
     RECEIPT_MARKER,
+    RECEIPT_SCHEMA as RELEASE_RECEIPT_SCHEMA,
     canonical_json_bytes,
     configure_deploy_environment,
     exact_sha,
     is_actions_bot_comment,
     list_comments,
+    operation_id as release_operation_id,
 )
 from apps.release_protocol import (  # noqa: E402
     CANONICAL_PRODUCTION_TARGET_ID,
     CANONICAL_REPOSITORY,
     validate_production_manifest,
+)
+from apps.wbc0027_capital_recovery_source_binding import (  # noqa: E402
+    CONTRACT_NAME as WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT,
+    PATHS as WBC0027_RUNTIME_SOURCE_PATHS,
+    WORKFLOW_PATH as PRODUCTION_APPLY_WORKFLOW_PATH,
 )
 from packages.application.root_storage_policy import (  # noqa: E402
     storage_destination_root,
@@ -6937,6 +6944,405 @@ def _wbc0027_reconciliation_artifact_name(run_id: int) -> str:
     )
 
 
+def _wbc0027_release_comment_payloads(
+    comments: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    marker_re = re.compile(
+        rf"<!-- {re.escape(RECEIPT_MARKER)} "
+        r"operation=(release-v2-[0-9a-f]{32}) -->"
+    )
+    payloads: list[dict[str, Any]] = []
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if RECEIPT_MARKER not in body or not is_actions_bot_comment(comment):
+            continue
+        markers = marker_re.findall(body)
+        if len(markers) != 1 or "```json" not in body:
+            raise ApplyError("WBC0027 trusted release marker is malformed")
+        try:
+            payload = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+        except (IndexError, json.JSONDecodeError) as exc:
+            raise ApplyError("WBC0027 trusted release receipt is malformed") from exc
+        if not isinstance(payload, dict) or payload.get("operation_id") != markers[0]:
+            raise ApplyError("WBC0027 trusted release marker binding is invalid")
+        payloads.append(payload)
+    return payloads
+
+
+def _wbc0027_trusted_release(
+    client: GitHubClient,
+    *,
+    pr_number: int,
+    pr: Mapping[str, Any],
+    comments: list[Mapping[str, Any]],
+    merge_sha: str,
+    release_kind: str,
+    operation: str | None,
+) -> dict[str, Any]:
+    base = pr.get("base") or {}
+    head = pr.get("head") or {}
+    base_repo = base.get("repo") or {}
+    head_repo = head.get("repo") or {}
+    if not (
+        isinstance(base, Mapping)
+        and isinstance(head, Mapping)
+        and isinstance(base_repo, Mapping)
+        and isinstance(head_repo, Mapping)
+        and pr.get("number") == pr_number
+        and pr.get("merged") is True
+        and pr.get("draft") is False
+        and str(pr.get("state") or "") == "closed"
+        and exact_sha(pr.get("merge_commit_sha"), "trusted-release-merge")
+        == merge_sha
+        and base.get("ref") == "main"
+        and base_repo.get("full_name") == CANONICAL_REPOSITORY
+        and head_repo.get("full_name") == CANONICAL_REPOSITORY
+    ):
+        raise ApplyError("WBC0027 trusted release PR binding is invalid")
+    base_sha = exact_sha(base.get("sha"), "trusted-release-base")
+    head_sha = exact_sha(head.get("sha"), "trusted-release-head")
+    matches: list[dict[str, Any]] = []
+    for payload in _wbc0027_release_comment_payloads(comments):
+        workflow_run_id = payload.get("workflow_run_id")
+        plan_hash = str(payload.get("plan_hash") or "")
+        payload_operation = str(payload.get("operation_id") or "")
+        valid = bool(
+            payload.get("schema") == RELEASE_RECEIPT_SCHEMA
+            and payload.get("state") == "done"
+            and payload.get("repository") == CANONICAL_REPOSITORY
+            and payload.get("pull_request") == pr_number
+            and payload.get("base_sha") == base_sha
+            and payload.get("head_sha") == head_sha
+            and payload.get("merge_sha") == merge_sha
+            and payload.get("release_kind") == release_kind
+            and payload.get("manifest") is None
+            and payload.get("reason_codes") == []
+            and isinstance(workflow_run_id, int)
+            and not isinstance(workflow_run_id, bool)
+            and workflow_run_id > 0
+            and re.fullmatch(r"[0-9a-f]{64}", plan_hash) is not None
+            and payload_operation
+            == release_operation_id(
+                CANONICAL_REPOSITORY,
+                workflow_run_id,
+                pr_number,
+                head_sha,
+                plan_hash,
+            )
+            and (
+                payload.get("deployed_sha") == merge_sha
+                if release_kind == "live_runtime"
+                else payload.get("deployed_sha") is None
+            )
+        )
+        if operation is not None and payload_operation != operation:
+            continue
+        if not valid:
+            raise ApplyError("WBC0027 trusted release receipt binding is invalid")
+        matches.append(payload)
+    if len(matches) != 1:
+        raise ApplyError("WBC0027 trusted release receipt is missing or ambiguous")
+    receipt = matches[0]
+    gate = client.get(f"/actions/runs/{int(receipt['workflow_run_id'])}")
+    if not isinstance(gate, Mapping):
+        raise ApplyError("WBC0027 exact PR Gate response is invalid")
+    repository = gate.get("repository")
+    head_repository = gate.get("head_repository")
+    if not (
+        isinstance(gate, Mapping)
+        and isinstance(repository, Mapping)
+        and isinstance(head_repository, Mapping)
+        and gate.get("id") == receipt["workflow_run_id"]
+        and gate.get("name") == "PR Gate"
+        and gate.get("path") == ".github/workflows/pr-gate.yml"
+        and gate.get("event") == "pull_request"
+        and gate.get("status") == "completed"
+        and gate.get("conclusion") == "success"
+        and gate.get("run_attempt") == 1
+        and gate.get("head_sha") == head_sha
+        and repository.get("full_name") == CANONICAL_REPOSITORY
+        and head_repository.get("full_name") == CANONICAL_REPOSITORY
+    ):
+        raise ApplyError("WBC0027 exact PR Gate provenance is invalid")
+    return {
+        "pull_request": pr_number,
+        "operation_id": str(receipt["operation_id"]),
+        "state": "done",
+        "release_kind": release_kind,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "merge_sha": merge_sha,
+        "deployed_sha": receipt.get("deployed_sha"),
+        "workflow_run_id": int(receipt["workflow_run_id"]),
+        "plan_hash": str(receipt["plan_hash"]),
+        "pr_gate": {
+            "workflow_run_id": int(receipt["workflow_run_id"]),
+            "workflow": ".github/workflows/pr-gate.yml",
+            "event": "pull_request",
+            "run_attempt": 1,
+            "head_sha": head_sha,
+            "conclusion": "success",
+        },
+    }
+
+
+def _git_checkout_head() -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return exact_sha(completed.stdout.strip(), "trusted-checkout-head")
+
+
+def _git_blob_binding(commit_sha: str, path: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        ["git", "ls-tree", "--full-tree", commit_sha, "--", path],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = [row for row in completed.stdout.splitlines() if row]
+    if len(rows) != 1 or "\t" not in rows[0]:
+        raise ApplyError(f"WBC0027 source binding path is missing: {path}")
+    metadata, observed_path = rows[0].split("\t", 1)
+    parts = metadata.split()
+    if (
+        observed_path != path
+        or len(parts) != 3
+        or parts[0] not in {"100644", "100755"}
+        or parts[1] != "blob"
+        or re.fullmatch(r"[0-9a-f]{40}", parts[2]) is None
+    ):
+        raise ApplyError(f"WBC0027 source binding path is invalid: {path}")
+    size = subprocess.run(
+        ["git", "cat-file", "-s", parts[2]],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if not size.isdigit():
+        raise ApplyError(f"WBC0027 source binding size is invalid: {path}")
+    return {
+        "path": path,
+        "mode": parts[0],
+        "git_blob_sha": parts[2],
+        "size_bytes": int(size),
+    }
+
+
+def _wbc0027_runtime_source_integrity(
+    *, deployed_sha: str, bridge_sha: str
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for path in WBC0027_RUNTIME_SOURCE_PATHS:
+        deployed = _git_blob_binding(deployed_sha, path)
+        bridge = (
+            deployed
+            if bridge_sha == deployed_sha
+            else _git_blob_binding(bridge_sha, path)
+        )
+        if (
+            bridge["git_blob_sha"] != deployed["git_blob_sha"]
+            or bridge["mode"] != deployed["mode"]
+            or bridge["size_bytes"] != deployed["size_bytes"]
+        ):
+            raise ApplyError(
+                "WBC0027 reconciliation runtime source changed after live release: "
+                + path
+            )
+        rows.append(
+            {
+                "path": path,
+                "mode": str(deployed["mode"]),
+                "git_blob_sha": str(deployed["git_blob_sha"]),
+                "size_bytes": int(deployed["size_bytes"]),
+            }
+        )
+    payload = {
+        "contract_name": WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT,
+        "deployed_sha": deployed_sha,
+        "bridge_sha": bridge_sha,
+        "comparison": (
+            "direct_deployed_checkout"
+            if bridge_sha == deployed_sha
+            else "byte_identical_repo_only_bridge"
+        ),
+        "paths": rows,
+    }
+    return {**payload, "binding_digest": payload_digest(payload)}
+
+
+def _wbc0027_workflow_bridge(
+    *,
+    client: GitHubClient,
+    deployed_release: Mapping[str, Any],
+) -> dict[str, Any]:
+    event = str(os.environ.get("GITHUB_EVENT_NAME") or "")
+    ref = str(os.environ.get("GITHUB_REF") or "")
+    repository_name = str(os.environ.get("GITHUB_REPOSITORY") or "")
+    run_attempt = str(os.environ.get("GITHUB_RUN_ATTEMPT") or "")
+    run_id = int(os.environ.get("GITHUB_RUN_ID") or 0)
+    bridge_sha = exact_sha(os.environ.get("GITHUB_SHA"), "workflow-bridge")
+    if not (
+        event == "workflow_dispatch"
+        and ref == "refs/heads/main"
+        and repository_name == CANONICAL_REPOSITORY
+        and run_attempt == "1"
+        and run_id > 0
+        and _git_checkout_head() == bridge_sha
+    ):
+        raise ApplyError("WBC0027 workflow bridge is not an exact main dispatch")
+    dispatch_run = client.get(f"/actions/runs/{run_id}")
+    if not isinstance(dispatch_run, Mapping):
+        raise ApplyError("WBC0027 workflow dispatch response is invalid")
+    dispatch_repository = dispatch_run.get("repository")
+    dispatch_head_repository = dispatch_run.get("head_repository")
+    dispatch_terminal_valid = bool(
+        (
+            dispatch_run.get("status") == "in_progress"
+            and dispatch_run.get("conclusion") is None
+        )
+        or (
+            dispatch_run.get("status") == "completed"
+            and dispatch_run.get("conclusion") == "success"
+        )
+    )
+    if not (
+        isinstance(dispatch_run, Mapping)
+        and isinstance(dispatch_repository, Mapping)
+        and isinstance(dispatch_head_repository, Mapping)
+        and dispatch_run.get("id") == run_id
+        and dispatch_run.get("name") == "Production Apply Runner"
+        and dispatch_run.get("path") == PRODUCTION_APPLY_WORKFLOW_PATH
+        and dispatch_run.get("event") == "workflow_dispatch"
+        and dispatch_run.get("head_branch") == "main"
+        and dispatch_run.get("head_sha") == bridge_sha
+        and dispatch_run.get("run_attempt") == 1
+        and dispatch_terminal_valid
+        and dispatch_repository.get("full_name") == CANONICAL_REPOSITORY
+        and dispatch_head_repository.get("full_name") == CANONICAL_REPOSITORY
+    ):
+        raise ApplyError("WBC0027 workflow dispatch provenance is invalid")
+    associated = client.get(f"/commits/{bridge_sha}/pulls?per_page=100")
+    if not isinstance(associated, list):
+        raise ApplyError("WBC0027 workflow bridge PR lookup is invalid")
+    associated_numbers = [
+        item.get("number")
+        for item in associated
+        if isinstance(item, Mapping)
+        and isinstance(item.get("number"), int)
+        and not isinstance(item.get("number"), bool)
+        and item.get("merged_at")
+        and item.get("merge_commit_sha") == bridge_sha
+        and (item.get("base") or {}).get("ref") == "main"
+    ]
+    if len(associated_numbers) != 1:
+        raise ApplyError("WBC0027 workflow bridge PR is missing or ambiguous")
+    bridge_pr_number = int(associated_numbers[0])
+    bridge_pr = client.get(f"/pulls/{bridge_pr_number}")
+    deployed_sha = exact_sha(
+        deployed_release.get("deployed_sha"), "reconciliation-deployed"
+    )
+    expected_kind = "live_runtime" if bridge_sha == deployed_sha else "repo_only"
+    if bridge_sha == deployed_sha:
+        if bridge_pr_number != int(deployed_release["pull_request"]):
+            raise ApplyError("WBC0027 direct workflow bridge PR drifted")
+        bridge_release = dict(deployed_release)
+    else:
+        bridge_release = _wbc0027_trusted_release(
+            client,
+            pr_number=bridge_pr_number,
+            pr=bridge_pr,
+            comments=list_comments(client, bridge_pr_number),
+            merge_sha=bridge_sha,
+            release_kind=expected_kind,
+            operation=None,
+        )
+    if bridge_release.get("release_kind") != expected_kind:
+        raise ApplyError("WBC0027 workflow bridge release kind is invalid")
+    if bridge_sha == deployed_sha:
+        ancestry = {
+            "status": "identical",
+            "merge_base_sha": deployed_sha,
+            "ahead_by": 0,
+            "behind_by": 0,
+            "commit_count": 0,
+        }
+    else:
+        compare = client.get(f"/compare/{deployed_sha}...{bridge_sha}")
+        merge_base = compare.get("merge_base_commit") or {}
+        commits = compare.get("commits") or []
+        commit_shas = [
+            item.get("sha") for item in commits if isinstance(item, Mapping)
+        ]
+        if not (
+            isinstance(compare, Mapping)
+            and isinstance(merge_base, Mapping)
+            and isinstance(commits, list)
+            and compare.get("status") == "ahead"
+            and isinstance(compare.get("ahead_by"), int)
+            and not isinstance(compare.get("ahead_by"), bool)
+            and int(compare["ahead_by"]) > 0
+            and compare.get("behind_by") == 0
+            and merge_base.get("sha") == deployed_sha
+            and len(commit_shas) == int(compare["ahead_by"])
+            and all(
+                re.fullmatch(r"[0-9a-f]{40}", str(sha or "")) is not None
+                for sha in commit_shas
+            )
+            and commit_shas[-1:] == [bridge_sha]
+        ):
+            raise ApplyError("WBC0027 workflow bridge ancestry is invalid")
+        ancestry_payload = {
+            "deployed_sha": deployed_sha,
+            "bridge_sha": bridge_sha,
+            "commit_shas": commit_shas,
+        }
+        ancestry = {
+            "status": "ahead",
+            "merge_base_sha": deployed_sha,
+            "ahead_by": int(compare["ahead_by"]),
+            "behind_by": 0,
+            "commit_count": len(commit_shas),
+            "commit_digest": payload_digest(ancestry_payload),
+        }
+    workflow = _git_blob_binding(bridge_sha, PRODUCTION_APPLY_WORKFLOW_PATH)
+    checkout_workflow = _git_blob_binding("HEAD", PRODUCTION_APPLY_WORKFLOW_PATH)
+    if workflow != checkout_workflow:
+        raise ApplyError("WBC0027 checked-out workflow bytes are not exact main")
+    source_integrity = _wbc0027_runtime_source_integrity(
+        deployed_sha=deployed_sha,
+        bridge_sha=bridge_sha,
+    )
+    return {
+        "pull_request": bridge_pr_number,
+        "operation_id": str(bridge_release["operation_id"]),
+        "state": str(bridge_release["state"]),
+        "release_kind": expected_kind,
+        "merge_sha": bridge_sha,
+        "deployed_sha": bridge_release.get("deployed_sha"),
+        "workflow_run_id": int(bridge_release["workflow_run_id"]),
+        "plan_hash": str(bridge_release["plan_hash"]),
+        "pr_gate": dict(bridge_release["pr_gate"]),
+        "dispatch": {
+            "workflow_run_id": run_id,
+            "workflow": PRODUCTION_APPLY_WORKFLOW_PATH,
+            "event": event,
+            "ref": ref,
+            "run_attempt": 1,
+            "head_sha": bridge_sha,
+        },
+        "workflow_blob": workflow,
+        "ancestry": ancestry,
+        "runtime_source_integrity": source_integrity,
+    }
+
+
 def _validate_wbc0027_reconciliation_source_receipt(
     receipt: Mapping[str, Any],
     *,
@@ -7188,11 +7594,25 @@ def _wbc0027_reconciliation_context(
     correction_sha = exact_sha(
         correction_pr.get("merge_commit_sha"), "reconciliation-pr-merge"
     )
-    code_sha = exact_sha(os.environ.get("GITHUB_SHA"), "reconciliation-code")
-    if correction_sha != code_sha or correction_sha == source_merge_sha:
-        raise ApplyError("WBC0027 trusted reconciliation checkout is not exact")
+    if correction_sha == source_merge_sha:
+        raise ApplyError("WBC0027 reconciliation release did not change deployed code")
     correction_comments = list_comments(client, int(args.reconciliation_pr))
-    release = parse_release_receipt(
+    release = _wbc0027_trusted_release(
+        client,
+        pr_number=int(args.reconciliation_pr),
+        pr=correction_pr,
+        comments=correction_comments,
+        merge_sha=correction_sha,
+        release_kind="live_runtime",
+        operation=str(args.reconciliation_release_operation_id),
+    )
+    workflow_bridge = _wbc0027_workflow_bridge(
+        client=client,
+        deployed_release=release,
+    )
+    if release.get("deployed_sha") != correction_sha:
+        raise ApplyError("WBC0027 reconciliation deployed SHA binding is invalid")
+    parse_release_receipt(
         correction_comments,
         pr=int(args.reconciliation_pr),
         release_operation=str(args.reconciliation_release_operation_id),
@@ -7254,15 +7674,8 @@ def _wbc0027_reconciliation_context(
                 "source_adapter_rehearsal_digest"
             ],
         },
-        "reconciliation_release": {
-            "pull_request": int(args.reconciliation_pr),
-            "operation_id": str(args.reconciliation_release_operation_id),
-            "release_kind": "live_runtime",
-            "merge_sha": correction_sha,
-            "deployed_sha": correction_sha,
-            "workflow_run_id": release.get("workflow_run_id"),
-            "plan_hash": release.get("plan_hash"),
-        },
+        "reconciliation_release": release,
+        "workflow_bridge": workflow_bridge,
     }
 
 
@@ -7417,6 +7830,8 @@ def _valid_wbc0027_finalize_result(
     return bool(
         result.get("contract_name")
         == "wbc0027_existing_operation_reconciliation/v1"
+        and result.get("runtime_source_binding_contract")
+        == WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT
         and result.get("status") == "reconciled_existing_operation"
         and result.get("qualification_status") == "qualified"
         and result.get("repeat_disposition") == "already_qualifiable"
@@ -7683,6 +8098,7 @@ def _validate_wbc0027_reconciliation_receipt(
         and receipt.get("source") == context["source"]
         and receipt.get("reconciliation_release")
         == context["reconciliation_release"]
+        and receipt.get("workflow_bridge") == context["workflow_bridge"]
         and _valid_wbc0027_finalize_result(
             (receipt.get("probe") or {}).get("result"), context=context
         )
@@ -7728,6 +8144,7 @@ def _existing_wbc0027_reconciliation_marker(
         and payload.get("source") == context["source"]
         and payload.get("reconciliation_release")
         == context["reconciliation_release"]
+        and payload.get("workflow_bridge") == context["workflow_bridge"]
         and isinstance(artifact, Mapping)
         and artifact.get("file") == WBC0027_RECONCILIATION_ARTIFACT_FILE
         and artifact.get("retention_days") == 90
@@ -7748,7 +8165,7 @@ def _existing_wbc0027_reconciliation_marker(
         run_id=run_id,
         artifact_name=str(artifact["name"]),
         receipt_sha256=str(artifact["sha256"])[len("sha256:") :],
-        code_sha=str(context["reconciliation_release"]["merge_sha"]),
+        code_sha=str(context["workflow_bridge"]["merge_sha"]),
     )
     receipt = verified["receipt"]
     if not _validate_wbc0027_reconciliation_receipt(receipt, context=context):
@@ -7781,6 +8198,7 @@ def _run_wbc0027_reconciliation_preflight(
         "economics_replay_count": 0,
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
+        "workflow_bridge": context["workflow_bridge"],
         "comment_id": int(existing.get("id") or 0) if existing is not None else 0,
     }
     _write_receipt(args.output, receipt)
@@ -7831,6 +8249,7 @@ def _run_wbc0027_reconciliation_collect(
         "economics_replay_count": 0,
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
+        "workflow_bridge": context["workflow_bridge"],
         "probe": probe,
     }
     receipt["evidence_digest"] = payload_digest(receipt)
@@ -7868,7 +8287,7 @@ def _run_wbc0027_reconciliation_publish(
         run_id=run_id,
         artifact_name=artifact_name,
         receipt_sha256=digest(raw),
-        code_sha=str(context["reconciliation_release"]["merge_sha"]),
+        code_sha=str(context["workflow_bridge"]["merge_sha"]),
     )
     result = receipt["probe"]["result"]
     summary = {
@@ -7881,6 +8300,7 @@ def _run_wbc0027_reconciliation_publish(
         "economics_replay_count": 0,
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
+        "workflow_bridge": context["workflow_bridge"],
         "qualification": {
             "source_recovery_row_digest": result["source_recovery_row_digest"],
             "transition_digest": result["transition_digest"],

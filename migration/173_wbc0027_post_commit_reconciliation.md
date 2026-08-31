@@ -35,7 +35,21 @@ The source economics operation
 The default-off `wbc0027-receipt-reconciliation` workflow exact-binds source PR
 1129, Apply run 33345644125, artifact 9741910399, receipt and marker, original
 OWNER passport, deployed SHA/generation, private manifest/fingerprint and the
-new live-runtime release.
+exact live-runtime reconciliation release. The two reconciliation inputs remain
+bound to that deployed PR/SHA and its `live_runtime/done` receipt.
+
+The trusted workflow checkout is a separate, derived bridge. It must be an exact
+first-attempt `workflow_dispatch` checkout of `main`, derived from one merged
+same-repository PR with a successful exact PR Gate and trusted Release receipt.
+It is either the same live-runtime SHA or a descendant with an exact
+`repo_only/done` receipt. In the latter case every Git blob in the closed
+`wbc0027_reconciliation_runtime_source_binding/v1` set must remain byte-identical
+to the deployed SHA. The set owns the Apply Runner, WBC0027 finalizer, warehouse
+recovery/storage/lock boundary and imported release receipt validators. A changed
+blob, divergent ancestry, missing or ambiguous PR/Gate/receipt, or a non-main
+checkout fails closed. Workflow-only/test/docs changes may bridge repo-only; a
+runtime-source change requires a new live-runtime release. The reconciliation
+receipt records deployed release and workflow bridge separately.
 
 Its fixed remote command exposes only `finalize-only`. That command opens the
 operational database query-only and proves:
@@ -72,5 +86,6 @@ query-only repeat is byte-stable and reports `already_qualifiable`.
 after-COMMIT false quarantine, durable write truth, genuine concurrent
 non-target drift rejection and byte-unchanged idempotent finalization.
 `apps/wbc0027_capital_recovery_runner_smoke.py` verifies the mutation-incapable
-command, provenance/receipt contract, artifact-first workflow and negative
-missing/foreign evidence.
+command, provenance/receipt contract, artifact-first workflow, the exact PR 1133
+live-runtime plus PR 1134 repo-only bridge, direct-equality binding and negative
+source-drift/ancestry/receipt evidence.

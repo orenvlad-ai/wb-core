@@ -30,6 +30,9 @@ from apps.sheet_vitrina_v1_historical_missing_repair import (  # noqa: E402
     _target_cells,
 )
 from apps.ff_pool_dense_fbs import _write_private  # noqa: E402
+from apps.wbc0027_capital_recovery_source_binding import (  # noqa: E402
+    CONTRACT_NAME as RECONCILIATION_RUNTIME_SOURCE_BINDING_CONTRACT,
+)
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
@@ -2765,6 +2768,9 @@ def finalize_existing_economics_operation(
     }
     return {
         "contract_name": FINALIZE_ONLY_CONTRACT,
+        "runtime_source_binding_contract": (
+            RECONCILIATION_RUNTIME_SOURCE_BINDING_CONTRACT
+        ),
         "status": "reconciled_existing_operation",
         "qualification_status": "qualified",
         "repeat_disposition": "already_qualifiable",

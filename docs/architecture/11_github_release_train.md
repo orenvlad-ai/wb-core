@@ -379,13 +379,32 @@ dispatch и не authorization marker.
 Apply run `33345644125`, существует отдельный default-off mode
 `wbc0027-receipt-reconciliation`. Он exact-bind source PR/run/artifact/receipt/
 blocked marker/OWNER passport, исходные T1 before/after rows и quarantine reason,
-а также новый `live_runtime/done` release. Fixed remote command способен вызвать
-только `finalize-only`: он открывает production SQLite query-only, не создаёт
-manifest или recovery row, не пишет product/economics/outbox и не повторяет ни
-один submit. Full canonical receipt загружается до единственного compact
-supersession marker; exact repeat валидирует этот artifact и возвращает
-`already_terminal` до SSH. Missing, foreign, duplicated или drifted evidence
-fail closed.
+а также exact `live_runtime/done` release фактически deployed reconciliation
+code. Caller inputs `reconciliation_pr` и
+`reconciliation_release_operation_id` всегда относятся только к этому release;
+текущий trusted workflow checkout не подменяет deployed binding.
+
+Workflow bridge выводится без нового dispatch input. `GITHUB_SHA` обязан быть
+exact first-attempt `workflow_dispatch` checkout ветки `main`, связанным с одним
+merged same-repository PR, exact successful PR Gate и trusted Release receipt.
+При прямом совпадении с deployed SHA используется тот же `live_runtime/done`
+receipt. Более новый SHA допускается только как descendant deployed SHA с exact
+`repo_only/done` receipt и byte-identical closed source binding
+`wbc0027_reconciliation_runtime_source_binding/v1`. В binding входят Apply
+Runner, WBC0027 finalize-only runtime, warehouse recovery/storage/lock owners и
+imported release receipt validators. Любое изменение одного из этих Git blobs
+требует новый live-runtime reconciliation release; workflow/tests/docs-only
+bridge может остаться repo-only. Workflow blob проверяется отдельно на current
+main. Missing/ambiguous PR, Gate или receipt, divergent ancestry и source drift
+fail closed. Receipt сохраняет deployed reconciliation release и workflow bridge
+раздельно, а uploaded artifact provenance связан с bridge SHA.
+
+Fixed remote command способен вызвать только `finalize-only`: он открывает
+production SQLite query-only, не создаёт manifest или recovery row, не пишет
+product/economics/outbox и не повторяет ни один submit. Full canonical receipt
+загружается до единственного compact supersession marker; exact repeat
+валидирует этот artifact и возвращает `already_terminal` до SSH. Missing,
+foreign, duplicated или drifted evidence fail closed.
 
 Source manifest PR #1129 имеет ровно legacy shape: raw `non_target_digest`,
 три `functional_economics.patches` и три `material.semantic_patches`; полей

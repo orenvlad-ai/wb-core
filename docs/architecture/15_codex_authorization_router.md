@@ -237,6 +237,15 @@ Legacy adapter не изобретает отсутствующие source seman
 truth — raw 221-row aggregate плюс три exact target-removed T1 equality и
 undo/order proof. Эта exception grammar недоступна future Apply manifest-ам.
 
+Для этого WBC0027 contour caller-provided reconciliation PR/operation всегда
+bind exact `live_runtime/done` deployed finalize-only code. Trusted current-main
+workflow SHA выводится отдельно из GitHub dispatch/PR/Gate/Release evidence: он
+либо равен deployed SHA, либо является его descendant с exact `repo_only/done`
+receipt и byte-identical closed reconciliation source binding. Workflow-only
+bridge не становится новым production release; изменение Apply/finalize/
+warehouse-policy/receipt-validator blob без нового live-runtime release даёт
+`EVIDENCE_BLOCKED`. Оба binding сохраняются раздельно в query-only receipt.
+
 Для WBC0008 terminal-receipt contour legacy reconciliation `a01` также является
 immutable terminal evidence. После exact validation его run/artifact/receipt/
 marker, того же source operation/job, zero mutation и единственного timer-
