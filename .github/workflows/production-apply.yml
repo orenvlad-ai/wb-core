@@ -68,12 +68,12 @@ on:
         default: 0
         type: number
       reconciliation_pr:
-        description: Exact merged repo-only reconciliation release PR
+        description: Exact merged live-runtime reconciliation release PR
         required: false
         default: 0
         type: number
       reconciliation_release_operation_id:
-        description: Exact repo-only Release Runner operation for reconciliation code
+        description: Exact live-runtime Release Runner operation for reconciliation code
         required: false
         type: string
       prior_reconciliation_run_id:
