@@ -164,6 +164,7 @@
         ["python3", "apps/ff_pool_fbs_lifecycle_smoke.py"],
         ["python3", "apps/warehouse_fbs_material_rematerialization_smoke.py"],
         ["python3", "apps/ff_pool_fbs_forward_recovery_smoke.py"],
+        ["python3", "apps/fbs_lifecycle_manifests_smoke.py"],
         ["python3", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py"],
         ["python3", "apps/russian_payment_orders_smoke.py"],
         ["python3", "apps/ff_pool_overhead_backfill_smoke.py"],
@@ -290,7 +291,7 @@
     },
     {
       "id": "wbc0027-fbs-lifecycle-quality-recovery",
-      "paths": ["apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_mapping_extension.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py", "migration/177_wbc0027_exact_fbs_sku_mapping_extension.md"],
+      "paths": ["apps/fbs_lifecycle_manifests_smoke.py", "apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_mapping_extension.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py", "packages/application/fbs_lifecycle_manifests.py", "release/production-mutations/wbc0027_fbs_lifecycle_incident.json", "migration/177_wbc0027_exact_fbs_sku_mapping_extension.md", "migration/178_wbc0027_general_fbs_manifest_recovery.md"],
       "suites": ["fulfillment", "inventory_history", "release_safety"],
       "release": "live_runtime"
     },

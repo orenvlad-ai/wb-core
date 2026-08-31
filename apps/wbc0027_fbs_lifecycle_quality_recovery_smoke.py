@@ -819,5 +819,13 @@ def _assert_mapping_negative_guards(
         mapping_module.EXPECTED_TARGET_NM_ID = previous_target
 
 
+def main() -> int:
+    """Compatibility entrypoint for the general v2 manifest smoke."""
+
+    from apps.fbs_lifecycle_manifests_smoke import main as manifests_main
+
+    return manifests_main()
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
