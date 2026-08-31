@@ -422,7 +422,7 @@ def _exercise_false_quarantine_finalize() -> None:
         recovery.reconcile_warehouse_business_projection = lambda *_args, **_kwargs: {
             "status": "published_exact",
             "mismatch_count": 0,
-            "row_count": 1152,
+            "scope_count": 1152,
             "cell_count": 24192,
         }
         recovery._hard_non_target_semantics = lambda _conn: {
