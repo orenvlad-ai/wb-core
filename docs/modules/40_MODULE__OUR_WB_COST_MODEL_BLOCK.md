@@ -398,3 +398,11 @@ invariant, 12/0 missing partition and hard non-targets using query-only SQLite.
 It separately records later current non-target row/component drift without
 requiring equality to source; that evidence cannot approve target drift. It writes no
 cost, Proxy, Finance, product, economics, outbox or recovery row.
+
+The exact PR-1129 source predates the canonical semantic witness fields. Its
+source-locked legacy adapter therefore proves the historic transaction from
+the 221-row raw aggregate and the three target-removed before/planned-after
+equalities, binds the 3-row/472-cell undo artifact and immutable source-code
+COMMIT-before-retain order, and explicitly marks historic per-row semantic
+components as unavailable. This exception is not a fallback: every future
+economics plan/Apply still requires the canonical versioned semantic witness.

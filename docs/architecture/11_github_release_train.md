@@ -335,8 +335,9 @@ target-row count и component digests identities/semantic payloads/rows.
 pre-submit, post-submit и retain. Отложенный `finalize-only` — иной temporal
 boundary: он не пишет business data и не требует равенства позднего current
 non-target историческому source digest. Receipt отдельно сохраняет
-source/current row counts, identity/payload/row component digests и derivable
-changed identities/hashes. Поздняя ordinary evolution — только evidence, не
+source/current row counts, source/current raw digests, current identity/payload/
+row component digests и derivable changed identities/hashes. Недоступные source
+semantic components не синтезируются. Поздняя ordinary evolution — только evidence, не
 approval target changes; current target after-images остаются exact.
 
 Факт business write сохраняется внутри той же SQLite transaction непосредственно
@@ -385,6 +386,22 @@ manifest или recovery row, не пишет product/economics/outbox и не �
 supersession marker; exact repeat валидирует этот artifact и возвращает
 `already_terminal` до SSH. Missing, foreign, duplicated или drifted evidence
 fail closed.
+
+Source manifest PR #1129 имеет ровно legacy shape: raw `non_target_digest`,
+три `functional_economics.patches` и три `material.semantic_patches`; полей
+`functional_economics.semantic_non_target` и
+`material.semantic_non_target_contract` в нём нет. Только для exact source
+PR/run/artifact/receipt/marker/passport/deployed SHA/goal/manifest/generation/
+phase adapter
+`wbc0027_source_economics_transaction_legacy_adapter/v1` принимает это
+отсутствие. Он связывает allowlisted cardinality `224 ready = 221 raw + 3
+target`, raw digest, три target-removed before/planned-after equality, undo
+artifact, write set `3/472` и source-code order CAS → after-readback → semantic
+equality → COMMIT → retain/quarantine. Исторические per-row semantic component
+digests не реконструируются и не декларируются. Current canonical semantic
+builder остаётся versioned и strict для любого будущего Apply; поздняя current
+non-target evolution сохраняется только typed receipt evidence, тогда как
+current target after-images остаются exact equality gate.
 
 Отдельная новая presentation-only операция WBC0013 не переиспользует terminal
 A/B identity и имеет собственный exact profile:

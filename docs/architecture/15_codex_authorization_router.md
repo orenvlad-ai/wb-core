@@ -220,10 +220,22 @@ query-only, mutation0/replay0 и сохраняет quarantined row immutable. �
 source transaction доказывается независимо от current: source raw scope и три
 T1 before/planned-after rows после удаления target slices обязаны совпасть,
 тогда как поздняя ordinary non-target evolution допускается и записывается
-typed source/current digests. Это receipt evidence, а не разрешение target
+typed source/current raw digests и current semantic components. Это receipt
+evidence, а не разрешение target
 изменения; current target after-image drift всегда блокирует. Единственный
 новый effect — uploaded receipt и compact supersession marker. Любой mismatch
 остаётся `EVIDENCE_BLOCKED`, не разрешением на повтор product/economics Apply.
+
+Allowlist относится только к immutable source PR `1129`, run `33345644125`,
+artifact `9741910399`, receipt
+`843d1eb81d92ac16a51bc21fb92256916e4c9c3a353d3221ebc1a82df80bf9f5`,
+blocked marker `5472359912`, predecessor OWNER passport `5472278622`, source
+SHA `876f5f307a2053d66544dd1c8950f94f77f92ddb`, goal
+`production-goal-v1-5024719a64fa9707b72d938ebf8a2127` и private manifest
+`675fcb98fdcc74ce2d30c4e907c9c5330f7878fee929027c536b5a6f03ec47c4`.
+Legacy adapter не изобретает отсутствующие source semantic components: source
+truth — raw 221-row aggregate плюс три exact target-removed T1 equality и
+undo/order proof. Эта exception grammar недоступна future Apply manifest-ам.
 
 Для WBC0008 terminal-receipt contour legacy reconciliation `a01` также является
 immutable terminal evidence. После exact validation его run/artifact/receipt/

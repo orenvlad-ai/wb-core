@@ -832,3 +832,12 @@ source proof binds the historic 224-row/221-unpatched transaction and exact
 target after-images. A later ordinary ready-snapshot publication may change the
 current non-target digest; finalize records that temporal drift, while any
 current target after-image change remains blocking.
+
+For that one source, `224-row` is an exact source-specific cardinality, not a
+field read from the legacy manifest. The manifest has raw `non_target_digest`,
+three patches and three semantic patches but no `semantic_non_target` or
+`semantic_non_target_contract`. Adapter
+`wbc0027_source_economics_transaction_legacy_adapter/v1` binds those absences
+to the immutable source lineage and proves non-target preservation through the
+three target-removed row equalities plus the source CAS/readback/COMMIT/retain
+order. It never synthesizes historical component digests.

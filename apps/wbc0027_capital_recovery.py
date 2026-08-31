@@ -72,6 +72,11 @@ ECONOMICS_NON_TARGET_CONTRACT = (
 )
 ECONOMICS_NON_TARGET_SCOPE_VERSION = "ready_snapshot_target_slices_removed_v1"
 FINALIZE_ONLY_CONTRACT = "wbc0027_existing_operation_reconciliation/v1"
+LEGACY_SOURCE_TRANSACTION_CONTRACT = (
+    "wbc0027_source_economics_transaction_legacy_adapter/v1"
+)
+LEGACY_SOURCE_RAW_NON_TARGET_CONTRACT = "wbc0027_legacy_raw_non_target_aggregate/v1"
+LEGACY_SOURCE_CODE_ORDER_CONTRACT = "wbc0027_source_economics_code_order/v1"
 PROFILE = "product-capital-qualified-economics"
 CANONICAL_TARGET_ID = "wb_core_eu_hosted_runtime_active"
 MUTATION_KIND_PRODUCT = "wbc0027_product_capital_version_bound_recovery"
@@ -117,7 +122,88 @@ LEGACY_PHASE_OPERATION_IDS = frozenset(
 LEGACY_MANIFEST_SHA256 = (
     "sha256:84a4bef9d6cba4c969988d880ab56bde06db307f3caf87a42305f7fe8c8680ee"
 )
-LEGACY_APPROVAL_REFERENCE = "https://github.com/orenvlad-ai/wb-core/issues/1126#issuecomment-5471418411"
+LEGACY_APPROVAL_REFERENCE = (
+    "https://github.com/orenvlad-ai/wb-core/issues/1126#issuecomment-5471418411"
+)
+LEGACY_SOURCE_TRANSACTION_BINDING = {
+    "pull_request": 1129,
+    "run_id": 33345644125,
+    "artifact_id": 9741910399,
+    "artifact_name": "production-apply-receipt-pr-1129-run-33345644125",
+    "receipt_sha256": (
+        "sha256:843d1eb81d92ac16a51bc21fb92256916e4c9c3a353d3221ebc1a82df80bf9f5"
+    ),
+    "blocked_comment_id": 5472359912,
+    "authorization_comment_id": 5472278622,
+    "authorization_body_sha256": (
+        "b2cfb8bf9f20ecfe7a9075f42ff443a144d4550ee07c8418482988ad2542d3ad"
+    ),
+    "goal_operation_id": "production-goal-v1-5024719a64fa9707b72d938ebf8a2127",
+    "product_phase_operation_id": "recovery_9b9d1d2ad66035d080ec2bced855201e",
+    "economics_phase_operation_id": "recovery_ae66a56f72d90b469b75d8adb893c51f",
+    "source_deployed_sha": "876f5f307a2053d66544dd1c8950f94f77f92ddb",
+    "source_phase_contract": PHASE_CONTRACT,
+    "manifest_sha256": (
+        "sha256:675fcb98fdcc74ce2d30c4e907c9c5330f7878fee929027c536b5a6f03ec47c4"
+    ),
+    "phase_fingerprint": (
+        "sha256:2d6004dcd37b8d3becd31231d6d2a77e4ab1c5262757f355ddf1413f1d24b542"
+    ),
+    "storage_generation": {
+        "generation_id": "operational-c54072027f14f90b374b",
+        "manifest_sha256": (
+            "sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb"
+        ),
+        "schema_revision": "operational_v1",
+    },
+    "source_ready_row_count": 224,
+    "source_raw_non_target_row_count": 221,
+    "source_raw_non_target_digest": (
+        "sha256:55e057f0f18109cc01b4f78583c96facc78e5e4ef09f205c80d2c1991d57a858"
+    ),
+    "target_identities": (
+        (
+            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+            "2026-08-25",
+            "2026-08-25__2026-08-26__sheet_vitrina_v1_temporal_live_v1__current",
+        ),
+        (
+            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+            "2026-08-26",
+            "2026-08-26__partial_group_wb_api__2026-08-28T04:59:24Z",
+        ),
+        (
+            "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+            "2026-08-29",
+            "2026-08-29__2026-08-30__sheet_vitrina_v1_temporal_live_v1__current",
+        ),
+    ),
+    "target_before_hashes": (
+        "sha256:a20d88e0208dd0ebec804c8f9a61f9734f6e43880ad3908f48bb63aaa340d3c7",
+        "sha256:baee41dea0e85ae958b5149f6c944af7e77d6f42cd3b46f868ddea0038912fd4",
+        "sha256:bddbad60bdfa0cb99668d2d0ab663ae5fa10f021ad169c692fc0804a9978272e",
+    ),
+    "target_before_digest": (
+        "sha256:edca64a735d30abad44c5b31a0603baf06932ecdad8b3cedba0af9dcd980b67e"
+    ),
+    "target_after_hashes": (
+        "sha256:d186a89de1910576b20b86c707056b85f72e5b7a69e175db8ef6d041a1432f1d",
+        "sha256:54b0bdd0d36564c884071ec2e848945d0c1152113571fc7bb7ef2608a6d69c2e",
+        "sha256:ef848227b66e26ebe37643e752abac252c9a63c85fe0957a9bcae78736392c68",
+    ),
+    "target_after_digest": (
+        "sha256:359736666b74cc4b4b87eb5a6b4bce6e309a29f35b64d2548966a13fbfc58424"
+    ),
+    "target_removed_digests": (
+        "sha256:9d01f65d8e87705cae5aaf4eb1b5599312ca4bb05a02e0826c46d89899ea90a8",
+        "sha256:a593fb1b110178d9d2bffc2476191c9fb6bc34878ce1692fafee42f5c40a63f7",
+        "sha256:6f108a3bc53fb737a51ebd1cb9fe5e264aef155d7f5f11cac605ddb3c56d886c",
+    ),
+    "target_changed_cell_counts": (174, 174, 124),
+    "rehearsal_result_digest": (
+        "sha256:3598233834edfdc236bff126dfd9a25f432d36e44a1ed97abad9123d079cf4aa"
+    ),
+}
 
 
 class Wbc0027RecoveryError(RuntimeError):
@@ -2076,44 +2162,89 @@ def _raw_unpatched_ready_digest(
     )
 
 
+def _validate_legacy_source_transaction_binding(
+    *,
+    goal_operation_id: str,
+    source_deployed_sha: str,
+    source_manifest_sha256: str,
+    source_phase_operation_id: str,
+    source_phase_fingerprint: str,
+    source_storage_generation: Mapping[str, Any],
+    source_run_id: int,
+    source_artifact_id: int,
+    source_artifact_name: str,
+    source_receipt_sha256: str,
+    source_comment_id: int,
+    authorization_reference: str,
+) -> None:
+    """Admit the missing-semantic exception for exactly one immutable source."""
+
+    source = LEGACY_SOURCE_TRANSACTION_BINDING
+    expected_authorization = (
+        "github:orenvlad-ai/wb-core:pr:1129:comment:"
+        f"{source['authorization_comment_id']}:sha256:"
+        f"{source['authorization_body_sha256']}"
+    )
+    observed = {
+        "goal_operation_id": goal_operation_id,
+        "source_deployed_sha": source_deployed_sha,
+        "source_manifest_sha256": source_manifest_sha256,
+        "source_phase_operation_id": source_phase_operation_id,
+        "source_phase_fingerprint": source_phase_fingerprint,
+        "source_storage_generation": _phase_generation(source_storage_generation),
+        "source_run_id": source_run_id,
+        "source_artifact_id": source_artifact_id,
+        "source_artifact_name": source_artifact_name,
+        "source_receipt_sha256": source_receipt_sha256,
+        "source_comment_id": source_comment_id,
+        "authorization_reference": authorization_reference,
+    }
+    expected = {
+        "goal_operation_id": source["goal_operation_id"],
+        "source_deployed_sha": source["source_deployed_sha"],
+        "source_manifest_sha256": source["manifest_sha256"],
+        "source_phase_operation_id": source["economics_phase_operation_id"],
+        "source_phase_fingerprint": source["phase_fingerprint"],
+        "source_storage_generation": source["storage_generation"],
+        "source_run_id": source["run_id"],
+        "source_artifact_id": source["artifact_id"],
+        "source_artifact_name": source["artifact_name"],
+        "source_receipt_sha256": source["receipt_sha256"],
+        "source_comment_id": source["blocked_comment_id"],
+        "authorization_reference": expected_authorization,
+    }
+    if observed != expected:
+        raise Wbc0027RecoveryError("WBC0027 legacy source transaction binding drifted")
+
+
 def _source_economics_transaction_proof(
     *,
     economics: Mapping[str, Any],
+    material: Mapping[str, Any],
     semantic_patches: list[Mapping[str, Any]],
     recovery: Mapping[str, Any],
     undo_rows: list[sqlite3.Row],
+    undo_artifacts: list[sqlite3.Row],
     transitions: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    source = LEGACY_SOURCE_TRANSACTION_BINDING
     patches = list(economics["patches"])
-    source_semantic = economics.get("semantic_non_target")
-    if not isinstance(source_semantic, Mapping):
-        raise Wbc0027RecoveryError("WBC0027 source semantic T1 witness is missing")
-    source_semantic = dict(source_semantic)
-    source_semantic_material = {
-        key: source_semantic[key]
-        for key in (
-            "contract_name",
-            "scope_version",
-            "row_count",
-            "target_row_count",
-            "component_digests",
-        )
-    }
     source_raw_digest = str(economics.get("non_target_digest") or "")
-    source_raw_row_count = int(source_semantic.get("row_count") or 0) - len(patches)
     if not (
-        source_semantic.get("contract_name") == ECONOMICS_NON_TARGET_CONTRACT
-        and source_semantic.get("scope_version") == ECONOMICS_NON_TARGET_SCOPE_VERSION
-        and source_semantic.get("target_row_count") == len(patches) == 3
-        and source_raw_row_count >= 0
-        and source_semantic.get("digest") == _digest(source_semantic_material)
-        and re.fullmatch(r"sha256:[0-9a-f]{64}", source_raw_digest)
+        "semantic_non_target" not in economics
+        and "semantic_non_target_contract" not in material
+        and len(patches) == len(semantic_patches) == 3
+        and source_raw_digest == source["source_raw_non_target_digest"]
         and recovery.get("non_target_digest") == source_raw_digest
     ):
-        raise Wbc0027RecoveryError("WBC0027 source T1 aggregate witness drifted")
+        raise Wbc0027RecoveryError(
+            "WBC0027 exact legacy source shape or raw aggregate drifted"
+        )
 
     target_rows: list[dict[str, Any]] = []
-    for patch, semantic_patch in zip(patches, semantic_patches, strict=True):
+    for index, (patch, semantic_patch) in enumerate(
+        zip(patches, semantic_patches, strict=True)
+    ):
         identity = [str(value) for value in patch["identity"]]
         days = [str(day) for day in patch["business_dates"]]
         before_json = str(patch["before_plan_json"])
@@ -2131,6 +2262,12 @@ def _source_economics_transaction_proof(
             and patch.get("before_sha256") == _sha_text(before_json)
             and patch.get("after_sha256") == _sha_text(after_json)
             and before_normalized_digest == after_normalized_digest
+            and tuple(identity) == source["target_identities"][index]
+            and patch.get("before_sha256") == source["target_before_hashes"][index]
+            and patch.get("after_sha256") == source["target_after_hashes"][index]
+            and before_normalized_digest == source["target_removed_digests"][index]
+            and len(patch["changed_cells"])
+            == source["target_changed_cell_counts"][index]
         ):
             raise Wbc0027RecoveryError(
                 "WBC0027 source T1 before/planned-after equality drifted"
@@ -2151,10 +2288,38 @@ def _source_economics_transaction_proof(
     if not (
         _digest(before_hashes) == economics.get("before_digest")
         and _digest(after_hashes) == economics.get("after_digest")
+        and economics.get("before_digest") == source["target_before_digest"]
+        and economics.get("after_digest") == source["target_after_digest"]
         and sum(item["changed_cell_count"] for item in target_rows)
         == EXPECTED_ECONOMICS_PERSISTED_REPAIRS
     ):
         raise Wbc0027RecoveryError("WBC0027 source T1 target write-set drifted")
+
+    expected_after_images = [
+        {
+            "bundle_version": patch["identity"][0],
+            "as_of_date": patch["identity"][1],
+            "snapshot_id": patch["identity"][2],
+            "plan_json": patch["after_plan_json"],
+        }
+        for patch in patches
+    ]
+    undo_artifact_metadata: Mapping[str, Any] = {}
+    if len(undo_artifacts) == 1:
+        try:
+            parsed = json.loads(str(undo_artifacts[0]["metadata_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            undo_artifact_metadata = parsed
+    if not (
+        len(undo_artifacts) == 1
+        and str(undo_artifacts[0]["artifact_kind"]) == "undo"
+        and str(undo_artifacts[0]["state"]) == "verified"
+        and undo_artifact_metadata.get("row_count") == 3
+        and undo_artifact_metadata.get("expected_after_images") == expected_after_images
+    ):
+        raise Wbc0027RecoveryError("WBC0027 source undo artifact metadata drifted")
 
     mutation_index = next(
         (
@@ -2174,18 +2339,24 @@ def _source_economics_transaction_proof(
         -1,
     )
     if not (
-        mutation_index >= 0
-        and quarantine_index > mutation_index
+        len(transitions) == 6
+        and mutation_index == 4
+        and quarantine_index == 5
         and len(undo_rows) == 3
         and all(str(row["status"]) == "verified" for row in undo_rows)
     ):
         raise Wbc0027RecoveryError("WBC0027 source T1 CAS/commit ordering drifted")
     return {
-        "contract_name": "wbc0027_source_economics_transaction/v1",
-        "source_ready_row_count": int(source_semantic["row_count"]),
-        "source_raw_non_target_row_count": source_raw_row_count,
-        "source_raw_non_target_digest": source_raw_digest,
-        "source_semantic_non_target": source_semantic,
+        "contract_name": LEGACY_SOURCE_TRANSACTION_CONTRACT,
+        "source_ready_row_count": source["source_ready_row_count"],
+        "source_raw_non_target": {
+            "contract_name": LEGACY_SOURCE_RAW_NON_TARGET_CONTRACT,
+            "row_count": source["source_raw_non_target_row_count"],
+            "digest": source_raw_digest,
+            "binding": "exact_source_manifest_and_recovery_row",
+        },
+        "source_semantic_components_reconstructable": False,
+        "source_adapter_rehearsal_digest": source["rehearsal_result_digest"],
         "target_rows": target_rows,
         "target_identities_digest": _digest(
             [item["identity"] for item in target_rows]
@@ -2197,12 +2368,29 @@ def _source_economics_transaction_proof(
             "cell_count": sum(item["changed_cell_count"] for item in target_rows),
             "undo_row_count": len(undo_rows),
             "undo_rows_verified": True,
+            "undo_artifact_verified": True,
+            "expected_after_image_count": len(expected_after_images),
         },
         "ordering": {
             "cas_before_images_verified": True,
+            "exact_after_readback_verified": True,
+            "source_code_semantic_before_after_equal": True,
+            "source_code_commit_before_retain": True,
+            "exact_retain_mismatch_caused_quarantine": True,
             "mutation_running_transition_index": mutation_index,
-            "quarantine_after_committed_target_index": quarantine_index,
-            "committed_target_readback_required": True,
+            "quarantine_after_commit_index": quarantine_index,
+        },
+        "source_code": {
+            "contract_name": LEGACY_SOURCE_CODE_ORDER_CONTRACT,
+            "deployed_sha": source["source_deployed_sha"],
+            "phase_contract": source["source_phase_contract"],
+            "immutable_order": [
+                "before_image_cas",
+                "exact_after_readback",
+                "semantic_non_target_equality",
+                "commit",
+                "retain",
+            ],
         },
     }
 
@@ -2214,10 +2402,10 @@ def _current_temporal_non_target_drift(
     semantic_patches: list[Mapping[str, Any]],
     source_transaction: Mapping[str, Any],
 ) -> dict[str, Any]:
+    source = LEGACY_SOURCE_TRANSACTION_BINDING
     current_semantic = _economics_semantic_non_target_snapshot(
         current_rows, semantic_patches
     )
-    source_semantic = dict(source_transaction["source_semantic_non_target"])
     raw_components = [
         {
             "identity": list(_ready_identity(row)),
@@ -2227,9 +2415,13 @@ def _current_temporal_non_target_drift(
         if _ready_identity(row) not in patch_identities
     ]
     current_raw_digest = _digest(raw_components)
-    source_raw_digest = str(source_transaction["source_raw_non_target_digest"])
+    source_raw = source_transaction["source_raw_non_target"]
+    source_raw_digest = str(source_raw["digest"])
     derived_added: list[dict[str, Any]] = []
-    if current_raw_digest != source_raw_digest:
+    if (
+        current_raw_digest != source_raw_digest
+        and len(raw_components) == int(source_raw["row_count"]) + 1
+    ):
         matches = [
             index
             for index in range(len(raw_components))
@@ -2249,26 +2441,52 @@ def _current_temporal_non_target_drift(
                     **component,
                     "semantic_payload_digest": _digest(payload),
                     "as_of_date": component["identity"][1],
+                    **(
+                        {"refreshed_at": str(row["refreshed_at"])}
+                        if "refreshed_at" in row.keys()
+                        else {}
+                    ),
                 }
             )
-    changed = current_semantic != source_semantic
+    changed = bool(
+        int(current_semantic["row_count"]) != source["source_ready_row_count"]
+        or len(raw_components) != source["source_raw_non_target_row_count"]
+        or current_raw_digest != source_raw_digest
+    )
+    observed_late_ordinary_rows = [
+        {
+            "identity": list(_ready_identity(row)),
+            "plan_sha256": _sha_text(str(row["plan_json"])),
+            **(
+                {"refreshed_at": str(row["refreshed_at"])}
+                if "refreshed_at" in row.keys()
+                else {}
+            ),
+        }
+        for row in current_rows
+        if _ready_identity(row) not in patch_identities
+        and str(row["as_of_date"]) >= HARD_NON_TARGET_DATE
+    ]
     return {
         "contract_name": "wbc0027_temporal_non_target_drift/v1",
         "classification": (
             "later_non_target_evolution" if changed else "no_later_non_target_evolution"
         ),
         "changed": changed,
-        "source_row_count": int(source_semantic["row_count"]),
-        "current_row_count": int(current_semantic["row_count"]),
-        "source_target_row_count": int(source_semantic["target_row_count"]),
+        "source_ready_row_count": source["source_ready_row_count"],
+        "current_ready_row_count": int(current_semantic["row_count"]),
+        "source_raw_non_target_row_count": source["source_raw_non_target_row_count"],
+        "current_raw_non_target_row_count": len(raw_components),
+        "source_target_row_count": 3,
         "current_target_row_count": int(current_semantic["target_row_count"]),
-        "source_component_digests": dict(source_semantic["component_digests"]),
+        "source_semantic_components_available": False,
+        "source_semantic_reconstruction_permitted": False,
         "current_component_digests": dict(current_semantic["component_digests"]),
-        "source_semantic_digest": str(source_semantic["digest"]),
         "current_semantic_digest": str(current_semantic["digest"]),
         "source_raw_non_target_digest": source_raw_digest,
         "current_raw_non_target_digest": current_raw_digest,
         "derived_added_rows": derived_added,
+        "observed_late_ordinary_rows": observed_late_ordinary_rows,
         "diff_derivation": (
             "unique_added_row_from_source_raw_aggregate"
             if derived_added
@@ -2278,6 +2496,7 @@ def _current_temporal_non_target_drift(
                 else "not_derivable_from_source_aggregate_digest"
             )
         ),
+        "equality_gate": False,
         "effect": "receipt_evidence_only_not_target_approval",
     }
 
@@ -2326,6 +2545,20 @@ def finalize_existing_economics_operation(
         )
     generation = _phase_generation(_generation(runtime.runtime_dir))
     expected_generation = _phase_generation(source_storage_generation)
+    _validate_legacy_source_transaction_binding(
+        goal_operation_id=operation_id,
+        source_deployed_sha=source_deployed_sha,
+        source_manifest_sha256=source_manifest_sha256,
+        source_phase_operation_id=phase_operation_id,
+        source_phase_fingerprint=source_phase_fingerprint,
+        source_storage_generation=expected_generation,
+        source_run_id=source_run_id,
+        source_artifact_id=source_artifact_id,
+        source_artifact_name=source_artifact_name,
+        source_receipt_sha256=source_receipt_sha256,
+        source_comment_id=source_comment_id,
+        authorization_reference=authorization_reference,
+    )
     if generation != expected_generation:
         raise Wbc0027RecoveryError(
             "WBC0027 finalize-only StoreRegistry generation drifted"
@@ -2345,12 +2578,14 @@ def finalize_existing_economics_operation(
         phase_fingerprint=source_phase_fingerprint,
     )
     economics = dict(candidate["functional_economics"])
+    material = dict(candidate["material"])
     patches = list(economics["patches"])
-    semantic_patches = list(candidate["material"]["semantic_patches"])
+    semantic_patches = list(material["semantic_patches"])
     if not (
         len(patches) == 3
-        and int(economics["logical_repair_count"])
-        == EXPECTED_ECONOMICS_LOGICAL_REPAIRS
+        and "semantic_non_target" not in economics
+        and "semantic_non_target_contract" not in material
+        and int(economics["logical_repair_count"]) == EXPECTED_ECONOMICS_LOGICAL_REPAIRS
         and int(economics["persisted_repair_count"])
         == EXPECTED_ECONOMICS_PERSISTED_REPAIRS
     ):
@@ -2361,9 +2596,7 @@ def finalize_existing_economics_operation(
         runtime_dir=runtime.runtime_dir, db_path=runtime.db_path
     )
     recovery = registry.get_operation(phase_operation_id)
-    product_operation_id = str(
-        candidate["material"].get("product_phase_operation_id") or ""
-    )
+    product_operation_id = str(material.get("product_phase_operation_id") or "")
     product_recovery = registry.get_operation(product_operation_id)
     if not isinstance(recovery, Mapping) or not isinstance(product_recovery, Mapping):
         raise Wbc0027RecoveryError("WBC0027 source recovery operations are missing")
@@ -2377,6 +2610,8 @@ def finalize_existing_economics_operation(
         == candidate["material_qualification_digest"]
         and recovery.get("quarantine_reason")
         == "non_target_digest_drift_after_mutation"
+        and product_operation_id
+        == LEGACY_SOURCE_TRANSACTION_BINDING["product_phase_operation_id"]
         and product_recovery.get("lifecycle") == RecoveryState.RETAINED.value
     ):
         raise Wbc0027RecoveryError(
@@ -2384,7 +2619,7 @@ def finalize_existing_economics_operation(
         )
     with _query_only(runtime.db_path) as conn:
         current_rows = conn.execute(
-            "SELECT bundle_version,as_of_date,snapshot_id,plan_json "
+            "SELECT bundle_version,as_of_date,snapshot_id,plan_json,refreshed_at "
             "FROM sheet_vitrina_v1_ready_snapshots "
             "ORDER BY bundle_version,as_of_date,snapshot_id"
         ).fetchall()
@@ -2434,6 +2669,12 @@ def finalize_existing_economics_operation(
                 raise Wbc0027RecoveryError(
                     "WBC0027 economics T1 before/after journal drifted"
                 )
+        undo_artifacts = conn.execute(
+            "SELECT artifact_kind,state,digest,metadata_json "
+            "FROM sheet_vitrina_v1_recovery_artifacts "
+            "WHERE operation_id=? AND artifact_kind='undo' ORDER BY artifact_id",
+            (phase_operation_id,),
+        ).fetchall()
         transitions = [
             dict(row)
             for row in conn.execute(
@@ -2453,9 +2694,11 @@ def finalize_existing_economics_operation(
             )
         source_transaction = _source_economics_transaction_proof(
             economics=economics,
+            material=material,
             semantic_patches=semantic_patches,
             recovery=recovery,
             undo_rows=list(undo_rows),
+            undo_artifacts=list(undo_artifacts),
             transitions=transitions,
         )
         temporal_drift = _current_temporal_non_target_drift(
@@ -2486,9 +2729,19 @@ def finalize_existing_economics_operation(
             )
     if not (
         product.get("status") == "published_exact"
+        and int(product.get("row_count") or 0) == EXPECTED_PRODUCT_ROWS
+        and int(product.get("cell_count") or 0) == EXPECTED_PRODUCT_CELLS
         and int(product.get("mismatch_count") or 0) == 0
         and hard.get("all_exact") is True
         and economics_missing == {"2026-08-26": 12, "2026-08-29": 0}
+        and economics.get("protected_invariant")
+        == {
+            "as_of_date": "2026-08-26",
+            "nm_id": 428853741,
+            "unit_cost_rub": "117.537167",
+            "status": "separate_exact_invariant_preserved",
+        }
+        and len(economics.get("evidence_blocked") or []) == 12
     ):
         raise Wbc0027RecoveryError(
             "WBC0027 current product/economics readback is not exact"
@@ -2513,6 +2766,8 @@ def finalize_existing_economics_operation(
     return {
         "contract_name": FINALIZE_ONLY_CONTRACT,
         "status": "reconciled_existing_operation",
+        "qualification_status": "qualified",
+        "repeat_disposition": "already_qualifiable",
         "terminal_disposition": "supersede_false_quarantine_receipt",
         "profile": PROFILE,
         "target_id": CANONICAL_TARGET_ID,

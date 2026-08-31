@@ -58,17 +58,19 @@ def _context() -> dict:
                 "economics_source_raw_non_target_digest"
             ],
             "economics_target_identities": source["economics_target_identities"],
-            "economics_target_before_hashes": source[
-                "economics_target_before_hashes"
+            "economics_target_before_hashes": source["economics_target_before_hashes"],
+            "economics_target_before_digest": source["economics_target_before_digest"],
+            "economics_target_after_hashes": source["economics_target_after_hashes"],
+            "economics_target_after_digest": source["economics_target_after_digest"],
+            "economics_target_removed_digests": source[
+                "economics_target_removed_digests"
             ],
-            "economics_target_before_digest": source[
-                "economics_target_before_digest"
+            "economics_target_changed_cell_counts": source[
+                "economics_target_changed_cell_counts"
             ],
-            "economics_target_after_hashes": source[
-                "economics_target_after_hashes"
-            ],
-            "economics_target_after_digest": source[
-                "economics_target_after_digest"
+            "source_phase_contract": source["source_phase_contract"],
+            "source_adapter_rehearsal_digest": source[
+                "source_adapter_rehearsal_digest"
             ],
         },
         "reconciliation_release": {
@@ -84,23 +86,13 @@ def _context() -> dict:
 
 
 def _result(context: dict) -> dict:
-    source_semantic = {
-        "contract_name": "wbc0027_economics_semantic_non_target_digest/v1",
-        "scope_version": "ready_snapshot_target_slices_removed_v1",
-        "row_count": 224,
-        "target_row_count": 3,
-        "component_digests": {
-            "identities": "sha256:" + "6" * 64,
-            "semantic_payloads": "sha256:" + "7" * 64,
-            "rows": "sha256:" + "8" * 64,
-        },
-        "digest": "sha256:" + "9" * 64,
-    }
     source = context["source"]
     release = context["reconciliation_release"]
     return {
         "contract_name": "wbc0027_existing_operation_reconciliation/v1",
         "status": "reconciled_existing_operation",
+        "qualification_status": "qualified",
+        "repeat_disposition": "already_qualifiable",
         "terminal_disposition": "supersede_false_quarantine_receipt",
         "profile": runner.WBC0027_GOAL_PROFILE,
         "target_id": runner.CANONICAL_PRODUCTION_TARGET_ID,
@@ -126,6 +118,8 @@ def _result(context: dict) -> dict:
             "operation_id": source["economics_phase_operation_id"],
             "lifecycle": "quarantined",
             "quarantine_reason": "non_target_digest_drift_after_mutation",
+            "after_digest": source["economics_target_after_digest"],
+            "non_target_digest": source["economics_source_raw_non_target_digest"],
         },
         "source_recovery_row_digest": "sha256:" + "a" * 64,
         "transition_digest": "sha256:" + "b" * 64,
@@ -136,23 +130,33 @@ def _result(context: dict) -> dict:
         "current_target_digest": source["economics_target_after_digest"],
         "current_target_hashes": source["economics_target_after_hashes"],
         "source_transaction": {
-            "contract_name": "wbc0027_source_economics_transaction/v1",
+            "contract_name": "wbc0027_source_economics_transaction_legacy_adapter/v1",
             "source_ready_row_count": source["economics_source_ready_row_count"],
-            "source_raw_non_target_row_count": source["economics_source_raw_non_target_row_count"],
-            "source_raw_non_target_digest": source["economics_source_raw_non_target_digest"],
-            "source_semantic_non_target": source_semantic,
+            "source_raw_non_target": {
+                "contract_name": "wbc0027_legacy_raw_non_target_aggregate/v1",
+                "row_count": source["economics_source_raw_non_target_row_count"],
+                "digest": source["economics_source_raw_non_target_digest"],
+                "binding": "exact_source_manifest_and_recovery_row",
+            },
+            "source_semantic_components_reconstructable": False,
+            "source_adapter_rehearsal_digest": source[
+                "source_adapter_rehearsal_digest"
+            ],
             "target_rows": [
                 {
                     "identity": identity,
+                    "changed_cell_count": changed,
                     "before_sha256": before,
                     "planned_after_sha256": after,
-                    "target_removed_before_digest": "sha256:" + "a" * 64,
-                    "target_removed_planned_after_digest": "sha256:" + "a" * 64,
+                    "target_removed_before_digest": removed,
+                    "target_removed_planned_after_digest": removed,
                 }
-                for identity, before, after in zip(
+                for identity, before, after, removed, changed in zip(
                     source["economics_target_identities"],
                     source["economics_target_before_hashes"],
                     source["economics_target_after_hashes"],
+                    source["economics_target_removed_digests"],
+                    source["economics_target_changed_cell_counts"],
                     strict=True,
                 )
             ],
@@ -161,34 +165,79 @@ def _result(context: dict) -> dict:
                 "cell_count": 472,
                 "undo_row_count": 3,
                 "undo_rows_verified": True,
+                "undo_artifact_verified": True,
+                "expected_after_image_count": 3,
             },
             "ordering": {
                 "cas_before_images_verified": True,
+                "exact_after_readback_verified": True,
+                "source_code_semantic_before_after_equal": True,
+                "source_code_commit_before_retain": True,
+                "exact_retain_mismatch_caused_quarantine": True,
                 "mutation_running_transition_index": 4,
-                "quarantine_after_committed_target_index": 5,
-                "committed_target_readback_required": True,
+                "quarantine_after_commit_index": 5,
+            },
+            "source_code": {
+                "contract_name": "wbc0027_source_economics_code_order/v1",
+                "deployed_sha": source["deployed_sha"],
+                "phase_contract": source["source_phase_contract"],
+                "immutable_order": [
+                    "before_image_cas",
+                    "exact_after_readback",
+                    "semantic_non_target_equality",
+                    "commit",
+                    "retain",
+                ],
             },
         },
         "temporal_non_target_drift": {
             "contract_name": "wbc0027_temporal_non_target_drift/v1",
             "classification": "later_non_target_evolution",
             "changed": True,
-            "source_row_count": 224,
-            "current_row_count": 225,
+            "source_ready_row_count": 224,
+            "current_ready_row_count": 225,
+            "source_raw_non_target_row_count": 221,
+            "current_raw_non_target_row_count": 222,
             "source_target_row_count": 3,
             "current_target_row_count": 3,
-            "source_component_digests": source_semantic["component_digests"],
+            "source_semantic_components_available": False,
+            "source_semantic_reconstruction_permitted": False,
             "current_component_digests": {
-                "identities": "sha256:" + "a" * 64,
-                "semantic_payloads": "sha256:" + "b" * 64,
-                "rows": "sha256:" + "c" * 64,
+                "identities": (
+                    "sha256:9709363e72d0cb2a34e97938c448f5bf59784431bb1ab8a91c37b7bb6c37d581"
+                ),
+                "semantic_payloads": (
+                    "sha256:ccd70f358f12aeebeb002e83431c7812612b65589b284c2e53f94f2c8de51b3c"
+                ),
+                "rows": (
+                    "sha256:b8d8b14531c9a1506459125bd880c7a6b4d169b24af53a9346f1b5ca897885c3"
+                ),
             },
-            "source_semantic_digest": source_semantic["digest"],
-            "current_semantic_digest": "sha256:" + "d" * 64,
-            "source_raw_non_target_digest": source["economics_source_raw_non_target_digest"],
-            "current_raw_non_target_digest": "sha256:" + "e" * 64,
+            "current_semantic_digest": (
+                "sha256:a8cd7a0185a23f1a6d9ec1b398bf69522a6d53316939683a96041c122b26a07e"
+            ),
+            "source_raw_non_target_digest": source[
+                "economics_source_raw_non_target_digest"
+            ],
+            "current_raw_non_target_digest": (
+                "sha256:9afa5cfa2532c2f524e10c400a6a259e42e69fcf3000006d8d6ab9df30728fcf"
+            ),
             "derived_added_rows": [],
+            "observed_late_ordinary_rows": [
+                {
+                    "identity": [
+                        "registry_upload_bundle_v1__2026-06-08T00:00:00Z",
+                        "2026-08-30",
+                        "2026-08-30__2026-08-31__sheet_vitrina_v1_temporal_live_v1__current",
+                    ],
+                    "plan_sha256": (
+                        "sha256:782f84896d84ea54368da753108c29ea59c4ba71d36da53f2357c9a06f1951ab"
+                    ),
+                    "refreshed_at": "2026-08-31T01:39:50Z",
+                }
+            ],
             "diff_derivation": "not_derivable_from_source_aggregate_digest",
+            "equality_gate": False,
             "effect": "receipt_evidence_only_not_target_approval",
         },
         "protected_invariant": {"nm_id": 428853741, "unit_cost_rub": "117.537167"},
@@ -240,6 +289,27 @@ def main() -> None:
         "sha256:" + "f" * 64
     )
     assert not runner._valid_wbc0027_finalize_result(source_drift, context=context)
+    source_semantic_invented = deepcopy(result)
+    source_semantic_invented["source_transaction"]["source_semantic_non_target"] = {
+        "digest": "sha256:" + "f" * 64
+    }
+    assert not runner._valid_wbc0027_finalize_result(
+        source_semantic_invented, context=context
+    )
+
+    duplicate_marker = runner._wbc0027_reconciliation_marker(
+        str(context["source"]["operation_id"])
+    )
+    try:
+        runner._existing_wbc0027_reconciliation_marker(
+            [{"body": duplicate_marker}, {"body": duplicate_marker}],
+            context=context,
+            client=None,  # type: ignore[arg-type]
+        )
+    except runner.ApplyError as exc:
+        assert "duplicate or ambiguous" in str(exc)
+    else:
+        raise AssertionError("duplicate WBC0027 source marker was accepted")
 
     receipt = {
         "schema": runner.WBC0027_RECONCILIATION_RECEIPT_SCHEMA,

@@ -43,8 +43,9 @@ operational database query-only and proves:
 - three exact current target after-images and their aggregate digest;
 - three exact T1 undo before/after rows and the mutation-running to quarantined
   transition/reason;
-- legacy raw witness equality and canonical semantic
-  before=after=current over 224 rows;
+- source-locked legacy raw 221-row aggregate plus three target-removed
+  before/planned-after equalities, without inventing unavailable historical
+  semantic component digests;
 - retained exact product predecessor, product 1,152 rows / 24,192 cells /
   mismatch 0, economics missing 12/0, protected cost `117.537167`, and hard
   non-target exactness.
@@ -53,6 +54,17 @@ It performs zero database writes and zero product/economics replay. The workflow
 uploads one canonical receipt before posting one compact supersession marker.
 Exact repeat validates that artifact and returns `already_terminal` before SSH;
 missing, foreign, duplicate or drifted evidence fails closed.
+
+The exception contract is
+`wbc0027_source_economics_transaction_legacy_adapter/v1`. It is admitted only
+for the exact PR-1129 source bindings and the private manifest whose real shape
+contains raw `non_target_digest`, three patches and three semantic patches, but
+contains neither `semantic_non_target` nor `semantic_non_target_contract`.
+It binds the exact 3/472 write set, undo artifact and source code order
+CAS → after-readback → semantic equality → COMMIT → retain/quarantine. The
+canonical versioned semantic builder and every future Apply guard stay strict.
+The deployed finalize-only result is explicitly `qualified`; an identical
+query-only repeat is byte-stable and reports `already_qualifiable`.
 
 ## Verification
 
