@@ -84,7 +84,8 @@ binds the original source Apply receipt and exact operation
 `d8176c48b41b6d128aa9adacb3aa50f1d464dc318cc9cc8df58d3be637649d2d`,
 both terminal a01/a02 run, artifact archive, receipt and marker digests, and one
 new merged `repo_only/done` Release SHA. The only admitted attempt is
-`v2-a01`. Exact replay is `already_terminal` before SSH/comment; `v2-a02`,
+`v2-a01`, supplied by the workflow as a closed literal rather than a caller
+input. Exact replay is `already_terminal` before SSH/comment; `v2-a02`,
 `v2-a03`, queue and identity-nonce release are invalid.
 
 The one SSH process first verifies deployed SHA exactly
