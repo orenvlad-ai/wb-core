@@ -1347,3 +1347,18 @@ write path is the exact `fbs-lifecycle-quality-recovery` Production Apply
 profile: two query-only JIT witnesses, one shared-lock/one-transaction submit,
 private before-image, target/non-target CAS and query-only terminal readback.
 It changes no service/timer, performs no blanket stop and never writes WB stock.
+
+Migration 177 preserves that deploy boundary. Live deploy installs the inert
+exact-SKU mapping profile and typed recovery blocker/rehearsal support only. It
+does not insert mapping `428855758`, append identity re-evidence, resolve a
+pending lifecycle row or append history. A post-deploy
+`mapping-rehearsal` is source-query-only/no-durable-create and overlays the
+candidate solely inside the removed-after-use coherent preview. It must prove
+all original four recovery groups and 15 dates with zero production mapping,
+recovery and history writes.
+
+The sole mapping write path is the separate default-off
+`exact-fbs-sku-mapping-extension` Production Apply profile. Its SQLite
+authorizer permits one canonical identity-mapping insert and denies every other
+table write. Lifecycle debit and history supersession remain a later distinct
+`fbs-lifecycle-quality-recovery` Apply; neither profile is dispatched by deploy.

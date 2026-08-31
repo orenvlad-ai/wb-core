@@ -778,3 +778,29 @@ digest. Only then may it issue one apply command. It always performs query-only
 readback afterward and never retries the mutation command after an ambiguous
 transport result. The durable terminal receipt must reconcile the derived
 target count, all 15 same-date captures, four exact groups and `mutates_wb=false`.
+
+### WBC0027 exact FBS SKU mapping extension
+
+The missing canonical mapping is a separate default-off scope-goal profile. Its
+OWNER/MEMBER passport is exact and uses the deployed SHA from the trusted
+`live_runtime/done` receipt in the `runtime` field:
+
+```text
+/wb-core authorize-goal-v1 task WBC0027 profile exact-fbs-sku-mapping-extension target wb_core_eu_hosted_runtime_active diagnosis-runtime 999c53285ca684bd3b1d2caa5992594f8870ffc7 runtime <exact-deployed-sha> generation operational-c54072027f14f90b374b manifest sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb schema 987 cutover ffcut_d2816d894a75390dcaa6514c0a96 identity-digest sha256:ca2117e1c33a81df62d9de68c0f6e7f652d755fef828a91a88a8592ae69db6f7 tuple-digest sha256:680a220d3bb88741723956ba90d84a12ce57b44ec17d2dc1c2233c4c54c38968 tuples 1 owners 1 active-mappings 0 target-nm 428855758 mapping-inserts 1 submits 1
+```
+
+The external identity digest is an opaque accepted source-snapshot binding; the
+Runner does not invent its preimage. The tuple digest independently binds the
+versioned canonical JSON grammar from migration 177. Two consecutive JIT
+witnesses must retain the exact StoreRegistry/cutover bindings, one tuple, one
+active owner, zero active/all mappings, the two typed facility × SKU blocker
+rows and a successful query-only hypothetical recovery rehearsal for all four
+groups and 15 dates.
+
+Apply persists an exclusive private before-image, repeats CAS under the shared
+warehouse writer lock and permits exactly one insert into the canonical identity
+mapping table. A SQLite authorizer denies every other table write. Query-only
+readback follows the single submit even after transport ambiguity; the mapping
+command is never retried. The profile cannot debit lifecycle, change balance,
+history, public/outbox or WB state. The later
+`fbs-lifecycle-quality-recovery` remains a distinct passport and Apply.

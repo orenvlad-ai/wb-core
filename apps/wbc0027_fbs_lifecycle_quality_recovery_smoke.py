@@ -26,6 +26,7 @@ from apps.ff_pool_fbs_lifecycle_smoke import (  # noqa: E402
     _insert_post_t_order,
 )
 from apps import wbc0027_fbs_lifecycle_quality_recovery as module  # noqa: E402
+from apps import wbc0027_fbs_mapping_extension as mapping_module  # noqa: E402
 from packages.application.ff_pool_fbs_forward_recovery import (  # noqa: E402
     FfPoolFbsForwardRecoveryMutation,
 )
@@ -120,6 +121,19 @@ def main() -> int:
                 source_created_at="2026-08-17T03:00:00Z",
                 observed_at="2026-08-17T03:01:00Z",
             )
+            _insert_post_t_order(
+                conn,
+                order_id=9704,
+                supplier="new",
+                wb="waiting",
+                source_created_at="2026-08-17T03:10:00Z",
+                observed_at="2026-08-17T03:11:00Z",
+                identity_outcome="unmatched_identity",
+                source_nm_id=996,
+                source_chrt_id=1996,
+                seller_sku="seller-996",
+                barcode="sku-996",
+            )
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             processed = process_post_t_fbs_lifecycle(
@@ -129,8 +143,9 @@ def main() -> int:
                 schema_ready=True,
             )
             conn.commit()
-            assert processed["summary"]["identity_pending"] == 3
+            assert processed["summary"]["identity_pending"] == 4
             _add_later_canonical_identity(conn)
+            _seed_mapping_owner(conn)
             _seed_history(conn)
             cutoff = int(
                 conn.execute(
@@ -143,7 +158,7 @@ def main() -> int:
                     LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} resolution
                       ON resolution.pending_id=pending.pending_id
                     WHERE resolution.pending_id IS NULL"""
-            ).fetchone()[0] == 4
+            ).fetchone()[0] == 5
             coverage = fbs_lifecycle_quality_coverage(
                 conn,
                 as_of_date="2026-08-17",
@@ -153,12 +168,8 @@ def main() -> int:
             assert {
                 (str(item["facility_id"]), int(item["nm_id"]))
                 for item in coverage["groups"]
-            } == {
-                ("fac_moscow", 101),
-                ("fac_moscow", 102),
-                ("fac_moscow", 103),
-                ("fac_orenburg", 103),
-            }
+                if item.get("nm_id") is not None
+            }.issuperset({("fac_moscow", 101), ("fac_moscow", 102)})
             capital_lookup = {
                 102: {
                     "_inventory_cost_stages": {
@@ -190,6 +201,7 @@ def main() -> int:
             module.ORENBURG_FACILITY_ID,
             module.TARGET_GROUPS,
             module.TARGET_GROUP_SET,
+            module.EXACT_MAPPING_TUPLE,
         )
         module.SOURCE_CUTOFF_SEQUENCE = cutoff
         module.MOSCOW_FACILITY_ID = "fac_moscow"
@@ -201,15 +213,138 @@ def main() -> int:
             ("fac_orenburg", 103),
         )
         module.TARGET_GROUP_SET = frozenset(module.TARGET_GROUPS)
+        module.EXACT_MAPPING_TUPLE = {
+            "source_nm_id": 996,
+            "source_chrt_id": 1996,
+            "source_barcode": "sku-996",
+            "source_sku": "seller-996",
+            "target_nm_id": 103,
+        }
         try:
             runner = module.Wbc0027FbsLifecycleQualityRecovery(
                 runtime_dir=runtime.runtime_dir,
                 deployed_sha=SHA,
                 timestamp_factory=_Clock(),
             )
+            blocked_plan = runner.build_plan()
+            assert blocked_plan["apply_allowed"] is False
+            assert blocked_plan["blockers"] == [
+                "exact_four_group_coverage_missing",
+                "typed_identity_mapping_blockers_present",
+            ]
+            assert {
+                (row["facility_id"], row["nm_id"], row["order_count"], row["status_observation_count"])
+                for row in blocked_plan["scope"]["typed_blocker_rows"]
+            } == {
+                ("fac_moscow", 103, 1, 1),
+                ("fac_orenburg", 103, 1, 1),
+            }
+            storage = runner._storage_identity()
+            with sqlite3.connect(runtime.db_path) as active_conn:
+                active_conn.row_factory = sqlite3.Row
+                active = module._active_manifest(active_conn)
+            mapping_original = (
+                mapping_module.EXPECTED_OPERATIONAL_GENERATION_ID,
+                mapping_module.EXPECTED_MANIFEST_SHA256,
+                mapping_module.EXPECTED_SCHEMA_REVISION,
+                mapping_module.EXPECTED_CUTOVER_ID,
+                mapping_module.EXPECTED_TARGET_NM_ID,
+                mapping_module.EXPECTED_BLOCKER_CARDINALITY,
+            )
+            mapping_module.EXPECTED_OPERATIONAL_GENERATION_ID = str(
+                storage["operational_generation_id"]
+            )
+            mapping_module.EXPECTED_MANIFEST_SHA256 = str(storage["manifest_sha256"])
+            mapping_module.EXPECTED_SCHEMA_REVISION = str(
+                storage["operational_schema_revision"]
+            )
+            mapping_module.EXPECTED_CUTOVER_ID = str(active["cutover_id"])
+            mapping_module.EXPECTED_TARGET_NM_ID = 103
+            mapping_module.EXPECTED_BLOCKER_CARDINALITY = {
+                "fac_moscow": {"orders": 1, "statuses": 1},
+                "fac_orenburg": {"orders": 1, "statuses": 1},
+            }
+            try:
+                mapping_runner = mapping_module.Wbc0027ExactFbsSkuMappingExtension(
+                    runtime_dir=runtime.runtime_dir,
+                    deployed_sha=SHA,
+                    timestamp_factory=_Clock(),
+                )
+                mapping_plan = mapping_runner.build_plan(
+                    external_identity_digest=module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST
+                )
+                assert mapping_plan["apply_allowed"] is True, mapping_plan["blockers"]
+                rehearsal = mapping_plan["hypothetical_rehearsal"]
+                assert rehearsal["accepted"] is True
+                assert rehearsal["date_count"] == rehearsal["history_capture_count"] == 15
+                assert len(rehearsal["resolved_groups"]) == 4
+                _assert_mapping_negative_guards(
+                    deployed_sha=SHA,
+                    storage=storage,
+                    cutover_id=str(active["cutover_id"]),
+                    blocked_scope=dict(blocked_plan["scope"]),
+                )
+                mapping_counts_before = _mapping_non_target_counts(runtime.db_path)
+                mapping_evidence = root / "mapping-evidence"
+                mapping_evidence.mkdir(mode=0o700)
+                mapping_result = mapping_runner.apply(
+                    mapping_plan,
+                    fingerprint=str(mapping_plan["fingerprint"]),
+                    external_identity_digest=module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+                    approval_reference="synthetic-mapping-gate",
+                    actor="smoke",
+                    evidence_dir=mapping_evidence,
+                )
+                assert mapping_result["status"] == "completed"
+                assert mapping_result["mapping_insert_count"] == 1
+                assert _mapping_non_target_counts(runtime.db_path) == mapping_counts_before
+                repeated_mapping = mapping_runner.apply(
+                    mapping_plan,
+                    fingerprint=str(mapping_plan["fingerprint"]),
+                    external_identity_digest=module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+                    approval_reference="synthetic-mapping-gate",
+                    actor="smoke",
+                    evidence_dir=mapping_evidence,
+                )
+                assert repeated_mapping["idempotent"] is True
+                duplicate = mapping_runner.build_plan(
+                    external_identity_digest=module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST
+                )
+                assert duplicate["apply_allowed"] is False
+                assert "active_mapping_count_drift" in duplicate["blockers"]
+                assert "duplicate_mapping_present" in duplicate["blockers"]
+                synthetic_snapshot = dict(mapping_plan["scope"])
+                synthetic_snapshot["typed_blocker_rows"] = []
+                assert "typed_blocker_evidence_absent_or_ambiguous" in mapping_module._binding_blockers(
+                    deployed_sha=SHA,
+                    target_id=mapping_module.CANONICAL_TARGET_ID,
+                    external_identity_digest=module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+                    storage=storage,
+                    source={
+                        "cutover_id": active["cutover_id"],
+                        "typed_blocker_rows": [],
+                        "coverage": blocked_plan["scope"]["coverage"],
+                    },
+                    identity_snapshot={
+                        "tuple_count": 1,
+                        "tuple_digest": module.exact_mapping_tuple_digest(),
+                        "active_owner_count": 1,
+                        "active_mapping_count": 0,
+                        "all_mapping_count": 0,
+                    },
+                )
+            finally:
+                (
+                    mapping_module.EXPECTED_OPERATIONAL_GENERATION_ID,
+                    mapping_module.EXPECTED_MANIFEST_SHA256,
+                    mapping_module.EXPECTED_SCHEMA_REVISION,
+                    mapping_module.EXPECTED_CUTOVER_ID,
+                    mapping_module.EXPECTED_TARGET_NM_ID,
+                    mapping_module.EXPECTED_BLOCKER_CARDINALITY,
+                ) = mapping_original
             plan = runner.build_plan()
             assert plan["apply_allowed"] is True, plan["blockers"]
-            assert plan["scope"]["target_count"] == 4
+            assert plan["scope"]["target_count"] == 5
             assert len(plan["scope"]["groups"]) == 4
             assert len(plan["history"]["captures"]) == 15
             assert plan["predicted_effects"]["wb_write_count"] == 0
@@ -223,7 +358,7 @@ def main() -> int:
             )
             assert result["status"] == "completed"
             receipt = runner.readback(fingerprint=str(plan["fingerprint"]))
-            assert receipt["target_count"] == receipt["target_readback_count"] == 4
+            assert receipt["target_count"] == receipt["target_readback_count"] == 5
             assert receipt["history_capture_count"] == receipt["history_readback_count"] == 15
             repeated = runner.apply(
                 plan,
@@ -302,6 +437,7 @@ def main() -> int:
                 module.ORENBURG_FACILITY_ID,
                 module.TARGET_GROUPS,
                 module.TARGET_GROUP_SET,
+                module.EXACT_MAPPING_TUPLE,
             ) = original
     print("wbc0027_fbs_lifecycle_quality_recovery_smoke: OK")
     return 0
@@ -441,7 +577,6 @@ def _add_later_canonical_identity(conn: sqlite3.Connection) -> None:
         (9600, 999, 1999, "synthetic-unmapped", "synthetic-unmapped", 101, "warehouse_mapping_1"),
         (9701, 998, 1998, "sku-998", "seller-998", 102, "warehouse_mapping_1"),
         (9702, 997, 1997, "sku-997", "seller-997", 103, "warehouse_mapping_1"),
-        (9703, 996, 1996, "sku-996", "seller-996", 103, "warehouse_mapping_2"),
     )
     for order_id, source_nm, chrt_id, barcode, seller_sku, target_nm, warehouse_mapping in rows:
         mapping_id = f"identity_mapping_later_{order_id}"
@@ -474,6 +609,41 @@ def _add_later_canonical_identity(conn: sqlite3.Connection) -> None:
                 now,
             ),
         )
+
+
+def _seed_mapping_owner(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in conn.execute(
+            "PRAGMA table_info(sheet_vitrina_v1_nomenclature_items)"
+        ).fetchall()
+    }
+    values = {
+        "item_id": "synthetic-mapping-owner-996",
+        "nm_id": 103,
+        "vendor_code": "seller-996",
+        "barcode": "sku-996",
+        "barcodes_json": '["sku-996"]',
+        "is_active": 1,
+        "is_hidden": 0,
+        "created_at": "2026-08-18T00:00:00Z",
+        "updated_at": "2026-08-18T00:00:00Z",
+        "source": "smoke",
+        "title": "Synthetic mapping owner",
+        "nomenclature_name": "Synthetic mapping owner",
+        "product_type": "synthetic",
+        "match_key": "synthetic|996",
+        "aliases_json": "[]",
+    }
+    selected = [column for column in values if column in columns]
+    conn.execute(
+        "INSERT INTO sheet_vitrina_v1_nomenclature_items("
+        + ",".join(selected)
+        + ") VALUES("
+        + ",".join("?" for _ in selected)
+        + ")",
+        tuple(values[column] for column in selected),
+    )
 
 
 def _seed_history(conn: sqlite3.Connection) -> None:
@@ -552,6 +722,101 @@ def _component(
 def _history_component_count(path: Path) -> int:
     with sqlite3.connect(path) as conn:
         return int(conn.execute(f"SELECT COUNT(*) FROM {COMPONENTS_TABLE}").fetchone()[0])
+
+
+def _mapping_non_target_counts(path: Path) -> dict[str, int]:
+    tables = (
+        "sheet_vitrina_v1_ff_pool_fbs_lifecycle_events",
+        IDENTITY_PENDING_RESOLUTIONS_TABLE,
+        "sheet_vitrina_v1_ff_pool_fbs_quality_recovery_runs",
+        "sheet_vitrina_v1_ff_pool_fbs_quality_recovery_targets",
+        "sheet_vitrina_v1_ff_pool_fbs_quality_recovery_history",
+        COMPONENTS_TABLE,
+        FINALIZATIONS_TABLE,
+    )
+    with sqlite3.connect(path) as conn:
+        return {
+            table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in tables
+        }
+
+
+def _assert_mapping_negative_guards(
+    *,
+    deployed_sha: str,
+    storage: dict[str, object],
+    cutover_id: str,
+    blocked_scope: dict[str, object],
+) -> None:
+    source = {
+        "cutover_id": cutover_id,
+        "typed_blocker_rows": list(blocked_scope["typed_blocker_rows"]),
+        "coverage": dict(blocked_scope["coverage"]),
+    }
+    identity = {
+        "tuple_count": 1,
+        "tuple_digest": module.exact_mapping_tuple_digest(),
+        "active_owner_count": 1,
+        "active_mapping_count": 0,
+        "all_mapping_count": 0,
+    }
+
+    def codes(
+        *,
+        digest: str = module.EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+        storage_value: dict[str, object] | None = None,
+        source_value: dict[str, object] | None = None,
+        identity_value: dict[str, object] | None = None,
+    ) -> set[str]:
+        return set(
+            mapping_module._binding_blockers(
+                deployed_sha=deployed_sha,
+                target_id=mapping_module.CANONICAL_TARGET_ID,
+                external_identity_digest=digest,
+                storage=storage_value or storage,
+                source=source_value or source,
+                identity_snapshot=identity_value or identity,
+            )
+        )
+
+    assert "external_identity_digest_drift" in codes(digest="sha256:" + "0" * 64)
+    changed = dict(storage)
+    changed["operational_generation_id"] = "foreign-generation"
+    assert "storage_generation_drift" in codes(storage_value=changed)
+    changed = dict(storage)
+    changed["operational_schema_revision"] = "foreign-schema"
+    assert "storage_schema_revision_drift" in codes(storage_value=changed)
+    changed_source = dict(source)
+    changed_source["cutover_id"] = "foreign-cutover"
+    assert "cutover_drift" in codes(source_value=changed_source)
+    for field, value, expected in (
+        ("tuple_count", 0, "tuple_count_drift"),
+        ("active_owner_count", 2, "owner_count_drift"),
+        ("active_mapping_count", 1, "active_mapping_count_drift"),
+        ("all_mapping_count", 1, "duplicate_mapping_present"),
+    ):
+        changed_identity = dict(identity)
+        changed_identity[field] = value
+        assert expected in codes(identity_value=changed_identity)
+    foreign_source = dict(source)
+    foreign_rows = [dict(row) for row in source["typed_blocker_rows"]]
+    foreign_rows[0]["facility_id"] = "foreign-facility"
+    foreign_rows[0]["nm_id"] = 999
+    foreign_source["typed_blocker_rows"] = foreign_rows
+    assert "typed_blocker_scope_or_cardinality_drift" in codes(
+        source_value=foreign_source
+    )
+    absent_source = dict(source)
+    absent_source["typed_blocker_rows"] = []
+    assert "typed_blocker_evidence_absent_or_ambiguous" in codes(
+        source_value=absent_source
+    )
+    previous_target = mapping_module.EXPECTED_TARGET_NM_ID
+    mapping_module.EXPECTED_TARGET_NM_ID = 104
+    try:
+        assert "target_nm_drift" in codes()
+    finally:
+        mapping_module.EXPECTED_TARGET_NM_ID = previous_target
 
 
 if __name__ == "__main__":

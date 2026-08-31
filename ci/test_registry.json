@@ -290,7 +290,7 @@
     },
     {
       "id": "wbc0027-fbs-lifecycle-quality-recovery",
-      "paths": ["apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py"],
+      "paths": ["apps/wbc0027_fbs_lifecycle_quality_recovery.py", "apps/wbc0027_fbs_mapping_extension.py", "apps/wbc0027_fbs_lifecycle_quality_recovery_smoke.py", "migration/177_wbc0027_exact_fbs_sku_mapping_extension.md"],
       "suites": ["fulfillment", "inventory_history", "release_safety"],
       "release": "live_runtime"
     },

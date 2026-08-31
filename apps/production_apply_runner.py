@@ -66,6 +66,7 @@ WARM_ARCHIVE_GOAL_PROFILE = "root-warm-archive-six"
 WBC0013_GOAL_PROFILE = "dense-fbs-historical-recovery"
 WBC0027_GOAL_PROFILE = "product-capital-qualified-economics"
 WBC0027_FBS_QUALITY_GOAL_PROFILE = "fbs-lifecycle-quality-recovery"
+WBC0027_FBS_MAPPING_GOAL_PROFILE = "exact-fbs-sku-mapping-extension"
 WBC0027_FBS_QUALITY_SOURCE_SEQUENCE = 28_050_157
 WBC0027_FBS_QUALITY_DATE_FROM = "2026-08-17"
 WBC0027_FBS_QUALITY_DATE_TO = "2026-08-31"
@@ -75,6 +76,22 @@ WBC0027_FBS_QUALITY_GROUPS = (
     "fff_d67e8c823d5f81dd988d00dbfea6:428855758,"
     "fff_2579bb2741ed4ab23b11bb4c4183:428855758"
 )
+WBC0027_FBS_MAPPING_DIAGNOSIS_RUNTIME_SHA = (
+    "999c53285ca684bd3b1d2caa5992594f8870ffc7"
+)
+WBC0027_FBS_MAPPING_GENERATION_ID = "operational-c54072027f14f90b374b"
+WBC0027_FBS_MAPPING_MANIFEST_SHA256 = (
+    "sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb"
+)
+WBC0027_FBS_MAPPING_SCHEMA_REVISION = "987"
+WBC0027_FBS_MAPPING_CUTOVER_ID = "ffcut_d2816d894a75390dcaa6514c0a96"
+WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST = (
+    "sha256:ca2117e1c33a81df62d9de68c0f6e7f652d755fef828a91a88a8592ae69db6f7"
+)
+WBC0027_FBS_MAPPING_TUPLE_DIGEST = (
+    "sha256:680a220d3bb88741723956ba90d84a12ce57b44ec17d2dc1c2233c4c54c38968"
+)
+WBC0027_FBS_MAPPING_TARGET_NM_ID = 428855758
 WBC0027_LEGACY_MANIFEST_SHA256 = (
     "84a4bef9d6cba4c969988d880ab56bde06db307f3caf87a42305f7fe8c8680ee"
 )
@@ -478,6 +495,23 @@ WBC0027_FBS_QUALITY_AUTH_RE = re.compile(
     r"(?P<date_to>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
     r"groups (?P<groups>[a-z0-9_:,]{1,400}) "
     r"submits (?P<submits>1)$"
+)
+WBC0027_FBS_MAPPING_AUTH_RE = re.compile(
+    r"^/wb-core authorize-goal-v1 task (?P<task>WBC0027) "
+    r"profile (?P<profile>exact-fbs-sku-mapping-extension) "
+    r"target (?P<target>[A-Za-z0-9._:-]{1,160}) "
+    r"diagnosis-runtime (?P<diagnosis_runtime>[0-9a-f]{40}) "
+    r"runtime (?P<runtime>[0-9a-f]{40}) "
+    r"generation (?P<generation>[A-Za-z0-9._:-]{1,160}) "
+    r"manifest (?P<manifest>sha256:[0-9a-f]{64}) "
+    r"schema (?P<schema>[A-Za-z0-9._:-]{1,80}) "
+    r"cutover (?P<cutover>[A-Za-z0-9._:-]{1,160}) "
+    r"identity-digest (?P<identity_digest>sha256:[0-9a-f]{64}) "
+    r"tuple-digest (?P<tuple_digest>sha256:[0-9a-f]{64}) "
+    r"tuples (?P<tuples>1) owners (?P<owners>1) "
+    r"active-mappings (?P<active_mappings>0) "
+    r"target-nm (?P<target_nm>[1-9][0-9]*) "
+    r"mapping-inserts (?P<mapping_inserts>1) submits (?P<submits>1)$"
 )
 HISTORICAL_COST_AUTH_RE = re.compile(
     r"^/wb-core authorize-goal-v1 task (?P<task>WBC0013) "
@@ -1110,6 +1144,7 @@ def validate_authorization(
     wbc0013_match = WBC0013_AUTH_RE.fullmatch(body)
     wbc0027_match = WBC0027_AUTH_RE.fullmatch(body)
     wbc0027_fbs_quality_match = WBC0027_FBS_QUALITY_AUTH_RE.fullmatch(body)
+    wbc0027_fbs_mapping_match = WBC0027_FBS_MAPPING_AUTH_RE.fullmatch(body)
     historical_cost_match = HISTORICAL_COST_AUTH_RE.fullmatch(body)
     historical_missing_match = HISTORICAL_MISSING_REPAIR_AUTH_RE.fullmatch(body)
     if (
@@ -1118,6 +1153,7 @@ def validate_authorization(
         and wbc0013_match is None
         and wbc0027_match is None
         and wbc0027_fbs_quality_match is None
+        and wbc0027_fbs_mapping_match is None
         and historical_cost_match is None
         and historical_missing_match is None
     ):
@@ -1128,6 +1164,7 @@ def validate_authorization(
         or wbc0013_match
         or wbc0027_match
         or wbc0027_fbs_quality_match
+        or wbc0027_fbs_mapping_match
         or historical_cost_match
         or historical_missing_match
     ).groupdict()
@@ -1301,6 +1338,50 @@ def validate_authorization(
             or goal["max_mutation_submits"] != 1
         ):
             raise ApplyError("WBC0027 FBS quality authorization scope is not exact")
+        return goal
+    if wbc0027_fbs_mapping_match is not None:
+        goal = {
+            "contract": "wb-core.production-goal-passport/v1",
+            "task": "WBC0027",
+            "profile": WBC0027_FBS_MAPPING_GOAL_PROFILE,
+            "target_id": raw["target"],
+            "diagnosis_runtime_sha": raw["diagnosis_runtime"],
+            "runtime_sha": raw["runtime"],
+            "operational_generation_id": raw["generation"],
+            "manifest_sha256": raw["manifest"],
+            "schema_revision": raw["schema"],
+            "cutover_id": raw["cutover"],
+            "external_identity_digest": raw["identity_digest"],
+            "tuple_digest": raw["tuple_digest"],
+            "expected_tuple_count": int(raw["tuples"]),
+            "expected_active_owner_count": int(raw["owners"]),
+            "expected_active_mapping_count": int(raw["active_mappings"]),
+            "target_nm_id": int(raw["target_nm"]),
+            "expected_mapping_insert_count": int(raw["mapping_inserts"]),
+            "max_mutation_submits": int(raw["submits"]),
+            "timer_changes_allowed": False,
+            "lifecycle_writes_allowed": False,
+            "history_writes_allowed": False,
+            "wb_writes_allowed": False,
+            "reversible": True,
+        }
+        exact = {
+            "diagnosis_runtime_sha": WBC0027_FBS_MAPPING_DIAGNOSIS_RUNTIME_SHA,
+            "operational_generation_id": WBC0027_FBS_MAPPING_GENERATION_ID,
+            "manifest_sha256": WBC0027_FBS_MAPPING_MANIFEST_SHA256,
+            "schema_revision": WBC0027_FBS_MAPPING_SCHEMA_REVISION,
+            "cutover_id": WBC0027_FBS_MAPPING_CUTOVER_ID,
+            "external_identity_digest": WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+            "tuple_digest": WBC0027_FBS_MAPPING_TUPLE_DIGEST,
+            "expected_tuple_count": 1,
+            "expected_active_owner_count": 1,
+            "expected_active_mapping_count": 0,
+            "target_nm_id": WBC0027_FBS_MAPPING_TARGET_NM_ID,
+            "expected_mapping_insert_count": 1,
+            "max_mutation_submits": 1,
+        }
+        if any(goal.get(key) != value for key, value in exact.items()):
+            raise ApplyError("WBC0027 FBS mapping authorization scope is not exact")
         return goal
     if historical_cost_match is not None:
         goal = {
@@ -2663,6 +2744,111 @@ def _wbc0027_fbs_quality_remote_command(
         + ' && test "$(stat -c %a '
         + shlex.quote(evidence_dir)
         + ')" = 700'
+    )
+    shell = (
+        "set -eu; umask 077; "
+        + setup
+        + "; cd "
+        + shlex.quote(target_dir)
+        + "; export PYTHONPATH="
+        + shlex.quote(target_dir)
+        + "; "
+        + " ".join(shlex.quote(part) for part in parts)
+    )
+    return _ssh_command() + [str(target["ssh_destination"]), shell]
+
+
+def _wbc0027_fbs_mapping_remote_command(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    operation: str,
+    evidence_dir: str,
+    action: str,
+    candidate_path: str = "",
+    fingerprint: str = "",
+    external_identity_digest: str = WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+    approval_reference: str = "",
+) -> list[str]:
+    if action not in {"plan", "apply", "readback", "rehearsal"}:
+        raise ApplyError("unsupported WBC0027 FBS mapping action")
+    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation) is None:
+        raise ApplyError("WBC0027 FBS mapping operation namespace is invalid")
+    if external_identity_digest != WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST:
+        raise ApplyError("WBC0027 FBS mapping external identity digest drifted")
+    target_dir = str(target["target_dir"])
+    if action in {"plan", "apply"} and (
+        not candidate_path.startswith(evidence_dir + "/wbc0027-fbs-mapping-candidate-a")
+        or not candidate_path.endswith(".json")
+        or posixpath.normpath(candidate_path) != candidate_path
+    ):
+        raise ApplyError("WBC0027 FBS mapping private candidate path is invalid")
+    if action == "apply" and re.fullmatch(
+        r"sha256:[0-9a-f]{64}", fingerprint
+    ) is None:
+        raise ApplyError("WBC0027 FBS mapping fingerprint is invalid")
+    parts = [
+        "python3",
+        f"{target_dir}/apps/wbc0027_fbs_mapping_extension.py",
+        "--runtime-dir",
+        "/opt/wb-core-runtime/state",
+        "--deployed-sha",
+        merge_sha,
+        "--target-id",
+        CANONICAL_PRODUCTION_TARGET_ID,
+        "--scratch-dir",
+        "/tmp/wbc0027-fbs-mapping-rehearsal",
+    ]
+    if action == "plan":
+        parts.extend(
+            [
+                "--output",
+                candidate_path,
+                "mapping-dry-run",
+                "--external-identity-digest",
+                external_identity_digest,
+            ]
+        )
+    elif action == "apply":
+        if not approval_reference or len(approval_reference) > 500:
+            raise ApplyError("WBC0027 FBS mapping approval reference is invalid")
+        parts.extend(
+            [
+                "mapping-apply",
+                "--plan-file",
+                candidate_path,
+                "--fingerprint",
+                fingerprint,
+                "--external-identity-digest",
+                external_identity_digest,
+                "--approval-reference",
+                approval_reference,
+                "--actor",
+                "production-apply-runner",
+                "--evidence-dir",
+                evidence_dir,
+            ]
+        )
+    elif action == "rehearsal":
+        parts.extend(
+            [
+                "mapping-rehearsal",
+                "--external-identity-digest",
+                external_identity_digest,
+            ]
+        )
+    else:
+        parts.append("mapping-readback")
+    setup = (
+        "install -d -m 0700 " + shlex.quote(evidence_dir)
+        if action == "plan"
+        else "test -d "
+        + shlex.quote(evidence_dir)
+        + ' && test "$(stat -c %a '
+        + shlex.quote(evidence_dir)
+        + ')" = 700'
+        if action == "apply"
+        else "true"
     )
     shell = (
         "set -eu; umask 077; "
@@ -4401,6 +4587,236 @@ def run_wbc0027_fbs_quality_goal(
                 "stable_target_digest": candidate["scope"]["stable_target_digest"],
             },
             "history_digest": candidate["history"]["digest"],
+        },
+        "apply": apply_evidence,
+        "readback": readback_evidence,
+    }
+
+
+def run_wbc0027_fbs_mapping_goal(
+    *,
+    target: Mapping[str, Any],
+    merge_sha: str,
+    goal: Mapping[str, Any],
+    operation: str,
+    approval_reference: str,
+) -> dict[str, Any]:
+    if goal.get("runtime_sha") != merge_sha:
+        return {
+            "state": "blocked",
+            "reason": "wbc0027-fbs-mapping-runtime-binding-drift",
+            "apply_count": 0,
+        }
+    evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / operation
+    )
+    attempts: list[dict[str, Any]] = []
+    prior_witness: dict[str, Any] | None = None
+    candidate: Mapping[str, Any] | None = None
+    candidate_path = ""
+    for attempt in range(1, MAX_QUALIFICATION_CANDIDATES + 1):
+        current_path = (
+            f"{evidence_dir}/wbc0027-fbs-mapping-candidate-a{attempt:02d}.json"
+        )
+        evidence = command_evidence(
+            _wbc0027_fbs_mapping_remote_command(
+                target=target,
+                merge_sha=merge_sha,
+                operation=operation,
+                evidence_dir=evidence_dir,
+                action="plan",
+                candidate_path=current_path,
+                external_identity_digest=str(goal["external_identity_digest"]),
+            )
+        )
+        payload = evidence.get("result")
+        if evidence.get("return_code") != 0 or not isinstance(payload, Mapping):
+            return {
+                "state": "blocked",
+                "reason": "wbc0027-fbs-mapping-query-only-qualification-failed",
+                "apply_count": 0,
+                "qualification_attempts": [*attempts, evidence],
+            }
+        scope = payload.get("scope")
+        rehearsal = payload.get("hypothetical_rehearsal")
+        safety = payload.get("safety")
+        storage = payload.get("storage")
+        boundary = payload.get("boundary")
+        valid = bool(
+            payload.get("contract_name")
+            == "wbc0027_exact_fbs_sku_mapping_extension_v1"
+            and payload.get("contract_version") == 1
+            and payload.get("mode") == "dry_run"
+            and payload.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
+            and payload.get("deployed_sha") == merge_sha
+            and payload.get("apply_allowed") is True
+            and payload.get("blockers") == []
+            and isinstance(storage, Mapping)
+            and storage.get("manifest_sha256") == goal["manifest_sha256"]
+            and storage.get("operational_generation_id")
+            == goal["operational_generation_id"]
+            and str(storage.get("operational_schema_revision") or "")
+            == goal["schema_revision"]
+            and isinstance(boundary, Mapping)
+            and boundary.get("cutover_id") == goal["cutover_id"]
+            and isinstance(scope, Mapping)
+            and scope.get("external_identity_digest")
+            == goal["external_identity_digest"]
+            and scope.get("tuple_digest") == goal["tuple_digest"]
+            and scope.get("tuple_count") == goal["expected_tuple_count"]
+            and scope.get("active_owner_count")
+            == goal["expected_active_owner_count"]
+            and scope.get("active_mapping_count")
+            == goal["expected_active_mapping_count"]
+            and scope.get("all_mapping_count") == 0
+            and scope.get("target_nm_id") == goal["target_nm_id"]
+            and len(scope.get("typed_blocker_rows") or []) == 2
+            and isinstance(rehearsal, Mapping)
+            and rehearsal.get("accepted") is True
+            and rehearsal.get("status") == "ready"
+            and len(rehearsal.get("resolved_groups") or []) == 4
+            and rehearsal.get("date_count") == 15
+            and rehearsal.get("history_capture_count") == 15
+            and rehearsal.get("mapping_insert_count") == 0
+            and rehearsal.get("recovery_write_count") == 0
+            and rehearsal.get("history_write_count") == 0
+            and isinstance(safety, Mapping)
+            and safety.get("one_submit") is True
+            and safety.get("one_insert_max") == 1
+            and safety.get("lifecycle_debit_count") == 0
+            and safety.get("balance_write_count") == 0
+            and safety.get("history_write_count") == 0
+            and safety.get("public_write_count") == 0
+            and safety.get("outbox_write_count") == 0
+            and safety.get("wb_write_count") == 0
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(payload.get("fingerprint") or "")
+            )
+            is not None
+            and re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(payload.get("material_cas_digest") or ""),
+            )
+            is not None
+        )
+        if not valid:
+            return {
+                "state": "blocked",
+                "reason": "wbc0027-fbs-mapping-candidate-escaped-exact-goal",
+                "apply_count": 0,
+                "qualification_attempts": [*attempts, evidence],
+            }
+        witness = {
+            "fingerprint": payload["fingerprint"],
+            "material_cas_digest": payload["material_cas_digest"],
+            "storage": storage,
+            "boundary": boundary,
+            "tuple_digest": scope["tuple_digest"],
+            "typed_blocker_rows_digest": payload_digest(scope["typed_blocker_rows"]),
+            "recovery_fingerprint": rehearsal["recovery_fingerprint"],
+            "stable_target_digest": rehearsal["stable_target_digest"],
+            "history_digest": rehearsal["history_digest"],
+        }
+        attempts.append(
+            {
+                **{key: value for key, value in evidence.items() if key != "result"},
+                "attempt": attempt,
+                "candidate_path": current_path,
+                **witness,
+                "qualification_state": "candidate",
+            }
+        )
+        if prior_witness is not None and witness == prior_witness:
+            attempts[-2]["qualification_state"] = "matching_witness"
+            attempts[-1]["qualification_state"] = "qualified"
+            candidate = payload
+            candidate_path = current_path
+            break
+        if len(attempts) > 1:
+            attempts[-2]["qualification_state"] = "superseded_material_drift"
+        prior_witness = witness
+        if attempt < MAX_QUALIFICATION_CANDIDATES:
+            time.sleep(1.1)
+    if candidate is None:
+        if attempts:
+            attempts[-1]["qualification_state"] = "unstable_at_bound"
+        return {
+            "state": "blocked",
+            "reason": "wbc0027-fbs-mapping-cas-not-qualified",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+        }
+    fingerprint = str(candidate["fingerprint"])
+    apply_evidence = command_evidence(
+        _wbc0027_fbs_mapping_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            action="apply",
+            candidate_path=candidate_path,
+            fingerprint=fingerprint,
+            external_identity_digest=str(goal["external_identity_digest"]),
+            approval_reference=approval_reference,
+        )
+    )
+    # One mapping submit is consumed after dispatch.  The command is never
+    # reissued; terminal state comes only from the exact query-only readback.
+    readback_evidence = command_evidence(
+        _wbc0027_fbs_mapping_remote_command(
+            target=target,
+            merge_sha=merge_sha,
+            operation=operation,
+            evidence_dir=evidence_dir,
+            action="readback",
+            external_identity_digest=str(goal["external_identity_digest"]),
+        )
+    )
+    readback = readback_evidence.get("result")
+    mapping = readback.get("mapping") if isinstance(readback, Mapping) else None
+    reconciled = bool(
+        readback_evidence.get("return_code") == 0
+        and isinstance(readback, Mapping)
+        and readback.get("status") == "completed"
+        and readback.get("query_only") is True
+        and readback.get("target_id") == CANONICAL_PRODUCTION_TARGET_ID
+        and readback.get("deployed_sha") == merge_sha
+        and readback.get("exact_mapping_row_count") == 1
+        and isinstance(mapping, Mapping)
+        and mapping.get("target_nm_id") == goal["target_nm_id"]
+        and mapping.get("mapping_digest") == goal["tuple_digest"]
+        and readback.get("mapping_insert_count") == 0
+        and readback.get("recovery_write_count") == 0
+        and readback.get("history_write_count") == 0
+        and readback.get("wb_write_count") == 0
+    )
+    return {
+        "state": "done" if reconciled else "blocked",
+        "reason": (
+            "reconciled"
+            if reconciled
+            else "wbc0027-fbs-mapping-query-only-readback-not-reconciled"
+        ),
+        "apply_count": 1,
+        "mapping_insert_count": (
+            apply_evidence.get("result", {}).get("mapping_insert_count")
+            if isinstance(apply_evidence.get("result"), Mapping)
+            else None
+        ),
+        "qualification_attempts": attempts,
+        "candidate": {
+            "path": candidate_path,
+            "fingerprint": fingerprint,
+            "material_cas_digest": candidate["material_cas_digest"],
+            "tuple_digest": candidate["scope"]["tuple_digest"],
+            "external_identity_digest": candidate["scope"][
+                "external_identity_digest"
+            ],
+            "hypothetical_recovery_fingerprint": candidate[
+                "hypothetical_rehearsal"
+            ]["recovery_fingerprint"],
         },
         "apply": apply_evidence,
         "readback": readback_evidence,
@@ -10376,6 +10792,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="wb-core-production-goal-") as directory:
         configure_deploy_environment(Path(directory))
         result = (
+            run_wbc0027_fbs_mapping_goal(
+                target=target,
+                merge_sha=merge_sha,
+                goal=goal,
+                operation=operation,
+                approval_reference=approval_reference,
+            )
+            if goal["profile"] == WBC0027_FBS_MAPPING_GOAL_PROFILE
+            else
             run_wbc0027_fbs_quality_goal(
                 target=target,
                 merge_sha=merge_sha,

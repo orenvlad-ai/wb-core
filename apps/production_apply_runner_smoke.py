@@ -75,6 +75,29 @@ WBC0027_FBS_QUALITY_AUTH_BODY = (
     + apply.WBC0027_FBS_QUALITY_GROUPS
     + " submits 1"
 )
+WBC0027_FBS_MAPPING_AUTH_BODY = (
+    "/wb-core authorize-goal-v1 task WBC0027 "
+    "profile exact-fbs-sku-mapping-extension "
+    "target wb_core_eu_hosted_runtime_active "
+    "diagnosis-runtime "
+    + apply.WBC0027_FBS_MAPPING_DIAGNOSIS_RUNTIME_SHA
+    + " runtime "
+    + MERGE_SHA
+    + " generation "
+    + apply.WBC0027_FBS_MAPPING_GENERATION_ID
+    + " manifest "
+    + apply.WBC0027_FBS_MAPPING_MANIFEST_SHA256
+    + " schema "
+    + apply.WBC0027_FBS_MAPPING_SCHEMA_REVISION
+    + " cutover "
+    + apply.WBC0027_FBS_MAPPING_CUTOVER_ID
+    + " identity-digest "
+    + apply.WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST
+    + " tuple-digest "
+    + apply.WBC0027_FBS_MAPPING_TUPLE_DIGEST
+    + " tuples 1 owners 1 active-mappings 0 target-nm 428855758 "
+    "mapping-inserts 1 submits 1"
+)
 HISTORICAL_COST_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 "
     "profile historical-analytical-cost-carry-forward "
@@ -964,6 +987,160 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
     rendered = [" ".join(command) for command in calls]
     assert sum(" apply " in value for value in rendered) == 1
     assert sum(" readback " in value for value in rendered) == 1
+
+
+def _exercise_wbc0027_fbs_mapping_runner() -> None:
+    goal = apply.validate_authorization(
+        authorization(body=WBC0027_FBS_MAPPING_AUTH_BODY),
+        repository="orenvlad-ai/wb-core",
+        pr=1050,
+    )
+    assert goal["profile"] == apply.WBC0027_FBS_MAPPING_GOAL_PROFILE
+    assert goal["runtime_sha"] == MERGE_SHA
+    assert goal["external_identity_digest"] == (
+        apply.WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST
+    )
+    changed = WBC0027_FBS_MAPPING_AUTH_BODY.replace(
+        "active-mappings 0", "active-mappings 1"
+    )
+    try:
+        apply.validate_authorization(
+            authorization(body=changed), repository="orenvlad-ai/wb-core", pr=1050
+        )
+    except apply.ApplyError:
+        pass
+    else:
+        raise AssertionError("drifted WBC0027 FBS mapping count was accepted")
+
+    operation = "production-goal-v1-" + "6" * 32
+    blocker_rows = [
+        {
+            "facility_id": facility_id,
+            "nm_id": 428855758,
+            "identity_error_code": "identity_evidence_missing_or_drifted",
+            "mapping_error_code": "order_sku_unmapped",
+        }
+        for facility_id in (
+            "fff_d67e8c823d5f81dd988d00dbfea6",
+            "fff_2579bb2741ed4ab23b11bb4c4183",
+        )
+    ]
+    candidate = {
+        "contract_name": "wbc0027_exact_fbs_sku_mapping_extension_v1",
+        "contract_version": 1,
+        "mode": "dry_run",
+        "target_id": "wb_core_eu_hosted_runtime_active",
+        "deployed_sha": MERGE_SHA,
+        "storage": {
+            "operational_generation_id": apply.WBC0027_FBS_MAPPING_GENERATION_ID,
+            "operational_schema_revision": apply.WBC0027_FBS_MAPPING_SCHEMA_REVISION,
+            "manifest_sha256": apply.WBC0027_FBS_MAPPING_MANIFEST_SHA256,
+        },
+        "boundary": {
+            "cutover_id": apply.WBC0027_FBS_MAPPING_CUTOVER_ID,
+            "cutover_manifest_digest": "sha256:" + "1" * 64,
+            "forward_generation_id": "fbsgen-smoke",
+            "forward_generation_manifest_fingerprint": "sha256:" + "2" * 64,
+        },
+        "scope": {
+            "external_identity_digest": apply.WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+            "tuple_digest": apply.WBC0027_FBS_MAPPING_TUPLE_DIGEST,
+            "tuple_count": 1,
+            "active_owner_count": 1,
+            "active_mapping_count": 0,
+            "all_mapping_count": 0,
+            "target_nm_id": 428855758,
+            "typed_blocker_rows": blocker_rows,
+        },
+        "hypothetical_rehearsal": {
+            "accepted": True,
+            "status": "ready",
+            "resolved_groups": [{}, {}, {}, {}],
+            "date_count": 15,
+            "history_capture_count": 15,
+            "mapping_insert_count": 0,
+            "recovery_write_count": 0,
+            "history_write_count": 0,
+            "recovery_fingerprint": "sha256:" + "3" * 64,
+            "stable_target_digest": "sha256:" + "4" * 64,
+            "history_digest": "sha256:" + "5" * 64,
+        },
+        "safety": {
+            "one_submit": True,
+            "one_insert_max": 1,
+            "lifecycle_debit_count": 0,
+            "balance_write_count": 0,
+            "history_write_count": 0,
+            "public_write_count": 0,
+            "outbox_write_count": 0,
+            "wb_write_count": 0,
+        },
+        "material_cas_digest": "sha256:" + "6" * 64,
+        "apply_allowed": True,
+        "blockers": [],
+        "fingerprint": "sha256:" + "7" * 64,
+    }
+    command_results = iter(
+        [
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {"status": "completed", "mapping_insert_count": 1},
+            },
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {
+                    "status": "completed",
+                    "query_only": True,
+                    "target_id": "wb_core_eu_hosted_runtime_active",
+                    "deployed_sha": MERGE_SHA,
+                    "exact_mapping_row_count": 1,
+                    "mapping": {
+                        "target_nm_id": 428855758,
+                        "mapping_digest": apply.WBC0027_FBS_MAPPING_TUPLE_DIGEST,
+                    },
+                    "mapping_insert_count": 0,
+                    "recovery_write_count": 0,
+                    "history_write_count": 0,
+                    "wb_write_count": 0,
+                },
+            },
+        ]
+    )
+    original_command = apply.command_evidence
+    original_sleep = apply.time.sleep
+    calls: list[list[str]] = []
+
+    def fake_command(command: list[str], *, timeout_seconds: float = 3600.0) -> dict:
+        del timeout_seconds
+        calls.append(command)
+        return next(command_results)
+
+    try:
+        apply.command_evidence = fake_command
+        apply.time.sleep = lambda _seconds: None
+        result = apply.run_wbc0027_fbs_mapping_goal(
+            target={
+                "target_dir": "/opt/wb-core-runtime/app",
+                "ssh_destination": "wb-core-eu-root",
+            },
+            merge_sha=MERGE_SHA,
+            goal=goal,
+            operation=operation,
+            approval_reference="github:fixture:sha256:" + "2" * 64,
+        )
+    finally:
+        apply.command_evidence = original_command
+        apply.time.sleep = original_sleep
+    assert result["state"] == "done"
+    assert result["apply_count"] == 1
+    assert len(calls) == 4
+    rendered = [" ".join(command) for command in calls]
+    assert sum(" mapping-apply " in value for value in rendered) == 1
+    assert sum(" mapping-readback" in value for value in rendered) == 1
 
 
 def _exercise_wbc0013_two_phase_runner() -> None:
@@ -2153,6 +2330,7 @@ def main() -> None:
     _exercise_worker_mount_probe()
     _exercise_wbc0027_two_phase_runner()
     _exercise_wbc0027_fbs_quality_runner()
+    _exercise_wbc0027_fbs_mapping_runner()
     _exercise_wbc0013_two_phase_runner()
     _exercise_historical_cost_runner()
     _exercise_historical_missing_runner()

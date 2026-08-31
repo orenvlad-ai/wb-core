@@ -49,6 +49,8 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     EVENTS_TABLE,
     FORWARD_GENERATIONS_TABLE,
     FORWARD_STATE_TABLE,
+    MAPPING_EXTENSION_ALLOCATIONS_TABLE,
+    MAPPING_EXTENSIONS_TABLE,
     IDENTITY_PENDING_RESOLUTIONS_TABLE,
     IDENTITY_PENDING_TABLE,
     QUALITY_RECOVERY_HISTORY_TABLE,
@@ -57,6 +59,10 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     ensure_ff_pool_fbs_lifecycle_schema,
     recover_pinned_fbs_lifecycle,
     resolve_fbs_lifecycle_status_scope,
+)
+from packages.application.ff_pool_foundation import (  # noqa: E402
+    BALANCES_TABLE,
+    FACILITIES_TABLE,
 )
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
@@ -74,8 +80,11 @@ from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
 )
 from packages.application.wb_fbs_orders import (  # noqa: E402
+    IDENTITY_EVIDENCE_TABLE,
+    IDENTITY_MAPPINGS_TABLE,
     OBSERVATIONS_TABLE,
     STATUS_OBSERVATIONS_TABLE,
+    WAREHOUSE_MAPPINGS_TABLE,
 )
 from packages.business_time import current_business_date_iso  # noqa: E402
 
@@ -96,6 +105,17 @@ TARGET_GROUPS = (
 TARGET_GROUP_SET = frozenset(TARGET_GROUPS)
 MAX_TARGET_COUNT = 10_000
 SAFE_SHA_RE = re.compile(r"[0-9a-f]{40}")
+EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST = (
+    "sha256:ca2117e1c33a81df62d9de68c0f6e7f652d755fef828a91a88a8592ae69db6f7"
+)
+EXACT_MAPPING_TUPLE_CONTRACT = "wbc0027_exact_fbs_sku_tuple/v1"
+EXACT_MAPPING_TUPLE: dict[str, Any] = {
+    "source_nm_id": 428855758,
+    "source_chrt_id": 610113487,
+    "source_barcode": "2044193046047",
+    "source_sku": "(Matte) iPhone 14 Pro",
+    "target_nm_id": 428855758,
+}
 
 
 class Wbc0027RecoveryError(RuntimeError):
@@ -129,14 +149,22 @@ class Wbc0027FbsLifecycleQualityRecovery:
             else self.runtime.runtime_dir / "wbc0027-fbs-quality-recovery-scratch"
         ).expanduser()
 
-    def build_plan(self) -> dict[str, Any]:
+    def build_plan(
+        self,
+        *,
+        hypothetical_mapping: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         generated_at = str(self.timestamp_factory())
         _require_utc(generated_at)
         storage = self._storage_identity()
         with closing(_open_query_only(self.runtime.db_path)) as conn:
             conn.execute("BEGIN")
             try:
-                source = self._source_snapshot(conn, storage=storage)
+                source = self._source_snapshot(
+                    conn,
+                    storage=storage,
+                    hypothetical_mapping=hypothetical_mapping,
+                )
                 preview, target_result = self._preview(conn, source=source, at=generated_at)
                 history = _history_plan(
                     conn,
@@ -196,6 +224,9 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "target_rows": source["target_rows"],
                 "location_wac_evidence": source["location_wac_evidence"],
                 "resolved_scopes": source["resolved_scopes"],
+                "mapping_re_evidence": source["mapping_re_evidence"],
+                "typed_blocker_rows": source["typed_blocker_rows"],
+                "coverage": source["coverage"],
             },
             "predicted_effects": preview,
             "history": history,
@@ -216,6 +247,10 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "current_retrocopy": False,
                 "immutable_history_overwrite": False,
                 "wb_writes": 0,
+                "production_mapping_inserts": 0,
+                "production_recovery_writes": 0,
+                "production_history_writes": 0,
+                "hypothetical_mapping": hypothetical_mapping is not None,
             },
             "apply_allowed": not blockers,
             "blockers": sorted(set(blockers)),
@@ -301,6 +336,11 @@ class Wbc0027FbsLifecycleQualityRecovery:
                     )
                 source = self._source_snapshot(conn, storage=locked_storage)
                 _verify_reviewed_source(reviewed, source)
+                _append_mapping_recovery_identity_evidence(
+                    conn,
+                    rows=list(source.get("mapping_re_evidence") or []),
+                    observed_at=now,
+                )
                 manifest = _active_manifest(conn)["manifest"]
                 sequences = tuple(int(value) for value in source["target_sequences"])
                 before_balances = _balance_payload(conn)
@@ -537,7 +577,11 @@ class Wbc0027FbsLifecycleQualityRecovery:
             }
 
     def _source_snapshot(
-        self, conn: sqlite3.Connection, *, storage: Mapping[str, Any]
+        self,
+        conn: sqlite3.Connection,
+        *,
+        storage: Mapping[str, Any],
+        hypothetical_mapping: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         required = {
             FORWARD_GENERATIONS_TABLE,
@@ -594,6 +638,8 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 details={"count": len(pending_sequences), "max": MAX_TARGET_COUNT},
             )
         resolved: list[dict[str, Any]] = []
+        mapping_re_evidence: list[dict[str, Any]] = []
+        raw_typed_blockers: list[dict[str, Any]] = []
         blockers: list[str] = []
         if conn.execute(
             f"SELECT 1 FROM {STATUS_OBSERVATIONS_TABLE} WHERE observation_sequence=?",
@@ -611,7 +657,27 @@ class Wbc0027FbsLifecycleQualityRecovery:
             except Exception as exc:
                 if getattr(exc, "code", "") == "recovery_target_status_drift":
                     blockers.append("candidate_status_drift")
-                continue
+                    raw_typed_blockers.append(
+                        _generic_resolution_blocker(
+                            sequence=sequence,
+                            error_code="recovery_target_status_drift",
+                        )
+                    )
+                    continue
+                exact_candidate = _resolve_exact_mapping_recovery_candidate(
+                    conn,
+                    manifest=manifest,
+                    status_observation_sequence=sequence,
+                    hypothetical_mapping=hypothetical_mapping,
+                )
+                if exact_candidate.get("resolved_scope") is not None:
+                    scope = dict(exact_candidate["resolved_scope"])
+                    mapping_re_evidence.append(dict(exact_candidate["re_evidence"]))
+                else:
+                    blocker = exact_candidate.get("blocker")
+                    if isinstance(blocker, Mapping):
+                        raw_typed_blockers.append(dict(blocker))
+                    continue
             group = (str(scope["facility_id"]), int(scope["nm_id"]))
             if (
                 _business_date(str(scope["source_created_at"])) > DATE_TO
@@ -625,6 +691,9 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 and group[1] in {210183919, 428855560, 428855758}
             ):
                 blockers.append("unexpected_group_inside_bounded_business_scope")
+        typed_blocker_rows = _aggregate_typed_blockers(raw_typed_blockers)
+        if typed_blocker_rows:
+            blockers.append("typed_identity_mapping_blockers_present")
         sequences = sorted(
             {int(item["status_observation_sequence"]) for item in resolved}
         )
@@ -651,8 +720,16 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "groups": list(TARGET_GROUPS),
                 "rows": target_rows,
                 "resolved_scopes": resolved,
+                "mapping_re_evidence": _deduplicate_re_evidence(mapping_re_evidence),
+                "typed_blocker_rows": typed_blocker_rows,
             }
         )
+        blocked_groups = {
+            (str(item["facility_id"]), int(item["nm_id"]))
+            for item in typed_blocker_rows
+            if str(item.get("facility_id") or "") and int(item.get("nm_id") or 0) > 0
+        }
+        covered_groups = actual_groups | blocked_groups
         return {
             "deployed_sha": self.deployed_sha,
             "storage": dict(storage),
@@ -667,6 +744,19 @@ class Wbc0027FbsLifecycleQualityRecovery:
             "resolved_scopes": sorted(
                 resolved, key=lambda item: int(item["status_observation_sequence"])
             ),
+            "mapping_re_evidence": _deduplicate_re_evidence(mapping_re_evidence),
+            "hypothetical_mapping": (
+                dict(hypothetical_mapping) if hypothetical_mapping is not None else None
+            ),
+            "typed_blocker_rows": typed_blocker_rows,
+            "coverage": {
+                "expected_groups": _group_rows(TARGET_GROUP_SET),
+                "resolved_groups": _group_rows(actual_groups),
+                "blocked_groups": _group_rows(blocked_groups),
+                "covered_groups": _group_rows(covered_groups),
+                "full_original_scope_evidenced": covered_groups == TARGET_GROUP_SET,
+                "all_groups_resolvable": actual_groups == TARGET_GROUP_SET,
+            },
             "stable_target_digest": stable_target_digest,
             "location_wac_evidence": (
                 _target_location_wac_evidence(conn, target_rows) if target_rows else []
@@ -694,6 +784,14 @@ class Wbc0027FbsLifecycleQualityRecovery:
         try:
             scratch.execute("PRAGMA foreign_keys=OFF")
             _build_preview_projection(conn, scratch, source=source, scratch_path=path)
+            hypothetical_mapping = source.get("hypothetical_mapping")
+            if isinstance(hypothetical_mapping, Mapping):
+                _insert_hypothetical_mapping(scratch, hypothetical_mapping)
+            _append_mapping_recovery_identity_evidence(
+                scratch,
+                rows=list(source.get("mapping_re_evidence") or []),
+                observed_at=at,
+            )
             before = _balance_payload(scratch)
             sequences = tuple(int(value) for value in source["target_sequences"])
             recovery = recover_pinned_fbs_lifecycle(
@@ -739,6 +837,417 @@ class Wbc0027FbsLifecycleQualityRecovery:
             "sqlite_schema_version": schema_version,
             "manifest_contract": manifest_payload(manifest)["contract_version"],
         }
+
+
+def exact_mapping_tuple_digest(
+    identity: Mapping[str, Any] | None = None,
+) -> str:
+    normalized = dict(identity or EXACT_MAPPING_TUPLE)
+    material = {
+        "contract": EXACT_MAPPING_TUPLE_CONTRACT,
+        "source_nm_id": int(normalized["source_nm_id"]),
+        "source_chrt_id": int(normalized["source_chrt_id"]),
+        "source_barcode": str(normalized["source_barcode"]),
+        "source_sku": str(normalized["source_sku"]),
+        "target_nm_id": int(normalized["target_nm_id"]),
+    }
+    return _fingerprint(material)
+
+
+def _resolve_exact_mapping_recovery_candidate(
+    conn: sqlite3.Connection,
+    *,
+    manifest: Mapping[str, Any],
+    status_observation_sequence: int,
+    hypothetical_mapping: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    identity = dict(EXACT_MAPPING_TUPLE)
+    source = conn.execute(
+        f"""SELECT status.order_id,status.order_revision,status.status_digest,
+                   status.observed_at,source.source_created_at,source.warehouse_id,
+                   source.office_id,source.nm_id,source.chrt_id,source.skus_json,
+                   pending.deferred_identity_evidence_sequence
+            FROM {IDENTITY_PENDING_TABLE} AS pending
+            JOIN {STATUS_OBSERVATIONS_TABLE} AS status
+              ON status.observation_sequence=pending.source_status_observation_sequence
+            JOIN {OBSERVATIONS_TABLE} AS source
+              ON source.order_id=status.order_id
+             AND source.source_revision=status.order_revision
+            LEFT JOIN {IDENTITY_PENDING_RESOLUTIONS_TABLE} AS resolution
+              ON resolution.pending_id=pending.pending_id
+            WHERE pending.cutover_id=?
+              AND pending.source_status_observation_sequence=?
+              AND resolution.pending_id IS NULL""",
+        (str(manifest["cutover_id"]), int(status_observation_sequence)),
+    ).fetchone()
+    if source is None:
+        return {}
+    try:
+        barcodes = json.loads(str(source[9] or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not (
+        int(source[7]) == int(identity["source_nm_id"])
+        and int(source[8] or 0) == int(identity["source_chrt_id"])
+        and isinstance(barcodes, list)
+        and len(barcodes) == 1
+        and str(barcodes[0]) == str(identity["source_barcode"])
+    ):
+        return {}
+    evidence = conn.execute(
+        f"""SELECT evidence_sequence,evidence_id,warehouse_mapping_id,
+                   evidence_digest,order_revision,warehouse_id,nm_id,chrt_id,
+                   barcode,seller_sku,outcome
+            FROM {IDENTITY_EVIDENCE_TABLE}
+            WHERE order_id=? AND order_revision=? AND warehouse_id=?
+              AND nm_id=? AND chrt_id=? AND barcode=? AND seller_sku=?
+            ORDER BY evidence_sequence DESC""",
+        (
+            int(source[0]),
+            str(source[1]),
+            int(source[5] or 0),
+            int(identity["source_nm_id"]),
+            int(identity["source_chrt_id"]),
+            str(identity["source_barcode"]),
+            str(identity["source_sku"]),
+        ),
+    ).fetchall()
+    exact_unmatched = [row for row in evidence if str(row[10]) == "unmatched_identity"]
+    if len(exact_unmatched) != 1:
+        return {
+            "blocker": _exact_mapping_blocker(
+                source=source,
+                status_observation_sequence=status_observation_sequence,
+                facility_id="",
+                identity_error_code="identity_tuple_evidence_missing_or_ambiguous",
+                mapping_error_code="order_sku_unmapped",
+            )
+        }
+    evidence_row = exact_unmatched[0]
+    warehouse_rows = conn.execute(
+        f"""SELECT mapping.mapping_id,mapping.facility_id
+            FROM {WAREHOUSE_MAPPINGS_TABLE} AS mapping
+            JOIN {FACILITIES_TABLE} AS facility
+              ON facility.facility_id=mapping.facility_id
+            WHERE mapping.seller_warehouse_id=?
+              AND mapping.active=1 AND facility.active=1
+            ORDER BY mapping.mapping_id""",
+        (int(source[5] or 0),),
+    ).fetchall()
+    facilities = {str(row[1]) for row in warehouse_rows}
+    facility_id = next(iter(facilities)) if len(facilities) == 1 else ""
+    valid_warehouse_ids = {
+        str(row[0]) for row in warehouse_rows if str(row[1]) == facility_id
+    }
+    if (
+        not facility_id
+        or facility_id not in {MOSCOW_FACILITY_ID, ORENBURG_FACILITY_ID}
+        or str(evidence_row[2]) not in valid_warehouse_ids
+    ):
+        return {
+            "blocker": _exact_mapping_blocker(
+                source=source,
+                status_observation_sequence=status_observation_sequence,
+                facility_id=facility_id,
+                identity_error_code="warehouse_identity_missing_stale_or_ambiguous",
+                mapping_error_code="foreign_facility_mapping",
+            )
+        }
+    active_mappings = conn.execute(
+        f"""SELECT mapping_id,target_nm_id,mapping_digest
+            FROM {IDENTITY_MAPPINGS_TABLE}
+            WHERE source_nm_id=? AND source_chrt_id=?
+              AND source_barcode=? AND source_sku=? AND active=1
+            ORDER BY mapping_id""",
+        (
+            int(identity["source_nm_id"]),
+            int(identity["source_chrt_id"]),
+            str(identity["source_barcode"]),
+            str(identity["source_sku"]),
+        ),
+    ).fetchall()
+    mapping: dict[str, Any] | None = None
+    if len(active_mappings) == 1 and int(active_mappings[0][1]) == int(
+        identity["target_nm_id"]
+    ):
+        mapping = {
+            "mapping_id": str(active_mappings[0][0]),
+            "mapping_digest": str(active_mappings[0][2]),
+            **identity,
+        }
+    elif not active_mappings and hypothetical_mapping is not None:
+        candidate = dict(hypothetical_mapping)
+        expected = {
+            key: identity[key]
+            for key in (
+                "source_nm_id",
+                "source_chrt_id",
+                "source_barcode",
+                "source_sku",
+                "target_nm_id",
+            )
+        }
+        if all(candidate.get(key) == value for key, value in expected.items()) and bool(
+            str(candidate.get("mapping_id") or "")
+        ):
+            mapping = candidate
+    if mapping is None:
+        error = (
+            "order_sku_unmapped"
+            if not active_mappings
+            else "active_identity_mapping_ambiguous_or_foreign"
+        )
+        return {
+            "blocker": _exact_mapping_blocker(
+                source=source,
+                status_observation_sequence=status_observation_sequence,
+                facility_id=facility_id,
+                identity_error_code="identity_evidence_missing_or_drifted",
+                mapping_error_code=error,
+            )
+        }
+    physical = conn.execute(
+        f"""SELECT 1 FROM {BALANCES_TABLE}
+            WHERE facility_id=? AND pool='FBS' AND nm_id=?
+              AND projection_epoch=?""",
+        (
+            facility_id,
+            int(identity["target_nm_id"]),
+            int(manifest["feature_epoch"]),
+        ),
+    ).fetchall()
+    extension = conn.execute(
+        f"""SELECT extension_id FROM {MAPPING_EXTENSIONS_TABLE}
+            WHERE cutover_id=? AND seller_warehouse_id=?
+              AND official_office_id=? AND facility_id=?
+              AND warehouse_mapping_id=?
+            ORDER BY extension_id""",
+        (
+            str(manifest["cutover_id"]),
+            int(source[5] or 0),
+            int(source[6] or 0),
+            facility_id,
+            str(evidence_row[2]),
+        ),
+    ).fetchall()
+    allocation = (
+        conn.execute(
+            f"""SELECT 1 FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
+                WHERE extension_id=? AND nm_id=?""",
+            (str(extension[0][0]), int(identity["target_nm_id"])),
+        ).fetchall()
+        if len(extension) == 1
+        else []
+    )
+    if len(physical) != 1 and len(allocation) != 1:
+        return {
+            "blocker": _exact_mapping_blocker(
+                source=source,
+                status_observation_sequence=status_observation_sequence,
+                facility_id=facility_id,
+                identity_error_code="facility_sku_admission_missing",
+                mapping_error_code="facility_sku_admission_missing",
+            )
+        }
+    resolved_scope = {
+        "status_observation_sequence": int(status_observation_sequence),
+        "order_id": int(source[0]),
+        "source_created_at": str(source[4]),
+        "source_status_observed_at": str(source[3]),
+        "facility_id": facility_id,
+        "nm_id": int(identity["target_nm_id"]),
+    }
+    re_evidence = {
+        "order_id": int(source[0]),
+        "order_revision": str(source[1]),
+        "warehouse_id": int(source[5] or 0),
+        "nm_id": int(identity["source_nm_id"]),
+        "chrt_id": int(identity["source_chrt_id"]),
+        "barcode": str(identity["source_barcode"]),
+        "seller_sku": str(identity["source_sku"]),
+        "warehouse_mapping_id": str(evidence_row[2]),
+        "identity_mapping_id": str(mapping["mapping_id"]),
+        "source_identity_evidence_sequence": int(evidence_row[0]),
+        "source_identity_evidence_digest": str(evidence_row[3]),
+    }
+    return {"resolved_scope": resolved_scope, "re_evidence": re_evidence}
+
+
+def _exact_mapping_blocker(
+    *,
+    source: Sequence[Any],
+    status_observation_sequence: int,
+    facility_id: str,
+    identity_error_code: str,
+    mapping_error_code: str,
+) -> dict[str, Any]:
+    return {
+        "facility_id": str(facility_id),
+        "nm_id": int(EXACT_MAPPING_TUPLE["target_nm_id"]),
+        "identity_error_code": str(identity_error_code),
+        "mapping_error_code": str(mapping_error_code),
+        "external_identity_digest": EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST,
+        "tuple_digest": exact_mapping_tuple_digest(),
+        "order_id": int(source[0]),
+        "status_observation_sequence": int(status_observation_sequence),
+        "status_digest": str(source[2]),
+    }
+
+
+def _generic_resolution_blocker(*, sequence: int, error_code: str) -> dict[str, Any]:
+    return {
+        "facility_id": "",
+        "nm_id": 0,
+        "identity_error_code": str(error_code),
+        "mapping_error_code": "not_applicable",
+        "external_identity_digest": "",
+        "tuple_digest": "",
+        "order_id": 0,
+        "status_observation_sequence": int(sequence),
+        "status_digest": "",
+    }
+
+
+def _aggregate_typed_blockers(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, int, str, str, str, str], dict[str, Any]] = {}
+    for raw in rows:
+        item = dict(raw)
+        key = (
+            str(item.get("facility_id") or ""),
+            int(item.get("nm_id") or 0),
+            str(item.get("identity_error_code") or ""),
+            str(item.get("mapping_error_code") or ""),
+            str(item.get("external_identity_digest") or ""),
+            str(item.get("tuple_digest") or ""),
+        )
+        group = grouped.setdefault(
+            key,
+            {
+                "orders": set(),
+                "statuses": {},
+            },
+        )
+        if int(item.get("order_id") or 0) > 0:
+            group["orders"].add(int(item["order_id"]))
+        group["statuses"][int(item["status_observation_sequence"])] = str(
+            item.get("status_digest") or ""
+        )
+    result: list[dict[str, Any]] = []
+    for key, evidence in sorted(grouped.items()):
+        orders = sorted(evidence["orders"])
+        statuses = [
+            {"status_observation_sequence": sequence, "status_digest": digest}
+            for sequence, digest in sorted(evidence["statuses"].items())
+        ]
+        result.append(
+            {
+                "facility_id": key[0],
+                "nm_id": key[1],
+                "identity_error_code": key[2],
+                "mapping_error_code": key[3],
+                "external_identity_digest": key[4],
+                "tuple_digest": key[5],
+                "order_count": len(orders),
+                "status_observation_count": len(statuses),
+                "order_identity_digest": _fingerprint(orders),
+                "status_identity_digest": _fingerprint(statuses),
+            }
+        )
+    return result
+
+
+def _deduplicate_re_evidence(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    by_order: dict[int, dict[str, Any]] = {}
+    for raw in rows:
+        item = dict(raw)
+        order_id = int(item["order_id"])
+        previous = by_order.get(order_id)
+        if previous is None or int(item["source_identity_evidence_sequence"]) > int(
+            previous["source_identity_evidence_sequence"]
+        ):
+            by_order[order_id] = item
+    return [by_order[key] for key in sorted(by_order)]
+
+
+def _append_mapping_recovery_identity_evidence(
+    conn: sqlite3.Connection,
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    observed_at: str,
+) -> int:
+    inserted = 0
+    for raw in rows:
+        item = dict(raw)
+        material = {
+            "order_id": int(item["order_id"]),
+            "order_revision": str(item["order_revision"]),
+            "warehouse_id": int(item["warehouse_id"]),
+            "nm_id": int(item["nm_id"]),
+            "chrt_id": int(item["chrt_id"]),
+            "barcode": str(item["barcode"]),
+            "seller_sku": str(item["seller_sku"]),
+            "warehouse_mapping_id": str(item["warehouse_mapping_id"]),
+            "identity_mapping_id": str(item["identity_mapping_id"]),
+            "outcome": "matched",
+        }
+        digest = _fingerprint(material)
+        inserted += int(
+            conn.execute(
+                f"""INSERT OR IGNORE INTO {IDENTITY_EVIDENCE_TABLE}(
+                       evidence_id,order_id,order_revision,warehouse_id,nm_id,chrt_id,
+                       barcode,seller_sku,outcome,warehouse_mapping_id,
+                       identity_mapping_id,evidence_digest,observed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,'matched',?,?,?,?)""",
+                (
+                    "fbs_map_" + digest.removeprefix("sha256:")[:32],
+                    material["order_id"],
+                    material["order_revision"],
+                    material["warehouse_id"],
+                    material["nm_id"],
+                    material["chrt_id"],
+                    material["barcode"],
+                    material["seller_sku"],
+                    material["warehouse_mapping_id"],
+                    material["identity_mapping_id"],
+                    digest,
+                    observed_at,
+                ),
+            ).rowcount
+        )
+    return inserted
+
+
+def _insert_hypothetical_mapping(
+    conn: sqlite3.Connection,
+    mapping: Mapping[str, Any],
+) -> None:
+    item = dict(mapping)
+    conn.execute(
+        f"""INSERT INTO {IDENTITY_MAPPINGS_TABLE}(
+               mapping_id,source_nm_id,source_chrt_id,source_barcode,source_sku,
+               target_nm_id,mapping_digest,active,created_at,created_by
+           ) VALUES(?,?,?,?,?,?,?,1,?,?)""",
+        (
+            str(item["mapping_id"]),
+            int(item["source_nm_id"]),
+            int(item["source_chrt_id"]),
+            str(item["source_barcode"]),
+            str(item["source_sku"]),
+            int(item["target_nm_id"]),
+            str(item["mapping_digest"]),
+            str(item.get("created_at") or "2026-08-31T00:00:00Z"),
+            str(item.get("created_by") or "query-only-hypothetical-rehearsal"),
+        ),
+    )
+
+
+def _group_rows(groups: Iterable[tuple[str, int]]) -> list[dict[str, Any]]:
+    return [
+        {"facility_id": facility_id, "nm_id": nm_id}
+        for facility_id, nm_id in sorted(groups)
+    ]
 
 
 def _history_plan(
@@ -1203,6 +1712,11 @@ def _verify_reviewed_source(reviewed: Mapping[str, Any], source: Mapping[str, An
         "target_rows": list(source["target_rows"]) == list(scope["target_rows"]),
         "resolved_scopes": list(source["resolved_scopes"])
         == list(scope["resolved_scopes"]),
+        "mapping_re_evidence": list(source["mapping_re_evidence"])
+        == list(scope.get("mapping_re_evidence") or []),
+        "typed_blocker_rows": list(source["typed_blocker_rows"])
+        == list(scope.get("typed_blocker_rows") or []),
+        "coverage": dict(source["coverage"]) == dict(scope.get("coverage") or {}),
         "blockers": not source["blockers"],
     }
     if not all(checks.values()):
