@@ -43,11 +43,6 @@ from apps.release_protocol import (  # noqa: E402
     CANONICAL_REPOSITORY,
     validate_production_manifest,
 )
-from apps.wbc0027_capital_recovery import (  # noqa: E402
-    LEGACY_SOURCE_TRANSACTION_CONTRACT,
-    Wbc0027RecoveryError,
-    _validate_legacy_source_transaction_binding,
-)
 from apps.wbc0027_capital_recovery_source_binding import (  # noqa: E402
     CONTRACT_NAME as WBC0027_RUNTIME_SOURCE_BINDING_CONTRACT,
     PATHS as WBC0027_RUNTIME_SOURCE_PATHS,
@@ -7773,7 +7768,17 @@ def _valid_wbc0027_source_recovery_after_digest(
     observed = source_row.get("after_digest")
     if isinstance(expected, str) and expected and observed == expected:
         return True
-    if observed != "" or (
+    if observed != "":
+        return False
+    try:
+        from apps.wbc0027_capital_recovery import (
+            LEGACY_SOURCE_TRANSACTION_CONTRACT,
+            Wbc0027RecoveryError,
+            _validate_legacy_source_transaction_binding,
+        )
+    except ImportError:
+        return False
+    if (
         source_transaction.get("contract_name")
         != LEGACY_SOURCE_TRANSACTION_CONTRACT
     ):
