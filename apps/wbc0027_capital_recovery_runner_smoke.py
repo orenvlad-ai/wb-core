@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from copy import deepcopy
 import io
 import json
 import os
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 import zipfile
 
 
@@ -321,6 +324,7 @@ def _exercise_workflow_bridge_binding() -> None:
 
 def _context() -> dict:
     source = runner.WBC0027_RECONCILIATION_SOURCE
+    predecessor = runner.WBC0027_FAILED_RECONCILIATION_PREDECESSOR
     return {
         "source": {
             "pull_request": source["pull_request"],
@@ -389,6 +393,32 @@ def _context() -> dict:
             "state": "done",
             "release_kind": "repo_only",
             "merge_sha": "7" * 40,
+        },
+        "diagnosed_predecessor": {
+            "run_id": predecessor["run_id"],
+            "job_id": predecessor["job_id"],
+            "workflow": predecessor["workflow_path"],
+            "event": predecessor["event"],
+            "run_attempt": predecessor["run_attempt"],
+            "head_sha": predecessor["head_sha"],
+            "conclusion": "failure",
+            "failure_step": "Execute one fixed query-only finalize probe",
+            "failure_signature": (
+                "WBC0027 query-only reconciliation proof is not exact"
+            ),
+            "artifact_count": 0,
+            "marker_count_at_completion": 0,
+            "source_inputs": {},
+            "preflight": {
+                "state": "ready_for_probe",
+                "query_only": True,
+                "database_written": False,
+                "production_mutation_count": 0,
+                "product_replay_count": 0,
+                "economics_replay_count": 0,
+            },
+            "job_log_size_bytes": 123,
+            "job_log_sha256": "sha256:" + "8" * 64,
         },
     }
 
@@ -573,8 +603,388 @@ def _result(context: dict) -> dict:
     }
 
 
+def _predecessor_args() -> SimpleNamespace:
+    predecessor = runner.WBC0027_FAILED_RECONCILIATION_PREDECESSOR
+    return SimpleNamespace(
+        prior_reconciliation_run_id=predecessor["run_id"],
+        prior_reconciliation_artifact_id=0,
+        prior_reconciliation_artifact_name=None,
+        prior_reconciliation_receipt_sha256=None,
+        prior_reconciliation_comment_id=0,
+        prior_reconciliation_a02_run_id=0,
+        prior_reconciliation_a02_artifact_id=0,
+        prior_reconciliation_a02_artifact_name=None,
+        prior_reconciliation_a02_receipt_sha256=None,
+        prior_reconciliation_a02_comment_id=0,
+    )
+
+
+class _FailedPredecessorClient:
+    def __init__(self) -> None:
+        predecessor = runner.WBC0027_FAILED_RECONCILIATION_PREDECESSOR
+        repository = {"full_name": runner.CANONICAL_REPOSITORY}
+        self.run = {
+            "id": predecessor["run_id"],
+            "name": predecessor["workflow_name"],
+            "path": predecessor["workflow_path"],
+            "event": predecessor["event"],
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": predecessor["run_attempt"],
+            "head_branch": predecessor["head_branch"],
+            "head_sha": predecessor["head_sha"],
+            "updated_at": "2026-08-31T06:22:02Z",
+            "repository": repository,
+            "head_repository": repository,
+        }
+        self.job = {
+            "id": predecessor["job_id"],
+            "name": predecessor["job_name"],
+            "status": "completed",
+            "conclusion": "failure",
+            "run_attempt": predecessor["run_attempt"],
+            "head_sha": predecessor["head_sha"],
+            "steps": [
+                {"name": name, "conclusion": conclusion}
+                for name, conclusion in (
+                    (
+                        "Checkout exact trusted-main WBC0027 reconciliation runner",
+                        "success",
+                    ),
+                    (
+                        "Validate exact source and suppress an already terminal operation",
+                        "success",
+                    ),
+                    ("Execute one fixed query-only finalize probe", "failure"),
+                    (
+                        "Upload full immutable WBC0027 reconciliation evidence first",
+                        "skipped",
+                    ),
+                    (
+                        "Verify uploaded evidence and publish one supersession marker",
+                        "skipped",
+                    ),
+                )
+            ],
+        }
+        preflight = {
+            "state": "ready_for_probe",
+            "query_only": True,
+            "database_written": False,
+            "production_mutation_count": 0,
+            "product_replay_count": 0,
+            "economics_replay_count": 0,
+            "source": {"run_id": runner.WBC0027_RECONCILIATION_SOURCE["run_id"]},
+            "reconciliation_release": {
+                "pull_request": predecessor["reconciliation_pr"]
+            },
+            "workflow_bridge": {
+                "dispatch": {"workflow_run_id": predecessor["run_id"]}
+            },
+        }
+        self.raw_log = (
+            "2026-08-31T06:21:35Z ##[group]Run "
+            + runner._wbc0027_failed_predecessor_command("preflight")
+            + "\n2026-08-31T06:21:40Z "
+            + json.dumps(preflight, sort_keys=True)
+            + "\n2026-08-31T06:21:40Z ##[group]Run "
+            + runner._wbc0027_failed_predecessor_command("collect")
+            + "\nApplyError: WBC0027 query-only reconciliation proof is not exact\n"
+        ).encode("utf-8")
+        self.artifacts: list[dict[str, object]] = []
+
+    def get(self, path: str):
+        predecessor = runner.WBC0027_FAILED_RECONCILIATION_PREDECESSOR
+        if path == f"/actions/runs/{predecessor['run_id']}":
+            return self.run
+        if path == f"/actions/runs/{predecessor['run_id']}/jobs?per_page=100":
+            return {"total_count": 1, "jobs": [self.job]}
+        if path == f"/actions/runs/{predecessor['run_id']}/artifacts?per_page=100":
+            return {"total_count": len(self.artifacts), "artifacts": self.artifacts}
+        raise AssertionError(f"unexpected predecessor read: {path}")
+
+    def request(self, method: str, path: str, *, raw: bool = False):
+        predecessor = runner.WBC0027_FAILED_RECONCILIATION_PREDECESSOR
+        assert method == "GET"
+        assert path == f"/actions/jobs/{predecessor['job_id']}/logs"
+        assert raw is True
+        return self.raw_log
+
+
+def _exercise_failed_predecessor_binding() -> None:
+    args = _predecessor_args()
+    client = _FailedPredecessorClient()
+    binding = runner._validate_wbc0027_failed_reconciliation_predecessor(
+        args=args,
+        client=client,  # type: ignore[arg-type]
+        source_comments=[],
+    )
+    assert binding["run_id"] == 33363863580
+    assert binding["job_id"] == 99400411103
+    assert binding["artifact_count"] == 0
+    assert binding["preflight"]["production_mutation_count"] == 0
+
+    missing = _predecessor_args()
+    missing.prior_reconciliation_run_id = 0
+    try:
+        runner._validate_wbc0027_failed_reconciliation_predecessor(
+            args=missing,
+            client=_FailedPredecessorClient(),  # type: ignore[arg-type]
+            source_comments=[],
+        )
+    except runner.ApplyError as exc:
+        assert "missing or foreign" in str(exc)
+    else:
+        raise AssertionError("missing diagnosed predecessor was accepted")
+
+    populated = _predecessor_args()
+    populated.prior_reconciliation_artifact_id = 1
+    try:
+        runner._validate_wbc0027_failed_reconciliation_predecessor(
+            args=populated,
+            client=_FailedPredecessorClient(),  # type: ignore[arg-type]
+            source_comments=[],
+        )
+    except runner.ApplyError as exc:
+        assert "no artifact" in str(exc)
+    else:
+        raise AssertionError("foreign predecessor artifact input was accepted")
+
+    for mutate, expected in (
+        (lambda value: value.run.__setitem__("head_sha", "f" * 40), "run drifted"),
+        (lambda value: value.job.__setitem__("id", 1), "job is missing"),
+        (lambda value: value.artifacts.append({"id": 1}), "has artifacts"),
+        (
+            lambda value: setattr(
+                value,
+                "raw_log",
+                value.raw_log.replace(b'--pr "1129"', b'--pr "1"'),
+            ),
+            "source inputs drifted",
+        ),
+    ):
+        wrong = _FailedPredecessorClient()
+        mutate(wrong)
+        try:
+            runner._validate_wbc0027_failed_reconciliation_predecessor(
+                args=_predecessor_args(),
+                client=wrong,  # type: ignore[arg-type]
+                source_comments=[],
+            )
+        except runner.ApplyError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"wrong predecessor evidence was accepted: {expected}")
+
+    old_marker = {
+        "created_at": "2026-08-31T06:21:59Z",
+        "body": runner._wbc0027_reconciliation_marker(
+            runner.WBC0027_RECONCILIATION_SOURCE["operation_id"]
+        ),
+    }
+    try:
+        runner._validate_wbc0027_failed_reconciliation_predecessor(
+            args=_predecessor_args(),
+            client=_FailedPredecessorClient(),  # type: ignore[arg-type]
+            source_comments=[old_marker],
+        )
+    except runner.ApplyError as exc:
+        assert "already had a supersession marker" in str(exc)
+    else:
+        raise AssertionError("predecessor with an existing marker was accepted")
+
+
+def _command_probe(
+    *,
+    result: object,
+    return_code: int = 0,
+    parse_status: str = "parsed_object",
+    transport: bool = False,
+) -> dict:
+    stdout_sha = runner.digest(b"stdout")
+    stderr_sha = runner.digest(b"stderr")
+    return {
+        "command_sha256": runner.digest(b"command"),
+        "return_code": None if transport else return_code,
+        "stdout_sha256": stdout_sha,
+        "stderr_sha256": stderr_sha,
+        "stdout": {
+            "size_bytes": 6,
+            "sha256": stdout_sha,
+            "truncated": False,
+            "preview": "stdout",
+        },
+        "stderr": {
+            "size_bytes": 6,
+            "sha256": stderr_sha,
+            "truncated": False,
+            "preview": "stderr",
+        },
+        "transport_ambiguous": transport,
+        "transport_error": {"type": "TimeoutExpired", "message": "timeout"}
+        if transport
+        else None,
+        "parse_status": parse_status,
+        "parse_error": None if parse_status == "parsed_object" else {"message": "bad"},
+        "result": result,
+    }
+
+
+def _exercise_structured_command_evidence() -> None:
+    remote_nonzero = runner.command_evidence(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.stdout.write('{\"not\":'); "
+                "sys.stderr.write('token=must-not-leak'); "
+                "raise SystemExit(17)"
+            ),
+        ],
+        structured_failure=True,
+    )
+    assert remote_nonzero["return_code"] == 17
+    assert remote_nonzero["parse_status"] == "invalid_json"
+    assert remote_nonzero["parse_error"]["line"] == 1
+    assert remote_nonzero["stderr"]["size_bytes"] == len("token=must-not-leak")
+    assert remote_nonzero["stderr"]["sha256"] == remote_nonzero["stderr_sha256"]
+    assert "must-not-leak" not in remote_nonzero["stderr"]["preview"]
+    assert "[REDACTED]" in remote_nonzero["stderr"]["preview"]
+
+    invalid_bytes = runner.command_evidence(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(bytes([255, 0, 254]))",
+        ],
+        structured_failure=True,
+    )
+    assert invalid_bytes["return_code"] == 0
+    assert invalid_bytes["parse_status"] == "invalid_json"
+    assert invalid_bytes["stdout"]["size_bytes"] == 3
+    assert invalid_bytes["stdout"]["sha256"] == runner.digest(bytes([255, 0, 254]))
+
+
+def _exercise_failure_receipt_materialization() -> None:
+    context = _context()
+    valid_result = _result(context)
+    invalid_result = deepcopy(valid_result)
+    invalid_result["product_capital"]["scope_count"] = 1151
+    cases = (
+        (
+            "wbc0027-reconciliation-remote-nonzero",
+            _command_probe(result=valid_result, return_code=17),
+        ),
+        (
+            "wbc0027-reconciliation-invalid-json-payload",
+            _command_probe(result=None, parse_status="invalid_json"),
+        ),
+        (
+            "wbc0027-reconciliation-validator-failed",
+            _command_probe(result=invalid_result),
+        ),
+        (
+            "wbc0027-reconciliation-transport-failure",
+            _command_probe(
+                result=None,
+                parse_status="not_attempted_transport_failure",
+                transport=True,
+            ),
+        ),
+    )
+    original_context = runner._wbc0027_reconciliation_context
+    original_existing = runner._existing_wbc0027_reconciliation_marker
+    original_target = runner._canonical_target
+    original_configure = runner.configure_deploy_environment
+    original_command = runner._wbc0027_finalize_remote_command
+    original_evidence = runner.command_evidence
+    try:
+        runner._wbc0027_reconciliation_context = lambda **_kwargs: context
+        runner._existing_wbc0027_reconciliation_marker = lambda *_args, **_kwargs: None
+        runner._canonical_target = lambda: {
+            "target_dir": "/srv/wb-core",
+            "ssh_destination": "fixture",
+        }
+        runner.configure_deploy_environment = lambda _path: None
+        runner._wbc0027_finalize_remote_command = lambda **_kwargs: ["probe"]
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (reason, probe) in enumerate(cases):
+                output = Path(directory) / f"blocked-{index}.json"
+                github_output = Path(directory) / f"github-{index}.txt"
+                runner.command_evidence = lambda *_args, _probe=probe, **_kwargs: _probe
+                with redirect_stdout(io.StringIO()):
+                    code = runner._run_wbc0027_reconciliation_collect(
+                        args=SimpleNamespace(
+                            output=output,
+                            github_output=github_output,
+                        ),
+                        client=None,  # type: ignore[arg-type]
+                        pr={},
+                        comments=[],
+                    )
+                assert code == 1
+                receipt = json.loads(output.read_text(encoding="utf-8"))
+                assert receipt["state"] == "blocked"
+                assert receipt["reason"] == reason
+                assert receipt["production_mutation_count"] == 0
+                assert receipt["database_written"] is False
+                if reason == "wbc0027-reconciliation-invalid-json-payload":
+                    assert receipt["validator"]["predicate_failures"] == [
+                        "result_object"
+                    ]
+                if reason == "wbc0027-reconciliation-validator-failed":
+                    assert "business_state_exact" in receipt["validator"][
+                        "predicate_failures"
+                    ]
+                assert runner._validate_wbc0027_blocked_reconciliation_receipt(
+                    receipt, context=context
+                )
+                assert "receipt_qualified=false" in github_output.read_text(
+                    encoding="utf-8"
+                )
+
+            success_output = Path(directory) / "done.json"
+            success_github_output = Path(directory) / "done-output.txt"
+            success_probe = _command_probe(result=valid_result)
+            runner.command_evidence = lambda *_args, **_kwargs: success_probe
+            with redirect_stdout(io.StringIO()):
+                code = runner._run_wbc0027_reconciliation_collect(
+                    args=SimpleNamespace(
+                        output=success_output,
+                        github_output=success_github_output,
+                    ),
+                    client=None,  # type: ignore[arg-type]
+                    pr={},
+                    comments=[],
+                )
+            assert code == 0
+            receipt = json.loads(success_output.read_text(encoding="utf-8"))
+            assert receipt["state"] == "done"
+            assert receipt["validator"] == {
+                "valid": True,
+                "predicate_failures": [],
+            }
+            assert runner._validate_wbc0027_reconciliation_receipt(
+                receipt, context=context
+            )
+            assert "receipt_qualified=true" in success_github_output.read_text(
+                encoding="utf-8"
+            )
+    finally:
+        runner._wbc0027_reconciliation_context = original_context
+        runner._existing_wbc0027_reconciliation_marker = original_existing
+        runner._canonical_target = original_target
+        runner.configure_deploy_environment = original_configure
+        runner._wbc0027_finalize_remote_command = original_command
+        runner.command_evidence = original_evidence
+
+
 def main() -> None:
     _exercise_workflow_bridge_binding()
+    _exercise_failed_predecessor_binding()
+    _exercise_structured_command_evidence()
+    _exercise_failure_receipt_materialization()
     context = _context()
     result = _result(context)
     assert runner._valid_wbc0027_finalize_result(result, context=context)
@@ -687,11 +1097,13 @@ def main() -> None:
         "source": context["source"],
         "reconciliation_release": context["reconciliation_release"],
         "workflow_bridge": context["workflow_bridge"],
+        "diagnosed_predecessor": context["diagnosed_predecessor"],
         "probe": {
             "return_code": 0,
             "transport_ambiguous": False,
             "result": result,
         },
+        "validator": {"valid": True, "predicate_failures": []},
     }
     receipt["evidence_digest"] = runner.payload_digest(receipt)
     assert runner._validate_wbc0027_reconciliation_receipt(
@@ -727,6 +1139,12 @@ def main() -> None:
     assert "--reconciliation-phase preflight" in job
     assert "--reconciliation-phase collect" in job
     assert "--reconciliation-phase publish" in job
+    assert job.count("--prior-reconciliation-run-id") == 3
+    assert "id: collect" in job
+    assert "always()" in job
+    assert "steps.preflight.outcome == 'success'" in job
+    assert "steps.collect.outputs.receipt_qualified == 'true'" in job
+    assert "if-no-files-found: error" in job
     assert job.index("Upload full immutable WBC0027 reconciliation evidence first") < job.index(
         "Verify uploaded evidence and publish one supersession marker"
     )

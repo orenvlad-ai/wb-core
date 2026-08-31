@@ -1938,6 +1938,7 @@ puts JSON.generate(decode(Psych.parse_file(ARGV.fetch(0)).root))
             "blocked_comment_id",
             "operation_id",
             "pr",
+            "prior_reconciliation_run_id",
             "reconciliation_pr",
             "reconciliation_release_operation_id",
             "source_artifact_id",
@@ -2886,13 +2887,13 @@ def main() -> None:
     assert "--reconciliation-phase publish" in reconciliation_job
     for exact_a02_input in (
         "--reconciliation-attempt",
-        "--prior-reconciliation-run-id",
         "--prior-reconciliation-artifact-id",
         "--prior-reconciliation-artifact-name",
         "--prior-reconciliation-receipt-sha256",
         "--prior-reconciliation-comment-id",
     ):
         assert reconciliation_job.count(exact_a02_input) == 3
+    assert reconciliation_job.count("--prior-reconciliation-run-id") == 6
     assert reconciliation_job.index(
         "Upload full immutable reconciliation evidence first"
     ) < (reconciliation_job.index("publish one compact supersession marker"))
