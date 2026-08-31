@@ -578,6 +578,47 @@ def main() -> None:
     context = _context()
     result = _result(context)
     assert runner._valid_wbc0027_finalize_result(result, context=context)
+
+    exact_legacy_empty = deepcopy(result)
+    exact_legacy_empty["source_recovery_row"]["after_digest"] = ""
+    assert runner._valid_wbc0027_finalize_result(
+        exact_legacy_empty, context=context
+    )
+    missing_legacy_identity = deepcopy(context["source"])
+    del missing_legacy_identity["run_id"]
+    assert not runner._valid_wbc0027_source_recovery_after_digest(
+        {"after_digest": ""},
+        source=missing_legacy_identity,
+        source_transaction=result["source_transaction"],
+    )
+    foreign_legacy_identity = deepcopy(context["source"])
+    foreign_legacy_identity["run_id"] += 1
+    assert not runner._valid_wbc0027_source_recovery_after_digest(
+        {"after_digest": ""},
+        source=foreign_legacy_identity,
+        source_transaction=result["source_transaction"],
+    )
+    canonical_source_transaction = {
+        "contract_name": "wbc0027_economics_semantic_non_target_digest/v1"
+    }
+    assert not runner._valid_wbc0027_source_recovery_after_digest(
+        {"after_digest": ""},
+        source=context["source"],
+        source_transaction=canonical_source_transaction,
+    )
+    exact_legacy_wrong = deepcopy(result)
+    exact_legacy_wrong["source_recovery_row"]["after_digest"] = (
+        "sha256:" + "f" * 64
+    )
+    assert not runner._valid_wbc0027_finalize_result(
+        exact_legacy_wrong, context=context
+    )
+    assert runner._valid_wbc0027_source_recovery_after_digest(
+        result["source_recovery_row"],
+        source=context["source"],
+        source_transaction=result["source_transaction"],
+    )
+
     for scope_count in (None, 1151):
         scope_drift = deepcopy(result)
         if scope_count is None:
