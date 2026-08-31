@@ -764,43 +764,42 @@ non-target invariants остаются plan/apply guards, но не queue owners
 `user-artifact` не входит в GitHub PR/release flow. Historical Actions logs,
 comments и branches сохраняются как audit evidence.
 
-### WBC0027 FBS lifecycle quality recovery
+### WBC0027 general FBS mapping, impact and recovery
 
-Release Runner deploys the recovery code as ordinary `live_runtime` and performs
-no business-data mutation. The separate Production Apply passport is exact:
+Release Runner deploys the generic manifest-driven capability as ordinary
+`live_runtime` and performs no business-data mutation. Incident SKU, facility,
+group, order/status count and date values live only in a checked-in incident
+passport or a fresh private manifest.
 
-`/wb-core authorize-goal-v1 task WBC0027 profile fbs-lifecycle-quality-recovery target wb_core_eu_hosted_runtime_active source-sequence 28050157 dates 2026-08-17..2026-08-31 groups fff_d67e8c823d5f81dd988d00dbfea6:210183919,fff_d67e8c823d5f81dd988d00dbfea6:428855560,fff_d67e8c823d5f81dd988d00dbfea6:428855758,fff_2579bb2741ed4ab23b11bb4c4183:428855758 submits 1`
-
-The trusted runner obtains two consecutive query-only witnesses with the same
-deployed SHA, StoreRegistry generation/schema, active cutover/forward
-generation, exact source rows, derived effects, history bases and non-target
-digest. Only then may it issue one apply command. It always performs query-only
-readback afterward and never retries the mutation command after an ambiguous
-transport result. The durable terminal receipt must reconcile the derived
-target count, all 15 same-date captures, four exact groups and `mutates_wb=false`.
-
-### WBC0027 exact FBS SKU mapping extension
-
-The missing canonical mapping is a separate default-off scope-goal profile. Its
-OWNER/MEMBER passport is exact and uses the deployed SHA from the trusted
-`live_runtime/done` receipt in the `runtime` field:
+The default-off mapping grammar is:
 
 ```text
-/wb-core authorize-goal-v1 task WBC0027 profile exact-fbs-sku-mapping-extension target wb_core_eu_hosted_runtime_active diagnosis-runtime 999c53285ca684bd3b1d2caa5992594f8870ffc7 runtime <exact-deployed-sha> generation operational-c54072027f14f90b374b manifest sha256:8cdd437b7357042092a8be2e1fdce028af2444c81a464465dbadd557b57a2ffb schema 987 cutover ffcut_d2816d894a75390dcaa6514c0a96 identity-digest sha256:ca2117e1c33a81df62d9de68c0f6e7f652d755fef828a91a88a8592ae69db6f7 tuple-digest sha256:680a220d3bb88741723956ba90d84a12ce57b44ec17d2dc1c2233c4c54c38968 tuples 1 owners 1 active-mappings 0 target-nm 428855758 mapping-inserts 1 submits 1
+/wb-core authorize-goal-v2 task WBC0027 profile fbs-identity-mapping-v2 target <target-id> incident-passport sha256:<incident-passport> operation <operation-id> inserts 1 submits 1
 ```
 
-The external identity digest is an opaque accepted source-snapshot binding; the
-Runner does not invent its preimage. The tuple digest independently binds the
-versioned canonical JSON grammar from migration 177. Two consecutive JIT
-witnesses must retain the exact StoreRegistry/cutover bindings, one tuple, one
-active owner, zero active/all mappings, the two typed facility × SKU blocker
-rows and a successful query-only hypothetical recovery rehearsal for all four
-groups and 15 dates.
+The runner parses `fbs_identity_mapping_manifest/v2`, obtains two matching
+query-only material-CAS witnesses and requires a successful hypothetical
+mapping/readback plus global impact/recovery rehearsal.  Mapping Apply permits
+at most one canonical INSERT under the shared warehouse writer lock, writes a
+private before-image, cannot touch lifecycle/history/WB state and is never
+retried after an ambiguous transport result.  Its terminal query-only readback
+digest is a mandatory input to impact generation.
 
-Apply persists an exclusive private before-image, repeats CAS under the shared
-warehouse writer lock and permits exactly one insert into the canonical identity
-mapping table. A SQLite authorizer denies every other table write. Query-only
-readback follows the single submit even after transport ambiguity; the mapping
-command is never retried. The profile cannot debit lifecycle, change balance,
-history, public/outbox or WB state. The later
-`fbs-lifecycle-quality-recovery` remains a distinct passport and Apply.
+`fbs_lifecycle_impact_manifest/v2` scans the complete fresh unresolved set and
+derives every affected facility × SKU, facility total, global SKU and global
+total plus FBS/capital/WAC/economics/history evidence.  It is reviewed data, not
+a mutation submit.
+
+The separate recovery grammar is:
+
+```text
+/wb-core authorize-goal-v2 task WBC0027 profile fbs-lifecycle-recovery-v2 target <target-id> incident-passport sha256:<incident-passport> mapping-readback sha256:<terminal-mapping-readback> impact sha256:<impact-manifest> recovery sha256:<recovery-manifest> submits 1
+```
+
+Two matching query-only witnesses must retain the exact runtime, four distinct
+StoreRegistry/schema fields, cutover/forward generation, complete target row
+coverage, predicted effects, history bases and non-target/WB digests.  Recovery
+Apply has its own one-submit boundary and terminal query-only readback; it cannot
+write mappings or WB state.  History cells classified
+`remain_missing_no_same_date_evidence` stay missing and do not block exact
+recovery of cells classified `recoverable_exact`.

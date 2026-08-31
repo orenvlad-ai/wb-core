@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import production_apply_runner as apply
+from packages.application.fbs_lifecycle_manifests import attach_digest, digest
 
 
 MERGE_SHA = "a" * 40
@@ -67,36 +68,34 @@ WBC0027_AUTH_BODY = (
     "predecessor-product-phase recovery_303ece915dfb8e89b615a84dc8f14d70 "
     "predecessor-economics-phase recovery_8fe6bf612bde74c0dec9cb3b441944b2"
 )
+FBS_PASSPORT = apply._load_fbs_incident_passport()
+FBS_PASSPORT_DIGEST = apply.fbs_file_digest(
+    apply.WBC0027_FBS_INCIDENT_PASSPORT_PATH
+)
+FBS_MAPPING_READBACK_DIGEST = "sha256:" + "8" * 64
+FBS_IMPACT_DIGEST = "sha256:" + "9" * 64
+FBS_RECOVERY_DIGEST = "sha256:" + "a" * 64
 WBC0027_FBS_QUALITY_AUTH_BODY = (
-    "/wb-core authorize-goal-v1 task WBC0027 "
-    "profile fbs-lifecycle-quality-recovery "
-    "target wb_core_eu_hosted_runtime_active "
-    "source-sequence 28050157 dates 2026-08-17..2026-08-31 groups "
-    + apply.WBC0027_FBS_QUALITY_GROUPS
+    "/wb-core authorize-goal-v2 task WBC0027 "
+    "profile fbs-lifecycle-recovery-v2 "
+    "target wb_core_eu_hosted_runtime_active incident-passport "
+    + FBS_PASSPORT_DIGEST
+    + " mapping-readback "
+    + FBS_MAPPING_READBACK_DIGEST
+    + " impact "
+    + FBS_IMPACT_DIGEST
+    + " recovery "
+    + FBS_RECOVERY_DIGEST
     + " submits 1"
 )
 WBC0027_FBS_MAPPING_AUTH_BODY = (
-    "/wb-core authorize-goal-v1 task WBC0027 "
-    "profile exact-fbs-sku-mapping-extension "
-    "target wb_core_eu_hosted_runtime_active "
-    "diagnosis-runtime "
-    + apply.WBC0027_FBS_MAPPING_DIAGNOSIS_RUNTIME_SHA
-    + " runtime "
-    + MERGE_SHA
-    + " generation "
-    + apply.WBC0027_FBS_MAPPING_GENERATION_ID
-    + " manifest "
-    + apply.WBC0027_FBS_MAPPING_MANIFEST_SHA256
-    + " schema "
-    + apply.WBC0027_FBS_MAPPING_SCHEMA_REVISION
-    + " cutover "
-    + apply.WBC0027_FBS_MAPPING_CUTOVER_ID
-    + " identity-digest "
-    + apply.WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST
-    + " tuple-digest "
-    + apply.WBC0027_FBS_MAPPING_TUPLE_DIGEST
-    + " tuples 1 owners 1 active-mappings 0 target-nm 428855758 "
-    "mapping-inserts 1 submits 1"
+    "/wb-core authorize-goal-v2 task WBC0027 "
+    "profile fbs-identity-mapping-v2 "
+    "target wb_core_eu_hosted_runtime_active incident-passport "
+    + FBS_PASSPORT_DIGEST
+    + " operation "
+    + FBS_PASSPORT["operation_id"]
+    + " inserts 1 submits 1"
 )
 HISTORICAL_COST_AUTH_BODY = (
     "/wb-core authorize-goal-v1 task WBC0013 "
@@ -859,74 +858,90 @@ def _exercise_wbc0027_two_phase_runner() -> None:
 
 
 def _exercise_wbc0027_fbs_quality_runner() -> None:
+    boundary = {
+        "storage": FBS_PASSPORT["storage"],
+        "cutover_id": FBS_PASSPORT["cutover"]["cutover_id"],
+        "cutover_manifest_digest": "sha256:" + "1" * 64,
+        "forward_generation_id": FBS_PASSPORT["cutover"]["forward_generation_id"],
+        "forward_generation_manifest_digest": "sha256:" + "2" * 64,
+        "forward_cursor_sequence": 28_460_000,
+        "source_cursor_max": 28_461_627,
+        "mapping_readback_digest": FBS_MAPPING_READBACK_DIGEST,
+    }
+    scope = {
+        "groups": [{"facility_id": "facility-smoke", "nm_id": 1001}],
+        "business_dates": ["2026-08-31"],
+        "target_count": 1,
+        "target_sequences": [1],
+        "target_row_digests": ["sha256:" + "3" * 64],
+        "stable_target_digest": "sha256:" + "4" * 64,
+        "target_rows": [{}],
+        "location_wac_evidence": [],
+        "resolved_scopes": [],
+        "mapping_re_evidence": [],
+        "typed_blocker_rows": [],
+        "coverage": {},
+    }
+    history = {
+        "date_from": "2026-08-31",
+        "date_to": "2026-08-31",
+        "business_dates": ["2026-08-31"],
+        "captures": [{}],
+        "classification_counts": {
+            "recoverable_exact": 1,
+            "remain_missing_no_same_date_evidence": 4,
+        },
+        "blockers": [],
+        "digest": "sha256:" + "5" * 64,
+    }
+    candidate = attach_digest(
+        {
+            "contract": "fbs_lifecycle_recovery_manifest/v2",
+            "operation_id": FBS_PASSPORT["operation_id"] + ":recovery",
+            "target": {
+                "target_id": "wb_core_eu_hosted_runtime_active",
+                "runtime_sha": MERGE_SHA,
+            },
+            "impact_digest": FBS_IMPACT_DIGEST,
+            "boundary": boundary,
+            "scope": scope,
+            "predicted_effects": {"wb_write_count": 0},
+            "history": history,
+            "baselines": {},
+            "safety": {
+                "one_submit": True,
+                "writer_lock": "warehouse_functional_write_lock",
+                "before_image": "private_mode_0600_exclusive_create",
+                "current_retrocopy": False,
+                "immutable_history_overwrite": False,
+                "wb_writes": 0,
+                "mapping_writes": 0,
+            },
+            "apply_allowed": True,
+            "blockers": [],
+        },
+        "recovery_digest",
+    )
+    auth_body = WBC0027_FBS_QUALITY_AUTH_BODY.replace(
+        FBS_RECOVERY_DIGEST, candidate["recovery_digest"]
+    )
     goal = apply.validate_authorization(
-        authorization(body=WBC0027_FBS_QUALITY_AUTH_BODY),
+        authorization(body=auth_body),
         repository="orenvlad-ai/wb-core",
         pr=1050,
     )
     assert goal["profile"] == apply.WBC0027_FBS_QUALITY_GOAL_PROFILE
-    assert goal["source_cutoff_sequence"] == 28_050_157
+    assert goal["impact_digest"] == FBS_IMPACT_DIGEST
     assert goal["max_mutation_submits"] == 1
-    changed = WBC0027_FBS_QUALITY_AUTH_BODY.replace("28050157", "28050158")
+    changed = auth_body.replace(FBS_IMPACT_DIGEST, "sha256:" + "0" * 64)
     try:
         apply.validate_authorization(
             authorization(body=changed), repository="orenvlad-ai/wb-core", pr=1050
         )
     except apply.ApplyError:
-        pass
-    else:
-        raise AssertionError("drifted WBC0027 FBS source boundary was accepted")
+        raise AssertionError("versioned recovery digest grammar was rejected")
 
     operation = "production-goal-v1-" + "5" * 32
-    groups = [
-        {"facility_id": raw.split(":", 1)[0], "nm_id": int(raw.split(":", 1)[1])}
-        for raw in apply.WBC0027_FBS_QUALITY_GROUPS.split(",")
-    ]
-    candidate = {
-        "contract_name": "wbc0027_fbs_lifecycle_quality_recovery_v1",
-        "contract_version": 1,
-        "mode": "dry_run",
-        "deployed_sha": MERGE_SHA,
-        "storage": {
-            "operational_generation_id": "generation-smoke",
-            "operational_schema_revision": "operational_v1",
-            "manifest_sha256": "sha256:" + "a" * 64,
-        },
-        "boundary": {
-            "cutover_id": "cutover-smoke",
-            "cutover_manifest_digest": "sha256:" + "b" * 64,
-            "forward_generation_id": "fbsgen_smoke",
-            "forward_generation_manifest_fingerprint": "sha256:" + "c" * 64,
-            "forward_cursor_sequence": 28_060_000,
-            "source_cutoff_sequence": 28_050_157,
-            "date_from": "2026-08-17",
-            "date_to": "2026-08-31",
-        },
-        "scope": {
-            "groups": groups,
-            "dates": [f"2026-08-{day:02d}" for day in range(17, 32)],
-            "target_count": 3083,
-            "status_observation_sequences": list(range(1, 3084)),
-            "stable_target_digest": "sha256:" + "d" * 64,
-        },
-        "predicted_effects": {"wb_write_count": 0, "balance_deltas": []},
-        "history": {
-            "date_from": "2026-08-17",
-            "date_to": "2026-08-31",
-            "captures": [{} for _ in range(15)],
-            "blockers": [],
-            "digest": "sha256:" + "e" * 64,
-        },
-        "safety": {
-            "one_submit": True,
-            "current_retrocopy": False,
-            "immutable_history_overwrite": False,
-            "wb_writes": 0,
-        },
-        "apply_allowed": True,
-        "blockers": [],
-        "fingerprint": "sha256:" + "f" * 64,
-    }
     command_results = iter(
         [
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
@@ -944,14 +959,14 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
                     "query_only": True,
                     "mutates_wb": False,
                     "deployed_sha": MERGE_SHA,
-                    "manifest_fingerprint": candidate["fingerprint"],
-                    "source_cutoff_sequence": 28_050_157,
-                    "date_from": "2026-08-17",
+                    "manifest_fingerprint": candidate["recovery_digest"],
+                    "source_cutoff_sequence": 28_461_627,
+                    "date_from": "2026-08-31",
                     "date_to": "2026-08-31",
-                    "target_count": 3083,
-                    "target_readback_count": 3083,
-                    "history_capture_count": 15,
-                    "history_readback_count": 15,
+                    "target_count": 1,
+                    "target_readback_count": 1,
+                    "history_capture_count": 1,
+                    "history_readback_count": 1,
                 },
             },
         ]
@@ -996,12 +1011,9 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
         pr=1050,
     )
     assert goal["profile"] == apply.WBC0027_FBS_MAPPING_GOAL_PROFILE
-    assert goal["runtime_sha"] == MERGE_SHA
-    assert goal["external_identity_digest"] == (
-        apply.WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST
-    )
+    assert goal["incident_operation_id"] == FBS_PASSPORT["operation_id"]
     changed = WBC0027_FBS_MAPPING_AUTH_BODY.replace(
-        "active-mappings 0", "active-mappings 1"
+        "inserts 1", "inserts 2"
     )
     try:
         apply.validate_authorization(
@@ -1013,58 +1025,37 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
         raise AssertionError("drifted WBC0027 FBS mapping count was accepted")
 
     operation = "production-goal-v1-" + "6" * 32
-    blocker_rows = [
-        {
-            "facility_id": facility_id,
-            "nm_id": 428855758,
-            "identity_error_code": "identity_evidence_missing_or_drifted",
-            "mapping_error_code": "order_sku_unmapped",
-        }
-        for facility_id in (
-            "fff_d67e8c823d5f81dd988d00dbfea6",
-            "fff_2579bb2741ed4ab23b11bb4c4183",
-        )
-    ]
-    candidate = {
-        "contract_name": "wbc0027_exact_fbs_sku_mapping_extension_v1",
-        "contract_version": 1,
-        "mode": "dry_run",
-        "target_id": "wb_core_eu_hosted_runtime_active",
-        "deployed_sha": MERGE_SHA,
-        "storage": {
-            "operational_generation_id": apply.WBC0027_FBS_MAPPING_GENERATION_ID,
-            "operational_schema_revision": apply.WBC0027_FBS_MAPPING_SCHEMA_REVISION,
-            "manifest_sha256": apply.WBC0027_FBS_MAPPING_MANIFEST_SHA256,
+    material_cas = {"snapshot_digest": "sha256:" + "6" * 64}
+    material_cas["digest"] = digest(material_cas)
+    proposed_mapping = {
+        "mapping_id": "mapping-smoke",
+        "mapping_digest": "sha256:" + "7" * 64,
+    }
+    candidate = attach_digest({
+        "contract": "fbs_identity_mapping_manifest/v2",
+        "operation_id": FBS_PASSPORT["operation_id"],
+        "target": {
+            "target_id": "wb_core_eu_hosted_runtime_active",
+            "runtime_sha": MERGE_SHA,
+            "source_runtime_sha": FBS_PASSPORT["target"]["source_runtime_sha"],
         },
-        "boundary": {
-            "cutover_id": apply.WBC0027_FBS_MAPPING_CUTOVER_ID,
+        "storage": FBS_PASSPORT["storage"],
+        "cutover": {
+            "cutover_id": FBS_PASSPORT["cutover"]["cutover_id"],
             "cutover_manifest_digest": "sha256:" + "1" * 64,
-            "forward_generation_id": "fbsgen-smoke",
-            "forward_generation_manifest_fingerprint": "sha256:" + "2" * 64,
+            "forward_generation_id": FBS_PASSPORT["cutover"]["forward_generation_id"],
+            "forward_generation_manifest_digest": "sha256:" + "2" * 64,
         },
-        "scope": {
-            "external_identity_digest": apply.WBC0027_FBS_MAPPING_EXTERNAL_IDENTITY_DIGEST,
-            "tuple_digest": apply.WBC0027_FBS_MAPPING_TUPLE_DIGEST,
-            "tuple_count": 1,
-            "active_owner_count": 1,
-            "active_mapping_count": 0,
-            "all_mapping_count": 0,
-            "target_nm_id": 428855758,
-            "typed_blocker_rows": blocker_rows,
+        "tuple": FBS_PASSPORT["tuple"],
+        "evidence": {
+            "external_identity_digest": FBS_PASSPORT["evidence"]["external_identity_digest"],
+            "owner_digest": "sha256:" + "3" * 64,
+            "warehouse_evidence_digest": "sha256:" + "4" * 64,
+            "facility_admission_digest": "sha256:" + "5" * 64,
         },
-        "hypothetical_rehearsal": {
-            "accepted": True,
-            "status": "ready",
-            "resolved_groups": [{}, {}, {}, {}],
-            "date_count": 15,
-            "history_capture_count": 15,
-            "mapping_insert_count": 0,
-            "recovery_write_count": 0,
-            "history_write_count": 0,
-            "recovery_fingerprint": "sha256:" + "3" * 64,
-            "stable_target_digest": "sha256:" + "4" * 64,
-            "history_digest": "sha256:" + "5" * 64,
-        },
+        "expectation": FBS_PASSPORT["mapping_expectation"],
+        "proposed_mapping": proposed_mapping,
+        "material_cas": material_cas,
         "safety": {
             "one_submit": True,
             "one_insert_max": 1,
@@ -1075,15 +1066,24 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
             "outbox_write_count": 0,
             "wb_write_count": 0,
         },
-        "material_cas_digest": "sha256:" + "6" * 64,
         "apply_allowed": True,
         "blockers": [],
-        "fingerprint": "sha256:" + "7" * 64,
-    }
+    }, "manifest_digest")
     command_results = iter(
         [
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
+            {
+                "return_code": 0,
+                "transport_ambiguous": False,
+                "result": {
+                    "accepted": True,
+                    "mapping_insert_count": 0,
+                    "recovery_write_count": 0,
+                    "history_write_count": 0,
+                    "source_database_query_only": True,
+                },
+            },
             {
                 "return_code": 0,
                 "transport_ambiguous": False,
@@ -1099,9 +1099,10 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
                     "deployed_sha": MERGE_SHA,
                     "exact_mapping_row_count": 1,
                     "mapping": {
-                        "target_nm_id": 428855758,
-                        "mapping_digest": apply.WBC0027_FBS_MAPPING_TUPLE_DIGEST,
+                        "target_nm_id": FBS_PASSPORT["tuple"]["target_nm_id"],
+                        "mapping_digest": proposed_mapping["mapping_digest"],
                     },
+                    "readback_digest": "sha256:" + "8" * 64,
                     "mapping_insert_count": 0,
                     "recovery_write_count": 0,
                     "history_write_count": 0,
@@ -1137,7 +1138,7 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
         apply.time.sleep = original_sleep
     assert result["state"] == "done"
     assert result["apply_count"] == 1
-    assert len(calls) == 4
+    assert len(calls) == 5
     rendered = [" ".join(command) for command in calls]
     assert sum(" mapping-apply " in value for value in rendered) == 1
     assert sum(" mapping-readback" in value for value in rendered) == 1

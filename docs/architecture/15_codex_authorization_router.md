@@ -304,14 +304,21 @@ correction, merge/deploy и query-only deployed qualification, но не под�
 следующим действием. Исторические manifest/comment/operation bindings не
 расширяют эту авторизацию и fail closed.
 
-Для exact FBS SKU mapping correction release также разрешает только inert
-capability и deployed query-only/no-create hypothetical rehearsal. Отдельный
-`exact-fbs-sku-mapping-extension` OWNER/MEMBER passport exact-bind новый
-deployed runtime, diagnosis runtime, StoreRegistry generation/manifest/schema,
-cutover, opaque external identity digest, independently computed tuple digest,
-counts `1 tuple / 1 owner / 0 mappings`, target `428855758` и один submit.
-Mapping Apply может сделать только один canonical mapping insert; lifecycle и
-history остаются другим future Apply. Release, rehearsal и подготовка exact
+Для general FBS mapping correction release также разрешает только inert
+capability и deployed query-only/no-submit rehearsal. Отдельный
+`fbs-identity-mapping-v2` OWNER/MEMBER passport exact-bind digest incident
+passport, target, operation, один insert и один submit. Strict
+`fbs_identity_mapping_manifest/v2` переносит runtime, четыре раздельных поля
+StoreRegistry/schema, cutover/forward generation, arbitrary exact tuple,
+external/owner/warehouse/facility-admission evidence и material CAS. Orders,
+statuses, groups и dates в mapping manifest запрещены.
+
+Terminal mapping readback открывает только подготовку fresh
+`fbs_lifecycle_impact_manifest/v2`; он сам не является recovery authorization.
+Отдельный `fbs-lifecycle-recovery-v2` passport exact-bind incident passport,
+terminal mapping readback, impact digest, recovery digest и один submit.
+Mapping Apply может сделать только один canonical mapping insert; recovery
+Apply не может писать mapping или WB. Release, rehearsal и подготовка обоих
 passport body не являются authorization или dispatch обоих Apply.
 
 Query-only WBC0027 same-operation finalization не является новым Production

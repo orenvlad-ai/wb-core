@@ -76,6 +76,18 @@ from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E
     preview_inventory_history_capture,
 )
 from packages.application.storage_registry import manifest_payload  # noqa: E402
+from packages.application.fbs_lifecycle_manifests import (  # noqa: E402
+    FbsManifestError,
+    IMPACT_MANIFEST_CONTRACT,
+    RECOVERY_MANIFEST_CONTRACT,
+    attach_digest,
+    digest as manifest_digest,
+    parse_impact_manifest,
+    parse_incident_passport,
+    parse_mapping_manifest,
+    parse_recovery_manifest,
+    read_json as read_manifest_json,
+)
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
 )
@@ -89,33 +101,14 @@ from packages.application.wb_fbs_orders import (  # noqa: E402
 from packages.business_time import current_business_date_iso  # noqa: E402
 
 
-CONTRACT_NAME = "wbc0027_fbs_lifecycle_quality_recovery_v1"
-CONTRACT_VERSION = 1
-SOURCE_CUTOFF_SEQUENCE = 28_050_157
-DATE_FROM = "2026-08-17"
-DATE_TO = "2026-08-31"
-MOSCOW_FACILITY_ID = "fff_d67e8c823d5f81dd988d00dbfea6"
-ORENBURG_FACILITY_ID = "fff_2579bb2741ed4ab23b11bb4c4183"
-TARGET_GROUPS = (
-    (MOSCOW_FACILITY_ID, 210183919),
-    (MOSCOW_FACILITY_ID, 428855560),
-    (MOSCOW_FACILITY_ID, 428855758),
-    (ORENBURG_FACILITY_ID, 428855758),
-)
-TARGET_GROUP_SET = frozenset(TARGET_GROUPS)
+CONTRACT_NAME = RECOVERY_MANIFEST_CONTRACT
+CONTRACT_VERSION = 2
+# The append-only receipt table predates manifest v2 and retains its storage
+# schema discriminator.  The versioned manifest contract is persisted in the
+# bound digest/summary rather than rewriting historical receipt rows.
+QUALITY_RECOVERY_STORAGE_CONTRACT_VERSION = 1
 MAX_TARGET_COUNT = 10_000
 SAFE_SHA_RE = re.compile(r"[0-9a-f]{40}")
-EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST = (
-    "sha256:ca2117e1c33a81df62d9de68c0f6e7f652d755fef828a91a88a8592ae69db6f7"
-)
-EXACT_MAPPING_TUPLE_CONTRACT = "wbc0027_exact_fbs_sku_tuple/v1"
-EXACT_MAPPING_TUPLE: dict[str, Any] = {
-    "source_nm_id": 428855758,
-    "source_chrt_id": 610113487,
-    "source_barcode": "2044193046047",
-    "source_sku": "(Matte) iPhone 14 Pro",
-    "target_nm_id": 428855758,
-}
 
 
 class Wbc0027RecoveryError(RuntimeError):
@@ -131,6 +124,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
         *,
         runtime_dir: Path,
         deployed_sha: str,
+        incident_passport: Mapping[str, Any],
         timestamp_factory: Any | None = None,
         scratch_dir: Path | None = None,
     ) -> None:
@@ -142,6 +136,10 @@ class Wbc0027FbsLifecycleQualityRecovery:
             raise Wbc0027RecoveryError(
                 "invalid_deployed_sha", "deployed_sha must be exact 40-hex"
             )
+        try:
+            self.incident_passport = parse_incident_passport(incident_passport)
+        except FbsManifestError as exc:
+            raise Wbc0027RecoveryError(exc.code, str(exc), details=exc.details) from exc
         self.timestamp_factory = timestamp_factory or _utc_now
         self.scratch_dir = Path(
             scratch_dir
@@ -149,13 +147,19 @@ class Wbc0027FbsLifecycleQualityRecovery:
             else self.runtime.runtime_dir / "wbc0027-fbs-quality-recovery-scratch"
         ).expanduser()
 
-    def build_plan(
+    @property
+    def mapping_tuple(self) -> dict[str, Any]:
+        return dict(self.incident_passport["tuple"])
+
+    def build_manifests(
         self,
         *,
         hypothetical_mapping: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        generated_at = str(self.timestamp_factory())
-        _require_utc(generated_at)
+        mapping_readback_digest: str = "",
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        observed_at = str(self.timestamp_factory())
+        _require_utc(observed_at)
+        generated_at = observed_at[:10] + "T00:00:00Z"
         storage = self._storage_identity()
         with closing(_open_query_only(self.runtime.db_path)) as conn:
             conn.execute("BEGIN")
@@ -171,8 +175,14 @@ class Wbc0027FbsLifecycleQualityRecovery:
                     source=source,
                     target_result=target_result,
                     generated_at=generated_at,
+                    contract_name=CONTRACT_NAME,
                 )
-                non_target = _non_target_digest(conn)
+                groups = {
+                    (str(item["facility_id"]), int(item["nm_id"]))
+                    for item in source["resolved_scopes"]
+                }
+                non_target = _non_target_digest(conn, target_groups=groups)
+                wb_baseline = _wb_baseline_digest(conn)
                 if self._storage_identity(conn=conn) != storage:
                     raise Wbc0027RecoveryError(
                         "storage_generation_drift", "Storage changed inside dry-run snapshot"
@@ -185,7 +195,11 @@ class Wbc0027FbsLifecycleQualityRecovery:
             (str(item["facility_id"]), int(item["nm_id"]))
             for item in preview["balance_deltas"]
         }
-        if not delta_groups.issubset(TARGET_GROUP_SET):
+        target_group_set = {
+            (str(item["facility_id"]), int(item["nm_id"]))
+            for item in source["resolved_scopes"]
+        }
+        if not delta_groups.issubset(target_group_set):
             blockers.append("predicted_non_target_balance_effect")
         if preview.get("wb_write_count") != 0:
             blockers.append("predicted_wb_write")
@@ -193,70 +207,142 @@ class Wbc0027FbsLifecycleQualityRecovery:
             blockers.append("target_remains_identity_quarantined")
         if history["blockers"]:
             blockers.extend(str(value) for value in history["blockers"])
-        plan: dict[str, Any] = {
-            "contract_name": CONTRACT_NAME,
-            "contract_version": CONTRACT_VERSION,
-            "mode": "dry_run",
-            "generated_at": generated_at,
-            "deployed_sha": self.deployed_sha,
+        readback_digest = _require_digest(
+            mapping_readback_digest
+            or manifest_digest(
+                {
+                    "mode": "hypothetical_mapping",
+                    "tuple_digest": self.mapping_tuple["tuple_digest"],
+                    "production_mapping_insert_count": 0,
+                }
+            ),
+            "mapping_readback_digest",
+        )
+        boundary = {
             "storage": storage,
-            "boundary": {
-                "cutover_id": source["cutover_id"],
-                "cutover_manifest_digest": source["cutover_manifest_digest"],
-                "forward_generation_id": source["generation_id"],
-                "forward_generation_manifest_fingerprint": source[
-                    "generation_manifest_fingerprint"
-                ],
-                "forward_cursor_sequence": source["old_cursor_sequence"],
-                "source_cutoff_sequence": SOURCE_CUTOFF_SEQUENCE,
-                "date_from": DATE_FROM,
-                "date_to": DATE_TO,
+            "cutover_id": source["cutover_id"],
+            "cutover_manifest_digest": source["cutover_manifest_digest"],
+            "forward_generation_id": source["generation_id"],
+            "forward_generation_manifest_digest": source[
+                "generation_manifest_fingerprint"
+            ],
+            "forward_cursor_sequence": source["old_cursor_sequence"],
+            "source_cursor_max": source["source_cursor_max"],
+            "mapping_readback_digest": readback_digest,
+        }
+        impact_material: dict[str, Any] = {
+            "contract": IMPACT_MANIFEST_CONTRACT,
+            "operation_id": str(self.incident_passport["operation_id"]) + ":impact",
+            "target": {
+                "target_id": self.incident_passport["target"]["target_id"],
+                "runtime_sha": self.deployed_sha,
             },
-            "scope": {
-                "groups": [
-                    {"facility_id": facility_id, "nm_id": nm_id}
-                    for facility_id, nm_id in TARGET_GROUPS
-                ],
-                "dates": _date_strings(DATE_FROM, DATE_TO),
-                "target_count": len(source["target_sequences"]),
-                "status_observation_sequences": source["target_sequences"],
-                "stable_target_digest": source["stable_target_digest"],
-                "target_rows": source["target_rows"],
-                "location_wac_evidence": source["location_wac_evidence"],
-                "resolved_scopes": source["resolved_scopes"],
-                "mapping_re_evidence": source["mapping_re_evidence"],
-                "typed_blocker_rows": source["typed_blocker_rows"],
-                "coverage": source["coverage"],
+            "mapping_readback_digest": readback_digest,
+            "storage": storage,
+            "boundary": boundary,
+            "unresolved_scan": _impact_scan(source),
+            "affected_groups": _affected_group_rows(target_group_set),
+            "dependent_surfaces": [
+                "fbs_facility_sku",
+                "fbs_facility_total",
+                "fbs_global_sku",
+                "fbs_global_total",
+                "stock_total",
+                "own_product_capital",
+                "warehouse_wac",
+                "finance_partner_economics",
+                "inventory_history",
+            ],
+            "history_evidence": {
+                "classification_counts": history["classification_counts"],
+                "cell_evidence": history["cell_evidence"],
+                "digest": history["evidence_digest"],
             },
+            "baselines": {
+                "non_target_digest": non_target,
+                "wb_digest": wb_baseline,
+            },
+            "blockers": sorted(set(blockers)),
+        }
+        impact = attach_digest(impact_material, "impact_digest")
+        parse_impact_manifest(impact)
+        scope = {
+            "groups": _group_rows(target_group_set),
+            "business_dates": history["business_dates"],
+            "target_count": len(source["target_sequences"]),
+            "target_sequences": source["target_sequences"],
+            "target_row_digests": [
+                manifest_digest(dict(item)) for item in source["target_rows"]
+            ],
+            "stable_target_digest": source["stable_target_digest"],
+            "target_rows": source["target_rows"],
+            "location_wac_evidence": source["location_wac_evidence"],
+            "resolved_scopes": source["resolved_scopes"],
+            "mapping_re_evidence": source["mapping_re_evidence"],
+            "typed_blocker_rows": source["typed_blocker_rows"],
+            "coverage": source["coverage"],
+        }
+        recovery_material: dict[str, Any] = {
+            "contract": RECOVERY_MANIFEST_CONTRACT,
+            "operation_id": str(self.incident_passport["operation_id"]) + ":recovery",
+            "target": {
+                "target_id": self.incident_passport["target"]["target_id"],
+                "runtime_sha": self.deployed_sha,
+            },
+            "impact_digest": impact["impact_digest"],
+            "boundary": boundary,
+            "scope": scope,
             "predicted_effects": preview,
             "history": history,
-            "source_evidence": {
+            "baselines": {
+                "non_target_digest": non_target,
+                "wb_digest": wb_baseline,
                 "projection_schema_evidence": source["projection_schema_evidence"],
                 "canonical_write_seeds": source["canonical_write_seeds"],
                 "past_fulfilled_invariant": source["past_fulfilled_invariant"],
-                "non_target_digest": non_target,
             },
             "safety": {
                 "default_mode": "query_only_dry_run",
                 "one_submit": True,
                 "writer_lock": "warehouse_functional_write_lock",
                 "target_cas": "exact_source_rows_history_base_and_effect",
-                "before_image": "private_mode_0600",
-                "recovery": "sqlite_atomic_rollback_and_append_only_supersession",
-                "ambiguous_transport": "query_only_readback_before_any_retry",
+                "before_image": "private_mode_0600_exclusive_create",
+                "backup": "sqlite_transaction_and_private_before_image",
+                "ambiguous_transport": "query_only_readback_no_retry",
                 "current_retrocopy": False,
                 "immutable_history_overwrite": False,
                 "wb_writes": 0,
-                "production_mapping_inserts": 0,
-                "production_recovery_writes": 0,
-                "production_history_writes": 0,
+                "mapping_writes": 0,
                 "hypothetical_mapping": hypothetical_mapping is not None,
             },
             "apply_allowed": not blockers,
             "blockers": sorted(set(blockers)),
         }
-        plan["fingerprint"] = _plan_fingerprint(plan)
-        return plan
+        recovery = attach_digest(recovery_material, "recovery_digest")
+        parse_recovery_manifest(recovery)
+        return impact, recovery
+
+    def build_impact_manifest(
+        self,
+        *,
+        hypothetical_mapping: Mapping[str, Any] | None = None,
+        mapping_readback_digest: str = "",
+    ) -> dict[str, Any]:
+        return self.build_manifests(
+            hypothetical_mapping=hypothetical_mapping,
+            mapping_readback_digest=mapping_readback_digest,
+        )[0]
+
+    def build_plan(
+        self,
+        *,
+        hypothetical_mapping: Mapping[str, Any] | None = None,
+        mapping_readback_digest: str = "",
+    ) -> dict[str, Any]:
+        return self.build_manifests(
+            hypothetical_mapping=hypothetical_mapping,
+            mapping_readback_digest=mapping_readback_digest,
+        )[1]
 
     def apply(
         self,
@@ -267,15 +353,18 @@ class Wbc0027FbsLifecycleQualityRecovery:
         actor: str,
         evidence_dir: Path,
     ) -> dict[str, Any]:
-        reviewed = dict(reviewed_plan)
+        try:
+            reviewed = parse_recovery_manifest(reviewed_plan)
+        except FbsManifestError as exc:
+            raise Wbc0027RecoveryError(exc.code, str(exc), details=exc.details) from exc
         expected = _require_digest(fingerprint, "fingerprint")
-        if reviewed.get("fingerprint") != expected or _plan_fingerprint(reviewed) != expected:
+        if reviewed.get("recovery_digest") != expected:
             raise Wbc0027RecoveryError(
                 "reviewed_fingerprint_mismatch", "Reviewed plan fingerprint differs"
             )
         if reviewed.get("apply_allowed") is not True or reviewed.get("blockers"):
             raise Wbc0027RecoveryError("reviewed_plan_blocked", "Blocked plan cannot apply")
-        if str(reviewed.get("deployed_sha") or "") != self.deployed_sha:
+        if str(dict(reviewed.get("target") or {}).get("runtime_sha") or "") != self.deployed_sha:
             raise Wbc0027RecoveryError("deployed_sha_drift", "Plan belongs to another SHA")
         approval = str(approval_reference or "").strip()
         operator = str(actor or "").strip()
@@ -289,8 +378,12 @@ class Wbc0027FbsLifecycleQualityRecovery:
 
         # A fresh query-only witness must be byte-for-byte business-equivalent
         # to the reviewed plan immediately before the writer lock.
-        fresh = self.build_plan()
-        if fresh.get("fingerprint") != expected:
+        fresh = self.build_plan(
+            mapping_readback_digest=str(
+                dict(reviewed["boundary"])["mapping_readback_digest"]
+            )
+        )
+        if fresh.get("recovery_digest") != expected:
             raise Wbc0027RecoveryError(
                 "target_source_drift", "Source/history/effect changed after review"
             )
@@ -304,7 +397,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
 
         with warehouse_functional_write_lock(self.runtime.runtime_dir, timeout_seconds=300):
             locked_storage = self._storage_identity()
-            if locked_storage != dict(reviewed["storage"]):
+            if locked_storage != dict(dict(reviewed["boundary"])["storage"]):
                 raise Wbc0027RecoveryError(
                     "storage_generation_drift", "Storage changed before writer submit"
                 )
@@ -317,9 +410,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "scope_digest": _fingerprint(reviewed["scope"]),
                 "predicted_effect_digest": _fingerprint(reviewed["predicted_effects"]),
                 "history_digest": str(dict(reviewed["history"])["digest"]),
-                "non_target_digest": str(
-                    dict(reviewed["source_evidence"])["non_target_digest"]
-                ),
+                "non_target_digest": str(dict(reviewed["baselines"])["non_target_digest"]),
                 "recovery": "atomic rollback before commit; append superseding history after",
                 "created_at": now,
             }
@@ -330,7 +421,9 @@ class Wbc0027FbsLifecycleQualityRecovery:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 ensure_ff_pool_fbs_lifecycle_schema(conn)
-                if self._storage_identity(conn=conn) != dict(reviewed["storage"]):
+                if self._storage_identity(conn=conn) != dict(
+                    dict(reviewed["boundary"])["storage"]
+                ):
                     raise Wbc0027RecoveryError(
                         "storage_generation_drift", "Storage changed inside writer submit"
                     )
@@ -376,8 +469,12 @@ class Wbc0027FbsLifecycleQualityRecovery:
                     approval_reference=approval,
                     applied_at=now,
                 )
-                if _non_target_digest(conn) != str(
-                    dict(reviewed["source_evidence"])["non_target_digest"]
+                reviewed_groups = {
+                    (str(item["facility_id"]), int(item["nm_id"]))
+                    for item in dict(reviewed["scope"])["groups"]
+                }
+                if _non_target_digest(conn, target_groups=reviewed_groups) != str(
+                    dict(reviewed["baselines"])["non_target_digest"]
                 ):
                     raise Wbc0027RecoveryError(
                         "non_target_after_image_drift",
@@ -392,7 +489,8 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 )
                 recovery_id = "fbsqrec_" + expected.removeprefix("sha256:")[:25]
                 boundary = dict(reviewed["boundary"])
-                source_evidence = dict(reviewed["source_evidence"])
+                source_evidence = dict(reviewed["baselines"])
+                business_dates = list(dict(reviewed["scope"])["business_dates"])
                 conn.execute(
                     f"""INSERT INTO {QUALITY_RECOVERY_RUNS_TABLE}(
                            recovery_id,generation_id,cutover_id,contract_version,
@@ -408,14 +506,14 @@ class Wbc0027FbsLifecycleQualityRecovery:
                         recovery_id,
                         str(boundary["forward_generation_id"]),
                         str(boundary["cutover_id"]),
-                        CONTRACT_VERSION,
+                        QUALITY_RECOVERY_STORAGE_CONTRACT_VERSION,
                         self.deployed_sha,
                         str(locked_storage["operational_generation_id"]),
                         str(locked_storage["operational_schema_revision"]),
                         int(locked_storage["sqlite_schema_version"]),
-                        SOURCE_CUTOFF_SEQUENCE,
-                        DATE_FROM,
-                        DATE_TO,
+                        int(boundary["source_cursor_max"]),
+                        str(business_dates[0]),
+                        str(business_dates[-1]),
                         expected,
                         str(dict(reviewed["scope"])["stable_target_digest"]),
                         _fingerprint(actual_effect),
@@ -618,6 +716,15 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "forward_generation_missing_or_ambiguous",
                 "Exactly one active forward generation is required",
             )
+        source_cursor_max = int(
+            conn.execute(
+                f"SELECT COALESCE(MAX(observation_sequence),0) FROM {STATUS_OBSERVATIONS_TABLE}"
+            ).fetchone()[0]
+        )
+        if source_cursor_max <= 0:
+            raise Wbc0027RecoveryError(
+                "source_cursor_empty", "FBS status source has no current maximum"
+            )
         pending_sequences = [
             int(row[0])
             for row in conn.execute(
@@ -628,7 +735,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                     WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
                       AND pending.source_status_observation_sequence<=?
                     ORDER BY pending.source_status_observation_sequence""",
-                (cutover_id, SOURCE_CUTOFF_SEQUENCE),
+                (cutover_id, source_cursor_max),
             ).fetchall()
         ]
         if len(pending_sequences) > MAX_TARGET_COUNT:
@@ -643,9 +750,9 @@ class Wbc0027FbsLifecycleQualityRecovery:
         blockers: list[str] = []
         if conn.execute(
             f"SELECT 1 FROM {STATUS_OBSERVATIONS_TABLE} WHERE observation_sequence=?",
-            (SOURCE_CUTOFF_SEQUENCE,),
+            (source_cursor_max,),
         ).fetchone() is None:
-            blockers.append("exact_source_cutoff_sequence_missing")
+            blockers.append("source_cursor_max_missing")
         manifest = dict(active["manifest"])
         for sequence in pending_sequences:
             try:
@@ -664,7 +771,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
                         )
                     )
                     continue
-                exact_candidate = _resolve_exact_mapping_recovery_candidate(
+                exact_candidate = _resolve_mapping_recovery_candidate(
                     conn,
                     manifest=manifest,
                     status_observation_sequence=sequence,
@@ -679,18 +786,10 @@ class Wbc0027FbsLifecycleQualityRecovery:
                         raw_typed_blockers.append(dict(blocker))
                     continue
             group = (str(scope["facility_id"]), int(scope["nm_id"]))
-            if (
-                _business_date(str(scope["source_created_at"])) > DATE_TO
-                or _business_date(str(scope["source_status_observed_at"])) > DATE_TO
-            ):
-                blockers.append("target_effect_outside_exact_date_boundary")
-            if group in TARGET_GROUP_SET:
-                resolved.append(scope)
-            elif (
-                group[0] in {MOSCOW_FACILITY_ID, ORENBURG_FACILITY_ID}
-                and group[1] in {210183919, 428855560, 428855758}
-            ):
-                blockers.append("unexpected_group_inside_bounded_business_scope")
+            if not group[0] or group[1] <= 0:
+                blockers.append("resolved_group_identity_invalid")
+                continue
+            resolved.append(scope)
         typed_blocker_rows = _aggregate_typed_blockers(raw_typed_blockers)
         if typed_blocker_rows:
             blockers.append("typed_identity_mapping_blockers_present")
@@ -700,12 +799,12 @@ class Wbc0027FbsLifecycleQualityRecovery:
         actual_groups = {
             (str(item["facility_id"]), int(item["nm_id"])) for item in resolved
         }
-        if actual_groups != TARGET_GROUP_SET:
-            blockers.append("exact_four_group_coverage_missing")
+        if typed_blocker_rows:
+            blockers.append("unresolved_scope_not_fully_resolvable")
         if not sequences:
             blockers.append("empty_recovery_target")
         target_rows = (
-            _stable_target_rows(conn, tuple(sequences), cutoff=SOURCE_CUTOFF_SEQUENCE)
+            _stable_target_rows(conn, tuple(sequences), cutoff=source_cursor_max)
             if sequences
             else []
         )
@@ -714,10 +813,8 @@ class Wbc0027FbsLifecycleQualityRecovery:
                 "contract": CONTRACT_NAME,
                 "cutover_id": cutover_id,
                 "generation_id": str(generation[0][0]),
-                "source_cutoff_sequence": SOURCE_CUTOFF_SEQUENCE,
-                "date_from": DATE_FROM,
-                "date_to": DATE_TO,
-                "groups": list(TARGET_GROUPS),
+                "source_cursor_max": source_cursor_max,
+                "groups": _group_rows(actual_groups),
                 "rows": target_rows,
                 "resolved_scopes": resolved,
                 "mapping_re_evidence": _deduplicate_re_evidence(mapping_re_evidence),
@@ -737,7 +834,7 @@ class Wbc0027FbsLifecycleQualityRecovery:
             "cutover_manifest_digest": _fingerprint(active["manifest"]),
             "generation_id": str(generation[0][0]),
             "generation_manifest_fingerprint": str(generation[0][1]),
-            "cutoff_sequence": SOURCE_CUTOFF_SEQUENCE,
+            "source_cursor_max": source_cursor_max,
             "old_cursor_sequence": int(generation[0][2]),
             "target_sequences": sequences,
             "target_rows": target_rows,
@@ -750,12 +847,16 @@ class Wbc0027FbsLifecycleQualityRecovery:
             ),
             "typed_blocker_rows": typed_blocker_rows,
             "coverage": {
-                "expected_groups": _group_rows(TARGET_GROUP_SET),
+                "candidate_count": len(pending_sequences),
                 "resolved_groups": _group_rows(actual_groups),
                 "blocked_groups": _group_rows(blocked_groups),
                 "covered_groups": _group_rows(covered_groups),
-                "full_original_scope_evidenced": covered_groups == TARGET_GROUP_SET,
-                "all_groups_resolvable": actual_groups == TARGET_GROUP_SET,
+                "classified_count": len(sequences)
+                + sum(int(item["status_observation_count"]) for item in typed_blocker_rows),
+                "full_unresolved_scan": len(pending_sequences)
+                == len(sequences)
+                + sum(int(item["status_observation_count"]) for item in typed_blocker_rows),
+                "all_groups_resolvable": not typed_blocker_rows,
             },
             "stable_target_digest": stable_target_digest,
             "location_wac_evidence": (
@@ -839,29 +940,13 @@ class Wbc0027FbsLifecycleQualityRecovery:
         }
 
 
-def exact_mapping_tuple_digest(
-    identity: Mapping[str, Any] | None = None,
-) -> str:
-    normalized = dict(identity or EXACT_MAPPING_TUPLE)
-    material = {
-        "contract": EXACT_MAPPING_TUPLE_CONTRACT,
-        "source_nm_id": int(normalized["source_nm_id"]),
-        "source_chrt_id": int(normalized["source_chrt_id"]),
-        "source_barcode": str(normalized["source_barcode"]),
-        "source_sku": str(normalized["source_sku"]),
-        "target_nm_id": int(normalized["target_nm_id"]),
-    }
-    return _fingerprint(material)
-
-
-def _resolve_exact_mapping_recovery_candidate(
+def _resolve_mapping_recovery_candidate(
     conn: sqlite3.Connection,
     *,
     manifest: Mapping[str, Any],
     status_observation_sequence: int,
     hypothetical_mapping: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    identity = dict(EXACT_MAPPING_TUPLE)
     source = conn.execute(
         f"""SELECT status.order_id,status.order_revision,status.status_digest,
                    status.observed_at,source.source_created_at,source.warehouse_id,
@@ -886,13 +971,7 @@ def _resolve_exact_mapping_recovery_candidate(
         barcodes = json.loads(str(source[9] or "[]"))
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
-    if not (
-        int(source[7]) == int(identity["source_nm_id"])
-        and int(source[8] or 0) == int(identity["source_chrt_id"])
-        and isinstance(barcodes, list)
-        and len(barcodes) == 1
-        and str(barcodes[0]) == str(identity["source_barcode"])
-    ):
+    if not isinstance(barcodes, list) or not barcodes:
         return {}
     evidence = conn.execute(
         f"""SELECT evidence_sequence,evidence_id,warehouse_mapping_id,
@@ -900,30 +979,95 @@ def _resolve_exact_mapping_recovery_candidate(
                    barcode,seller_sku,outcome
             FROM {IDENTITY_EVIDENCE_TABLE}
             WHERE order_id=? AND order_revision=? AND warehouse_id=?
-              AND nm_id=? AND chrt_id=? AND barcode=? AND seller_sku=?
+              AND nm_id=? AND chrt_id=?
             ORDER BY evidence_sequence DESC""",
         (
             int(source[0]),
             str(source[1]),
             int(source[5] or 0),
-            int(identity["source_nm_id"]),
-            int(identity["source_chrt_id"]),
-            str(identity["source_barcode"]),
-            str(identity["source_sku"]),
+            int(source[7]),
+            int(source[8] or 0),
         ),
     ).fetchall()
-    exact_unmatched = [row for row in evidence if str(row[10]) == "unmatched_identity"]
-    if len(exact_unmatched) != 1:
+    exact_evidence = [
+        row
+        for row in evidence
+        if str(row[10]) in {"matched", "unmatched_identity"}
+        and str(row[8]) in {str(v) for v in barcodes}
+        and str(row[9] or "")
+    ]
+    candidates: list[dict[str, Any]] = []
+    for evidence_row in exact_evidence:
+        rows = conn.execute(
+            f"""SELECT mapping_id,target_nm_id,mapping_digest
+                FROM {IDENTITY_MAPPINGS_TABLE}
+                WHERE source_nm_id=? AND source_chrt_id=?
+                  AND source_barcode=? AND source_sku=? AND active=1
+                ORDER BY mapping_id""",
+            (
+                int(source[7]),
+                int(source[8] or 0),
+                str(evidence_row[8]),
+                str(evidence_row[9]),
+            ),
+        ).fetchall()
+        if len(rows) == 1:
+            candidates.append(
+                {
+                    "evidence_row": evidence_row,
+                    "mapping": {
+                        "mapping_id": str(rows[0][0]),
+                        "source_nm_id": int(source[7]),
+                        "source_chrt_id": int(source[8] or 0),
+                        "source_barcode": str(evidence_row[8]),
+                        "source_sku": str(evidence_row[9]),
+                        "target_nm_id": int(rows[0][1]),
+                        "mapping_digest": str(rows[0][2]),
+                    },
+                }
+            )
+    if hypothetical_mapping is not None:
+        hypothetical = dict(hypothetical_mapping)
+        matching_evidence = [
+            row
+            for row in exact_evidence
+            if int(source[7]) == int(hypothetical.get("source_nm_id") or 0)
+            and int(source[8] or 0) == int(hypothetical.get("source_chrt_id") or 0)
+            and str(row[8]) == str(hypothetical.get("source_barcode") or "")
+            and str(row[9]) == str(hypothetical.get("source_sku") or "")
+        ]
+        candidates.extend(
+            {"evidence_row": row, "mapping": hypothetical}
+            for row in matching_evidence
+        )
+    unique = {
+        (
+            str(item["mapping"].get("mapping_id") or ""),
+            int(item["mapping"].get("target_nm_id") or 0),
+            int(item["mapping"].get("source_nm_id") or 0),
+            int(item["mapping"].get("source_chrt_id") or 0),
+            str(item["mapping"].get("source_barcode") or ""),
+            str(item["mapping"].get("source_sku") or ""),
+        ): item
+        for item in sorted(candidates, key=lambda value: int(value["evidence_row"][0]))
+    }
+    if len(unique) != 1:
+        tuple_hint = dict(hypothetical_mapping or {})
         return {
-            "blocker": _exact_mapping_blocker(
+            "blocker": _mapping_blocker(
                 source=source,
                 status_observation_sequence=status_observation_sequence,
                 facility_id="",
                 identity_error_code="identity_tuple_evidence_missing_or_ambiguous",
-                mapping_error_code="order_sku_unmapped",
+                mapping_error_code=(
+                    "order_sku_unmapped" if not unique else "active_identity_mapping_ambiguous"
+                ),
+                tuple_hint=tuple_hint,
             )
         }
-    evidence_row = exact_unmatched[0]
+    selected = next(iter(unique.values()))
+    evidence_row = selected["evidence_row"]
+    mapping = dict(selected["mapping"])
     warehouse_rows = conn.execute(
         f"""SELECT mapping.mapping_id,mapping.facility_id
             FROM {WAREHOUSE_MAPPINGS_TABLE} AS mapping
@@ -941,69 +1085,16 @@ def _resolve_exact_mapping_recovery_candidate(
     }
     if (
         not facility_id
-        or facility_id not in {MOSCOW_FACILITY_ID, ORENBURG_FACILITY_ID}
         or str(evidence_row[2]) not in valid_warehouse_ids
     ):
         return {
-            "blocker": _exact_mapping_blocker(
+            "blocker": _mapping_blocker(
                 source=source,
                 status_observation_sequence=status_observation_sequence,
                 facility_id=facility_id,
                 identity_error_code="warehouse_identity_missing_stale_or_ambiguous",
                 mapping_error_code="foreign_facility_mapping",
-            )
-        }
-    active_mappings = conn.execute(
-        f"""SELECT mapping_id,target_nm_id,mapping_digest
-            FROM {IDENTITY_MAPPINGS_TABLE}
-            WHERE source_nm_id=? AND source_chrt_id=?
-              AND source_barcode=? AND source_sku=? AND active=1
-            ORDER BY mapping_id""",
-        (
-            int(identity["source_nm_id"]),
-            int(identity["source_chrt_id"]),
-            str(identity["source_barcode"]),
-            str(identity["source_sku"]),
-        ),
-    ).fetchall()
-    mapping: dict[str, Any] | None = None
-    if len(active_mappings) == 1 and int(active_mappings[0][1]) == int(
-        identity["target_nm_id"]
-    ):
-        mapping = {
-            "mapping_id": str(active_mappings[0][0]),
-            "mapping_digest": str(active_mappings[0][2]),
-            **identity,
-        }
-    elif not active_mappings and hypothetical_mapping is not None:
-        candidate = dict(hypothetical_mapping)
-        expected = {
-            key: identity[key]
-            for key in (
-                "source_nm_id",
-                "source_chrt_id",
-                "source_barcode",
-                "source_sku",
-                "target_nm_id",
-            )
-        }
-        if all(candidate.get(key) == value for key, value in expected.items()) and bool(
-            str(candidate.get("mapping_id") or "")
-        ):
-            mapping = candidate
-    if mapping is None:
-        error = (
-            "order_sku_unmapped"
-            if not active_mappings
-            else "active_identity_mapping_ambiguous_or_foreign"
-        )
-        return {
-            "blocker": _exact_mapping_blocker(
-                source=source,
-                status_observation_sequence=status_observation_sequence,
-                facility_id=facility_id,
-                identity_error_code="identity_evidence_missing_or_drifted",
-                mapping_error_code=error,
+                tuple_hint=mapping,
             )
         }
     physical = conn.execute(
@@ -1012,7 +1103,7 @@ def _resolve_exact_mapping_recovery_candidate(
               AND projection_epoch=?""",
         (
             facility_id,
-            int(identity["target_nm_id"]),
+            int(mapping["target_nm_id"]),
             int(manifest["feature_epoch"]),
         ),
     ).fetchall()
@@ -1034,19 +1125,20 @@ def _resolve_exact_mapping_recovery_candidate(
         conn.execute(
             f"""SELECT 1 FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE}
                 WHERE extension_id=? AND nm_id=?""",
-            (str(extension[0][0]), int(identity["target_nm_id"])),
+            (str(extension[0][0]), int(mapping["target_nm_id"])),
         ).fetchall()
         if len(extension) == 1
         else []
     )
     if len(physical) != 1 and len(allocation) != 1:
         return {
-            "blocker": _exact_mapping_blocker(
+            "blocker": _mapping_blocker(
                 source=source,
                 status_observation_sequence=status_observation_sequence,
                 facility_id=facility_id,
                 identity_error_code="facility_sku_admission_missing",
                 mapping_error_code="facility_sku_admission_missing",
+                tuple_hint=mapping,
             )
         }
     resolved_scope = {
@@ -1055,16 +1147,16 @@ def _resolve_exact_mapping_recovery_candidate(
         "source_created_at": str(source[4]),
         "source_status_observed_at": str(source[3]),
         "facility_id": facility_id,
-        "nm_id": int(identity["target_nm_id"]),
+        "nm_id": int(mapping["target_nm_id"]),
     }
     re_evidence = {
         "order_id": int(source[0]),
         "order_revision": str(source[1]),
         "warehouse_id": int(source[5] or 0),
-        "nm_id": int(identity["source_nm_id"]),
-        "chrt_id": int(identity["source_chrt_id"]),
-        "barcode": str(identity["source_barcode"]),
-        "seller_sku": str(identity["source_sku"]),
+        "nm_id": int(mapping["source_nm_id"]),
+        "chrt_id": int(mapping["source_chrt_id"]),
+        "barcode": str(mapping["source_barcode"]),
+        "seller_sku": str(mapping["source_sku"]),
         "warehouse_mapping_id": str(evidence_row[2]),
         "identity_mapping_id": str(mapping["mapping_id"]),
         "source_identity_evidence_sequence": int(evidence_row[0]),
@@ -1073,21 +1165,24 @@ def _resolve_exact_mapping_recovery_candidate(
     return {"resolved_scope": resolved_scope, "re_evidence": re_evidence}
 
 
-def _exact_mapping_blocker(
+def _mapping_blocker(
     *,
     source: Sequence[Any],
     status_observation_sequence: int,
     facility_id: str,
     identity_error_code: str,
     mapping_error_code: str,
+    tuple_hint: Mapping[str, Any],
 ) -> dict[str, Any]:
+    target_nm_id = int(tuple_hint.get("target_nm_id") or 0)
+    tuple_digest = str(tuple_hint.get("tuple_digest") or tuple_hint.get("mapping_digest") or "")
     return {
         "facility_id": str(facility_id),
-        "nm_id": int(EXACT_MAPPING_TUPLE["target_nm_id"]),
+        "nm_id": target_nm_id,
         "identity_error_code": str(identity_error_code),
         "mapping_error_code": str(mapping_error_code),
-        "external_identity_digest": EXACT_MAPPING_EXTERNAL_IDENTITY_DIGEST,
-        "tuple_digest": exact_mapping_tuple_digest(),
+        "external_identity_digest": str(tuple_hint.get("external_identity_digest") or ""),
+        "tuple_digest": tuple_digest,
         "order_id": int(source[0]),
         "status_observation_sequence": int(status_observation_sequence),
         "status_digest": str(source[2]),
@@ -1159,16 +1254,24 @@ def _aggregate_typed_blockers(rows: Sequence[Mapping[str, Any]]) -> list[dict[st
 def _deduplicate_re_evidence(
     rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    by_order: dict[int, dict[str, Any]] = {}
+    by_revision_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
     for raw in rows:
         item = dict(raw)
-        order_id = int(item["order_id"])
-        previous = by_order.get(order_id)
+        key = (
+            int(item["order_id"]),
+            str(item["order_revision"]),
+            int(item["warehouse_id"]),
+            int(item["nm_id"]),
+            int(item["chrt_id"]),
+            str(item["barcode"]),
+            str(item["seller_sku"]),
+        )
+        previous = by_revision_identity.get(key)
         if previous is None or int(item["source_identity_evidence_sequence"]) > int(
             previous["source_identity_evidence_sequence"]
         ):
-            by_order[order_id] = item
-    return [by_order[key] for key in sorted(by_order)]
+            by_revision_identity[key] = item
+    return [by_revision_identity[key] for key in sorted(by_revision_identity)]
 
 
 def _append_mapping_recovery_identity_evidence(
@@ -1181,6 +1284,7 @@ def _append_mapping_recovery_identity_evidence(
     for raw in rows:
         item = dict(raw)
         material = {
+            "contract": "fbs_lifecycle_mapping_re_evidence/v2",
             "order_id": int(item["order_id"]),
             "order_revision": str(item["order_revision"]),
             "warehouse_id": int(item["warehouse_id"]),
@@ -1191,6 +1295,12 @@ def _append_mapping_recovery_identity_evidence(
             "warehouse_mapping_id": str(item["warehouse_mapping_id"]),
             "identity_mapping_id": str(item["identity_mapping_id"]),
             "outcome": "matched",
+            "source_identity_evidence_sequence": int(
+                item["source_identity_evidence_sequence"]
+            ),
+            "source_identity_evidence_digest": str(
+                item["source_identity_evidence_digest"]
+            ),
         }
         digest = _fingerprint(material)
         inserted += int(
@@ -1250,14 +1360,112 @@ def _group_rows(groups: Iterable[tuple[str, int]]) -> list[dict[str, Any]]:
     ]
 
 
+def _impact_scan(source: Mapping[str, Any]) -> dict[str, Any]:
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for raw in source.get("resolved_scopes") or []:
+        item = dict(raw)
+        grouped.setdefault(
+            (str(item["facility_id"]), int(item["nm_id"])), []
+        ).append(item)
+    classifications: list[dict[str, Any]] = []
+    for (facility_id, nm_id), rows in sorted(grouped.items()):
+        sequences = sorted(int(item["status_observation_sequence"]) for item in rows)
+        earliest = min(
+            _business_date(str(item[field]))
+            for item in rows
+            for field in ("source_created_at", "source_status_observed_at")
+        )
+        classifications.append(
+            {
+                "facility_id": facility_id,
+                "nm_id": nm_id,
+                "classification": "resolvable_exact",
+                "earliest_business_date": earliest,
+                "reasons": [],
+                "sequence_count": len(sequences),
+                "sequence_digest": _fingerprint(sequences),
+            }
+        )
+    for raw in source.get("typed_blocker_rows") or []:
+        item = dict(raw)
+        classifications.append(
+            {
+                "facility_id": str(item.get("facility_id") or ""),
+                "nm_id": int(item.get("nm_id") or 0),
+                "classification": "blocked_fail_closed",
+                "earliest_business_date": "",
+                "reasons": sorted(
+                    {
+                        str(item.get("identity_error_code") or ""),
+                        str(item.get("mapping_error_code") or ""),
+                    }
+                    - {""}
+                ),
+                "sequence_count": int(item.get("status_observation_count") or 0),
+                "sequence_digest": str(item.get("status_identity_digest") or ""),
+            }
+        )
+    classifications.sort(
+        key=lambda item: (
+            str(item["facility_id"]),
+            int(item["nm_id"]),
+            str(item["classification"]),
+        )
+    )
+    result = {
+        "source_cursor_max": int(source["source_cursor_max"]),
+        "candidate_count": int(dict(source["coverage"])["candidate_count"]),
+        "classified_count": int(dict(source["coverage"])["classified_count"]),
+        "full_scan": bool(dict(source["coverage"])["full_unresolved_scan"]),
+        "classifications": classifications,
+    }
+    result["classification_digest"] = _fingerprint(classifications)
+    return result
+
+
+def _affected_group_rows(
+    groups: Iterable[tuple[str, int]],
+) -> list[dict[str, Any]]:
+    values = sorted(set(groups))
+    rows = [
+        {"scope_kind": "FACILITY_SKU", "facility_id": facility_id, "nm_id": nm_id}
+        for facility_id, nm_id in values
+    ]
+    rows.extend(
+        {
+            "scope_kind": "FACILITY_TOTAL",
+            "facility_id": facility_id,
+            "nm_id": 0,
+        }
+        for facility_id in sorted({facility_id for facility_id, _ in values})
+    )
+    rows.extend(
+        {"scope_kind": "GLOBAL_SKU", "facility_id": "", "nm_id": nm_id}
+        for nm_id in sorted({nm_id for _, nm_id in values})
+    )
+    rows.append({"scope_kind": "GLOBAL_TOTAL", "facility_id": "", "nm_id": 0})
+    return rows
+
+
 def _history_plan(
     conn: sqlite3.Connection,
     *,
     source: Mapping[str, Any],
     target_result: Sequence[Mapping[str, Any]],
     generated_at: str,
+    contract_name: str,
 ) -> dict[str, Any]:
-    dates = _date_strings(DATE_FROM, DATE_TO)
+    current_date = current_business_date_iso(
+        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    )
+    evidence_dates = [
+        _business_date(str(item[field]))
+        for item in source["resolved_scopes"]
+        for field in ("source_created_at", "source_status_observed_at")
+    ]
+    date_from = min(evidence_dates) if evidence_dates else current_date
+    date_to = current_date
+    dates = _date_strings(date_from, date_to) if date_from <= date_to else []
     corrections, event_evidence = _history_corrections(
         conn,
         source=source,
@@ -1266,8 +1474,10 @@ def _history_plan(
     )
     blockers: list[str] = []
     captures: list[dict[str, Any]] = []
-    current_date = current_business_date_iso(datetime.fromisoformat(generated_at.replace("Z", "+00:00")))
+    cell_evidence: list[dict[str, Any]] = []
     stable_target_digest = str(source["stable_target_digest"])
+    if not dates:
+        blockers.append("history_date_boundary_invalid")
     for business_date in dates:
         capture = _latest_capture(conn, business_date=business_date, current_date=current_date)
         if capture is None:
@@ -1302,7 +1512,35 @@ def _history_plan(
             key = (f"SKU:{nm_id}", "FBS_FACILITY", facility_id)
             component = by_key.get(key)
             if component is None or component["state"] not in {"exact", "exact_zero"}:
-                blockers.append(f"history_target_not_exact:{business_date}:{facility_id}:{nm_id}")
+                cell_evidence.append(
+                    {
+                        "business_date": business_date,
+                        "scope_kind": "SKU",
+                        "facility_id": facility_id,
+                        "nm_id": nm_id,
+                        "classification": "remain_missing_no_same_date_evidence",
+                        "base_state": (
+                            str(component.get("state") or "missing")
+                            if component is not None
+                            else "missing"
+                        ),
+                        "evidence_digest": _fingerprint(
+                            {
+                                "business_date": business_date,
+                                "facility_id": facility_id,
+                                "nm_id": nm_id,
+                                "base_state": (
+                                    str(component.get("state") or "missing")
+                                    if component is not None
+                                    else "missing"
+                                ),
+                            }
+                        ),
+                    }
+                )
+                facility_total_delta[facility_id] = (
+                    facility_total_delta.get(facility_id, 0) + delta
+                )
                 continue
             component["quantity"] = int(component["quantity"]) + delta
             component["state"] = "exact_zero" if int(component["quantity"]) == 0 else "exact"
@@ -1312,12 +1550,45 @@ def _history_plan(
                 business_date=business_date,
                 stable_target_digest=stable_target_digest,
                 event_evidence=event_evidence,
+                source_cursor_max=int(source["source_cursor_max"]),
+                contract_name=contract_name,
+            )
+            cell_evidence.append(
+                {
+                    "business_date": business_date,
+                    "scope_kind": "SKU",
+                    "facility_id": facility_id,
+                    "nm_id": nm_id,
+                    "classification": "recoverable_exact",
+                    "base_state": str(component["state"]),
+                    "evidence_digest": str(component["source_digest"]),
+                }
             )
         for facility_id, delta in facility_total_delta.items():
             key = ("TOTAL", "FBS_FACILITY", facility_id)
             component = by_key.get(key)
             if component is None or component["state"] not in {"exact", "exact_zero"}:
-                blockers.append(f"history_total_not_exact:{business_date}:{facility_id}")
+                cell_evidence.append(
+                    {
+                        "business_date": business_date,
+                        "scope_kind": "FACILITY_TOTAL",
+                        "facility_id": facility_id,
+                        "nm_id": 0,
+                        "classification": "remain_missing_no_same_date_evidence",
+                        "base_state": (
+                            str(component.get("state") or "missing")
+                            if component is not None
+                            else "missing"
+                        ),
+                        "evidence_digest": _fingerprint(
+                            {
+                                "business_date": business_date,
+                                "facility_id": facility_id,
+                                "scope_kind": "FACILITY_TOTAL",
+                            }
+                        ),
+                    }
+                )
                 continue
             component["quantity"] = int(component["quantity"]) + delta
             component["state"] = "exact_zero" if int(component["quantity"]) == 0 else "exact"
@@ -1326,11 +1597,24 @@ def _history_plan(
                 business_date=business_date,
                 stable_target_digest=stable_target_digest,
                 event_evidence=event_evidence,
+                source_cursor_max=int(source["source_cursor_max"]),
+                contract_name=contract_name,
+            )
+            cell_evidence.append(
+                {
+                    "business_date": business_date,
+                    "scope_kind": "FACILITY_TOTAL",
+                    "facility_id": facility_id,
+                    "nm_id": 0,
+                    "classification": "recoverable_exact",
+                    "base_state": str(component["state"]),
+                    "evidence_digest": str(component["source_digest"]),
+                }
             )
         roster = json.loads(str(capture["facility_roster_json"]))
         source_manifest = {
-            "contract": CONTRACT_NAME,
-            "source_cutoff_sequence": SOURCE_CUTOFF_SEQUENCE,
+            "contract": contract_name,
+            "source_cursor_max": int(source["source_cursor_max"]),
             "business_date": business_date,
             "base_capture_id": str(capture["capture_id"]),
             "base_source_digest": str(capture["source_digest"]),
@@ -1380,9 +1664,10 @@ def _history_plan(
             }
         )
     material = {
-        "contract": "wbc0027_same_date_inventory_history_supersession_v1",
-        "date_from": DATE_FROM,
-        "date_to": DATE_TO,
+        "contract": "fbs_same_date_inventory_history_supersession/v2",
+        "date_from": date_from,
+        "date_to": date_to,
+        "business_dates": dates,
         "current_business_date": current_date,
         "event_evidence": event_evidence,
         "corrections": [
@@ -1395,8 +1680,27 @@ def _history_plan(
             for (date_value, group), delta in sorted(corrections.items())
         ],
         "captures": captures,
+        "cell_evidence": sorted(
+            cell_evidence,
+            key=lambda item: (
+                str(item["business_date"]),
+                str(item["facility_id"]),
+                str(item["scope_kind"]),
+                int(item["nm_id"]),
+            ),
+        ),
+        "classification_counts": {
+            "recoverable_exact": sum(
+                item["classification"] == "recoverable_exact" for item in cell_evidence
+            ),
+            "remain_missing_no_same_date_evidence": sum(
+                item["classification"] == "remain_missing_no_same_date_evidence"
+                for item in cell_evidence
+            ),
+        },
         "blockers": sorted(set(blockers)),
     }
+    material["evidence_digest"] = _fingerprint(material["cell_evidence"])
     material["digest"] = _fingerprint(_stable_plan_material(material))
     return material
 
@@ -1533,6 +1837,8 @@ def _mark_recovered_component(
     business_date: str,
     stable_target_digest: str,
     event_evidence: Sequence[Mapping[str, Any]],
+    source_cursor_max: int,
+    contract_name: str,
 ) -> None:
     digest = _fingerprint(
         {
@@ -1543,10 +1849,10 @@ def _mark_recovered_component(
     )
     component["source_revision"] = f"wbc0027:{business_date}"
     component["source_digest"] = digest
-    component["source_watermark"] = str(SOURCE_CUTOFF_SEQUENCE)
+    component["source_watermark"] = str(source_cursor_max)
     component["provenance"] = {
         **dict(component.get("provenance") or {}),
-        "recovery_contract": CONTRACT_NAME,
+        "recovery_contract": contract_name,
         "same_date_source_reconstruction": True,
         "current_retrocopy": False,
         "stable_target_digest": stable_target_digest,
@@ -1642,24 +1948,31 @@ def _apply_history(
     return receipts
 
 
-def _non_target_digest(conn: sqlite3.Connection) -> str:
-    target_predicates = " OR ".join("(facility_id=? AND nm_id=?)" for _ in TARGET_GROUPS)
+def _non_target_digest(
+    conn: sqlite3.Connection,
+    *,
+    target_groups: Iterable[tuple[str, int]],
+) -> str:
+    groups = sorted(set(target_groups))
+    target_predicates = " OR ".join("(facility_id=? AND nm_id=?)" for _ in groups)
+    where = f"pool<>'FBS' OR NOT ({target_predicates})" if groups else "1=1"
     balance_rows = [
         dict(row)
         for row in conn.execute(
             f"""SELECT facility_id,pool,nm_id,quantity,capital_rub,wac_rub,
                        projection_epoch,updated_at
                 FROM sheet_vitrina_v1_ff_pool_balances
-                WHERE pool<>'FBS' OR NOT ({target_predicates})
+                WHERE {where}
                 ORDER BY facility_id,pool,nm_id""",
-            tuple(value for group in TARGET_GROUPS for value in group),
+            tuple(value for group in groups for value in group),
         ).fetchall()
     ]
     # The recovery appends target captures.  Existing immutable history and all
     # non-target component identities must remain byte-for-byte represented.
-    history_rows = [
-        dict(row)
-        for row in conn.execute(
+    target_skus = set(groups)
+    target_facilities = {facility_id for facility_id, _ in groups}
+    history_rows: list[dict[str, Any]] = []
+    for row in conn.execute(
             f"""SELECT component.capture_id,component.scope_kind,
                        component.scope_key,component.nm_id,
                        component.component_kind,component.component_id,
@@ -1671,25 +1984,39 @@ def _non_target_digest(conn: sqlite3.Connection) -> str:
                 WHERE COALESCE(json_extract(
                           capture.source_manifest_json,'$.contract'
                       ),'')<>?
-                  AND NOT(
-                    component.component_kind='FBS_FACILITY'
-                    AND component.component_id IN (?,?)
-                    AND (component.scope_key='TOTAL' OR component.nm_id IN (?,?,?))
-                )
                 ORDER BY component.capture_id,component.scope_kind,
                          component.scope_key,component.component_kind,
                          component.component_id""",
-            (
-                CONTRACT_NAME,
-                MOSCOW_FACILITY_ID,
-                ORENBURG_FACILITY_ID,
-                210183919,
-                428855560,
-                428855758,
-            ),
+            (CONTRACT_NAME,),
+        ).fetchall():
+        item = dict(row)
+        facility_id = str(item["component_id"])
+        nm_id = int(item["nm_id"] or 0)
+        target = (
+            str(item["component_kind"]) == "FBS_FACILITY"
+            and (
+                (facility_id, nm_id) in target_skus
+                or (str(item["scope_key"]) == "TOTAL" and facility_id in target_facilities)
+            )
+        )
+        if not target:
+            history_rows.append(item)
+    return _fingerprint({"balances": balance_rows, "history": history_rows})
+
+
+def _wb_baseline_digest(conn: sqlite3.Connection) -> str:
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            f"""SELECT capture_id,scope_kind,scope_key,nm_id,component_kind,
+                       component_id,state,quantity,source_revision,source_digest,
+                       source_watermark
+                FROM {COMPONENTS_TABLE}
+                WHERE component_kind LIKE 'WB%'
+                ORDER BY capture_id,scope_kind,scope_key,component_kind,component_id"""
         ).fetchall()
     ]
-    return _fingerprint({"balances": balance_rows, "history": history_rows})
+    return _fingerprint(rows)
 
 
 def _verify_reviewed_source(reviewed: Mapping[str, Any], source: Mapping[str, Any]) -> None:
@@ -1702,11 +2029,13 @@ def _verify_reviewed_source(reviewed: Mapping[str, Any], source: Mapping[str, An
         "generation_id": str(source["generation_id"])
         == str(boundary["forward_generation_id"]),
         "generation_manifest_fingerprint": str(source["generation_manifest_fingerprint"])
-        == str(boundary["forward_generation_manifest_fingerprint"]),
+        == str(boundary["forward_generation_manifest_digest"]),
         "cursor": int(source["old_cursor_sequence"])
         == int(boundary["forward_cursor_sequence"]),
+        "source_cursor_max": int(source["source_cursor_max"])
+        == int(boundary["source_cursor_max"]),
         "target_sequences": list(source["target_sequences"])
-        == list(scope["status_observation_sequences"]),
+        == list(scope["target_sequences"]),
         "stable_target_digest": str(source["stable_target_digest"])
         == str(scope["stable_target_digest"]),
         "target_rows": list(source["target_rows"]) == list(scope["target_rows"]),
@@ -1830,16 +2159,17 @@ def _sha256_file(path: Path) -> str:
 
 
 def _read_plan(path: str) -> dict[str, Any]:
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise Wbc0027RecoveryError("invalid_plan", "Reviewed plan must be an object")
-    return value
+    try:
+        return parse_recovery_manifest(read_manifest_json(Path(path)))
+    except FbsManifestError as exc:
+        raise Wbc0027RecoveryError(exc.code, str(exc), details=exc.details) from exc
 
 
 def run(args: argparse.Namespace) -> int:
     runner = Wbc0027FbsLifecycleQualityRecovery(
         runtime_dir=Path(args.runtime_dir),
         deployed_sha=str(args.deployed_sha),
+        incident_passport=read_manifest_json(Path(args.passport_file)),
         scratch_dir=(Path(args.scratch_dir) if args.scratch_dir else None),
     )
     if args.command == "apply":
@@ -1852,8 +2182,18 @@ def run(args: argparse.Namespace) -> int:
         )
     elif args.command == "readback":
         payload = runner.readback(fingerprint=str(args.fingerprint or ""))
+    elif args.command == "impact-dry-run":
+        mapping_readback = read_manifest_json(Path(args.mapping_readback_file))
+        mapping_digest = str(mapping_readback.get("readback_digest") or "")
+        payload = runner.build_impact_manifest(
+            mapping_readback_digest=mapping_digest,
+        )
     else:
-        payload = runner.build_plan()
+        mapping_digest = ""
+        if str(getattr(args, "mapping_readback_file", "") or ""):
+            mapping_readback = read_manifest_json(Path(args.mapping_readback_file))
+            mapping_digest = str(mapping_readback.get("readback_digest") or "")
+        payload = runner.build_plan(mapping_readback_digest=mapping_digest)
     if args.output:
         _write_private(Path(args.output), payload)
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -1864,10 +2204,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--deployed-sha", required=True)
+    parser.add_argument("--passport-file", required=True)
     parser.add_argument("--scratch-dir", default="")
     parser.add_argument("--output", default="")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("dry-run")
+    dry_run = sub.add_parser("dry-run")
+    dry_run.add_argument("--mapping-readback-file", default="")
+    impact = sub.add_parser("impact-dry-run")
+    impact.add_argument("--mapping-readback-file", required=True)
     apply = sub.add_parser("apply")
     apply.add_argument("--plan-file", required=True)
     apply.add_argument("--fingerprint", required=True)
