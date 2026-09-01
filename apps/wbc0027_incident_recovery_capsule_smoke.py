@@ -48,6 +48,7 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     ensure_ff_pool_fbs_lifecycle_schema,
     process_post_t_fbs_lifecycle,
 )
+from packages.application.wb_fbs_orders import STATUS_OBSERVATIONS_TABLE  # noqa: E402
 from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E402
     CAPTURES_TABLE,
     COMPONENTS_TABLE,
@@ -297,6 +298,27 @@ def main() -> int:
                     f"FROM {IDENTITY_PENDING_TABLE}"
                 ).fetchone()[0]
             )
+            conn.execute(
+                f"""INSERT INTO {STATUS_OBSERVATIONS_TABLE}(
+                       observation_id,order_id,order_revision,status_digest,
+                       supplier_status,wb_status,positive_quantity,observed_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    "status-cursor-witness",
+                    9701,
+                    "cursor-witness-revision",
+                    "sha256:" + "c" * 64,
+                    "new",
+                    "waiting",
+                    1,
+                    "2026-08-17T04:01:00Z",
+                ),
+            )
+            assert int(
+                conn.execute(
+                    f"SELECT MAX(observation_sequence) FROM {STATUS_OBSERVATIONS_TABLE}"
+                ).fetchone()[0]
+            ) > source_cursor_max
             active = _active_manifest(conn)
             conn.commit()
         passport = _passport(
