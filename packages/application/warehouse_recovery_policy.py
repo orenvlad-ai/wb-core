@@ -1360,6 +1360,7 @@ class WarehouseRecoveryRegistry:
         after_digest: str,
         non_target_digest: str = "",
         timer_state: str = "",
+        transition_evidence_digest: str = "",
     ) -> dict[str, Any]:
         operation = self.get_operation(operation_id)
         if operation is None:
@@ -1383,6 +1384,7 @@ class WarehouseRecoveryRegistry:
             after_digest=after_digest,
             writer_state="idle",
             timer_state=timer_state,
+            transition_evidence_digest=transition_evidence_digest,
         )
         result = self.get_operation(operation_id)
         if result is None:
@@ -3686,6 +3688,7 @@ class WarehouseRecoveryRegistry:
         last_error: str | None = None,
         writer_state: str | None = None,
         timer_state: str | None = None,
+        transition_evidence_digest: str = "",
     ) -> None:
         allowed = ALLOWED_TRANSITIONS.get(expected_state, frozenset())
         if next_state not in allowed:
@@ -3767,6 +3770,9 @@ class WarehouseRecoveryRegistry:
                                 "after_digest": after_digest,
                                 "quarantine_reason": quarantine_reason,
                                 "last_error": last_error,
+                                "evidence_digest": str(
+                                    transition_evidence_digest or ""
+                                ),
                             }
                         ),
                     ),

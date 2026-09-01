@@ -104,10 +104,13 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
     _warehouse_input_manifest_digest,
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
+    readback_functional_economics_committed_operation,
+    retain_reconciled_functional_economics_commit,
     rollback_target_scoped_functional_economics,
 )
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
     WarehouseRecoveryRegistry,
+    recovery_operation_id,
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     WarehouseFunctionalBusyError,
@@ -4563,6 +4566,117 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             and "Платежи подтверждены, часть расходов предварительная" in status["reason"],
             f"exact-date provisional quality is published for {row_id}",
         )
+    newly_closed_costs = copy.deepcopy(probe_args["costs"])
+    newly_closed_costs["2026-07-20"][104].update(
+        {
+            "stock_qty": "2",
+            "source_status": "blended_inventory_wac_provisional",
+            "inventory_cost_evidence": {
+                "quantity": "2",
+                "status": "provisional",
+                "reason_codes": ["confirmed_payments_provisional_expenses"],
+            },
+        }
+    )
+    newly_closed_probe = _transform_snapshot(
+        snapshot={
+            **exact_day_probe,
+            "plan_json": missing_probe["after_plan_json"],
+        },
+        costs=newly_closed_costs,
+        warehouse_metrics={
+            "2026-07-20": {
+                104: {
+                    "own_capital_WB_qty": "2",
+                    "own_capital_WB_unit_cost_rub": "10",
+                    "own_capital_WB_capital_rub": "20",
+                    "own_total_product_qty": "2",
+                    "own_total_product_capital_rub": "20",
+                    "own_total_product_avg_cost_rub": "10",
+                    "presentation_state": "unconfirmed",
+                    "presentation_reason": "confirmed_payments_provisional_expenses",
+                    "stage_presentation": {
+                        "WB": {
+                            "state": "unconfirmed",
+                            "reason": "confirmed_payments_provisional_expenses",
+                        }
+                    },
+                }
+            }
+        },
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {104}},
+        warehouse_version_ids={"2026-07-20": "whfv_newly_closed_exact"},
+        parameters=parameters,
+        source_fingerprint="sha256:newly-closed-exact",
+        cutover_business_date="2026-07-18",
+        operation_business_date="2026-07-21",
+    )
+    newly_closed_payload = json.loads(newly_closed_probe["after_plan_json"])
+    _assert(
+        newly_closed_probe["repair_signal_changes"] == 1
+        and newly_closed_payload["metadata"][HISTORICAL_REPAIR_METADATA_KEY][
+            "dates"
+        ]["2026-07-20"]["ordinary_publication_applied"]
+        is True
+        and newly_closed_payload["metadata"]["warehouse_history_coverage"]
+        ["2026-07-20"]["functional_version_id"]
+        == "whfv_newly_closed_exact",
+        "a newly exact closed date publishes its version and provisional repair signal in one pass",
+    )
+    newly_closed_repeat = _transform_snapshot(
+        snapshot={
+            **exact_day_probe,
+            "plan_json": newly_closed_probe["after_plan_json"],
+        },
+        costs=newly_closed_costs,
+        warehouse_metrics={
+            "2026-07-20": {
+                104: {
+                    "own_capital_WB_qty": "2",
+                    "own_capital_WB_unit_cost_rub": "10",
+                    "own_capital_WB_capital_rub": "20",
+                    "own_total_product_qty": "2",
+                    "own_total_product_capital_rub": "20",
+                    "own_total_product_avg_cost_rub": "10",
+                    "presentation_state": "unconfirmed",
+                    "presentation_reason": "confirmed_payments_provisional_expenses",
+                    "stage_presentation": {
+                        "WB": {
+                            "state": "unconfirmed",
+                            "reason": "confirmed_payments_provisional_expenses",
+                        }
+                    },
+                }
+            }
+        },
+        warehouse_exact_dates={"2026-07-20"},
+        warehouse_covered_nm_ids={"2026-07-20": {104}},
+        warehouse_version_ids={"2026-07-20": "whfv_newly_closed_exact"},
+        parameters=parameters,
+        source_fingerprint="sha256:newly-closed-exact",
+        cutover_business_date="2026-07-18",
+        operation_business_date="2026-07-21",
+    )
+    _assert(
+        newly_closed_repeat["changed_cells"] == 0
+        and newly_closed_repeat["presentation_changes"] == 0
+        and newly_closed_repeat["coverage_changes"] == 0
+        and newly_closed_repeat["repair_signal_changes"] == 0,
+        "a newly exact closed date with provisional evidence is a full second-pass no-op: "
+        + json.dumps(
+            {
+                key: newly_closed_repeat[key]
+                for key in (
+                    "changed_cells",
+                    "presentation_changes",
+                    "coverage_changes",
+                    "repair_signal_changes",
+                )
+            },
+            sort_keys=True,
+        ),
+    )
     certified_exact_probe = _transform_snapshot(
         snapshot={
             **exact_day_probe,
@@ -5373,37 +5487,162 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         "business-date drift is rejected before any ready-snapshot mutation",
     )
     dry_run = build_functional_economics_backfill_plan(runtime)
-    applied = apply_functional_economics_backfill_plan(
-        runtime,
-        dry_run,
-        confirm_fingerprint=dry_run["plan_fingerprint"],
-        backup_dir=root / "economics-backups",
-        target_scoped_undo=True,
+    original_builder = economics_module.build_functional_economics_backfill_plan
+    builder_calls = 0
+
+    def force_post_commit_non_noop(*args, **kwargs):
+        nonlocal builder_calls
+        builder_calls += 1
+        result = original_builder(*args, **kwargs)
+        if builder_calls == 3:
+            _assert(
+                not result["updates"],
+                "forced post-commit readback starts from an exact no-op",
+            )
+            result = {**result, "updates": [{"forced_post_commit_probe": True}]}
+        return result
+
+    with patch.object(
+        economics_module,
+        "build_functional_economics_backfill_plan",
+        side_effect=force_post_commit_non_noop,
+    ):
+        try:
+            apply_functional_economics_backfill_plan(
+                runtime,
+                dry_run,
+                confirm_fingerprint=dry_run["plan_fingerprint"],
+                backup_dir=root / "economics-backups",
+                target_scoped_undo=True,
+            )
+        except Exception as exc:
+            _assert(
+                "functional economics backfill is not idempotent" in str(exc),
+                f"forced post-commit no-op failure is explicit: {exc}",
+            )
+        else:
+            raise AssertionError("forced post-commit non-noop must fail readback")
+    operation_id = recovery_operation_id(
+        "functional_economics_targeted_publication",
+        str(dry_run["plan_fingerprint"]),
     )
-    _assert(applied["database_written"] is True, "functional economics backfill applies atomically")
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    committed_operation = recovery_registry.get_operation(operation_id)
+    with sqlite3.connect(runtime.db_path) as conn:
+        manifest_row = conn.execute(
+            """
+            SELECT manifest_digest,after_images_json
+            FROM sheet_vitrina_v1_functional_economics_undo_manifests
+            WHERE plan_fingerprint=?
+            """,
+            (dry_run["plan_fingerprint"],),
+        ).fetchone()
+    _assert(manifest_row is not None, "post-commit failure preserves its exact undo manifest")
+    rollback_manifest_digest = str(manifest_row[0])
     _assert(
-        applied["backup"]["full_database_copy"] is False
-        and applied["backup"]["copy_bytes"] == 0,
-        "targeted economics publication records exact before-images without a database copy",
+        committed_operation is not None
+        and committed_operation["lifecycle"] == "failed_recoverable"
+        and committed_operation["after_digest"] == rollback_manifest_digest,
+        "business rows and exact committed after digest become durable in one transaction",
     )
-    rolled_back = rollback_target_scoped_functional_economics(
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_recovery_operations SET after_digest=''
+            WHERE operation_id=? AND lifecycle_state='failed_recoverable'
+              AND after_digest=?
+            """,
+            (operation_id, rollback_manifest_digest),
+        )
+        conn.commit()
+    reconciliation = readback_functional_economics_committed_operation(
         runtime,
-        manifest_digest=applied["rollback_manifest_digest"],
+        operation_id=operation_id,
+        plan_fingerprint=str(dry_run["plan_fingerprint"]),
+        manifest_digest=rollback_manifest_digest,
+        non_target_digest=str(dry_run["non_target_digest"]),
     )
     _assert(
-        rolled_back["rolled_back"] is True,
-        "targeted economics before-images restore exactly",
+        reconciliation["query_only"] is True
+        and reconciliation["legacy_commit_digest_missing"] is True
+        and reconciliation["business_row_write_count"] == 0,
+        "legacy missing commit metadata is proven from exact after-images query-only",
     )
-    restored_plan = build_functional_economics_backfill_plan(runtime)
-    _assert(
-        restored_plan["plan_fingerprint"] == dry_run["plan_fingerprint"],
-        "targeted economics rollback restores the reviewed source revision",
+    after_items = json.loads(str(manifest_row[1]))
+    unrelated_item = after_items[0]
+    unrelated_key = (
+        str(unrelated_item["bundle_version"]),
+        str(unrelated_item["as_of_date"]),
     )
-    applied = apply_functional_economics_backfill_plan(
+    with sqlite3.connect(runtime.db_path) as conn:
+        unrelated_original = str(unrelated_item["plan_json"])
+        unrelated_payload = json.loads(unrelated_original)
+        unrelated_payload["reconciliation_non_target_probe"] = True
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
+            WHERE bundle_version=? AND as_of_date=? AND plan_json=?
+            """,
+            (
+                json.dumps(
+                    unrelated_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                unrelated_key[0],
+                unrelated_key[1],
+                unrelated_original,
+            ),
+        )
+        conn.commit()
+    try:
+        readback_functional_economics_committed_operation(
+            runtime,
+            operation_id=operation_id,
+            plan_fingerprint=str(dry_run["plan_fingerprint"]),
+            manifest_digest=rollback_manifest_digest,
+            non_target_digest=str(dry_run["non_target_digest"]),
+        )
+    except Exception as exc:
+        _assert(
+            "non-target readback drifted" in str(exc),
+            f"same-operation reconciliation rejects non-target drift: {exc}",
+        )
+    else:
+        raise AssertionError("same-operation reconciliation must reject non-target drift")
+    with sqlite3.connect(runtime.db_path) as conn:
+        conn.execute(
+            """
+            UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
+            WHERE bundle_version=? AND as_of_date=?
+            """,
+            (unrelated_original, unrelated_key[0], unrelated_key[1]),
+        )
+        conn.commit()
+    reconciliation = readback_functional_economics_committed_operation(
         runtime,
-        restored_plan,
-        confirm_fingerprint=restored_plan["plan_fingerprint"],
-        backup_dir=root / "economics-backups",
+        operation_id=operation_id,
+        plan_fingerprint=str(dry_run["plan_fingerprint"]),
+        manifest_digest=rollback_manifest_digest,
+        non_target_digest=str(dry_run["non_target_digest"]),
+    )
+    retained = retain_reconciled_functional_economics_commit(
+        runtime,
+        operation_id=operation_id,
+        plan_fingerprint=str(dry_run["plan_fingerprint"]),
+        manifest_digest=rollback_manifest_digest,
+        non_target_digest=str(dry_run["non_target_digest"]),
+        evidence_digest=str(reconciliation["evidence_digest"]),
+    )
+    _assert(
+        retained["status"] == "retained"
+        and retained["business_row_write_count"] == 0
+        and retained["recovery_metadata_write_count"] == 2,
+        "exact legacy commit reconciliation writes only one recovery transition",
     )
     repeated = build_functional_economics_backfill_plan(runtime)
     _assert(repeated["changed_snapshot_count"] == 0, "functional economics backfill is idempotent")
@@ -5572,6 +5811,19 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
                 f"pre-boundary {label} stamped warehouse rows: "
                 f"{timestamped_warehouse_rows}"
             )
+    rolled_back = rollback_target_scoped_functional_economics(
+        runtime,
+        manifest_digest=rollback_manifest_digest,
+    )
+    _assert(
+        rolled_back["rolled_back"] is True,
+        "targeted economics before-images restore exactly after reconciliation",
+    )
+    restored_plan = build_functional_economics_backfill_plan(runtime)
+    _assert(
+        restored_plan["plan_fingerprint"] == dry_run["plan_fingerprint"],
+        "targeted economics rollback restores the reviewed source revision",
+    )
     parameters = CalculationParametersBlock(runtime=runtime)
     changed_payload = {
         "effective_date": "2026-07-01",

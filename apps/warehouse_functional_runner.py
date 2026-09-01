@@ -36,6 +36,8 @@ from packages.application.warehouse_functional import (  # noqa: E402
 from packages.application.warehouse_functional_economics_backfill import (  # noqa: E402
     apply_functional_economics_backfill_plan,
     build_functional_economics_backfill_plan,
+    readback_functional_economics_committed_operation,
+    retain_reconciled_functional_economics_commit,
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_job_lock,
@@ -172,6 +174,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_exact_plan_args(economics_apply)
     economics_apply.add_argument("--backup-dir", required=True)
 
+    economics_commit_readback = commands.add_parser(
+        "economics-backfill-commit-readback"
+    )
+    _add_economics_commit_reconciliation_args(economics_commit_readback)
+
+    economics_commit_retain = commands.add_parser(
+        "economics-backfill-commit-retain"
+    )
+    _add_economics_commit_reconciliation_args(economics_commit_retain)
+    economics_commit_retain.add_argument("--evidence-digest", required=True)
+
     certification_dry_run = commands.add_parser("supplier-certification-dry-run")
     certification_dry_run.add_argument("--output", default="")
     certification_dry_run.add_argument("--shipment-id", action="append", default=[])
@@ -194,6 +207,15 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_exact_plan_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plan-file", required=True)
     parser.add_argument("--fingerprint", required=True)
+
+
+def _add_economics_commit_reconciliation_args(
+    parser: argparse.ArgumentParser,
+) -> None:
+    parser.add_argument("--operation-id", required=True)
+    parser.add_argument("--plan-fingerprint", required=True)
+    parser.add_argument("--manifest-digest", required=True)
+    parser.add_argument("--non-target-digest", required=True)
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -646,6 +668,24 @@ def _run(
             confirm_fingerprint=str(args.fingerprint),
             backup_dir=Path(str(args.backup_dir)).resolve(),
         )
+    if args.command == "economics-backfill-commit-readback":
+        return readback_functional_economics_committed_operation(
+            runtime,
+            operation_id=str(args.operation_id),
+            plan_fingerprint=str(args.plan_fingerprint),
+            manifest_digest=str(args.manifest_digest),
+            non_target_digest=str(args.non_target_digest),
+        )
+    if args.command == "economics-backfill-commit-retain":
+        with warehouse_functional_write_lock(runtime.runtime_dir):
+            return retain_reconciled_functional_economics_commit(
+                runtime,
+                operation_id=str(args.operation_id),
+                plan_fingerprint=str(args.plan_fingerprint),
+                manifest_digest=str(args.manifest_digest),
+                non_target_digest=str(args.non_target_digest),
+                evidence_digest=str(args.evidence_digest),
+            )
     if args.command == "supplier-certification-dry-run":
         return _write_optional_plan(
             build_supplier_cost_state_replay_plan(

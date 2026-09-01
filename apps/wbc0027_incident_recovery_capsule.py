@@ -246,6 +246,12 @@ class Wbc0027IncidentRecoveryCapsule:
                 ],
                 "non_target_unchanged": True,
                 "wb_unchanged": True,
+                "natural_producer_control": {
+                    "minimum_cycles": 1,
+                    "collector_result": "success",
+                    "lifecycle_processor_result": "success",
+                    "vitrina_readback_after_cycle": True,
+                },
             },
         }
         manifest = attach_digest(manifest_material, "manifest_digest")
