@@ -43,6 +43,9 @@ from packages.application.sheet_vitrina_v1_inventory_planning import (
 from packages.application.sheet_vitrina_v1_inventory_history import (
     read_inventory_history_window,
 )
+from packages.application.sheet_vitrina_v1_breakglass_last_good import (
+    apply_breakglass_last_good_overlay,
+)
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_proxy_v4 import (
     PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
@@ -348,6 +351,11 @@ class SheetVitrinaV1WebVitrinaBlock:
             ),
             date_columns=list(snapshot.date_columns),
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
+        )
+        rows = apply_breakglass_last_good_overlay(
+            rows,
+            db_path=self.runtime.db_path,
+            date_columns=snapshot.date_columns,
         )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
