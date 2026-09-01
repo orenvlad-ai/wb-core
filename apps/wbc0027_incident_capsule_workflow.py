@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.github_release_runner import GitHubClient  # noqa: E402
+from apps import registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
 from apps.production_apply_runner import (  # noqa: E402
     ApplyError,
     collect_exact_release_binding,
@@ -25,6 +27,111 @@ from packages.application.fbs_lifecycle_manifests import (  # noqa: E402
     digest,
     read_json,
 )
+
+
+SSH_HOST_ALIAS = "wbc0027-capsule-canonical"
+
+
+def materialize_ssh_transport(
+    *,
+    target_file: Path,
+    output_directory: Path,
+    private_key: str,
+    known_hosts: str,
+) -> dict[str, Any]:
+    """Resolve the trusted target before materializing an isolated SSH contour."""
+
+    target_path = Path(target_file).expanduser().resolve()
+    if not target_path.is_file():
+        raise ApplyError(f"capsule canonical target file is missing: {target_path}")
+    try:
+        target = hosted_runtime.load_hosted_runtime_target(target_path)
+        hosted_runtime._validate_production_target_identity(
+            target,
+            action="WBC0027 incident capsule transport",
+        )
+        hosted_runtime._ensure_active_hosted_runtime_target(
+            target,
+            action="WBC0027 incident capsule transport",
+        )
+    except (OSError, ValueError) as exc:
+        raise ApplyError(f"capsule canonical target is invalid: {exc}") from exc
+    host_name = str(target.host_ip or "").strip()
+    if not host_name:
+        raise ApplyError("capsule canonical target host_ip is missing")
+    if host_name not in hosted_runtime.ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS:
+        raise ApplyError(f"capsule canonical target host_ip is foreign: {host_name}")
+    if target.target_id != capsule_module.CANONICAL_TARGET_ID:
+        raise ApplyError("capsule canonical target_id is foreign")
+    if target.ssh_destination != hosted_runtime.ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION:
+        raise ApplyError("capsule canonical ssh_destination is foreign")
+    key = str(private_key or "")
+    hosts = str(known_hosts or "")
+    if not key.strip() or not hosts.strip():
+        raise ApplyError("capsule hosted SSH credentials are missing")
+
+    directory = Path(output_directory).expanduser()
+    if directory.is_symlink():
+        raise ApplyError("capsule SSH directory cannot be a symlink")
+    directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+    directory = directory.resolve()
+    os.chmod(directory, 0o700)
+    identity_path = directory / "identity"
+    known_hosts_path = directory / "known_hosts"
+    config_path = directory / "config"
+    _write_secret(identity_path, key)
+    _write_secret(known_hosts_path, hosts)
+    config = "\n".join(
+        (
+            f"Host {SSH_HOST_ALIAS}",
+            f"    HostName {host_name}",
+            "    User root",
+            f'    IdentityFile "{_ssh_config_path(identity_path)}"',
+            "    IdentitiesOnly yes",
+            "    BatchMode yes",
+            "    StrictHostKeyChecking yes",
+            f'    UserKnownHostsFile "{_ssh_config_path(known_hosts_path)}"',
+            "    GlobalKnownHostsFile /dev/null",
+            f"    HostKeyAlias {host_name}",
+            "    CheckHostIP yes",
+            "",
+        )
+    )
+    _write_secret(config_path, config)
+    return {
+        "contract": "wbc0027_incident_capsule_ssh_binding/v1",
+        "target_id": target.target_id,
+        "target_file": str(target_path),
+        "target_file_sha256": "sha256:" + hashlib.sha256(target_path.read_bytes()).hexdigest(),
+        "source_ssh_destination": target.ssh_destination,
+        "ssh_host_alias": SSH_HOST_ALIAS,
+        "host_name": host_name,
+        "user": "root",
+        "host_key_alias": host_name,
+        "ssh_config": str(config_path),
+        "identity_file": str(identity_path),
+        "known_hosts_file": str(known_hosts_path),
+    }
+
+
+def _ssh_config_path(path: Path) -> str:
+    value = str(Path(path).resolve())
+    if any(character in value for character in ('\n', '\r', '"')):
+        raise ApplyError("capsule SSH path cannot be represented safely")
+    return value.replace("\\", "\\\\")
+
+
+def _write_secret(path: Path, value: str) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(value)
+            if not value.endswith("\n"):
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
 
 
 def collect_release(*, repository: str, pr: int, operation: str) -> dict[str, Any]:
@@ -132,7 +239,24 @@ def _github_outputs(path: str, payload: Mapping[str, Any]) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.command == "release-binding":
+    if args.command == "materialize-ssh":
+        payload = materialize_ssh_transport(
+            target_file=Path(args.target_file),
+            output_directory=Path(args.output_directory),
+            private_key=os.environ.get("WB_CORE_DEPLOY_SSH_KEY", ""),
+            known_hosts=os.environ.get("WB_CORE_DEPLOY_KNOWN_HOSTS", ""),
+        )
+        _write(Path(args.output), payload)
+        _github_outputs(
+            str(args.github_output or ""),
+            {
+                "ssh_config": payload["ssh_config"],
+                "ssh_host_alias": payload["ssh_host_alias"],
+                "host_name": payload["host_name"],
+                "target_file_sha256": payload["target_file_sha256"],
+            },
+        )
+    elif args.command == "release-binding":
         payload = collect_release(
             repository=str(args.repository),
             pr=int(args.pr),
@@ -178,6 +302,11 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    transport = sub.add_parser("materialize-ssh")
+    transport.add_argument("--target-file", required=True)
+    transport.add_argument("--output-directory", required=True)
+    transport.add_argument("--output", required=True)
+    transport.add_argument("--github-output", default="")
     release = sub.add_parser("release-binding")
     release.add_argument("--repository", default="orenvlad-ai/wb-core")
     release.add_argument("--pr", required=True, type=int)

@@ -654,6 +654,11 @@ class Wbc0027IncidentRecoveryCapsule:
             ],
         }
         with closing(recovery_module._open_query_only(self.recovery.runtime.db_path)) as source_conn:
+            if int(source_conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise CapsuleError(
+                    "capsule_preview_source_not_query_only",
+                    "Capsule simulation source must remain SQLite query-only",
+                )
             source_conn.execute("BEGIN")
             source = self.recovery._source_snapshot(
                 source_conn,
@@ -674,12 +679,20 @@ class Wbc0027IncidentRecoveryCapsule:
                     scratch,
                     source=source,
                     scratch_path=scratch_path,
+                    defer_foreign_key_check=True,
                 )
                 _extend_scratch_with_history(
                     source_conn,
                     scratch,
                     recovery_plan=recovery_plan,
                 )
+                scratch.commit()
+                forward_module._finalize_preview_projection_foreign_keys(scratch)
+                if int(scratch.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+                    raise CapsuleError(
+                        "capsule_preview_foreign_keys_disabled",
+                        "Capsule simulation foreign-key enforcement is not active",
+                    )
                 _install_write_audit(scratch)
                 scratch.commit()
                 scratch.execute("BEGIN IMMEDIATE")
@@ -717,9 +730,25 @@ class Wbc0027IncidentRecoveryCapsule:
                     pass
                 if source_conn.in_transaction:
                     source_conn.rollback()
+                if int(source_conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                    raise CapsuleError(
+                        "capsule_preview_source_query_only_drift",
+                        "Capsule simulation source left SQLite query-only mode",
+                    )
         return {
             **writes,
             "recovery_fingerprint": str(recovery_plan["recovery_digest"]),
+            "simulation": {
+                "contract": "wbc0027_incident_capsule_full_projection_simulation/v1",
+                "production_source_open_mode": "ro",
+                "production_source_query_only": True,
+                "production_source_write_count": 0,
+                "scratch_projection": "full_forward_and_history_dependencies",
+                "scratch_foreign_keys_during_projection": "disabled",
+                "scratch_foreign_keys_after_projection": "enabled",
+                "scratch_foreign_key_check": "zero_violations",
+                "final_apply_foreign_keys": "enabled",
+            },
             "logical": {
                 "mapping_insert_count": 1,
                 "target_status_count": int(dict(recovery_plan["scope"])["target_count"]),
@@ -1085,11 +1114,24 @@ def _parse_capsule_manifest(value: Mapping[str, Any], *, deployed_sha: str) -> d
         raise CapsuleError("capsule_mapping_not_absent", "Capsule requires exact mapping absence")
     parse_impact_manifest(dict(item["impact"]))
     expected = dict(item["expected_writes"])
+    simulation = dict(expected.get("simulation") or {})
     if (
         not isinstance(expected.get("tables"), list)
         or not expected["tables"]
         or DIGEST_RE.fullmatch(str(expected.get("digest") or "")) is None
         or DIGEST_RE.fullmatch(str(expected.get("recovery_fingerprint") or "")) is None
+        or simulation
+        != {
+            "contract": "wbc0027_incident_capsule_full_projection_simulation/v1",
+            "production_source_open_mode": "ro",
+            "production_source_query_only": True,
+            "production_source_write_count": 0,
+            "scratch_projection": "full_forward_and_history_dependencies",
+            "scratch_foreign_keys_during_projection": "disabled",
+            "scratch_foreign_keys_after_projection": "enabled",
+            "scratch_foreign_key_check": "zero_violations",
+            "final_apply_foreign_keys": "enabled",
+        }
         or any(
             not isinstance(row, Mapping)
             or TABLE_RE.fullmatch(str(row.get("table") or "")) is None
@@ -1184,14 +1226,22 @@ def _extend_scratch_with_history(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone() is None:
             forward_module._create_projection_table(source, scratch, table)
-    captures = [
-        str(item["base_capture_id"])
-        for item in dict(recovery_plan["history"])["captures"]
-    ]
     dates = [
         str(item["business_date"])
         for item in dict(recovery_plan["history"])["captures"]
     ]
+    captures: list[str] = []
+    for batch in forward_module._chunks(dates, forward_module.PROJECTION_CHUNK_SIZE):
+        placeholders = ",".join("?" for _ in batch)
+        captures.extend(
+            str(row[0])
+            for row in source.execute(
+                f"SELECT capture_id FROM {CAPTURES_TABLE} "
+                f"WHERE business_date IN ({placeholders}) ORDER BY capture_sequence",
+                tuple(batch),
+            ).fetchall()
+        )
+    captures = list(dict.fromkeys(captures))
     forward_module._copy_projection_in(
         source,
         scratch,
