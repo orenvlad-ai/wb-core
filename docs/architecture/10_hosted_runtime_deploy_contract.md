@@ -104,6 +104,13 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   activation waits for an already active FBS/warehouse writer without holding
   that lock across Prices/Ads acquisition. Both perform only Prices/Ads WB GET and bounded operational
   StoreRegistry writes. No WB POST/PATCH or seller-state mutation is permitted.
+- A bounded remote loopback timeout after an exact deploy is transport
+  ambiguity, not permission to repeat sync, dependencies or restart. The
+  deploy verifier first runs the canonical exact-SHA reconciliation in
+  read-only mode; only a healthy metadata/runtime/process/auth/light-probe
+  binding permits one repeat of the query-only loopback surface. SSH exit 255
+  retains the existing bounded transport-repair contour. An ordinary HTTP or
+  semantic probe failure remains terminal and is never reclassified.
 - Migration 142 adds canonical hosted
   `ff-pool-cutover-production-dry-run/apply/readback`. Every action pins the
   active target, environment file and exact `.wb-core-runtime-sha`. Dry-run is
