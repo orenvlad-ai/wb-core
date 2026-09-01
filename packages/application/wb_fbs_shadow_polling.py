@@ -45,6 +45,7 @@ from packages.application.warehouse_functional_lock import (
 
 CONTRACT_NAME = "wb_fbs_shadow_polling_v1"
 READINESS_CONTRACT = "wb_fbs_shadow_handoff_readiness_v1"
+NATURAL_CYCLE_ACCEPTANCE_CONTRACT = "wb_fbs_natural_cycle_acceptance_v1"
 CADENCE_SECONDS = 5 * 60
 FRESHNESS_SLO_SECONDS = 10 * 60
 LOOKBACK_SECONDS = 7 * 24 * 60 * 60
@@ -64,6 +65,32 @@ class WbFbsShadowPollingError(RuntimeError):
 
 class WbFbsShadowPollingBusy(WbFbsShadowPollingError):
     pass
+
+
+def natural_cycle_acceptance(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Require both the collector and its nested lifecycle fold to succeed."""
+
+    lifecycle = result.get("lifecycle_processor")
+    nested = dict(lifecycle) if isinstance(lifecycle, Mapping) else {}
+    checks = {
+        "collector_success": str(result.get("status") or "") == "success",
+        "lifecycle_processor_present": bool(nested),
+        "lifecycle_processor_caught_up": str(nested.get("status") or "")
+        == "caught_up",
+        "wb_unmodified": result.get("mutates_wb") is False
+        and nested.get("mutates_wb") is False,
+    }
+    accepted = all(checks.values())
+    return {
+        "contract": NATURAL_CYCLE_ACCEPTANCE_CONTRACT,
+        "status": "accepted" if accepted else "rejected",
+        "accepted": accepted,
+        "run_id": str(result.get("run_id") or ""),
+        "checks": checks,
+        "collector_status": str(result.get("status") or ""),
+        "lifecycle_processor_status": str(nested.get("status") or ""),
+        "lifecycle_processor_error": str(nested.get("error") or ""),
+    }
 
 
 def _process_lock(path: Path) -> threading.Lock:

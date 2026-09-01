@@ -825,6 +825,26 @@ def _run_bounded_recovery_retention(
         runtime_dir=runtime.runtime_dir,
         db_path=runtime.db_path,
     )
+    with sqlite3.connect(
+        f"file:{runtime.db_path}?mode=ro",
+        uri=True,
+    ) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        active_row = conn.execute(
+            "SELECT version_id FROM "
+            "sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"
+        ).fetchone()
+        if int(conn.total_changes) != 0:
+            raise RuntimeError(
+                "warehouse recovery active-version readback mutated SQLite"
+            )
+    precheckpoint_reconciliation = (
+        registry.reconcile_failed_hourly_precheckpoint_locks(
+            current_active_version_id=(
+                str(active_row[0]) if active_row is not None else ""
+            ),
+        )
+    )
     blocking = [
         operation
         for operation in registry.list_operations(limit=1000)
@@ -847,6 +867,7 @@ def _run_bounded_recovery_retention(
             **plan,
             "status": "no_change",
             "applied": False,
+            "precheckpoint_reconciliation": precheckpoint_reconciliation,
         }
     result = registry.apply_retention(
         plan_fingerprint=str(plan["fingerprint"]),
@@ -861,6 +882,7 @@ def _run_bounded_recovery_retention(
     return {
         **result,
         "applied": str(result.get("status") or "") == "applied",
+        "precheckpoint_reconciliation": precheckpoint_reconciliation,
     }
 
 

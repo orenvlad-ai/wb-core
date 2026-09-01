@@ -94,6 +94,7 @@ MAX_PRIVACY_SAFE_DIFF_COUNT = 1_000_000
 CUTOVER_ORDERS_TABLE = "sheet_vitrina_v1_ff_pool_cutover_order_classifications"
 CUTOVER_LATE_CASES_TABLE = "sheet_vitrina_v1_ff_pool_cutover_late_pre_t_cases"
 FUNCTIONAL_ACTIVE_TABLE = "sheet_vitrina_v1_warehouse_functional_active"
+FUNCTIONAL_VERSIONS_TABLE = "sheet_vitrina_v1_warehouse_functional_versions"
 FUNCTIONAL_BALANCES_TABLE = "sheet_vitrina_v1_warehouse_functional_balances"
 
 PREVIEW_SCHEMA_TABLES = (
@@ -136,6 +137,7 @@ PREVIEW_SCHEMA_TABLES = (
     QUALITY_RECOVERY_HISTORY_TABLE,
     WAREHOUSE_DOMAIN_EVENTS_TABLE,
     FUNCTIONAL_ACTIVE_TABLE,
+    FUNCTIONAL_VERSIONS_TABLE,
     FUNCTIONAL_BALANCES_TABLE,
 )
 
@@ -1378,6 +1380,14 @@ def _build_preview_projection(
         FUNCTIONAL_ACTIVE_TABLE,
         tracker,
         where="slot=1",
+    )
+    _copy_projection_rows(
+        source_conn,
+        scratch,
+        FUNCTIONAL_VERSIONS_TABLE,
+        tracker,
+        where="version_id=?",
+        parameters=(active_version,),
     )
     _copy_projection_rows(
         source_conn,

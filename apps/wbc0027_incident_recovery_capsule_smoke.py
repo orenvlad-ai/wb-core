@@ -348,6 +348,47 @@ def main() -> int:
             release_binding=release,
             timestamp_factory=_Clock(),
         )
+        # Production-shaped regression: a historical pinned replay used to be
+        # simulated without the functional-version table, silently selecting
+        # the opening in-place projection.  Once the exact active version is
+        # present in scratch, the canonical publisher must reject a version
+        # from a different publication business date before qualification.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+                       version_id,cutover_id,version_kind,effective_at,status,
+                       plan_fingerprint,local_source_digest,source_watermarks_json,
+                       created_at,business_effective_date,published_at)
+                   VALUES('wf_stage7c','warehouse_functional_cutover_v1',
+                          'hourly_sync','2026-08-30T23:00:00Z','good',
+                          'sha256:stale-date-smoke','sha256:stale-date-source','{}',
+                          '2026-08-30T23:00:00Z','2026-08-30',
+                          '2026-08-30T23:00:00Z')"""
+            )
+            conn.commit()
+        stale_date_blocked = False
+        try:
+            capsule.qualification(
+                operation_id="synthetic-stale-functional-date",
+                evidence_dir=(
+                    runtime.runtime_dir
+                    / "backups/private-evidence/production-goals/"
+                    "synthetic-stale-functional-date"
+                ),
+            )
+        except Exception as exc:
+            stale_date_blocked = (
+                getattr(exc, "code", "") == "fbs_material_active_business_date_stale"
+                and "Active functional version does not belong to the publication business date"
+                in str(exc)
+            )
+        assert stale_date_blocked
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(
+                "DELETE FROM sheet_vitrina_v1_warehouse_functional_versions "
+                "WHERE version_id='wf_stage7c'"
+            )
+            conn.commit()
         evidence = (
             runtime.runtime_dir
             / "backups/private-evidence/production-goals/synthetic-incident-capsule"

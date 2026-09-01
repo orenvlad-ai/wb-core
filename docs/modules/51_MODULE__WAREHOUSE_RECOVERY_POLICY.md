@@ -359,6 +359,17 @@ After successful readback, ordinary hourly/manual warehouse sync may publish a
 fresh functional/business projection. Supersession itself never edits a
 projection row.
 
+An ordinary hourly sync also has one narrower automatic pre-checkpoint
+reconciliation. It may release a failed `hourly_warehouse_sync` T2 row only
+when the failure came exactly from `writing`, the error is an exact SQLite lock
+error, checkpoint/read/after bytes and digests are zero, no registered artifact,
+undo row or owned checkpoint/temporary/manifest/sidecar path exists, and the
+operation's pinned base is still the exact active functional version. The CAS
+transition preserves the original error and every registry row, releases only
+the unused capacity reservation and records that no business mutation was
+reconciled. Any mismatch remains `failed_recoverable` and blocks the next T2;
+this path never substitutes for Stage 7C supersession or artifact recovery.
+
 ## WBC0027 two-operation recovery
 
 The historical static production-mutation manifest and its two recovery IDs
