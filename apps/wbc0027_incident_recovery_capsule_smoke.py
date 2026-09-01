@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 from apps import wbc0027_incident_recovery_capsule as module  # noqa: E402
 from apps import wbc0027_incident_capsule_workflow as workflow_module  # noqa: E402
-from apps import registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
+from apps import wbc0027_incident_capsule_target as target_module  # noqa: E402
 from apps.fbs_lifecycle_manifests_smoke import (  # noqa: E402
     _Clock,
     _add_later_canonical_identity,
@@ -59,7 +59,7 @@ from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E
 
 def _assert_hosted_transport_contract(root: Path) -> None:
     binding = workflow_module.materialize_ssh_transport(
-        target_file=hosted_runtime.DEFAULT_TARGET_FILE,
+        target_file=target_module.DEFAULT_TARGET_FILE,
         output_directory=root / "capsule-ssh",
         private_key="synthetic-private-key",
         known_hosts="89.191.226.88 ssh-ed25519 c3ludGhldGljLWtleQ==",
@@ -91,7 +91,7 @@ def _assert_hosted_transport_contract(root: Path) -> None:
     assert f"hostkeyalias {binding['host_name']}" in resolved
     assert f"userknownhostsfile {binding['known_hosts_file']}" in resolved
 
-    canonical = json.loads(hosted_runtime.DEFAULT_TARGET_FILE.read_text(encoding="utf-8"))
+    canonical = json.loads(target_module.DEFAULT_TARGET_FILE.read_text(encoding="utf-8"))
     for label, host in (("missing", ""), ("foreign", "203.0.113.10")):
         invalid = {**canonical, "host_ip": host}
         invalid_path = root / f"target-{label}.json"

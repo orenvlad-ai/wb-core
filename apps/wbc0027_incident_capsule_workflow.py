@@ -16,11 +16,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.github_release_runner import GitHubClient  # noqa: E402
-from apps import registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
 from apps.production_apply_runner import (  # noqa: E402
     ApplyError,
     collect_exact_release_binding,
 )
+from apps import wbc0027_incident_capsule_target as target_module  # noqa: E402
 from apps import wbc0027_incident_recovery_capsule as capsule_module  # noqa: E402
 from packages.application.fbs_lifecycle_manifests import (  # noqa: E402
     canonical_bytes,
@@ -42,28 +42,18 @@ def materialize_ssh_transport(
     """Resolve the trusted target before materializing an isolated SSH contour."""
 
     target_path = Path(target_file).expanduser().resolve()
-    if not target_path.is_file():
-        raise ApplyError(f"capsule canonical target file is missing: {target_path}")
     try:
-        target = hosted_runtime.load_hosted_runtime_target(target_path)
-        hosted_runtime._validate_production_target_identity(
-            target,
-            action="WBC0027 incident capsule transport",
-        )
-        hosted_runtime._ensure_active_hosted_runtime_target(
-            target,
-            action="WBC0027 incident capsule transport",
-        )
+        target = target_module.load_canonical_target(target_path)
     except (OSError, ValueError) as exc:
         raise ApplyError(f"capsule canonical target is invalid: {exc}") from exc
-    host_name = str(target.host_ip or "").strip()
+    host_name = str(target.host_name or "").strip()
     if not host_name:
-        raise ApplyError("capsule canonical target host_ip is missing")
-    if host_name not in hosted_runtime.ACTIVE_HOSTED_RUNTIME_PUBLIC_HOSTS:
-        raise ApplyError(f"capsule canonical target host_ip is foreign: {host_name}")
+        raise ApplyError("capsule canonical target HostName is missing")
+    if host_name not in target_module.CANONICAL_PUBLIC_HOSTS:
+        raise ApplyError(f"capsule canonical target HostName is foreign: {host_name}")
     if target.target_id != capsule_module.CANONICAL_TARGET_ID:
         raise ApplyError("capsule canonical target_id is foreign")
-    if target.ssh_destination != hosted_runtime.ACTIVE_HOSTED_RUNTIME_SSH_DESTINATION:
+    if target.ssh_destination != target_module.CANONICAL_SSH_DESTINATION:
         raise ApplyError("capsule canonical ssh_destination is foreign")
     key = str(private_key or "")
     hosts = str(known_hosts or "")
@@ -85,7 +75,7 @@ def materialize_ssh_transport(
         (
             f"Host {SSH_HOST_ALIAS}",
             f"    HostName {host_name}",
-            "    User root",
+            f"    User {target_module.CANONICAL_SSH_USER}",
             f'    IdentityFile "{_ssh_config_path(identity_path)}"',
             "    IdentitiesOnly yes",
             "    BatchMode yes",
@@ -106,7 +96,7 @@ def materialize_ssh_transport(
         "source_ssh_destination": target.ssh_destination,
         "ssh_host_alias": SSH_HOST_ALIAS,
         "host_name": host_name,
-        "user": "root",
+        "user": target_module.CANONICAL_SSH_USER,
         "host_key_alias": host_name,
         "ssh_config": str(config_path),
         "identity_file": str(identity_path),
