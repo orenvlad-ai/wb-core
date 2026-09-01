@@ -75,7 +75,20 @@ INDEPENDENT_WRITER_TIMER_UNITS = (
     "wb-core-sheet-vitrina-canary-restore.timer",
     "wb-core-sheet-vitrina-health-candidate.timer",
     "wb-core-sheet-vitrina-health-confirmation.timer",
+    "wb-core-fbs-shadow-collector.timer",
 )
+# This projection is deliberately version-stable.  Pause ownership for the
+# FBS shadow writer is recorded in the full baseline/readback and restore plan,
+# without changing pre-existing control-signature bytes.
+CONTROL_SIGNATURE_INDEPENDENT_WRITER_TIMER_UNITS = (
+    "wb-core-fbs-warehouse-registry.timer",
+    "wb-core-sheet-vitrina-canary-restore.timer",
+    "wb-core-sheet-vitrina-health-candidate.timer",
+    "wb-core-sheet-vitrina-health-confirmation.timer",
+)
+FBS_SHADOW_TIMER_UNIT = "wb-core-fbs-shadow-collector.timer"
+FBS_SHADOW_SERVICE_UNIT = "wb-core-fbs-shadow-collector.service"
+FBS_SHADOW_PROCESS_MARKER = "apps/wb_fbs_shadow.py"
 FORCE_OFF_TIMER_UNITS = (
     "wb-core-warehouse-functional-sync.timer",
     "wb-core-autoanswers-readonly-sync.timer",
@@ -88,7 +101,6 @@ ALL_BUSINESS_TIMER_UNITS = (
 )
 ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for unit in ALL_BUSINESS_TIMER_UNITS)
 CONTINUOUS_OBSERVER_TIMER_UNITS = (
-    "wb-core-fbs-shadow-collector.timer",
     "wb-core-change-registry-observer.timer",
     "wb-core-root-storage-policy.timer",
 )
@@ -148,6 +160,14 @@ WRITER_PROCESS_MARKERS = (
     "wb_fbs_warehouse_registry.py",
     "sheet_vitrina_v1_health_tick.py",
 )
+EXACT_WRITER_PROCESS_ARGS = {
+    FBS_SHADOW_PROCESS_MARKER: frozenset(
+        {
+            FBS_SHADOW_PROCESS_MARKER,
+            "/opt/wb-core-runtime/app/apps/wb_fbs_shadow.py",
+        }
+    ),
+}
 
 WEB_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
 FEEDBACK_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/feedbacks/automation/schedules"
@@ -433,9 +453,26 @@ def _writer_processes(proc_root: Path = Path("/proc")) -> list[dict[str, Any]]:
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
-            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ")
+            command_raw = (entry / "cmdline").read_bytes()
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
+        arguments = [
+            value.decode("utf-8", errors="surrogateescape")
+            for value in command_raw.split(b"\0")
+            if value
+        ]
+        exact_marker = next(
+            (
+                marker
+                for marker, accepted in EXACT_WRITER_PROCESS_ARGS.items()
+                if any(argument in accepted for argument in arguments)
+            ),
+            "",
+        )
+        if exact_marker:
+            rows.append({"pid": int(entry.name), "marker": exact_marker})
+            continue
+        command = command_raw.replace(b"\0", b" ")
         for marker in WRITER_PROCESS_MARKERS:
             if marker.encode("utf-8") in command:
                 rows.append({"pid": int(entry.name), "marker": marker})
@@ -1896,7 +1933,7 @@ def _require_fbs_shadow_terminal(
     context: str,
 ) -> None:
     fbs_shadow = dict(
-        services.get("wb-core-fbs-shadow-collector.service") or {}
+        services.get(FBS_SHADOW_SERVICE_UNIT) or {}
     )
     if (
         str(fbs_shadow.get("is_active") or "") not in QUIESCENT_SERVICE_STATES
@@ -1927,7 +1964,7 @@ def _stable_quiet_readback(
         systemd
     )
     _require_fbs_shadow_terminal(
-        first_observer_services,
+        dict(first.get("services") or {}),
         context="first stable quiet readback",
     )
     first_projection = _quiet_readback_projection(
@@ -1949,7 +1986,7 @@ def _stable_quiet_readback(
         systemd
     )
     _require_fbs_shadow_terminal(
-        second_observer_services,
+        dict(second.get("services") or {}),
         context="second stable quiet readback",
     )
     second_projection = _quiet_readback_projection(
@@ -2028,7 +2065,7 @@ def maintenance_control_signature(
                 or ""
             ),
         }
-        for unit in INDEPENDENT_WRITER_TIMER_UNITS
+        for unit in CONTROL_SIGNATURE_INDEPENDENT_WRITER_TIMER_UNITS
     }
     payload = {
         "master_desired": auto_updates.get("master_desired"),
@@ -2077,6 +2114,11 @@ def _independent_writer_timer_restore_plan(
     plan: dict[str, bool] = {}
     for unit in INDEPENDENT_WRITER_TIMER_UNITS:
         state = dict(timers.get(unit) or {})
+        if not state and unit == FBS_SHADOW_TIMER_UNIT:
+            state = dict(
+                (baseline.get("continuous_observer_timers") or {}).get(unit)
+                or {}
+            )
         pair = (
             str(state.get("is_enabled") or ""),
             str(state.get("is_active") or ""),
@@ -2102,6 +2144,29 @@ def _restore_independent_writer_timers(
             systemd.enable_now(unit)
         else:
             systemd.disable_now(unit)
+
+
+def _require_independent_writer_timers_restored(
+    status: Mapping[str, Any],
+    plan: Mapping[str, bool],
+) -> None:
+    timers = dict(status.get("timers") or {})
+    for unit in INDEPENDENT_WRITER_TIMER_UNITS:
+        state = dict(timers.get(unit) or {})
+        actual = (
+            str(state.get("is_enabled") or ""),
+            str(state.get("is_active") or ""),
+        )
+        expected = (
+            ("enabled", "active")
+            if plan.get(unit) is True
+            else ("disabled", "inactive")
+        )
+        if actual != expected:
+            raise RuntimeError(
+                "independent writer timer exact prior state was not restored: "
+                f"{unit}={actual!r}, expected={expected!r}"
+            )
 
 
 def _parse_systemd_utc_timestamp(raw: str) -> datetime:
@@ -2543,7 +2608,10 @@ def maintenance_hold(
     state_path = runtime_dir / STATE_FILENAME
     audit_path = runtime_dir / AUDIT_FILENAME
     state = json.loads(state_path.read_text(encoding="utf-8"))
-    resumed_prepared = bool(state.get("prepared_resume_binding"))
+    resumed_prepared = bool(
+        state.get("prepared_resume_binding")
+        or state.get("pause_owned_inventory_resume_binding")
+    )
     if prepared.get("quiet"):
         if resumed_prepared:
             stable = _stable_quiet_readback(
@@ -2663,6 +2731,10 @@ def maintenance_restore(
         idempotent: bool,
         service_continuity_readback: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        _require_independent_writer_timers_restored(
+            final_status,
+            independent_writer_timer_restore_plan,
+        )
         control = maintenance_control_signature(
             final_status,
             runtime_dir=runtime_dir,
@@ -3081,6 +3153,277 @@ def maintenance_restore(
         raise
 
 
+def _unit_state_pair(state: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        str(state.get("is_enabled") or ""),
+        str(state.get("is_active") or ""),
+    )
+
+
+def _resume_legacy_fbs_pause_ownership(
+    runtime_dir: Path,
+    *,
+    existing: dict[str, Any],
+    before: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    persisted_readback: Mapping[str, Any],
+    persisted_signature: Mapping[str, Any],
+    current_revision: int,
+    current_policy_fingerprint: str,
+    systemd: SystemdClient,
+    window_id: str,
+    plan_fingerprint: str,
+) -> dict[str, Any] | None:
+    """Bind the exact pre-upgrade FBS timer prestate before pausing it.
+
+    Runtime revisions before FBS became pause-owned captured that timer in the
+    continuous-observer section.  Only an exact active prepared revision may
+    reuse that durable slot; current timer state is never captured or rebased.
+    """
+
+    if FBS_SHADOW_TIMER_UNIT in dict(baseline.get("timers") or {}):
+        return None
+    legacy_state = dict(
+        (baseline.get("continuous_observer_timers") or {}).get(
+            FBS_SHADOW_TIMER_UNIT
+        )
+        or {}
+    )
+    legacy_pair = _unit_state_pair(legacy_state)
+    if legacy_pair not in {
+        ("enabled", "active"),
+        ("disabled", "inactive"),
+    }:
+        raise RuntimeError(
+            "prepared maintenance FBS shadow prestate is not exactly restorable"
+        )
+    if str(legacy_state.get("unit") or "") != FBS_SHADOW_TIMER_UNIT:
+        raise RuntimeError(
+            "prepared maintenance FBS shadow prestate identity drifted"
+        )
+    if str(existing.get("phase") or "") != "prepared":
+        raise RuntimeError(
+            "legacy FBS pause ownership requires the same prepared revision"
+        )
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+        or str(barrier.get("window_id") or "") != window_id
+        or str(barrier.get("plan_fingerprint") or "") != plan_fingerprint
+    ):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership barrier identity drifted"
+        )
+    if (
+        str(existing.get("schema_version") or "") != SCHEMA_VERSION
+        or str(baseline.get("schema_version") or "") != SCHEMA_VERSION
+        or str(persisted_readback.get("schema_version") or "")
+        != SCHEMA_VERSION
+    ):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership schema drifted"
+        )
+    barrier_started = _parse_utc_instant(
+        barrier.get("started_at"), label="barrier started_at"
+    )
+    baseline_captured = _parse_utc_instant(
+        baseline.get("captured_at"), label="maintenance baseline captured_at"
+    )
+    hold_started = _parse_utc_instant(
+        existing.get("hold_started_at"), label="maintenance hold_started_at"
+    )
+    prepared_at = _parse_utc_instant(
+        existing.get("prepared_at"), label="maintenance prepared_at"
+    )
+    if not barrier_started <= baseline_captured <= hold_started <= prepared_at:
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership prestate chronology drifted"
+        )
+    current_inventory = list(before.get("discovered_wb_core_timers") or [])
+    if (
+        list(baseline.get("discovered_wb_core_timers") or [])
+        != current_inventory
+        or list(persisted_readback.get("discovered_wb_core_timers") or [])
+        != current_inventory
+        or current_inventory != sorted(CLASSIFIED_WB_CORE_TIMER_UNITS)
+    ):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership timer inventory drifted"
+        )
+    persisted_fbs_state = dict(
+        (persisted_readback.get("continuous_observer_timers") or {}).get(
+            FBS_SHADOW_TIMER_UNIT
+        )
+        or {}
+    )
+    if _unit_state_pair(persisted_fbs_state) != legacy_pair:
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership prestate drifted"
+        )
+    if before.get("unknown_wb_core_timers") or before.get("cron_entries"):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership found unclassified execution"
+        )
+    timers = dict(before.get("timers") or {})
+    for unit in ALL_BUSINESS_TIMER_UNITS:
+        if unit in {FBS_SHADOW_TIMER_UNIT, "wb-core-warehouse-functional-sync.timer"}:
+            continue
+        if _unit_state_pair(dict(timers.get(unit) or {})) != (
+            "disabled",
+            "inactive",
+        ):
+            raise RuntimeError(
+                "prepared maintenance FBS pause ownership found timer drift: "
+                + unit
+            )
+    fbs_current = _unit_state_pair(dict(timers.get(FBS_SHADOW_TIMER_UNIT) or {}))
+    prior_binding = dict(
+        existing.get("pause_owned_inventory_resume_binding") or {}
+    )
+    allowed_current_pairs = {("disabled", "inactive")}
+    if legacy_pair == ("enabled", "active"):
+        allowed_current_pairs.add(legacy_pair)
+    if fbs_current not in allowed_current_pairs or (
+        not prior_binding and fbs_current != legacy_pair
+    ):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership current timer drifted"
+        )
+    services = dict(before.get("services") or {})
+    for unit, state_raw in services.items():
+        if unit == FBS_SHADOW_SERVICE_UNIT:
+            continue
+        if str((state_raw or {}).get("is_active") or "") not in (
+            QUIESCENT_SERVICE_STATES
+        ):
+            raise RuntimeError(
+                "prepared maintenance FBS pause ownership found active service: "
+                + unit
+            )
+    fbs_service = dict(services.get(FBS_SHADOW_SERVICE_UNIT) or {})
+    fbs_service_active = (
+        str(fbs_service.get("is_active") or "")
+        not in QUIESCENT_SERVICE_STATES
+        or int((fbs_service.get("properties") or {}).get("MainPID") or 0) != 0
+    )
+    fbs_pid = int((fbs_service.get("properties") or {}).get("MainPID") or 0)
+    writer_processes = [dict(row) for row in before.get("writer_processes") or []]
+    unexpected_writers = [
+        row
+        for row in writer_processes
+        if str(row.get("marker") or "") != FBS_SHADOW_PROCESS_MARKER
+        or (fbs_pid > 0 and int(row.get("pid") or 0) != fbs_pid)
+    ]
+    if unexpected_writers:
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership found another writer"
+        )
+    runtime = dict(before.get("runtime_schedules") or {})
+    if (
+        bool((runtime.get("web_vitrina") or {}).get("active"))
+        or list(
+            (runtime.get("feedback_complaints") or {}).get("active_runs")
+            or []
+        )
+        or (runtime.get("spp") or {}).get("active_job") is not None
+    ):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership runtime is not drained"
+        )
+    locks = dict(before.get("writer_locks") or {})
+    if any(
+        bool((value or {}).get("held"))
+        for key, value in locks.items()
+        if key not in {"seller_portal", "warehouse_functional"}
+    ) or bool((locks.get("seller_portal") or {}).get("busy")):
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership found another active lock"
+        )
+    warehouse_lock_held = bool(
+        (locks.get("warehouse_functional") or {}).get("held")
+    )
+    if warehouse_lock_held and not fbs_service_active:
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership lock holder is unknown"
+        )
+    sidecars = _sqlite_sidecar_readback(runtime_dir)
+    sidecars_hot = any(
+        bool(item.get("exists"))
+        for item in dict(sidecars.get("sidecars") or {}).values()
+    )
+    if sidecars_hot and not fbs_service_active:
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership has an unexplained SQLite sidecar"
+        )
+    binding = {
+        "schema_version": "business_data_pause_owned_inventory_resume_v1",
+        "window_id": window_id,
+        "plan_fingerprint": plan_fingerprint,
+        "barrier_state_fingerprint": str(
+            barrier.get("state_fingerprint") or ""
+        ),
+        "hold_started_at": str(existing.get("hold_started_at") or ""),
+        "prepared_at": str(existing.get("prepared_at") or ""),
+        "paused_policy_revision": current_revision,
+        "paused_policy_fingerprint": current_policy_fingerprint,
+        "baseline_control_fingerprint": str(
+            persisted_signature.get("fingerprint") or ""
+        ),
+        "baseline_fingerprint": _stable_fingerprint(dict(baseline)),
+        "baseline_captured_at": str(baseline.get("captured_at") or ""),
+        "baseline_timer_source": "continuous_observer_timers",
+        "baseline_timer_state": legacy_state,
+        "prepare_readback_fingerprint": _stable_fingerprint(
+            dict(persisted_readback)
+        ),
+        "timer_inventory": current_inventory,
+        "sqlite_operational_path": str(
+            sidecars.get("operational_path") or ""
+        ),
+    }
+    if prior_binding and prior_binding != binding:
+        raise RuntimeError(
+            "prepared maintenance FBS pause ownership binding drifted"
+        )
+    if not prior_binding:
+        audit_event = _last_private_audit_event(runtime_dir / AUDIT_FILENAME)
+        if (
+            str(audit_event.get("event") or "") != "core_freeze_prepared"
+            or dict(audit_event.get("status") or {})
+            != dict(persisted_readback)
+        ):
+            raise RuntimeError(
+                "prepared maintenance FBS pause ownership audit prestate drifted"
+            )
+        existing["pause_owned_inventory_resume_binding"] = binding
+        _save_json_0600(runtime_dir / STATE_FILENAME, existing)
+        _append_audit_0600(
+            runtime_dir / AUDIT_FILENAME,
+            {
+                "event": "pause_owned_inventory_resume_bound",
+                "captured_at": _utc_now(),
+                "binding": binding,
+            },
+        )
+    transition_applied = False
+    if fbs_current == ("enabled", "active"):
+        systemd.disable_now(FBS_SHADOW_TIMER_UNIT)
+        transition_applied = True
+    return {
+        "binding": binding,
+        "transition_applied": transition_applied,
+        "resume_pending": bool(
+            transition_applied
+            or fbs_service_active
+            or writer_processes
+            or warehouse_lock_held
+            or sidecars_hot
+        ),
+    }
+
+
 def _resume_prepared_nonquiet(
     runtime_dir: Path,
     *,
@@ -3174,12 +3517,10 @@ def _resume_prepared_nonquiet(
         state = dict(timer_states.get(unit) or {})
         if unit == "wb-core-warehouse-functional-sync.timer":
             expected = dict((baseline.get("timers") or {}).get(unit) or {})
-            if (
-                str(state.get("is_enabled") or "")
-                != str(expected.get("is_enabled") or "")
-                or str(state.get("is_active") or "")
-                != str(expected.get("is_active") or "")
-            ):
+            allowed_pairs = {_unit_state_pair(expected)}
+            if existing.get("prepared_resume_binding"):
+                allowed_pairs.add(("disabled", "inactive"))
+            if _unit_state_pair(state) not in allowed_pairs:
                 raise RuntimeError(
                     "prepared maintenance continuation warehouse timer drifted"
                 )
@@ -3191,18 +3532,31 @@ def _resume_prepared_nonquiet(
             raise RuntimeError(
                 f"prepared maintenance continuation timer is not paused: {unit}"
             )
-    for unit, state_raw in dict(before.get("services") or {}).items():
+    services = dict(before.get("services") or {})
+    for unit, state_raw in services.items():
+        if unit == FBS_SHADOW_SERVICE_UNIT:
+            continue
         if str((state_raw or {}).get("is_active") or "") not in (
             QUIESCENT_SERVICE_STATES
         ):
             raise RuntimeError(
                 f"prepared maintenance continuation service is active: {unit}"
             )
-    _require_fbs_shadow_terminal(
-        _continuous_observer_service_readback(systemd),
-        context="prepared maintenance continuation",
+    fbs_service = dict(services.get(FBS_SHADOW_SERVICE_UNIT) or {})
+    fbs_service_active = (
+        str(fbs_service.get("is_active") or "")
+        not in QUIESCENT_SERVICE_STATES
+        or int((fbs_service.get("properties") or {}).get("MainPID") or 0) != 0
     )
+    fbs_pid = int((fbs_service.get("properties") or {}).get("MainPID") or 0)
     runtime = dict(before.get("runtime_schedules") or {})
+    writer_processes = [dict(row) for row in before.get("writer_processes") or []]
+    unexpected_writers = [
+        row
+        for row in writer_processes
+        if str(row.get("marker") or "") != FBS_SHADOW_PROCESS_MARKER
+        or (fbs_pid > 0 and int(row.get("pid") or 0) != fbs_pid)
+    ]
     if (
         bool((runtime.get("web_vitrina") or {}).get("active"))
         or list(
@@ -3210,7 +3564,7 @@ def _resume_prepared_nonquiet(
             or []
         )
         or (runtime.get("spp") or {}).get("active_job") is not None
-        or before.get("writer_processes")
+        or unexpected_writers
     ):
         raise RuntimeError(
             "prepared maintenance continuation runtime is not drained"
@@ -3219,21 +3573,32 @@ def _resume_prepared_nonquiet(
     if any(
         bool((value or {}).get("held"))
         for key, value in locks.items()
-        if key != "seller_portal"
+        if key not in {"seller_portal", "warehouse_functional"}
     ) or bool((locks.get("seller_portal") or {}).get("busy")):
         raise RuntimeError(
             "prepared maintenance continuation lock is active"
         )
+    warehouse_lock_held = bool(
+        (locks.get("warehouse_functional") or {}).get("held")
+    )
+    if warehouse_lock_held and not fbs_service_active:
+        raise RuntimeError(
+            "prepared maintenance continuation lock is active with unknown holder"
+        )
     sidecars = _sqlite_sidecar_readback(runtime_dir)
-    if any(
+    sidecars_hot = any(
         bool(item.get("exists"))
         for item in dict(sidecars.get("sidecars") or {}).values()
-    ):
+    )
+    if sidecars_hot and not fbs_service_active:
         raise RuntimeError(
             "prepared maintenance continuation has a hot SQLite sidecar"
         )
     audit_event = _last_private_audit_event(runtime_dir / AUDIT_FILENAME)
     prior_binding = dict(existing.get("prepared_resume_binding") or {})
+    pause_owned_binding = dict(
+        existing.get("pause_owned_inventory_resume_binding") or {}
+    )
     if prior_binding:
         if (
             str(audit_event.get("event") or "")
@@ -3242,6 +3607,16 @@ def _resume_prepared_nonquiet(
         ):
             raise RuntimeError(
                 "prepared maintenance continuation audit binding drifted"
+            )
+    elif pause_owned_binding:
+        if (
+            str(audit_event.get("event") or "")
+            != "pause_owned_inventory_resume_bound"
+            or dict(audit_event.get("binding") or {})
+            != pause_owned_binding
+        ):
+            raise RuntimeError(
+                "prepared maintenance continuation pause-owned audit drifted"
             )
     elif (
         str(audit_event.get("event") or "") != "core_freeze_prepared"
@@ -3295,6 +3670,12 @@ def _resume_prepared_nonquiet(
         "reused_phase": "prepared",
         "resume_pending": True,
         "prepared_resume_binding": binding,
+        "active_fbs_writer_drain": bool(
+            fbs_service_active
+            or writer_processes
+            or warehouse_lock_held
+            or sidecars_hot
+        ),
     }
 
 
@@ -3403,6 +3784,35 @@ def maintenance_prepare(
             raise RuntimeError(
                 "active maintenance hold baseline signature drifted"
             )
+        pause_owned_resume = _resume_legacy_fbs_pause_ownership(
+            runtime_dir,
+            existing=existing,
+            before=before,
+            baseline=baseline,
+            persisted_readback=persisted_readback,
+            persisted_signature=persisted_signature,
+            current_revision=current_revision,
+            current_policy_fingerprint=str(
+                current_auto_updates.get("policy_fingerprint") or ""
+            ),
+            systemd=systemd,
+            window_id=window_id,
+            plan_fingerprint=plan_fingerprint,
+        )
+        if pause_owned_resume and (
+            pause_owned_resume["transition_applied"]
+            or pause_owned_resume["resume_pending"]
+        ):
+            return {
+                **before,
+                "status": "prepared",
+                "idempotent": True,
+                "reused_phase": "prepared",
+                "resume_pending": True,
+                "pause_owned_inventory_resume_binding": (
+                    pause_owned_resume["binding"]
+                ),
+            }
         current_signature = maintenance_control_signature(
             before,
             runtime_dir=runtime_dir,
