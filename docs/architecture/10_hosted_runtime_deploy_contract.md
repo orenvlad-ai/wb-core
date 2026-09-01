@@ -1372,3 +1372,13 @@ The sole mapping write path is the separate default-off
 authorizer permits one canonical identity-mapping insert and denies every other
 table write. Lifecycle debit and history supersession remain a later distinct
 `fbs-lifecycle-quality-recovery` Apply; neither profile is dispatched by deploy.
+
+Migration 180's `wbc0027_breakglass_last_good.py` remains inert on deploy. A
+production operation first uses the existing deploy-persistent
+`business-data-maintenance` HTTP barrier, complete writer/timer inventory and
+detached exact-restore watchdog/continuity path. Inside that confirmed quiet
+boundary the repo-owned runner admits only the exact sealed JSON and accepted
+inventory capture, writes a durable before-image before its marker, and may
+append exactly one 303-cell provisional overlay operation. The official revoke
+mode is also artifact-before-marker and append-only. No ad-hoc timer stop,
+second barrier, source-table edit or unmerged runtime is supported.
