@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+import tracemalloc
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,6 +32,7 @@ from apps.wbc0027_breakglass_last_good import (  # noqa: E402
     revoke_manifest,
     revoke_readback_manifest,
 )
+from apps import wbc0027_breakglass_last_good as breakglass_runner  # noqa: E402
 from packages.application.sheet_vitrina_v1_breakglass_last_good import (  # noqa: E402
     apply_breakglass_last_good_overlay,
     read_active_breakglass_last_good,
@@ -47,12 +49,15 @@ PUBLIC_DATES = ["2026-08-31", "2026-09-01"]
 NM_IDS = [497413772, *range(600000001, 600000033)]
 LEGACY_JSON_DIGEST = "sha256:500092495d9da36fa50bc94f1b9b8bfd5d4e2a1e5e2503bf85b773637553d874"
 BLOB_FIXTURE_NON_TARGET_DIGEST = "sha256:01a95006e7db6fd0121d6a1de3674d322119cd21f706a2f32dcf9546361bdcc7"
+LEGACY_FIXTURE_NON_TARGET_DIGEST = "sha256:204a1fcc37561a2dbff16d0090e0850d5b9b4af78bb02910e2649ca7866d64a0"
 
 
 def main() -> None:
     _assert_sqlite_blob_canonicalization()
     with TemporaryDirectory(prefix="wbc0027-breakglass-last-good-") as raw:
         root = Path(raw)
+        _assert_legacy_streaming_parity(root / "legacy.sqlite3")
+        _assert_large_digest_is_streamed(root / "large.sqlite3")
         db_path = root / "operational.sqlite3"
         source_path = root / "sealed-economics.json"
         _seed_operational(db_path)
@@ -170,6 +175,7 @@ def _assert_sqlite_blob_canonicalization() -> None:
 def _assert_blob_digest_properties(db_path: Path) -> str:
     baseline = _read_non_target_digest(db_path)
     assert baseline == BLOB_FIXTURE_NON_TARGET_DIGEST
+    assert baseline == _read_eager_non_target_digest(db_path)
     assert baseline == _read_non_target_digest(db_path)
     conn = sqlite3.connect(db_path)
     try:
@@ -218,12 +224,101 @@ def _assert_blob_digest_properties(db_path: Path) -> str:
     return baseline
 
 
+def _assert_legacy_streaming_parity(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE sheet_vitrina_v1_warehouse_stream_legacy(
+              row_id INTEGER,nullable_value TEXT,integer_value INTEGER,real_value REAL
+            );
+            INSERT INTO sheet_vitrina_v1_warehouse_stream_legacy VALUES
+              (2,NULL,-7,3.5),
+              (1,'legacy',42,0.0);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    streamed = _read_non_target_digest(db_path)
+    assert streamed == _read_eager_non_target_digest(db_path)
+    assert streamed == LEGACY_FIXTURE_NON_TARGET_DIGEST
+    assert _fingerprint({"t": [[1], [2]]}) != _fingerprint({"t": [[2], [1]]})
+
+
+def _assert_large_digest_is_streamed(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE sheet_vitrina_v1_warehouse_stream_large("
+            "row_id INTEGER PRIMARY KEY,payload TEXT)"
+        )
+        payload = "x" * 1024
+        conn.executemany(
+            "INSERT INTO sheet_vitrina_v1_warehouse_stream_large VALUES(?,?)",
+            ((index, payload) for index in range(30_000)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    original = breakglass_runner._table_rows
+    breakglass_runner._table_rows = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("non-target digest must not materialize a table")
+    )
+    try:
+        tracemalloc.start()
+        first = _read_non_target_digest(db_path)
+        _current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        assert first == _read_non_target_digest(db_path)
+        assert peak < 8 * 1024 * 1024, peak
+    finally:
+        breakglass_runner._table_rows = original
+        if tracemalloc.is_tracing():
+            tracemalloc.stop()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE sheet_vitrina_v1_warehouse_stream_large "
+            "SET payload=? WHERE row_id=29999",
+            ("x" * 1023 + "y",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert _read_non_target_digest(db_path) != first
+
+
 def _read_non_target_digest(db_path: Path) -> str:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
     try:
         return _non_target_digest(conn)
+    finally:
+        conn.close()
+
+
+def _read_eager_non_target_digest(db_path: Path) -> str:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    try:
+        tables = breakglass_runner._tables(conn)
+        selected = sorted(
+            table
+            for table in tables
+            if table in breakglass_runner.NON_TARGET_TABLES
+            or table.startswith(breakglass_runner.NON_TARGET_TABLE_PREFIXES)
+        )
+        return _fingerprint(
+            {
+                table: breakglass_runner._table_rows(conn, table)
+                for table in selected
+            }
+        )
     finally:
         conn.close()
 

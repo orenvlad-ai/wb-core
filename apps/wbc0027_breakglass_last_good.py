@@ -95,6 +95,11 @@ PRODUCTION_INVENTORY_TOTALS = {
     "combined": 143246,
 }
 SQLITE_CANONICAL_VALUE_CONTRACT = "wbc0027_sqlite_scalar_canonical_json/v1"
+_CANONICAL_JSON_ENCODER = json.JSONEncoder(
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+)
 
 
 class BreakglassRunnerError(RuntimeError):
@@ -1045,11 +1050,28 @@ def _non_target_digest(conn: sqlite3.Connection) -> str:
         if table in NON_TARGET_TABLES
         or table.startswith(NON_TARGET_TABLE_PREFIXES)
     )
-    payload = {
-        table: _table_rows(conn, table)
-        for table in selected
-    }
-    return _fingerprint(payload)
+    digest = hashlib.sha256()
+    digest.update(b"{")
+    for table_index, table in enumerate(selected):
+        if table_index:
+            digest.update(b",")
+        _update_digest_with_canonical_json(digest, table)
+        digest.update(b":[")
+        columns = _table_columns(conn, table)
+        if columns:
+            order = ",".join(f'"{item}"' for item in columns)
+            for row_index, row in enumerate(
+                conn.execute(f'SELECT {order} FROM "{table}" ORDER BY {order}')
+            ):
+                if row_index:
+                    digest.update(b",")
+                _update_digest_with_canonical_json(
+                    digest,
+                    [_canonicalize_sqlite_scalar(value) for value in row],
+                )
+        digest.update(b"]")
+    digest.update(b"}")
+    return "sha256:" + digest.hexdigest()
 
 
 def _breakglass_only_authorizer(
@@ -1073,7 +1095,7 @@ def _breakglass_only_authorizer(
 
 
 def _table_rows(conn: sqlite3.Connection, table: str) -> list[list[Any]]:
-    columns = [str(item[1]) for item in conn.execute(f"PRAGMA table_info({table})")]
+    columns = _table_columns(conn, table)
     if not columns:
         return []
     order = ",".join(f'"{item}"' for item in columns)
@@ -1081,6 +1103,10 @@ def _table_rows(conn: sqlite3.Connection, table: str) -> list[list[Any]]:
         [_canonicalize_sqlite_scalar(value) for value in item]
         for item in conn.execute(f'SELECT {order} FROM "{table}" ORDER BY {order}')
     ]
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [str(item[1]) for item in conn.execute(f"PRAGMA table_info({table})")]
 
 
 def _canonicalize_sqlite_scalar(value: Any) -> Any:
@@ -1144,7 +1170,14 @@ def _file_sha256(path: Path) -> str:
 
 
 def _fingerprint(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    _update_digest_with_canonical_json(digest, value)
+    return "sha256:" + digest.hexdigest()
+
+
+def _update_digest_with_canonical_json(digest: Any, value: Any) -> None:
+    for chunk in _CANONICAL_JSON_ENCODER.iterencode(value):
+        digest.update(chunk.encode("utf-8"))
 
 
 def _canonical_json(value: Any) -> str:
