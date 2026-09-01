@@ -348,11 +348,17 @@ The same runner owns the only production path for the active functional cutover 
   passes the exact acquiring barrier window, plan fingerprint and owner-policy
   revision to both core steps. Core validates the unchanged schema, timer
   inventory, baseline/control fingerprints, prepare readback and audit, requires
-  every core-owned timer already paused, admits only the still-baseline
-  warehouse timer for the nested owner, and rejects any current writer, lock or
-  SQLite journal/WAL/SHM. It then fsyncs one exact resume binding without
-  recapturing or rebasing prestate and performs no timer or business-data
-  mutation. The canonical wrapper completes the ordinary warehouse hold and
+  every core-owned timer already paused, and admits only the still-baseline
+  warehouse timer for the nested owner. The FBS shadow poller is a pause-owned
+  writer, not a continuous observer: its exact timer is disabled while its
+  paired service, exact `apps/wb_fbs_shadow.py` process, warehouse lock and any
+  SQLite sidecar drain naturally without kill. A legacy prepared revision may
+  add that ownership only when its immutable pre-prepare baseline already
+  contains the exact FBS timer under `continuous_observer_timers`; the runner
+  fsyncs an identity-bound upgrade marker before disabling the timer and never
+  recaptures or rebases current state. Any missing/mixed timer state, unrelated
+  process, lock or sidecar fails closed. The canonical wrapper completes the
+  ordinary warehouse hold and
   the final core step requires two stable quiet control reads, including
   continuous-observer services and absent SQLite sidecars, before persisting
   `held`. A repeated process invocation reuses the same binding; mismatched
@@ -361,12 +367,14 @@ The same runner owns the only production path for the active functional cutover 
   unchanged;
 - The same inventory explicitly pauses and restores the exact pre-hold
   enabled/active state of `wb-core-fbs-warehouse-registry.timer`,
+  `wb-core-fbs-shadow-collector.timer`,
   `wb-core-sheet-vitrina-canary-restore.timer`,
   `wb-core-sheet-vitrina-health-candidate.timer` and
   `wb-core-sheet-vitrina-health-confirmation.timer`. Their paired commands
   respectively persist the official FBS warehouse readback, can restore
   timer-control state, launch Web Vitrina refresh/recovery, or persist its
-  health evaluation, so none may run through a broad business-data hold.
+  health evaluation, or append FBS shadow observations/poll state, so none may
+  run through a broad business-data hold.
   `wb-core-root-storage-policy.timer` is separately classified as a
   maintenance-safe continuous observer: its status action only inventories
   registered filesystems and publishes the external root-storage status file,

@@ -367,11 +367,11 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
             _restore_local_boundaries(old)
         assert result["status"] == "held"
         assert result["quiet"] is True
-        observer = result["continuous_observer_timers"][
+        fbs_writer = result["timers"][
             "wb-core-fbs-shadow-collector.timer"
         ]
-        assert observer["is_enabled"] == "enabled"
-        assert observer["is_active"] == "active"
+        assert fbs_writer["is_enabled"] == "disabled"
+        assert fbs_writer["is_active"] == "inactive"
         root_storage_observer = result["continuous_observer_timers"][
             "wb-core-root-storage-policy.timer"
         ]
@@ -888,6 +888,68 @@ def _assert_unknown_timer_fails_before_mutation() -> None:
         assert schedules.disable_calls == 0
 
 
+def _assert_exact_fbs_shadow_process_detection() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        proc_root = Path(raw)
+        exact = proc_root / "4101"
+        exact.mkdir()
+        (exact / "cmdline").write_bytes(
+            b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0"
+        )
+        absolute = proc_root / "4102"
+        absolute.mkdir()
+        (absolute / "cmdline").write_bytes(
+            b"/usr/bin/python3\0"
+            b"/opt/wb-core-runtime/app/apps/wb_fbs_shadow.py\0poll\0"
+        )
+        lookalike = proc_root / "4103"
+        lookalike.mkdir()
+        (lookalike / "cmdline").write_bytes(
+            b"/usr/bin/python3\0apps/wb_fbs_shadow.py.backup\0poll\0"
+        )
+        legacy_nonexistent = proc_root / "4104"
+        legacy_nonexistent.mkdir()
+        (legacy_nonexistent / "cmdline").write_bytes(
+            b"/usr/bin/python3\0apps/wb_fbs_shadow_collector.py\0poll\0"
+        )
+        assert maintenance._writer_processes(proc_root) == [
+            {"pid": 4101, "marker": maintenance.FBS_SHADOW_PROCESS_MARKER},
+            {"pid": 4102, "marker": maintenance.FBS_SHADOW_PROCESS_MARKER},
+        ]
+
+
+def _assert_legacy_control_signature_bytes_are_stable() -> None:
+    legacy_units = (
+        "wb-core-fbs-warehouse-registry.timer",
+        "wb-core-sheet-vitrina-canary-restore.timer",
+        "wb-core-sheet-vitrina-health-candidate.timer",
+        "wb-core-sheet-vitrina-health-confirmation.timer",
+    )
+    status = {
+        "auto_updates": {"master_desired": True, "processes": []},
+        "runtime_schedules": {
+            "web_vitrina": {
+                "schedule_count": 0,
+                "enabled_ids": [],
+                "schedule_policy": {},
+            },
+            "feedback_complaints": {
+                "schedule_count": 0,
+                "enabled_ids": [],
+            },
+        },
+        "timers": {
+            unit: {"is_enabled": "enabled", "is_active": "active"}
+            for unit in legacy_units
+        },
+        "unknown_wb_core_timers": [],
+        "cron_entries": [],
+    }
+    assert maintenance.maintenance_control_signature(status)[
+        "fingerprint"
+    ] == "sha256:9300e94cf51d7189104a931064ae77f6f394451f406a7f92532f2b6ef4e47d9a"
+
+
 def _assert_unstarted_hold_abort_is_exact_and_drift_safe() -> None:
     production_unknown_five = {
         "wb-core-fbs-warehouse-registry.timer",
@@ -903,6 +965,12 @@ def _assert_unstarted_hold_abort_is_exact_and_drift_safe() -> None:
         "wb-core-root-storage-policy.timer"
     } <= set(maintenance.INDEPENDENT_WRITER_TIMER_UNITS)
     assert "wb-core-root-storage-policy.timer" in (
+        maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
+    )
+    assert "wb-core-fbs-shadow-collector.timer" in (
+        maintenance.INDEPENDENT_WRITER_TIMER_UNITS
+    )
+    assert "wb-core-fbs-shadow-collector.timer" not in (
         maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
     )
 
@@ -1423,13 +1491,14 @@ def _assert_prepared_nonquiet_restart_resume_is_exact() -> None:
                     systemd=restarted,
                     schedules=schedules,
                     proc_root=proc_root,
+                    wait_timeout_seconds=0,
                     poll_interval_seconds=0.01,
                     expected_revision=revision,
                     window_id=window_id,
                     plan_fingerprint=plan_fingerprint,
                 )
-            except RuntimeError as exc:
-                assert "stable quiet readback FBS shadow writer" in str(exc)
+            except TimeoutError as exc:
+                assert "timed out waiting" in str(exc)
             else:
                 raise AssertionError(
                     "resumed hold accepted a newly active FBS writer"
@@ -1509,6 +1578,254 @@ def _assert_prepared_nonquiet_restart_resume_is_exact() -> None:
                 *maintenance.CORE_TIMER_UNITS,
                 *maintenance.INDEPENDENT_WRITER_TIMER_UNITS,
             ]
+        finally:
+            _restore_local_boundaries(old)
+
+
+def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        operational = runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(operational) as connection:
+            connection.execute(
+                "CREATE TABLE business_sentinel (id INTEGER PRIMARY KEY, value TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO business_sentinel (value) VALUES ('unchanged')"
+            )
+        source_digest = hashlib.sha256(operational.read_bytes()).hexdigest()
+        window_id = "legacy-fbs-prepared-restart"
+        plan_fingerprint = "sha256:" + "7" * 64
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id=window_id,
+            window_kind="snapshot",
+            plan_fingerprint=plan_fingerprint,
+            approval_reference="root-gate-legacy-fbs-smoke",
+            actor="smoke",
+            reason="bind exact legacy FBS timer prestate",
+        )
+        original_systemd = FakeSystemd()
+        fbs_timer = maintenance.FBS_SHADOW_TIMER_UNIT
+        fbs_service = maintenance.FBS_SHADOW_SERVICE_UNIT
+        original_systemd.service_states[fbs_service].update(
+            {
+                "is_active": "activating",
+                "properties": {
+                    "MainPID": 5151,
+                    "ExecMainStartTimestamp": "Sat 2000-01-01 00:00:00 UTC",
+                },
+            }
+        )
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=original_systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="legacy-runtime",
+                reason="partial prepare before inventory correction",
+            )
+            state_path = runtime_dir / maintenance.STATE_FILENAME
+            audit_path = runtime_dir / maintenance.AUDIT_FILENAME
+            legacy_state = json.loads(state_path.read_text())
+            baseline_fbs = copy.deepcopy(
+                legacy_state["baseline"]["timers"].pop(fbs_timer)
+            )
+            legacy_state["baseline"][
+                "continuous_observer_timers"
+            ][fbs_timer] = copy.deepcopy(baseline_fbs)
+            legacy_state["baseline"]["services"].pop(fbs_service)
+            legacy_prepared = legacy_state["prepare_readback"]
+            legacy_prepared["timers"].pop(fbs_timer)
+            legacy_prepared["continuous_observer_timers"][fbs_timer] = (
+                copy.deepcopy(baseline_fbs)
+            )
+            legacy_prepared["services"].pop(fbs_service)
+            legacy_state["prepare_readback"] = legacy_prepared
+            state_path.write_text(json.dumps(legacy_state))
+            state_path.chmod(0o600)
+            audit_rows = [
+                json.loads(line)
+                for line in audit_path.read_text().splitlines()
+                if line.strip()
+            ]
+            assert audit_rows[-1]["event"] == "core_freeze_prepared"
+            audit_rows[-1]["status"] = copy.deepcopy(legacy_prepared)
+            audit_path.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                    for row in audit_rows
+                )
+            )
+            audit_path.chmod(0o600)
+            durable_baseline = copy.deepcopy(legacy_state["baseline"])
+            durable_signature = copy.deepcopy(
+                legacy_state["control_signature_before_hold"]
+            )
+            revision = int(
+                legacy_prepared["auto_updates"]["revision"]
+            )
+
+            restarted = FakeSystemd()
+            restarted.timer_states = copy.deepcopy(
+                original_systemd.timer_states
+            )
+            restarted.timer_states[fbs_timer].update(
+                {"is_enabled": "enabled", "is_active": "active"}
+            )
+            restarted.service_states = copy.deepcopy(
+                original_systemd.service_states
+            )
+            restarted.mutations = []
+            writer_proc = proc_root / "5151"
+            writer_proc.mkdir()
+            (writer_proc / "cmdline").write_bytes(
+                b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0"
+            )
+            warehouse_lock = {"held": True}
+
+            def lock_summary(runtime: Path) -> dict[str, Any]:
+                return {
+                    "warehouse_functional": {
+                        "path": str(runtime / "warehouse.lock"),
+                        "held": warehouse_lock["held"],
+                    },
+                    "web_schedule": {
+                        "path": str(runtime / "web.lock"),
+                        "held": False,
+                    },
+                    "spp_execution": {
+                        "path": str(runtime / "spp.lock"),
+                        "held": False,
+                    },
+                    "seller_portal": {"busy": False},
+                    "finance_backup": {
+                        "path": str(runtime / "finance.lock"),
+                        "held": False,
+                    },
+                }
+
+            maintenance._lock_summary = lock_summary
+            resumed = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="corrected-runtime",
+                reason="resume exact legacy FBS prestate",
+                expected_revision=revision,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
+            assert resumed["resume_pending"] is True
+            assert resumed["pause_owned_inventory_resume_binding"][
+                "baseline_timer_source"
+            ] == "continuous_observer_timers"
+            assert restarted.timer_states[fbs_timer]["is_enabled"] == (
+                "disabled"
+            )
+            assert restarted.timer_states[fbs_timer]["is_active"] == (
+                "inactive"
+            )
+            assert restarted.mutations == [fbs_timer]
+            rebound_state = json.loads(state_path.read_text())
+            assert rebound_state["baseline"] == durable_baseline
+            assert (
+                rebound_state["control_signature_before_hold"]
+                == durable_signature
+            )
+            try:
+                maintenance.maintenance_hold(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    wait_timeout_seconds=0,
+                    poll_interval_seconds=0.01,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError("active exact FBS process reached held")
+            assert json.loads(state_path.read_text())["phase"] == "prepared"
+
+            (writer_proc / "cmdline").unlink()
+            writer_proc.rmdir()
+            restarted.service_states[fbs_service].update(
+                {"is_active": "inactive", "properties": {"MainPID": 0}}
+            )
+            warehouse_lock["held"] = False
+            restarted.disable_now("wb-core-warehouse-functional-sync.timer")
+            held = maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                poll_interval_seconds=0.01,
+                expected_revision=revision,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
+            assert held["status"] == "held"
+            assert held["quiet"] is True
+            assert held["stable_quiet_readback"]["fingerprint"].startswith(
+                "sha256:"
+            )
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                restarted.enable_now(
+                    "wb-core-warehouse-functional-sync.timer"
+                )
+                return {"status": "restored"}
+
+            restored = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke",
+                reason="restore exact legacy FBS timer prestate",
+                expected_revision=revision,
+                warehouse_restore=restore_warehouse,
+            )
+            assert restored["status"] == "restored"
+            assert restored["exact_prior_state_restored"] is True
+            assert restarted.timer_states[fbs_timer]["is_enabled"] == (
+                "enabled"
+            )
+            assert restarted.timer_states[fbs_timer]["is_active"] == "active"
+            assert hashlib.sha256(operational.read_bytes()).hexdigest() == (
+                source_digest
+            )
+
+            disabled_legacy = copy.deepcopy(durable_baseline)
+            disabled_legacy["continuous_observer_timers"][fbs_timer].update(
+                {"is_enabled": "disabled", "is_active": "inactive"}
+            )
+            disabled_plan = maintenance._independent_writer_timer_restore_plan(
+                disabled_legacy
+            )
+            assert disabled_plan[fbs_timer] is False
+            maintenance._restore_independent_writer_timers(
+                restarted,
+                disabled_plan,
+            )
+            assert restarted.timer_states[fbs_timer]["is_enabled"] == (
+                "disabled"
+            )
+            assert restarted.timer_states[fbs_timer]["is_active"] == (
+                "inactive"
+            )
         finally:
             _restore_local_boundaries(old)
 
@@ -1977,6 +2294,8 @@ def main() -> int:
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_prepared_quiet_hold_is_reused_without_lifecycle_replay()
     _assert_prepared_quiet_hold_reuse_fails_closed_on_drift()
+    _assert_exact_fbs_shadow_process_detection()
+    _assert_legacy_control_signature_bytes_are_stable()
     _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation()
     _assert_persisted_service_continuity_accepts_exact_completion()
     _assert_quiet_confirmed_hold_continuity_is_exact()
@@ -1985,6 +2304,7 @@ def main() -> int:
     _assert_status_does_not_initialize_owner_policy()
     _assert_legacy_active_hold_is_not_guessed()
     _assert_prepared_nonquiet_restart_resume_is_exact()
+    _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly()
     _assert_exact_policy_restore_and_revision_guards()
     _assert_unknown_policy_state_blocks_resume()
     _assert_policy_v1_hold_restores_exact_feature_schedules_once()
