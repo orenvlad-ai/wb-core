@@ -3406,6 +3406,125 @@ def main() -> None:
         or business_args.action != "hold"
     ):
         raise AssertionError("hosted runner must expose all-writer business-data hold")
+    continuation_fingerprint = "sha256:" + "c" * 64
+    continuation_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "business-data-maintenance",
+            "hold",
+            "--expected-revision",
+            "59",
+            "--window-id",
+            "prepared-restart-window",
+            "--plan-fingerprint",
+            continuation_fingerprint,
+        ]
+    )
+    continuation_calls: list[tuple[str, dict[str, object]]] = []
+
+    def continuation_runner(
+        _target: object,
+        *,
+        action: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        continuation_calls.append((action, kwargs))
+        if action == "prepare":
+            return {"status": "prepared", "resume_pending": True}
+        if action == "hold":
+            return {"status": "held", "quiet": True}
+        raise AssertionError(f"unexpected continuation action: {action}")
+
+    with (
+        mock.patch.object(
+            hosted_runtime,
+            "load_hosted_runtime_target",
+            return_value=active_target,
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_business_data_maintenance_runner",
+            side_effect=continuation_runner,
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_warehouse_functional_maintenance_action",
+            return_value={"status": "held"},
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_autoanswers_lifecycle",
+            return_value={"status": "paused"},
+        ),
+        mock.patch.object(hosted_runtime, "_print_json"),
+    ):
+        hosted_runtime.run_business_data_maintenance_command(
+            continuation_args
+        )
+    if [action for action, _ in continuation_calls] != [
+        "prepare",
+        "hold",
+    ]:
+        raise AssertionError(
+            "prepared continuation changed canonical hold sequencing"
+        )
+    for _action, kwargs in continuation_calls:
+        if (
+            kwargs.get("expected_revision") != 59
+            or kwargs.get("window_id") != "prepared-restart-window"
+            or kwargs.get("plan_fingerprint")
+            != continuation_fingerprint
+        ):
+            raise AssertionError(
+                "prepared continuation lost exact revision/window binding"
+            )
+
+    continuation_payload = {
+        "status": "prepared",
+        "resume_pending": True,
+    }
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(continuation_payload),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed,
+    ) as run_mock:
+        hosted_runtime._run_remote_business_data_maintenance_runner(
+            active_target,
+            action="prepare",
+            expected_revision=59,
+            window_id="prepared-restart-window",
+            plan_fingerprint=continuation_fingerprint,
+        )
+    continuation_command = " ".join(run_mock.call_args.args[0])
+    if not all(
+        token in continuation_command
+        for token in (
+            "--expected-revision 59",
+            "--window-id prepared-restart-window",
+            f"--plan-fingerprint {continuation_fingerprint}",
+        )
+    ):
+        raise AssertionError(
+            "remote prepared continuation command lost exact identity"
+        )
+    try:
+        hosted_runtime._run_remote_business_data_maintenance_runner(
+            active_target,
+            action="prepare",
+            window_id="prepared-restart-window",
+        )
+    except ValueError as exc:
+        if "both exact window identity" not in str(exc):
+            raise
+    else:
+        raise AssertionError(
+            "remote prepared continuation accepted partial identity"
+        )
     business_restore_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "business-data-maintenance",

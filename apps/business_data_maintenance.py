@@ -36,6 +36,7 @@ from packages.application.business_data_write_barrier import (  # noqa: E402
     mark_barrier_restoring,
     release_barrier,
 )
+from packages.application.storage_registry import StoreRegistry  # noqa: E402
 
 
 SCHEMA_VERSION = "business_data_maintenance_v1"
@@ -1807,6 +1808,168 @@ def maintenance_status(
     return result
 
 
+def _sqlite_sidecar_readback(runtime_dir: Path) -> dict[str, Any]:
+    operational = StoreRegistry(runtime_dir).resolve("operational")
+    sidecars = {
+        suffix: Path(str(operational) + suffix)
+        for suffix in ("-journal", "-wal", "-shm")
+    }
+    return {
+        "operational_path": str(operational),
+        "sidecars": {
+            suffix: {
+                "path": str(path),
+                "exists": path.exists(),
+                "size_bytes": path.stat().st_size if path.exists() else 0,
+            }
+            for suffix, path in sidecars.items()
+        },
+    }
+
+
+def _quiet_readback_projection(
+    status: Mapping[str, Any],
+    *,
+    sqlite_sidecars: Mapping[str, Any],
+    continuous_observer_services: Mapping[str, Any],
+) -> dict[str, Any]:
+    def units(raw: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            unit: {
+                "is_enabled": str((value or {}).get("is_enabled") or ""),
+                "is_active": str((value or {}).get("is_active") or ""),
+                "main_pid": int(
+                    ((value or {}).get("properties") or {}).get("MainPID")
+                    or 0
+                ),
+                "started_at": str(
+                    ((value or {}).get("properties") or {}).get(
+                        "ExecMainStartTimestamp"
+                    )
+                    or ""
+                ),
+            }
+            for unit, value in sorted(dict(raw or {}).items())
+        }
+
+    auto_updates = dict(status.get("auto_updates") or {})
+    return {
+        "quiet": status.get("quiet") is True,
+        "timers": units(dict(status.get("timers") or {})),
+        "services": units(dict(status.get("services") or {})),
+        "continuous_observer_timers": units(
+            dict(status.get("continuous_observer_timers") or {})
+        ),
+        "continuous_observer_services": units(continuous_observer_services),
+        "runtime_schedules": dict(status.get("runtime_schedules") or {}),
+        "writer_processes": list(status.get("writer_processes") or []),
+        "writer_locks": dict(status.get("writer_locks") or {}),
+        "cron_entries": list(status.get("cron_entries") or []),
+        "discovered_wb_core_timers": list(
+            status.get("discovered_wb_core_timers") or []
+        ),
+        "unknown_wb_core_timers": list(
+            status.get("unknown_wb_core_timers") or []
+        ),
+        "paused_policy_revision": int(auto_updates.get("revision") or 0),
+        "paused_policy_fingerprint": str(
+            auto_updates.get("policy_fingerprint") or ""
+        ),
+        "sqlite_sidecars": dict(sqlite_sidecars),
+    }
+
+
+def _continuous_observer_service_readback(
+    systemd: SystemdClient,
+) -> dict[str, Any]:
+    return {
+        unit.removesuffix(".timer") + ".service": systemd.unit_state(
+            unit.removesuffix(".timer") + ".service"
+        )
+        for unit in CONTINUOUS_OBSERVER_TIMER_UNITS
+    }
+
+
+def _require_fbs_shadow_terminal(
+    services: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    fbs_shadow = dict(
+        services.get("wb-core-fbs-shadow-collector.service") or {}
+    )
+    if (
+        str(fbs_shadow.get("is_active") or "") not in QUIESCENT_SERVICE_STATES
+        or int((fbs_shadow.get("properties") or {}).get("MainPID") or 0)
+        != 0
+    ):
+        raise RuntimeError(f"{context} FBS shadow writer is active")
+
+
+def _stable_quiet_readback(
+    runtime_dir: Path,
+    *,
+    first: Mapping[str, Any],
+    systemd: SystemdClient,
+    schedules: RuntimeScheduleClient,
+    proc_root: Path,
+    poll_interval_seconds: float,
+) -> dict[str, Any]:
+    first_sidecars = _sqlite_sidecar_readback(runtime_dir)
+    if any(
+        bool(item.get("exists"))
+        for item in dict(first_sidecars.get("sidecars") or {}).values()
+    ):
+        raise RuntimeError(
+            "operational SQLite hot journal/sidecar blocks maintenance hold"
+        )
+    first_observer_services = _continuous_observer_service_readback(
+        systemd
+    )
+    _require_fbs_shadow_terminal(
+        first_observer_services,
+        context="first stable quiet readback",
+    )
+    first_projection = _quiet_readback_projection(
+        first,
+        sqlite_sidecars=first_sidecars,
+        continuous_observer_services=first_observer_services,
+    )
+    if first_projection.get("quiet") is not True:
+        raise RuntimeError("business-data maintenance is not quiet")
+    time.sleep(min(2.0, max(0.05, float(poll_interval_seconds))))
+    second = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    second_sidecars = _sqlite_sidecar_readback(runtime_dir)
+    second_observer_services = _continuous_observer_service_readback(
+        systemd
+    )
+    _require_fbs_shadow_terminal(
+        second_observer_services,
+        context="second stable quiet readback",
+    )
+    second_projection = _quiet_readback_projection(
+        second,
+        sqlite_sidecars=second_sidecars,
+        continuous_observer_services=second_observer_services,
+    )
+    if first_projection != second_projection:
+        raise RuntimeError(
+            "business-data maintenance quiet readback is not stable"
+        )
+    return {
+        "first_captured_at": str(first.get("captured_at") or ""),
+        "second_captured_at": str(second.get("captured_at") or ""),
+        "fingerprint": _stable_fingerprint(second_projection),
+        "projection": second_projection,
+        "status": second,
+    }
+
+
 def maintenance_control_signature(
     status: Mapping[str, Any],
     *,
@@ -2361,6 +2524,8 @@ def maintenance_hold(
     actor: str = "business_data_maintenance",
     reason: str = "canonical cross-writer hold",
     expected_revision: int | None = None,
+    window_id: str = "",
+    plan_fingerprint: str = "",
     autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
     prepared = maintenance_prepare(
@@ -2371,20 +2536,34 @@ def maintenance_hold(
         actor=actor,
         reason=reason,
         expected_revision=expected_revision,
+        window_id=window_id,
+        plan_fingerprint=plan_fingerprint,
         autoanswers_reconcile=autoanswers_reconcile,
     )
+    state_path = runtime_dir / STATE_FILENAME
+    audit_path = runtime_dir / AUDIT_FILENAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    resumed_prepared = bool(state.get("prepared_resume_binding"))
     if prepared.get("quiet"):
-        state_path = runtime_dir / STATE_FILENAME
-        audit_path = runtime_dir / AUDIT_FILENAME
-        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if resumed_prepared:
+            stable = _stable_quiet_readback(
+                runtime_dir,
+                first=prepared,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+            prepared = dict(stable["status"])
+            prepared["stable_quiet_readback"] = {
+                key: value
+                for key, value in stable.items()
+                if key != "status"
+            }
         state.update({"phase": "held", "held_at": _utc_now(), "hold_readback": prepared})
         _save_json_0600(state_path, state)
         _append_audit_0600(audit_path, {"event": "hold_acquired", "captured_at": _utc_now(), "status": prepared})
         return {**prepared, "status": "held"}
-    state_path = runtime_dir / STATE_FILENAME
-    audit_path = runtime_dir / AUDIT_FILENAME
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-
     deadline = time.monotonic() + max(0.0, float(wait_timeout_seconds))
     while True:
         current = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules, proc_root=proc_root)
@@ -2397,6 +2576,19 @@ def maintenance_hold(
             raise TimeoutError(state["error"])
         time.sleep(max(0.05, float(poll_interval_seconds)))
 
+    if resumed_prepared:
+        stable = _stable_quiet_readback(
+            runtime_dir,
+            first=current,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        current = dict(stable["status"])
+        current["stable_quiet_readback"] = {
+            key: value for key, value in stable.items() if key != "status"
+        }
     state.update({"phase": "held", "held_at": _utc_now(), "hold_readback": current})
     _save_json_0600(state_path, state)
     _append_audit_0600(audit_path, {"event": "hold_acquired", "captured_at": _utc_now(), "status": current})
@@ -2889,6 +3081,223 @@ def maintenance_restore(
         raise
 
 
+def _resume_prepared_nonquiet(
+    runtime_dir: Path,
+    *,
+    existing: dict[str, Any],
+    before: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    persisted_readback: Mapping[str, Any],
+    persisted_signature: Mapping[str, Any],
+    current_revision: int,
+    current_policy_fingerprint: str,
+    systemd: SystemdClient,
+    window_id: str,
+    plan_fingerprint: str,
+) -> dict[str, Any]:
+    if not window_id or not plan_fingerprint:
+        raise RuntimeError(
+            "prepared maintenance continuation requires exact barrier window "
+            "and plan fingerprint"
+        )
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+        or str(barrier.get("window_id") or "") != window_id
+        or str(barrier.get("plan_fingerprint") or "")
+        != plan_fingerprint
+    ):
+        raise RuntimeError(
+            "prepared maintenance continuation barrier identity drifted"
+        )
+    if (
+        str(existing.get("schema_version") or "") != SCHEMA_VERSION
+        or str(baseline.get("schema_version") or "") != SCHEMA_VERSION
+        or str(persisted_readback.get("schema_version") or "")
+        != SCHEMA_VERSION
+    ):
+        raise RuntimeError(
+            "prepared maintenance continuation schema drifted"
+        )
+    try:
+        barrier_started = _parse_utc_instant(
+            barrier.get("started_at"), label="barrier started_at"
+        )
+        hold_started = _parse_utc_instant(
+            existing.get("hold_started_at"),
+            label="maintenance hold_started_at",
+        )
+        prepared_at = _parse_utc_instant(
+            existing.get("prepared_at"),
+            label="maintenance prepared_at",
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "prepared maintenance continuation timestamps are invalid"
+        ) from exc
+    if not barrier_started <= hold_started <= prepared_at:
+        raise RuntimeError(
+            "prepared maintenance continuation predates its barrier"
+        )
+    baseline_inventory = list(
+        baseline.get("discovered_wb_core_timers") or []
+    )
+    current_inventory = list(
+        before.get("discovered_wb_core_timers") or []
+    )
+    prepared_inventory = list(
+        persisted_readback.get("discovered_wb_core_timers") or []
+    )
+    if (
+        baseline_inventory != current_inventory
+        or prepared_inventory != current_inventory
+        or current_inventory != sorted(CLASSIFIED_WB_CORE_TIMER_UNITS)
+    ):
+        raise RuntimeError(
+            "prepared maintenance continuation timer inventory drifted"
+        )
+    if before.get("unknown_wb_core_timers") or before.get("cron_entries"):
+        raise RuntimeError(
+            "prepared maintenance continuation found unclassified execution"
+        )
+    current_auto_updates = dict(before.get("auto_updates") or {})
+    if set(current_auto_updates.get("drift_processes") or []) - {
+        "warehouse_functional"
+    }:
+        raise RuntimeError(
+            "prepared maintenance continuation owner policy drifted"
+        )
+    timer_states = dict(before.get("timers") or {})
+    for unit in ALL_BUSINESS_TIMER_UNITS:
+        state = dict(timer_states.get(unit) or {})
+        if unit == "wb-core-warehouse-functional-sync.timer":
+            expected = dict((baseline.get("timers") or {}).get(unit) or {})
+            if (
+                str(state.get("is_enabled") or "")
+                != str(expected.get("is_enabled") or "")
+                or str(state.get("is_active") or "")
+                != str(expected.get("is_active") or "")
+            ):
+                raise RuntimeError(
+                    "prepared maintenance continuation warehouse timer drifted"
+                )
+            continue
+        if (
+            str(state.get("is_enabled") or "") != "disabled"
+            or str(state.get("is_active") or "") != "inactive"
+        ):
+            raise RuntimeError(
+                f"prepared maintenance continuation timer is not paused: {unit}"
+            )
+    for unit, state_raw in dict(before.get("services") or {}).items():
+        if str((state_raw or {}).get("is_active") or "") not in (
+            QUIESCENT_SERVICE_STATES
+        ):
+            raise RuntimeError(
+                f"prepared maintenance continuation service is active: {unit}"
+            )
+    _require_fbs_shadow_terminal(
+        _continuous_observer_service_readback(systemd),
+        context="prepared maintenance continuation",
+    )
+    runtime = dict(before.get("runtime_schedules") or {})
+    if (
+        bool((runtime.get("web_vitrina") or {}).get("active"))
+        or list(
+            (runtime.get("feedback_complaints") or {}).get("active_runs")
+            or []
+        )
+        or (runtime.get("spp") or {}).get("active_job") is not None
+        or before.get("writer_processes")
+    ):
+        raise RuntimeError(
+            "prepared maintenance continuation runtime is not drained"
+        )
+    locks = dict(before.get("writer_locks") or {})
+    if any(
+        bool((value or {}).get("held"))
+        for key, value in locks.items()
+        if key != "seller_portal"
+    ) or bool((locks.get("seller_portal") or {}).get("busy")):
+        raise RuntimeError(
+            "prepared maintenance continuation lock is active"
+        )
+    sidecars = _sqlite_sidecar_readback(runtime_dir)
+    if any(
+        bool(item.get("exists"))
+        for item in dict(sidecars.get("sidecars") or {}).values()
+    ):
+        raise RuntimeError(
+            "prepared maintenance continuation has a hot SQLite sidecar"
+        )
+    audit_event = _last_private_audit_event(runtime_dir / AUDIT_FILENAME)
+    prior_binding = dict(existing.get("prepared_resume_binding") or {})
+    if prior_binding:
+        if (
+            str(audit_event.get("event") or "")
+            != "prepared_resume_bound"
+            or dict(audit_event.get("binding") or {}) != prior_binding
+        ):
+            raise RuntimeError(
+                "prepared maintenance continuation audit binding drifted"
+            )
+    elif (
+        str(audit_event.get("event") or "") != "core_freeze_prepared"
+        or dict(audit_event.get("status") or {})
+        != dict(persisted_readback)
+    ):
+        raise RuntimeError(
+            "prepared maintenance continuation audit prestate drifted"
+        )
+    binding = {
+        "schema_version": "business_data_prepared_resume_v1",
+        "window_id": window_id,
+        "plan_fingerprint": plan_fingerprint,
+        "barrier_state_fingerprint": str(
+            barrier.get("state_fingerprint") or ""
+        ),
+        "hold_started_at": str(existing.get("hold_started_at") or ""),
+        "prepared_at": str(existing.get("prepared_at") or ""),
+        "paused_policy_revision": current_revision,
+        "paused_policy_fingerprint": current_policy_fingerprint,
+        "baseline_control_fingerprint": str(
+            persisted_signature.get("fingerprint") or ""
+        ),
+        "prepare_readback_fingerprint": _stable_fingerprint(
+            dict(persisted_readback)
+        ),
+        "timer_inventory": current_inventory,
+        "sqlite_operational_path": str(
+            sidecars.get("operational_path") or ""
+        ),
+    }
+    if prior_binding and prior_binding != binding:
+        raise RuntimeError(
+            "prepared maintenance continuation identity drifted"
+        )
+    if not prior_binding:
+        existing["prepared_resume_binding"] = binding
+        _save_json_0600(runtime_dir / STATE_FILENAME, existing)
+        _append_audit_0600(
+            runtime_dir / AUDIT_FILENAME,
+            {
+                "event": "prepared_resume_bound",
+                "captured_at": _utc_now(),
+                "binding": binding,
+            },
+        )
+    return {
+        **dict(before),
+        "status": "prepared",
+        "idempotent": True,
+        "reused_phase": "prepared",
+        "resume_pending": True,
+        "prepared_resume_binding": binding,
+    }
+
+
 def maintenance_prepare(
     runtime_dir: Path,
     *,
@@ -2898,6 +3307,8 @@ def maintenance_prepare(
     actor: str = "business_data_maintenance",
     reason: str = "canonical cross-writer hold",
     expected_revision: int | None = None,
+    window_id: str = "",
+    plan_fingerprint: str = "",
     autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
@@ -2937,16 +3348,11 @@ def maintenance_prepare(
         "held",
     }:
         active_phase = str(existing.get("phase") or "")
-        if not before["quiet"]:
-            raise RuntimeError(
-                "active maintenance hold is no longer quiet and cannot be reused"
-            )
         current_auto_updates = dict(before.get("auto_updates") or {})
         if (
             not owner_policy_existed
             or current_auto_updates.get("master_desired") is not False
             or current_auto_updates.get("unknown_processes")
-            or current_auto_updates.get("drift_processes")
         ):
             raise RuntimeError(
                 "active maintenance hold owner policy drifted and cannot be reused"
@@ -3016,6 +3422,55 @@ def maintenance_prepare(
         ):
             raise RuntimeError(
                 "active maintenance hold control intent drifted"
+            )
+        if not before["quiet"]:
+            if active_phase != "prepared":
+                raise RuntimeError(
+                    "active maintenance hold is no longer quiet and cannot be reused"
+                )
+            non_warehouse_timer_drift = [
+                unit
+                for unit in ALL_BUSINESS_TIMER_UNITS
+                if unit != "wb-core-warehouse-functional-sync.timer"
+                and (
+                    str(
+                        ((before.get("timers") or {}).get(unit) or {}).get(
+                            "is_enabled"
+                        )
+                        or ""
+                    )
+                    != "disabled"
+                    or str(
+                        ((before.get("timers") or {}).get(unit) or {}).get(
+                            "is_active"
+                        )
+                        or ""
+                    )
+                    != "inactive"
+                )
+            ]
+            if non_warehouse_timer_drift:
+                raise RuntimeError(
+                    "active maintenance hold is no longer quiet and cannot be reused"
+                )
+            return _resume_prepared_nonquiet(
+                runtime_dir,
+                existing=existing,
+                before=before,
+                baseline=baseline,
+                persisted_readback=persisted_readback,
+                persisted_signature=persisted_signature,
+                current_revision=current_revision,
+                current_policy_fingerprint=str(
+                    current_auto_updates.get("policy_fingerprint") or ""
+                ),
+                systemd=systemd,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
+        if current_auto_updates.get("drift_processes"):
+            raise RuntimeError(
+                "active maintenance hold owner policy drifted and cannot be reused"
             )
         _append_audit_0600(
             audit_path,
@@ -3508,6 +3963,8 @@ def main(argv: list[str] | None = None) -> int:
                 actor=args.actor,
                 reason=args.reason or "canonical cross-writer hold",
                 expected_revision=args.expected_revision,
+                window_id=args.window_id,
+                plan_fingerprint=args.plan_fingerprint,
             )
     elif args.action == "hold":
         with _ExclusiveRestoreLock(runtime_dir):
@@ -3520,6 +3977,8 @@ def main(argv: list[str] | None = None) -> int:
                 actor=args.actor,
                 reason=args.reason or "canonical cross-writer hold",
                 expected_revision=args.expected_revision,
+                window_id=args.window_id,
+                plan_fingerprint=args.plan_fingerprint,
             )
     elif args.action == "restore":
         continuity_evidence: dict[str, Any] | None = None
