@@ -66,7 +66,8 @@
         ["python3", "apps/inventory_planning_read_model_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_inventory_history_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_inventory_history_backfill_smoke.py"],
-        ["python3", "apps/sheet_vitrina_v1_inventory_planning_smoke.py"]
+        ["python3", "apps/sheet_vitrina_v1_inventory_planning_smoke.py"],
+        ["python3", "apps/wbc0027_breakglass_last_good_smoke.py"]
       ]
     },
     "inventory_history_browser": {
@@ -288,7 +289,7 @@
     },
     {
       "id": "inventory-history",
-      "paths": ["apps/inventory_planning_*", "apps/sheet_vitrina_v1_inventory_history*", "apps/sheet_vitrina_v1_inventory_planning*", "packages/application/inventory_planning*", "packages/application/sheet_vitrina_v1_inventory_history*", "packages/application/sheet_vitrina_v1_inventory_planning*"],
+      "paths": ["apps/inventory_planning_*", "apps/sheet_vitrina_v1_inventory_history*", "apps/sheet_vitrina_v1_inventory_planning*", "apps/wbc0027_breakglass_last_good*", "packages/application/inventory_planning*", "packages/application/sheet_vitrina_v1_inventory_history*", "packages/application/sheet_vitrina_v1_inventory_planning*", "packages/application/sheet_vitrina_v1_breakglass_last_good.py", "packages/application/sheet_vitrina_v1_web_vitrina.py", "migration/180_wbc0027_breakglass_last_good.md"],
       "suites": ["inventory_history"],
       "release": "live_runtime"
     },
