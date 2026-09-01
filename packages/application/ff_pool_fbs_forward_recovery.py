@@ -1250,6 +1250,12 @@ def _build_preview_projection(
     cutover_id = str(source["cutover_id"])
     target_rows = [dict(row) for row in source["target_rows"]]
     sequences = tuple(int(value) for value in source["target_sequences"])
+    source_cursor_sequence = int(source.get("source_cursor_max") or 0)
+    projected_status_sequences = (
+        tuple(dict.fromkeys((*sequences, source_cursor_sequence)))
+        if source_cursor_sequence > 0
+        else sequences
+    )
     order_ids = tuple(sorted({int(row["order_id"]) for row in target_rows}))
 
     _copy_projection_rows(
@@ -1295,7 +1301,7 @@ def _build_preview_projection(
         scratch,
         STATUS_OBSERVATIONS_TABLE,
         "observation_sequence",
-        sequences,
+        projected_status_sequences,
         tracker,
     )
     for table in (
