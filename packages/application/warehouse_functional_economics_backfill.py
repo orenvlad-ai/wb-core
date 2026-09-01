@@ -720,12 +720,9 @@ def apply_functional_economics_backfill_plan(
             and not fresh.get("updates")
         ):
             if existing_recovery.get("lifecycle") != RecoveryState.RETAINED.value:
-                existing_recovery = recovery_registry.retain(
-                    operation_id,
-                    after_digest=str(normalized.get("plan_fingerprint") or ""),
-                    non_target_digest=str(
-                        normalized.get("non_target_digest") or ""
-                    ),
+                raise FunctionalEconomicsBackfillError(
+                    "committed functional economics operation requires exact "
+                    "same-operation query-only reconciliation"
                 )
             return {
                 **fresh,
@@ -996,6 +993,12 @@ def apply_functional_economics_backfill_plan(
                 raise FunctionalEconomicsBackfillError(
                     "functional economics apply crossed the canonical business-date boundary before commit"
                 )
+            recovery_registry.record_mutation_commit(
+                conn,
+                str(recovery["operation_id"]),
+                after_digest=manifest_digest,
+                non_target_digest=str(normalized.get("non_target_digest") or ""),
+            )
             conn.commit()
     except Exception as exc:
         recovery_registry.fail_recoverable(
@@ -1029,7 +1032,7 @@ def apply_functional_economics_backfill_plan(
         raise FunctionalEconomicsBackfillError("functional economics backfill is not idempotent")
     recovery = recovery_registry.retain(
         str(recovery["operation_id"]),
-        after_digest=str(readback.get("plan_fingerprint") or ""),
+        after_digest=manifest_digest,
         non_target_digest=str(normalized.get("non_target_digest") or ""),
     )
     return {
@@ -1043,6 +1046,250 @@ def apply_functional_economics_backfill_plan(
         "applied_plan_fingerprint": fingerprint,
         "rollback_manifest_digest": manifest_digest,
         "lock_free_revalidation_telemetry": revalidation_telemetry,
+    }
+
+
+def readback_functional_economics_committed_operation(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    operation_id: str,
+    plan_fingerprint: str,
+    manifest_digest: str,
+    non_target_digest: str,
+) -> dict[str, Any]:
+    """Prove one committed economics mutation without changing its recovery state."""
+
+    selected_operation = str(operation_id or "").strip()
+    selected_plan = str(plan_fingerprint or "").strip()
+    selected_manifest = str(manifest_digest or "").strip()
+    selected_non_target = str(non_target_digest or "").strip()
+    if not selected_operation:
+        raise FunctionalEconomicsBackfillError(
+            "exact functional economics recovery operation is required"
+        )
+    if not selected_plan.startswith("sha256:"):
+        raise FunctionalEconomicsBackfillError(
+            "exact functional economics plan fingerprint is required"
+        )
+    if not selected_manifest.startswith("sha256:"):
+        raise FunctionalEconomicsBackfillError(
+            "exact functional economics undo manifest is required"
+        )
+    if not selected_non_target.startswith("sha256:"):
+        raise FunctionalEconomicsBackfillError(
+            "exact functional economics non-target digest is required"
+        )
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    operation = recovery_registry.get_operation(selected_operation)
+    if operation is None:
+        raise FunctionalEconomicsBackfillError(
+            "functional economics recovery operation was not found"
+        )
+    if (
+        str(operation.get("operation_kind") or "")
+        != "functional_economics_targeted_publication"
+        or str(operation.get("closure_kind") or "") != "sku_date"
+        or str(operation.get("tier") or "") != "T1"
+        or str(operation.get("plan_fingerprint") or "") != selected_plan
+        or str(operation.get("non_target_digest") or "")
+        != selected_non_target
+    ):
+        raise FunctionalEconomicsBackfillError(
+            "functional economics recovery identity does not match exact expectations"
+        )
+    lifecycle = str(operation.get("lifecycle") or "")
+    if lifecycle not in {
+        RecoveryState.FAILED_RECOVERABLE.value,
+        RecoveryState.RETAINED.value,
+    }:
+        raise FunctionalEconomicsBackfillError(
+            "functional economics recovery is not reconcilable from its current lifecycle"
+        )
+
+    uri = f"file:{Path(runtime.db_path).resolve().as_posix()}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=120) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+            raise FunctionalEconomicsBackfillError(
+                "functional economics reconciliation is not query-only"
+            )
+        manifest_row = conn.execute(
+            """
+            SELECT manifest_digest,plan_fingerprint,before_images_json,
+                   after_images_json,status,rolled_back_at
+            FROM sheet_vitrina_v1_functional_economics_undo_manifests
+            WHERE manifest_digest=? AND plan_fingerprint=?
+            """,
+            (selected_manifest, selected_plan),
+        ).fetchone()
+        if manifest_row is None or str(manifest_row["status"]) != "ready":
+            raise FunctionalEconomicsBackfillError(
+                "functional economics undo manifest is not ready"
+            )
+        if str(manifest_row["rolled_back_at"] or ""):
+            raise FunctionalEconomicsBackfillError(
+                "functional economics undo manifest was rolled back"
+            )
+        before_images = json.loads(str(manifest_row["before_images_json"]))
+        after_images = json.loads(str(manifest_row["after_images_json"]))
+        if not isinstance(before_images, list) or not isinstance(after_images, list):
+            raise FunctionalEconomicsBackfillError(
+                "functional economics undo images are invalid"
+            )
+        manifest_material = {
+            "plan_fingerprint": selected_plan,
+            "before_images": before_images,
+            "after_images": after_images,
+        }
+        if "sha256:" + _hash(manifest_material) != selected_manifest:
+            raise FunctionalEconomicsBackfillError(
+                "functional economics undo manifest digest does not match its images"
+            )
+        before_keys = [
+            (str(item["bundle_version"]), str(item["as_of_date"]))
+            for item in before_images
+        ]
+        after_by_key = {
+            (str(item["bundle_version"]), str(item["as_of_date"])): str(
+                item["plan_json"]
+            )
+            for item in after_images
+        }
+        if (
+            not before_keys
+            or len(before_keys) != len(set(before_keys))
+            or set(before_keys) != set(after_by_key)
+            or len(after_by_key) != len(after_images)
+        ):
+            raise FunctionalEconomicsBackfillError(
+                "functional economics undo image keys are incomplete or duplicated"
+            )
+        current_non_target = "sha256:" + _hash(
+            [
+                [
+                    str(row["bundle_version"]),
+                    str(row["as_of_date"]),
+                    _non_target_digest(json.loads(str(row["plan_json"]))),
+                ]
+                for row in conn.execute(
+                    """
+                    SELECT bundle_version,as_of_date,plan_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    ORDER BY bundle_version,as_of_date
+                    """
+                )
+            ]
+        )
+        if current_non_target != selected_non_target:
+            raise FunctionalEconomicsBackfillError(
+                "functional economics committed non-target readback drifted"
+            )
+        for key in sorted(after_by_key):
+            current = conn.execute(
+                """
+                SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
+                WHERE bundle_version=? AND as_of_date=?
+                """,
+                key,
+            ).fetchone()
+            if current is None or str(current["plan_json"]) != after_by_key[key]:
+                raise FunctionalEconomicsBackfillError(
+                    "functional economics committed after-image readback drifted"
+                )
+
+    committed_after = str(operation.get("after_digest") or "")
+    if committed_after and committed_after != selected_manifest:
+        raise FunctionalEconomicsBackfillError(
+            "functional economics recovery owns a different committed after digest"
+        )
+    evidence = {
+        "contract_name": "functional_economics_committed_operation_reconciliation/v1",
+        "status": "exact_commit_confirmed",
+        "operation_id": selected_operation,
+        "operation_kind": "functional_economics_targeted_publication",
+        "tier": "T1",
+        "lifecycle": lifecycle,
+        "state_version": int(operation.get("state_version") or 0),
+        "plan_fingerprint": selected_plan,
+        "manifest_digest": selected_manifest,
+        "after_image_count": len(after_images),
+        "after_images_digest": "sha256:" + _hash(after_images),
+        "non_target_digest": current_non_target,
+        "legacy_commit_digest_missing": not bool(committed_after),
+        "recovery_metadata_mutation_required": (
+            lifecycle != RecoveryState.RETAINED.value
+            or committed_after != selected_manifest
+        ),
+        "query_only": True,
+        "business_row_write_count": 0,
+        "recovery_metadata_write_count": 0,
+    }
+    evidence["evidence_digest"] = "sha256:" + _hash(evidence)
+    return evidence
+
+
+def retain_reconciled_functional_economics_commit(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    operation_id: str,
+    plan_fingerprint: str,
+    manifest_digest: str,
+    non_target_digest: str,
+    evidence_digest: str,
+) -> dict[str, Any]:
+    """Retain one exact committed operation after a separate query-only proof."""
+
+    evidence = readback_functional_economics_committed_operation(
+        runtime,
+        operation_id=operation_id,
+        plan_fingerprint=plan_fingerprint,
+        manifest_digest=manifest_digest,
+        non_target_digest=non_target_digest,
+    )
+    if str(evidence.get("evidence_digest") or "") != str(
+        evidence_digest or ""
+    ):
+        raise FunctionalEconomicsBackfillError(
+            "exact functional economics reconciliation evidence digest is required"
+        )
+    recovery_registry = WarehouseRecoveryRegistry(
+        runtime_dir=runtime.runtime_dir,
+        db_path=runtime.db_path,
+    )
+    if (
+        str(evidence["lifecycle"]) == RecoveryState.RETAINED.value
+        and not bool(evidence["recovery_metadata_mutation_required"])
+    ):
+        return {
+            **evidence,
+            "status": "retained",
+            "idempotent": True,
+            "recovery_metadata_write_count": 0,
+        }
+    recovery = recovery_registry.retain(
+        str(operation_id),
+        after_digest=str(manifest_digest),
+        non_target_digest=str(non_target_digest),
+        transition_evidence_digest=str(evidence_digest),
+    )
+    if (
+        str(recovery.get("lifecycle") or "") != RecoveryState.RETAINED.value
+        or str(recovery.get("after_digest") or "") != str(manifest_digest)
+    ):
+        raise FunctionalEconomicsBackfillError(
+            "functional economics committed operation retain readback failed"
+        )
+    return {
+        **evidence,
+        "status": "retained",
+        "idempotent": False,
+        "retained_state_version": int(recovery.get("state_version") or 0),
+        "business_row_write_count": 0,
+        "recovery_metadata_write_count": 2,
     }
 
 
@@ -1782,6 +2029,14 @@ def _transform_snapshot(
             existing_day_coverage.get("functional_version_id") or ""
         )
         candidate_functional_version_id = str(warehouse_version_ids.get(day) or "")
+        newly_closed_exact = bool(
+            not targeted
+            and day
+            < str(operation_business_date or current_business_date_iso())[:10]
+            and not closed_history_guard
+            and warehouse_totals_known
+            and candidate_functional_version_id
+        )
         if (
             closed_history_guard
             and candidate_functional_version_id
@@ -1962,7 +2217,7 @@ def _transform_snapshot(
             repair_reason_codes = _historical_inventory_repair_reason_codes(
                 cost_state
             )
-            if closed_history_guard and repair_reason_codes:
+            if (closed_history_guard or newly_closed_exact) and repair_reason_codes:
                 day_repair_issues = _add_historical_repair_issue(
                     day_repair_issues,
                     scope=scope,
@@ -2242,11 +2497,15 @@ def _transform_snapshot(
                             else None
                         ),
                     )
-        if closed_history_guard and day_repair_issues:
+        if (closed_history_guard or newly_closed_exact) and day_repair_issues:
             stable_functional_version_id = str(
                 existing_day_coverage.get("functional_version_id")
                 or warehouse_version_ids.get(day)
                 or ""
+            )
+            ordinary_publication_applied = bool(
+                newly_closed_exact
+                or day_repair_entry.get("ordinary_publication_applied")
             )
             day_repair_entry = {
                 "status": "historical_repair_required",
@@ -2254,16 +2513,22 @@ def _transform_snapshot(
                 "functional_version_id": stable_functional_version_id,
                 "issues": _sorted_historical_repair_issues(day_repair_issues),
                 "repair_contract": "version_bound_historical_reconciliation",
-                "ordinary_publication_applied": False,
+                "ordinary_publication_applied": ordinary_publication_applied,
             }
             repair_dates[day] = day_repair_entry
             warehouse_coverage[day] = {
                 **dict(warehouse_coverage.get(day) or existing_day_coverage),
                 "status": "historical_repair_required",
                 "reason_ru": (
-                    "Закрытая дата сохранена без перепубликации: новая складская "
-                    "проекция не согласована с её точной функциональной версией. "
+                    "Точная складская версия закрытой даты опубликована вместе "
+                    "с типизированным сигналом предварительной себестоимости. "
                     "Требуется отдельная историческая сверка."
+                    if ordinary_publication_applied
+                    else (
+                        "Закрытая дата сохранена без перепубликации: новая складская "
+                        "проекция не согласована с её точной функциональной версией. "
+                        "Требуется отдельная историческая сверка."
+                    )
                 ),
                 "functional_version_id": stable_functional_version_id,
                 "historical_repair_required": True,

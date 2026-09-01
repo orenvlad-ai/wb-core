@@ -45,6 +45,15 @@ Operations advance by compare-and-set:
 
 `planned → reserved → writing → verified → mutation_running → retained`
 
+A business writer that owns a T1 operation records the exact committed
+after-image and non-target digests on the same SQLite connection immediately
+before the business commit. A later readback failure may move the operation to
+`failed_recoverable`, but cannot erase that committed truth. A legacy operation
+without this field can reach `retained` only after exact query-only after-image,
+undo-manifest and whole non-target reconciliation; the single metadata-only
+transition carries the reconciliation evidence digest and never repeats the
+business submit.
+
 Recovery alternatives are `failed_recoverable`, `rolled_back`, `quarantined`
 and retention-driven `released`. The terminal `superseded` state is available
 only for the exact Stage 7C stale-failure contract described below; it is not a
