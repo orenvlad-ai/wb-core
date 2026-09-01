@@ -1196,6 +1196,137 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
         )
         self.assertEqual(self.registry.scan_orphans()["status"], "clean")
 
+    def test_hourly_precheckpoint_lock_reconciliation_is_exact_and_evidence_preserving(
+        self,
+    ) -> None:
+        def fail_before_checkpoint(_: str, boundary: str) -> None:
+            if boundary == "before_checkpoint_write":
+                raise sqlite3.OperationalError("database is locked")
+
+        faulting = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime_dir,
+            db_path=self.runtime.db_path,
+            operational_reserve_bytes=0,
+            fault_injector=fail_before_checkpoint,
+        )
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+            faulting.prepare_t2(
+                mutation_kind="hourly_warehouse_sync",
+                plan_fingerprint="sha256:hourly-precheckpoint-lock",
+                scope={
+                    "base_active_version_id": "v1",
+                    "effective_date": "2026-07-26",
+                },
+                source_digest="sha256:source",
+                non_target_digest="",
+                source_watermarks={"functional_version_id": "v1"},
+                schema_revision="smoke-v1",
+            )
+        failed = next(
+            operation
+            for operation in self.registry.list_operations(limit=100)
+            if operation["plan_fingerprint"]
+            == "sha256:hourly-precheckpoint-lock"
+        )
+        self.assertEqual(failed["lifecycle"], RecoveryState.FAILED_RECOVERABLE.value)
+        self.assertEqual(failed["actual_bytes"], 0)
+        self.assertEqual(failed["artifacts"], [])
+
+        wrong_active = self.registry.reconcile_failed_hourly_precheckpoint_locks(
+            current_active_version_id="v2",
+        )
+        self.assertEqual(wrong_active["status"], "noop")
+        self.assertEqual(
+            wrong_active["rejected"],
+            [
+                {
+                    "operation_id": failed["operation_id"],
+                    "reason": "base_active_version_drift",
+                }
+            ],
+        )
+        self.assertEqual(
+            self.registry.get_operation(failed["operation_id"])["lifecycle"],
+            RecoveryState.FAILED_RECOVERABLE.value,
+        )
+
+        reconciled = self.registry.reconcile_failed_hourly_precheckpoint_locks(
+            current_active_version_id="v1",
+        )
+        self.assertEqual(reconciled["status"], "released")
+        self.assertEqual(
+            reconciled["released_operation_ids"], [failed["operation_id"]]
+        )
+        self.assertEqual(reconciled["removed_paths"], [])
+        terminal = self.registry.get_operation(failed["operation_id"])
+        self.assertEqual(terminal["lifecycle"], RecoveryState.RELEASED.value)
+        self.assertEqual(terminal["last_error"], "database is locked")
+        self.assertFalse(terminal["rollback"]["available"])
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn:
+            transition = conn.execute(
+                """SELECT detail_json
+                   FROM sheet_vitrina_v1_recovery_transitions
+                   WHERE operation_id=? ORDER BY transition_id DESC LIMIT 1""",
+                (failed["operation_id"],),
+            ).fetchone()
+            reservation = conn.execute(
+                """SELECT state FROM sheet_vitrina_v1_recovery_capacity_reservations
+                   WHERE operation_id=?""",
+                (failed["operation_id"],),
+            ).fetchone()
+        detail = json.loads(transition[0])
+        self.assertTrue(detail["failed_error_preserved"])
+        self.assertTrue(detail["artifacts_preserved"])
+        self.assertFalse(detail["business_mutation_reconciled"])
+        self.assertEqual(reservation[0], "released")
+
+    def test_hourly_precheckpoint_lock_reconciliation_rejects_owned_path(self) -> None:
+        def fail_before_checkpoint(_: str, boundary: str) -> None:
+            if boundary == "before_checkpoint_write":
+                raise sqlite3.OperationalError("database is locked")
+
+        faulting = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime_dir,
+            db_path=self.runtime.db_path,
+            operational_reserve_bytes=0,
+            fault_injector=fail_before_checkpoint,
+        )
+        with self.assertRaises(sqlite3.OperationalError):
+            faulting.prepare_t2(
+                mutation_kind="hourly_warehouse_sync",
+                plan_fingerprint="sha256:hourly-precheckpoint-path",
+                scope={
+                    "base_active_version_id": "v1",
+                    "effective_date": "2026-07-26",
+                },
+                source_digest="sha256:source",
+                non_target_digest="",
+                source_watermarks={"functional_version_id": "v1"},
+                schema_revision="smoke-v1",
+            )
+        failed = next(
+            operation
+            for operation in self.registry.list_operations(limit=100)
+            if operation["plan_fingerprint"]
+            == "sha256:hourly-precheckpoint-path"
+        )
+        partial = (
+            self.registry.checkpoint_root
+            / f"{failed['operation_id']}.sqlite3.tmp"
+        )
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_bytes(b"ambiguous-checkpoint")
+        result = self.registry.reconcile_failed_hourly_precheckpoint_locks(
+            current_active_version_id="v1",
+        )
+        self.assertEqual(result["status"], "noop")
+        self.assertIn("owned_checkpoint_path_present", result["rejected"][0]["reason"])
+        self.assertTrue(partial.is_file())
+        self.assertEqual(
+            self.registry.get_operation(failed["operation_id"])["lifecycle"],
+            RecoveryState.FAILED_RECOVERABLE.value,
+        )
+
     def test_expired_retention_is_fingerprint_gated(self) -> None:
         start = datetime(2026, 7, 1, tzinfo=timezone.utc)
         clock_value = {"now": start}

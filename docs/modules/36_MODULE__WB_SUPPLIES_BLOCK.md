@@ -734,6 +734,12 @@ themselves. A transition for an opening order above `W` is processed as a
 post-checkpoint event; the exact suffix is drained by sequence and revision
 without pausing the five-minute collector.
 
+Operational acceptance of a natural five-minute cycle is stricter than the
+collector transport result: the top-level result must be `success` and its
+nested `lifecycle_processor` must be present with status `caught_up`. A nested
+`held` or `failed` result, including a functional-version/business-date guard,
+is not a healthy producer cycle even though official WB collection succeeded.
+
 # 12. Own capital movement consumer
 
 The warehouse opening consumer is separate from the cost-engine movement consumer. `warehouse_stocks_block` reads persisted `raw_goods` only for the current material FF→WB source: ordinary status `3` (`Отгрузка разрешена`) and its later proven non-final physical stages `4/6` form `В пути: FF → WB`; planned `2`, final `5` and `Допринято` are excluded. The separate acceptance-discrepancy opening is a management boundary fixed at zero with no SKU lines. Historical final/doprinato rows are not read, validated or fingerprinted by opening and remain available only to an optional bounded read-only diagnostic. The consumer stores a one-time immutable quantity snapshot with source row/hash/timestamps and never updates this module's cache, triggers WB sync, or creates FF/cost/capital operations.

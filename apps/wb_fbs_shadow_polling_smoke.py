@@ -44,6 +44,7 @@ from packages.application.wb_fbs_shadow_polling import (  # noqa: E402
     WbFbsShadowPollingService,
     build_readiness_report,
     fbs_shadow_poll_lock,
+    natural_cycle_acceptance,
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
@@ -137,7 +138,45 @@ def main() -> None:
     _failed_cycle_observability()
     _poll_resume_single_flight_and_readiness()
     _transition_sequence_property()
+    _natural_cycle_acceptance_requires_nested_success()
     print("wb_fbs_shadow_polling_smoke: OK")
+
+
+def _natural_cycle_acceptance_requires_nested_success() -> None:
+    failed_nested = natural_cycle_acceptance(
+        {
+            "run_id": "fbs_poll_failed_nested",
+            "status": "success",
+            "mutates_wb": False,
+            "lifecycle_processor": {
+                "status": "failed",
+                "error": (
+                    "Active functional version does not belong to the "
+                    "publication business date"
+                ),
+                "mutates_wb": False,
+            },
+        }
+    )
+    assert failed_nested["status"] == "rejected"
+    assert failed_nested["checks"]["collector_success"] is True
+    assert failed_nested["checks"]["lifecycle_processor_caught_up"] is False
+    accepted = natural_cycle_acceptance(
+        {
+            "run_id": "fbs_poll_healthy_nested",
+            "status": "success",
+            "mutates_wb": False,
+            "lifecycle_processor": {
+                "status": "caught_up",
+                "processed_count": 0,
+                "pending_count": 0,
+                "identity_pending_count": 0,
+                "mutates_wb": False,
+            },
+        }
+    )
+    assert accepted["status"] == "accepted"
+    assert all(accepted["checks"].values())
 
 
 class _Response:

@@ -2555,6 +2555,234 @@ class WarehouseRecoveryRegistry:
             "removed_paths": removed_paths,
         }
 
+    def reconcile_failed_hourly_precheckpoint_locks(
+        self,
+        *,
+        current_active_version_id: str,
+    ) -> dict[str, Any]:
+        """Release exact hourly T2 lock failures before any checkpoint existed.
+
+        This is deliberately narrower than an ordinary T2 resume.  It preserves
+        the failed operation and its error/transition evidence, and may only
+        terminalize a pre-checkpoint lock failure whose pinned base version is
+        still the exact active functional version.  Any artifact, owned path,
+        byte, digest, unexpected scope/state or concurrent CAS change remains a
+        protected failure for operator reconciliation.
+        """
+
+        active_version_id = str(current_active_version_id or "").strip()
+        if not active_version_id:
+            return {
+                "contract": "hourly_t2_precheckpoint_lock_reconciliation_v1",
+                "status": "not_applicable",
+                "reason": "active_functional_version_missing",
+                "released_operation_ids": [],
+            }
+        candidates = [
+            operation
+            for operation in self.list_operations(limit=1000)
+            if operation.get("operation_kind") == "hourly_warehouse_sync"
+            and operation.get("tier") == RecoveryTier.T2.value
+            and operation.get("lifecycle")
+            == RecoveryState.FAILED_RECOVERABLE.value
+        ]
+        released: list[str] = []
+        rejected: list[dict[str, str]] = []
+        for operation in candidates:
+            operation_id = str(operation.get("operation_id") or "")
+            scope = dict(operation.get("scope") or {})
+            reasons: list[str] = []
+            if set(scope) != {"base_active_version_id", "effective_date"}:
+                reasons.append("target_scope_not_exact")
+            if str(scope.get("base_active_version_id") or "") != active_version_id:
+                reasons.append("base_active_version_drift")
+            if not str(scope.get("effective_date") or "").strip():
+                reasons.append("effective_date_missing")
+            if self._failed_from_state(operation_id) != RecoveryState.WRITING.value:
+                reasons.append("failure_not_from_checkpoint_writing")
+            if int(operation.get("actual_bytes") or 0) != 0:
+                reasons.append("checkpoint_bytes_present")
+            if int(operation.get("read_bytes") or 0) != 0:
+                reasons.append("checkpoint_read_bytes_present")
+            if str(operation.get("checkpoint_digest") or ""):
+                reasons.append("checkpoint_digest_present")
+            if str(operation.get("after_digest") or ""):
+                reasons.append("business_after_digest_present")
+            if list(operation.get("artifacts") or []):
+                reasons.append("registered_artifacts_present")
+            if str(operation.get("next_action") or "") != (
+                "resume_or_quarantine_domain_checkpoint"
+            ):
+                reasons.append("unexpected_next_action")
+            if str(operation.get("writer_state") or "") != "failed":
+                reasons.append("writer_state_not_failed")
+            if str(operation.get("last_error") or "").strip().lower() not in {
+                "database is locked",
+                "database table is locked",
+            }:
+                reasons.append("failure_not_exact_sqlite_lock")
+
+            owned_paths: set[Path] = set()
+            for root in self.recovery_roots:
+                checkpoint = root / CHECKPOINT_DIRNAME / f"{operation_id}.sqlite3"
+                owned_paths.update(
+                    {
+                        checkpoint,
+                        checkpoint.with_name(checkpoint.name + TEMP_SUFFIX),
+                        checkpoint.with_name(checkpoint.name + MANIFEST_SUFFIX),
+                        Path(str(checkpoint) + "-wal"),
+                        Path(str(checkpoint) + "-shm"),
+                        Path(str(checkpoint) + "-journal"),
+                    }
+                )
+            if any(path.exists() or path.is_symlink() for path in owned_paths):
+                reasons.append("owned_checkpoint_path_present")
+            if reasons:
+                rejected.append(
+                    {"operation_id": operation_id, "reason": ",".join(sorted(reasons))}
+                )
+                continue
+
+            now = self._now()
+            with _connect(self.db_path) as conn:
+                _ensure_schema(conn)
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    row = conn.execute(
+                        """SELECT lifecycle_state,state_version,operation_kind,tier,
+                                  target_scope_json,actual_bytes,read_bytes,
+                                  checkpoint_digest,after_digest,next_action,
+                                  writer_state,last_error
+                           FROM sheet_vitrina_v1_recovery_operations
+                           WHERE operation_id=?""",
+                        (operation_id,),
+                    ).fetchone()
+                    failed_from = conn.execute(
+                        """SELECT from_state
+                           FROM sheet_vitrina_v1_recovery_transitions
+                           WHERE operation_id=? AND to_state=?
+                           ORDER BY transition_id DESC LIMIT 1""",
+                        (operation_id, RecoveryState.FAILED_RECOVERABLE.value),
+                    ).fetchone()
+                    artifact_count = int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM sheet_vitrina_v1_recovery_artifacts "
+                            "WHERE operation_id=?",
+                            (operation_id,),
+                        ).fetchone()[0]
+                    )
+                    undo_count = int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM sheet_vitrina_v1_recovery_undo_rows "
+                            "WHERE operation_id=?",
+                            (operation_id,),
+                        ).fetchone()[0]
+                    )
+                    unsafe_reservation_count = int(
+                        conn.execute(
+                            """SELECT COUNT(*)
+                               FROM sheet_vitrina_v1_recovery_capacity_reservations
+                               WHERE operation_id=?
+                                 AND state NOT IN ('active','expired','released')""",
+                            (operation_id,),
+                        ).fetchone()[0]
+                    )
+                    exact = (
+                        row is not None
+                        and str(row["lifecycle_state"])
+                        == RecoveryState.FAILED_RECOVERABLE.value
+                        and str(row["operation_kind"]) == "hourly_warehouse_sync"
+                        and str(row["tier"]) == RecoveryTier.T2.value
+                        and _json_object(row["target_scope_json"]) == scope
+                        and str(scope["base_active_version_id"]) == active_version_id
+                        and int(row["actual_bytes"] or 0) == 0
+                        and int(row["read_bytes"] or 0) == 0
+                        and not str(row["checkpoint_digest"] or "")
+                        and not str(row["after_digest"] or "")
+                        and str(row["next_action"])
+                        == "resume_or_quarantine_domain_checkpoint"
+                        and str(row["writer_state"]) == "failed"
+                        and str(row["last_error"] or "").strip().lower()
+                        in {"database is locked", "database table is locked"}
+                        and failed_from is not None
+                        and str(failed_from[0]) == RecoveryState.WRITING.value
+                        and artifact_count == 0
+                        and undo_count == 0
+                        and unsafe_reservation_count == 0
+                    )
+                    if not exact:
+                        raise RecoveryPolicyError(
+                            "hourly T2 pre-checkpoint lock evidence drifted during reconciliation"
+                        )
+                    next_version = int(row["state_version"]) + 1
+                    changed = conn.execute(
+                        """UPDATE sheet_vitrina_v1_recovery_operations
+                           SET lifecycle_state=?,state_version=?,next_action='none',
+                               writer_state='idle',rollback_available=0,
+                               updated_at=?,last_heartbeat_at=?
+                           WHERE operation_id=? AND lifecycle_state=?
+                             AND state_version=?""",
+                        (
+                            RecoveryState.RELEASED.value,
+                            next_version,
+                            now,
+                            now,
+                            operation_id,
+                            RecoveryState.FAILED_RECOVERABLE.value,
+                            int(row["state_version"]),
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise RecoveryPolicyError(
+                            "hourly T2 pre-checkpoint reconciliation CAS update lost"
+                        )
+                    conn.execute(
+                        """UPDATE sheet_vitrina_v1_recovery_capacity_reservations
+                           SET state='released',released_at=?
+                           WHERE operation_id=? AND state IN ('active','expired')""",
+                        (now, operation_id),
+                    )
+                    conn.execute(
+                        """INSERT INTO sheet_vitrina_v1_recovery_transitions(
+                               operation_id,from_state,to_state,state_version,
+                               transitioned_at,detail_json)
+                           VALUES(?,?,?,?,?,?)""",
+                        (
+                            operation_id,
+                            RecoveryState.FAILED_RECOVERABLE.value,
+                            RecoveryState.RELEASED.value,
+                            next_version,
+                            now,
+                            _json(
+                                {
+                                    "contract": (
+                                        "hourly_t2_precheckpoint_lock_reconciliation_v1"
+                                    ),
+                                    "next_action": "none",
+                                    "active_version_id": active_version_id,
+                                    "failed_error_preserved": True,
+                                    "artifacts_preserved": True,
+                                    "business_mutation_reconciled": False,
+                                }
+                            ),
+                        ),
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            self._fsync_registry()
+            released.append(operation_id)
+        return {
+            "contract": "hourly_t2_precheckpoint_lock_reconciliation_v1",
+            "status": "released" if released else "noop",
+            "active_version_id": active_version_id,
+            "released_operation_ids": released,
+            "rejected": rejected,
+            "business_mutation_reconciled": False,
+            "removed_paths": [],
+        }
+
     def scan_orphans(self) -> dict[str, Any]:
         """Classify complete artifact families without deleting anything."""
 
