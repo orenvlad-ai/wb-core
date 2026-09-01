@@ -3271,33 +3271,95 @@ def _resume_legacy_fbs_pause_ownership(
         raise RuntimeError(
             "prepared maintenance FBS pause ownership found unclassified execution"
         )
-    timers = dict(before.get("timers") or {})
-    for unit in ALL_BUSINESS_TIMER_UNITS:
-        if unit in {FBS_SHADOW_TIMER_UNIT, "wb-core-warehouse-functional-sync.timer"}:
-            continue
-        if _unit_state_pair(dict(timers.get(unit) or {})) != (
-            "disabled",
-            "inactive",
-        ):
-            raise RuntimeError(
-                "prepared maintenance FBS pause ownership found timer drift: "
-                + unit
-            )
-    fbs_current = _unit_state_pair(dict(timers.get(FBS_SHADOW_TIMER_UNIT) or {}))
     prior_binding = dict(
         existing.get("pause_owned_inventory_resume_binding") or {}
     )
-    allowed_current_pairs = {("disabled", "inactive")}
-    if legacy_pair == ("enabled", "active"):
-        allowed_current_pairs.add(legacy_pair)
-    if fbs_current not in allowed_current_pairs or (
-        not prior_binding and fbs_current != legacy_pair
+    timers = dict(before.get("timers") or {})
+    persisted_timers = dict(persisted_readback.get("timers") or {})
+    baseline_services = set(dict(baseline.get("services") or {}))
+    persisted_services = set(dict(persisted_readback.get("services") or {}))
+    expected_legacy_services = set(ALL_BUSINESS_SERVICE_UNITS) - {
+        FBS_SHADOW_SERVICE_UNIT
+    }
+    if (
+        baseline_services != expected_legacy_services
+        or persisted_services != expected_legacy_services
     ):
         raise RuntimeError(
-            "prepared maintenance FBS pause ownership current timer drifted"
+            "prepared maintenance FBS pause ownership service inventory drifted"
         )
+    current_drift_timer_states: dict[str, dict[str, Any]] = {}
+    for unit in ALL_BUSINESS_TIMER_UNITS:
+        current_state = dict(timers.get(unit) or {})
+        persisted_state = dict(persisted_timers.get(unit) or {})
+        if unit == FBS_SHADOW_TIMER_UNIT:
+            persisted_state = persisted_fbs_state
+        if (
+            str(current_state.get("unit") or "") != unit
+            or str(persisted_state.get("unit") or "") != unit
+        ):
+            raise RuntimeError(
+                "prepared maintenance pause-owned timer identity drifted: "
+                + unit
+            )
+        if _unit_state_pair(persisted_state) not in {
+            ("disabled", "inactive"),
+            ("enabled", "active"),
+        }:
+            raise RuntimeError(
+                "prepared maintenance pause-owned timer prestate drifted: "
+                + unit
+            )
+        current_pair = _unit_state_pair(current_state)
+        if current_pair not in {
+            ("disabled", "inactive"),
+            ("enabled", "active"),
+        }:
+            raise RuntimeError(
+                "prepared maintenance pause-owned timer runtime drifted: "
+                + unit
+            )
+        if current_pair != ("disabled", "inactive"):
+            current_drift_timer_states[unit] = current_state
+    recorded_drift_timer_states = {
+        str(unit): dict(state or {})
+        for unit, state in dict(
+            prior_binding.get("deploy_drift_timer_states") or {}
+        ).items()
+    }
+    if prior_binding:
+        if (
+            "deploy_drift_timer_states" not in prior_binding
+            or sorted(recorded_drift_timer_states)
+            != list(prior_binding.get("repaused_timer_units") or [])
+            or not set(current_drift_timer_states).issubset(
+                recorded_drift_timer_states
+            )
+        ):
+            raise RuntimeError(
+                "prepared maintenance pause-owned timer drift changed after binding"
+            )
+        for unit, state in current_drift_timer_states.items():
+            if _unit_state_pair(state) != _unit_state_pair(
+                recorded_drift_timer_states[unit]
+            ):
+                raise RuntimeError(
+                    "prepared maintenance pause-owned timer state changed after binding: "
+                    + unit
+                )
+    else:
+        recorded_drift_timer_states = current_drift_timer_states
     services = dict(before.get("services") or {})
+    if set(services) != set(ALL_BUSINESS_SERVICE_UNITS):
+        raise RuntimeError(
+            "prepared maintenance pause-owned service inventory drifted"
+        )
     for unit, state_raw in services.items():
+        if str((state_raw or {}).get("unit") or "") != unit:
+            raise RuntimeError(
+                "prepared maintenance pause-owned service identity drifted: "
+                + unit
+            )
         if unit == FBS_SHADOW_SERVICE_UNIT:
             continue
         if str((state_raw or {}).get("is_active") or "") not in (
@@ -3384,6 +3446,8 @@ def _resume_legacy_fbs_pause_ownership(
             dict(persisted_readback)
         ),
         "timer_inventory": current_inventory,
+        "deploy_drift_timer_states": recorded_drift_timer_states,
+        "repaused_timer_units": sorted(recorded_drift_timer_states),
         "sqlite_operational_path": str(
             sidecars.get("operational_path") or ""
         ),
@@ -3413,9 +3477,10 @@ def _resume_legacy_fbs_pause_ownership(
             },
         )
     transition_applied = False
-    if fbs_current == ("enabled", "active"):
-        systemd.disable_now(FBS_SHADOW_TIMER_UNIT)
-        transition_applied = True
+    for unit in ALL_BUSINESS_TIMER_UNITS:
+        if unit in current_drift_timer_states:
+            systemd.disable_now(unit)
+            transition_applied = True
     return {
         "binding": binding,
         "transition_applied": transition_applied,
