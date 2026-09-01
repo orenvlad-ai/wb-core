@@ -2567,7 +2567,10 @@ class WarehouseRecoveryRegistry:
         terminalize a pre-checkpoint lock failure whose pinned base version is
         still the exact active functional version.  Any artifact, owned path,
         byte, digest, unexpected scope/state or concurrent CAS change remains a
-        protected failure for operator reconciliation.
+        protected failure for operator reconciliation.  The sole accepted path
+        trace is an unregistered ``.sqlite3.tmp`` containing only the empty
+        recovery metadata schema created before the source read failed; it is
+        preserved in place and bound into the terminal transition evidence.
         """
 
         active_version_id = str(current_active_version_id or "").strip()
@@ -2588,6 +2591,7 @@ class WarehouseRecoveryRegistry:
         ]
         released: list[str] = []
         rejected: list[dict[str, str]] = []
+        preserved_precheckpoint_traces: list[dict[str, Any]] = []
         for operation in candidates:
             operation_id = str(operation.get("operation_id") or "")
             scope = dict(operation.get("scope") or {})
@@ -2623,20 +2627,38 @@ class WarehouseRecoveryRegistry:
                 reasons.append("failure_not_exact_sqlite_lock")
 
             owned_paths: set[Path] = set()
+            temporary_paths: set[Path] = set()
             for root in self.recovery_roots:
                 checkpoint = root / CHECKPOINT_DIRNAME / f"{operation_id}.sqlite3"
+                temporary = checkpoint.with_name(checkpoint.name + TEMP_SUFFIX)
+                temporary_paths.add(temporary)
                 owned_paths.update(
                     {
                         checkpoint,
-                        checkpoint.with_name(checkpoint.name + TEMP_SUFFIX),
+                        temporary,
                         checkpoint.with_name(checkpoint.name + MANIFEST_SUFFIX),
                         Path(str(checkpoint) + "-wal"),
                         Path(str(checkpoint) + "-shm"),
                         Path(str(checkpoint) + "-journal"),
                     }
                 )
-            if any(path.exists() or path.is_symlink() for path in owned_paths):
-                reasons.append("owned_checkpoint_path_present")
+            present_owned_paths = sorted(
+                path for path in owned_paths if path.exists() or path.is_symlink()
+            )
+            precheckpoint_trace: dict[str, Any] | None = None
+            if present_owned_paths:
+                if (
+                    len(present_owned_paths) == 1
+                    and present_owned_paths[0] in temporary_paths
+                ):
+                    try:
+                        precheckpoint_trace = _empty_precheckpoint_trace(
+                            present_owned_paths[0]
+                        )
+                    except RecoveryPolicyError:
+                        reasons.append("owned_checkpoint_path_present")
+                else:
+                    reasons.append("owned_checkpoint_path_present")
             if reasons:
                 rejected.append(
                     {"operation_id": operation_id, "reason": ",".join(sorted(reasons))}
@@ -2687,6 +2709,13 @@ class WarehouseRecoveryRegistry:
                             (operation_id,),
                         ).fetchone()[0]
                     )
+                    locked_precheckpoint_trace = (
+                        _empty_precheckpoint_trace(
+                            Path(str(precheckpoint_trace["path"]))
+                        )
+                        if precheckpoint_trace is not None
+                        else None
+                    )
                     exact = (
                         row is not None
                         and str(row["lifecycle_state"])
@@ -2709,6 +2738,7 @@ class WarehouseRecoveryRegistry:
                         and artifact_count == 0
                         and undo_count == 0
                         and unsafe_reservation_count == 0
+                        and locked_precheckpoint_trace == precheckpoint_trace
                     )
                     if not exact:
                         raise RecoveryPolicyError(
@@ -2762,6 +2792,9 @@ class WarehouseRecoveryRegistry:
                                     "active_version_id": active_version_id,
                                     "failed_error_preserved": True,
                                     "artifacts_preserved": True,
+                                    "empty_precheckpoint_trace_preserved": (
+                                        precheckpoint_trace
+                                    ),
                                     "business_mutation_reconciled": False,
                                 }
                             ),
@@ -2773,6 +2806,13 @@ class WarehouseRecoveryRegistry:
                     raise
             self._fsync_registry()
             released.append(operation_id)
+            if precheckpoint_trace is not None:
+                preserved_precheckpoint_traces.append(
+                    {
+                        "operation_id": operation_id,
+                        **precheckpoint_trace,
+                    }
+                )
         return {
             "contract": "hourly_t2_precheckpoint_lock_reconciliation_v1",
             "status": "released" if released else "noop",
@@ -2780,6 +2820,7 @@ class WarehouseRecoveryRegistry:
             "released_operation_ids": released,
             "rejected": rejected,
             "business_mutation_reconciled": False,
+            "preserved_precheckpoint_traces": preserved_precheckpoint_traces,
             "removed_paths": [],
         }
 
@@ -4497,6 +4538,107 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+def _empty_precheckpoint_trace(path: Path) -> dict[str, Any]:
+    """Prove one preserved SQLite trace has no checkpoint metadata or data."""
+
+    selected = Path(path)
+    if (
+        selected.is_symlink()
+        or not selected.is_file()
+        or not selected.name.endswith(f".sqlite3{TEMP_SUFFIX}")
+    ):
+        raise RecoveryPolicyError("pre-checkpoint trace is not an exact regular temp file")
+    before = selected.stat()
+    if before.st_size <= 0 or before.st_size > 64 * 1024:
+        raise RecoveryPolicyError("pre-checkpoint trace size is outside the empty bound")
+    connection = sqlite3.connect(
+        f"file:{selected.resolve()}?mode=ro&immutable=1",
+        uri=True,
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        if int(connection.execute("PRAGMA query_only").fetchone()[0]) != 1:
+            raise RecoveryPolicyError("pre-checkpoint trace query_only preflight failed")
+        integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+        tables = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
+        ]
+        indexes = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
+            )
+        ]
+        columns = [
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(recovery_checkpoint_metadata)"
+            )
+        ]
+        row_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM recovery_checkpoint_metadata"
+            ).fetchone()[0]
+        ) if tables == ["recovery_checkpoint_metadata"] else -1
+        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+        if (
+            integrity != "ok"
+            or tables != ["recovery_checkpoint_metadata"]
+            or indexes != ["sqlite_autoindex_recovery_checkpoint_metadata_1"]
+            or columns
+            != [
+                "operation_id",
+                "contract_name",
+                "plan_fingerprint",
+                "source_digest",
+                "source_watermarks_json",
+                "schema_revision",
+                "created_at",
+            ]
+            or row_count != 0
+            or page_count != 3
+            or freelist_count != 0
+            or schema_version != 1
+            or int(connection.total_changes) != 0
+        ):
+            raise RecoveryPolicyError("pre-checkpoint temp contains non-empty or unknown SQLite material")
+    except sqlite3.Error as exc:
+        raise RecoveryPolicyError("pre-checkpoint temp is not a readable empty SQLite trace") from exc
+    finally:
+        connection.close()
+    file_sha256 = _sha256_file(selected)
+    after = selected.stat()
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise RecoveryPolicyError("pre-checkpoint trace changed during query-only proof")
+    return {
+        "path": str(selected.resolve()),
+        "size_bytes": int(after.st_size),
+        "sha256": file_sha256,
+        "device": int(after.st_dev),
+        "inode": int(after.st_ino),
+        "page_count": page_count,
+        "schema_version": schema_version,
+        "metadata_row_count": row_count,
+        "query_only": True,
+        "preserved": True,
+    }
 
 
 @contextmanager

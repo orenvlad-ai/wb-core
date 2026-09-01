@@ -1327,6 +1327,89 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
             RecoveryState.FAILED_RECOVERABLE.value,
         )
 
+    def test_hourly_precheckpoint_lock_reconciliation_preserves_empty_sqlite_trace(
+        self,
+    ) -> None:
+        def fail_before_checkpoint(_: str, boundary: str) -> None:
+            if boundary == "before_checkpoint_write":
+                raise sqlite3.OperationalError("database is locked")
+
+        faulting = WarehouseRecoveryRegistry(
+            runtime_dir=self.runtime_dir,
+            db_path=self.runtime.db_path,
+            operational_reserve_bytes=0,
+            fault_injector=fail_before_checkpoint,
+        )
+        with self.assertRaises(sqlite3.OperationalError):
+            faulting.prepare_t2(
+                mutation_kind="hourly_warehouse_sync",
+                plan_fingerprint="sha256:hourly-empty-precheckpoint-trace",
+                scope={
+                    "base_active_version_id": "v1",
+                    "effective_date": "2026-07-26",
+                },
+                source_digest="sha256:source",
+                non_target_digest="",
+                source_watermarks={"functional_version_id": "v1"},
+                schema_revision="smoke-v1",
+            )
+        failed = next(
+            operation
+            for operation in self.registry.list_operations(limit=100)
+            if operation["plan_fingerprint"]
+            == "sha256:hourly-empty-precheckpoint-trace"
+        )
+        partial = (
+            self.registry.checkpoint_root
+            / f"{failed['operation_id']}.sqlite3.tmp"
+        )
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(partial)) as trace:
+            trace.execute(
+                """CREATE TABLE recovery_checkpoint_metadata(
+                       operation_id TEXT PRIMARY KEY,
+                       contract_name TEXT NOT NULL,
+                       plan_fingerprint TEXT NOT NULL,
+                       source_digest TEXT NOT NULL,
+                       source_watermarks_json TEXT NOT NULL,
+                       schema_revision TEXT NOT NULL,
+                       created_at TEXT NOT NULL
+                   )"""
+            )
+            trace.commit()
+        before_bytes = partial.read_bytes()
+
+        result = self.registry.reconcile_failed_hourly_precheckpoint_locks(
+            current_active_version_id="v1",
+        )
+
+        self.assertEqual(result["status"], "released")
+        self.assertEqual(result["removed_paths"], [])
+        self.assertEqual(len(result["preserved_precheckpoint_traces"]), 1)
+        trace_evidence = result["preserved_precheckpoint_traces"][0]
+        self.assertEqual(trace_evidence["operation_id"], failed["operation_id"])
+        self.assertEqual(trace_evidence["path"], str(partial.resolve()))
+        self.assertEqual(trace_evidence["metadata_row_count"], 0)
+        self.assertTrue(trace_evidence["query_only"])
+        self.assertTrue(trace_evidence["preserved"])
+        self.assertEqual(partial.read_bytes(), before_bytes)
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn:
+            transition = conn.execute(
+                """SELECT detail_json
+                   FROM sheet_vitrina_v1_recovery_transitions
+                   WHERE operation_id=? ORDER BY transition_id DESC LIMIT 1""",
+                (failed["operation_id"],),
+            ).fetchone()
+        detail = json.loads(transition[0])
+        self.assertEqual(
+            detail["empty_precheckpoint_trace_preserved"]["sha256"],
+            trace_evidence["sha256"],
+        )
+        self.assertEqual(
+            self.registry.get_operation(failed["operation_id"])["lifecycle"],
+            RecoveryState.RELEASED.value,
+        )
+
     def test_expired_retention_is_fingerprint_gated(self) -> None:
         start = datetime(2026, 7, 1, tzinfo=timezone.utc)
         clock_value = {"now": start}
