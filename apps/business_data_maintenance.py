@@ -1762,6 +1762,7 @@ def maintenance_status(
     systemd: SystemdClient,
     schedules: RuntimeScheduleClient,
     proc_root: Path = Path("/proc"),
+    runtime_schedule_readback: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     captured_at = _utc_now()
     timer_states = {unit: systemd.unit_state(unit) for unit in ALL_BUSINESS_TIMER_UNITS}
@@ -1776,7 +1777,11 @@ def maintenance_status(
         for unit in discovered
         if unit not in CLASSIFIED_WB_CORE_TIMER_UNITS
     ]
-    runtime = _runtime_summary(schedules.read_all())
+    runtime = (
+        dict(runtime_schedule_readback)
+        if runtime_schedule_readback is not None
+        else _runtime_summary(schedules.read_all())
+    )
     processes = _writer_processes(proc_root)
     locks = _lock_summary(runtime_dir)
     cron = _cron_entries()
@@ -3712,8 +3717,52 @@ def maintenance_prepare(
             "capture; prior state is unknown and mutation is fail-closed"
         )
     owner_policy_existed = (runtime_dir / POLICY_FILENAME).is_file()
-    before_payloads = schedules.read_all()
-    before = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules, proc_root=proc_root)
+    active_phase = str((existing or {}).get("phase") or "")
+    persisted_readback = dict(
+        (
+            (existing or {}).get("hold_readback")
+            if active_phase == "held"
+            else (existing or {}).get("prepare_readback")
+        )
+        or {}
+    )
+    bind_prepared_before_schedules = bool(
+        active_phase == "prepared"
+        and window_id
+        and plan_fingerprint
+        and not (existing or {}).get("prepared_resume_binding")
+        and not (existing or {}).get(
+            "pause_owned_inventory_resume_binding"
+        )
+    )
+    if bind_prepared_before_schedules:
+        persisted_runtime = dict(
+            persisted_readback.get("runtime_schedules") or {}
+        )
+        if set(persisted_runtime) != {
+            "feedback_complaints",
+            "spp",
+            "web_vitrina",
+        }:
+            raise RuntimeError(
+                "prepared maintenance runtime schedule readback drifted"
+            )
+        before_payloads: dict[str, dict[str, Any]] = {}
+        before = maintenance_status(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+            runtime_schedule_readback=persisted_runtime,
+        )
+    else:
+        before_payloads = schedules.read_all()
+        before = maintenance_status(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+        )
     prior_auto_updates = (
         owner_policy_readback(runtime_dir, status=before)
         if owner_policy_existed
@@ -3728,7 +3777,6 @@ def maintenance_prepare(
         "prepared",
         "held",
     }:
-        active_phase = str(existing.get("phase") or "")
         current_auto_updates = dict(before.get("auto_updates") or {})
         if (
             not owner_policy_existed
@@ -3746,14 +3794,6 @@ def maintenance_prepare(
                 f"stale policy revision: expected {expected_revision}, "
                 f"current {current_revision}"
             )
-        persisted_readback = dict(
-            (
-                existing.get("hold_readback")
-                if active_phase == "held"
-                else existing.get("prepare_readback")
-            )
-            or {}
-        )
         persisted_auto_updates = dict(
             persisted_readback.get("auto_updates") or {}
         )
@@ -3800,7 +3840,8 @@ def maintenance_prepare(
             plan_fingerprint=plan_fingerprint,
         )
         if pause_owned_resume and (
-            pause_owned_resume["transition_applied"]
+            bind_prepared_before_schedules
+            or pause_owned_resume["transition_applied"]
             or pause_owned_resume["resume_pending"]
         ):
             return {
@@ -3813,6 +3854,22 @@ def maintenance_prepare(
                     pause_owned_resume["binding"]
                 ),
             }
+        if bind_prepared_before_schedules:
+            return _resume_prepared_nonquiet(
+                runtime_dir,
+                existing=existing,
+                before=before,
+                baseline=baseline,
+                persisted_readback=persisted_readback,
+                persisted_signature=persisted_signature,
+                current_revision=current_revision,
+                current_policy_fingerprint=str(
+                    current_auto_updates.get("policy_fingerprint") or ""
+                ),
+                systemd=systemd,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
         current_signature = maintenance_control_signature(
             before,
             runtime_dir=runtime_dir,
