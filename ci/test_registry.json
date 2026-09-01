@@ -44,7 +44,8 @@
         ["python3", "apps/wbc0010_autoanswers_budget_recovery_smoke.py"],
         ["python3", "apps/root_storage_policy_smoke.py"],
         ["python3", "apps/registry_upload_http_entrypoint_public_routes_smoke.py"],
-        ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"]
+        ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"],
+        ["python3", "-S", "apps/wbc0027_incident_capsule_target_smoke.py"]
       ]
     },
     "business_data_safety": {
@@ -299,7 +300,7 @@
     },
     {
       "id": "wbc0027-incident-recovery-capsule",
-      "paths": [".github/workflows/wbc0027-incident-capsule.yml", "apps/wbc0027_incident_capsule_workflow.py", "apps/wbc0027_incident_recovery_capsule.py", "apps/wbc0027_incident_recovery_capsule_smoke.py", "migration/179_wbc0027_incident_recovery_capsule.md"],
+      "paths": [".github/workflows/wbc0027-incident-capsule.yml", "apps/wbc0027_incident_capsule_target.py", "apps/wbc0027_incident_capsule_target_smoke.py", "apps/wbc0027_incident_capsule_workflow.py", "apps/wbc0027_incident_recovery_capsule.py", "apps/wbc0027_incident_recovery_capsule_smoke.py", "migration/179_wbc0027_incident_recovery_capsule.md"],
       "suites": ["fulfillment", "inventory_history", "release_safety"],
       "release": "live_runtime"
     },
