@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
@@ -16,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from apps import wbc0027_incident_recovery_capsule as module  # noqa: E402
 from apps import wbc0027_incident_capsule_workflow as workflow_module  # noqa: E402
+from apps import registry_upload_http_entrypoint_hosted_runtime as hosted_runtime  # noqa: E402
 from apps.fbs_lifecycle_manifests_smoke import (  # noqa: E402
     _Clock,
     _add_later_canonical_identity,
@@ -34,8 +37,10 @@ from apps.ff_pool_fbs_forward_recovery_smoke import (  # noqa: E402
 from apps.ff_pool_fbs_lifecycle_smoke import _insert_post_t_order  # noqa: E402
 from packages.application.fbs_lifecycle_manifests import read_json  # noqa: E402
 from packages.application.ff_pool_fbs_forward_recovery import (  # noqa: E402
+    FfPoolFbsForwardRecoveryError,
     FfPoolFbsForwardRecoveryMutation,
     _active_manifest,
+    _finalize_preview_projection_foreign_keys,
 )
 from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     IDENTITY_PENDING_RESOLUTIONS_TABLE,
@@ -44,13 +49,173 @@ from packages.application.ff_pool_fbs_lifecycle import (  # noqa: E402
     process_post_t_fbs_lifecycle,
 )
 from packages.application.sheet_vitrina_v1_inventory_history import (  # noqa: E402
+    CAPTURES_TABLE,
+    COMPONENTS_TABLE,
+    append_inventory_history_capture,
+    append_inventory_history_finalization,
     ensure_inventory_history_schema,
 )
+
+
+def _assert_hosted_transport_contract(root: Path) -> None:
+    binding = workflow_module.materialize_ssh_transport(
+        target_file=hosted_runtime.DEFAULT_TARGET_FILE,
+        output_directory=root / "capsule-ssh",
+        private_key="synthetic-private-key",
+        known_hosts="89.191.226.88 ssh-ed25519 c3ludGhldGljLWtleQ==",
+    )
+    assert binding["target_id"] == module.CANONICAL_TARGET_ID
+    assert binding["host_name"] == "89.191.226.88"
+    assert binding["user"] == "root"
+    assert binding["ssh_host_alias"] != binding["source_ssh_destination"]
+    assert {
+        Path(binding["ssh_config"]).stat().st_mode & 0o777,
+        Path(binding["identity_file"]).stat().st_mode & 0o777,
+        Path(binding["known_hosts_file"]).stat().st_mode & 0o777,
+    } == {0o600}
+    resolved = subprocess.run(
+        [
+            "ssh",
+            "-G",
+            "-F",
+            str(binding["ssh_config"]),
+            str(binding["ssh_host_alias"]),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(root / "empty-home")},
+    ).stdout.splitlines()
+    assert "hostname 89.191.226.88" in resolved
+    assert "user root" in resolved
+    assert f"hostkeyalias {binding['host_name']}" in resolved
+    assert f"userknownhostsfile {binding['known_hosts_file']}" in resolved
+
+    canonical = json.loads(hosted_runtime.DEFAULT_TARGET_FILE.read_text(encoding="utf-8"))
+    for label, host in (("missing", ""), ("foreign", "203.0.113.10")):
+        invalid = {**canonical, "host_ip": host}
+        invalid_path = root / f"target-{label}.json"
+        invalid_path.write_text(json.dumps(invalid), encoding="utf-8")
+        blocked = False
+        try:
+            workflow_module.materialize_ssh_transport(
+                target_file=invalid_path,
+                output_directory=root / f"capsule-ssh-{label}",
+                private_key="synthetic-private-key",
+                known_hosts="89.191.226.88 ssh-ed25519 c3ludGhldGljLWtleQ==",
+            )
+        except workflow_module.ApplyError as exc:
+            blocked = f"host_ip is {label}" in str(exc)
+        assert blocked, label
+
+    workflow = (ROOT / ".github/workflows/wbc0027-incident-capsule.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "materialize-ssh" in workflow
+    assert "ssh -F \"$SSH_CONFIG\"" in workflow
+    assert "wb-core-eu-root" not in workflow
+
+
+def _insert_history_component(conn: sqlite3.Connection, *, capture_id: str) -> None:
+    conn.execute(
+        f"""INSERT INTO {COMPONENTS_TABLE}(
+               capture_id,scope_kind,scope_key,nm_id,component_kind,component_id,
+               component_label,state,quantity,source_revision,source_digest,
+               source_watermark,provenance_json,captured_at
+           ) VALUES(?, 'TOTAL', 'TOTAL', NULL, 'WB', 'WB', 'WB', 'missing', NULL,
+                    '', '', '', '{{}}', '2026-08-17T00:00:00Z')""",
+        (capture_id,),
+    )
+
+
+def _insert_history_capture(conn: sqlite3.Connection, *, capture_id: str) -> None:
+    conn.execute(
+        f"""INSERT INTO {CAPTURES_TABLE}(
+               capture_id,business_date,capture_kind,formula_version,bundle_version,
+               ready_snapshot_id,ready_plan_version,generation_identity,
+               facility_roster_revision,facility_roster_json,source_manifest_json,
+               source_digest,captured_at
+           ) VALUES(?, '2026-08-17', 'historical_backfill', 'smoke', '', '', '', '',
+                    'smoke', '[]', '{{}}', 'sha256:smoke', '2026-08-17T00:00:00Z')""",
+        (capture_id,),
+    )
+
+
+def _assert_deferred_foreign_key_contract(root: Path) -> None:
+    success = sqlite3.connect(root / "history-projection-success.sqlite3")
+    try:
+        success.execute("PRAGMA foreign_keys=OFF")
+        ensure_inventory_history_schema(success)
+        _insert_history_component(success, capture_id="capture-success")
+        _insert_history_capture(success, capture_id="capture-success")
+        success.commit()
+        _finalize_preview_projection_foreign_keys(success)
+        assert int(success.execute("PRAGMA foreign_keys").fetchone()[0]) == 1
+        assert success.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        success.close()
+
+    failure = sqlite3.connect(root / "history-projection-failure.sqlite3")
+    try:
+        failure.execute("PRAGMA foreign_keys=OFF")
+        ensure_inventory_history_schema(failure)
+        _insert_history_component(failure, capture_id="capture-missing")
+        failure.commit()
+        blocked = False
+        try:
+            _finalize_preview_projection_foreign_keys(failure)
+        except FfPoolFbsForwardRecoveryError as exc:
+            blocked = (
+                exc.code == "preview_projection_foreign_key_drift"
+                and dict(exc.details or {}) == {"violation_count": 1}
+            )
+        assert blocked
+    finally:
+        failure.close()
+
+
+def _seed_superseded_history_dependency(conn: sqlite3.Connection) -> None:
+    base = conn.execute(
+        f"SELECT * FROM {CAPTURES_TABLE} WHERE business_date='2026-08-17' "
+        "ORDER BY capture_sequence DESC LIMIT 1"
+    ).fetchone()
+    assert base is not None
+    components = [
+        module.recovery_module._stored_component(row)
+        for row in conn.execute(
+            f"""SELECT scope_kind,scope_key,nm_id,component_kind,component_id,
+                       component_label,state,quantity,source_revision,source_digest,
+                       source_watermark,provenance_json
+                FROM {COMPONENTS_TABLE} WHERE capture_id=?
+                ORDER BY scope_kind,scope_key,component_kind,component_id""",
+            (str(base[1]),),
+        ).fetchall()
+    ]
+    later = append_inventory_history_capture(
+        conn,
+        business_date="2026-08-17",
+        capture_kind="historical_backfill",
+        formula_version=str(base[4]),
+        facility_roster=json.loads(str(base[10])),
+        source_manifest={"contract": "synthetic_exact_same_date_v2", "date": "2026-08-17"},
+        components=components,
+        captured_at="2026-08-17T22:00:00Z",
+    )
+    append_inventory_history_finalization(
+        conn,
+        business_date="2026-08-17",
+        capture_id=str(later["capture_id"]),
+        finalization_identity="synthetic-v2:2026-08-17",
+        finalized_at="2026-08-17T23:00:00Z",
+        provenance={"source": "capsule-supersession-smoke"},
+    )
 
 
 def main() -> int:
     with TemporaryDirectory(prefix="wbc0027-incident-capsule-") as raw:
         root = Path(raw)
+        _assert_hosted_transport_contract(root)
+        _assert_deferred_foreign_key_contract(root)
         runtime = _prepared_runtime(root / "runtime")
         _insert_backlog(runtime.db_path)
         forward = FfPoolFbsForwardRecoveryMutation(
@@ -125,6 +290,7 @@ def main() -> int:
             _add_later_canonical_identity(conn)
             _seed_mapping_owner(conn)
             _seed_history_with_four_unsupported_cells(conn)
+            _seed_superseded_history_dependency(conn)
             source_cursor_max = int(
                 conn.execute(
                     "SELECT MAX(source_status_observation_sequence) "
@@ -176,6 +342,17 @@ def main() -> int:
         qualified = read_json(Path(qualification["qualification_path"]))
         assert manifest["expected_writes"]["logical"]["mapping_insert_count"] == 1
         assert manifest["expected_writes"]["logical"]["target_status_count"] == 5
+        assert manifest["expected_writes"]["simulation"] == {
+            "contract": "wbc0027_incident_capsule_full_projection_simulation/v1",
+            "production_source_open_mode": "ro",
+            "production_source_query_only": True,
+            "production_source_write_count": 0,
+            "scratch_projection": "full_forward_and_history_dependencies",
+            "scratch_foreign_keys_during_projection": "disabled",
+            "scratch_foreign_keys_after_projection": "enabled",
+            "scratch_foreign_key_check": "zero_violations",
+            "final_apply_foreign_keys": "enabled",
+        }
         assert manifest["history"]["classification_counts"][
             "remain_missing_no_same_date_evidence"
         ] == 4

@@ -1231,6 +1231,7 @@ def _build_preview_projection(
     *,
     source: Mapping[str, Any],
     scratch_path: Path,
+    defer_foreign_key_check: bool = False,
 ) -> dict[str, Any]:
     """Copy the coherent lifecycle dependency graph into bounded disk scratch.
 
@@ -1446,14 +1447,8 @@ def _build_preview_projection(
     scratch.commit()
     _create_projection_indexes_and_triggers(source_conn, scratch)
     scratch.commit()
-    scratch.execute("PRAGMA foreign_keys=ON")
-    foreign_key_violations = scratch.execute("PRAGMA foreign_key_check").fetchall()
-    if foreign_key_violations:
-        raise FfPoolFbsForwardRecoveryError(
-            "preview_projection_foreign_key_drift",
-            "Coherent preview dependency graph fails exact foreign-key readback",
-            details={"violation_count": len(foreign_key_violations)},
-        )
+    if not defer_foreign_key_check:
+        _finalize_preview_projection_foreign_keys(scratch)
     expected_schema = dict(source["projection_schema_evidence"])
     actual_schema = _projection_schema_evidence(scratch)
     if actual_schema != expected_schema:
@@ -1489,7 +1484,7 @@ def _build_preview_projection(
         "full_relevant_schema_cloned": True,
         "schema_digest_equal": True,
         "schema_evidence": actual_schema,
-        "foreign_key_check": "pass",
+        "foreign_key_check": "deferred" if defer_foreign_key_check else "pass",
         "canonical_write_seeds": dict(source["canonical_write_seeds"]),
         "chunk_size": PROJECTION_CHUNK_SIZE,
         "copied_table_count": len(tracker.table_rows),
@@ -1504,6 +1499,27 @@ def _build_preview_projection(
         ),
         "table_row_counts": dict(sorted(tracker.table_rows.items())),
     }
+
+
+def _finalize_preview_projection_foreign_keys(scratch: sqlite3.Connection) -> None:
+    if scratch.in_transaction:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_foreign_key_check_in_transaction",
+            "Foreign-key enforcement must be enabled after projection commit",
+        )
+    scratch.execute("PRAGMA foreign_keys=ON")
+    if int(scratch.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_foreign_key_enforcement_disabled",
+            "Coherent preview foreign-key enforcement did not enable",
+        )
+    foreign_key_violations = scratch.execute("PRAGMA foreign_key_check").fetchall()
+    if foreign_key_violations:
+        raise FfPoolFbsForwardRecoveryError(
+            "preview_projection_foreign_key_drift",
+            "Coherent preview dependency graph fails exact foreign-key readback",
+            details={"violation_count": len(foreign_key_violations)},
+        )
 
 
 class _ProjectionTracker:

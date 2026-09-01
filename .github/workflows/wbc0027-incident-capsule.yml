@@ -52,6 +52,18 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Resolve canonical target and materialize hosted SSH binding
+        id: transport
+        env:
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/wbc0027_incident_capsule_workflow.py materialize-ssh
+          --target-file artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json
+          --output-directory "$RUNNER_TEMP/capsule-ssh"
+          --output "$RUNNER_TEMP/capsule-ssh-binding.json"
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Bind exact capsule release
         id: release
         env:
@@ -65,37 +77,28 @@ jobs:
           --output "$RUNNER_TEMP/capsule-release-binding.json"
           --github-output "$GITHUB_OUTPUT"
 
-      - name: Configure canonical hosted SSH identity
-        env:
-          SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: |
-          set -eu
-          install -d -m 0700 "$RUNNER_TEMP/capsule-ssh"
-          install -m 0600 /dev/null "$RUNNER_TEMP/capsule-ssh/id"
-          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/capsule-ssh/id"
-          install -m 0600 /dev/null "$RUNNER_TEMP/capsule-ssh/known_hosts"
-          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/capsule-ssh/known_hosts"
-
       - name: Run deployed query-only qualification
         env:
           DEPLOYED_SHA: ${{ steps.release.outputs.deployed_sha }}
           OPERATION_ID: ${{ steps.release.outputs.operation_id }}
+          SSH_CONFIG: ${{ steps.transport.outputs.ssh_config }}
+          SSH_HOST_ALIAS: ${{ steps.transport.outputs.ssh_host_alias }}
         run: |
           set -eu
-          SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/capsule-ssh/known_hosts" -i "$RUNNER_TEMP/capsule-ssh/id")
-          SCP=(scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/capsule-ssh/known_hosts" -i "$RUNNER_TEMP/capsule-ssh/id")
+          SSH=(ssh -F "$SSH_CONFIG")
+          SCP=(scp -q -F "$SSH_CONFIG")
           REMOTE_EVIDENCE="/opt/wb-core-runtime/state/backups/private-evidence/production-goals/$OPERATION_ID"
-          "${SSH[@]}" wb-core-eu-root "set -eu; umask 077; install -d -m 0700 '$REMOTE_EVIDENCE'"
-          "${SCP[@]}" "$RUNNER_TEMP/capsule-release-binding.json" "wb-core-eu-root:$REMOTE_EVIDENCE/release-binding.json"
-          "${SSH[@]}" wb-core-eu-root "set -eu; umask 077; cd /opt/wb-core-runtime/app; export PYTHONPATH=/opt/wb-core-runtime/app PYTHONDONTWRITEBYTECODE=1; python3 apps/wbc0027_incident_recovery_capsule.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha '$DEPLOYED_SHA' --passport-file /opt/wb-core-runtime/app/release/production-mutations/wbc0027_fbs_lifecycle_incident.json --release-binding-file '$REMOTE_EVIDENCE/release-binding.json' --scratch-dir /tmp/wbc0027-incident-capsule-qualification qualification --operation-id '$OPERATION_ID' --evidence-dir '$REMOTE_EVIDENCE'" > "$RUNNER_TEMP/qualification-compact.json"
+          "${SSH[@]}" "$SSH_HOST_ALIAS" "set -eu; umask 077; install -d -m 0700 '$REMOTE_EVIDENCE'"
+          "${SCP[@]}" "$RUNNER_TEMP/capsule-release-binding.json" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/release-binding.json"
+          "${SSH[@]}" "$SSH_HOST_ALIAS" "set -eu; umask 077; cd /opt/wb-core-runtime/app; export PYTHONPATH=/opt/wb-core-runtime/app PYTHONDONTWRITEBYTECODE=1; python3 apps/wbc0027_incident_recovery_capsule.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha '$DEPLOYED_SHA' --passport-file /opt/wb-core-runtime/app/release/production-mutations/wbc0027_fbs_lifecycle_incident.json --release-binding-file '$REMOTE_EVIDENCE/release-binding.json' --scratch-dir /tmp/wbc0027-incident-capsule-qualification qualification --operation-id '$OPERATION_ID' --evidence-dir '$REMOTE_EVIDENCE'" > "$RUNNER_TEMP/qualification-compact.json"
           test "$(jq -r .state "$RUNNER_TEMP/qualification-compact.json")" = HUMAN_REQUIRED
           test "$(jq -r .production_mutation_submit_count "$RUNNER_TEMP/qualification-compact.json")" = 0
           install -d -m 0700 "$RUNNER_TEMP/capsule-artifact"
-          "${SCP[@]}" "wb-core-eu-root:$(jq -r .manifest_path "$RUNNER_TEMP/qualification-compact.json")" "$RUNNER_TEMP/capsule-artifact/capsule-manifest.json"
-          "${SCP[@]}" "wb-core-eu-root:$(jq -r .backup_path "$RUNNER_TEMP/qualification-compact.json")" "$RUNNER_TEMP/capsule-artifact/capsule-backup-evidence.json"
-          "${SCP[@]}" "wb-core-eu-root:$(jq -r .qualification_path "$RUNNER_TEMP/qualification-compact.json")" "$RUNNER_TEMP/capsule-artifact/capsule-qualification.json"
+          "${SCP[@]}" "$SSH_HOST_ALIAS:$(jq -r .manifest_path "$RUNNER_TEMP/qualification-compact.json")" "$RUNNER_TEMP/capsule-artifact/capsule-manifest.json"
+          "${SCP[@]}" "$SSH_HOST_ALIAS:$(jq -r .backup_path "$RUNNER_TEMP/qualification-compact.json")" "$RUNNER_TEMP/capsule-artifact/capsule-backup-evidence.json"
+          "${SCP[@]}" "$SSH_HOST_ALIAS:$(jq -r .qualification_path "$RUNNER_TEMP/qualification-compact.json")" "$RUNNER_TEMP/capsule-artifact/capsule-qualification.json"
           cp "$RUNNER_TEMP/capsule-release-binding.json" "$RUNNER_TEMP/capsule-artifact/capsule-release-binding.json"
+          cp "$RUNNER_TEMP/capsule-ssh-binding.json" "$RUNNER_TEMP/capsule-artifact/capsule-ssh-binding.json"
           cp "$RUNNER_TEMP/qualification-compact.json" "$RUNNER_TEMP/capsule-artifact/qualification-compact.json"
           test "sha256:$(sha256sum "$RUNNER_TEMP/capsule-artifact/capsule-manifest.json" | cut -d' ' -f1)" = "$(jq -r .manifest_sha256 "$RUNNER_TEMP/qualification-compact.json")"
           test "sha256:$(sha256sum "$RUNNER_TEMP/capsule-artifact/capsule-qualification.json" | cut -d' ' -f1)" = "$(jq -r .qualification_sha256 "$RUNNER_TEMP/qualification-compact.json")"
@@ -142,6 +145,18 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Resolve canonical target and materialize hosted SSH binding
+        id: transport
+        env:
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+        run: >-
+          python3 apps/wbc0027_incident_capsule_workflow.py materialize-ssh
+          --target-file artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json
+          --output-directory "$RUNNER_TEMP/capsule-ssh"
+          --output "$RUNNER_TEMP/capsule-ssh-binding.json"
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Reject missing Apply bindings
         run: |
           set -eu
@@ -183,44 +198,34 @@ jobs:
           --output "$RUNNER_TEMP/capsule-authorization.json"
           --github-output "$GITHUB_OUTPUT"
 
-      - name: Configure canonical hosted SSH identity
-        env:
-          SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: |
-          set -eu
-          install -d -m 0700 "$RUNNER_TEMP/capsule-ssh"
-          install -m 0600 /dev/null "$RUNNER_TEMP/capsule-ssh/id"
-          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/capsule-ssh/id"
-          install -m 0600 /dev/null "$RUNNER_TEMP/capsule-ssh/known_hosts"
-          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/capsule-ssh/known_hosts"
-
       - name: Submit once, then query-only readback
         id: submit
         env:
           DEPLOYED_SHA: ${{ steps.release.outputs.deployed_sha }}
           OPERATION_ID: ${{ steps.authorization.outputs.operation_id }}
+          SSH_CONFIG: ${{ steps.transport.outputs.ssh_config }}
+          SSH_HOST_ALIAS: ${{ steps.transport.outputs.ssh_host_alias }}
         run: |
           set -eu
-          SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/capsule-ssh/known_hosts" -i "$RUNNER_TEMP/capsule-ssh/id")
-          SCP=(scp -q -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/capsule-ssh/known_hosts" -i "$RUNNER_TEMP/capsule-ssh/id")
+          SSH=(ssh -F "$SSH_CONFIG")
+          SCP=(scp -q -F "$SSH_CONFIG")
           REMOTE_EVIDENCE="/opt/wb-core-runtime/state/backups/private-evidence/production-goals/$OPERATION_ID-apply"
-          "${SSH[@]}" wb-core-eu-root "set -eu; umask 077; install -d -m 0700 '$REMOTE_EVIDENCE'"
-          "${SCP[@]}" "$RUNNER_TEMP/capsule-release-binding.json" "wb-core-eu-root:$REMOTE_EVIDENCE/release-binding.json"
-          "${SCP[@]}" "$RUNNER_TEMP/qualification-artifact/capsule-manifest.json" "wb-core-eu-root:$REMOTE_EVIDENCE/capsule-manifest.json"
-          "${SCP[@]}" "$RUNNER_TEMP/qualification-artifact/capsule-qualification.json" "wb-core-eu-root:$REMOTE_EVIDENCE/capsule-qualification.json"
-          "${SCP[@]}" "$RUNNER_TEMP/capsule-authorization.json" "wb-core-eu-root:$REMOTE_EVIDENCE/capsule-authorization.json"
+          "${SSH[@]}" "$SSH_HOST_ALIAS" "set -eu; umask 077; install -d -m 0700 '$REMOTE_EVIDENCE'"
+          "${SCP[@]}" "$RUNNER_TEMP/capsule-release-binding.json" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/release-binding.json"
+          "${SCP[@]}" "$RUNNER_TEMP/qualification-artifact/capsule-manifest.json" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/capsule-manifest.json"
+          "${SCP[@]}" "$RUNNER_TEMP/qualification-artifact/capsule-qualification.json" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/capsule-qualification.json"
+          "${SCP[@]}" "$RUNNER_TEMP/capsule-authorization.json" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/capsule-authorization.json"
           set +e
-          "${SSH[@]}" wb-core-eu-root "set -eu; umask 077; cd /opt/wb-core-runtime/app; export PYTHONPATH=/opt/wb-core-runtime/app PYTHONDONTWRITEBYTECODE=1; AUTH=\$(jq -r .body '$REMOTE_EVIDENCE/capsule-authorization.json'); python3 apps/wbc0027_incident_recovery_capsule.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha '$DEPLOYED_SHA' --passport-file /opt/wb-core-runtime/app/release/production-mutations/wbc0027_fbs_lifecycle_incident.json --release-binding-file '$REMOTE_EVIDENCE/release-binding.json' --output '$REMOTE_EVIDENCE/apply-result.json' apply --manifest-file '$REMOTE_EVIDENCE/capsule-manifest.json' --qualification-file '$REMOTE_EVIDENCE/capsule-qualification.json' --operation-id '$OPERATION_ID' --approval-reference \"\$AUTH\" --actor production-apply-runner --evidence-dir '$REMOTE_EVIDENCE'"
+          "${SSH[@]}" "$SSH_HOST_ALIAS" "set -eu; umask 077; cd /opt/wb-core-runtime/app; export PYTHONPATH=/opt/wb-core-runtime/app PYTHONDONTWRITEBYTECODE=1; AUTH=\$(jq -r .body '$REMOTE_EVIDENCE/capsule-authorization.json'); python3 apps/wbc0027_incident_recovery_capsule.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha '$DEPLOYED_SHA' --passport-file /opt/wb-core-runtime/app/release/production-mutations/wbc0027_fbs_lifecycle_incident.json --release-binding-file '$REMOTE_EVIDENCE/release-binding.json' --output '$REMOTE_EVIDENCE/apply-result.json' apply --manifest-file '$REMOTE_EVIDENCE/capsule-manifest.json' --qualification-file '$REMOTE_EVIDENCE/capsule-qualification.json' --operation-id '$OPERATION_ID' --approval-reference \"\$AUTH\" --actor production-apply-runner --evidence-dir '$REMOTE_EVIDENCE'"
           APPLY_RC=$?
           set -e
           set +e
-          "${SSH[@]}" wb-core-eu-root "set -eu; umask 077; cd /opt/wb-core-runtime/app; export PYTHONPATH=/opt/wb-core-runtime/app PYTHONDONTWRITEBYTECODE=1; AUTH=\$(jq -r .body '$REMOTE_EVIDENCE/capsule-authorization.json'); python3 apps/wbc0027_incident_recovery_capsule.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha '$DEPLOYED_SHA' --passport-file /opt/wb-core-runtime/app/release/production-mutations/wbc0027_fbs_lifecycle_incident.json --release-binding-file '$REMOTE_EVIDENCE/release-binding.json' --output '$REMOTE_EVIDENCE/readback.json' readback --manifest-file '$REMOTE_EVIDENCE/capsule-manifest.json' --operation-id '$OPERATION_ID' --approval-reference \"\$AUTH\""
+          "${SSH[@]}" "$SSH_HOST_ALIAS" "set -eu; umask 077; cd /opt/wb-core-runtime/app; export PYTHONPATH=/opt/wb-core-runtime/app PYTHONDONTWRITEBYTECODE=1; AUTH=\$(jq -r .body '$REMOTE_EVIDENCE/capsule-authorization.json'); python3 apps/wbc0027_incident_recovery_capsule.py --runtime-dir /opt/wb-core-runtime/state --deployed-sha '$DEPLOYED_SHA' --passport-file /opt/wb-core-runtime/app/release/production-mutations/wbc0027_fbs_lifecycle_incident.json --release-binding-file '$REMOTE_EVIDENCE/release-binding.json' --output '$REMOTE_EVIDENCE/readback.json' readback --manifest-file '$REMOTE_EVIDENCE/capsule-manifest.json' --operation-id '$OPERATION_ID' --approval-reference \"\$AUTH\""
           READBACK_RC=$?
           set -e
           install -d -m 0700 "$RUNNER_TEMP/apply-artifact"
-          "${SCP[@]}" "wb-core-eu-root:$REMOTE_EVIDENCE/readback.json" "$RUNNER_TEMP/apply-artifact/readback.json" || true
-          "${SCP[@]}" "wb-core-eu-root:$REMOTE_EVIDENCE/apply-result.json" "$RUNNER_TEMP/apply-artifact/apply-result.json" || true
+          "${SCP[@]}" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/readback.json" "$RUNNER_TEMP/apply-artifact/readback.json" || true
+          "${SCP[@]}" "$SSH_HOST_ALIAS:$REMOTE_EVIDENCE/apply-result.json" "$RUNNER_TEMP/apply-artifact/apply-result.json" || true
           cp "$RUNNER_TEMP/capsule-release-binding.json" "$RUNNER_TEMP/apply-artifact/release-binding.json"
           cp "$RUNNER_TEMP/capsule-authorization.json" "$RUNNER_TEMP/apply-artifact/authorization.json"
           cp "$RUNNER_TEMP/qualification-artifact/capsule-manifest.json" "$RUNNER_TEMP/apply-artifact/capsule-manifest.json"

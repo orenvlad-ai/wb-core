@@ -42,6 +42,15 @@ expected write digest and invariant digests. It records
 Qualification does not create a general phase marker and does not authorize
 Apply.
 
+The trusted workflow resolves the explicit canonical hosted target before any
+remote command and materializes a private SSH config with exact `HostName`,
+`User=root`, identity and known-host bindings. It never depends on a hosted
+runner's local alias or probes a legacy/default target. The mutation-incapable
+simulation keeps scratch foreign-key enforcement disabled only while the full
+forward/history dependency projection is populated; after projection commit it
+enables enforcement and requires a complete zero-row `foreign_key_check`.
+The production source connection remains `mode=ro` and query-only throughout.
+
 ## Single later Apply contract
 
 Apply is intentionally not executed by this migration. A later invocation can
