@@ -475,3 +475,24 @@ contract. Current semantic component digests are typed observation only and
 have no historical equality predicate. Absence of the semantic fields is
 accepted only for the exact PR-1129 lineage; canonical future Apply validation
 remains unchanged and fail-closed.
+
+## WBC0027 provisional last-good break-glass
+
+The break-glass contour is a read-side availability operation, not lifecycle
+reconstruction. Its production profile is closed at 303 append-only cells
+(68 FBS facility, 34 combined, 34 WAC and 167 economics), with three exact
+source-empty SKU 497413772 margin identities excluded. Inventory comes from
+one exact accepted capture. Dependent cells come directly from one sealed
+economics JSON `before_plan_json`; a SQLite surrogate is forbidden. File,
+raw-plan, bundle/as-of/snapshot and date-column digests are CAS-checked before
+plan and mutation.
+
+The overlay fills only ordinary blank public cells, remains visibly
+`last_good_provisional` and never overwrites a current value. Apply uses one
+operation, one submit and one transaction. WB, FBO, history, ready/source,
+capital and every other non-target table remain digest-invariant. Its guarded
+revoke is a second, separately identified one-submit append-only transaction
+bound to the original manifest, prestate, non-target and before-image/readback
+evidence. It deletes or updates nothing; query-only second readback proves the
+overlay inactive and the full audit retained. Any ambiguous result permits
+only same-operation readback, never retry.

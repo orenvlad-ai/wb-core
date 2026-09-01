@@ -24,6 +24,7 @@ CONTRACT_NAME = "sheet_vitrina_v1_breakglass_last_good_v1"
 OPERATIONS_TABLE = "sheet_vitrina_v1_breakglass_last_good_operations"
 CELLS_TABLE = "sheet_vitrina_v1_breakglass_last_good_cells"
 REVOCATIONS_TABLE = "sheet_vitrina_v1_breakglass_last_good_revocations"
+REVOCATION_AUDIT_TABLE = "sheet_vitrina_v1_breakglass_last_good_revocation_audit"
 
 
 class BreakglassLastGoodError(RuntimeError):
@@ -71,6 +72,17 @@ def ensure_breakglass_last_good_schema(conn: sqlite3.Connection) -> None:
                 CHECK(substr(revoked_at,-1,1)='Z' AND julianday(revoked_at) IS NOT NULL),
             UNIQUE(operation_id)
         );
+        CREATE TABLE IF NOT EXISTS {REVOCATION_AUDIT_TABLE}(
+            revocation_id TEXT PRIMARY KEY REFERENCES {REVOCATIONS_TABLE}(revocation_id),
+            operation_id TEXT NOT NULL REFERENCES {OPERATIONS_TABLE}(operation_id),
+            manifest_sha256 TEXT NOT NULL,
+            target_prestate_digest TEXT NOT NULL,
+            non_target_digest TEXT NOT NULL,
+            backup_digest TEXT NOT NULL,
+            applied_readback_digest TEXT NOT NULL,
+            metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)),
+            UNIQUE(operation_id)
+        );
         CREATE TRIGGER IF NOT EXISTS breakglass_last_good_operations_no_update
         BEFORE UPDATE ON {OPERATIONS_TABLE}
         BEGIN SELECT RAISE(ABORT,'breakglass last-good operations are immutable'); END;
@@ -89,6 +101,12 @@ def ensure_breakglass_last_good_schema(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS breakglass_last_good_revocations_no_delete
         BEFORE DELETE ON {REVOCATIONS_TABLE}
         BEGIN SELECT RAISE(ABORT,'breakglass last-good revocations are append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS breakglass_last_good_revocation_audit_no_update
+        BEFORE UPDATE ON {REVOCATION_AUDIT_TABLE}
+        BEGIN SELECT RAISE(ABORT,'breakglass last-good revocation audit is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS breakglass_last_good_revocation_audit_no_delete
+        BEFORE DELETE ON {REVOCATION_AUDIT_TABLE}
+        BEGIN SELECT RAISE(ABORT,'breakglass last-good revocation audit is append-only'); END;
         """
     )
 
@@ -277,6 +295,12 @@ def revoke_breakglass_last_good(
     revocation_id: str,
     reason: str,
     revoked_at: str,
+    manifest_sha256: str,
+    target_prestate_digest: str,
+    non_target_digest: str,
+    backup_digest: str,
+    applied_readback_digest: str,
+    metadata: Mapping[str, Any] | None = None,
 ) -> None:
     ensure_breakglass_last_good_schema(conn)
     if conn.execute(
@@ -284,12 +308,77 @@ def revoke_breakglass_last_good(
         (operation_id,),
     ).fetchone() is None:
         raise BreakglassLastGoodError("breakglass operation is absent")
+    operation = conn.execute(
+        f"SELECT manifest_sha256 FROM {OPERATIONS_TABLE} WHERE operation_id=?",
+        (operation_id,),
+    ).fetchone()
+    if str(operation[0]) != str(manifest_sha256):
+        raise BreakglassLastGoodError("breakglass revocation manifest binding changed")
     conn.execute(
         f"""INSERT INTO {REVOCATIONS_TABLE}(
                 revocation_id,operation_id,reason,revoked_at
             ) VALUES(?,?,?,?)""",
         (revocation_id, operation_id, str(reason), revoked_at),
     )
+    conn.execute(
+        f"""INSERT INTO {REVOCATION_AUDIT_TABLE}(
+                revocation_id,operation_id,manifest_sha256,target_prestate_digest,
+                non_target_digest,backup_digest,applied_readback_digest,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            revocation_id,
+            operation_id,
+            str(manifest_sha256),
+            str(target_prestate_digest),
+            str(non_target_digest),
+            str(backup_digest),
+            str(applied_readback_digest),
+            _canonical_json(dict(metadata or {})),
+        ),
+    )
+
+
+def read_breakglass_last_good_revocation(
+    db_path: Path,
+    *,
+    operation_id: str,
+) -> dict[str, Any] | None:
+    """Read one exact append-only revocation without opening a write handle."""
+
+    if not Path(db_path).is_file():
+        return None
+    with _connect_readonly(Path(db_path)) as conn:
+        if {REVOCATIONS_TABLE, REVOCATION_AUDIT_TABLE} - {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }:
+            return None
+        row = conn.execute(
+            f"""SELECT revocation.revocation_id,revocation.operation_id,
+                       revocation.reason,revocation.revoked_at,
+                       audit.manifest_sha256,audit.target_prestate_digest,
+                       audit.non_target_digest,audit.backup_digest,
+                       audit.applied_readback_digest,audit.metadata_json
+                FROM {REVOCATIONS_TABLE} revocation
+                JOIN {REVOCATION_AUDIT_TABLE} audit
+                  ON audit.revocation_id=revocation.revocation_id
+                WHERE revocation.operation_id=?""",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "revocation_id": str(row["revocation_id"]),
+            "operation_id": str(row["operation_id"]),
+            "reason": str(row["reason"]),
+            "revoked_at": str(row["revoked_at"]),
+            "manifest_sha256": str(row["manifest_sha256"]),
+            "target_prestate_digest": str(row["target_prestate_digest"]),
+            "non_target_digest": str(row["non_target_digest"]),
+            "backup_digest": str(row["backup_digest"]),
+            "applied_readback_digest": str(row["applied_readback_digest"]),
+            "metadata": json.loads(str(row["metadata_json"])),
+        }
 
 
 def normalize_manifest_cells(cells: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
