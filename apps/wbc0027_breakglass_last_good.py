@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import date, datetime, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -92,6 +94,7 @@ PRODUCTION_INVENTORY_TOTALS = {
     "WB": 44428,
     "combined": 143246,
 }
+SQLITE_CANONICAL_VALUE_CONTRACT = "wbc0027_sqlite_scalar_canonical_json/v1"
 
 
 class BreakglassRunnerError(RuntimeError):
@@ -1074,7 +1077,34 @@ def _table_rows(conn: sqlite3.Connection, table: str) -> list[list[Any]]:
     if not columns:
         return []
     order = ",".join(f'"{item}"' for item in columns)
-    return [list(item) for item in conn.execute(f'SELECT {order} FROM "{table}" ORDER BY {order}')]
+    return [
+        [_canonicalize_sqlite_scalar(value) for value in item]
+        for item in conn.execute(f'SELECT {order} FROM "{table}" ORDER BY {order}')
+    ]
+
+
+def _canonicalize_sqlite_scalar(value: Any) -> Any:
+    """Return the v1 collision-free JSON representation of one SQLite scalar."""
+
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytes):
+        return {
+            "__sqlite_value_type__": "blob",
+            "base64": base64.b64encode(value).decode("ascii"),
+        }
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise BreakglassRunnerError(
+                f"unsupported SQLite scalar for {SQLITE_CANONICAL_VALUE_CONTRACT}: non-finite float"
+            )
+        return value
+    raise BreakglassRunnerError(
+        f"unsupported SQLite scalar for {SQLITE_CANONICAL_VALUE_CONTRACT}: "
+        f"{type(value).__name__}"
+    )
 
 
 def _tables(conn: sqlite3.Connection) -> set[str]:

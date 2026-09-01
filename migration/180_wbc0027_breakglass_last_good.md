@@ -55,5 +55,15 @@ deploy-persistent `business-data-maintenance` barrier/inventory and detached
 restore watchdog/continuity contract; this runner does not invent a second
 timer or barrier mechanism.
 
+Non-target/source CAS uses
+`wbc0027_sqlite_scalar_canonical_json/v1`. SQLite `bytes` and `memoryview`
+scalars are represented as the typed canonical JSON object
+`{"__sqlite_value_type__":"blob","base64":"<RFC4648 padded>"}`. `NULL`
+remains JSON `null`, including when compared with an empty BLOB. All other
+JSON-native SQLite scalars retain their legacy canonical JSON bytes and digest;
+unsupported and non-finite values fail closed. Plan, apply, readback and revoke
+all recompute this same representation through the shared table-row
+canonicalizer.
+
 Full exact FBS lifecycle reconstruction and historical certification remain a
 separate recovery scope.

@@ -15,11 +15,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.wbc0027_breakglass_last_good import (  # noqa: E402
+    BreakglassRunnerError,
     ECONOMICS_KEYS,
     PRODUCTION_FAMILY_COUNTS,
     PRODUCTION_SOURCE_EMPTY_IDENTITIES,
+    SQLITE_CANONICAL_VALUE_CONTRACT,
     WAC_KEYS,
     _breakglass_only_authorizer,
+    _canonicalize_sqlite_scalar,
+    _fingerprint,
+    _non_target_digest,
     apply_manifest,
     build_manifest,
     readback_manifest,
@@ -40,14 +45,18 @@ SNAPSHOT_ID = "2026-08-29__2026-08-30__sheet_vitrina_v1_temporal_live_v1__curren
 COLUMN_DATE = "2026-08-30"
 PUBLIC_DATES = ["2026-08-31", "2026-09-01"]
 NM_IDS = [497413772, *range(600000001, 600000033)]
+LEGACY_JSON_DIGEST = "sha256:500092495d9da36fa50bc94f1b9b8bfd5d4e2a1e5e2503bf85b773637553d874"
+BLOB_FIXTURE_NON_TARGET_DIGEST = "sha256:01a95006e7db6fd0121d6a1de3674d322119cd21f706a2f32dcf9546361bdcc7"
 
 
 def main() -> None:
+    _assert_sqlite_blob_canonicalization()
     with TemporaryDirectory(prefix="wbc0027-breakglass-last-good-") as raw:
         root = Path(raw)
         db_path = root / "operational.sqlite3"
         source_path = root / "sealed-economics.json"
         _seed_operational(db_path)
+        expected_non_target_digest = _assert_blob_digest_properties(db_path)
         raw_plan = _seed_sealed_economics(source_path)
         operation_id = "wbc0027-breakglass-production-shaped-op"
         manifest = build_manifest(
@@ -76,6 +85,7 @@ def main() -> None:
             "Orenburg": 25920, "Moscow": 72898, "FBS": 98818,
             "WB": 44428, "combined": 143246,
         }
+        assert manifest["non_target_digest"] == expected_non_target_digest
         manifest_path = root / "manifest.json"
         manifest_path.write_text(_canonical_json(manifest) + "\n", encoding="utf-8")
         manifest_digest = _file_sha256(manifest_path)
@@ -96,6 +106,7 @@ def main() -> None:
         assert receipt["production_mutation_submit_count"] == 1
         assert receipt["transaction_count"] == 1
         assert receipt["readback"]["status"] == "verified"
+        assert receipt["readback"]["non_target_digest"] == expected_non_target_digest
         assert all(
             receipt[f"{name}_write_count"] == 0
             for name in ("wb", "fbo", "warehouse", "history", "ready_snapshot", "source", "capital", "non_target")
@@ -116,6 +127,7 @@ def main() -> None:
         assert revoked["production_mutation_submit_count"] == 1
         assert revoked["transaction_count"] == 1
         assert revoked["readback"]["status"] == "verified_revoked"
+        assert revoked["readback"]["non_target_digest"] == expected_non_target_digest
         assert read_active_breakglass_last_good(db_path) is None
         second = revoke_readback_manifest(
             db_path=db_path, manifest_path=manifest_path,
@@ -130,6 +142,90 @@ def main() -> None:
             evidence_dir, writer_lock_path,
         )
     print("wbc0027_breakglass_last_good_smoke: OK")
+
+
+def _assert_sqlite_blob_canonicalization() -> None:
+    blob = b"\x00\x01\xfe\xff"
+    expected = {
+        "__sqlite_value_type__": "blob",
+        "base64": "AAH+/w==",
+    }
+    assert SQLITE_CANONICAL_VALUE_CONTRACT.endswith("/v1")
+    assert _canonicalize_sqlite_scalar(blob) == expected
+    assert _canonicalize_sqlite_scalar(memoryview(blob)) == expected
+    assert _canonicalize_sqlite_scalar(None) is None
+    assert _canonicalize_sqlite_scalar(b"") != _canonicalize_sqlite_scalar(None)
+    assert _fingerprint(
+        {"a": [None, True, False, 0, 1, -2, 3.5, "текст", {"b": "x"}]}
+    ) == LEGACY_JSON_DIGEST
+    for unsupported in (bytearray(blob), object(), float("inf"), float("nan")):
+        try:
+            _canonicalize_sqlite_scalar(unsupported)
+        except BreakglassRunnerError as exc:
+            assert SQLITE_CANONICAL_VALUE_CONTRACT in str(exc)
+        else:
+            raise AssertionError("unsupported SQLite scalar must fail closed")
+
+
+def _assert_blob_digest_properties(db_path: Path) -> str:
+    baseline = _read_non_target_digest(db_path)
+    assert baseline == BLOB_FIXTURE_NON_TARGET_DIGEST
+    assert baseline == _read_non_target_digest(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE sheet_vitrina_v1_ff_pool_document_requests "
+            "SET source_file_blob=? WHERE request_id='blob-00'",
+            (b"\x00\x01\x03",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    changed = _read_non_target_digest(db_path)
+    assert changed != baseline
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE sheet_vitrina_v1_ff_pool_document_requests "
+            "SET source_file_blob=? WHERE request_id='blob-00'",
+            (b"\x00\x01\x02",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert _read_non_target_digest(db_path) == baseline
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE sheet_vitrina_v1_ff_pool_document_requests "
+            "SET source_file_blob=? WHERE request_id='null-00'",
+            (b"",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert _read_non_target_digest(db_path) != baseline
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE sheet_vitrina_v1_ff_pool_document_requests "
+            "SET source_file_blob=NULL WHERE request_id='null-00'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert _read_non_target_digest(db_path) == baseline
+    return baseline
+
+
+def _read_non_target_digest(db_path: Path) -> str:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    try:
+        return _non_target_digest(conn)
+    finally:
+        conn.close()
 
 
 def _assert_overlay_matrix(db_path: Path, manifest: dict[str, object]) -> None:
@@ -278,6 +374,9 @@ def _seed_operational(path: Path) -> None:
         CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(x TEXT);
         CREATE TABLE sheet_vitrina_v1_ff_pool_balances(x TEXT);
         CREATE TABLE sheet_vitrina_v1_ff_pool_fbs_lifecycle_current(x TEXT);
+        CREATE TABLE sheet_vitrina_v1_ff_pool_document_requests(
+          request_id TEXT PRIMARY KEY,source_file_blob BLOB
+        );
         INSERT INTO registry_upload_current_state VALUES(1,'registry_upload_bundle_v1__2026-06-08T00:00:00Z','2026-09-01T00:00:00Z');
         """
     )
@@ -292,6 +391,15 @@ def _seed_operational(path: Path) -> None:
          BUNDLE, "ready", "plan", "generation", "roster", "[]", "{}",
          CAPTURE_DIGEST, "2026-08-31T11:09:59Z"),
     )
+    for index in range(8):
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_ff_pool_document_requests VALUES(?,?)",
+            (f"blob-{index:02d}", bytes((index, index + 1, index + 2))),
+        )
+        conn.execute(
+            "INSERT INTO sheet_vitrina_v1_ff_pool_document_requests VALUES(?,NULL)",
+            (f"null-{index:02d}",),
+        )
     scopes = [("TOTAL", "TOTAL", None), *[("SKU", f"SKU:{item}", item) for item in NM_IDS]]
     for scope_kind, scope_key, nm_id in scopes:
         quantities = (
