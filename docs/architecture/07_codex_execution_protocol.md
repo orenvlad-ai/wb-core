@@ -81,6 +81,23 @@ test suite: outcome/effects отражаются в уже существующ�
 расширяет проверку в broad audit. Ordinary narrow task без такой неясности
 проходит её без нового subagent, owner pause или отдельного status message.
 
+Implementation subagent молча применяет `RED_FIRST` только когда accepted exact
+behavior однозначен, есть deterministic/hermetic focused reproducer и stable
+local test seam, а test-first не зависит от live production, нестабильного
+external API или исследовательского UI. Это routine technical decision, не
+user-facing mode, вопрос, artifact или gate. Docs/config/cosmetic/no-behavior
+changes и все остальные задачи идут обычным путём без TDD overhead.
+
+При `RED_FIRST` subagent добавляет минимальный failing assertion/test,
+подтверждает target-causal red, делает минимальный fix, получает green, затем
+выполняет уже действующие proportional targeted/final checks. Отдельный commit
+или durable red-proof не нужен; достаточно одной compact строки в existing
+technical handoff, если proof нужен для понимания результата. `RED_FIRST` не
+применяется к incident/live/migration/external/UI work, пока behavior неизвестен:
+сначала идут diagnosis/containment и accepted behavior; regression добавляется
+позже на ближайшем реально появившемся stable seam и не задерживает recovery
+ради искусственного Red.
+
 Результат использует closed outcomes doc15:
 
 - `AUTO_CONTINUE`, если всё однозначно и есть dominant technical path: main
