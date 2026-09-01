@@ -166,6 +166,16 @@ class FakeSchedules:
         return self.read_all()
 
 
+class UnavailableSchedules(FakeSchedules):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_calls = 0
+
+    def read_all(self) -> dict[str, dict[str, Any]]:
+        self.read_calls += 1
+        raise TimeoutError("synthetic loopback timeout")
+
+
 def _with_quiet_local_boundaries() -> tuple[Any, Any]:
     old_cron = maintenance._cron_entries
     old_locks = maintenance._lock_summary
@@ -1713,10 +1723,11 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
                 }
 
             maintenance._lock_summary = lock_summary
+            unavailable_schedules = UnavailableSchedules()
             resumed = maintenance.maintenance_prepare(
                 runtime_dir,
                 systemd=restarted,
-                schedules=schedules,
+                schedules=unavailable_schedules,
                 proc_root=proc_root,
                 actor="corrected-runtime",
                 reason="resume exact legacy FBS prestate",
@@ -1724,6 +1735,7 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
                 window_id=window_id,
                 plan_fingerprint=plan_fingerprint,
             )
+            assert unavailable_schedules.read_calls == 0
             assert resumed["resume_pending"] is True
             assert resumed["pause_owned_inventory_resume_binding"][
                 "baseline_timer_source"
