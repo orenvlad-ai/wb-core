@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import tempfile
 from typing import Any, Mapping
@@ -71,6 +73,17 @@ class FakeSystemd:
             }
             for unit in maintenance.ALL_BUSINESS_SERVICE_UNITS
         }
+        self.service_states.update(
+            {
+                timer.removesuffix(".timer") + ".service": {
+                    "unit": timer.removesuffix(".timer") + ".service",
+                    "is_enabled": "static",
+                    "is_active": "inactive",
+                    "properties": {"MainPID": 0},
+                }
+                for timer in maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
+            }
+        )
         self.unknown_timer = unknown_timer
         self.active_reads = active_reads
         self.fail_enable_unit = fail_enable_unit
@@ -1142,6 +1155,364 @@ def _warehouse_baseline(runtime_dir: Path) -> None:
     )
 
 
+def _assert_prepared_nonquiet_restart_resume_is_exact() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        operational = runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(operational) as connection:
+            connection.execute(
+                "CREATE TABLE business_sentinel (id INTEGER PRIMARY KEY, value TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO business_sentinel (value) VALUES (?)",
+                ("production-shaped-business-payload",),
+            )
+        source_digest = hashlib.sha256(operational.read_bytes()).hexdigest()
+        window_id = "prepared-restart-smoke"
+        plan_fingerprint = "sha256:" + "9" * 64
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id=window_id,
+            window_kind="snapshot",
+            plan_fingerprint=plan_fingerprint,
+            approval_reference="root-gate-smoke",
+            actor="smoke",
+            reason="prove exact prepared restart continuation",
+        )
+        first_process = FakeSystemd()
+        warehouse_timer = "wb-core-warehouse-functional-sync.timer"
+        first_process.timer_states[warehouse_timer].update(
+            {"is_enabled": "enabled", "is_active": "active"}
+        )
+        fbs_service = "wb-core-fbs-shadow-collector.service"
+        first_process.service_states[fbs_service].update(
+            {
+                "is_active": "activating",
+                "properties": {
+                    "MainPID": 4242,
+                    "ExecMainStartTimestamp": (
+                        "Sat 2000-01-01 00:00:00 UTC"
+                    ),
+                },
+            }
+        )
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        try:
+            prepared = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=first_process,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke-first-process",
+                reason="interrupt after durable core prepare",
+            )
+            assert prepared["status"] == "prepared"
+            assert prepared["quiet"] is False
+            prepared_state_path = runtime_dir / maintenance.STATE_FILENAME
+            original_prepared_state = prepared_state_path.read_bytes()
+            original_prepared = json.loads(original_prepared_state)
+            original_baseline = copy.deepcopy(original_prepared["baseline"])
+            original_signature = copy.deepcopy(
+                original_prepared["control_signature_before_hold"]
+            )
+            initial_mutations = list(first_process.mutations)
+            initial_disable_calls = schedules.disable_calls
+            revision = int(
+                maintenance.load_or_initialize_owner_policy(runtime_dir)[
+                    "revision"
+                ]
+            )
+
+            restarted = FakeSystemd()
+            restarted.timer_states = copy.deepcopy(
+                first_process.timer_states
+            )
+            restarted.service_states = copy.deepcopy(
+                first_process.service_states
+            )
+            restarted.service_states[fbs_service].update(
+                {
+                    "is_active": "inactive",
+                    "properties": {"MainPID": 0},
+                }
+            )
+            restarted.mutations = []
+
+            for label, kwargs, expected in (
+                (
+                    "window",
+                    {
+                        "window_id": "different-window",
+                        "plan_fingerprint": plan_fingerprint,
+                        "expected_revision": revision,
+                    },
+                    "barrier identity drifted",
+                ),
+                (
+                    "revision",
+                    {
+                        "window_id": window_id,
+                        "plan_fingerprint": plan_fingerprint,
+                        "expected_revision": revision + 1,
+                    },
+                    "stale policy revision",
+                ),
+            ):
+                try:
+                    maintenance.maintenance_prepare(
+                        runtime_dir,
+                        systemd=restarted,
+                        schedules=schedules,
+                        proc_root=proc_root,
+                        actor="smoke-restarted-process",
+                        reason=f"reject mismatched {label}",
+                        **kwargs,
+                    )
+                except RuntimeError as exc:
+                    assert expected in str(exc)
+                else:
+                    raise AssertionError(
+                        f"prepared continuation accepted mismatched {label}"
+                    )
+
+            drifted_state = json.loads(original_prepared_state)
+            drifted_state["baseline"][
+                "discovered_wb_core_timers"
+            ] = drifted_state["baseline"][
+                "discovered_wb_core_timers"
+            ][:-1]
+            prepared_state_path.write_text(json.dumps(drifted_state))
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "timer inventory drifted" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared continuation accepted changed prestate"
+                )
+            prepared_state_path.write_bytes(original_prepared_state)
+            prepared_state_path.chmod(0o600)
+
+            lock_active = {"held": True}
+
+            def lock_summary(runtime: Path) -> dict[str, Any]:
+                return {
+                    "warehouse_functional": {
+                        "path": str(runtime / "warehouse.lock"),
+                        "held": lock_active["held"],
+                    },
+                    "web_schedule": {
+                        "path": str(runtime / "web.lock"),
+                        "held": False,
+                    },
+                    "spp_execution": {
+                        "path": str(runtime / "spp.lock"),
+                        "held": False,
+                    },
+                    "seller_portal": {"busy": False},
+                }
+
+            maintenance._lock_summary = lock_summary
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "lock is active" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared continuation accepted an active writer lock"
+                )
+            lock_active["held"] = False
+
+            journal = Path(str(operational) + "-journal")
+            journal.write_bytes(b"hot")
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "hot SQLite sidecar" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared continuation accepted a hot journal"
+                )
+            journal.unlink()
+
+            resumed = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke-restarted-process",
+                reason="resume same exact prepared revision",
+                expected_revision=revision,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
+            assert resumed["resume_pending"] is True
+            assert resumed["reused_phase"] == "prepared"
+            assert resumed["prepared_resume_binding"]["window_id"] == (
+                window_id
+            )
+            bound_state_bytes = prepared_state_path.read_bytes()
+            bound_state = json.loads(bound_state_bytes)
+            assert bound_state["baseline"] == original_baseline
+            assert (
+                bound_state["control_signature_before_hold"]
+                == original_signature
+            )
+            audit_before_retry = (
+                runtime_dir / maintenance.AUDIT_FILENAME
+            ).read_bytes()
+            repeated = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                expected_revision=revision,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
+            assert repeated["prepared_resume_binding"] == resumed[
+                "prepared_resume_binding"
+            ]
+            assert prepared_state_path.read_bytes() == bound_state_bytes
+            assert (
+                runtime_dir / maintenance.AUDIT_FILENAME
+            ).read_bytes() == audit_before_retry
+            assert restarted.mutations == []
+            assert schedules.disable_calls == initial_disable_calls
+
+            restarted.disable_now(
+                warehouse_timer
+            )
+            restarted.service_states[fbs_service].update(
+                {
+                    "is_active": "activating",
+                    "properties": {"MainPID": 4343},
+                }
+            )
+            try:
+                maintenance.maintenance_hold(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    poll_interval_seconds=0.01,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "stable quiet readback FBS shadow writer" in str(exc)
+            else:
+                raise AssertionError(
+                    "resumed hold accepted a newly active FBS writer"
+                )
+            assert json.loads(prepared_state_path.read_text())[
+                "phase"
+            ] == "prepared"
+            restarted.service_states[fbs_service].update(
+                {
+                    "is_active": "inactive",
+                    "properties": {"MainPID": 0},
+                }
+            )
+            held = maintenance.maintenance_hold(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                poll_interval_seconds=0.01,
+                expected_revision=revision,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+            )
+            assert held["status"] == "held"
+            assert held["quiet"] is True
+            assert held["stable_quiet_readback"][
+                "fingerprint"
+            ].startswith("sha256:")
+            maintenance_state = json.loads(
+                prepared_state_path.read_text()
+            )
+            maintenance.confirm_barrier_hold(
+                runtime_dir,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+                maintenance_state=maintenance_state,
+            )
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                restarted.enable_now(
+                    warehouse_timer
+                )
+                return {"status": "restored"}
+
+            restored = maintenance.maintenance_restore(
+                runtime_dir,
+                systemd=restarted,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke",
+                reason="restore exact pre-interruption controls",
+                expected_revision=revision,
+                warehouse_restore=restore_warehouse,
+            )
+            assert restored["status"] == "restored"
+            assert restored["exact_prior_state_restored"] is True
+            released = maintenance.release_barrier(
+                runtime_dir,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+                actor="smoke",
+                reason="exact restore proven",
+                restore_readback=restored,
+            )
+            assert released["active"] is False
+            assert released["phase"] == "released"
+            assert hashlib.sha256(operational.read_bytes()).hexdigest() == (
+                source_digest
+            )
+            assert not any(
+                Path(str(operational) + suffix).exists()
+                for suffix in ("-journal", "-wal", "-shm")
+            )
+            assert initial_mutations == [
+                "wb-core-autoanswers-worker.timer",
+                "wb-core-autoanswers-readonly-sync.timer",
+                *maintenance.CORE_TIMER_UNITS,
+                *maintenance.INDEPENDENT_WRITER_TIMER_UNITS,
+            ]
+        finally:
+            _restore_local_boundaries(old)
+
+
 def _assert_exact_policy_restore_and_revision_guards() -> None:
     with tempfile.TemporaryDirectory() as raw:
         runtime_dir = Path(raw)
@@ -1613,6 +1984,7 @@ def main() -> int:
     _assert_unstarted_hold_abort_is_exact_and_drift_safe()
     _assert_status_does_not_initialize_owner_policy()
     _assert_legacy_active_hold_is_not_guessed()
+    _assert_prepared_nonquiet_restart_resume_is_exact()
     _assert_exact_policy_restore_and_revision_guards()
     _assert_unknown_policy_state_blocks_resume()
     _assert_policy_v1_hold_restores_exact_feature_schedules_once()

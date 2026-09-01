@@ -10280,6 +10280,25 @@ def _run_remote_business_data_maintenance_runner(
                 str(reason or "canonical cross-writer maintenance"),
             ]
         )
+    if action in {"prepare", "hold"}:
+        if bool(window_id) != bool(plan_fingerprint):
+            raise ValueError(
+                "business-data maintenance prepared continuation requires "
+                "both exact window identity and plan fingerprint"
+            )
+        if window_id:
+            runner_args.extend(
+                [
+                    "--window-id",
+                    window_id,
+                    "--plan-fingerprint",
+                    plan_fingerprint,
+                ]
+            )
+        if expected_revision is not None:
+            runner_args.extend(
+                ["--expected-revision", str(int(expected_revision))]
+            )
     if action == "restore":
         if expected_revision is None:
             raise ValueError(
@@ -10392,8 +10411,11 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
         evidence["core_prepare"] = _run_remote_business_data_maintenance_runner(
             target,
             action="prepare",
+            expected_revision=args.expected_revision,
             actor=str(args.actor or "repo_owned_cli"),
             reason=str(args.reason or "canonical cross-writer maintenance"),
+            window_id=str(args.window_id or ""),
+            plan_fingerprint=str(args.plan_fingerprint or ""),
         )
         evidence["warehouse"] = _run_remote_warehouse_functional_maintenance_action(
             target,
@@ -10403,8 +10425,11 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
         result = _run_remote_business_data_maintenance_runner(
             target,
             action="hold",
+            expected_revision=args.expected_revision,
             actor=str(args.actor or "repo_owned_cli"),
             reason=str(args.reason or "canonical cross-writer maintenance"),
+            window_id=str(args.window_id or ""),
+            plan_fingerprint=str(args.plan_fingerprint or ""),
         )
         if (
             result.get("quiet") is not True
