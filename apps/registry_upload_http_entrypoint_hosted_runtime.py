@@ -2284,6 +2284,19 @@ def run_deploy_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _loopback_transport_reconciliation_reason(
+    summary: Mapping[str, Any],
+) -> str:
+    for route in summary.get("routes") or []:
+        if route.get("timed_out") is True:
+            return "bounded_loopback_timeout"
+        if "ssh exit code 255" in str(
+            route.get("network_error") or ""
+        ).lower():
+            return "ssh_disconnect"
+    return ""
+
+
 def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
@@ -2306,11 +2319,10 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
         timeout_seconds=args.timeout_seconds,
         auth_cookie=auth_cookie,
     )
-    transport_disconnect = any(
-        "ssh exit code 255" in str(route.get("network_error") or "").lower()
-        for route in loopback_summary.get("routes") or []
+    reconciliation_reason = _loopback_transport_reconciliation_reason(
+        loopback_summary
     )
-    if transport_disconnect and not args.dry_run:
+    if reconciliation_reason and not args.dry_run:
         release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
         release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip()
         release_merge = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
@@ -2324,7 +2336,9 @@ def run_deploy_and_verify_command(args: argparse.Namespace) -> int:
                 head=release_head,
                 merge=release_merge,
                 failed_stage="probes",
+                allow_repairs=reconciliation_reason == "ssh_disconnect",
             )
+            reconciliation["trigger"] = reconciliation_reason
             deploy_summary["transport_reconciliation"] = reconciliation
             if bool(reconciliation.get("healthy")):
                 loopback_summary = collect_loopback_surface(

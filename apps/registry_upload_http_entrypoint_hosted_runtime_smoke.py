@@ -386,6 +386,32 @@ def _assert_page_composition_compact_probe_contract() -> None:
 
 
 def main() -> None:
+    if (
+        hosted_runtime._loopback_transport_reconciliation_reason(
+            {
+                "routes": [
+                    {
+                        "route": "loopback_transport",
+                        "network_error": "remote loopback probe timed out after 180 seconds",
+                        "timed_out": True,
+                    }
+                ]
+            }
+        )
+        != "bounded_loopback_timeout"
+    ):
+        raise AssertionError("bounded loopback timeout must enter reconciliation")
+    if (
+        hosted_runtime._loopback_transport_reconciliation_reason(
+            {"routes": [{"network_error": "SSH exit code 255"}]}
+        )
+        != "ssh_disconnect"
+    ):
+        raise AssertionError("SSH disconnect must retain repair-capable reconciliation")
+    if hosted_runtime._loopback_transport_reconciliation_reason(
+        {"routes": [{"network_error": "HTTP 500", "timed_out": False}]}
+    ):
+        raise AssertionError("ordinary semantic probe failure is not transport ambiguity")
     _assert_deploy_status_readback_retry()
     _assert_pre_prepare_abort_skips_stale_restore()
     _assert_wbc0027_opaque_schema_revision_contract()
