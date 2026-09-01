@@ -85,6 +85,7 @@ class FakeSystemd:
             }
         )
         self.unknown_timer = unknown_timer
+        self.unknown_active_service = ""
         self.active_reads = active_reads
         self.fail_enable_unit = fail_enable_unit
         self.mutations: list[str] = []
@@ -114,6 +115,17 @@ class FakeSystemd:
         rows = list(maintenance.CLASSIFIED_WB_CORE_TIMER_UNITS)
         if self.unknown_timer:
             rows.append(self.unknown_timer)
+        return sorted(rows)
+
+    def discovered_active_services(self) -> list[str]:
+        rows = [
+            unit
+            for unit, state in self.service_states.items()
+            if str(state.get("is_active") or "")
+            not in maintenance.QUIESCENT_SERVICE_STATES
+        ]
+        if self.unknown_active_service:
+            rows.append(self.unknown_active_service)
         return sorted(rows)
 
 
@@ -1698,16 +1710,42 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
             }
             for unit in deploy_reactivated_timers:
                 restarted.timer_states[unit].update(
-                    {"is_enabled": "enabled", "is_active": "active"}
+                    {
+                        "is_enabled": "enabled",
+                        "is_active": "active",
+                        "properties": {
+                            "LastTriggerUSec": (
+                                "Mon 2000-01-03 00:00:00 UTC " + unit
+                            )
+                        },
+                    }
                 )
             restarted.service_states = copy.deepcopy(
                 original_systemd.service_states
             )
             restarted.mutations = []
-            writer_proc = proc_root / "5151"
-            writer_proc.mkdir()
-            (writer_proc / "cmdline").write_bytes(
+            warehouse_service = "wb-core-warehouse-functional-sync.service"
+            restarted.service_states[warehouse_service].update(
+                {
+                    "is_active": "activating",
+                    "properties": {
+                        "MainPID": 5152,
+                        "ExecMainStartTimestamp": (
+                            "Sun 2000-01-02 00:00:00 UTC"
+                        ),
+                    },
+                }
+            )
+            fbs_writer_proc = proc_root / "5151"
+            fbs_writer_proc.mkdir()
+            (fbs_writer_proc / "cmdline").write_bytes(
                 b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0"
+            )
+            warehouse_writer_proc = proc_root / "5152"
+            warehouse_writer_proc.mkdir()
+            (warehouse_writer_proc / "cmdline").write_bytes(
+                b"/usr/bin/python3\0apps/warehouse_functional_runner.py\0"
+                b"hourly-sync\0"
             )
             warehouse_lock = {"held": True}
 
@@ -1761,30 +1799,264 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
             assert audit_path.read_bytes() == audit_before_unknown
             restarted.unknown_timer = ""
 
-            unavailable_schedules = UnavailableSchedules()
-            resumed = maintenance.maintenance_prepare(
+            restarted.unknown_active_service = (
+                "wb-core-unknown-writer.service"
+            )
+            blocked_service_schedules = UnavailableSchedules()
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=blocked_service_schedules,
+                    proc_root=proc_root,
+                    actor="corrected-runtime",
+                    reason="reject unknown active service",
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "unknown active wb-core service" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared resume accepted an unknown active service"
+                )
+            assert blocked_service_schedules.read_calls == 0
+            assert restarted.mutations == []
+            assert state_path.read_bytes() == state_before_unknown
+            assert audit_path.read_bytes() == audit_before_unknown
+            restarted.unknown_active_service = ""
+
+            original_disable_now = restarted.disable_now
+            interrupted_disables = {"count": 0}
+
+            def interrupted_disable_now(unit: str) -> None:
+                durable = json.loads(state_path.read_text())
+                assert durable[
+                    "pause_owned_inventory_resume_binding"
+                ]["schema_version"] == (
+                    "business_data_pause_owned_inventory_resume_v2"
+                )
+                original_disable_now(unit)
+                interrupted_disables["count"] += 1
+                if interrupted_disables["count"] == 2:
+                    raise RuntimeError("synthetic process restart")
+
+            restarted.disable_now = interrupted_disable_now
+            interrupted_schedules = UnavailableSchedules()
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=interrupted_schedules,
+                    proc_root=proc_root,
+                    actor="corrected-runtime",
+                    reason="interrupt exact timer pause",
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "synthetic process restart" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared resume did not preserve an interrupted pause"
+                )
+            assert interrupted_schedules.read_calls == 0
+            interrupted_state = json.loads(state_path.read_text())
+            assert interrupted_state[
+                "pause_owned_inventory_resume_binding"
+            ]["repaused_timer_units"] == sorted(
+                deploy_reactivated_timers
+            )
+            assert len(restarted.mutations) == 2
+            state_before_rogue = state_path.read_bytes()
+            audit_before_rogue = audit_path.read_bytes()
+            rogue_proc = proc_root / "6161"
+            rogue_proc.mkdir()
+            (rogue_proc / "cmdline").write_bytes(
+                b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0"
+            )
+            rogue_schedules = UnavailableSchedules()
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=rogue_schedules,
+                    proc_root=proc_root,
+                    actor="corrected-runtime",
+                    reason="reject new writer after durable binding",
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "another writer" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared resume accepted a new writer process"
+                )
+            assert rogue_schedules.read_calls == 0
+            assert len(restarted.mutations) == 2
+            assert state_path.read_bytes() == state_before_rogue
+            assert audit_path.read_bytes() == audit_before_rogue
+            (rogue_proc / "cmdline").unlink()
+            rogue_proc.rmdir()
+            retriggered_unit = restarted.mutations[0]
+            recorded_trigger = restarted.timer_states[retriggered_unit][
+                "properties"
+            ]["LastTriggerUSec"]
+            restarted.timer_states[retriggered_unit]["properties"][
+                "LastTriggerUSec"
+            ] = "Tue 2000-01-04 00:00:00 UTC"
+            retrigger_schedules = UnavailableSchedules()
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=retrigger_schedules,
+                    proc_root=proc_root,
+                    actor="corrected-runtime",
+                    reason="reject timer retrigger after durable binding",
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "timer retriggered" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared resume accepted a timer retrigger"
+                )
+            assert retrigger_schedules.read_calls == 0
+            assert len(restarted.mutations) == 2
+            assert state_path.read_bytes() == state_before_rogue
+            assert audit_path.read_bytes() == audit_before_rogue
+            restarted.timer_states[retriggered_unit]["properties"][
+                "LastTriggerUSec"
+            ] = recorded_trigger
+            (fbs_writer_proc / "cmdline").unlink()
+            fbs_writer_proc.rmdir()
+            restarted.service_states[fbs_service].update(
+                {
+                    "is_active": "inactive",
+                    "properties": {
+                        "MainPID": 0,
+                        "ExecMainStartTimestamp": (
+                            "Sat 2000-01-01 00:00:00 UTC"
+                        ),
+                    },
+                }
+            )
+
+            resume_schedules = FakeSchedules()
+            original_schedule_read_all = resume_schedules.read_all
+            resume_schedule_reads = {"count": 0}
+
+            def bound_schedule_read_all() -> dict[str, dict[str, Any]]:
+                resume_schedule_reads["count"] += 1
+                assert json.loads(state_path.read_text()).get(
+                    "pause_owned_inventory_resume_binding"
+                )
+                return original_schedule_read_all()
+
+            resume_schedules.read_all = bound_schedule_read_all
+            original_unit_state = restarted.unit_state
+            active_reads = {fbs_service: 0, warehouse_service: 0}
+
+            def draining_unit_state(unit: str) -> dict[str, Any]:
+                if unit in active_reads:
+                    active_reads[unit] += 1
+                    if (
+                        active_reads[unit] > 2
+                        and restarted.service_states[unit]["is_active"]
+                        not in maintenance.QUIESCENT_SERVICE_STATES
+                    ):
+                        for timer in deploy_reactivated_timers:
+                            assert restarted.timer_states[timer][
+                                "is_enabled"
+                            ] == "disabled"
+                            assert restarted.timer_states[timer][
+                                "is_active"
+                            ] == "inactive"
+                        pid = int(
+                            restarted.service_states[unit]["properties"][
+                                "MainPID"
+                            ]
+                        )
+                        process_dir = proc_root / str(pid)
+                        (process_dir / "cmdline").unlink()
+                        process_dir.rmdir()
+                        restarted.service_states[unit].update(
+                            {
+                                "is_active": "inactive",
+                                "properties": {
+                                    "MainPID": 0,
+                                    "ExecMainStartTimestamp": (
+                                        "Sat 2000-01-01 00:00:00 UTC"
+                                        if unit == fbs_service
+                                        else "Sun 2000-01-02 00:00:00 UTC"
+                                    ),
+                                },
+                            }
+                        )
+                        if all(
+                            restarted.service_states[name]["is_active"]
+                            == "inactive"
+                            for name in active_reads
+                        ):
+                            warehouse_lock["held"] = False
+                return original_unit_state(unit)
+
+            def bound_disable_now(unit: str) -> None:
+                durable = json.loads(state_path.read_text())
+                assert durable[
+                    "pause_owned_inventory_resume_binding"
+                ]["schema_version"] == (
+                    "business_data_pause_owned_inventory_resume_v2"
+                )
+                original_disable_now(unit)
+
+            restarted.unit_state = draining_unit_state
+            restarted.disable_now = bound_disable_now
+            resumed = maintenance.maintenance_hold(
                 runtime_dir,
                 systemd=restarted,
-                schedules=unavailable_schedules,
+                schedules=resume_schedules,
                 proc_root=proc_root,
                 actor="corrected-runtime",
                 reason="resume exact legacy FBS prestate",
+                poll_interval_seconds=0.01,
                 expected_revision=revision,
                 window_id=window_id,
                 plan_fingerprint=plan_fingerprint,
             )
-            assert unavailable_schedules.read_calls == 0
-            assert resumed["resume_pending"] is True
-            assert resumed["pause_owned_inventory_resume_binding"][
-                "baseline_timer_source"
-            ] == "continuous_observer_timers"
-            binding = resumed["pause_owned_inventory_resume_binding"]
+            assert resume_schedule_reads["count"] > 0
+            assert resumed["status"] == "held"
+            assert resumed["quiet"] is True
+            rebound_state = json.loads(state_path.read_text())
+            binding = rebound_state[
+                "pause_owned_inventory_resume_binding"
+            ]
+            assert binding["baseline_timer_source"] == (
+                "continuous_observer_timers"
+            )
             assert set(binding["deploy_drift_timer_states"]) == (
                 deploy_reactivated_timers
             )
             assert set(binding["repaused_timer_units"]) == (
                 deploy_reactivated_timers
             )
+            assert set(binding["draining_service_units"]) == {
+                fbs_service,
+                warehouse_service,
+            }
+            assert binding["deploy_drift_service_generations"][
+                fbs_service
+            ]["main_pid"] == 5151
+            assert binding["deploy_drift_service_generations"][
+                warehouse_service
+            ]["main_pid"] == 5152
             for unit in deploy_reactivated_timers:
                 assert restarted.timer_states[unit]["is_enabled"] == (
                     "disabled"
@@ -1792,54 +2064,20 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
                 assert restarted.timer_states[unit]["is_active"] == (
                     "inactive"
                 )
+                assert restarted.timer_states[unit]["properties"][
+                    "LastTriggerUSec"
+                ] == "Mon 2000-01-03 00:00:00 UTC " + unit
             assert restarted.mutations == [
                 unit
                 for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
                 if unit in deploy_reactivated_timers
             ]
-            rebound_state = json.loads(state_path.read_text())
             assert rebound_state["baseline"] == durable_baseline
             assert (
                 rebound_state["control_signature_before_hold"]
                 == durable_signature
             )
-            try:
-                maintenance.maintenance_hold(
-                    runtime_dir,
-                    systemd=restarted,
-                    schedules=schedules,
-                    proc_root=proc_root,
-                    wait_timeout_seconds=0,
-                    poll_interval_seconds=0.01,
-                    expected_revision=revision,
-                    window_id=window_id,
-                    plan_fingerprint=plan_fingerprint,
-                )
-            except TimeoutError:
-                pass
-            else:
-                raise AssertionError("active exact FBS process reached held")
-            assert json.loads(state_path.read_text())["phase"] == "prepared"
-
-            (writer_proc / "cmdline").unlink()
-            writer_proc.rmdir()
-            restarted.service_states[fbs_service].update(
-                {"is_active": "inactive", "properties": {"MainPID": 0}}
-            )
-            warehouse_lock["held"] = False
-            held = maintenance.maintenance_hold(
-                runtime_dir,
-                systemd=restarted,
-                schedules=schedules,
-                proc_root=proc_root,
-                poll_interval_seconds=0.01,
-                expected_revision=revision,
-                window_id=window_id,
-                plan_fingerprint=plan_fingerprint,
-            )
-            assert held["status"] == "held"
-            assert held["quiet"] is True
-            assert held["stable_quiet_readback"]["fingerprint"].startswith(
+            assert resumed["stable_quiet_readback"]["fingerprint"].startswith(
                 "sha256:"
             )
 

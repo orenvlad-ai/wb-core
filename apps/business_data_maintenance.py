@@ -104,6 +104,14 @@ CONTINUOUS_OBSERVER_TIMER_UNITS = (
     "wb-core-change-registry-observer.timer",
     "wb-core-root-storage-policy.timer",
 )
+CONTINUOUS_OBSERVER_SERVICE_UNITS = tuple(
+    unit.removesuffix(".timer") + ".service"
+    for unit in CONTINUOUS_OBSERVER_TIMER_UNITS
+)
+CONTINUOUS_INFRASTRUCTURE_SERVICE_UNITS = (
+    "wb-core-registry-http.service",
+    "wb-core-data-mcp.service",
+)
 CLASSIFIED_WB_CORE_TIMER_UNITS = (
     ALL_BUSINESS_TIMER_UNITS + CONTINUOUS_OBSERVER_TIMER_UNITS
 )
@@ -166,6 +174,48 @@ EXACT_WRITER_PROCESS_ARGS = {
             FBS_SHADOW_PROCESS_MARKER,
             "/opt/wb-core-runtime/app/apps/wb_fbs_shadow.py",
         }
+    ),
+}
+SERVICE_WRITER_PROCESS_MARKERS = {
+    "wb-core-sheet-vitrina-refresh.service": frozenset(
+        {"sheet_vitrina_v1_auto_refresh_tick.py"}
+    ),
+    "wb-core-sheet-vitrina-closure-retry.service": frozenset(
+        {
+            "sheet_vitrina_v1_closure_retry.py",
+            "sheet_vitrina_v1_temporal_closure_retry_live.py",
+        }
+    ),
+    "wb-core-feedbacks-auto-complaints-tick.service": frozenset(
+        {"sheet_vitrina_v1_feedbacks_auto_complaints_tick.py"}
+    ),
+    "wb-core-wb-finance-weekly.service": frozenset(
+        {"wb_finance_weekly.py"}
+    ),
+    "wb-core-finance-backup-rotation.service": frozenset(
+        {"finance_storage_backup_rotation.py"}
+    ),
+    "wb-core-fbs-warehouse-registry.service": frozenset(
+        {"wb_fbs_warehouse_registry.py"}
+    ),
+    "wb-core-sheet-vitrina-canary-restore.service": frozenset(
+        {"sheet_vitrina_v1_auto_refresh_tick.py"}
+    ),
+    "wb-core-sheet-vitrina-health-candidate.service": frozenset(
+        {"sheet_vitrina_v1_health_tick.py"}
+    ),
+    "wb-core-sheet-vitrina-health-confirmation.service": frozenset(
+        {"sheet_vitrina_v1_health_tick.py"}
+    ),
+    FBS_SHADOW_SERVICE_UNIT: frozenset({FBS_SHADOW_PROCESS_MARKER}),
+    "wb-core-warehouse-functional-sync.service": frozenset(
+        {"warehouse_functional_runner.py"}
+    ),
+    "wb-core-autoanswers-readonly-sync.service": frozenset(
+        {"wb_autoanswers_readonly.py"}
+    ),
+    "wb-core-autoanswers-worker.service": frozenset(
+        {"wb_autoanswers_worker.py"}
     ),
 }
 
@@ -305,6 +355,27 @@ class SystemdClient:
                 line.split()[0]
                 for line in result.stdout.splitlines()
                 if line.split() and line.split()[0].startswith("wb-core-")
+            }
+        )
+
+    def discovered_active_services(self) -> list[str]:
+        result = self._run(
+            ["list-units", "wb-core-*.service", "--all", "--no-legend", "--no-pager"]
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "systemctl list-units failed: "
+                + (result.stderr.strip() or f"exit {result.returncode}")
+            )
+        return sorted(
+            {
+                fields[0]
+                for line in result.stdout.splitlines()
+                if len(fields := line.split()) >= 4
+                and fields[0].startswith("wb-core-")
+                and fields[0].endswith(".service")
+                and fields[2] not in QUIESCENT_SERVICE_STATES
+                and fields[3] not in {"dead", "failed", "exited"}
             }
         )
 
@@ -1956,7 +2027,10 @@ def _stable_quiet_readback(
     schedules: RuntimeScheduleClient,
     proc_root: Path,
     poll_interval_seconds: float,
+    drain_validator: Any | None = None,
 ) -> dict[str, Any]:
+    if drain_validator is not None:
+        drain_validator(first)
     first_sidecars = _sqlite_sidecar_readback(runtime_dir)
     if any(
         bool(item.get("exists"))
@@ -1986,6 +2060,8 @@ def _stable_quiet_readback(
         schedules=schedules,
         proc_root=proc_root,
     )
+    if drain_validator is not None:
+        drain_validator(second)
     second_sidecars = _sqlite_sidecar_readback(runtime_dir)
     second_observer_services = _continuous_observer_service_readback(
         systemd
@@ -2617,6 +2693,22 @@ def maintenance_hold(
         state.get("prepared_resume_binding")
         or state.get("pause_owned_inventory_resume_binding")
     )
+    pause_owned_binding = dict(
+        state.get("pause_owned_inventory_resume_binding") or {}
+    )
+
+    def validate_pause_owned_drain(
+        status: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if pause_owned_binding:
+            return _validate_pause_owned_resume_drain_status(
+                runtime_dir,
+                status=status,
+                binding=pause_owned_binding,
+                systemd=systemd,
+            )
+        return {}
+
     if prepared.get("quiet"):
         if resumed_prepared:
             stable = _stable_quiet_readback(
@@ -2626,6 +2718,7 @@ def maintenance_hold(
                 schedules=schedules,
                 proc_root=proc_root,
                 poll_interval_seconds=poll_interval_seconds,
+                drain_validator=validate_pause_owned_drain,
             )
             prepared = dict(stable["status"])
             prepared["stable_quiet_readback"] = {
@@ -2640,7 +2733,10 @@ def maintenance_hold(
     deadline = time.monotonic() + max(0.0, float(wait_timeout_seconds))
     while True:
         current = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules, proc_root=proc_root)
-        if current["quiet"]:
+        drain_readback = validate_pause_owned_drain(current)
+        if current["quiet"] and not bool(
+            drain_readback.get("sidecars_hot")
+        ):
             break
         if time.monotonic() >= deadline:
             state.update({"last_readback": current, "error": "timed out waiting for business-data quiet window"})
@@ -2657,6 +2753,7 @@ def maintenance_hold(
             schedules=schedules,
             proc_root=proc_root,
             poll_interval_seconds=poll_interval_seconds,
+            drain_validator=validate_pause_owned_drain,
         )
         current = dict(stable["status"])
         current["stable_quiet_readback"] = {
@@ -3165,6 +3262,348 @@ def _unit_state_pair(state: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
+def _pause_owned_service_generation_evidence(
+    services: Mapping[str, Any],
+    writer_processes: Sequence[Mapping[str, Any]],
+    *,
+    recorded: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    service_states = {
+        str(unit): dict(state or {})
+        for unit, state in dict(services or {}).items()
+    }
+    if set(service_states) != set(ALL_BUSINESS_SERVICE_UNITS):
+        raise RuntimeError(
+            "prepared maintenance pause-owned service inventory drifted"
+        )
+    if set(SERVICE_WRITER_PROCESS_MARKERS) != set(
+        ALL_BUSINESS_SERVICE_UNITS
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned service process contract drifted"
+        )
+    rows = [dict(row) for row in writer_processes]
+    rows_by_pid: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_pid.setdefault(int(row.get("pid") or 0), []).append(row)
+    recorded_generations = {
+        str(unit): dict(value or {})
+        for unit, value in dict(recorded or {}).items()
+    }
+    if recorded is not None and set(recorded_generations) != set(
+        ALL_BUSINESS_SERVICE_UNITS
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned service evidence drifted"
+        )
+    evidence: dict[str, dict[str, Any]] = {}
+    active_units: set[str] = set()
+    admitted_process_pids: set[int] = set()
+    for unit in ALL_BUSINESS_SERVICE_UNITS:
+        state = service_states[unit]
+        if str(state.get("unit") or "") != unit:
+            raise RuntimeError(
+                "prepared maintenance pause-owned service identity drifted: "
+                + unit
+            )
+        if str(state.get("is_enabled") or "") != "static":
+            raise RuntimeError(
+                "prepared maintenance pause-owned service contract drifted: "
+                + unit
+            )
+        properties = dict(state.get("properties") or {})
+        main_pid = int(properties.get("MainPID") or 0)
+        started_at = str(properties.get("ExecMainStartTimestamp") or "")
+        active = (
+            str(state.get("is_active") or "")
+            not in QUIESCENT_SERVICE_STATES
+        )
+        if active:
+            if main_pid <= 0:
+                raise RuntimeError(
+                    "prepared maintenance pause-owned service has no exact PID: "
+                    + unit
+                )
+            _parse_systemd_utc_timestamp(started_at)
+            matching_rows = rows_by_pid.get(main_pid, [])
+            expected_markers = SERVICE_WRITER_PROCESS_MARKERS[unit]
+            if (
+                len(matching_rows) != 1
+                or str(matching_rows[0].get("marker") or "")
+                not in expected_markers
+            ):
+                raise RuntimeError(
+                    "prepared maintenance pause-owned service process identity drifted: "
+                    + unit
+                )
+            admitted_process_pids.add(main_pid)
+            active_units.add(unit)
+        elif main_pid != 0:
+            raise RuntimeError(
+                "prepared maintenance pause-owned terminal service retained a PID: "
+                + unit
+            )
+        current = {
+            "unit": unit,
+            "is_enabled": str(state.get("is_enabled") or ""),
+            "initial_is_active": str(state.get("is_active") or ""),
+            "main_pid": main_pid,
+            "started_at": started_at,
+            "writer_processes": rows_by_pid.get(main_pid, []) if active else [],
+        }
+        if recorded is None:
+            evidence[unit] = current
+            continue
+        expected = recorded_generations[unit]
+        if (
+            str(expected.get("unit") or "") != unit
+            or str(expected.get("is_enabled") or "") != "static"
+            or str(expected.get("started_at") or "") != started_at
+        ):
+            raise RuntimeError(
+                "prepared maintenance pause-owned service generation changed: "
+                + unit
+            )
+        initially_active = (
+            str(expected.get("initial_is_active") or "")
+            not in QUIESCENT_SERVICE_STATES
+        )
+        if active and (
+            not initially_active
+            or main_pid != int(expected.get("main_pid") or 0)
+            or rows_by_pid.get(main_pid, [])
+            != list(expected.get("writer_processes") or [])
+        ):
+            raise RuntimeError(
+                "prepared maintenance pause-owned service restarted: " + unit
+            )
+        evidence[unit] = expected
+    unexpected_processes = [
+        row
+        for row in rows
+        if int(row.get("pid") or 0) not in admitted_process_pids
+    ]
+    if unexpected_processes:
+        raise RuntimeError(
+            "prepared maintenance pause-owned drain found another writer"
+        )
+    return evidence, active_units
+
+
+def _require_pause_owned_active_service_inventory(
+    systemd: SystemdClient,
+) -> set[str]:
+    active_services = set(systemd.discovered_active_services())
+    allowed = (
+        set(ALL_BUSINESS_SERVICE_UNITS)
+        | set(CONTINUOUS_OBSERVER_SERVICE_UNITS)
+        | set(CONTINUOUS_INFRASTRUCTURE_SERVICE_UNITS)
+    )
+    unknown = sorted(active_services - allowed)
+    if unknown:
+        raise RuntimeError(
+            "prepared maintenance found an unknown active wb-core service: "
+            + ", ".join(unknown)
+        )
+    return active_services
+
+
+def _pause_owned_resume_boundary_readback(
+    runtime_dir: Path,
+    *,
+    status: Mapping[str, Any],
+    active_service_units: set[str],
+    recorded: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    runtime = dict(status.get("runtime_schedules") or {})
+    if (
+        bool((runtime.get("web_vitrina") or {}).get("active"))
+        or list(
+            (runtime.get("feedback_complaints") or {}).get("active_runs")
+            or []
+        )
+        or (runtime.get("spp") or {}).get("active_job") is not None
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned runtime is not drained"
+        )
+    locks = dict(status.get("writer_locks") or {})
+    if bool((locks.get("seller_portal") or {}).get("busy")):
+        raise RuntimeError(
+            "prepared maintenance pause-owned seller-portal writer is active"
+        )
+    lock_owners = {
+        "warehouse_functional": {
+            "wb-core-warehouse-functional-sync.service",
+            FBS_SHADOW_SERVICE_UNIT,
+        },
+        "finance_backup": {"wb-core-finance-backup-rotation.service"},
+        "web_schedule": {
+            "wb-core-sheet-vitrina-refresh.service",
+            "wb-core-sheet-vitrina-closure-retry.service",
+            "wb-core-sheet-vitrina-canary-restore.service",
+            "wb-core-sheet-vitrina-health-candidate.service",
+            "wb-core-sheet-vitrina-health-confirmation.service",
+        },
+        "spp_execution": set(),
+    }
+    recorded_locks = dict((recorded or {}).get("locks") or {})
+    recorded_active_units = set(
+        (recorded or {}).get("active_service_units") or []
+    )
+    for key, value in locks.items():
+        if key == "seller_portal" or not bool((value or {}).get("held")):
+            continue
+        current_owner = active_service_units & lock_owners.get(key, set())
+        recorded_owner = (
+            recorded_active_units & lock_owners.get(key, set())
+        )
+        if not current_owner and not (
+            bool((recorded_locks.get(key) or {}).get("held"))
+            and recorded_owner
+        ):
+            raise RuntimeError(
+                "prepared maintenance pause-owned lock holder is unknown: "
+                + key
+            )
+    sidecars = _sqlite_sidecar_readback(runtime_dir)
+    sidecars_hot = any(
+        bool(item.get("exists"))
+        for item in dict(sidecars.get("sidecars") or {}).values()
+    )
+    if sidecars_hot and not active_service_units:
+        recorded_sidecars = dict(
+            ((recorded or {}).get("sidecars") or {}).get("sidecars") or {}
+        )
+        new_sidecars = [
+            suffix
+            for suffix, item in dict(sidecars.get("sidecars") or {}).items()
+            if bool((item or {}).get("exists"))
+            and not bool((recorded_sidecars.get(suffix) or {}).get("exists"))
+        ]
+        if new_sidecars:
+            raise RuntimeError(
+                "prepared maintenance pause-owned SQLite sidecar has no writer: "
+                + ", ".join(sorted(new_sidecars))
+            )
+    return {
+        "locks": locks,
+        "sidecars": sidecars,
+        "sidecars_hot": sidecars_hot,
+    }
+
+
+def _validate_pause_owned_resume_drain_status(
+    runtime_dir: Path,
+    *,
+    status: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    systemd: SystemdClient,
+) -> dict[str, Any]:
+    if str(binding.get("schema_version") or "") != (
+        "business_data_pause_owned_inventory_resume_v2"
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned drain binding is unsupported"
+        )
+    inventory = list(status.get("discovered_wb_core_timers") or [])
+    if (
+        inventory != list(binding.get("timer_inventory") or [])
+        or inventory != sorted(CLASSIFIED_WB_CORE_TIMER_UNITS)
+        or status.get("unknown_wb_core_timers")
+        or status.get("cron_entries")
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned drain inventory changed"
+        )
+    recorded_timers = {
+        str(unit): dict(value or {})
+        for unit, value in dict(
+            binding.get("deploy_drift_timer_states") or {}
+        ).items()
+    }
+    if sorted(recorded_timers) != list(
+        binding.get("repaused_timer_units") or []
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned drain timer evidence changed"
+        )
+    timers = dict(status.get("timers") or {})
+    if set(timers) != set(ALL_BUSINESS_TIMER_UNITS):
+        raise RuntimeError(
+            "prepared maintenance pause-owned drain timer set changed"
+        )
+    for unit in ALL_BUSINESS_TIMER_UNITS:
+        current = dict(timers.get(unit) or {})
+        if (
+            str(current.get("unit") or "") != unit
+            or _unit_state_pair(current) != ("disabled", "inactive")
+        ):
+            raise RuntimeError(
+                "prepared maintenance pause-owned timer restarted: " + unit
+            )
+        if unit in recorded_timers:
+            recorded_properties = dict(
+                recorded_timers[unit].get("properties") or {}
+            )
+            current_properties = dict(current.get("properties") or {})
+            recorded_trigger = str(
+                recorded_properties.get("LastTriggerUSec") or ""
+            )
+            current_trigger = str(
+                current_properties.get("LastTriggerUSec") or ""
+            )
+            if recorded_trigger and current_trigger != recorded_trigger:
+                raise RuntimeError(
+                    "prepared maintenance pause-owned timer retriggered: "
+                    + unit
+                )
+    active_inventory = _require_pause_owned_active_service_inventory(
+        systemd
+    )
+    service_evidence, active_service_units = (
+        _pause_owned_service_generation_evidence(
+            dict(status.get("services") or {}),
+            [dict(row) for row in status.get("writer_processes") or []],
+            recorded=dict(
+                binding.get("deploy_drift_service_generations") or {}
+            ),
+        )
+    )
+    if active_service_units != (
+        active_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned active service readback changed"
+        )
+    initially_active = sorted(
+        unit
+        for unit, value in service_evidence.items()
+        if str((value or {}).get("initial_is_active") or "")
+        not in QUIESCENT_SERVICE_STATES
+    )
+    if initially_active != list(binding.get("draining_service_units") or []):
+        raise RuntimeError(
+            "prepared maintenance pause-owned draining service set changed"
+        )
+    boundaries = _pause_owned_resume_boundary_readback(
+        runtime_dir,
+        status=status,
+        active_service_units=active_service_units,
+        recorded={
+            "active_service_units": initially_active,
+            "locks": dict(binding.get("deploy_drift_writer_locks") or {}),
+            "sidecars": dict(
+                binding.get("deploy_drift_sqlite_sidecars") or {}
+            ),
+        },
+    )
+    return {
+        "active_service_units": sorted(active_service_units),
+        **boundaries,
+    }
+
+
 def _resume_legacy_fbs_pause_ownership(
     runtime_dir: Path,
     *,
@@ -3271,9 +3710,18 @@ def _resume_legacy_fbs_pause_ownership(
         raise RuntimeError(
             "prepared maintenance FBS pause ownership found unclassified execution"
         )
+    active_service_inventory = _require_pause_owned_active_service_inventory(
+        systemd
+    )
     prior_binding = dict(
         existing.get("pause_owned_inventory_resume_binding") or {}
     )
+    if prior_binding and str(prior_binding.get("schema_version") or "") != (
+        "business_data_pause_owned_inventory_resume_v2"
+    ):
+        raise RuntimeError(
+            "prepared maintenance pause-owned resume binding predates exact drain evidence"
+        )
     timers = dict(before.get("timers") or {})
     persisted_timers = dict(persisted_readback.get("timers") or {})
     baseline_services = set(dict(baseline.get("services") or {}))
@@ -3347,85 +3795,67 @@ def _resume_legacy_fbs_pause_ownership(
                     "prepared maintenance pause-owned timer state changed after binding: "
                     + unit
                 )
+        for unit, recorded_state in recorded_drift_timer_states.items():
+            recorded_trigger = str(
+                (recorded_state.get("properties") or {}).get(
+                    "LastTriggerUSec"
+                )
+                or ""
+            )
+            current_trigger = str(
+                ((timers.get(unit) or {}).get("properties") or {}).get(
+                    "LastTriggerUSec"
+                )
+                or ""
+            )
+            if recorded_trigger and current_trigger != recorded_trigger:
+                raise RuntimeError(
+                    "prepared maintenance pause-owned timer retriggered: "
+                    + unit
+                )
     else:
         recorded_drift_timer_states = current_drift_timer_states
-    services = dict(before.get("services") or {})
-    if set(services) != set(ALL_BUSINESS_SERVICE_UNITS):
-        raise RuntimeError(
-            "prepared maintenance pause-owned service inventory drifted"
-        )
-    for unit, state_raw in services.items():
-        if str((state_raw or {}).get("unit") or "") != unit:
-            raise RuntimeError(
-                "prepared maintenance pause-owned service identity drifted: "
-                + unit
-            )
-        if unit == FBS_SHADOW_SERVICE_UNIT:
-            continue
-        if str((state_raw or {}).get("is_active") or "") not in (
-            QUIESCENT_SERVICE_STATES
-        ):
-            raise RuntimeError(
-                "prepared maintenance FBS pause ownership found active service: "
-                + unit
-            )
-    fbs_service = dict(services.get(FBS_SHADOW_SERVICE_UNIT) or {})
-    fbs_service_active = (
-        str(fbs_service.get("is_active") or "")
-        not in QUIESCENT_SERVICE_STATES
-        or int((fbs_service.get("properties") or {}).get("MainPID") or 0) != 0
-    )
-    fbs_pid = int((fbs_service.get("properties") or {}).get("MainPID") or 0)
     writer_processes = [dict(row) for row in before.get("writer_processes") or []]
-    unexpected_writers = [
-        row
-        for row in writer_processes
-        if str(row.get("marker") or "") != FBS_SHADOW_PROCESS_MARKER
-        or (fbs_pid > 0 and int(row.get("pid") or 0) != fbs_pid)
-    ]
-    if unexpected_writers:
-        raise RuntimeError(
-            "prepared maintenance FBS pause ownership found another writer"
+    recorded_service_generations = dict(
+        prior_binding.get("deploy_drift_service_generations") or {}
+    )
+    service_generations, active_service_units = (
+        _pause_owned_service_generation_evidence(
+            dict(before.get("services") or {}),
+            writer_processes,
+            recorded=(recorded_service_generations if prior_binding else None),
         )
-    runtime = dict(before.get("runtime_schedules") or {})
-    if (
-        bool((runtime.get("web_vitrina") or {}).get("active"))
-        or list(
-            (runtime.get("feedback_complaints") or {}).get("active_runs")
-            or []
-        )
-        or (runtime.get("spp") or {}).get("active_job") is not None
+    )
+    if active_service_units != (
+        active_service_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
     ):
         raise RuntimeError(
-            "prepared maintenance FBS pause ownership runtime is not drained"
+            "prepared maintenance pause-owned active service readback changed"
         )
-    locks = dict(before.get("writer_locks") or {})
-    if any(
-        bool((value or {}).get("held"))
-        for key, value in locks.items()
-        if key not in {"seller_portal", "warehouse_functional"}
-    ) or bool((locks.get("seller_portal") or {}).get("busy")):
-        raise RuntimeError(
-            "prepared maintenance FBS pause ownership found another active lock"
-        )
-    warehouse_lock_held = bool(
-        (locks.get("warehouse_functional") or {}).get("held")
+    boundaries = _pause_owned_resume_boundary_readback(
+        runtime_dir,
+        status=before,
+        active_service_units=active_service_units,
+        recorded=(
+            {
+                "active_service_units": list(
+                    prior_binding.get("draining_service_units") or []
+                ),
+                "locks": dict(
+                    prior_binding.get("deploy_drift_writer_locks") or {}
+                ),
+                "sidecars": dict(
+                    prior_binding.get("deploy_drift_sqlite_sidecars") or {}
+                ),
+            }
+            if prior_binding
+            else None
+        ),
     )
-    if warehouse_lock_held and not fbs_service_active:
-        raise RuntimeError(
-            "prepared maintenance FBS pause ownership lock holder is unknown"
-        )
-    sidecars = _sqlite_sidecar_readback(runtime_dir)
-    sidecars_hot = any(
-        bool(item.get("exists"))
-        for item in dict(sidecars.get("sidecars") or {}).values()
-    )
-    if sidecars_hot and not fbs_service_active:
-        raise RuntimeError(
-            "prepared maintenance FBS pause ownership has an unexplained SQLite sidecar"
-        )
+    sidecars = dict(boundaries["sidecars"])
+    sidecars_hot = bool(boundaries["sidecars_hot"])
     binding = {
-        "schema_version": "business_data_pause_owned_inventory_resume_v1",
+        "schema_version": "business_data_pause_owned_inventory_resume_v2",
         "window_id": window_id,
         "plan_fingerprint": plan_fingerprint,
         "barrier_state_fingerprint": str(
@@ -3448,6 +3878,23 @@ def _resume_legacy_fbs_pause_ownership(
         "timer_inventory": current_inventory,
         "deploy_drift_timer_states": recorded_drift_timer_states,
         "repaused_timer_units": sorted(recorded_drift_timer_states),
+        "deploy_drift_service_generations": service_generations,
+        "draining_service_units": sorted(
+            unit
+            for unit, value in service_generations.items()
+            if str((value or {}).get("initial_is_active") or "")
+            not in QUIESCENT_SERVICE_STATES
+        ),
+        "deploy_drift_writer_locks": (
+            dict(prior_binding.get("deploy_drift_writer_locks") or {})
+            if prior_binding
+            else dict(boundaries["locks"])
+        ),
+        "deploy_drift_sqlite_sidecars": (
+            dict(prior_binding.get("deploy_drift_sqlite_sidecars") or {})
+            if prior_binding
+            else sidecars
+        ),
         "sqlite_operational_path": str(
             sidecars.get("operational_path") or ""
         ),
@@ -3486,9 +3933,8 @@ def _resume_legacy_fbs_pause_ownership(
         "transition_applied": transition_applied,
         "resume_pending": bool(
             transition_applied
-            or fbs_service_active
+            or active_service_units
             or writer_processes
-            or warehouse_lock_held
             or sidecars_hot
         ),
     }
@@ -3796,9 +4242,6 @@ def maintenance_prepare(
         and window_id
         and plan_fingerprint
         and not (existing or {}).get("prepared_resume_binding")
-        and not (existing or {}).get(
-            "pause_owned_inventory_resume_binding"
-        )
     )
     if bind_prepared_before_schedules:
         persisted_runtime = dict(
