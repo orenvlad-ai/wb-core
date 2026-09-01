@@ -68,7 +68,7 @@ on:
         default: 0
         type: number
       blocked_comment_id:
-        description: Exact immutable blocked Apply marker comment id
+        description: Exact blocked marker or ordered FBS predecessor marker comment id
         required: false
         default: 0
         type: number
@@ -227,6 +227,7 @@ jobs:
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
           --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --manifest-sha256 "${{ inputs.manifest_sha256 }}"
           --github-output "$GITHUB_OUTPUT"
           --output "$RUNNER_TEMP/production-apply-receipt.json"
@@ -253,6 +254,7 @@ jobs:
           --reconciliation-pr "${{ inputs.reconciliation_pr }}"
           --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
           --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
           --manifest-sha256 "${{ inputs.manifest_sha256 }}"
           --output "$RUNNER_TEMP/production-apply-receipt.json"
 

@@ -76,6 +76,50 @@ WBC0013_GOAL_PROFILE = "dense-fbs-historical-recovery"
 WBC0027_GOAL_PROFILE = "product-capital-qualified-economics"
 WBC0027_FBS_QUALITY_GOAL_PROFILE = "fbs-lifecycle-recovery-v2"
 WBC0027_FBS_MAPPING_GOAL_PROFILE = "fbs-identity-mapping-v2"
+FBS_PHASE_BINDING_SCHEMA = "wb-core.fbs-phase-binding/v1"
+FBS_PHASE_BY_MODE = {
+    "fbs-mapping-qualification": "mapping_qualification",
+    "fbs-mapping-apply": "mapping_apply",
+    "fbs-impact-generation": "impact_generation",
+    "fbs-recovery-qualification": "recovery_qualification",
+    "fbs-recovery-apply": "recovery_apply",
+}
+FBS_PHASE_PREDECESSOR = {
+    "mapping_qualification": None,
+    "mapping_apply": "mapping_qualification",
+    "impact_generation": "mapping_apply",
+    "recovery_qualification": "impact_generation",
+    "recovery_apply": "recovery_qualification",
+}
+FBS_PHASE_TERMINAL_STATE = {
+    "mapping_qualification": "qualified_no_submit",
+    "mapping_apply": "done",
+    "impact_generation": "qualified_no_submit",
+    "recovery_qualification": "qualified_no_submit",
+    "recovery_apply": "done",
+}
+WBC0027_FBS_SUPERSEDED_RUNTIME_RELEASE = {
+    "pull_request": 1145,
+    "base_sha": "e5adff55cd5f2f6581ab724984ee8ab3b14a0e09",
+    "head_sha": "068446766a144348578cd8460d8f22f267460681",
+    "merge_sha": "5cdd45b5a499e630bed5277d46bd7047ac6624e2",
+    "release_operation_id": "release-v2-76858aebf78533adc107428d99a7aa33",
+    "plan_hash": "f4acaa5917f132bf7bd98d68a07f2cf82202b6cdf80c128d37e69b474080fb8c",
+    "gate_run_id": 33434060381,
+    "release_run_id": 33435006142,
+    "release_comment_id": 5484024408,
+    "artifact_id": 9774197000,
+    "artifact_name": "release-receipt-33434060381",
+    "artifact_archive_digest": (
+        "sha256:d29ca0a10de5b9626a41a96644b6ffa5124068ca652d8f3009341139cb128319"
+    ),
+    "artifact_file_sha256": (
+        "sha256:1595293c9cd55df7aa36a09bc278c3d260a554d3b0a8c9109da9a89562a49d92"
+    ),
+    "changed_files_digest": (
+        "sha256:2ca8871159a4ca9d79f3c0f9bb948e95d56b75634a202d6ca263cf4b04ba741b"
+    ),
+}
 WBC0027_FBS_INCIDENT_PASSPORT_PATH = (
     ROOT / "release/production-mutations/wbc0027_fbs_lifecycle_incident.json"
 )
@@ -840,15 +884,21 @@ def collect_exact_release_binding(
     }
 
 
-def _intervening_release_path_is_non_interfering(path: str) -> bool:
-    """Allow only documentation and executable-test-only paths in a base bridge."""
-
+def _valid_repository_path(path: str) -> bool:
     if (
         not path
         or path.startswith("/")
         or "//" in path
         or any(part in {"", ".", ".."} for part in path.split("/"))
     ):
+        return False
+    return True
+
+
+def _intervening_release_path_is_non_interfering(path: str) -> bool:
+    """Allow only documentation and executable-test-only paths in a base bridge."""
+
+    if not _valid_repository_path(path):
         return False
     if path.startswith("docs/"):
         return True
@@ -860,6 +910,7 @@ def _collect_non_interfering_pr_files(
     *,
     pr_number: int,
     pr: Mapping[str, Any],
+    exact_superseded_digest: str | None = None,
 ) -> dict[str, Any]:
     changed_files = pr.get("changed_files")
     if (
@@ -892,19 +943,30 @@ def _collect_non_interfering_pr_files(
                 for value in (additions, deletions, changes)
             )
             or int(additions) + int(deletions) != int(changes)
-            or not _intervening_release_path_is_non_interfering(path)
+            or not _valid_repository_path(path)
+            or (
+                exact_superseded_digest is None
+                and not _intervening_release_path_is_non_interfering(path)
+            )
             or (
                 status == "renamed"
                 and (
                     not isinstance(previous, str)
-                    or not _intervening_release_path_is_non_interfering(previous)
+                    or not _valid_repository_path(previous)
+                    or (
+                        exact_superseded_digest is None
+                        and not _intervening_release_path_is_non_interfering(previous)
+                    )
                 )
             )
             or (status != "renamed" and previous is not None)
         ):
-            raise ApplyError(
+            reason = (
                 "intervening release touches a code/workflow/runtime/data surface"
+                if exact_superseded_digest is None
+                else "superseded runtime changed-file proof is invalid"
             )
+            raise ApplyError(reason)
         seen.add(path)
         row = {
             "path": path,
@@ -919,7 +981,13 @@ def _collect_non_interfering_pr_files(
         rows.append(row)
     rows.sort(key=lambda row: (str(row["path"]), str(row["status"])))
     payload = {"pull_request": pr_number, "changed_files": rows}
-    return {**payload, "digest": payload_digest(payload)}
+    proof = {**payload, "digest": payload_digest(payload)}
+    if (
+        exact_superseded_digest is not None
+        and proof["digest"] != exact_superseded_digest
+    ):
+        raise ApplyError("superseded runtime changed-file proof drifted")
+    return proof
 
 
 def collect_correction_base_ancestry(
@@ -928,7 +996,7 @@ def collect_correction_base_ancestry(
     source_release: Mapping[str, Any],
     correction_release: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Prove an exact, non-production, non-interfering linear base bridge."""
+    """Prove an exact linear bridge, including the one closed superseded runtime."""
 
     source_receipt = source_release.get("receipt")
     correction_receipt = correction_release.get("receipt")
@@ -1013,26 +1081,69 @@ def collect_correction_base_ancestry(
         if len(receipt_payloads) != 1:
             raise ApplyError("intervening release receipt is missing or ambiguous")
         operation = str(receipt_payloads[0].get("operation_id") or "")
+        superseded = WBC0027_FBS_SUPERSEDED_RUNTIME_RELEASE
+        is_superseded_runtime = pr_number == int(superseded["pull_request"])
         release = collect_exact_release_binding(
             client,
             pr=pr_number,
             release_operation=operation,
-            expected_kind="repo_only",
+            expected_kind="live_runtime" if is_superseded_runtime else "repo_only",
             expected_state="done",
             expected_manifest=None,
         )
-        if (
-            release["receipt"].get("base_sha") != previous_sha
-            or release["receipt"].get("merge_sha") != commit_sha
-            or release["receipt"].get("deployed_sha") is not None
-        ):
-            raise ApplyError("intervening release terminal receipt chain drifted")
-        path_proof = _collect_non_interfering_pr_files(
-            client, pr_number=pr_number, pr=pr
-        )
+        if is_superseded_runtime:
+            actual_superseded_binding = {
+                "pull_request": pr_number,
+                "base_sha": release["receipt"].get("base_sha"),
+                "head_sha": release["receipt"].get("head_sha"),
+                "merge_sha": release["receipt"].get("merge_sha"),
+                "release_operation_id": operation,
+                "plan_hash": release["receipt"].get("plan_hash"),
+                "gate_run_id": release.get("gate_run_id"),
+                "release_run_id": release.get("release_run_id"),
+                "release_comment_id": release.get("comment_id"),
+                "artifact_id": release.get("artifact_id"),
+                "artifact_name": release.get("artifact_name"),
+                "artifact_archive_digest": release.get("artifact_archive_digest"),
+                "artifact_file_sha256": release.get("artifact_file_sha256"),
+            }
+            expected_superseded_binding = {
+                key: value
+                for key, value in superseded.items()
+                if key != "changed_files_digest"
+            }
+            if (
+                actual_superseded_binding != expected_superseded_binding
+                or previous_sha != superseded["base_sha"]
+                or commit_sha != superseded["merge_sha"]
+                or release["receipt"].get("deployed_sha") != commit_sha
+            ):
+                raise ApplyError("superseded runtime release binding drifted")
+            path_proof = _collect_non_interfering_pr_files(
+                client,
+                pr_number=pr_number,
+                pr=pr,
+                exact_superseded_digest=str(superseded["changed_files_digest"]),
+            )
+            release_role = "superseded_fbs_runtime"
+            release_kind = "live_runtime"
+        else:
+            if (
+                release["receipt"].get("base_sha") != previous_sha
+                or release["receipt"].get("merge_sha") != commit_sha
+                or release["receipt"].get("deployed_sha") is not None
+            ):
+                raise ApplyError("intervening release terminal receipt chain drifted")
+            path_proof = _collect_non_interfering_pr_files(
+                client, pr_number=pr_number, pr=pr
+            )
+            release_role = "non_interfering_repo_only"
+            release_kind = "repo_only"
         releases.append(
             {
                 "pull_request": pr_number,
+                "role": release_role,
+                "release_kind": release_kind,
                 "base_sha": previous_sha,
                 "head_sha": str(release["receipt"]["head_sha"]),
                 "merge_sha": commit_sha,
@@ -1049,7 +1160,13 @@ def collect_correction_base_ancestry(
     if previous_sha != correction_base:
         raise ApplyError("intervening release chain does not reach correction base")
     payload = {
-        "status": "trusted_non_interfering_descendant",
+        "status": (
+            "trusted_closed_descendant"
+            if any(
+                item["role"] == "superseded_fbs_runtime" for item in releases
+            )
+            else "trusted_non_interfering_descendant"
+        ),
         "source_merge_sha": source_merge,
         "correction_base_sha": correction_base,
         "intervening_releases": releases,
@@ -1849,6 +1966,291 @@ def operation_id(
     )
     version = "v2" if goal.get("contract") == "wb-core.production-goal-passport/v2" else "v1"
     return f"production-goal-{version}-" + digest(material)[:32]
+
+
+def fbs_phase_operation_id(
+    *,
+    phase: str,
+    root_operation_id: str,
+    source_release: Mapping[str, Any],
+    correction_release: Mapping[str, Any],
+    authorization_comment_id: int,
+    authorization_body_sha256: str,
+    incident_passport_sha256: str,
+    predecessor: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    if phase not in FBS_PHASE_PREDECESSOR:
+        raise ApplyError("FBS phase is unsupported")
+    if (
+        not isinstance(authorization_comment_id, int)
+        or isinstance(authorization_comment_id, bool)
+        or authorization_comment_id <= 0
+    ):
+        raise ApplyError("FBS authorization comment identity is invalid")
+    if re.fullmatch(r"production-goal-v2-[0-9a-f]{32}", root_operation_id) is None:
+        raise ApplyError("FBS root goal operation is invalid")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", authorization_body_sha256) is None:
+        raise ApplyError("FBS authorization body digest is invalid")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", incident_passport_sha256) is None:
+        raise ApplyError("FBS incident passport digest is invalid")
+    expected_predecessor = FBS_PHASE_PREDECESSOR[phase]
+    if (expected_predecessor is None) != (predecessor is None):
+        raise ApplyError("FBS phase predecessor presence is invalid")
+    if predecessor is not None and predecessor.get("phase") != expected_predecessor:
+        raise ApplyError("FBS phase predecessor is out of order")
+    material = {
+        "schema": FBS_PHASE_BINDING_SCHEMA,
+        "phase": phase,
+        "mode": next(
+            mode for mode, candidate_phase in FBS_PHASE_BY_MODE.items()
+            if candidate_phase == phase
+        ),
+        "root_operation_id": root_operation_id,
+        "source_release_digest": payload_digest(source_release),
+        "correction_release_digest": payload_digest(correction_release),
+        "authorization_comment_id": int(authorization_comment_id),
+        "authorization_body_sha256": authorization_body_sha256,
+        "incident_passport_sha256": incident_passport_sha256,
+        "predecessor": dict(predecessor) if predecessor is not None else None,
+    }
+    phase_operation_id = "production-goal-v2-" + digest(
+        canonical_json_bytes(material)
+    )[:32]
+    return phase_operation_id, {**material, "phase_operation_id": phase_operation_id}
+
+
+def _validate_fbs_phase_binding(
+    binding: Any,
+    *,
+    receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(binding, Mapping):
+        raise ApplyError("FBS terminal receipt lacks a phase binding")
+    expected_keys = {
+        "schema",
+        "phase",
+        "mode",
+        "root_operation_id",
+        "phase_operation_id",
+        "source_release_digest",
+        "correction_release_digest",
+        "authorization_comment_id",
+        "authorization_body_sha256",
+        "incident_passport_sha256",
+        "predecessor",
+    }
+    if set(binding) != expected_keys:
+        raise ApplyError("FBS terminal phase binding schema is invalid")
+    phase = str(binding.get("phase") or "")
+    mode = str(binding.get("mode") or "")
+    if FBS_PHASE_BY_MODE.get(mode) != phase:
+        raise ApplyError("FBS terminal phase and mode differ")
+    predecessor = binding.get("predecessor")
+    expected_predecessor = FBS_PHASE_PREDECESSOR.get(phase, object())
+    if expected_predecessor is None:
+        if predecessor is not None:
+            raise ApplyError("first FBS phase has a foreign predecessor")
+    else:
+        predecessor_keys = {
+            "phase",
+            "root_operation_id",
+            "phase_operation_id",
+            "mode",
+            "state",
+            "comment_id",
+            "marker_sha256",
+            "receipt_sha256",
+            "receipt_size_bytes",
+            "artifact_name",
+            "artifact_id",
+            "artifact_archive_sha256",
+            "workflow_run_id",
+        }
+        if (
+            not isinstance(predecessor, Mapping)
+            or set(predecessor) != predecessor_keys
+            or predecessor.get("phase") != expected_predecessor
+            or FBS_PHASE_BY_MODE.get(str(predecessor.get("mode") or ""))
+            != expected_predecessor
+            or predecessor.get("state")
+            != FBS_PHASE_TERMINAL_STATE[expected_predecessor]
+            or re.fullmatch(
+                r"production-goal-v2-[0-9a-f]{32}",
+                str(predecessor.get("root_operation_id") or ""),
+            )
+            is None
+            or re.fullmatch(
+                r"production-goal-v2-[0-9a-f]{32}",
+                str(predecessor.get("phase_operation_id") or ""),
+            )
+            is None
+            or any(
+                re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", str(predecessor.get(key) or "")
+                )
+                is None
+                for key in (
+                    "marker_sha256",
+                    "receipt_sha256",
+                    "artifact_archive_sha256",
+                )
+            )
+            or any(
+                not isinstance(predecessor.get(key), int)
+                or isinstance(predecessor.get(key), bool)
+                or int(predecessor[key]) <= 0
+                for key in (
+                    "comment_id",
+                    "receipt_size_bytes",
+                    "artifact_id",
+                    "workflow_run_id",
+                )
+            )
+            or re.fullmatch(
+                r"production-apply-receipt-pr-[1-9][0-9]*-run-[1-9][0-9]*",
+                str(predecessor.get("artifact_name") or ""),
+            )
+            is None
+        ):
+            raise ApplyError("FBS terminal predecessor chain is invalid")
+    if (
+        re.fullmatch(
+            r"production-goal-v2-[0-9a-f]{32}",
+            str(binding.get("root_operation_id") or ""),
+        )
+        is None
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(binding.get("source_release_digest") or ""),
+        )
+        is None
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(binding.get("correction_release_digest") or ""),
+        )
+        is None
+        or not isinstance(binding.get("authorization_comment_id"), int)
+        or isinstance(binding.get("authorization_comment_id"), bool)
+        or int(binding["authorization_comment_id"]) <= 0
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(binding.get("authorization_body_sha256") or ""),
+        )
+        is None
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(binding.get("incident_passport_sha256") or ""),
+        )
+        is None
+    ):
+        raise ApplyError("FBS terminal release/root binding is invalid")
+    persisted_material = {
+        key: binding[key] for key in expected_keys if key != "phase_operation_id"
+    }
+    phase_operation = "production-goal-v2-" + digest(
+        canonical_json_bytes(persisted_material)
+    )[:32]
+    if (
+        binding.get("schema") != FBS_PHASE_BINDING_SCHEMA
+        or binding.get("phase_operation_id") != phase_operation
+        or receipt.get("operation_id") != phase_operation
+        or receipt.get("mode") != mode
+        or receipt.get("state")
+        not in {FBS_PHASE_TERMINAL_STATE[phase], "blocked"}
+        or receipt.get("authorization_comment_id")
+        != binding.get("authorization_comment_id")
+        or receipt.get("authorization_body_sha256")
+        != binding.get("authorization_body_sha256")
+    ):
+        raise ApplyError("FBS terminal phase binding is foreign or drifted")
+    return dict(binding)
+
+
+def _collect_fbs_phase_predecessor(
+    client: GitHubClient,
+    comments: list[Mapping[str, Any]],
+    *,
+    pr: int,
+    comment_id: int,
+    expected_phase: str,
+    expected_root_operation_id: str,
+    source_release: Mapping[str, Any],
+    correction_release: Mapping[str, Any],
+    incident_passport_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    selected = [item for item in comments if int(item.get("id") or 0) == comment_id]
+    if len(selected) != 1:
+        raise ApplyError("exact FBS predecessor marker is missing or duplicated")
+    comment = selected[0]
+    body = str(comment.get("body") or "")
+    match = re.match(
+        rf"^<!-- {re.escape(APPLY_MARKER)} operation=(production-goal-v2-[0-9a-f]{{32}}) -->",
+        body,
+    )
+    if match is None:
+        raise ApplyError("FBS predecessor marker operation is invalid")
+    phase_operation_id = match.group(1)
+    same_operation = [
+        item for item in comments
+        if marker(phase_operation_id) in str(item.get("body") or "")
+    ]
+    if len(same_operation) != 1 or same_operation[0] is not comment:
+        raise ApplyError("FBS predecessor terminal marker is duplicated or foreign")
+    terminal = _parse_exact_apply_marker(comment, operation=phase_operation_id, pr=pr)
+    artifact = dict(terminal["artifact"])
+    artifact_match = re.fullmatch(
+        r"production-apply-receipt-pr-[1-9][0-9]*-run-([1-9][0-9]*)",
+        str(artifact["name"]),
+    )
+    assert artifact_match is not None
+    verified = _verify_apply_artifact(
+        client,
+        run_id=int(artifact_match.group(1)),
+        artifact_name=str(artifact["name"]),
+        expected_receipt_sha256=str(artifact["sha256"]),
+        expected_receipt_size=int(artifact["size_bytes"]),
+    )
+    receipt = dict(verified["receipt"])
+    binding = _validate_fbs_phase_binding(receipt.get("phase_binding"), receipt=receipt)
+    if (
+        binding["phase"] != expected_phase
+        or receipt.get("state") != FBS_PHASE_TERMINAL_STATE[expected_phase]
+        or binding["root_operation_id"] != expected_root_operation_id
+        or binding["source_release_digest"] != payload_digest(source_release)
+        or binding["correction_release_digest"] != payload_digest(correction_release)
+        or binding["incident_passport_sha256"] != incident_passport_sha256
+        or receipt.get("source_release") != source_release
+        or receipt.get("correction_release") != correction_release
+        or terminal.get("state") != receipt.get("state")
+        or terminal.get("apply_count") != receipt.get("apply_count")
+    ):
+        raise ApplyError("FBS predecessor terminal artifact is foreign or drifted")
+    metadata = dict(verified["metadata"])
+    workflow_run = metadata.get("workflow_run")
+    descriptor = {
+        "phase": expected_phase,
+        "root_operation_id": expected_root_operation_id,
+        "phase_operation_id": phase_operation_id,
+        "mode": binding["mode"],
+        "state": receipt["state"],
+        "comment_id": comment_id,
+        "marker_sha256": "sha256:" + digest(body.encode("utf-8")),
+        "receipt_sha256": str(artifact["sha256"]),
+        "receipt_size_bytes": int(artifact["size_bytes"]),
+        "artifact_name": str(artifact["name"]),
+        "artifact_id": int(metadata["id"]),
+        "artifact_archive_sha256": str(metadata["digest"]),
+        "workflow_run_id": int((workflow_run or {}).get("id") or 0),
+    }
+    if (
+        descriptor["workflow_run_id"] <= 0
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", descriptor["artifact_archive_sha256"]
+        )
+        is None
+    ):
+        raise ApplyError("FBS predecessor artifact provenance is incomplete")
+    return descriptor, receipt
 
 
 def validate_unique_authorization(
@@ -4830,8 +5232,11 @@ def run_wbc0027_fbs_quality_goal(
     merge_sha: str,
     goal: Mapping[str, Any],
     operation: str,
+    mapping_apply_operation: str,
+    impact_generation_operation: str,
     approval_reference: str,
     qualification_only: bool = False,
+    predecessor_qualification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     passport = _load_fbs_incident_passport()
     evidence_dir = str(
@@ -4842,10 +5247,15 @@ def run_wbc0027_fbs_quality_goal(
     mapping_evidence_dir = str(
         storage_destination_root("production_apply_evidence")
         / "production-goals"
-        / str(goal["mapping_operation_id"])
+        / mapping_apply_operation
+    )
+    impact_evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / impact_generation_operation
     )
     mapping_readback_path = f"{mapping_evidence_dir}/fbs-mapping-terminal-readback.json"
-    impact_path = f"{mapping_evidence_dir}/fbs-impact-manifest.json"
+    impact_path = f"{impact_evidence_dir}/fbs-impact-manifest.json"
     manifest_path = ""
     attempts: list[dict[str, Any]] = []
     prior_witness: dict[str, Any] | None = None
@@ -4999,6 +5409,41 @@ def run_wbc0027_fbs_quality_goal(
             "qualification_attempts": attempts,
         }
     fingerprint = str(candidate["recovery_digest"])
+    current_qualification_binding = {
+        "fingerprint": fingerprint,
+        "impact_digest": candidate["impact_digest"],
+        "mapping_apply_operation_id": mapping_apply_operation,
+        "impact_generation_operation_id": impact_generation_operation,
+        "storage": candidate["boundary"]["storage"],
+        "boundary": candidate["boundary"],
+        "scope": {
+            "groups": candidate["scope"]["groups"],
+            "target_count": candidate["scope"]["target_count"],
+            "stable_target_digest": candidate["scope"]["stable_target_digest"],
+        },
+        "history_digest": candidate["history"]["digest"],
+        "history_classification_counts": candidate["history"][
+            "classification_counts"
+        ],
+    }
+    if qualification_only:
+        if predecessor_qualification is not None:
+            raise ApplyError("recovery qualification cannot consume itself")
+    elif (
+        not isinstance(predecessor_qualification, Mapping)
+        or {
+            key: predecessor_qualification.get(key)
+            for key in current_qualification_binding
+        }
+        != current_qualification_binding
+    ):
+        return {
+            "state": "blocked",
+            "reason": "fbs-recovery-qualified-predecessor-drifted",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+            "current_qualification_binding": current_qualification_binding,
+        }
     native_qualification = command_evidence(
         _wbc0027_fbs_quality_remote_command(
             target=target,
@@ -5042,9 +5487,8 @@ def run_wbc0027_fbs_quality_goal(
             "native_qualification": native_qualification,
             "candidate": {
                 "manifest_path": manifest_path,
-                "fingerprint": fingerprint,
                 "impact_path": impact_path,
-                "impact_digest": candidate["impact_digest"],
+                **current_qualification_binding,
             },
         }
     apply_evidence = command_evidence(
@@ -5119,19 +5563,7 @@ def run_wbc0027_fbs_quality_goal(
         "native_qualification": native_qualification,
         "candidate": {
             "manifest_path": manifest_path,
-            "fingerprint": fingerprint,
-            "impact_digest": candidate["impact_digest"],
-            "storage": candidate_boundary["storage"],
-            "boundary": candidate_boundary,
-            "scope": {
-                "groups": candidate_scope["groups"],
-                "target_count": target_count,
-                "stable_target_digest": candidate_scope["stable_target_digest"],
-            },
-            "history_digest": candidate_history["digest"],
-            "history_classification_counts": candidate_history[
-                "classification_counts"
-            ],
+            **current_qualification_binding,
         },
         "apply": apply_evidence,
         "readback": readback_evidence,
@@ -5142,21 +5574,27 @@ def run_wbc0027_fbs_impact_generation(
     *,
     target: Mapping[str, Any],
     merge_sha: str,
-    mapping_operation: str,
+    operation: str,
+    mapping_apply_operation: str,
     mapping_readback_digest: str,
 ) -> dict[str, Any]:
     evidence_dir = str(
         storage_destination_root("production_apply_evidence")
         / "production-goals"
-        / mapping_operation
+        / operation
     )
-    mapping_readback_path = f"{evidence_dir}/fbs-mapping-terminal-readback.json"
+    mapping_evidence_dir = str(
+        storage_destination_root("production_apply_evidence")
+        / "production-goals"
+        / mapping_apply_operation
+    )
+    mapping_readback_path = f"{mapping_evidence_dir}/fbs-mapping-terminal-readback.json"
     impact_path = f"{evidence_dir}/fbs-impact-manifest.json"
     evidence = command_evidence(
         _wbc0027_fbs_quality_remote_command(
             target=target,
             merge_sha=merge_sha,
-            operation=mapping_operation,
+            operation=operation,
             evidence_dir=evidence_dir,
             action="impact",
             impact_path=impact_path,
@@ -5196,6 +5634,7 @@ def run_wbc0027_fbs_impact_generation(
             "path": impact_path,
             "digest": impact["impact_digest"],
             "mapping_readback_digest": impact["mapping_readback_digest"],
+            "mapping_apply_operation_id": mapping_apply_operation,
         },
         "evidence": evidence,
     }
@@ -5209,6 +5648,7 @@ def run_wbc0027_fbs_mapping_goal(
     operation: str,
     approval_reference: str,
     qualification_only: bool = False,
+    predecessor_qualification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     passport = _load_fbs_incident_passport()
     evidence_dir = str(
@@ -5363,6 +5803,29 @@ def run_wbc0027_fbs_mapping_goal(
             "rehearsal": rehearsal_evidence,
         }
     fingerprint = str(candidate["manifest_digest"])
+    current_qualification_binding = {
+        "fingerprint": fingerprint,
+        "material_cas_digest": candidate["material_cas"]["digest"],
+        "tuple_digest": candidate["tuple"]["tuple_digest"],
+    }
+    if qualification_only:
+        if predecessor_qualification is not None:
+            raise ApplyError("mapping qualification cannot consume itself")
+    elif (
+        not isinstance(predecessor_qualification, Mapping)
+        or {
+            key: predecessor_qualification.get(key)
+            for key in current_qualification_binding
+        }
+        != current_qualification_binding
+    ):
+        return {
+            "state": "blocked",
+            "reason": "fbs-mapping-qualified-predecessor-drifted",
+            "apply_count": 0,
+            "qualification_attempts": attempts,
+            "current_qualification_binding": current_qualification_binding,
+        }
     if qualification_only:
         return {
             "state": "qualified_no_submit",
@@ -5379,9 +5842,7 @@ def run_wbc0027_fbs_mapping_goal(
             "rehearsal": rehearsal_evidence,
             "candidate": {
                 "path": candidate_path,
-                "fingerprint": fingerprint,
-                "material_cas_digest": candidate["material_cas"]["digest"],
-                "tuple_digest": candidate["tuple"]["tuple_digest"],
+                **current_qualification_binding,
             },
         }
     apply_evidence = command_evidence(
@@ -11391,11 +11852,124 @@ def _run_wbc0027_fbs_v2_mode(
         raise ApplyError("FBS mapping/impact mode requires the mapping v2 passport")
     if args.authorization_mode in recovery_modes and goal.get("profile") != WBC0027_FBS_QUALITY_GOAL_PROFILE:
         raise ApplyError("FBS recovery mode requires the recovery v2 passport")
-    operation = operation_id(args.repository, args.pr, args.authorization_comment_id, goal)
+    root_operation = operation_id(
+        args.repository, args.pr, args.authorization_comment_id, goal
+    )
     if goal.get("profile") == WBC0027_FBS_QUALITY_GOAL_PROFILE and (
-        str(goal.get("mapping_operation_id")) == operation
+        str(goal.get("mapping_operation_id")) == root_operation
     ):
         raise ApplyError("mapping and recovery operations must be distinct")
+    phase = FBS_PHASE_BY_MODE[args.authorization_mode]
+    expected_predecessor_phase = FBS_PHASE_PREDECESSOR[phase]
+    predecessor: dict[str, Any] | None = None
+    predecessor_receipt: dict[str, Any] | None = None
+    if expected_predecessor_phase is None:
+        if args.blocked_comment_id != 0:
+            raise ApplyError("mapping qualification cannot consume a predecessor marker")
+    else:
+        if args.blocked_comment_id <= 0:
+            raise ApplyError("FBS phase requires the exact predecessor marker comment")
+        expected_predecessor_root = (
+            str(goal["mapping_operation_id"])
+            if phase == "recovery_qualification"
+            else root_operation
+        )
+        predecessor, predecessor_receipt = _collect_fbs_phase_predecessor(
+            client,
+            comments,
+            pr=args.pr,
+            comment_id=args.blocked_comment_id,
+            expected_phase=str(expected_predecessor_phase),
+            expected_root_operation_id=expected_predecessor_root,
+            source_release=source_release,
+            correction_release=correction_release,
+            incident_passport_sha256=str(goal["incident_passport_digest"]),
+        )
+    operation, phase_binding = fbs_phase_operation_id(
+        phase=phase,
+        root_operation_id=root_operation,
+        source_release=source_release,
+        correction_release=correction_release,
+        authorization_comment_id=args.authorization_comment_id,
+        authorization_body_sha256=authorization_digest,
+        incident_passport_sha256=str(goal["incident_passport_digest"]),
+        predecessor=predecessor,
+    )
+    mapping_apply_operation = ""
+    impact_generation_operation = ""
+    mapping_predecessor_qualification: Mapping[str, Any] | None = None
+    recovery_predecessor_qualification: Mapping[str, Any] | None = None
+    if phase == "mapping_apply":
+        assert predecessor_receipt is not None
+        prior_candidate = (predecessor_receipt.get("evidence") or {}).get("candidate")
+        if not isinstance(prior_candidate, Mapping) or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", str(prior_candidate.get(key) or ""))
+            is None
+            for key in ("fingerprint", "material_cas_digest", "tuple_digest")
+        ):
+            raise ApplyError("mapping Apply qualification predecessor drifted")
+        mapping_predecessor_qualification = prior_candidate
+    elif phase == "impact_generation":
+        assert predecessor is not None and predecessor_receipt is not None
+        mapping_apply_operation = str(predecessor["phase_operation_id"])
+        prior_candidate = (predecessor_receipt.get("evidence") or {}).get("candidate")
+        prior_readback_digest = (
+            prior_candidate.get("mapping_readback_digest")
+            if isinstance(prior_candidate, Mapping)
+            else None
+        )
+        requested_readback_digest = str(args.manifest_sha256 or "")
+        if re.fullmatch(r"[0-9a-f]{64}", requested_readback_digest):
+            requested_readback_digest = "sha256:" + requested_readback_digest
+        if (
+            re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(prior_readback_digest or "")
+            )
+            is None
+            or requested_readback_digest != prior_readback_digest
+        ):
+            raise ApplyError(
+                "impact generation does not consume the exact terminal mapping readback"
+            )
+    elif phase == "recovery_qualification":
+        assert predecessor is not None and predecessor_receipt is not None
+        impact_generation_operation = str(predecessor["phase_operation_id"])
+        prior_impact = (predecessor_receipt.get("evidence") or {}).get("impact")
+        if not isinstance(prior_impact, Mapping) or (
+            prior_impact.get("digest") != goal["impact_digest"]
+            or prior_impact.get("mapping_readback_digest")
+            != goal["mapping_readback_digest"]
+            or re.fullmatch(
+                r"production-goal-v2-[0-9a-f]{32}",
+                str(prior_impact.get("mapping_apply_operation_id") or ""),
+            )
+            is None
+        ):
+            raise ApplyError("recovery qualification impact predecessor drifted")
+        mapping_apply_operation = str(prior_impact["mapping_apply_operation_id"])
+    elif phase == "recovery_apply":
+        assert predecessor is not None and predecessor_receipt is not None
+        prior_candidate = (predecessor_receipt.get("evidence") or {}).get("candidate")
+        if not isinstance(prior_candidate, Mapping) or (
+            prior_candidate.get("impact_digest") != goal["impact_digest"]
+            or prior_candidate.get("fingerprint") != goal["recovery_digest"]
+            or re.fullmatch(
+                r"production-goal-v2-[0-9a-f]{32}",
+                str(prior_candidate.get("mapping_apply_operation_id") or ""),
+            )
+            is None
+            or re.fullmatch(
+                r"production-goal-v2-[0-9a-f]{32}",
+                str(prior_candidate.get("impact_generation_operation_id") or ""),
+            )
+            is None
+        ):
+            raise ApplyError("recovery Apply qualification predecessor drifted")
+        mapping_apply_operation = str(prior_candidate["mapping_apply_operation_id"])
+        impact_generation_operation = str(
+            prior_candidate["impact_generation_operation_id"]
+        )
+        recovery_predecessor_qualification = prior_candidate
     marker_candidates = [
         item for item in comments if marker(operation) in str(item.get("body") or "")
     ]
@@ -11419,9 +11993,13 @@ def _run_wbc0027_fbs_v2_mode(
             expected_receipt_size=int(artifact["size_bytes"]),
         )
         prior_receipt = dict(verified["receipt"])
+        validated_binding = _validate_fbs_phase_binding(
+            prior_receipt.get("phase_binding"), receipt=prior_receipt
+        )
         if (
             prior_receipt.get("operation_id") != operation
             or prior_receipt.get("mode") != args.authorization_mode
+            or validated_binding != phase_binding
             or prior_receipt.get("authorization_comment_id")
             != args.authorization_comment_id
             or prior_receipt.get("source_release") != source_release
@@ -11434,6 +12012,8 @@ def _run_wbc0027_fbs_v2_mode(
             "schema": APPLY_RECEIPT_SCHEMA,
             "state": "already_terminal",
             "operation_id": operation,
+            "root_operation_id": root_operation,
+            "phase": phase,
             "pull_request": args.pr,
             "validated_terminal_state": prior_receipt["state"],
             "validated_artifact": verified["metadata"],
@@ -11452,11 +12032,17 @@ def _run_wbc0027_fbs_v2_mode(
         except (OSError, json.JSONDecodeError) as exc:
             raise ApplyError("collected immutable receipt is invalid") from exc
         raw = args.output.read_bytes()
+        collected_binding = (
+            _validate_fbs_phase_binding(receipt.get("phase_binding"), receipt=receipt)
+            if isinstance(receipt, Mapping)
+            else None
+        )
         if (
             not isinstance(receipt, dict)
             or raw != canonical_json_bytes(receipt) + b"\n"
             or receipt.get("operation_id") != operation
             or receipt.get("mode") != args.authorization_mode
+            or collected_binding != phase_binding
             or receipt.get("source_release") != source_release
             or receipt.get("correction_release") != correction_release
         ):
@@ -11498,18 +12084,18 @@ def _run_wbc0027_fbs_v2_mode(
     )
     with tempfile.TemporaryDirectory(prefix="wb-core-fbs-v2-") as directory:
         configure_deploy_environment(Path(directory))
-        if args.authorization_mode == "fbs-impact-generation":
-            mapping_readback_digest = str(args.manifest_sha256 or "")
-            if re.fullmatch(r"[0-9a-f]{64}", mapping_readback_digest):
-                mapping_readback_digest = "sha256:" + mapping_readback_digest
-            if re.fullmatch(r"sha256:[0-9a-f]{64}", mapping_readback_digest) is None:
-                raise ApplyError(
-                    "impact generation requires the exact mapping readback digest"
-                )
+        if phase == "impact_generation":
+            assert predecessor_receipt is not None
+            mapping_readback_digest = str(
+                predecessor_receipt["evidence"]["candidate"][
+                    "mapping_readback_digest"
+                ]
+            )
             result = run_wbc0027_fbs_impact_generation(
                 target=target,
                 merge_sha=correction_merge_sha,
-                mapping_operation=operation,
+                operation=operation,
+                mapping_apply_operation=mapping_apply_operation,
                 mapping_readback_digest=mapping_readback_digest,
             )
         elif args.authorization_mode in mapping_modes:
@@ -11520,6 +12106,7 @@ def _run_wbc0027_fbs_v2_mode(
                 operation=operation,
                 approval_reference=approval_reference,
                 qualification_only=args.authorization_mode == "fbs-mapping-qualification",
+                predecessor_qualification=mapping_predecessor_qualification,
             )
         else:
             result = run_wbc0027_fbs_quality_goal(
@@ -11527,13 +12114,34 @@ def _run_wbc0027_fbs_v2_mode(
                 merge_sha=correction_merge_sha,
                 goal=goal,
                 operation=operation,
+                mapping_apply_operation=mapping_apply_operation,
+                impact_generation_operation=impact_generation_operation,
                 approval_reference=approval_reference,
                 qualification_only=args.authorization_mode == "fbs-recovery-qualification",
+                predecessor_qualification=recovery_predecessor_qualification,
             )
+    result_state = str(result.get("state") or "")
+    result_apply_count = int(result.get("apply_count") or 0)
+    if result_state not in {FBS_PHASE_TERMINAL_STATE[phase], "blocked"}:
+        raise ApplyError("FBS phase returned a non-terminal state")
+    if phase in {
+        "mapping_qualification",
+        "impact_generation",
+        "recovery_qualification",
+    } and result_apply_count != 0:
+        raise ApplyError("FBS no-submit phase consumed a submit")
+    if phase in {"mapping_apply", "recovery_apply"} and result_apply_count not in {
+        0,
+        1,
+    }:
+        raise ApplyError("FBS Apply phase exceeded its independent one-submit budget")
     receipt = {
         "schema": APPLY_RECEIPT_SCHEMA,
         "state": result["state"],
         "operation_id": operation,
+        "root_operation_id": root_operation,
+        "phase": phase,
+        "phase_binding": phase_binding,
         "mode": args.authorization_mode,
         "repository": args.repository,
         "pull_request": args.pr,
@@ -11547,7 +12155,7 @@ def _run_wbc0027_fbs_v2_mode(
         "authorization_body_sha256": authorization_digest,
         "authorization_body": str(authorization.get("body") or "").strip(),
         "goal": goal,
-        "apply_count": int(result.get("apply_count") or 0),
+        "apply_count": result_apply_count,
         "evidence": result,
     }
     _write_receipt(args.output, receipt)
