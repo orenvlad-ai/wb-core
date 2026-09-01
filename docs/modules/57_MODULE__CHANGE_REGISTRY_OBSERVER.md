@@ -35,6 +35,12 @@ and `wb-core-registry-http.service` receive the activation flag/account scope
 from canonical target `runtime_env`; the owner-managed environment file remains
 the credential/source-secret boundary. A timer/activation collision is
 serialized by the seller lease, never collapsed into one identity.
+Every local schema, admission, result and failure-evidence write boundary also
+owns the canonical warehouse functional writer lock. A trusted activation
+therefore waits behind an already running FBS or warehouse publication instead
+of racing the shared operational SQLite generation. The lock is released before
+all Prices/Ads WB GET calls and reacquired only for the short local persistence
+transaction; source acquisition never extends the writer-lock hold.
 
 Acquisition timestamps are canonical UTC `...Z` before all acquisition
 digests. The observer also defensively canonicalizes the acquisition interval

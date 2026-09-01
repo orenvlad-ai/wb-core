@@ -44,6 +44,9 @@ from packages.application.change_registry_source_acquisition import (
     canonicalize_acquisition_timestamps,
 )
 from packages.application.storage_registry import StorageRegistryError, StoreRegistry
+from packages.application.warehouse_functional_lock import (
+    warehouse_functional_write_lock,
+)
 
 
 CONTRACT_NAME = "wb_change_registry_observer"
@@ -376,7 +379,8 @@ class ChangeRegistryObserver:
             self.fallback_stage_hook(stage, conn)
 
     def initialize_schema(self) -> None:
-        ChangeRegistryRepository(self.runtime_dir).initialize_schema()
+        with warehouse_functional_write_lock(self.runtime_dir):
+            ChangeRegistryRepository(self.runtime_dir).initialize_schema()
 
     def run(
         self,
@@ -559,6 +563,10 @@ class ChangeRegistryObserver:
         return self.read_job(exact_job_id)
 
     def _admit(self, **row: Any) -> dict[str, bool]:
+        with warehouse_functional_write_lock(self.runtime_dir):
+            return self._admit_under_writer_lock(**row)
+
+    def _admit_under_writer_lock(self, **row: Any) -> dict[str, bool]:
         self.initialize_schema()
         now = canonical_utc_timestamp(row["requested_at"])
         requested_by = str(row["requested_by"] or "").strip()[:160]
@@ -726,6 +734,27 @@ class ChangeRegistryObserver:
                 )
 
     def _persist(
+        self,
+        job_id: str,
+        trigger: str,
+        slot: str,
+        snapshot: Mapping[str, Any],
+        source_status: str,
+        persistence: _PersistenceStage,
+        inject_db_failure: bool,
+    ) -> dict[str, Any]:
+        with warehouse_functional_write_lock(self.runtime_dir):
+            return self._persist_under_writer_lock(
+                job_id,
+                trigger,
+                slot,
+                snapshot,
+                source_status,
+                persistence,
+                inject_db_failure,
+            )
+
+    def _persist_under_writer_lock(
         self,
         job_id: str,
         trigger: str,
@@ -1023,6 +1052,21 @@ class ChangeRegistryObserver:
             )
 
     def _fail_job(
+        self,
+        job_id: str,
+        trigger: str,
+        slot: str,
+        primary_failure: Mapping[str, Any],
+    ) -> None:
+        with warehouse_functional_write_lock(self.runtime_dir):
+            self._fail_job_under_writer_lock(
+                job_id,
+                trigger,
+                slot,
+                primary_failure,
+            )
+
+    def _fail_job_under_writer_lock(
         self,
         job_id: str,
         trigger: str,
