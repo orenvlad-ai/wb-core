@@ -9,6 +9,7 @@ import shlex
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+import threading
 import time
 from typing import Any, Mapping
 
@@ -43,6 +44,9 @@ from packages.application.change_registry_source_acquisition import (  # noqa: E
 )
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypoint,
+)
+from packages.application.warehouse_functional_lock import (  # noqa: E402
+    warehouse_functional_write_lock,
 )
 from apps.change_registry_source_acquisition_smoke import (  # noqa: E402
     FakeAdsSource,
@@ -277,6 +281,21 @@ class SnapshotAcquirer:
     def acquire(self) -> dict[str, Any]:
         self.acquire_calls += 1
         return deepcopy(self.snapshot)
+
+
+class LockProbingAcquirer(SnapshotAcquirer):
+    def __init__(self, runtime_dir: Path, snapshot: Mapping[str, Any]) -> None:
+        super().__init__(snapshot)
+        self.runtime_dir = runtime_dir
+        self.lock_evidence: dict[str, Any] | None = None
+
+    def acquire(self) -> dict[str, Any]:
+        with warehouse_functional_write_lock(
+            self.runtime_dir,
+            blocking=False,
+        ) as evidence:
+            self.lock_evidence = dict(evidence)
+        return super().acquire()
 
 
 def _observer(
@@ -1068,6 +1087,68 @@ def main() -> None:
         )
         assert prices_source.write_calls == 0
         assert ads_source.write_calls == 0
+
+        serialized_runtime = Path(tmp) / "serialized-runtime"
+        serialized_acquirer = LockProbingAcquirer(
+            serialized_runtime,
+            _snapshot(15 * 60),
+        )
+        serialized_observer = ChangeRegistryObserver(
+            serialized_runtime,
+            seller_id=SELLER,
+            account_scope=ACCOUNT,
+            acquirer_factory=lambda: serialized_acquirer,
+            now_fn=lambda: "2026-08-29T15:00:00Z",
+        )
+        serialized_result: dict[str, Any] = {}
+        serialized_failure: list[BaseException] = []
+        persistence_lock_evidence: list[dict[str, Any]] = []
+
+        def probe_persistence_lock(
+            _stage: str,
+            _conn: sqlite3.Connection | None,
+        ) -> None:
+            with warehouse_functional_write_lock(
+                serialized_runtime,
+                blocking=False,
+            ) as evidence:
+                persistence_lock_evidence.append(dict(evidence))
+
+        serialized_observer.persistence_stage_hook = probe_persistence_lock
+
+        def run_serialized_activation() -> None:
+            try:
+                serialized_result.update(
+                    serialized_observer.run(
+                        trigger_kind="activation",
+                        requested_by="trusted-release-runner",
+                        deployed_sha="e" * 40,
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                serialized_failure.append(exc)
+
+        with warehouse_functional_write_lock(serialized_runtime):
+            serialized_thread = threading.Thread(
+                target=run_serialized_activation,
+                name="change-registry-activation-contention",
+            )
+            serialized_thread.start()
+            time.sleep(0.2)
+            assert serialized_thread.is_alive()
+            assert serialized_acquirer.acquire_calls == 0
+        serialized_thread.join(timeout=10)
+        assert not serialized_thread.is_alive()
+        assert serialized_failure == []
+        assert serialized_result["events"][-1]["state"] == "complete"
+        assert serialized_acquirer.acquire_calls == 1
+        assert serialized_acquirer.lock_evidence is not None
+        assert serialized_acquirer.lock_evidence["reentrant"] == 0.0
+        assert persistence_lock_evidence
+        assert all(
+            evidence["reentrant"] == 1.0
+            for evidence in persistence_lock_evidence
+        )
 
         stat_before = db_path.stat()
         readonly_surface = ChangeRegistryReadSurface(

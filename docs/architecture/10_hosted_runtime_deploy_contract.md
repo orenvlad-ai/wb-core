@@ -99,7 +99,10 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   verifies the exact SHA-bound job is terminal `complete`; a new SHA always has
   a new activation identity, while exact replay of the same complete SHA is a
   no-op. Timer and activation remain distinct identities and serialize through
-  one seller lease. Both perform only Prices/Ads WB GET and bounded operational
+  one seller lease. Their local schema/admission/result/failure transactions also
+  serialize through the canonical warehouse functional writer lock, so exact-SHA
+  activation waits for an already active FBS/warehouse writer without holding
+  that lock across Prices/Ads acquisition. Both perform only Prices/Ads WB GET and bounded operational
   StoreRegistry writes. No WB POST/PATCH or seller-state mutation is permitted.
 - Migration 142 adds canonical hosted
   `ff-pool-cutover-production-dry-run/apply/readback`. Every action pins the
