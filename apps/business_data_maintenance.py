@@ -69,16 +69,27 @@ CORE_TIMER_UNITS = (
     "wb-core-wb-finance-weekly.timer",
     "wb-core-finance-backup-rotation.timer",
 )
+INDEPENDENT_WRITER_TIMER_UNITS = (
+    "wb-core-fbs-warehouse-registry.timer",
+    "wb-core-sheet-vitrina-canary-restore.timer",
+    "wb-core-sheet-vitrina-health-candidate.timer",
+    "wb-core-sheet-vitrina-health-confirmation.timer",
+)
 FORCE_OFF_TIMER_UNITS = (
     "wb-core-warehouse-functional-sync.timer",
     "wb-core-autoanswers-readonly-sync.timer",
     "wb-core-autoanswers-worker.timer",
 )
-ALL_BUSINESS_TIMER_UNITS = CORE_TIMER_UNITS + FORCE_OFF_TIMER_UNITS
+ALL_BUSINESS_TIMER_UNITS = (
+    CORE_TIMER_UNITS
+    + INDEPENDENT_WRITER_TIMER_UNITS
+    + FORCE_OFF_TIMER_UNITS
+)
 ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for unit in ALL_BUSINESS_TIMER_UNITS)
 CONTINUOUS_OBSERVER_TIMER_UNITS = (
     "wb-core-fbs-shadow-collector.timer",
     "wb-core-change-registry-observer.timer",
+    "wb-core-root-storage-policy.timer",
 )
 CLASSIFIED_WB_CORE_TIMER_UNITS = (
     ALL_BUSINESS_TIMER_UNITS + CONTINUOUS_OBSERVER_TIMER_UNITS
@@ -133,6 +144,8 @@ WRITER_PROCESS_MARKERS = (
     "warehouse_functional_runner.py",
     "wb_autoanswers_readonly.py",
     "wb_autoanswers_worker.py",
+    "wb_fbs_warehouse_registry.py",
+    "sheet_vitrina_v1_health_tick.py",
 )
 
 WEB_SCHEDULE_PATH = "/v1/sheet-vitrina-v1/web-vitrina/auto-schedules"
@@ -1837,10 +1850,28 @@ def maintenance_control_signature(
         if spec.get("timer")
     }
     timer_control_intent["autoanswers"] = process_desired.get("autoanswers")
+    independent_writer_timer_intent = {
+        unit: {
+            "is_enabled": str(
+                ((status.get("timers") or {}).get(unit) or {}).get(
+                    "is_enabled"
+                )
+                or ""
+            ),
+            "is_active": str(
+                ((status.get("timers") or {}).get(unit) or {}).get(
+                    "is_active"
+                )
+                or ""
+            ),
+        }
+        for unit in INDEPENDENT_WRITER_TIMER_UNITS
+    }
     payload = {
         "master_desired": auto_updates.get("master_desired"),
         "process_desired": process_desired,
         "timer_control_intent": timer_control_intent,
+        "independent_writer_timer_intent": independent_writer_timer_intent,
         "runtime_schedule_intent": {
             "web_vitrina": {
                 "schedule_count": int(web.get("schedule_count") or 0),
@@ -1872,6 +1903,42 @@ def maintenance_control_signature(
         "payload": payload,
         "fingerprint": _stable_fingerprint(payload),
     }
+
+
+def _independent_writer_timer_restore_plan(
+    baseline: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Validate the exact representable pre-hold state before any restore."""
+
+    timers = dict(baseline.get("timers") or {})
+    plan: dict[str, bool] = {}
+    for unit in INDEPENDENT_WRITER_TIMER_UNITS:
+        state = dict(timers.get(unit) or {})
+        pair = (
+            str(state.get("is_enabled") or ""),
+            str(state.get("is_active") or ""),
+        )
+        if pair == ("enabled", "active"):
+            plan[unit] = True
+        elif pair == ("disabled", "inactive"):
+            plan[unit] = False
+        else:
+            raise RuntimeError(
+                "independent writer timer baseline is not exactly "
+                f"restorable: {unit}={pair!r}"
+            )
+    return plan
+
+
+def _restore_independent_writer_timers(
+    systemd: SystemdClient,
+    plan: Mapping[str, bool],
+) -> None:
+    for unit in INDEPENDENT_WRITER_TIMER_UNITS:
+        if plan.get(unit) is True:
+            systemd.enable_now(unit)
+        else:
+            systemd.disable_now(unit)
 
 
 def _parse_systemd_utc_timestamp(raw: str) -> datetime:
@@ -2386,6 +2453,9 @@ def maintenance_restore(
         raise RuntimeError(
             "exact prior maintenance control state is missing; restore is fail-closed"
         )
+    independent_writer_timer_restore_plan = (
+        _independent_writer_timer_restore_plan(baseline)
+    )
     prior_master_desired = (baseline.get("auto_updates") or {}).get(
         "master_desired"
     )
@@ -2583,6 +2653,16 @@ def maintenance_restore(
     if not before["quiet"] and service_continuity is None:
         raise RuntimeError("business-data maintenance is not quiet before resume")
     if not prior_master_desired:
+        _restore_independent_writer_timers(
+            systemd,
+            independent_writer_timer_restore_plan,
+        )
+        before = maintenance_status(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+        )
         continuity_readback = (
             _verify_pre_hold_service_continuity(systemd, service_continuity)
             if service_continuity is not None
@@ -2640,8 +2720,12 @@ def maintenance_restore(
             reason=reason,
             systemd=systemd,
         )
+        _restore_independent_writer_timers(
+            systemd,
+            independent_writer_timer_restore_plan,
+        )
     except Exception as exc:
-        for unit in CORE_TIMER_UNITS + (
+        for unit in CORE_TIMER_UNITS + INDEPENDENT_WRITER_TIMER_UNITS + (
             "wb-core-warehouse-functional-sync.timer",
         ):
             systemd.disable_now(unit)
@@ -2700,7 +2784,7 @@ def maintenance_restore(
             )
     drift = [item["process_key"] for item in actual if item["drift_status"] != "matched"]
     if drift:
-        for unit in CORE_TIMER_UNITS + (
+        for unit in CORE_TIMER_UNITS + INDEPENDENT_WRITER_TIMER_UNITS + (
             "wb-core-warehouse-functional-sync.timer",
         ):
             systemd.disable_now(unit)
@@ -2786,7 +2870,7 @@ def maintenance_restore(
             runtime_schedule_baseline=schedule_baseline,
             pre_hold_readback=final,
         )
-        for unit in CORE_TIMER_UNITS + (
+        for unit in CORE_TIMER_UNITS + INDEPENDENT_WRITER_TIMER_UNITS + (
             "wb-core-warehouse-functional-sync.timer",
         ):
             systemd.disable_now(unit)
@@ -2996,7 +3080,7 @@ def maintenance_prepare(
         reason=reason,
         systemd=systemd,
     )
-    for unit in CORE_TIMER_UNITS:
+    for unit in CORE_TIMER_UNITS + INDEPENDENT_WRITER_TIMER_UNITS:
         systemd.disable_now(unit)
     schedules.disable_all(before_payloads)
     current = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules, proc_root=proc_root)
