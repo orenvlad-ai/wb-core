@@ -29,8 +29,24 @@ class FakeSystemd:
         self.timer_states = {
             unit: {
                 "unit": unit,
-                "is_enabled": "enabled" if unit in maintenance.CORE_TIMER_UNITS else "disabled",
-                "is_active": "active" if unit in maintenance.CORE_TIMER_UNITS else "inactive",
+                "is_enabled": (
+                    "enabled"
+                    if unit
+                    in (
+                        maintenance.CORE_TIMER_UNITS
+                        + maintenance.INDEPENDENT_WRITER_TIMER_UNITS
+                    )
+                    else "disabled"
+                ),
+                "is_active": (
+                    "active"
+                    if unit
+                    in (
+                        maintenance.CORE_TIMER_UNITS
+                        + maintenance.INDEPENDENT_WRITER_TIMER_UNITS
+                    )
+                    else "inactive"
+                ),
                 "properties": {},
             }
             for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
@@ -343,10 +359,16 @@ def _assert_hold_disables_every_boundary_without_killing_service() -> None:
         ]
         assert observer["is_enabled"] == "enabled"
         assert observer["is_active"] == "active"
+        root_storage_observer = result["continuous_observer_timers"][
+            "wb-core-root-storage-policy.timer"
+        ]
+        assert root_storage_observer["is_enabled"] == "enabled"
+        assert root_storage_observer["is_active"] == "active"
         assert systemd.mutations == [
             "wb-core-autoanswers-worker.timer",
             "wb-core-autoanswers-readonly-sync.timer",
             *maintenance.CORE_TIMER_UNITS,
+            *maintenance.INDEPENDENT_WRITER_TIMER_UNITS,
         ]
         assert schedules.disable_calls == 1
         assert result["runtime_schedules"]["web_vitrina"]["schedule_policy"]["mode"] == "interval"
@@ -854,25 +876,42 @@ def _assert_unknown_timer_fails_before_mutation() -> None:
 
 
 def _assert_unstarted_hold_abort_is_exact_and_drift_safe() -> None:
+    production_unknown_five = {
+        "wb-core-fbs-warehouse-registry.timer",
+        "wb-core-root-storage-policy.timer",
+        "wb-core-sheet-vitrina-canary-restore.timer",
+        "wb-core-sheet-vitrina-health-candidate.timer",
+        "wb-core-sheet-vitrina-health-confirmation.timer",
+    }
+    assert production_unknown_five <= set(
+        maintenance.CLASSIFIED_WB_CORE_TIMER_UNITS
+    )
+    assert production_unknown_five - {
+        "wb-core-root-storage-policy.timer"
+    } <= set(maintenance.INDEPENDENT_WRITER_TIMER_UNITS)
+    assert "wb-core-root-storage-policy.timer" in (
+        maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
+    )
+
     def current_status() -> dict[str, Any]:
+        fake = FakeSystemd()
         return {
             "schema_version": maintenance.SCHEMA_VERSION,
             "status": "not_quiet",
             "quiet": False,
             "captured_at": maintenance._utc_now(),
-            "timers": {},
+            "timers": {
+                unit: copy.deepcopy(fake.timer_states[unit])
+                for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
+            },
             "continuous_observer_timers": {
-                "wb-core-fbs-shadow-collector.timer": {
-                    "unit": "wb-core-fbs-shadow-collector.timer",
-                    "is_enabled": "enabled",
-                    "is_active": "active",
-                    "properties": {},
-                }
+                unit: copy.deepcopy(fake.timer_states[unit])
+                for unit in maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
             },
             "services": {},
-            "discovered_wb_core_timers": [
-                "wb-core-fbs-shadow-collector.timer"
-            ],
+            "discovered_wb_core_timers": list(
+                maintenance.CLASSIFIED_WB_CORE_TIMER_UNITS
+            ),
             "unknown_wb_core_timers": [],
             "runtime_schedules": {},
             "writer_processes": [{"pid": 101, "marker": "ordinary"}],
@@ -918,10 +957,12 @@ def _assert_unstarted_hold_abort_is_exact_and_drift_safe() -> None:
         )
         original_status = maintenance.maintenance_status
         maintenance.maintenance_status = lambda *args, **kwargs: current_status()
+        systemd = FakeSystemd()
+        timer_prestate = copy.deepcopy(systemd.timer_states)
         try:
             readback = maintenance.maintenance_barrier_abort_readback(
                 runtime_dir,
-                systemd=FakeSystemd(),
+                systemd=systemd,
                 schedules=FakeSchedules(),
                 proc_root=runtime_dir / "proc",
             )
@@ -935,6 +976,8 @@ def _assert_unstarted_hold_abort_is_exact_and_drift_safe() -> None:
         assert readback["no_hold_proof"]["last_maintenance_event"] == (
             "hold_restored"
         )
+        assert systemd.mutations == []
+        assert systemd.timer_states == timer_prestate
         aborted = maintenance.abort_barrier_acquire(
             runtime_dir,
             window_id=window,
@@ -1106,6 +1149,15 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
         proc_root.mkdir()
         _warehouse_baseline(runtime_dir)
         systemd = FakeSystemd()
+        disabled_independent = (
+            "wb-core-sheet-vitrina-health-confirmation.timer"
+        )
+        systemd.timer_states[disabled_independent]["is_enabled"] = "disabled"
+        systemd.timer_states[disabled_independent]["is_active"] = "inactive"
+        independent_prestate = {
+            unit: copy.deepcopy(systemd.timer_states[unit])
+            for unit in maintenance.INDEPENDENT_WRITER_TIMER_UNITS
+        }
         schedules = FakeSchedules()
         old = _with_quiet_local_boundaries()
         try:
@@ -1134,6 +1186,11 @@ def _assert_exact_policy_restore_and_revision_guards() -> None:
                 warehouse_restore=restore_warehouse,
             )
             assert restored["status"] == "restored"
+            for unit in maintenance.INDEPENDENT_WRITER_TIMER_UNITS:
+                assert systemd.timer_states[unit] == independent_prestate[unit]
+            assert systemd.timer_states[
+                "wb-core-root-storage-policy.timer"
+            ]["is_enabled"] == "enabled"
             assert restored["auto_updates"]["master_desired"] is True
             rows = {
                 item["process_key"]: item
@@ -1498,7 +1555,53 @@ def _assert_restore_lock_rejects_overlap() -> None:
             pass
 
 
+def _assert_production_timer_execstart_roles_are_exact() -> None:
+    unit_root = (
+        ROOT
+        / "artifacts"
+        / "registry_upload_http_entrypoint"
+        / "systemd"
+    )
+    expected_writer_commands = {
+        "wb-core-fbs-warehouse-registry": (
+            "apps/wb_fbs_warehouse_registry.py",
+            "collect",
+        ),
+        "wb-core-sheet-vitrina-canary-restore": (
+            "apps/sheet_vitrina_v1_auto_refresh_tick.py",
+            "--restore-expired-control-canary-pauses",
+        ),
+        "wb-core-sheet-vitrina-health-candidate": (
+            "apps/sheet_vitrina_v1_health_tick.py",
+            "--phase candidate",
+        ),
+        "wb-core-sheet-vitrina-health-confirmation": (
+            "apps/sheet_vitrina_v1_health_tick.py",
+            "--phase confirmation",
+        ),
+    }
+    for unit, markers in expected_writer_commands.items():
+        timer = unit_root / f"{unit}.timer"
+        service = unit_root / f"{unit}.service"
+        assert timer.is_file() and service.is_file()
+        body = service.read_text(encoding="utf-8")
+        assert all(marker in body for marker in markers)
+        assert f"{unit}.timer" in maintenance.INDEPENDENT_WRITER_TIMER_UNITS
+
+    root_storage_service = (
+        unit_root / "wb-core-root-storage-policy.service"
+    ).read_text(encoding="utf-8")
+    assert "apps/root_storage_policy.py status" in root_storage_service
+    assert "--output /var/lib/wb-core-root-storage-policy/status.json" in (
+        root_storage_service
+    )
+    assert "wb-core-root-storage-policy.timer" in (
+        maintenance.CONTINUOUS_OBSERVER_TIMER_UNITS
+    )
+
+
 def main() -> int:
+    _assert_production_timer_execstart_roles_are_exact()
     _assert_autoanswers_restore_uses_bound_lifecycle_readback()
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_prepared_quiet_hold_is_reused_without_lifecycle_replay()
