@@ -1687,9 +1687,19 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
             restarted.timer_states = copy.deepcopy(
                 original_systemd.timer_states
             )
-            restarted.timer_states[fbs_timer].update(
-                {"is_enabled": "enabled", "is_active": "active"}
-            )
+            deploy_reactivated_timers = {
+                "wb-core-fbs-warehouse-registry.timer",
+                "wb-core-finance-backup-rotation.timer",
+                "wb-core-sheet-vitrina-canary-restore.timer",
+                "wb-core-sheet-vitrina-health-candidate.timer",
+                "wb-core-sheet-vitrina-health-confirmation.timer",
+                "wb-core-warehouse-functional-sync.timer",
+                fbs_timer,
+            }
+            for unit in deploy_reactivated_timers:
+                restarted.timer_states[unit].update(
+                    {"is_enabled": "enabled", "is_active": "active"}
+                )
             restarted.service_states = copy.deepcopy(
                 original_systemd.service_states
             )
@@ -1723,6 +1733,34 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
                 }
 
             maintenance._lock_summary = lock_summary
+            state_before_unknown = state_path.read_bytes()
+            audit_before_unknown = audit_path.read_bytes()
+            restarted.unknown_timer = "wb-core-unknown-writer.timer"
+            blocked_schedules = UnavailableSchedules()
+            try:
+                maintenance.maintenance_prepare(
+                    runtime_dir,
+                    systemd=restarted,
+                    schedules=blocked_schedules,
+                    proc_root=proc_root,
+                    actor="corrected-runtime",
+                    reason="reject unknown deploy timer drift",
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                )
+            except RuntimeError as exc:
+                assert "unknown wb-core timers" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared resume accepted an unknown deploy timer"
+                )
+            assert blocked_schedules.read_calls == 0
+            assert restarted.mutations == []
+            assert state_path.read_bytes() == state_before_unknown
+            assert audit_path.read_bytes() == audit_before_unknown
+            restarted.unknown_timer = ""
+
             unavailable_schedules = UnavailableSchedules()
             resumed = maintenance.maintenance_prepare(
                 runtime_dir,
@@ -1740,13 +1778,25 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
             assert resumed["pause_owned_inventory_resume_binding"][
                 "baseline_timer_source"
             ] == "continuous_observer_timers"
-            assert restarted.timer_states[fbs_timer]["is_enabled"] == (
-                "disabled"
+            binding = resumed["pause_owned_inventory_resume_binding"]
+            assert set(binding["deploy_drift_timer_states"]) == (
+                deploy_reactivated_timers
             )
-            assert restarted.timer_states[fbs_timer]["is_active"] == (
-                "inactive"
+            assert set(binding["repaused_timer_units"]) == (
+                deploy_reactivated_timers
             )
-            assert restarted.mutations == [fbs_timer]
+            for unit in deploy_reactivated_timers:
+                assert restarted.timer_states[unit]["is_enabled"] == (
+                    "disabled"
+                )
+                assert restarted.timer_states[unit]["is_active"] == (
+                    "inactive"
+                )
+            assert restarted.mutations == [
+                unit
+                for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
+                if unit in deploy_reactivated_timers
+            ]
             rebound_state = json.loads(state_path.read_text())
             assert rebound_state["baseline"] == durable_baseline
             assert (
@@ -1777,7 +1827,6 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
                 {"is_active": "inactive", "properties": {"MainPID": 0}}
             )
             warehouse_lock["held"] = False
-            restarted.disable_now("wb-core-warehouse-functional-sync.timer")
             held = maintenance.maintenance_hold(
                 runtime_dir,
                 systemd=restarted,
