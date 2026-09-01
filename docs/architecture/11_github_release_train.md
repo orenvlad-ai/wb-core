@@ -797,7 +797,18 @@ must form a linear main chain, have a fully downloaded and hash-verified
 `*_smoke.py` test files.  Any workflow, runtime, registry, migration, manifest
 or business-data surface makes the lineage `EVIDENCE_BLOCKED`.  The complete
 commit/PR/Gate/Release/artifact/path proof and its digest become part of the
-correction binding.  FBS passports are accepted only through the explicit `fbs-mapping-qualification`,
+correction binding. There is one closed migration exception for the already
+released faulty phase-identity runtime: PR 1145, head
+`068446766a144348578cd8460d8f22f267460681`, merge/deployed
+`5cdd45b5a499e630bed5277d46bd7047ac6624e2`, release operation
+`release-v2-76858aebf78533adc107428d99a7aa33`, artifact `9774197000` and exact
+changed-file proof digest
+`sha256:2ca8871159a4ca9d79f3c0f9bb948e95d56b75634a202d6ca263cf4b04ba741b`.
+It may occur only as `superseded_fbs_runtime` in that exact linear ancestry;
+all PR/Gate/Release/comment/artifact/archive/file/path fields are equality
+checked. It is never current correction evidence, terminal phase evidence or
+Apply authorization. No other intervening runtime release is admitted.
+FBS passports are accepted only through the explicit `fbs-mapping-qualification`,
 `fbs-impact-generation`, `fbs-recovery-qualification`, `fbs-mapping-apply` and
 `fbs-recovery-apply` modes; the old generic `scope-goal` route rejects them.
 
@@ -806,6 +817,29 @@ Qualification modes are default-off and terminate as
 They perform zero submit, mapping, recovery, history and WB writes.  Mapping
 plans use a new immutable per-attempt candidate path, so A/B witnesses never
 overwrite each other.
+
+Five workflow modes form one closed ordered lifecycle:
+
+`mapping_qualification -> mapping_apply -> impact_generation -> recovery_qualification -> recovery_apply`.
+
+The parsed passport still produces one immutable root goal operation; it is not
+duplicated per mode. Each mode derives a distinct phase operation through
+`wb-core.fbs-phase-binding/v1`. The derivation includes the phase, exact source
+and correction release binding digests, incident-passport and authorization
+body digests, plus the exact predecessor marker/artifact descriptor when the
+phase has a predecessor. `blocked_comment_id` is reused as the exact FBS
+predecessor marker input because the workflow dispatch surface is already at
+GitHub's 25-input limit; for first `mapping_qualification` it must remain zero.
+
+Before a later phase can reach checkout/SSH, Runner validates the selected
+predecessor comment, requires it to be the only marker for that phase operation,
+downloads and hashes the named artifact, validates its closed receipt and exact
+terminal state, and checks common root/release/passport bindings. Mapping Apply
+accepts only terminal mapping qualification; impact only terminal mapping Apply
+and its readback digest; recovery qualification only terminal impact plus the
+recovery passport; recovery Apply only terminal recovery qualification. A
+missing, duplicate, foreign, cross-mode, skipped, reordered or drifted
+predecessor fails closed.
 
 `fbs_lifecycle_impact_manifest/v2` scans the complete fresh unresolved set and
 derives every affected facility × SKU, facility total, global SKU and global
@@ -831,4 +865,9 @@ passports fail closed.  Every terminal marker is a closed exact JSON schema;
 before publication the workflow uploads, downloads and hashes the canonical
 receipt artifact.  Replay returns `already_terminal` only after the marker and
 artifact validate exactly, and then performs no SSH, comment or workflow
-dispatch.
+dispatch. Terminal markers are phase-scoped: an earlier phase marker is
+predecessor evidence, never terminal evidence for the next phase. Qualification
+and impact phases have submit count zero; mapping and recovery Apply each have
+their own one-submit budget. Ambiguity after either submit permits only
+query-only readback under that same phase operation and never opens the next
+phase.

@@ -68,6 +68,24 @@ rehearsal; it does not require SKU-specific code.
 
 ## Staged production acceptance
 
+Every dispatch first derives one immutable root goal operation from the exact
+repository, source PR, OWNER/MEMBER passport comment and parsed goal. It then
+derives a different `production-goal-v2-*` phase operation under
+`wb-core.fbs-phase-binding/v1`. The phase binding exact-binds the source and
+correction release binding digests, incident-passport digest, passport body,
+phase and the complete predecessor marker/artifact descriptor. The closed order
+is:
+
+`mapping_qualification -> mapping_apply -> impact_generation -> recovery_qualification -> recovery_apply`.
+
+The first phase forbids a predecessor. Every later phase requires the exact
+predecessor marker comment, downloads and hashes its canonical receipt artifact,
+validates marker, artifact archive, receipt, phase operation, root goal, releases
+and expected terminal state, and derives its own phase operation from those
+bytes. A predecessor is never treated as the current phase terminal. Missing,
+duplicate, foreign, cross-mode, skipped, reordered or drifted evidence blocks
+before SSH or submit.
+
 1. Validate the source `production_mutation/awaiting_apply` and correction
    `live_runtime/done` releases independently through exact PR/base/head/Gate/
    plan/Release/comment/downloaded-artifact/file/manifest bindings. Release the
@@ -76,22 +94,41 @@ rehearsal; it does not require SKU-specific code.
    admissible only through a bounded linear chain of exact trusted
    `repo_only/done` receipts whose downloaded artifacts verify and whose exact
    paths are restricted to `docs/**` and executable `*_smoke.py`; all other
-   paths fail closed.
-2. A separate `fbs-identity-mapping-v2` passport may authorize one mapping
-   insert. It must be the unique equivalent OWNER/MEMBER passport. Its terminal
-   query-only exact-operation readback digest becomes the next input.
-3. Generate and review one fresh immutable
-   `fbs_lifecycle_impact_manifest/v2` outside the recovery command.
-4. A separate `fbs-lifecycle-recovery-v2` passport exact-binds the mapping
-   operation/readback, impact and recovery digests and may authorize one
-   recovery submit.
+   paths fail closed. The sole migration exception is exact PR 1145 runtime
+   `068446766a144348578cd8460d8f22f267460681` / deployed
+   `5cdd45b5a499e630bed5277d46bd7047ac6624e2`, operation
+   `release-v2-76858aebf78533adc107428d99a7aa33`, artifact `9774197000` and
+   changed-file digest
+   `sha256:2ca8871159a4ca9d79f3c0f9bb948e95d56b75634a202d6ca263cf4b04ba741b`.
+   It is accepted only as an exact `superseded_fbs_runtime` ancestry record,
+   never as current correction, phase terminal or authorization; no other
+   intervening runtime release is allowed.
+2. `fbs-mapping-qualification` terminates `qualified_no_submit`. Only its exact
+   terminal artifact opens `fbs-mapping-apply`; that phase owns the accepted
+   single mapping insert submit and terminal query-only mapping readback. Its
+   fresh two-witness candidate must match the predecessor fingerprint,
+   material-CAS and tuple digests before the submit boundary.
+3. `fbs-impact-generation` consumes only terminal `mapping_apply` and its exact
+   readback digest, then publishes one fresh immutable
+   `fbs_lifecycle_impact_manifest/v2` with submit count zero.
+4. A separate `fbs-lifecycle-recovery-v2` passport exact-binds the mapping root
+   goal operation, terminal mapping readback, impact and recovery digests.
+   `fbs-recovery-qualification` consumes the terminal impact artifact and
+   terminates `qualified_no_submit`; only its exact terminal artifact opens
+   `fbs-recovery-apply`, whose independent budget is one recovery submit.
+   Recovery Apply freshly requalifies and requires exact equality with the
+   predecessor recovery fingerprint, impact, storage/boundary, scope and
+   history binding before its submit boundary.
 
-Mapping and recovery qualification modes stop at the native shared-lock
-boundary with `qualified_no_submit`; they never invoke the remote Apply
-command. Every attempt uses a distinct private admitted plan path. Workflow
-publication uploads the canonical receipt first, then downloads and hashes it,
-then publishes a closed marker. Exact replay validates both marker and artifact
-before returning `already_terminal` with no SSH/comment/dispatch.
+Mapping/recovery qualification and impact generation stop before submit with
+`qualified_no_submit`; their combined submit count is zero. Mapping Apply and
+recovery Apply have independent one-submit budgets. Once either Apply command is
+issued, ambiguity remains inside that same phase and permits only its query-only
+readback; it cannot derive or submit a new phase. Every attempt uses a distinct
+private admitted plan path. Workflow publication uploads the canonical receipt
+first, then downloads and hashes it, then publishes the phase-scoped closed
+marker. Exact replay validates the same phase marker and artifact before
+returning `already_terminal` with zero SSH, comment, dispatch and submit counts.
 
 No deployment receipt, rehearsal artifact or prepared passport text is itself
 authorization for either Apply.

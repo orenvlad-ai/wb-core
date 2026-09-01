@@ -997,6 +997,25 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
         raise AssertionError("versioned recovery digest grammar was rejected")
 
     operation = "production-goal-v2-" + "5" * 32
+    mapping_apply_operation = FBS_MAPPING_OPERATION
+    impact_generation_operation = "production-goal-v2-" + "7" * 32
+    recovery_predecessor = {
+        "fingerprint": candidate["recovery_digest"],
+        "impact_digest": candidate["impact_digest"],
+        "mapping_apply_operation_id": mapping_apply_operation,
+        "impact_generation_operation_id": impact_generation_operation,
+        "storage": candidate["boundary"]["storage"],
+        "boundary": candidate["boundary"],
+        "scope": {
+            "groups": candidate["scope"]["groups"],
+            "target_count": candidate["scope"]["target_count"],
+            "stable_target_digest": candidate["scope"]["stable_target_digest"],
+        },
+        "history_digest": candidate["history"]["digest"],
+        "history_classification_counts": candidate["history"][
+            "classification_counts"
+        ],
+    }
     command_results = iter(
         [
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
@@ -1065,7 +1084,10 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
             merge_sha=MERGE_SHA,
             goal=goal,
             operation=operation,
+            mapping_apply_operation=mapping_apply_operation,
+            impact_generation_operation=impact_generation_operation,
             approval_reference="github:fixture:sha256:" + "1" * 64,
+            predecessor_qualification=recovery_predecessor,
         )
     finally:
         apply.command_evidence = original_command
@@ -1110,6 +1132,8 @@ def _exercise_wbc0027_fbs_quality_runner() -> None:
             merge_sha=MERGE_SHA,
             goal=goal,
             operation=operation,
+            mapping_apply_operation=mapping_apply_operation,
+            impact_generation_operation=impact_generation_operation,
             approval_reference="github:fixture:sha256:" + "1" * 64,
             qualification_only=True,
         )
@@ -1217,6 +1241,11 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
         "apply_allowed": True,
         "blockers": [],
     }, "manifest_digest")
+    mapping_predecessor = {
+        "fingerprint": candidate["manifest_digest"],
+        "material_cas_digest": candidate["material_cas"]["digest"],
+        "tuple_digest": candidate["tuple"]["tuple_digest"],
+    }
     command_results = iter(
         [
             {"return_code": 0, "transport_ambiguous": False, "result": candidate},
@@ -1282,6 +1311,7 @@ def _exercise_wbc0027_fbs_mapping_runner() -> None:
             goal=goal,
             operation=operation,
             approval_reference="github:fixture:sha256:" + "2" * 64,
+            predecessor_qualification=mapping_predecessor,
         )
     finally:
         apply.command_evidence = original_command
@@ -2515,6 +2545,156 @@ def _correction_base_ancestry_contract() -> None:
             pass
         else:
             raise AssertionError("interfering workflow bridge was accepted")
+
+        superseded = apply.WBC0027_FBS_SUPERSEDED_RUNTIME_RELEASE
+        superseded_receipt = {
+            "schema": apply.RELEASE_RECEIPT_SCHEMA,
+            "state": "done",
+            "operation_id": superseded["release_operation_id"],
+            "repository": "orenvlad-ai/wb-core",
+            "pull_request": superseded["pull_request"],
+            "release_kind": "live_runtime",
+            "base_sha": superseded["base_sha"],
+            "head_sha": superseded["head_sha"],
+            "merge_sha": superseded["merge_sha"],
+            "deployed_sha": superseded["merge_sha"],
+            "manifest": None,
+            "reason_codes": [],
+            "plan_hash": superseded["plan_hash"],
+            "workflow_run_id": superseded["gate_run_id"],
+        }
+        superseded_comment = {
+            "id": superseded["release_comment_id"],
+            "user": {"login": "github-actions[bot]"},
+            "body": (
+                "<!-- wb-core-release-receipt operation="
+                f"{superseded['release_operation_id']} -->\n```json\n"
+                + json.dumps(superseded_receipt, sort_keys=True)
+                + "\n```"
+            ),
+        }
+        superseded_files = [
+            (".github/workflows/production-apply.yml", "20fa1cadbb8fae10fc3fe215a37bc4a54aae9dad", 77, 3),
+            ("apps/fbs_lifecycle_manifests_smoke.py", "2193fb6301aa20c35f60a195fea52e699899283f", 107, 10),
+            ("apps/production_apply_runner.py", "6dd93575aee7a4447a0fa43f2fe003f30731bce7", 1005, 46),
+            ("apps/production_apply_runner_smoke.py", "8960367d2cfc6578ad601151079b148d5324e7a6", 487, 10),
+            ("apps/wbc0027_fbs_lifecycle_quality_recovery.py", "dd50f3076c2e2923fa5dc28dad60314afa5c1661", 447, 23),
+            ("apps/wbc0027_fbs_mapping_extension.py", "a68164142cd788e9420076856859175395d79e74", 263, 58),
+            ("ci/test_registry.json", "72ea7c0b5d436ccb19859d42b4cb17c914b3127a", 1, 1),
+            ("docs/architecture/11_github_release_train.md", "4a6b547bc9a8520cab643d4db0022dff279b519f", 31, 2),
+            ("docs/architecture/15_codex_authorization_router.md", "1c56c822df29de3b81c3d0e5a914beb593fcae07", 24, 1),
+            ("migration/178_wbc0027_general_fbs_manifest_recovery.md", "6a877ebc1713acded2015b7f0261f205c4144189", 35, 11),
+            ("packages/application/fbs_lifecycle_manifests.py", "d96e1fc4d562351c048db6c817d86d960734e15e", 295, 9),
+            ("packages/application/ff_pool_fbs_forward_recovery.py", "0dee908118b87a1fddc362c0d29f28818c2f38b5", 14, 1),
+        ]
+        superseded_file_rows = [
+            {
+                "filename": path,
+                "status": "modified",
+                "sha": blob_sha,
+                "additions": additions,
+                "deletions": deletions,
+                "changes": additions + deletions,
+            }
+            for path, blob_sha, additions, deletions in superseded_files
+        ]
+
+        class SupersededClient:
+            repository = "orenvlad-ai/wb-core"
+
+            def get(self, path: str):
+                if path == (
+                    f"/compare/{superseded['base_sha']}..."
+                    f"{superseded['merge_sha']}"
+                ):
+                    return {
+                        "status": "ahead",
+                        "ahead_by": 1,
+                        "behind_by": 0,
+                        "merge_base_commit": {"sha": superseded["base_sha"]},
+                        "commits": [{"sha": superseded["merge_sha"]}],
+                    }
+                if path == (
+                    f"/commits/{superseded['merge_sha']}/pulls?per_page=100"
+                ):
+                    return [{
+                        "number": superseded["pull_request"],
+                        "merged_at": "2026-08-31T20:19:48Z",
+                        "merge_commit_sha": superseded["merge_sha"],
+                        "base": {"ref": "main"},
+                    }]
+                if path == f"/pulls/{superseded['pull_request']}":
+                    return {
+                        "number": superseded["pull_request"],
+                        "merged": True,
+                        "draft": False,
+                        "state": "closed",
+                        "merge_commit_sha": superseded["merge_sha"],
+                        "changed_files": len(superseded_file_rows),
+                        "base": {
+                            "ref": "main",
+                            "sha": superseded["base_sha"],
+                            "repo": {"full_name": "orenvlad-ai/wb-core"},
+                        },
+                        "head": {
+                            "sha": superseded["head_sha"],
+                            "repo": {"full_name": "orenvlad-ai/wb-core"},
+                        },
+                    }
+                if path.startswith(
+                    f"/issues/{superseded['pull_request']}/comments?"
+                ):
+                    return [superseded_comment]
+                if path == (
+                    f"/pulls/{superseded['pull_request']}/files?per_page=100&page=1"
+                ):
+                    return superseded_file_rows
+                raise AssertionError(path)
+
+        superseded_binding = {
+            "receipt": superseded_receipt,
+            "comment_id": superseded["release_comment_id"],
+            "gate_run_id": superseded["gate_run_id"],
+            "release_run_id": superseded["release_run_id"],
+            "artifact_id": superseded["artifact_id"],
+            "artifact_name": superseded["artifact_name"],
+            "artifact_archive_digest": superseded["artifact_archive_digest"],
+            "artifact_file_sha256": superseded["artifact_file_sha256"],
+        }
+        apply.collect_exact_release_binding = lambda *_args, **kwargs: (
+            superseded_binding
+            if kwargs == {
+                "pr": superseded["pull_request"],
+                "release_operation": superseded["release_operation_id"],
+                "expected_kind": "live_runtime",
+                "expected_state": "done",
+                "expected_manifest": None,
+            }
+            else (_ for _ in ()).throw(AssertionError(kwargs))
+        )
+        superseded_proof = apply.collect_correction_base_ancestry(
+            SupersededClient(),
+            source_release={"receipt": {"merge_sha": superseded["base_sha"]}},
+            correction_release={"receipt": {"base_sha": superseded["merge_sha"]}},
+        )
+        assert superseded_proof["status"] == "trusted_closed_descendant"
+        assert superseded_proof["intervening_releases"][0]["role"] == (
+            "superseded_fbs_runtime"
+        )
+        assert superseded_proof["intervening_releases"][0]["path_proof"][
+            "digest"
+        ] == superseded["changed_files_digest"]
+        superseded_file_rows[0]["sha"] = "f" * 40
+        try:
+            apply.collect_correction_base_ancestry(
+                SupersededClient(),
+                source_release={"receipt": {"merge_sha": superseded["base_sha"]}},
+                correction_release={"receipt": {"base_sha": superseded["merge_sha"]}},
+            )
+        except apply.ApplyError:
+            pass
+        else:
+            raise AssertionError("drifted superseded runtime path proof was accepted")
     finally:
         apply.collect_exact_release_binding = original_collect
 
@@ -2671,6 +2851,7 @@ puts JSON.generate(decode(Psych.parse_file(ARGV.fetch(0)).root))
         "fbs_v2": {
             "authorization_comment_id",
             "authorization_mode",
+            "blocked_comment_id",
             "manifest_sha256",
             "pr",
             "reconciliation_pr",
@@ -2794,11 +2975,24 @@ assert "apps.wbc0027_capital_recovery" not in sys.modules
     assert completed.returncode == 0, completed.stderr
 
 
+def _exercise_fbs_phase_dependency_isolation() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-S", "apps/production_apply_runner_fbs_phases_smoke.py"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "production_apply_runner_fbs_phases_smoke: ok"
+
+
 def main() -> None:
     _exact_pr1143_release_binding_contract()
     _correction_base_ancestry_contract()
     _workflow_dispatch_contract()
     _exercise_wbc0027_stdlib_dependency_isolation()
+    _exercise_fbs_phase_dependency_isolation()
     _exercise_compact_oversized_blocked_receipt()
     _exercise_worker_mount_probe()
     _exercise_wbc0027_two_phase_runner()

@@ -323,6 +323,15 @@ correction base обычно обязан совпасть с source merge. Ес
 меняет исключительно `docs/**` или executable `*_smoke.py`; workflow/runtime/
 registry/migration/manifest/business-data path блокирует lineage. Exact
 commit/PR/Gate/Release/artifact/path proof включается в correction binding.
+Единственное migration-исключение — exact released runtime PR 1145
+(`068446766a144348578cd8460d8f22f267460681` ->
+`5cdd45b5a499e630bed5277d46bd7047ac6624e2`, operation
+`release-v2-76858aebf78533adc107428d99a7aa33`, artifact `9774197000`, path-proof
+`sha256:2ca8871159a4ca9d79f3c0f9bb948e95d56b75634a202d6ca263cf4b04ba741b`).
+Оно принимается только в роли `superseded_fbs_runtime` при exact equality всех
+receipt/artifact/path полей и никогда не становится current correction,
+terminal phase evidence или authorization. Любой другой промежуточный runtime
+release блокируется.
 Один parsed goal может иметь
 ровно один OWNER/MEMBER comment. Equivalent duplicate — `EVIDENCE_BLOCKED`, а
 не выбор первого комментария.
@@ -343,6 +352,25 @@ command. Реальные submits доступны только через `fbs-
 marker публикуется только после upload/download/hash canonical artifact.
 `already_terminal` возможен лишь после exact marker+artifact validation и
 означает SSH/comment/dispatch count `0`.
+
+Эти пять mode образуют закрытый порядок
+`mapping_qualification -> mapping_apply -> impact_generation -> recovery_qualification -> recovery_apply`.
+Parsed passport сохраняет один root goal operation, а каждый mode получает
+отдельный deterministic phase operation по contract
+`wb-core.fbs-phase-binding/v1`. Derivation exact-bind phase, source/correction
+release digests, incident passport, authorization body и, кроме первой phase,
+полный descriptor predecessor marker/artifact/receipt. Поэтому terminal marker
+предыдущей phase является только predecessor evidence и никогда не даёт
+`already_terminal` следующей.
+
+Mapping Apply требует terminal mapping qualification; impact — terminal mapping
+Apply readback; recovery qualification — terminal impact artifact и отдельный
+recovery passport; recovery Apply — terminal recovery qualification. Missing,
+duplicate, foreign, cross-mode, skip/reorder и drift блокируются до SSH/submit.
+Qualification/impact имеют submit0, а mapping/recovery Apply — независимые
+accepted one-submit budgets. После ambiguous submit остаётся только query-only
+readback exact той же phase operation; новый phase identity/submit запрещён до
+её exact terminal reconciliation.
 
 Query-only WBC0027 same-operation finalization не является новым Production
 Apply business submit и не требует нового OWNER passport: она использует exact
