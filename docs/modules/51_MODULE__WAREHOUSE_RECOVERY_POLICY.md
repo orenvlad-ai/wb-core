@@ -306,10 +306,12 @@ A separate mode-`0600` exact-target before-image is mutation evidence, not a
 second full-store backup or alternate recovery control plane.
 
 The canonical hosted runner first acquires/confirms the durable HTTP barrier,
-drains business writers, holds the warehouse timer and proves the five-minute
-FBS collector remains enabled/active. The collector is an explicitly classified
-continuous observer: the business-data hold inventories it but never stops or
-restores it, while every other unclassified timer still fails closed. An
+drains business writers and holds both the warehouse timer and the pause-owned
+five-minute FBS collector timer. A collector run already active when the exact
+prepared boundary resumes is generation-bound, allowed to finish naturally
+without kill and then proven terminal; the exact captured timer intent is
+restored after the window. Every unclassified timer or active service still
+fails closed. An
 unconfirmed HTTP acquire may be aborted without replaying stale prior
 maintenance state only when private maintenance state/audit both prove that no
 `hold_started` mutation occurred after the exact barrier timestamp; the proof

@@ -169,10 +169,10 @@ Contract покрывает active EU hosted contour на `https://api.selleros.
   acceptance, facility/pool balances, collector state and WB are hard
   non-targets. Unknown, missing, non-later or non-reconciled evidence stays
   blocked.
-- `wb-core-fbs-shadow-collector.timer` and
-  `wb-core-change-registry-observer.timer` are classified continuous observers,
+- `wb-core-change-registry-observer.timer` is a classified continuous observer,
   not a quiet-window-owned writer timer. `business-data-maintenance` inventories
-  and reports it but never disables, waits or restores it; any other
+  and reports it but never disables, waits or restores it. The FBS shadow timer
+  is separately pause-owned as specified below; any other
   unclassified `wb-core-*.timer` still blocks before `hold_started`. When an
   HTTP barrier exists but core prepare failed before private maintenance
   state/audit changed, `barrier-abort` may use only the bounded
@@ -355,10 +355,16 @@ The same runner owns the only production path for the active functional cutover 
   SQLite sidecar drain naturally without kill. A legacy prepared revision may
   add that ownership only when its immutable pre-prepare baseline already
   contains the exact FBS timer under `continuous_observer_timers`; the runner
-  fsyncs an identity-bound upgrade marker before disabling the timer and never
-  recaptures or rebases current state. Any missing/mixed timer state, unrelated
-  process, lock or sidecar fails closed. The canonical wrapper completes the
-  ordinary warehouse hold and
+  fsyncs an identity-bound upgrade marker with exact deploy-reactivated timer
+  state and every already-running known service PID/start/process identity
+  before disabling only those known drifted timers. It then waits every bound
+  business service and process, including FBS shadow and warehouse functional,
+  to finish naturally without kill; a restart may continue only the same
+  recorded generation or its terminal subset. It never recaptures or rebases
+  the pre-hold state. A retriggered timer, new service generation/PID, unknown
+  active `wb-core-*.service`, missing/mixed timer state, unrelated process,
+  lock or sidecar fails closed. The canonical wrapper completes the ordinary
+  warehouse hold and
   the final core step requires two stable quiet control reads, including
   continuous-observer services and absent SQLite sidecars, before persisting
   `held`. A repeated process invocation reuses the same binding; mismatched
