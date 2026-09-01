@@ -363,12 +363,17 @@ An ordinary hourly sync also has one narrower automatic pre-checkpoint
 reconciliation. It may release a failed `hourly_warehouse_sync` T2 row only
 when the failure came exactly from `writing`, the error is an exact SQLite lock
 error, checkpoint/read/after bytes and digests are zero, no registered artifact,
-undo row or owned checkpoint/temporary/manifest/sidecar path exists, and the
-operation's pinned base is still the exact active functional version. The CAS
-transition preserves the original error and every registry row, releases only
-the unused capacity reservation and records that no business mutation was
-reconciled. Any mismatch remains `failed_recoverable` and blocks the next T2;
-this path never substitutes for Stage 7C supersession or artifact recovery.
+undo row or owned checkpoint/manifest/sidecar path exists, and the operation's
+pinned base is still the exact active functional version. One preserved
+unregistered `.sqlite3.tmp` is also admissible only when immutable query-only
+inspection proves the exact three-page metadata-only schema, zero metadata
+rows, no other table/index and no companion path. Its path, inode, size and
+digest are CAS-rechecked and recorded in the terminal transition; it is never
+deleted or promoted. The CAS transition preserves the original error and every
+registry row, releases only the unused capacity reservation and records that
+no business mutation was reconciled. Any mismatch remains
+`failed_recoverable` and blocks the next T2; this path never substitutes for
+Stage 7C supersession or artifact recovery.
 
 ## WBC0027 two-operation recovery
 
