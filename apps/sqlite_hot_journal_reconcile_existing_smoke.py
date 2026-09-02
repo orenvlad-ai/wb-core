@@ -75,11 +75,18 @@ def _database(path: Path) -> Path:
                 f"2026-09-02T04:0{index + 4}:00Z", "sha256:" + str(index) * 64,
             ),
         )
-        for sequence, state in enumerate(("accepted", "running", "complete"), 1):
+        states = {1: "accepted", 2: "running", 3: "complete"}
+        event_ids = (
+            {1: "z", 2: "a", 3: "m"}
+            if index == 1
+            else {1: "m", 2: "z", 3: "a"}
+        )
+        for sequence in (3, 1, 2):
+            state = states[sequence]
             connection.execute(
                 "INSERT INTO change_registry_observer_job_events VALUES(?,?,?,?,?,?,?)",
                 (
-                    f"event-{index}-{sequence}", job_id, sequence, state,
+                    f"event-{index}-{event_ids[sequence]}", job_id, sequence, state,
                     f"2026-09-02T04:0{index + 4}:0{sequence}Z",
                     checkpoint_id if state == "complete" else None,
                     0,
@@ -125,6 +132,20 @@ def _database(path: Path) -> Path:
 def _digest_and_allowed_writer_smoke(root: Path) -> dict[str, object]:
     database = _database(root / "operational.sqlite3")
     before_sha = hot.file_sha256(database)
+    connection = sqlite3.connect(database)
+    canonical_rows = reconcile._rows(
+        connection, "change_registry_observer_job_events"
+    )
+    connection.close()
+    for job_id in (
+        reconcile.ACTIVATION_JOB_PREFIX + reconcile.EXPECTED_FIRST_ACTIVATION_SHA,
+        reconcile.ACTIVATION_JOB_PREFIX + NEW_SHA,
+    ):
+        assert [
+            int(row["sequence_no"])
+            for row in canonical_rows
+            if row["job_id"] == job_id
+        ] != [1, 2, 3]
     first = reconcile.database_evidence(database, deployed_sha=NEW_SHA)
     assert first["sqlite_readback"]["integrity_check"] == "ok"
     assert first["sqlite_readback"]["foreign_key_violation_count"] == 0
