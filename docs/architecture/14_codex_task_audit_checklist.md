@@ -153,3 +153,6 @@ audit_effect: read_only_no_action
 
 Audit заканчивается этим record. Он не является execution instruction,
 acceptance, authorization или основанием для автоматического follow-up.
+Owner-facing представление record следует
+[`13_codex_curator_workspace.md`](13_codex_curator_workspace.md#owner-facing-result);
+его exact machine schema не ограничивается summary body limit.
