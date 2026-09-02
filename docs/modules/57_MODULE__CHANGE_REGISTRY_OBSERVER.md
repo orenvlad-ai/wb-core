@@ -159,3 +159,12 @@ observation/incident cardinality. Module-58 foundation counts and fact links
 are reported exactly as persisted; observer activation creates no operations,
 items, attempts or `manual_pending` rows but does not assume writer-owned tables
 are empty.
+
+The WBC0027 implicit-rollback reconciliation does not redefine ordinary
+observer truth. Its incident-only typed manifest admits exactly the immutable
+10:00Z partial/zero-fact outcome and the immutable 12:00Z complete/two-fact
+outcome, bound to their exact job, event, checkpoint, manifest, fact and link
+digests. Every other historical or future natural job remains exact
+accepted/running/complete with zero facts. Reconciliation binds a reviewed
+observer prefix cutoff and admits later scheduled jobs only after the same
+generic validator passes; history before the cutoff cannot change.
