@@ -78,7 +78,31 @@ durable artifacts и не копируются в handoff. Исключение 
 Main curator не пересылает technical handoff дословно. Он даёт короткий
 outcome-first пересказ простым русским языком, понятный нетехническому взрослому:
 минимум jargon и identifiers, но сохранены значимые status, blocker, risk и
-next action. Технические детали предоставляются по запросу.
+next action.
+
+Если весь финальный ответ укладывается в 1000 символов с пробелами, отдельный
+summary block не нужен. Более подробный финальный ответ начинается с блока с
+заголовком `Краткий итог`; body этого блока занимает не более 1000 символов с
+пробелами, сам заголовок в лимит не входит. Это authoring discipline: модель
+пишет с запасом ниже границы, без отдельного tool call, точного machine
+counting, validator, check или gate.
+
+`Краткий итог` содержит только применимые outcome/status, существенный blocker
+или risk и required next action/user action, не повторяя последующие детали.
+Одна мысль может остаться одним коротким абзацем; несколько независимых мыслей
+разделяются короткими абзацами, bullets либо только необходимыми
+мини-подзаголовками, а не собираются в один плотный текст. Обязательных пустых
+секций и universal template нет. Детали идут ниже только когда добавляют
+evidence, calculations или technical pointers.
+
+Правило одинаково применяется к обычному final, plain-Russian пересказу
+technical handoff и owner-facing представлению post-task audit/conformance.
+Compact technical handoff, machine receipt/report artifact, code, table, raw
+evidence и промежуточные commentary/status messages этим лимитом не
+ограничиваются: при публикации main curator оборачивает их применимым owner
+summary. Один конкретный business question остаётся коротким и не получает
+формальный блок ради формы. Остальные технические детали предоставляются по
+запросу.
 
 Workspace не создаёт registry, scheduler, callback service, reviewer или
 release state. User tasks не archive/unpin/delete автоматически.

@@ -119,6 +119,9 @@ The report is compact but must contain:
 
 Counts in the matrix and both detail lists must reconcile. The report contains
 no recommendation, protocol correction, domain correction or platform action.
+Owner-facing представление report следует
+[`13_codex_curator_workspace.md`](13_codex_curator_workspace.md#owner-facing-result);
+exact factual report contract не ограничивается summary body limit.
 
 ## Strict stop and analysis handoff
 
