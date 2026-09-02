@@ -2639,8 +2639,14 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
         warehouse_timer = "wb-core-warehouse-functional-sync.timer"
         fbs_service = maintenance.FBS_SHADOW_SERVICE_UNIT
         warehouse_service = "wb-core-warehouse-functional-sync.service"
-        systemd.timer_states[fbs_timer].update(
-            {"is_enabled": "disabled", "is_active": "inactive"}
+        canary_service = "wb-core-sheet-vitrina-canary-restore.service"
+        deploy_reactivated_timers = (
+            "wb-core-finance-backup-rotation.timer",
+            "wb-core-fbs-warehouse-registry.timer",
+            "wb-core-sheet-vitrina-canary-restore.timer",
+            "wb-core-sheet-vitrina-health-candidate.timer",
+            "wb-core-sheet-vitrina-health-confirmation.timer",
+            fbs_timer,
         )
         schedules = FakeSchedules()
         old = _with_quiet_local_boundaries()
@@ -2691,7 +2697,7 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                 ]
             )
 
-            for unit in (fbs_timer, warehouse_timer):
+            for unit in deploy_reactivated_timers:
                 systemd.timer_states[unit].update(
                     {
                         "is_enabled": "enabled",
@@ -2703,7 +2709,18 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                         },
                     }
                 )
-            active_units = {
+            systemd.service_states[canary_service].update(
+                {
+                    "is_active": "inactive",
+                    "properties": {
+                        "MainPID": 0,
+                        "ExecMainStartTimestamp": (
+                            "Wed 2000-01-05 00:00:00 UTC"
+                        ),
+                    },
+                }
+            )
+            source_active_units = {
                 fbs_service: (
                     5151,
                     "Wed 2000-01-05 00:00:01 UTC",
@@ -2716,7 +2733,9 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                     b"apps/warehouse_functional_runner.py\0hourly-sync\0",
                 ),
             }
-            for unit, (pid, started_at, cmdline) in active_units.items():
+            for unit, (pid, started_at, cmdline) in (
+                source_active_units.items()
+            ):
                 systemd.service_states[unit].update(
                     {
                         "is_active": "activating",
@@ -2846,17 +2865,223 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
             ] = recorded_trigger
 
             systemd.disable_now = exact_disable_now
+            unavailable_completed = UnavailableSchedules()
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=unavailable_completed,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                )
+            except TimeoutError as exc:
+                assert "synthetic loopback timeout" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared abort did not retain the completed subset"
+                )
+            completed_state = json.loads(state_path.read_text())
+            completed_source_binding = copy.deepcopy(
+                completed_state["prepared_abort_quiesce_binding"]
+            )
+            assert completed_source_binding["pending_disable_unit"] == ""
+            assert set(
+                completed_source_binding["disabled_timer_units"]
+            ) == set(deploy_reactivated_timers)
+            assert set(
+                completed_source_binding["timer_units_to_disable"]
+            ) == set(deploy_reactivated_timers)
+            assert unavailable_completed.read_calls == 1
+
+            for unit, (pid, _, _) in source_active_units.items():
+                process_dir = proc_root / str(pid)
+                (process_dir / "cmdline").unlink()
+                process_dir.rmdir()
+                started_at = systemd.service_states[unit]["properties"][
+                    "ExecMainStartTimestamp"
+                ]
+                systemd.service_states[unit].update(
+                    {
+                        "is_active": "inactive",
+                        "properties": {
+                            "MainPID": 0,
+                            "ExecMainStartTimestamp": started_at,
+                        },
+                    }
+                )
+            warehouse_lock["held"] = False
+
+            # A collected terminal oneshot may lose only this volatile field.
+            systemd.service_states[canary_service]["properties"][
+                "ExecMainStartTimestamp"
+            ] = ""
+            terminal_status = maintenance.maintenance_status(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                runtime_schedule_readback=durable_prepared[
+                    "prepare_readback"
+                ]["runtime_schedules"],
+            )
+            _, terminal_active = (
+                maintenance._pause_owned_service_generation_evidence(
+                    terminal_status["services"],
+                    terminal_status["writer_processes"],
+                    recorded=completed_source_binding[
+                        "service_generations"
+                    ],
+                )
+            )
+            assert terminal_active == set()
+
+            recovery_deployed_sha = "c" * 40
+            deployed_sha_file.write_text(
+                recovery_deployed_sha + "\n", encoding="utf-8"
+            )
+            for unit in deploy_reactivated_timers:
+                systemd.timer_states[unit].update(
+                    {
+                        "is_enabled": "enabled",
+                        "is_active": "active",
+                        "properties": {
+                            "LastTriggerUSec": (
+                                "Thu 2000-01-06 00:00:00 UTC " + unit
+                            )
+                        },
+                    }
+                )
+            finance_service = "wb-core-finance-backup-rotation.service"
+            recovery_active_units = {
+                fbs_service: (
+                    6161,
+                    "Thu 2000-01-06 00:00:02 UTC",
+                    b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0",
+                ),
+                canary_service: (
+                    6162,
+                    "Thu 2000-01-06 00:00:03 UTC",
+                    b"/usr/bin/python3\0"
+                    b"apps/sheet_vitrina_v1_auto_refresh_tick.py\0"
+                    b"--canary-restore\0",
+                ),
+            }
+            for unit, (pid, started_at, cmdline) in (
+                recovery_active_units.items()
+            ):
+                systemd.service_states[unit].update(
+                    {
+                        "is_active": "activating",
+                        "properties": {
+                            "MainPID": pid,
+                            "ExecMainStartTimestamp": started_at,
+                        },
+                    }
+                )
+                process_dir = proc_root / str(pid)
+                process_dir.mkdir()
+                (process_dir / "cmdline").write_bytes(cmdline)
+
+            recovery_status = maintenance.maintenance_status(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                runtime_schedule_readback=durable_prepared[
+                    "prepare_readback"
+                ]["runtime_schedules"],
+            )
+            try:
+                maintenance._pause_owned_service_generation_evidence(
+                    recovery_status["services"],
+                    recovery_status["writer_processes"],
+                    recorded=completed_source_binding[
+                        "service_generations"
+                    ],
+                )
+            except RuntimeError as exc:
+                assert "service restarted" in str(exc)
+            else:
+                raise AssertionError(
+                    "terminal source generation accepted a new active PID"
+                )
+
+            systemd.service_states[finance_service].update(
+                {
+                    "is_active": "inactive",
+                    "properties": {
+                        "MainPID": 0,
+                        "ExecMainStartTimestamp": (
+                            "Thu 2000-01-06 00:00:01 UTC"
+                        ),
+                    },
+                }
+            )
+
+            state_before_unknown_service = state_path.read_bytes()
+            audit_before_unknown_service = audit_path.read_bytes()
+            mutations_before_unknown_service = list(systemd.mutations)
+            systemd.unknown_active_service = (
+                "wb-core-unknown-recovery-writer.service"
+            )
+            unavailable_unknown_service = UnavailableSchedules()
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=unavailable_unknown_service,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=recovery_deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                )
+            except RuntimeError as exc:
+                assert "unknown active wb-core service" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared abort recovery accepted an unknown service"
+                )
+            assert state_path.read_bytes() == state_before_unknown_service
+            assert audit_path.read_bytes() == audit_before_unknown_service
+            assert systemd.mutations == mutations_before_unknown_service
+            assert unavailable_unknown_service.read_calls == 0
+            systemd.unknown_active_service = ""
+
+            recovery_disable_now = systemd.disable_now
+            cleared_terminal_timestamp = {"done": False}
+
+            def recovery_disable(unit: str) -> None:
+                recovery_disable_now(unit)
+                if not cleared_terminal_timestamp["done"]:
+                    systemd.service_states[finance_service]["properties"][
+                        "ExecMainStartTimestamp"
+                    ] = ""
+                    cleared_terminal_timestamp["done"] = True
+
+            systemd.disable_now = recovery_disable
             original_unit_state = systemd.unit_state
-            service_reads = {unit: 0 for unit in active_units}
+            service_reads = {unit: 0 for unit in recovery_active_units}
 
             def draining_unit_state(unit: str) -> dict[str, Any]:
                 if unit in service_reads:
                     service_reads[unit] += 1
                     durable = json.loads(state_path.read_text())
-                    binding = durable.get(
-                        "prepared_abort_quiesce_binding"
-                    ) or {}
-                    required = set(binding.get("timer_units_to_disable") or [])
+                    quiesce = durable.get(
+                        "prepared_abort_recovery_epoch"
+                    ) or durable.get("prepared_abort_quiesce_binding") or {}
+                    required = set(
+                        quiesce.get("timer_units_to_disable") or []
+                    )
                     all_disabled = bool(required) and all(
                         maintenance._unit_state_pair(
                             systemd.timer_states[timer]
@@ -2890,7 +3115,7 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                         if all(
                             systemd.service_states[name]["is_active"]
                             == "inactive"
-                            for name in active_units
+                            for name in recovery_active_units
                         ):
                             warehouse_lock["held"] = False
                 return original_unit_state(unit)
@@ -2909,7 +3134,7 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                 expected_revision=revision,
                 window_id=window_id,
                 plan_fingerprint=plan_fingerprint,
-                expected_deployed_sha=deployed_sha,
+                expected_deployed_sha=recovery_deployed_sha,
                 deployed_sha_file=deployed_sha_file,
                 actor="smoke",
                 reason="restore exact prepared prestate",
@@ -2935,7 +3160,24 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
         assert final_state["stable_restore_readback"][
             "fingerprint"
         ] == original_signature["fingerprint"]
-        assert all(service_reads[unit] > 2 for unit in active_units)
+        assert all(service_reads[unit] > 2 for unit in recovery_active_units)
+        recovery_epoch = final_state["prepared_abort_recovery_epoch"]
+        assert recovery_epoch["schema_version"] == (
+            maintenance.PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA
+        )
+        assert recovery_epoch["source_deployed_sha"] == deployed_sha
+        assert recovery_epoch["deployed_sha"] == recovery_deployed_sha
+        assert set(recovery_epoch["timer_units_to_disable"]) == set(
+            deploy_reactivated_timers
+        )
+        assert recovery_epoch["pending_disable_unit"] == ""
+        assert set(recovery_epoch["disabled_timer_units"]) == set(
+            deploy_reactivated_timers
+        )
+        assert completed_source_binding == final_state[
+            "prepared_abort_quiesce_binding"
+        ]
+        assert cleared_terminal_timestamp["done"] is True
         assert maintenance._unit_state_pair(
             systemd.timer_states[fbs_timer]
         ) == maintenance._unit_state_pair(
