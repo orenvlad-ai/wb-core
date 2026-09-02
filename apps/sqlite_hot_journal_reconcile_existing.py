@@ -250,7 +250,10 @@ def _validate_operational_rows(
         raise ReconcileExistingError("post-recovery activation event set is not exact")
     checkpoints: set[str] = set()
     for job_id in sorted(expected_job_ids):
-        own = [row for row in events if row.get("job_id") == job_id]
+        own = sorted(
+            (row for row in events if row.get("job_id") == job_id),
+            key=lambda row: int(row.get("sequence_no") or 0),
+        )
         if [int(row.get("sequence_no") or 0) for row in own] != [1, 2, 3]:
             raise ReconcileExistingError("activation event sequence is not exact")
         if [row.get("state") for row in own] != ["accepted", "running", "complete"]:
