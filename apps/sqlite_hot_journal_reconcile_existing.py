@@ -93,6 +93,22 @@ OPERATIONAL_TABLES = (
     "sheet_vitrina_v1_source_health_status",
 )
 ACTIVATION_JOB_PREFIX = "crjob_activation_"
+ACTIVATION_JOB_PATTERN = re.compile(r"crjob_activation_([0-9a-f]{40})")
+SCHEDULED_JOB_PATTERN = re.compile(r"crjob_[0-9a-f]{32}")
+EXPECTED_SELLER_ID = "c0ed0bf8-c443-41f2-b9db-1c14f0099815"
+EXPECTED_ACCOUNT_SCOPE = "seller-portal-primary"
+EXPECTED_SOURCE_SURFACE = "wb_prices_ads_joint"
+EXPECTED_MAPPING_VERSION = "wb_change_registry_mapping_v1"
+OBSERVER_EVENT_FAILURE_FIELDS = (
+    "error_code",
+    "error_message",
+    "failure_origin",
+    "persistence_stage",
+    "persistence_table",
+    "persistence_operation",
+    "fallback_error_code",
+    "fallback_error_message",
+)
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 OPERATION_PATTERN = re.compile(r"[0-9a-f]{64}")
 
@@ -210,63 +226,136 @@ def _rows(
     ]
 
 
+def _validate_job_identity(row: Mapping[str, Any]) -> tuple[str, str]:
+    job_id = str(row.get("job_id") or "")
+    trigger = str(row.get("trigger_kind") or "")
+    requested_by = str(row.get("requested_by") or "")
+    slot = str(row.get("scheduled_slot") or "")
+    if (
+        row.get("seller_id") != EXPECTED_SELLER_ID
+        or row.get("account_scope") != EXPECTED_ACCOUNT_SCOPE
+    ):
+        raise ReconcileExistingError("post-recovery observer job source drifted")
+    deployed_sha = ""
+    if trigger == "activation":
+        match = ACTIVATION_JOB_PATTERN.fullmatch(job_id)
+        if match is None or requested_by != "trusted-release-runner" or slot:
+            raise ReconcileExistingError("post-recovery activation job identity drifted")
+        deployed_sha = match.group(1)
+    elif trigger == "scheduled":
+        if (
+            SCHEDULED_JOB_PATTERN.fullmatch(job_id) is None
+            or requested_by != "systemd"
+            or not slot.endswith("Z")
+        ):
+            raise ReconcileExistingError("post-recovery scheduled job identity drifted")
+        try:
+            moment = datetime.fromisoformat(slot[:-1] + "+00:00")
+        except ValueError as exc:
+            raise ReconcileExistingError(
+                "post-recovery scheduled slot is invalid"
+            ) from exc
+        canonical_slot = moment.astimezone(timezone.utc).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+        if (
+            slot != canonical_slot
+            or moment.minute
+            or moment.second
+            or moment.microsecond
+            or moment.hour % 2
+        ):
+            raise ReconcileExistingError("post-recovery scheduled slot is invalid")
+        identity_basis = {
+            "seller_id": row["seller_id"],
+            "account_scope": row["account_scope"],
+            "trigger_kind": trigger,
+            "scheduled_slot": slot,
+            "requested_by": requested_by,
+            "requested_at": slot,
+        }
+        expected_job_id = "crjob_" + hashlib.sha256(
+            _canonical_json(identity_basis).encode("utf-8")
+        ).hexdigest()[:32]
+        if job_id != expected_job_id:
+            raise ReconcileExistingError("post-recovery scheduled job identity drifted")
+    else:
+        raise ReconcileExistingError("post-recovery observer job type is not allowed")
+    request_basis = {
+        "seller_id": row["seller_id"],
+        "account_scope": row["account_scope"],
+        "trigger_kind": trigger,
+        "scheduled_slot": slot,
+        "requested_by": requested_by,
+        "client_job_id": job_id,
+        "deployed_sha": deployed_sha,
+    }
+    if row.get("request_digest") != _fingerprint(request_basis):
+        raise ReconcileExistingError("post-recovery observer job digest drifted")
+    return trigger, deployed_sha
+
+
 def _validate_operational_rows(
     connection: sqlite3.Connection,
     *,
     deployed_sha: str,
 ) -> dict[str, Any]:
-    expected_shas = {EXPECTED_FIRST_ACTIVATION_SHA, deployed_sha}
-    expected_job_ids = {ACTIVATION_JOB_PREFIX + value for value in expected_shas}
     jobs = _rows(
         connection,
         "change_registry_observer_jobs",
         where="requested_at>=?",
         params=(EXPECTED_IMPLICIT_RECOVERY_NOT_BEFORE,),
     )
-    if {str(row.get("job_id") or "") for row in jobs} != expected_job_ids:
-        raise ReconcileExistingError("post-recovery activation job set is not exact")
-    if any(
-        row.get("trigger_kind") != "activation"
-        or row.get("scheduled_slot") != ""
-        or not str(row.get("requested_by") or "")
-        for row in jobs
-    ):
-        raise ReconcileExistingError("post-recovery activation job identity drifted")
+    job_ids = {str(row.get("job_id") or "") for row in jobs}
+    if not jobs or len(job_ids) != len(jobs):
+        raise ReconcileExistingError("post-recovery observer job identity is ambiguous")
+    activation_shas: set[str] = set()
+    scheduled_job_ids: set[str] = set()
+    for row in jobs:
+        trigger, job_deployed_sha = _validate_job_identity(row)
+        if trigger == "activation":
+            activation_shas.add(job_deployed_sha)
+        else:
+            scheduled_job_ids.add(str(row["job_id"]))
+    if not {EXPECTED_FIRST_ACTIVATION_SHA, deployed_sha} <= activation_shas:
+        raise ReconcileExistingError("observed deploy activation metadata is incomplete")
 
-    placeholders = ",".join("?" for _ in expected_job_ids)
-    events = _rows(
-        connection,
-        "change_registry_observer_job_events",
-        where=f"job_id IN ({placeholders})",
-        params=tuple(sorted(expected_job_ids)),
-    )
     events_since_recovery = _rows(
         connection,
         "change_registry_observer_job_events",
         where="occurred_at>=?",
         params=(EXPECTED_IMPLICIT_RECOVERY_NOT_BEFORE,),
     )
-    if events_since_recovery != events:
-        raise ReconcileExistingError("post-recovery activation event set is not exact")
+    events = events_since_recovery
+    if {str(row.get("job_id") or "") for row in events} != job_ids:
+        raise ReconcileExistingError("post-recovery observer event set is not exact")
     checkpoints: set[str] = set()
-    for job_id in sorted(expected_job_ids):
+    for job_id in sorted(job_ids):
         own = sorted(
             (row for row in events if row.get("job_id") == job_id),
             key=lambda row: int(row.get("sequence_no") or 0),
         )
         if [int(row.get("sequence_no") or 0) for row in own] != [1, 2, 3]:
-            raise ReconcileExistingError("activation event sequence is not exact")
+            raise ReconcileExistingError("observer event sequence is not exact")
         if [row.get("state") for row in own] != ["accepted", "running", "complete"]:
-            raise ReconcileExistingError("activation event states are not exact")
+            raise ReconcileExistingError("observer event states are not exact")
+        if any(int(row.get("fact_count") or 0) != 0 for row in own):
+            raise ReconcileExistingError("observer job produced business facts")
+        if any(
+            str(row.get(field) or "")
+            for row in own
+            for field in OBSERVER_EVENT_FAILURE_FIELDS
+        ):
+            raise ReconcileExistingError("observer event failure metadata is present")
+        if any(row.get("checkpoint_id") not in (None, "") for row in own[:2]):
+            raise ReconcileExistingError("observer event checkpoint lifecycle drifted")
         complete = own[-1]
-        if int(complete.get("fact_count") or 0) != 0:
-            raise ReconcileExistingError("activation produced business facts")
         checkpoint_id = str(complete.get("checkpoint_id") or "")
         if not checkpoint_id:
-            raise ReconcileExistingError("activation checkpoint is absent")
+            raise ReconcileExistingError("observer checkpoint is absent")
         checkpoints.add(checkpoint_id)
-    if len(checkpoints) != len(expected_job_ids):
-        raise ReconcileExistingError("activation checkpoint identity is ambiguous")
+    if len(checkpoints) != len(job_ids):
+        raise ReconcileExistingError("observer checkpoint identity is ambiguous")
 
     checkpoint_rows = _rows(
         connection,
@@ -275,7 +364,7 @@ def _validate_operational_rows(
         params=tuple(sorted(checkpoints)),
     )
     if {str(row.get("checkpoint_id") or "") for row in checkpoint_rows} != checkpoints:
-        raise ReconcileExistingError("activation checkpoint rows are incomplete")
+        raise ReconcileExistingError("observer checkpoint rows are incomplete")
     checkpoints_since_recovery = _rows(
         connection,
         "change_registry_checkpoints",
@@ -284,6 +373,18 @@ def _validate_operational_rows(
     )
     if checkpoints_since_recovery != checkpoint_rows:
         raise ReconcileExistingError("post-recovery checkpoint set is not exact")
+    if any(
+        row.get("seller_id") != EXPECTED_SELLER_ID
+        or row.get("account_scope") != EXPECTED_ACCOUNT_SCOPE
+        or row.get("source_surface") != EXPECTED_SOURCE_SURFACE
+        or row.get("scan_kind") != "observer"
+        or row.get("completeness_status") != "complete"
+        or int(row.get("expected_target_count") or 0)
+        != int(row.get("observed_target_count") or -1)
+        or row.get("mapping_version") != EXPECTED_MAPPING_VERSION
+        for row in checkpoint_rows
+    ):
+        raise ReconcileExistingError("observer checkpoint source semantics drifted")
     manifests = _rows(
         connection,
         "change_registry_checkpoint_source_manifests",
@@ -291,7 +392,7 @@ def _validate_operational_rows(
         params=tuple(sorted(checkpoints)),
     )
     if len(manifests) != 2 * len(checkpoints):
-        raise ReconcileExistingError("activation source manifest count is not exact")
+        raise ReconcileExistingError("observer source manifest count is not exact")
     manifests_since_recovery = _rows(
         connection,
         "change_registry_checkpoint_source_manifests",
@@ -307,7 +408,34 @@ def _validate_operational_rows(
             if row.get("checkpoint_id") == checkpoint_id
         }
         if sources != {"prices", "ads"}:
-            raise ReconcileExistingError("activation source manifest set drifted")
+            raise ReconcileExistingError("observer source manifest set drifted")
+    if any(row.get("completeness_status") != "complete" for row in manifests):
+        raise ReconcileExistingError("observer source manifest semantics drifted")
+    for row in manifests:
+        try:
+            summary = json.loads(str(row.get("summary_json") or ""))
+        except json.JSONDecodeError as exc:
+            raise ReconcileExistingError(
+                "observer source manifest summary is invalid"
+            ) from exc
+        persistence = summary.get("persistence") if isinstance(summary, dict) else None
+        wb_mutations = (
+            summary.get("wb_mutation_calls") if isinstance(summary, dict) else None
+        )
+        if (
+            not isinstance(summary, dict)
+            or summary.get("source") != row.get("source_name")
+            or not isinstance(persistence, dict)
+            or set(persistence) != {
+                "checkpoints_written", "facts_written",
+                "identity_incidents_written", "registry_rows_written",
+            }
+            or any(int(value) != 0 for value in persistence.values())
+            or not isinstance(wb_mutations, dict)
+            or set(wb_mutations) != {"patch", "post"}
+            or any(int(value) != 0 for value in wb_mutations.values())
+        ):
+            raise ReconcileExistingError("observer source manifest semantics drifted")
 
     source_health = _rows(
         connection,
@@ -326,7 +454,8 @@ def _validate_operational_rows(
 
     return {
         "not_before": EXPECTED_IMPLICIT_RECOVERY_NOT_BEFORE,
-        "activation_deployed_shas": sorted(expected_shas),
+        "activation_deployed_shas": sorted(activation_shas),
+        "scheduled_observer_job_ids": sorted(scheduled_job_ids),
         "activation_jobs": jobs,
         "activation_job_events": events,
         "activation_checkpoints": checkpoint_rows,

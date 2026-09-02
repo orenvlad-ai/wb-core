@@ -23,7 +23,13 @@ import apps.storage_recovery_sanitation_job as jobs
 
 
 OLD_SHA = hot.EXPECTED_SOURCE_EPOCH_SHA
+INTERMEDIATE_SHA = "a" * 40
 NEW_SHA = "b" * 40
+RELEASE_SHAS = (
+    reconcile.EXPECTED_FIRST_ACTIVATION_SHA,
+    INTERMEDIATE_SHA,
+    NEW_SHA,
+)
 WINDOW = hot.EXPECTED_WINDOW_ID
 PLAN_FP = "sha256:" + "c" * 64
 STATE_FP = "sha256:" + "d" * 64
@@ -64,15 +70,63 @@ def _database(path: Path) -> Path:
         );
         """
     )
-    shas = (reconcile.EXPECTED_FIRST_ACTIVATION_SHA, NEW_SHA)
-    for index, sha in enumerate(shas, 1):
-        job_id = reconcile.ACTIVATION_JOB_PREFIX + sha
+    jobs: list[dict[str, str]] = []
+    for index, sha in enumerate((NEW_SHA, RELEASE_SHAS[0], INTERMEDIATE_SHA), 1):
+        jobs.append(
+            {
+                "job_id": reconcile.ACTIVATION_JOB_PREFIX + sha,
+                "trigger_kind": "activation",
+                "scheduled_slot": "",
+                "requested_by": "trusted-release-runner",
+                "requested_at": f"2026-09-02T04:0{index + 4}:00Z",
+                "deployed_sha": sha,
+            }
+        )
+    scheduled_slot = "2026-09-02T04:00:00Z"
+    scheduled_identity = {
+        "seller_id": reconcile.EXPECTED_SELLER_ID,
+        "account_scope": reconcile.EXPECTED_ACCOUNT_SCOPE,
+        "trigger_kind": "scheduled",
+        "scheduled_slot": scheduled_slot,
+        "requested_by": "systemd",
+        "requested_at": scheduled_slot,
+    }
+    jobs.insert(
+        1,
+        {
+            "job_id": "crjob_" + hashlib.sha256(
+                reconcile._canonical_json(scheduled_identity).encode("utf-8")
+            ).hexdigest()[:32],
+            "trigger_kind": "scheduled",
+            "scheduled_slot": scheduled_slot,
+            "requested_by": "systemd",
+            "requested_at": "2026-09-02T04:06:00Z",
+            "deployed_sha": "",
+        },
+    )
+    for index, job in enumerate(jobs, 1):
+        job_id = job["job_id"]
         checkpoint_id = f"checkpoint-{index}"
+        request_basis = {
+            "seller_id": reconcile.EXPECTED_SELLER_ID,
+            "account_scope": reconcile.EXPECTED_ACCOUNT_SCOPE,
+            "trigger_kind": job["trigger_kind"],
+            "scheduled_slot": job["scheduled_slot"],
+            "requested_by": job["requested_by"],
+            "client_job_id": job_id,
+            "deployed_sha": job["deployed_sha"],
+        }
         connection.execute(
             "INSERT INTO change_registry_observer_jobs VALUES(?,?,?,?,?,?,?,?)",
             (
-                job_id, "seller", "scope", "activation", "", "release",
-                f"2026-09-02T04:0{index + 4}:00Z", "sha256:" + str(index) * 64,
+                job_id,
+                reconcile.EXPECTED_SELLER_ID,
+                reconcile.EXPECTED_ACCOUNT_SCOPE,
+                job["trigger_kind"],
+                job["scheduled_slot"],
+                job["requested_by"],
+                job["requested_at"],
+                reconcile._fingerprint(request_basis),
             ),
         )
         states = {1: "accepted", 2: "running", 3: "complete"}
@@ -95,20 +149,37 @@ def _database(path: Path) -> Path:
         connection.execute(
             "INSERT INTO change_registry_checkpoints VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                checkpoint_id, "seller", "scope", "wb_api", "observer",
+                checkpoint_id,
+                reconcile.EXPECTED_SELLER_ID,
+                reconcile.EXPECTED_ACCOUNT_SCOPE,
+                reconcile.EXPECTED_SOURCE_SURFACE,
+                "observer",
                 f"2026-09-02T04:0{index + 4}:02Z",
-                f"2026-09-02T04:0{index + 4}:03Z", "complete", 0, 0,
+                f"2026-09-02T04:0{index + 4}:03Z", "complete", 818, 818,
                 "sha256:" + "b" * 64, "sha256:" + "a" * 64,
-                None, "fixture-v1",
+                None, reconcile.EXPECTED_MAPPING_VERSION,
             ),
         )
         for source in ("prices", "ads"):
+            expected_count = 92 if source == "prices" else 189
+            observed_count = 92 if source == "prices" else 179
+            summary = {
+                "source": source,
+                "persistence": {
+                    "checkpoints_written": 0,
+                    "facts_written": 0,
+                    "identity_incidents_written": 0,
+                    "registry_rows_written": 0,
+                },
+                "wb_mutation_calls": {"patch": 0, "post": 0},
+            }
             connection.execute(
                 "INSERT INTO change_registry_checkpoint_source_manifests "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
                 (
                     f"manifest-{index}-{source}", checkpoint_id, source,
-                    "complete", 0, 0, "{}", "sha256:" + "e" * 64,
+                    "complete", expected_count, observed_count,
+                    reconcile._canonical_json(summary), "sha256:" + "e" * 64,
                     f"2026-09-02T04:0{index + 4}:03Z",
                 ),
             )
@@ -137,10 +208,13 @@ def _digest_and_allowed_writer_smoke(root: Path) -> dict[str, object]:
         connection, "change_registry_observer_job_events"
     )
     connection.close()
-    for job_id in (
-        reconcile.ACTIVATION_JOB_PREFIX + reconcile.EXPECTED_FIRST_ACTIVATION_SHA,
-        reconcile.ACTIVATION_JOB_PREFIX + NEW_SHA,
-    ):
+    connection = sqlite3.connect(database)
+    job_ids = {
+        str(row["job_id"])
+        for row in reconcile._rows(connection, "change_registry_observer_jobs")
+    }
+    connection.close()
+    for job_id in job_ids:
         assert [
             int(row["sequence_no"])
             for row in canonical_rows
@@ -151,8 +225,10 @@ def _digest_and_allowed_writer_smoke(root: Path) -> dict[str, object]:
     assert first["sqlite_readback"]["foreign_key_violation_count"] == 0
     assert first["non_operational"]["table_row_counts"]["business_projection"] == 1
     assert first["operational_rows"]["activation_deployed_shas"] == sorted(
-        [reconcile.EXPECTED_FIRST_ACTIVATION_SHA, NEW_SHA]
+        RELEASE_SHAS
     )
+    assert len(first["operational_rows"]["scheduled_observer_job_ids"]) == 1
+    assert len(first["operational_rows"]["activation_jobs"]) == 4
 
     connection = sqlite3.connect(database)
     connection.execute(
@@ -201,6 +277,60 @@ def _digest_and_allowed_writer_smoke(root: Path) -> dict[str, object]:
     unexpected = reconcile.database_evidence(database, deployed_sha=NEW_SHA)
     assert unexpected["non_operational"] != allowed["non_operational"]
     return {"database": database, "evidence": allowed}
+
+
+def _semantic_rejection_smoke(root: Path) -> None:
+    cases = (
+        (
+            "unknown-type",
+            "UPDATE change_registry_observer_jobs SET trigger_kind='manual' "
+            "WHERE trigger_kind='scheduled'",
+            "type is not allowed",
+        ),
+        (
+            "unknown-actor",
+            "UPDATE change_registry_observer_jobs SET requested_by='operator' "
+            "WHERE trigger_kind='activation'",
+            "activation job identity",
+        ),
+        (
+            "business-facts",
+            "UPDATE change_registry_observer_job_events SET fact_count=1 "
+            "WHERE sequence_no=3",
+            "produced business facts",
+        ),
+        (
+            "non-lifecycle",
+            "UPDATE change_registry_observer_job_events SET state='partial' "
+            "WHERE sequence_no=2",
+            "event states",
+        ),
+        (
+            "source-drift",
+            "UPDATE change_registry_checkpoints SET source_surface='unknown' "
+            "WHERE checkpoint_id='checkpoint-1'",
+            "checkpoint source semantics",
+        ),
+    )
+    for name, statement, expected in cases:
+        database = _database(root / f"reject-{name}.sqlite3")
+        connection = sqlite3.connect(database)
+        connection.execute(statement)
+        connection.commit()
+        connection.close()
+        try:
+            reconcile.database_evidence(database, deployed_sha=NEW_SHA)
+        except reconcile.ReconcileExistingError as exc:
+            assert expected in str(exc), (name, str(exc))
+        else:
+            raise AssertionError(f"{name} must fail closed")
+    database = _database(root / "reject-deploy-metadata.sqlite3")
+    try:
+        reconcile.database_evidence(database, deployed_sha="c" * 40)
+    except reconcile.ReconcileExistingError as exc:
+        assert "deploy activation metadata" in str(exc)
+    else:
+        raise AssertionError("unobserved current deploy metadata must fail closed")
 
 
 def _marker_only_apply_smoke(root: Path, fixture: dict[str, object]) -> None:
@@ -448,6 +578,29 @@ def _marker_validator_smoke(fixture: dict[str, object]) -> None:
             Path("/runtime"), partial_epoch=partial, deployed_sha=NEW_SHA,
             barrier=result["barrier"],
         )
+    drifted = json.loads(json.dumps(evidence))
+    drifted["operational"]["digest"] = "sha256:" + "0" * 64
+    with (
+        mock.patch.object(maintenance, "_load_json_object", side_effect=load),
+        mock.patch.object(
+            reconcile.hot, "_file_identity", return_value=result["database_after"]
+        ),
+        mock.patch.object(reconcile, "database_evidence", return_value=drifted),
+        mock.patch.object(
+            maintenance, "_prepared_abort_breakglass_counters",
+            return_value={"operations": 0},
+        ),
+        mock.patch.object(Path, "exists", return_value=False),
+    ):
+        try:
+            maintenance._validate_hot_journal_recovery_marker(
+                Path("/runtime"), partial_epoch=partial, deployed_sha=NEW_SHA,
+                barrier=result["barrier"],
+            )
+        except RuntimeError as exc:
+            assert "logical CAS" in str(exc)
+        else:
+            raise AssertionError("post-marker operational append must fail closed")
 
 
 def main() -> None:
@@ -460,6 +613,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="wbc0027-reconcile-existing-") as raw:
         root = Path(raw)
         fixture = _digest_and_allowed_writer_smoke(root)
+        _semantic_rejection_smoke(root)
         _marker_only_apply_smoke(root, fixture)
         _one_submit_smoke(root)
         _marker_validator_smoke(fixture)
