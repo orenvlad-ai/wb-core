@@ -420,8 +420,11 @@ The same runner owns the only production path for the active functional cutover 
   transition must preserve the six deploy-managed pause-owned timers before
   any `systemctl` mutation, produce a compressed bit-exact DB+journal capsule,
   and publish the exact physical-recovery marker before this same partial
-  epoch may continue. Ordinary hold/restore semantics and payloads remain
-  unchanged;
+  epoch may continue. Its reconcile-existing alternative may bind only the two
+  digest-exact historical observer exceptions documented there; a reviewed
+  prefix-through-cutoff CAS may admit a later tail only when every appended job
+  is a generic scheduled complete/fact-zero outcome. Ordinary hold/restore
+  semantics and payloads remain unchanged;
 - The same inventory explicitly pauses and restores the exact pre-hold
   enabled/active state of `wb-core-fbs-warehouse-registry.timer`,
   `wb-core-fbs-shadow-collector.timer`,

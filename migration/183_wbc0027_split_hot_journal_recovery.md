@@ -58,24 +58,37 @@ paused writers, empty business-writer timeline and zero operation counters.
 
 The only admitted post-rollback operational writes are identity- and
 request-digest-bound Change Registry jobs from the trusted release activation
-actor or the natural systemd schedule actor, their exact three-event
-accepted/running/complete lifecycle, checkpoint/source-manifest rows, and the
-seller-session source-health UPSERT. The finite job count and UUID row order
-are not fixed; the current deployed SHA must be represented by a release
-activation. Those five tables are captured separately and the reviewed worker
-requires the identical rows and digest, with no append tolerance. Every other
-SQLite table is streamed in canonical sorted table/column/row order using the
-typed SQLite scalar encoding and bound by one SHA-256 digest. Any other job
-type/actor/source, row/table writer evidence, business fact, journal
-reappearance or ambiguous timeline fails closed.
+actor or the natural systemd schedule actor, their checkpoint/source-manifest
+rows, and the seller-session source-health UPSERT. Natural observer jobs retain
+the exact accepted/running/complete, terminal fact-count zero contract. The
+typed incident exception manifest binds exactly two immutable scheduled jobs
+to the historical observer/deployed contract and to full job/event/checkpoint/
+manifest/fact/link row-set digests: the 10:00Z job is
+accepted/running/partial with a partial checkpoint, `ads=partial`,
+`prices=complete` and zero facts; the 12:00Z job is
+accepted/running/complete with exactly the two checkpoint-linked bid and
+campaign facts. There is no third exception. Any identity or digest drift,
+extra/missing/reordered event, changed checkpoint/manifest, fact/link drift,
+unknown state/source/actor, or fact on any generic job fails closed.
+
+The reviewed plan records an exact `(requested_at, job_id)` observer cutoff and
+a canonical digest of every observer-owned row through that cutoff. A later
+apply or marker readback requires that prefix unchanged, while allowing only a
+strictly later tail that independently passes the generic scheduled
+complete/fact-zero validator. Thus the continuous observer may append truthful
+jobs without freezing a global row count, but cannot rewrite history or widen
+the exception. All remaining SQLite tables are streamed in canonical sorted
+table/column/row order using typed SQLite scalar encoding and bound by one
+SHA-256 digest. Journal reappearance or an ambiguous timeline remains closed.
 
 The detached one-submit reconcile worker opens the database only as
 `mode=ro&immutable=1` with `query_only=ON`. Its sole writes are durable private
 evidence, result and recovery marker files. The partial-abort continuation
 accepts `mode=reconciled_existing` only after independently re-reading the same
-non-operational digest and exact allowed operational set. It issues no SQLite
-recovery, DML, DDL or checkpoint; the ordinary hot-journal result shape and
-normal maintenance Apply/restore behavior remain unchanged.
+non-operational digest, the exact cutoff prefix and a newly validated generic
+tail. It issues no SQLite recovery, DML, DDL or checkpoint; the ordinary
+hot-journal result shape and normal maintenance Apply/restore behavior remain
+unchanged.
 
 ## Operational boundary
 
