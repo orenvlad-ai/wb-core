@@ -56,12 +56,17 @@ inode and size; two stable current physical hashes; query-only integrity/FK;
 unchanged Finance raw/manifest files; the exact acquiring barrier, abort epoch,
 paused writers, empty business-writer timeline and zero operation counters.
 
-The only admitted post-rollback operational writes are exact-SHA Change
-Registry activation job/events/checkpoint/source-manifest rows and the seller
-session source-health UPSERT made by the release probe. Those five tables are
-captured separately. Every other SQLite table is streamed in canonical sorted
-table/column/row order using the typed SQLite scalar encoding and bound by one
-SHA-256 digest. Any other row/table writer evidence, business fact, journal
+The only admitted post-rollback operational writes are identity- and
+request-digest-bound Change Registry jobs from the trusted release activation
+actor or the natural systemd schedule actor, their exact three-event
+accepted/running/complete lifecycle, checkpoint/source-manifest rows, and the
+seller-session source-health UPSERT. The finite job count and UUID row order
+are not fixed; the current deployed SHA must be represented by a release
+activation. Those five tables are captured separately and the reviewed worker
+requires the identical rows and digest, with no append tolerance. Every other
+SQLite table is streamed in canonical sorted table/column/row order using the
+typed SQLite scalar encoding and bound by one SHA-256 digest. Any other job
+type/actor/source, row/table writer evidence, business fact, journal
 reappearance or ambiguous timeline fails closed.
 
 The detached one-submit reconcile worker opens the database only as
