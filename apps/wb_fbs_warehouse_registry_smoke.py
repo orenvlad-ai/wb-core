@@ -17,6 +17,10 @@ from packages.adapters.wb_fbs_orders import (  # noqa: E402
     WbFbsSellerWarehouse,
     WbFbsStock,
 )
+from packages.adapters.wb_content import (  # noqa: E402
+    WbContentCard,
+    WbContentCatalogSnapshot,
+)
 from packages.application.ff_pool_foundation import (  # noqa: E402
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -59,6 +63,26 @@ class StockFailureSource(FakeSource):
         raise RuntimeError("synthetic official stock read failure")
 
 
+class CatalogSource:
+    def fetch_catalog_snapshot(self):
+        return WbContentCatalogSnapshot.from_cards(
+            [
+                WbContentCard(
+                    nm_id=101,
+                    vendor_code="fixture-101",
+                    title="Fixture 101",
+                    subject_name="Fixture",
+                    updated_at="2026-08-24T00:00:00Z",
+                    barcodes=["barcode-101"],
+                    chrt_ids=[9001],
+                )
+            ],
+            pages_fetched=1,
+            terminal_short_page=True,
+            cursor_chain_digest="sha256:fixture-cursor",
+        )
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="wb-fbs-registry-") as raw:
         db_path = Path(raw) / "operational.sqlite3"
@@ -69,10 +93,12 @@ def main() -> int:
             ensure_wb_fbs_orders_schema(conn)
             conn.execute(
                 """CREATE TABLE sheet_vitrina_v1_nomenclature_items(
-                       nm_id INTEGER,is_active INTEGER)"""
+                       item_id TEXT PRIMARY KEY,nm_id INTEGER,is_active INTEGER,
+                       is_hidden INTEGER,updated_at TEXT)"""
             )
             conn.execute(
-                "INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES(101,1)"
+                """INSERT INTO sheet_vitrina_v1_nomenclature_items
+                   VALUES('fixture-101',101,1,0,'2026-08-24T00:00:00Z')"""
             )
             conn.execute(
                 f"INSERT INTO {FEATURE_EPOCHS_TABLE} VALUES(1,1,1,'fixture','2026-08-24T00:00:00Z','{{}}')"
@@ -114,6 +140,7 @@ def main() -> int:
             db_path=db_path,
             timestamp_factory=lambda: next(moments),
             source=FakeSource(),
+            catalog_source=CatalogSource(),
             writer_enabled=True,
         )
         payload = registry.collect()
@@ -121,12 +148,7 @@ def main() -> int:
         official_a = next(row for row in payload["warehouses"] if row["seller_warehouse_id"] == 7001)
         assert official_a["binding_status"] == "Не привязан"
         stock = official_a["stock_readback"]
-        assert stock["complete"] is False and stock["rows"][0]["wb_declared_quantity"] == 9
-        assert stock["identity_scope"]["status"] == "observed_identity_scope_only"
-        assert stock["identity_scope"]["active_nm_coverage_complete"] is True
-        assert stock["identity_scope"]["full_official_chrt_catalog_available"] is False
-        assert stock["freshness"] == "fresh"
-        assert stock["rows"][0]["internal_physical_quantity"] is None
+        assert stock["complete"] is False and stock["status"] == "unavailable"
         before = _physical_image(db_path)
         preview = registry.preview_binding(
             {"request_id": "binding-fixture-0001", "seller_warehouse_id": 7001, "facility_id": "ff_a"},
@@ -141,8 +163,9 @@ def main() -> int:
         assert result["seller_warehouse_id"] == 7001
         assert result["bounded_recovery_scope"]["global_backlog_replay"] is False
         assert _physical_image(db_path) == before
-        after = registry.read_model()
+        after = registry.collect()
         official_a = next(row for row in after["warehouses"] if row["seller_warehouse_id"] == 7001)
+        assert after["source_generation"]["complete"] is True
         assert official_a["stock_readback"]["rows"][0]["internal_physical_quantity"] == 7
         assert official_a["stock_readback"]["rows"][0]["delta_quantity"] == 2
         assert any(row["facility_id"] == "ff_wait" for row in after["waiting_facilities"])
@@ -182,20 +205,22 @@ def main() -> int:
             db_path=db_path,
             timestamp_factory=lambda: next(failed_moments),
             source=StockFailureSource(),
+            catalog_source=CatalogSource(),
         )
         before_failure = _physical_image(db_path)
         failed_readback = failed_stock_registry.collect()
         assert failed_readback["status"] == "ready"
+        failed_bound = next(
+            item for item in failed_readback["warehouses"]
+            if item["seller_warehouse_id"] == 7001
+        )
+        assert failed_bound["stock_readback"]["status"] == "failed"
+        assert failed_bound["stock_readback"]["complete"] is False
         assert all(
-            item["stock_readback"]["status"] == "failed"
-            and item["stock_readback"]["complete"] is False
-            and all(
-                row["wb_declared_quantity"] is None
-                and row["delta_quantity"] is None
-                for row in item["stock_readback"]["rows"]
-            )
-            for item in failed_readback["warehouses"]
-        ), [item["stock_readback"] for item in failed_readback["warehouses"]]
+            row["wb_declared_quantity"] is None and row["delta_quantity"] is None
+            for row in failed_bound["stock_readback"]["rows"]
+        )
+        assert failed_readback["source_generation"]["complete"] is True
         assert _physical_image(db_path) == before_failure
     print("wb fbs warehouse registry smoke: ok")
     return 0

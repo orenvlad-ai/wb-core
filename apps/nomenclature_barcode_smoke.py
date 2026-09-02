@@ -21,7 +21,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.official_api_runtime import OfficialApiRuntimeError  # noqa: E402
-from packages.adapters.wb_content import HttpBackedWbContentSource, WbContentHttpStatusError  # noqa: E402
+from packages.adapters.wb_content import (  # noqa: E402
+    HttpBackedWbContentSource,
+    WbContentHttpStatusError,
+    WbContentTransportError,
+)
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_NOMENCLATURE_BARCODE_SYNC_PATH,
     DEFAULT_NOMENCLATURE_PATH,
@@ -151,7 +155,12 @@ def _adapter_smoke() -> None:
                         "title": "WB No Frame Anti-Spy",
                         "subjectName": "Защитные стекла",
                         "updatedAt": "2026-07-01T10:00:00Z",
-                        "sizes": [{"skus": ["7000000000001", "7000000000002"]}],
+                        "sizes": [
+                            {
+                                "chrtID": 77001,
+                                "skus": ["7000000000001", "7000000000002"],
+                            }
+                        ],
                     }
                 ],
                 "cursor": {"total": 1},
@@ -168,8 +177,24 @@ def _adapter_smoke() -> None:
             or card.subject_name != "Защитные стекла"
             or card.updated_at != "2026-07-01T10:00:00Z"
             or card.barcodes != ["7000000000001", "7000000000002"]
+            or card.chrt_ids != [77001]
         ):
             raise AssertionError(f"content adapter card parsing mismatch: {card}")
+
+        opener.next_payload = json.dumps(
+            {
+                "cards": [{"nmID": 1}, {"nmID": 2}],
+                "cursor": {"total": 2},
+            }
+        ).encode("utf-8")
+        bounded_source = HttpBackedWbContentSource(opener=opener, page_limit=2)
+        try:
+            bounded_source.fetch_catalog_snapshot()
+        except WbContentTransportError as exc:
+            if "continuation cursor" not in str(exc):
+                raise
+        else:
+            raise AssertionError("full catalog page without cursor must fail closed")
 
         opener.next_error = urllib_error.HTTPError(
             "https://content-api.example.test/content/v2/get/cards/list",

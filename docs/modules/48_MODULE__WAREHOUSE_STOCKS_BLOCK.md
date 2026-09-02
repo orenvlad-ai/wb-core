@@ -776,6 +776,15 @@ the active six-stage warehouse projection.  `wbStatus=sorted` is a candidate,
 not an enabled trigger; the query-only readiness remains `NO_GO` without
 repeatable same-order transition evidence and a later owner-gated design.
 
+The independent 15-minute seller-warehouse registry source proves a separate
+complete catalog-stable generation under
+`complete_catalog_stable_http200_omission_zero_v1`. It covers every active,
+non-hidden nomenclature `nmId` and official card-size `chrtId` at each active
+exact-bound seller warehouse, with exact official office evidence and dense
+explicit/omitted provenance. This readiness is reconciliation-only: it does not
+change lifecycle, functional warehouse versions, physical/capital/WAC rules or
+the current Web Vitrina source.
+
 ## Closed-date exact-functional invariant (WBC0027)
 
 After functional cutover, an outbox/event row is only a replay signal. It must
