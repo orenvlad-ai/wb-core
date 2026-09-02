@@ -135,6 +135,13 @@ current planning overlay. Source revision/digest/watermark сохраняютс�
 component; accepted column и active snapshot не смешиваются для одного
 публичного scope.
 
+The official seller-warehouse stock generation with policy
+`complete_catalog_stable_http200_omission_zero_v1` remains a source-layer
+reconciliation input only. This module does not read it as a current or
+historical FBS component, does not copy its omission-derived zero into history
+and does not switch any public Web Vitrina source without a later separately
+accepted cutover.
+
 # 5. Historical backfill boundary
 
 `apps/sheet_vitrina_v1_inventory_history_backfill.py` — versioned repo-owned

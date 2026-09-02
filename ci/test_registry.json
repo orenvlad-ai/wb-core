@@ -157,6 +157,7 @@
         ["python3", "apps/wb_fbs_orders_collector_smoke.py"],
         ["python3", "apps/wb_fbs_orders_http_smoke.py"],
         ["python3", "apps/wb_fbs_warehouse_registry_smoke.py"],
+        ["python3", "apps/wb_fbs_complete_snapshot_smoke.py"],
         ["python3", "apps/fbs_fulfillment_order_supply_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_fbs_fulfillment_order_http_smoke.py"],
         ["python3", "apps/wb_fbs_shadow_polling_smoke.py"],

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
 import json
 import re
 from typing import Any, Mapping
@@ -68,6 +69,7 @@ class WbContentCard:
     subject_name: str
     updated_at: str
     barcodes: list[str]
+    chrt_ids: list[int] = field(default_factory=list)
     endpoint: str = "/content/v2/get/cards/list"
 
     def to_dict(self) -> dict[str, Any]:
@@ -78,8 +80,71 @@ class WbContentCard:
             "subject_name": self.subject_name,
             "updated_at": self.updated_at,
             "barcodes": list(self.barcodes),
+            "chrt_ids": list(self.chrt_ids),
             "endpoint": self.endpoint,
         }
+
+
+@dataclass(frozen=True)
+class WbContentCatalogSnapshot:
+    """One provably terminal traversal of the official non-trash card list."""
+
+    cards: list[WbContentCard]
+    pages_fetched: int
+    terminal_short_page: bool
+    cursor_chain_digest: str
+    source_digest: str
+    endpoint: str = "/content/v2/get/cards/list"
+    scope_policy: str = "official_non_trash_cards_cursor_v1"
+    complete: bool = True
+
+    @classmethod
+    def from_cards(
+        cls,
+        cards: list[WbContentCard],
+        *,
+        pages_fetched: int,
+        terminal_short_page: bool,
+        cursor_chain_digest: str,
+    ) -> "WbContentCatalogSnapshot":
+        normalized = sorted(
+            (
+                {
+                    "nm_id": card.nm_id,
+                    "vendor_code": card.vendor_code,
+                    "title": card.title,
+                    "subject_name": card.subject_name,
+                    "updated_at": card.updated_at,
+                    "barcodes": sorted(card.barcodes),
+                    "chrt_ids": sorted(card.chrt_ids),
+                    "endpoint": card.endpoint,
+                }
+                for card in cards
+            ),
+            key=lambda item: (
+                int(item["nm_id"] or 0),
+                str(item["vendor_code"]),
+                str(item["updated_at"]),
+            ),
+        )
+        material = {
+            "scope_policy": "official_non_trash_cards_cursor_v1",
+            "endpoint": "/content/v2/get/cards/list",
+            "cards": normalized,
+        }
+        source_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        return cls(
+            cards=list(cards),
+            pages_fetched=int(pages_fetched),
+            terminal_short_page=bool(terminal_short_page),
+            cursor_chain_digest=str(cursor_chain_digest),
+            source_digest=source_digest,
+            complete=bool(terminal_short_page),
+        )
 
 
 class HttpBackedWbContentSource:
@@ -124,6 +189,13 @@ class HttpBackedWbContentSource:
         return result
 
     def fetch_cards(self, *, limit: int | None = None, max_pages: int | None = None) -> list[WbContentCard]:
+        return self.fetch_catalog_snapshot(limit=limit, max_pages=max_pages).cards
+
+    def fetch_catalog_snapshot(
+        self, *, limit: int | None = None, max_pages: int | None = None
+    ) -> WbContentCatalogSnapshot:
+        """Traverse the current official card list or fail without partial success."""
+
         runtime = load_runtime_config(
             token_env_var=self._token_env_var,
             default_base_url=self._default_base_url,
@@ -135,7 +207,12 @@ class HttpBackedWbContentSource:
         cursor: dict[str, Any] = {"limit": page_limit}
         result: list[WbContentCard] = []
         seen_cursors: set[tuple[str, int | None]] = set()
+        seen_nm_ids: set[int] = set()
+        cursor_chain: list[dict[str, Any]] = []
+        terminal_short_page = False
+        pages_fetched = 0
         for _ in range(max_page_count):
+            requested_cursor = dict(cursor)
             payload = self._request_cards_page(
                 base_url=runtime.base_url,
                 token=runtime.token,
@@ -143,19 +220,67 @@ class HttpBackedWbContentSource:
                 cursor=cursor,
             )
             cards = _extract_cards(payload)
-            result.extend(_normalize_card(card) for card in cards)
+            pages_fetched += 1
+            normalized_cards = [_normalize_card(card) for card in cards]
+            for card in normalized_cards:
+                if card.nm_id is not None:
+                    if card.nm_id in seen_nm_ids:
+                        raise WbContentTransportError(
+                            "WB content catalog traversal returned a duplicate nmID"
+                        )
+                    seen_nm_ids.add(card.nm_id)
+            result.extend(normalized_cards)
             next_cursor = _extract_cursor(payload)
             total = _optional_int(next_cursor.get("total")) or len(cards)
+            cursor_chain.append(
+                {
+                    "request": requested_cursor,
+                    "response": {
+                        "updatedAt": str(next_cursor.get("updatedAt") or "").strip(),
+                        "nmID": _optional_int(
+                            next_cursor.get("nmID")
+                            or next_cursor.get("nmId")
+                            or next_cursor.get("nm_id")
+                        ),
+                        "total": total,
+                    },
+                    "card_count": len(cards),
+                }
+            )
             if total < page_limit:
+                terminal_short_page = True
                 break
             updated_at = str(next_cursor.get("updatedAt") or "").strip()
             cursor_nm_id = _optional_int(next_cursor.get("nmID") or next_cursor.get("nmId") or next_cursor.get("nm_id"))
             cursor_key = (updated_at, cursor_nm_id)
-            if not updated_at or cursor_nm_id is None or cursor_key in seen_cursors:
-                break
+            if not updated_at or cursor_nm_id is None:
+                raise WbContentTransportError(
+                    "WB content catalog full page lacks a continuation cursor"
+                )
+            if cursor_key in seen_cursors:
+                raise WbContentTransportError(
+                    "WB content catalog continuation cursor repeated"
+                )
             seen_cursors.add(cursor_key)
             cursor = {"limit": page_limit, "updatedAt": updated_at, "nmID": cursor_nm_id}
-        return result
+        if not terminal_short_page:
+            raise WbContentTransportError(
+                "WB content catalog traversal reached the page bound before a terminal page"
+            )
+        cursor_chain_digest = "sha256:" + hashlib.sha256(
+            json.dumps(
+                cursor_chain,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return WbContentCatalogSnapshot.from_cards(
+            result,
+            pages_fetched=pages_fetched,
+            terminal_short_page=terminal_short_page,
+            cursor_chain_digest=cursor_chain_digest,
+        )
 
     def _fetch_one_nm_id(
         self,
@@ -347,7 +472,21 @@ def _normalize_card(card: Mapping[str, Any]) -> WbContentCard:
         subject_name=_optional_str(card.get("subjectName") or card.get("subject_name") or card.get("object")),
         updated_at=_optional_str(card.get("updatedAt") or card.get("updated_at")),
         barcodes=_normalize_string_list(_extract_card_barcodes(card)),
+        chrt_ids=_extract_card_chrt_ids(card),
     )
+
+
+def _extract_card_chrt_ids(card: Mapping[str, Any]) -> list[int]:
+    result: set[int] = set()
+    for size in card.get("sizes") or []:
+        if not isinstance(size, Mapping):
+            continue
+        parsed = _optional_int(
+            size.get("chrtID") or size.get("chrtId") or size.get("chrt_id")
+        )
+        if parsed is not None and parsed > 0:
+            result.add(parsed)
+    return sorted(result)
 
 
 def _normalize_string_list(values: list[Any]) -> list[str]:

@@ -759,11 +759,26 @@ the five-minute order collector. It reads the official seller warehouse and
 office registries, then uses official read-only `POST /api/v3/stocks/{id}` for
 timestamped `seller warehouse × chrtId` stock evidence. A registry or stock
 failure is append-only status evidence and never blocks order ingestion,
-lifecycle or Finance. Missing returned `chrtId` is partial coverage, not zero.
-The exact `chrtId → nmId` scope currently comes from observed orders and active
-exact identity mappings; even when it covers every active known `nmId`, it is
-reported as `observed_identity_scope_only` and `complete=false` because those
-sources do not prove the full official WB size/chrt catalog.
+lifecycle or Finance. Complete source generations use the named policy
+`complete_catalog_stable_http200_omission_zero_v1`. The request universe comes
+only from a terminal cursor traversal of official non-trash WB Content cards,
+joined exactly to the authoritative active/non-hidden positive-`nmId`
+nomenclature scope and every official size `chrtId`; observed orders are not a
+scope source. Only active facilities with one exact active
+`sellerWarehouseId → facility_id` binding participate. The current official
+warehouse row must preserve the mapping's positive office ID; mapping and
+current warehouse/office evidence remain separately digest-bound.
+
+One generation reads warehouse/office and Content catalog before and after all
+stock calls and requires identical normalized registry, catalog, local
+nomenclature and mapping scope digests. Every successful stock call materializes
+one dense immutable row per requested `chrtId`. An explicit WB row preserves its
+amount, including explicit zero, with provenance `explicit_wb_row`; an omitted
+requested ID is zero only under this policy and carries distinct provenance
+`omitted_requested_zero`. HTTP, pagination, catalog/mapping ambiguity, local
+scope drift, registry/catalog instability or any stock-call failure makes the
+attempt partial/failed. It cannot replace the latest complete generation.
+`missing != zero` remains the global rule outside this exact policy proof.
 
 The latest official warehouse remains visible by stable positive WB ID, name,
 office ID/name/city and evidence digest even when unbound; orders likewise
@@ -795,6 +810,10 @@ evidence is non-blocking. Synthetic API/browser/mobile coverage proves both
 binding directions, inactive facility onboarding and zero physical/capital
 effect; production creation/binding/transfer requires a later explicit
 operator preview and confirm.
+
+The complete seller-declared generation is source-layer readiness only. It does
+not switch current/history Web Vitrina facility operands, calculate capital as
+API quantity × WAC or publish any new business balance.
 
 ### Applicability-gated dense FBS
 

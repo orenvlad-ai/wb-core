@@ -16,11 +16,13 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Callable, Mapping
 
+from packages.adapters.wb_content import (
+    HttpBackedWbContentSource,
+    WbContentCatalogSnapshot,
+)
 from packages.adapters.wb_fbs_orders import HttpBackedWbFbsOrdersSource
 from packages.application.ff_pool_foundation import BALANCES_TABLE, FACILITIES_TABLE
 from packages.application.wb_fbs_orders import (
-    IDENTITY_MAPPINGS_TABLE,
-    OBSERVATIONS_TABLE,
     WAREHOUSE_MAPPINGS_TABLE,
     ensure_wb_fbs_orders_schema,
 )
@@ -34,6 +36,9 @@ STOCK_ROWS_TABLE = "sheet_vitrina_v1_wb_fbs_stock_snapshot_rows"
 BINDING_REQUESTS_TABLE = "sheet_vitrina_v1_wb_fbs_binding_requests"
 BINDING_CONFIRMATIONS_TABLE = "sheet_vitrina_v1_wb_fbs_binding_confirmations"
 MAX_STOCK_CHUNK = 1000
+COMPLETE_CATALOG_OMISSION_ZERO_POLICY = (
+    "complete_catalog_stable_http200_omission_zero_v1"
+)
 
 
 class WbFbsWarehouseRegistryError(ValueError):
@@ -173,6 +178,33 @@ def ensure_wb_fbs_warehouse_registry_schema(conn: sqlite3.Connection) -> None:
         BEGIN SELECT RAISE(ABORT,'WB FBS binding confirmations are append-only'); END;
         """
     )
+    _ensure_columns(
+        conn,
+        REGISTRY_RUNS_TABLE,
+        (
+            ("policy_version", "TEXT NOT NULL DEFAULT ''"),
+            ("catalog_scope_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("warehouse_scope_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("catalog_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("mapping_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("generation_digest", "TEXT NOT NULL DEFAULT ''"),
+        ),
+    )
+    _ensure_columns(
+        conn,
+        STOCK_RUNS_TABLE,
+        (
+            ("policy_version", "TEXT NOT NULL DEFAULT ''"),
+            ("explicit_chrt_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("omitted_zero_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("dense_row_count", "INTEGER NOT NULL DEFAULT 0"),
+        ),
+    )
+    _ensure_columns(
+        conn,
+        STOCK_ROWS_TABLE,
+        (("provenance", "TEXT NOT NULL DEFAULT 'legacy_explicit_wb_row'"),),
+    )
 
 
 class WbFbsWarehouseRegistry:
@@ -182,11 +214,13 @@ class WbFbsWarehouseRegistry:
         db_path: Path,
         timestamp_factory: Any | None = None,
         source: Any | None = None,
+        catalog_source: Any | None = None,
         writer_enabled: bool | Callable[[], bool] = False,
     ) -> None:
         self.db_path = Path(db_path)
         self._now = timestamp_factory or _utc_now
         self.source = source or HttpBackedWbFbsOrdersSource()
+        self.catalog_source = catalog_source or HttpBackedWbContentSource()
         self._writer_enabled = (
             writer_enabled
             if callable(writer_enabled)
@@ -194,170 +228,402 @@ class WbFbsWarehouseRegistry:
         )
 
     def collect(self) -> dict[str, Any]:
-        """Run official registry and stock reads before one short local write."""
+        """Capture one stable exact-catalog generation before one short local write."""
 
         started_at = self._now()
         run_id = "fbsreg_" + hashlib.sha256(
             f"{started_at}:{self._now()}".encode("utf-8")
         ).hexdigest()[:28]
-        try:
-            warehouses = self.source.list_seller_warehouses()
-            offices = self.source.list_offices()
-        except Exception as exc:
-            completed_at = self._now()
-            self._persist(
-                registry={
-                    "run_id": run_id,
-                    "status": "failed",
-                    "complete": False,
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                    "warehouses": [],
-                    "office_count": 0,
-                    "source_digest": _fingerprint({"run_id": run_id, "status": "failed"}),
-                    "error": _safe_error(exc),
-                },
-                stock_runs=[],
-            )
-            return self.read_model()
-        offices_by_id = {int(item.office_id): item for item in offices}
         registry_rows: list[dict[str, Any]] = []
-        complete = True
-        for warehouse in warehouses:
-            office = offices_by_id.get(int(warehouse.office_id))
-            if office is None:
-                complete = False
-            row = {
-                "seller_warehouse_id": int(warehouse.warehouse_id),
-                "office_id": int(warehouse.office_id),
-                "warehouse_name": str(warehouse.name),
-                "office_name": str(office.name) if office else "",
-                "office_city": str(office.city) if office else "",
-                "office_federal_district": (
-                    str(office.federal_district) if office else ""
-                ),
-                "cargo_type": warehouse.cargo_type,
-                "delivery_type": warehouse.delivery_type,
-                "is_deleting": bool(warehouse.is_deleting),
-                "is_processing": bool(warehouse.is_processing),
-            }
-            row["evidence_digest"] = _fingerprint(row)
-            registry_rows.append(row)
-        registry_source_digest = _fingerprint(
-            {"warehouses": registry_rows, "office_ids": sorted(offices_by_id)}
-        )
-        chrt_to_nm, identity_scope = self._exact_chrt_to_nm()
+        office_count = 0
+        catalog_scope: dict[str, Any] = {
+            "status": "unavailable",
+            "complete": False,
+        }
+        warehouse_scope: dict[str, Any] = {
+            "status": "unavailable",
+            "complete": False,
+            "warehouses": [],
+            "warehouse_count": 0,
+        }
         stock_runs: list[dict[str, Any]] = []
-        chrt_ids = sorted(chrt_to_nm)
-        for warehouse in registry_rows:
-            stock_runs.append(
+        try:
+            warehouses_before = self.source.list_seller_warehouses()
+            offices_before = self.source.list_offices()
+            registry_rows, registry_digest, registry_complete = (
+                _normalize_official_registry(warehouses_before, offices_before)
+            )
+            office_count = len(offices_before)
+            catalog_before = self.catalog_source.fetch_catalog_snapshot()
+            chrt_to_nm, catalog_scope = self._exact_catalog_scope(catalog_before)
+            warehouse_scope = self._active_exact_warehouse_scope(registry_rows)
+            snapshot_at = self._now()
+            for warehouse in warehouse_scope.get("warehouses") or []:
+                stock_runs.append(
+                    self._read_warehouse_stocks(
+                        registry_run_id=run_id,
+                        seller_warehouse_id=int(warehouse["seller_warehouse_id"]),
+                        snapshot_at=snapshot_at,
+                        chrt_ids=sorted(chrt_to_nm),
+                        chrt_to_nm=chrt_to_nm,
+                        identity_scope=catalog_scope,
+                    )
+                )
+            stock_confirmation_runs = [
                 self._read_warehouse_stocks(
                     registry_run_id=run_id,
                     seller_warehouse_id=int(warehouse["seller_warehouse_id"]),
-                    snapshot_at=self._now(),
-                    chrt_ids=chrt_ids,
+                    snapshot_at=snapshot_at,
+                    chrt_ids=sorted(chrt_to_nm),
                     chrt_to_nm=chrt_to_nm,
-                    identity_scope=identity_scope,
+                    identity_scope=catalog_scope,
                 )
+                for warehouse in warehouse_scope.get("warehouses") or []
+            ]
+            warehouses_after = self.source.list_seller_warehouses()
+            offices_after = self.source.list_offices()
+            _, registry_after_digest, registry_after_complete = (
+                _normalize_official_registry(warehouses_after, offices_after)
             )
-        completed_at = self._now()
-        self._persist(
-            registry={
-                "run_id": run_id,
-                "status": "success" if complete else "partial",
-                "complete": complete,
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "warehouses": registry_rows,
-                "office_count": len(offices_by_id),
-                "source_digest": registry_source_digest,
-                "error": "" if complete else "official office evidence incomplete",
-            },
-            stock_runs=stock_runs,
-        )
+            catalog_after = self.catalog_source.fetch_catalog_snapshot()
+            _, catalog_scope_after = self._exact_catalog_scope(catalog_after)
+            warehouse_scope_after = self._active_exact_warehouse_scope(
+                _normalize_official_registry(warehouses_after, offices_after)[0]
+            )
+            stability = {
+                "registry_stable": registry_digest == registry_after_digest,
+                "catalog_stable": (
+                    str(catalog_scope.get("scope_digest") or "")
+                    == str(catalog_scope_after.get("scope_digest") or "")
+                    and str(catalog_before.source_digest)
+                    == str(catalog_after.source_digest)
+                ),
+                "warehouse_scope_stable": (
+                    str(warehouse_scope.get("scope_digest") or "")
+                    == str(warehouse_scope_after.get("scope_digest") or "")
+                ),
+                "stock_sources_stable": (
+                    len(stock_runs) == len(stock_confirmation_runs)
+                    and all(
+                        first.get("complete")
+                        and second.get("complete")
+                        and first.get("source_digest") == second.get("source_digest")
+                        for first, second in zip(
+                            stock_runs, stock_confirmation_runs, strict=True
+                        )
+                    )
+                ),
+            }
+            source_complete = bool(
+                registry_complete
+                and registry_after_complete
+                and catalog_scope.get("complete")
+                and catalog_scope_after.get("complete")
+                and warehouse_scope.get("complete")
+                and warehouse_scope_after.get("complete")
+                and stock_runs
+                and all(item.get("complete") for item in stock_runs)
+                and all(stability.values())
+            )
+            failure_reasons: list[str] = []
+            if not registry_complete or not registry_after_complete:
+                failure_reasons.append("official registry/office evidence incomplete")
+            if not catalog_scope.get("complete") or not catalog_scope_after.get("complete"):
+                failure_reasons.append("active exact WB card catalog scope incomplete")
+            if not warehouse_scope.get("complete") or not warehouse_scope_after.get("complete"):
+                failure_reasons.append("active exact warehouse mapping scope incomplete")
+            if not stock_runs or not all(item.get("complete") for item in stock_runs):
+                failure_reasons.append("one or more official stock reads failed")
+            for key, value in stability.items():
+                if not value:
+                    failure_reasons.append(key.replace("_", " "))
+            if not source_complete:
+                for stock in stock_runs:
+                    stock["complete"] = False
+                    if stock["status"] == "success":
+                        stock["status"] = "partial"
+                    if not stock.get("error"):
+                        stock["error"] = "generation stability/completeness proof failed"
+            completed_at = self._now()
+            generation_material = {
+                "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+                "registry_digest": registry_digest,
+                "catalog_digest": str(catalog_scope.get("scope_digest") or ""),
+                "mapping_digest": str(warehouse_scope.get("scope_digest") or ""),
+                "stock_digests": [
+                    str(item.get("source_digest") or "") for item in stock_runs
+                ],
+                "stability": stability,
+                "complete": source_complete,
+            }
+            self._persist(
+                registry={
+                    "run_id": run_id,
+                    "status": "success" if source_complete else "partial",
+                    "complete": source_complete,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "warehouses": registry_rows,
+                    "office_count": office_count,
+                    "source_digest": _fingerprint(generation_material),
+                    "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+                    "catalog_scope": {**catalog_scope, "stability": stability},
+                    "warehouse_scope": warehouse_scope,
+                    "catalog_digest": str(catalog_scope.get("scope_digest") or ""),
+                    "mapping_digest": str(warehouse_scope.get("scope_digest") or ""),
+                    "generation_digest": _fingerprint(generation_material),
+                    "error": "; ".join(failure_reasons),
+                },
+                stock_runs=stock_runs,
+            )
+        except Exception as exc:
+            completed_at = self._now()
+            for stock in stock_runs:
+                stock["complete"] = False
+                if stock["status"] == "success":
+                    stock["status"] = "partial"
+                if not stock.get("error"):
+                    stock["error"] = "generation acquisition aborted"
+            self._persist(
+                registry={
+                    "run_id": run_id,
+                    "status": "partial" if registry_rows else "failed",
+                    "complete": False,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "warehouses": registry_rows,
+                    "office_count": office_count,
+                    "source_digest": _fingerprint({"run_id": run_id, "status": "failed"}),
+                    "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+                    "catalog_scope": catalog_scope,
+                    "warehouse_scope": warehouse_scope,
+                    "catalog_digest": str(catalog_scope.get("scope_digest") or ""),
+                    "mapping_digest": str(warehouse_scope.get("scope_digest") or ""),
+                    "generation_digest": "",
+                    "error": _safe_error(exc),
+                },
+                stock_runs=stock_runs,
+            )
         return self.read_model()
 
-    def _exact_chrt_to_nm(self) -> tuple[dict[int, int], dict[str, Any]]:
+    def _exact_catalog_scope(
+        self, snapshot: WbContentCatalogSnapshot
+    ) -> tuple[dict[int, int], dict[str, Any]]:
         if not self.db_path.exists():
             return {}, {
                 "status": "unavailable",
                 "active_nm_id_count": 0,
-                "mapped_nm_id_count": 0,
+                "requested_chrt_count": 0,
                 "complete": False,
             }
         with _connect_readonly(self.db_path) as conn:
-            tables = _table_names(conn)
-            candidates: dict[int, set[int]] = {}
-            if OBSERVATIONS_TABLE in tables:
-                for row in conn.execute(
-                    f"""SELECT chrt_id,nm_id FROM {OBSERVATIONS_TABLE}
-                         WHERE chrt_id IS NOT NULL AND chrt_id>0 AND nm_id>0
-                         GROUP BY chrt_id,nm_id ORDER BY chrt_id,nm_id"""
-                ):
-                    candidates.setdefault(int(row[0]), set()).add(int(row[1]))
-            if IDENTITY_MAPPINGS_TABLE in tables:
-                for row in conn.execute(
-                    f"""SELECT source_chrt_id,target_nm_id
-                           FROM {IDENTITY_MAPPINGS_TABLE}
-                          WHERE active=1 AND source_chrt_id>0 AND target_nm_id>0
-                          GROUP BY source_chrt_id,target_nm_id
-                          ORDER BY source_chrt_id,target_nm_id"""
-                ):
-                    candidates.setdefault(int(row[0]), set()).add(int(row[1]))
-            exact = {
-                chrt_id: next(iter(nm_ids))
-                for chrt_id, nm_ids in candidates.items()
-                if len(nm_ids) == 1
-            }
-            active_nm_ids: set[int] | None = None
-            if "sheet_vitrina_v1_nomenclature_items" in tables:
-                active_nm_ids = {
-                    int(row[0])
-                    for row in conn.execute(
-                        """SELECT DISTINCT nm_id
-                             FROM sheet_vitrina_v1_nomenclature_items
-                            WHERE is_active=1 AND nm_id>0 ORDER BY nm_id"""
-                    )
+            if "sheet_vitrina_v1_nomenclature_items" not in _table_names(conn):
+                return {}, {
+                    "status": "catalog_unavailable",
+                    "active_nm_id_count": 0,
+                    "requested_chrt_count": 0,
+                    "complete": False,
                 }
-            mapped_nm_ids = set(exact.values())
-            active_nm_coverage_complete = (
-                active_nm_ids is not None and active_nm_ids <= mapped_nm_ids
-            )
-            # Orders and exact identity mappings prove only identities already
-            # observed by wb-core.  They do not prove that every official WB
-            # size/chrtId for an active nmId is present, so this source can
-            # never claim a complete stock-request universe by itself.
-            complete = False
-            scope = {
-                "status": (
-                    "observed_identity_scope_only"
-                    if active_nm_coverage_complete
-                    else "partial"
-                    if active_nm_ids is not None
-                    else "catalog_unavailable"
-                ),
-                "active_nm_id_count": (
-                    len(active_nm_ids) if active_nm_ids is not None else 0
-                ),
-                "mapped_nm_id_count": len(mapped_nm_ids),
-                "unmapped_active_nm_id_count": (
-                    len(active_nm_ids - mapped_nm_ids)
-                    if active_nm_ids is not None
-                    else None
-                ),
-                "ambiguous_chrt_id_count": sum(
-                    len(nm_ids) != 1 for nm_ids in candidates.values()
-                ),
-                "complete": complete,
-                "active_nm_coverage_complete": active_nm_coverage_complete,
-                "full_official_chrt_catalog_available": False,
-                "sources": [
-                    name
-                    for name in (OBSERVATIONS_TABLE, IDENTITY_MAPPINGS_TABLE)
-                    if name in tables
-                ],
+            active_rows = [
+                {
+                    "item_id": str(row[0]),
+                    "nm_id": int(row[1]) if row[1] is not None else None,
+                    "updated_at": str(row[2] or ""),
+                }
+                for row in conn.execute(
+                    """SELECT item_id,nm_id,updated_at
+                         FROM sheet_vitrina_v1_nomenclature_items
+                        WHERE is_active=1 AND is_hidden=0
+                        ORDER BY item_id"""
+                )
+            ]
+        active_nm_values = [row["nm_id"] for row in active_rows]
+        positive_nm_ids = {int(value) for value in active_nm_values if value and value > 0}
+        cards_by_nm: dict[int, list[Any]] = {}
+        for card in snapshot.cards:
+            if card.nm_id is not None:
+                cards_by_nm.setdefault(int(card.nm_id), []).append(card)
+        missing_nm_ids = sorted(positive_nm_ids - set(cards_by_nm))
+        duplicate_nm_ids = sorted(
+            nm_id for nm_id in positive_nm_ids if len(cards_by_nm.get(nm_id) or []) != 1
+        )
+        chrt_candidates: dict[int, set[int]] = {}
+        empty_size_nm_ids: list[int] = []
+        for nm_id in sorted(positive_nm_ids):
+            cards = cards_by_nm.get(nm_id) or []
+            if len(cards) != 1:
+                continue
+            if not cards[0].chrt_ids:
+                empty_size_nm_ids.append(nm_id)
+            for chrt_id in cards[0].chrt_ids:
+                chrt_candidates.setdefault(int(chrt_id), set()).add(nm_id)
+        ambiguous_chrt_ids = sorted(
+            chrt_id for chrt_id, owners in chrt_candidates.items() if len(owners) != 1
+        )
+        exact = {
+            chrt_id: next(iter(owners))
+            for chrt_id, owners in chrt_candidates.items()
+            if len(owners) == 1
+        }
+        internal_scope_valid = bool(
+            active_rows
+            and len(active_nm_values) == len(positive_nm_ids)
+            and len(active_nm_values) == len(set(active_nm_values))
+        )
+        complete = bool(
+            snapshot.complete
+            and snapshot.terminal_short_page
+            and internal_scope_valid
+            and not missing_nm_ids
+            and not duplicate_nm_ids
+            and not empty_size_nm_ids
+            and not ambiguous_chrt_ids
+            and exact
+        )
+        scope_material = {
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            "active_scope": active_rows,
+            "catalog_snapshot_digest": snapshot.source_digest,
+            "mapping": [
+                {"chrt_id": chrt_id, "nm_id": exact[chrt_id]}
+                for chrt_id in sorted(exact)
+            ],
+        }
+        return exact, {
+            "status": "complete" if complete else "partial",
+            "complete": complete,
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            "source": "wb_content_cards",
+            "endpoint": snapshot.endpoint,
+            "scope_policy": snapshot.scope_policy,
+            "pages_fetched": snapshot.pages_fetched,
+            "terminal_short_page": snapshot.terminal_short_page,
+            "cursor_chain_digest": snapshot.cursor_chain_digest,
+            "catalog_snapshot_digest": snapshot.source_digest,
+            "active_scope_digest": _fingerprint(active_rows),
+            "mapping_digest": _fingerprint(scope_material["mapping"]),
+            "scope_digest": _fingerprint(scope_material),
+            "active_nm_id_count": len(positive_nm_ids),
+            "requested_chrt_count": len(exact),
+            "missing_active_nm_ids": missing_nm_ids,
+            "duplicate_active_nm_ids": duplicate_nm_ids,
+            "empty_size_nm_ids": empty_size_nm_ids,
+            "ambiguous_chrt_ids": ambiguous_chrt_ids,
+            "full_official_chrt_catalog_available": bool(snapshot.complete),
+            "order_observed_scope_used": False,
+        }
+
+    def _active_exact_warehouse_scope(
+        self, registry_rows: list[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        if not self.db_path.exists():
+            return {
+                "status": "unavailable",
+                "complete": False,
+                "warehouse_count": 0,
+                "warehouses": [],
             }
-            return exact, scope
+        official_by_id = {
+            int(row["seller_warehouse_id"]): dict(row) for row in registry_rows
+        }
+        with _connect_readonly(self.db_path) as conn:
+            if not {WAREHOUSE_MAPPINGS_TABLE, FACILITIES_TABLE} <= _table_names(conn):
+                return {
+                    "status": "unavailable",
+                    "complete": False,
+                    "warehouse_count": 0,
+                    "warehouses": [],
+                }
+            mappings = [
+                dict(row)
+                for row in conn.execute(
+                    f"""SELECT mapping.*,facility.name AS facility_name,
+                                facility.updated_at AS facility_updated_at
+                           FROM {WAREHOUSE_MAPPINGS_TABLE} mapping
+                           JOIN {FACILITIES_TABLE} facility
+                             ON facility.facility_id=mapping.facility_id
+                          WHERE mapping.active=1 AND facility.active=1
+                          ORDER BY mapping.seller_warehouse_id,mapping.facility_id,
+                                   mapping.created_at,mapping.mapping_id"""
+                )
+            ]
+        seller_targets: dict[int, set[str]] = {}
+        facility_sources: dict[str, set[int]] = {}
+        for mapping in mappings:
+            seller_targets.setdefault(int(mapping["seller_warehouse_id"]), set()).add(
+                str(mapping["facility_id"])
+            )
+            facility_sources.setdefault(str(mapping["facility_id"]), set()).add(
+                int(mapping["seller_warehouse_id"])
+            )
+        ambiguous_sellers = sorted(
+            seller_id for seller_id, facilities in seller_targets.items() if len(facilities) != 1
+        )
+        ambiguous_facilities = sorted(
+            facility_id
+            for facility_id, sellers in facility_sources.items()
+            if len(sellers) != 1
+        )
+        rows: list[dict[str, Any]] = []
+        invalid_mapping_ids: list[str] = []
+        seen_pairs: set[tuple[int, str]] = set()
+        for mapping in mappings:
+            seller_id = int(mapping["seller_warehouse_id"])
+            facility_id = str(mapping["facility_id"])
+            pair = (seller_id, facility_id)
+            if pair in seen_pairs:
+                invalid_mapping_ids.append(str(mapping["mapping_id"]))
+                continue
+            seen_pairs.add(pair)
+            official = official_by_id.get(seller_id)
+            valid = bool(
+                seller_id not in ambiguous_sellers
+                and facility_id not in ambiguous_facilities
+                and int(mapping.get("official_office_id") or 0) > 0
+                and str(mapping.get("official_evidence_digest") or "")
+                and official is not None
+                and int(official["office_id"])
+                == int(mapping.get("official_office_id") or 0)
+                and not bool(official.get("is_deleting"))
+                and not bool(official.get("is_processing"))
+            )
+            if not valid:
+                invalid_mapping_ids.append(str(mapping["mapping_id"]))
+                continue
+            rows.append(
+                {
+                    "mapping_id": str(mapping["mapping_id"]),
+                    "mapping_digest": str(mapping["mapping_digest"]),
+                    "seller_warehouse_id": seller_id,
+                    "facility_id": facility_id,
+                    "facility_name": str(mapping["facility_name"]),
+                    "facility_updated_at": str(mapping["facility_updated_at"]),
+                    "official_office_id": int(official["office_id"]),
+                    "official_warehouse_name": str(official["warehouse_name"]),
+                    "official_office_name": str(official["office_name"]),
+                    "official_office_city": str(official["office_city"]),
+                    "mapping_official_evidence_digest": str(
+                        mapping["official_evidence_digest"]
+                    ),
+                    "current_official_evidence_digest": str(official["evidence_digest"]),
+                }
+            )
+        complete = bool(mappings and len(rows) == len(mappings) and not invalid_mapping_ids)
+        scope_material = {
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            "warehouses": rows,
+        }
+        return {
+            "status": "complete" if complete else "partial",
+            "complete": complete,
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            "warehouse_count": len(rows),
+            "warehouses": rows,
+            "ambiguous_seller_warehouse_ids": ambiguous_sellers,
+            "ambiguous_facility_ids": ambiguous_facilities,
+            "invalid_mapping_ids": sorted(set(invalid_mapping_ids)),
+            "scope_digest": _fingerprint(scope_material),
+        }
 
     def _read_warehouse_stocks(
         self,
@@ -382,6 +648,11 @@ class WbFbsWarehouseRegistry:
                 "complete": scope_complete,
                 "snapshot_at": snapshot_at,
                 "requested_chrt_count": 0,
+                "returned_chrt_count": 0,
+                "explicit_chrt_count": 0,
+                "omitted_zero_count": 0,
+                "dense_row_count": 0,
+                "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
                 "rows": [],
                 "identity_scope": dict(identity_scope),
                 "source_digest": _fingerprint(
@@ -408,6 +679,11 @@ class WbFbsWarehouseRegistry:
                 "complete": False,
                 "snapshot_at": snapshot_at,
                 "requested_chrt_count": len(chrt_ids),
+                "returned_chrt_count": 0,
+                "explicit_chrt_count": 0,
+                "omitted_zero_count": 0,
+                "dense_row_count": 0,
+                "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
                 "rows": [],
                 "identity_scope": dict(identity_scope),
                 "source_digest": _fingerprint(
@@ -424,14 +700,21 @@ class WbFbsWarehouseRegistry:
                 "seller_warehouse_id": seller_warehouse_id,
                 "chrt_id": chrt_id,
                 "nm_id": int(chrt_to_nm[chrt_id]),
-                "amount": amount,
+                "amount": returned.get(chrt_id, 0),
+                "provenance": (
+                    "explicit_wb_row"
+                    if chrt_id in returned
+                    else "omitted_requested_zero"
+                ),
             }
-            for chrt_id, amount in sorted(returned.items())
+            for chrt_id in chrt_ids
         ]
         for row in rows:
             row["evidence_digest"] = _fingerprint(row)
-        request_complete = set(returned) == set(chrt_ids)
-        complete = request_complete and bool(identity_scope.get("complete"))
+        complete = bool(identity_scope.get("complete")) and len(rows) == len(chrt_ids)
+        omitted_zero_count = sum(
+            row["provenance"] == "omitted_requested_zero" for row in rows
+        )
         return {
             "run_id": run_id,
             "registry_run_id": registry_run_id,
@@ -440,6 +723,11 @@ class WbFbsWarehouseRegistry:
             "complete": complete,
             "snapshot_at": snapshot_at,
             "requested_chrt_count": len(chrt_ids),
+            "returned_chrt_count": len(returned),
+            "explicit_chrt_count": len(returned),
+            "omitted_zero_count": omitted_zero_count,
+            "dense_row_count": len(rows),
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
             "rows": rows,
             "identity_scope": dict(identity_scope),
             "source_digest": _fingerprint(
@@ -452,8 +740,6 @@ class WbFbsWarehouseRegistry:
             "error": (
                 ""
                 if complete
-                else "one or more requested chrtIds were absent"
-                if not request_complete
                 else "exact chrtId scope incomplete"
             ),
         }
@@ -470,13 +756,21 @@ class WbFbsWarehouseRegistry:
             conn.execute(
                 f"""INSERT OR IGNORE INTO {REGISTRY_RUNS_TABLE}(
                        run_id,status,complete,started_at,completed_at,warehouse_count,
-                       office_count,source_digest,error
-                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                       office_count,source_digest,error,policy_version,
+                       catalog_scope_json,warehouse_scope_json,catalog_digest,
+                       mapping_digest,generation_digest
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     registry["run_id"], registry["status"], int(bool(registry["complete"])),
                     registry["started_at"], registry["completed_at"],
                     len(registry.get("warehouses") or []), registry["office_count"],
                     registry["source_digest"], registry.get("error") or "",
+                    str(registry.get("policy_version") or ""),
+                    _json(registry.get("catalog_scope") or {}),
+                    _json(registry.get("warehouse_scope") or {}),
+                    str(registry.get("catalog_digest") or ""),
+                    str(registry.get("mapping_digest") or ""),
+                    str(registry.get("generation_digest") or ""),
                 ),
             )
             for row in registry.get("warehouses") or []:
@@ -499,25 +793,33 @@ class WbFbsWarehouseRegistry:
                     f"""INSERT OR IGNORE INTO {STOCK_RUNS_TABLE}(
                            run_id,registry_run_id,seller_warehouse_id,status,complete,
                            snapshot_at,requested_chrt_count,returned_chrt_count,
-                           identity_scope_json,source_digest,error
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                           identity_scope_json,source_digest,error,policy_version,
+                           explicit_chrt_count,omitted_zero_count,dense_row_count
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         stock["run_id"], stock["registry_run_id"],
                         stock["seller_warehouse_id"], stock["status"],
                         int(bool(stock["complete"])), stock["snapshot_at"],
-                        stock["requested_chrt_count"], len(stock.get("rows") or []),
+                        stock["requested_chrt_count"],
+                        int(stock.get("returned_chrt_count") or 0),
                         _json(stock.get("identity_scope") or {}),
                         stock["source_digest"], stock.get("error") or "",
+                        str(stock.get("policy_version") or ""),
+                        int(stock.get("explicit_chrt_count") or 0),
+                        int(stock.get("omitted_zero_count") or 0),
+                        int(stock.get("dense_row_count") or 0),
                     ),
                 )
                 for row in stock.get("rows") or []:
                     conn.execute(
                         f"""INSERT OR IGNORE INTO {STOCK_ROWS_TABLE}(
-                               run_id,seller_warehouse_id,chrt_id,nm_id,amount,evidence_digest
-                           ) VALUES(?,?,?,?,?,?)""",
+                               run_id,seller_warehouse_id,chrt_id,nm_id,amount,
+                               evidence_digest,provenance
+                           ) VALUES(?,?,?,?,?,?,?)""",
                         (
                             stock["run_id"], row["seller_warehouse_id"], row["chrt_id"],
                             row["nm_id"], row["amount"], row["evidence_digest"],
+                            row.get("provenance") or "legacy_explicit_wb_row",
                         ),
                     )
             conn.commit()
@@ -541,10 +843,12 @@ class WbFbsWarehouseRegistry:
             latest_attempt = conn.execute(
                 f"SELECT * FROM {REGISTRY_RUNS_TABLE} ORDER BY run_sequence DESC LIMIT 1"
             ).fetchone()
+            source_generation = _complete_source_generation(conn)
             if registry_run is None:
                 return {
                     **_empty_read_model("unavailable"),
                     "latest_attempt": dict(latest_attempt) if latest_attempt else None,
+                    "source_generation": source_generation,
                 }
             warehouses: list[dict[str, Any]] = []
             for official in conn.execute(
@@ -700,6 +1004,7 @@ class WbFbsWarehouseRegistry:
                     "warehouse_count": int(registry_run["warehouse_count"]),
                 },
                 "latest_attempt": dict(latest_attempt) if latest_attempt else None,
+                "source_generation": source_generation,
                 "warehouses": warehouses,
                 "waiting_facilities": waiting_facilities,
                 "policy": {
@@ -707,6 +1012,9 @@ class WbFbsWarehouseRegistry:
                     "cardinality": "one_active_wb_warehouse_to_one_fbs_facility",
                     "wb_stock_role": "reconciliation_only",
                     "missing_row_is_zero": False,
+                    "complete_catalog_omission_zero_policy": (
+                        COMPLETE_CATALOG_OMISSION_ZERO_POLICY
+                    ),
                     "order_collector_dependency": False,
                 },
             }
@@ -985,12 +1293,204 @@ class WbFbsWarehouseRegistry:
         }
 
 
+def _complete_source_generation(conn: sqlite3.Connection) -> dict[str, Any]:
+    required_run_columns = {
+        "policy_version",
+        "catalog_scope_json",
+        "warehouse_scope_json",
+        "generation_digest",
+    }
+    if not required_run_columns <= _column_names(conn, REGISTRY_RUNS_TABLE):
+        return {
+            "status": "unavailable",
+            "complete": False,
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+        }
+    run = conn.execute(
+        f"""SELECT * FROM {REGISTRY_RUNS_TABLE}
+             WHERE status='success' AND complete=1 AND policy_version=?
+             ORDER BY run_sequence DESC LIMIT 1""",
+        (COMPLETE_CATALOG_OMISSION_ZERO_POLICY,),
+    ).fetchone()
+    if run is None:
+        return {
+            "status": "unavailable",
+            "complete": False,
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+        }
+    try:
+        catalog_scope = json.loads(str(run["catalog_scope_json"] or "{}"))
+        warehouse_scope = json.loads(str(run["warehouse_scope_json"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {
+            "status": "inconsistent",
+            "complete": False,
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            "generation_id": str(run["run_id"]),
+        }
+    stock_runs = conn.execute(
+        f"""SELECT * FROM {STOCK_RUNS_TABLE}
+             WHERE registry_run_id=? ORDER BY seller_warehouse_id""",
+        (run["run_id"],),
+    ).fetchall()
+    warehouse_rows: list[dict[str, Any]] = []
+    actual_dense_row_count = 0
+    explicit_wb_row_count = 0
+    explicit_zero_count = 0
+    omitted_requested_zero_count = 0
+    for stock in stock_runs:
+        counts = conn.execute(
+            f"""SELECT COUNT(*) AS row_count,
+                       SUM(CASE WHEN provenance='explicit_wb_row' THEN 1 ELSE 0 END)
+                           AS explicit_count,
+                       SUM(CASE WHEN provenance='explicit_wb_row' AND amount=0 THEN 1 ELSE 0 END)
+                           AS explicit_zero_count,
+                       SUM(CASE WHEN provenance='omitted_requested_zero' THEN 1 ELSE 0 END)
+                           AS omitted_count
+                  FROM {STOCK_ROWS_TABLE} WHERE run_id=?""",
+            (stock["run_id"],),
+        ).fetchone()
+        row_count = int(counts["row_count"] or 0)
+        explicit_count = int(counts["explicit_count"] or 0)
+        explicit_zero = int(counts["explicit_zero_count"] or 0)
+        omitted_count = int(counts["omitted_count"] or 0)
+        actual_dense_row_count += row_count
+        explicit_wb_row_count += explicit_count
+        explicit_zero_count += explicit_zero
+        omitted_requested_zero_count += omitted_count
+        official = next(
+            (
+                item
+                for item in warehouse_scope.get("warehouses") or []
+                if int(item.get("seller_warehouse_id") or 0)
+                == int(stock["seller_warehouse_id"])
+            ),
+            {},
+        )
+        warehouse_rows.append(
+            {
+                "seller_warehouse_id": int(stock["seller_warehouse_id"]),
+                "official_office_id": int(official.get("official_office_id") or 0),
+                "facility_id": str(official.get("facility_id") or ""),
+                "mapping_id": str(official.get("mapping_id") or ""),
+                "complete": bool(stock["complete"]),
+                "requested_chrt_count": int(stock["requested_chrt_count"]),
+                "dense_row_count": row_count,
+                "explicit_wb_row_count": explicit_count,
+                "explicit_zero_count": explicit_zero,
+                "omitted_requested_zero_count": omitted_count,
+                "source_digest": str(stock["source_digest"]),
+            }
+        )
+    warehouse_count = int(warehouse_scope.get("warehouse_count") or 0)
+    requested_chrt_count = int(catalog_scope.get("requested_chrt_count") or 0)
+    expected_dense_row_count = warehouse_count * requested_chrt_count
+    readback_complete = bool(
+        warehouse_count > 0
+        and requested_chrt_count > 0
+        and len(stock_runs) == warehouse_count
+        and all(bool(row["complete"]) for row in stock_runs)
+        and all(
+            int(row["requested_chrt_count"]) == requested_chrt_count
+            and int(row["dense_row_count"]) == requested_chrt_count
+            and int(row["explicit_chrt_count"]) + int(row["omitted_zero_count"])
+            == requested_chrt_count
+            for row in stock_runs
+        )
+        and actual_dense_row_count == expected_dense_row_count
+        and explicit_wb_row_count + omitted_requested_zero_count
+        == expected_dense_row_count
+    )
+    return {
+        "status": "complete" if readback_complete else "inconsistent",
+        "complete": readback_complete,
+        "generation_id": str(run["run_id"]),
+        "generation_digest": str(run["generation_digest"]),
+        "policy_version": str(run["policy_version"]),
+        "started_at": str(run["started_at"]),
+        "completed_at": str(run["completed_at"]),
+        "catalog_scope": catalog_scope,
+        "warehouse_scope": {
+            "status": str(warehouse_scope.get("status") or ""),
+            "complete": bool(warehouse_scope.get("complete")),
+            "warehouse_count": warehouse_count,
+            "scope_digest": str(warehouse_scope.get("scope_digest") or ""),
+        },
+        "cardinality": {
+            "warehouse_count": warehouse_count,
+            "requested_chrt_count": requested_chrt_count,
+            "expected_dense_row_count": expected_dense_row_count,
+            "actual_dense_row_count": actual_dense_row_count,
+            "explicit_wb_row_count": explicit_wb_row_count,
+            "explicit_zero_count": explicit_zero_count,
+            "omitted_requested_zero_count": omitted_requested_zero_count,
+        },
+        "warehouses": warehouse_rows,
+    }
+
+
+def _normalize_official_registry(
+    warehouses: list[Any], offices: list[Any]
+) -> tuple[list[dict[str, Any]], str, bool]:
+    offices_by_id: dict[int, Any] = {}
+    duplicate_office_ids: set[int] = set()
+    for office in offices:
+        office_id = int(office.office_id)
+        if office_id in offices_by_id:
+            duplicate_office_ids.add(office_id)
+        offices_by_id[office_id] = office
+    warehouse_ids: set[int] = set()
+    rows: list[dict[str, Any]] = []
+    complete = not duplicate_office_ids
+    for warehouse in warehouses:
+        warehouse_id = int(warehouse.warehouse_id)
+        if warehouse_id in warehouse_ids:
+            complete = False
+        warehouse_ids.add(warehouse_id)
+        office = offices_by_id.get(int(warehouse.office_id))
+        if office is None:
+            complete = False
+        row = {
+            "seller_warehouse_id": warehouse_id,
+            "office_id": int(warehouse.office_id),
+            "warehouse_name": str(warehouse.name),
+            "office_name": str(office.name) if office else "",
+            "office_city": str(office.city) if office else "",
+            "office_federal_district": str(office.federal_district) if office else "",
+            "cargo_type": warehouse.cargo_type,
+            "delivery_type": warehouse.delivery_type,
+            "is_deleting": bool(warehouse.is_deleting),
+            "is_processing": bool(warehouse.is_processing),
+        }
+        row["evidence_digest"] = _fingerprint(row)
+        rows.append(row)
+    rows.sort(key=lambda row: int(row["seller_warehouse_id"]))
+    material = {
+        "warehouses": rows,
+        "offices": [
+            {
+                "office_id": office_id,
+                "name": str(offices_by_id[office_id].name),
+                "city": str(offices_by_id[office_id].city),
+                "federal_district": str(offices_by_id[office_id].federal_district),
+            }
+            for office_id in sorted(offices_by_id)
+        ],
+    }
+    return rows, _fingerprint(material), complete
+
+
 def _empty_read_model(status: str) -> dict[str, Any]:
     return {
         "contract": CONTRACT_NAME,
         "status": status,
         "registry": None,
         "latest_attempt": None,
+        "source_generation": {
+            "status": "unavailable",
+            "complete": False,
+            "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+        },
         "warehouses": [],
         "waiting_facilities": [],
         "policy": {
@@ -998,9 +1498,23 @@ def _empty_read_model(status: str) -> dict[str, Any]:
             "cardinality": "one_active_wb_warehouse_to_one_fbs_facility",
             "wb_stock_role": "reconciliation_only",
             "missing_row_is_zero": False,
+            "complete_catalog_omission_zero_policy": (
+                COMPLETE_CATALOG_OMISSION_ZERO_POLICY
+            ),
             "order_collector_dependency": False,
         },
     }
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: tuple[tuple[str, str], ...],
+) -> None:
+    existing = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, declaration in columns:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
@@ -1015,6 +1529,10 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
         str(row[0])
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
+
+
+def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def _fingerprint(value: Any) -> str:
