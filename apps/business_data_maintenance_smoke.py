@@ -1827,7 +1827,15 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
             assert audit_path.read_bytes() == audit_before_unknown
             restarted.unknown_active_service = ""
 
-            original_disable_now = restarted.disable_now
+            fake_disable_now = restarted.disable_now
+
+            def systemd_disable_now(unit: str) -> None:
+                fake_disable_now(unit)
+                restarted.timer_states[unit]["properties"][
+                    "LastTriggerUSec"
+                ] = ""
+
+            original_disable_now = systemd_disable_now
             interrupted_disables = {"count": 0}
 
             def interrupted_disable_now(unit: str) -> None:
@@ -1906,6 +1914,7 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
             recorded_trigger = restarted.timer_states[retriggered_unit][
                 "properties"
             ]["LastTriggerUSec"]
+            assert recorded_trigger == ""
             restarted.timer_states[retriggered_unit]["properties"][
                 "LastTriggerUSec"
             ] = "Tue 2000-01-04 00:00:00 UTC"
@@ -2066,7 +2075,12 @@ def _assert_legacy_prepared_fbs_writer_is_pause_owned_exactly() -> None:
                 )
                 assert restarted.timer_states[unit]["properties"][
                     "LastTriggerUSec"
-                ] == "Mon 2000-01-03 00:00:00 UTC " + unit
+                ] == ""
+                assert binding["deploy_drift_timer_states"][unit][
+                    "properties"
+                ]["LastTriggerUSec"] == (
+                    "Mon 2000-01-03 00:00:00 UTC " + unit
+                )
             assert restarted.mutations == [
                 unit
                 for unit in maintenance.ALL_BUSINESS_TIMER_UNITS

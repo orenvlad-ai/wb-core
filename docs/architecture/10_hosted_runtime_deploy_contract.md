@@ -360,8 +360,12 @@ The same runner owns the only production path for the active functional cutover 
   before disabling only those known drifted timers. It then waits every bound
   business service and process, including FBS shadow and warehouse functional,
   to finish naturally without kill; a restart may continue only the same
-  recorded generation or its terminal subset. It never recaptures or rebases
-  the pre-hold state. A retriggered timer, new service generation/PID, unknown
+  recorded generation or its terminal subset. If systemd clears
+  `LastTriggerUSec` while disabling an exactly bound timer, only that timer's
+  disabled/inactive terminal representation is accepted; the bound paired
+  service generation must still be unchanged, and any different non-empty
+  trigger remains a retrigger failure. It never recaptures or rebases the
+  pre-hold state. A retriggered timer, new service generation/PID, unknown
   active `wb-core-*.service`, missing/mixed timer state, unrelated process,
   lock or sidecar fails closed. The canonical wrapper completes the ordinary
   warehouse hold and

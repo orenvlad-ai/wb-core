@@ -3262,6 +3262,34 @@ def _unit_state_pair(state: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
+def _validate_pause_owned_timer_trigger(
+    unit: str,
+    *,
+    recorded: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> None:
+    recorded_trigger = str(
+        (recorded.get("properties") or {}).get("LastTriggerUSec") or ""
+    )
+    current_trigger = str(
+        (current.get("properties") or {}).get("LastTriggerUSec") or ""
+    )
+    if current_trigger == recorded_trigger:
+        return
+    # systemd clears LastTriggerUSec when an active timer is disabled.  That
+    # terminal representation is admissible only after the exact timer is
+    # disabled/inactive; the separately bound service generation still proves
+    # that no replacement writer started while the process was restarting.
+    if (
+        _unit_state_pair(current) == ("disabled", "inactive")
+        and not current_trigger
+    ):
+        return
+    raise RuntimeError(
+        "prepared maintenance pause-owned timer retriggered: " + unit
+    )
+
+
 def _pause_owned_service_generation_evidence(
     services: Mapping[str, Any],
     writer_processes: Sequence[Mapping[str, Any]],
@@ -3543,21 +3571,11 @@ def _validate_pause_owned_resume_drain_status(
                 "prepared maintenance pause-owned timer restarted: " + unit
             )
         if unit in recorded_timers:
-            recorded_properties = dict(
-                recorded_timers[unit].get("properties") or {}
+            _validate_pause_owned_timer_trigger(
+                unit,
+                recorded=recorded_timers[unit],
+                current=current,
             )
-            current_properties = dict(current.get("properties") or {})
-            recorded_trigger = str(
-                recorded_properties.get("LastTriggerUSec") or ""
-            )
-            current_trigger = str(
-                current_properties.get("LastTriggerUSec") or ""
-            )
-            if recorded_trigger and current_trigger != recorded_trigger:
-                raise RuntimeError(
-                    "prepared maintenance pause-owned timer retriggered: "
-                    + unit
-                )
     active_inventory = _require_pause_owned_active_service_inventory(
         systemd
     )
@@ -3796,23 +3814,11 @@ def _resume_legacy_fbs_pause_ownership(
                     + unit
                 )
         for unit, recorded_state in recorded_drift_timer_states.items():
-            recorded_trigger = str(
-                (recorded_state.get("properties") or {}).get(
-                    "LastTriggerUSec"
-                )
-                or ""
+            _validate_pause_owned_timer_trigger(
+                unit,
+                recorded=recorded_state,
+                current=dict(timers.get(unit) or {}),
             )
-            current_trigger = str(
-                ((timers.get(unit) or {}).get("properties") or {}).get(
-                    "LastTriggerUSec"
-                )
-                or ""
-            )
-            if recorded_trigger and current_trigger != recorded_trigger:
-                raise RuntimeError(
-                    "prepared maintenance pause-owned timer retriggered: "
-                    + unit
-                )
     else:
         recorded_drift_timer_states = current_drift_timer_states
     writer_processes = [dict(row) for row in before.get("writer_processes") or []]
