@@ -3990,7 +3990,16 @@ def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
     target_file = args.target_file or resolve_target_file()
     target = load_hosted_runtime_target(target_file)
     recovery_action = str(args.hot_journal_action)
-    action = f"sqlite-hot-journal-recovery-{recovery_action}"
+    reconcile_existing = (
+        str(getattr(args, "hot_journal_mode", "recovery"))
+        == "reconcile-existing"
+    )
+    action_stem = (
+        "sqlite-hot-journal-reconcile-existing"
+        if reconcile_existing
+        else "sqlite-hot-journal-recovery"
+    )
+    action = f"{action_stem}-{recovery_action}"
     _ensure_active_hosted_runtime_target(target, action=action)
     if recovery_action == "submit":
         _ensure_target_allows_mutation(target, action=action, dry_run=False)
@@ -4005,14 +4014,26 @@ def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
     deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
     if recovery_action == "dry-run":
         output = str(args.output or "")
-        if re.fullmatch(
+        output_pattern = (
             r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
-            r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json",
+            r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json"
+        )
+        if reconcile_existing:
+            output_pattern = output_pattern.replace(
+                "hot-journal-plan", "reconcile-existing-plan"
+            )
+        if re.fullmatch(
+            output_pattern,
             output,
         ) is None:
             raise ValueError("hot journal dry-run output path is outside exact scope")
         runner_args = [
-            "python3", "apps/sqlite_hot_journal_recovery.py",
+            "python3",
+            (
+                "apps/sqlite_hot_journal_reconcile_existing.py"
+                if reconcile_existing
+                else "apps/sqlite_hot_journal_recovery.py"
+            ),
             "--runtime-dir", runtime_dir,
             "--deployed-sha", deployed_sha,
             "--deployed-sha-file", deployed_sha_file,
@@ -4044,6 +4065,13 @@ def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
                     "--approval-reference", str(args.approval_reference),
                 ]
             )
+            if reconcile_existing:
+                operation_index = runner_args.index(
+                    "sqlite-hot-journal-recovery-apply"
+                )
+                runner_args[operation_index] = (
+                    "sqlite-hot-journal-reconcile-existing-apply"
+                )
     command = " && ".join(
         [
             f"cd {shlex.quote(target.target_dir)}",
@@ -13324,6 +13352,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     hot_journal_plan.set_defaults(
         handler=run_sqlite_hot_journal_recovery_command,
         hot_journal_action="dry-run",
+        hot_journal_mode="recovery",
     )
 
     hot_journal_submit = subparsers.add_parser(
@@ -13339,6 +13368,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     hot_journal_submit.set_defaults(
         handler=run_sqlite_hot_journal_recovery_command,
         hot_journal_action="submit",
+        hot_journal_mode="recovery",
     )
 
     hot_journal_status = subparsers.add_parser(
@@ -13350,6 +13380,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
     hot_journal_status.set_defaults(
         handler=run_sqlite_hot_journal_recovery_command,
         hot_journal_action="status",
+        hot_journal_mode="recovery",
+    )
+
+    reconcile_existing_plan = subparsers.add_parser(
+        "sqlite-hot-journal-reconcile-existing-dry-run",
+        help="Build the exact query-only implicit-rollback reconciliation plan.",
+    )
+    reconcile_existing_plan.add_argument("--deployed-sha", required=True)
+    reconcile_existing_plan.add_argument("--operation-id", required=True)
+    reconcile_existing_plan.add_argument("--window-id", required=True)
+    reconcile_existing_plan.add_argument("--plan-fingerprint", required=True)
+    reconcile_existing_plan.add_argument("--output", required=True)
+    reconcile_existing_plan.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="dry-run",
+        hot_journal_mode="reconcile-existing",
+    )
+
+    reconcile_existing_submit = subparsers.add_parser(
+        "sqlite-hot-journal-reconcile-existing-submit",
+        help="Submit one reviewed marker-only implicit-rollback reconciliation.",
+    )
+    reconcile_existing_submit.add_argument("--deployed-sha", required=True)
+    reconcile_existing_submit.add_argument("--job-id", required=True)
+    reconcile_existing_submit.add_argument("--reviewed-plan", required=True)
+    reconcile_existing_submit.add_argument("--reviewed-plan-sha256", required=True)
+    reconcile_existing_submit.add_argument("--confirm-fingerprint", required=True)
+    reconcile_existing_submit.add_argument("--approval-reference", required=True)
+    reconcile_existing_submit.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="submit",
+        hot_journal_mode="reconcile-existing",
+    )
+
+    reconcile_existing_status = subparsers.add_parser(
+        "sqlite-hot-journal-reconcile-existing-status",
+        help="Read one detached implicit-rollback reconciliation result.",
+    )
+    reconcile_existing_status.add_argument("--deployed-sha", required=True)
+    reconcile_existing_status.add_argument("--job-id", required=True)
+    reconcile_existing_status.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="status",
+        hot_journal_mode="reconcile-existing",
     )
 
     promo_gc_dry_run = subparsers.add_parser(

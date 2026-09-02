@@ -45,6 +45,33 @@ generation-manifest files, and zero WBC0027 operation counters. Only that result
 writes the recovery marker accepted by the partial-abort continuation. Normal
 maintenance Apply/restore semantics and all collector/order logic are unchanged.
 
+## SQLite-owned implicit rollback reconciliation
+
+If the journal has already been consumed by SQLite before the reviewed worker
+submitted, the normal recovery contour remains closed and is never retried.
+The incident-only `sqlite-hot-journal-reconcile-existing-*` mode instead binds
+the sealed pre-rollback DB/journal identity, header, all 169 checksums and page
+list, plus the reviewed overlay SHA. It requires the same generation, device,
+inode and size; two stable current physical hashes; query-only integrity/FK;
+unchanged Finance raw/manifest files; the exact acquiring barrier, abort epoch,
+paused writers, empty business-writer timeline and zero operation counters.
+
+The only admitted post-rollback operational writes are exact-SHA Change
+Registry activation job/events/checkpoint/source-manifest rows and the seller
+session source-health UPSERT made by the release probe. Those five tables are
+captured separately. Every other SQLite table is streamed in canonical sorted
+table/column/row order using the typed SQLite scalar encoding and bound by one
+SHA-256 digest. Any other row/table writer evidence, business fact, journal
+reappearance or ambiguous timeline fails closed.
+
+The detached one-submit reconcile worker opens the database only as
+`mode=ro&immutable=1` with `query_only=ON`. Its sole writes are durable private
+evidence, result and recovery marker files. The partial-abort continuation
+accepts `mode=reconciled_existing` only after independently re-reading the same
+non-operational digest and exact allowed operational set. It issues no SQLite
+recovery, DML, DDL or checkpoint; the ordinary hot-journal result shape and
+normal maintenance Apply/restore behavior remain unchanged.
+
 ## Operational boundary
 
 The release may preserve the active barrier, but it must not invoke the recovery

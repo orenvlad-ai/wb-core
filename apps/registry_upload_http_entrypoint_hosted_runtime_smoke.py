@@ -5185,6 +5185,9 @@ def main() -> None:
                 "sqlite-hot-journal-recovery-dry-run",
                 "sqlite-hot-journal-recovery-submit",
                 "sqlite-hot-journal-recovery-status",
+                "sqlite-hot-journal-reconcile-existing-dry-run",
+                "sqlite-hot-journal-reconcile-existing-submit",
+                "sqlite-hot-journal-reconcile-existing-status",
             ):
                 if required_command not in command_choices:
                     raise AssertionError(f"hosted adapter must expose {required_command}")
