@@ -1,7 +1,7 @@
 [Unit]
-Description=WB Core exact detached storage sanitation job %i
+Description=WB Core exact detached storage sanitation or guarded SQLite recovery job %i
 After=local-fs.target
-RequiresMountsFor=/opt/wb-core-runtime/state /opt/wb-core-runtime/backups
+RequiresMountsFor=/opt/wb-core-runtime/state /opt/wb-core-runtime/state/backups /opt/wb-core-runtime/backups
 StartLimitIntervalSec=300
 StartLimitBurst=3
 

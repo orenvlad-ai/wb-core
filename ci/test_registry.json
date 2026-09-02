@@ -131,6 +131,7 @@
         ["python3", "apps/storage_recovery_writer_inventory_static_smoke.py"],
         ["python3", "apps/storage_recovery_sanitation_smoke.py"],
         ["python3", "apps/storage_recovery_sanitation_job_smoke.py"],
+        ["python3", "apps/sqlite_hot_journal_recovery_smoke.py"],
         ["python3", "apps/root_storage_warm_archive_smoke.py"],
         ["python3", "apps/promo_campaign_archive_gc_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_refresh_promo_artifact_gc_smoke.py"],
@@ -374,7 +375,7 @@
     },
     {
       "id": "warehouse-recovery",
-      "paths": ["apps/warehouse_recovery*", "apps/storage_recovery*", "apps/business_data_*", "apps/promo_campaign_archive*", "packages/application/warehouse_recovery*", "packages/application/storage_recovery*", "packages/application/business_data_*"],
+      "paths": ["apps/warehouse_recovery*", "apps/storage_recovery*", "apps/sqlite_hot_journal_recovery*", "apps/hosted_runtime_deploy_barrier*", "apps/business_data_*", "apps/promo_campaign_archive*", "packages/application/warehouse_recovery*", "packages/application/storage_recovery*", "packages/application/business_data_*", "migration/183_wbc0027_split_hot_journal_recovery.md"],
       "suites": ["warehouse_recovery"],
       "release": "live_runtime"
     },

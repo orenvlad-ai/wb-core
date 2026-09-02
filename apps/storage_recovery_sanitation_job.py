@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.sqlite_backup_archive import DEFAULT_RESERVED_FREE_BYTES  # noqa: E402
+from apps.recovery_file_utils import file_sha256  # noqa: E402
 from apps.storage_recovery_sanitation import (  # noqa: E402
     FAMILY_POLICIES,
     SanitationError,
@@ -76,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
             "apply",
             "warm-archive-apply",
             "warm-archive-mount-probe",
+            "sqlite-hot-journal-recovery-apply",
         ),
         required=True,
     )
@@ -86,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--manifest-sha256", default="")
     submit.add_argument("--goal-operation-id", default="")
     submit.add_argument("--approval-reference", default="")
+    submit.add_argument("--reviewed-plan", default="")
+    submit.add_argument("--reviewed-plan-sha256", default="")
+    submit.add_argument("--confirm-fingerprint", default="")
     submit.add_argument(
         "--reserved-free-bytes",
         type=int,
@@ -122,6 +127,9 @@ def submit_job(
     manifest_sha256: str = "",
     goal_operation_id: str = "",
     approval_reference: str = "",
+    reviewed_plan: str = "",
+    reviewed_plan_sha256: str = "",
+    confirm_fingerprint: str = "",
     reserved_free_bytes: int = DEFAULT_RESERVED_FREE_BYTES,
     starter: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -135,6 +143,7 @@ def submit_job(
         "apply",
         "warm-archive-apply",
         "warm-archive-mount-probe",
+        "sqlite-hot-journal-recovery-apply",
     }:
         raise SanitationJobError("unsupported sanitation job operation")
     if int(reserved_free_bytes) < 0:
@@ -186,6 +195,51 @@ def submit_job(
         raise SanitationJobError(
             "warm archive mount probe must not carry mutation inputs"
         )
+    if operation == "sqlite-hot-journal-recovery-apply":
+        if (
+            root_name
+            or family
+            or approved
+            or manifest
+            or manifest_sha256
+            or goal_operation_id
+            or not str(approval_reference or "")
+            or len(str(approval_reference)) > 500
+            or re.fullmatch(
+                r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+                r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json",
+                str(reviewed_plan or ""),
+            )
+            is None
+            or not FINGERPRINT_PATTERN.fullmatch(
+                str(reviewed_plan_sha256 or "")
+            )
+            or not FINGERPRINT_PATTERN.fullmatch(
+                str(confirm_fingerprint or "")
+            )
+            or int(reserved_free_bytes) != DEFAULT_RESERVED_FREE_BYTES
+        ):
+            raise SanitationJobError(
+                "hot journal recovery exact request binding is invalid"
+            )
+        reviewed_payload = _read_json(
+            Path(str(reviewed_plan)), label="hot journal reviewed plan"
+        )
+        if (
+            "sha256:" + file_sha256(Path(str(reviewed_plan)))
+            != str(reviewed_plan_sha256)
+            or reviewed_payload.get("contract_name")
+            != "wbc0027_s047_split_hot_journal_recovery_v1"
+            or reviewed_payload.get("operation_id") != job_id
+            or reviewed_payload.get("deployed_sha") != deployed_sha
+            or reviewed_payload.get("fingerprint") != confirm_fingerprint
+            or not str(reviewed_plan).endswith(
+                f"wbc0027-s047-hot-journal-plan-{deployed_sha}.json"
+            )
+        ):
+            raise SanitationJobError(
+                "hot journal reviewed plan identity is invalid"
+            )
 
     runtime_dir = _canonical_directory(runtime_dir, label="runtime")
     root_backups = _canonical_directory(root_backups, label="root backup")
@@ -216,6 +270,15 @@ def submit_job(
                 "manifest": str(manifest),
                 "manifest_sha256": str(manifest_sha256),
                 "goal_operation_id": str(goal_operation_id),
+                "approval_reference": str(approval_reference),
+            }
+        )
+    elif operation == "sqlite-hot-journal-recovery-apply":
+        request_material.update(
+            {
+                "reviewed_plan": str(reviewed_plan),
+                "reviewed_plan_sha256": str(reviewed_plan_sha256),
+                "confirm_fingerprint": str(confirm_fingerprint),
                 "approval_reference": str(approval_reference),
             }
         )
@@ -503,6 +566,15 @@ def _execute_request(
             deployed_sha_file=deployed_sha_file,
             job_id=request["job_id"],
         )
+    if request["operation"] == "sqlite-hot-journal-recovery-apply":
+        from apps.sqlite_hot_journal_recovery import apply_plan
+
+        return apply_plan(
+            plan_path=Path(request["reviewed_plan"]),
+            plan_sha256=request["reviewed_plan_sha256"],
+            fingerprint=request["confirm_fingerprint"],
+            deployed_sha_file=deployed_sha_file,
+        )
     raise SanitationJobError("persisted sanitation operation is invalid")
 
 
@@ -627,6 +699,43 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             or len(material["approval_reference"]) > 500
         ):
             raise SanitationJobError("persisted warm archive request is invalid")
+    elif operation == "sqlite-hot-journal-recovery-apply":
+        material.update(
+            {
+                "reviewed_plan": str(request.get("reviewed_plan") or ""),
+                "reviewed_plan_sha256": str(
+                    request.get("reviewed_plan_sha256") or ""
+                ),
+                "confirm_fingerprint": str(
+                    request.get("confirm_fingerprint") or ""
+                ),
+                "approval_reference": str(
+                    request.get("approval_reference") or ""
+                ),
+            }
+        )
+        if (
+            re.fullmatch(
+                r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+                r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json",
+                material["reviewed_plan"],
+            )
+            is None
+            or not FINGERPRINT_PATTERN.fullmatch(
+                material["reviewed_plan_sha256"]
+            )
+            or not FINGERPRINT_PATTERN.fullmatch(
+                material["confirm_fingerprint"]
+            )
+            or not material["approval_reference"]
+            or len(material["approval_reference"]) > 500
+            or not material["reviewed_plan"].endswith(
+                f"wbc0027-s047-hot-journal-plan-{material['deployed_sha']}.json"
+            )
+        ):
+            raise SanitationJobError(
+                "persisted hot journal recovery request is invalid"
+            )
     elif operation in {"plan", "apply"}:
         material.update(
             {
@@ -641,6 +750,7 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
         "apply",
         "warm-archive-apply",
         "warm-archive-mount-probe",
+        "sqlite-hot-journal-recovery-apply",
     }:
         raise SanitationJobError("persisted sanitation operation is invalid")
     if operation in {"plan", "apply"} and (
@@ -897,6 +1007,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             manifest_sha256=str(args.manifest_sha256),
             goal_operation_id=str(args.goal_operation_id),
             approval_reference=str(args.approval_reference),
+            reviewed_plan=str(args.reviewed_plan),
+            reviewed_plan_sha256=str(args.reviewed_plan_sha256),
+            confirm_fingerprint=str(args.confirm_fingerprint),
             reserved_free_bytes=int(args.reserved_free_bytes),
         )
     if args.command == "status":

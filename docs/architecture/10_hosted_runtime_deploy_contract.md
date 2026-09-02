@@ -413,8 +413,15 @@ The same runner owns the only production path for the active functional cutover 
   never from the nested post-pause baseline. Any timer restored enabled may
   produce only its known paired service/process generation; unknown units or
   processes fail closed. Two fresh stable outer-control reads precede exact
-  restore and barrier release. A further SHA transition is forbidden, and
-  ordinary hold/restore semantics and payloads remain unchanged;
+  restore and barrier release. A further SHA transition is forbidden unless
+  the exact WBC0027 S047 split database has the separately reviewed hot
+  rollback-journal condition documented in
+  `migration/183_wbc0027_split_hot_journal_recovery.md`. That incident-only
+  transition must preserve the six deploy-managed pause-owned timers before
+  any `systemctl` mutation, produce a compressed bit-exact DB+journal capsule,
+  and publish the exact physical-recovery marker before this same partial
+  epoch may continue. Ordinary hold/restore semantics and payloads remain
+  unchanged;
 - The same inventory explicitly pauses and restores the exact pre-hold
   enabled/active state of `wb-core-fbs-warehouse-registry.timer`,
   `wb-core-fbs-shadow-collector.timer`,
