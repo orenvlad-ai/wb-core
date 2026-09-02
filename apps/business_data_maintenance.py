@@ -4278,11 +4278,12 @@ def _validate_hot_journal_recovery_marker(
         database_path = Path(
             str(dict(marker.get("database_after") or {}).get("path") or "")
         )
+        current_database = reconcile.hot._file_identity(database_path)
         if (
             Path(str(database_path) + "-journal").exists()
             or not reconcile.hot._same_file_identity(
                 dict(marker.get("database_after") or {}),
-                reconcile.hot._file_identity(database_path),
+                current_database,
                 allow_mtime_change=True,
                 allow_content_change=True,
             )
@@ -4290,11 +4291,20 @@ def _validate_hot_journal_recovery_marker(
         ):
             raise RuntimeError("reconciled-existing physical/control CAS drifted")
         cutoff_cas = dict(marker.get("observer_cutoff_tail_cas") or {})
+        sqlite_qualification = reconcile._qualify_current_sqlite(
+            database_path,
+            backup_root=reconcile.DEFAULT_BACKUP_ROOT,
+            expected_source=current_database,
+        )
         current = reconcile.database_evidence(
             database_path,
             deployed_sha=deployed_sha,
             observer_cutoff=dict(cutoff_cas.get("cutoff") or {}),
+            sqlite_qualification=sqlite_qualification,
+            expected_database_identity=current_database,
         )
+        if reconcile.hot._file_identity(database_path) != current_database:
+            raise RuntimeError("reconciled-existing logical read drifted")
         current_cutoff_cas = dict(current.get("observer_cutoff_tail_cas") or {})
         for payload in (cutoff_cas, current_cutoff_cas):
             payload.pop("tail_job_ids", None)

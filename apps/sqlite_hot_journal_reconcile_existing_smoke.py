@@ -780,6 +780,229 @@ def _observer_cutoff_tail_cas_smoke(root: Path) -> None:
     )
 
 
+def _observer_cutoff_terminal_boundary_red_smoke(root: Path) -> None:
+    database = _database(root / "observer-terminal-boundary.sqlite3")
+    _insert_incident_outcomes(database)
+    manifest = _incident_manifest(database)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO change_registry_identity_incidents VALUES(?,?,?,?,?)",
+        (
+            "same-job-terminal-incident",
+            reconcile.EXPECTED_SELLER_ID,
+            reconcile.EXPECTED_ACCOUNT_SCOPE,
+            reconcile.EXPECTED_SOURCE_SURFACE,
+            "2026-09-02T12:00:00.25Z",
+        ),
+    )
+    connection.commit()
+    connection.close()
+    with mock.patch.object(reconcile, "INCIDENT_OBSERVER_EXCEPTION_MANIFEST", manifest):
+        reviewed = reconcile.database_evidence(database, deployed_sha=NEW_SHA)
+    cutoff = dict(reviewed["observer_cutoff_tail_cas"]["cutoff"])
+    assert cutoff["terminal_occurred_at"] == "2026-09-02T12:00:00.3Z"
+    assert reviewed["observer_cutoff_tail_cas"]["prefix_table_row_counts"][
+        "identity_incidents"
+    ] == 1
+
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "UPDATE change_registry_identity_incidents SET source_surface=? "
+        "WHERE incident_id='same-job-terminal-incident'",
+        ("drifted",),
+    )
+    connection.commit()
+    connection.close()
+    with mock.patch.object(reconcile, "INCIDENT_OBSERVER_EXCEPTION_MANIFEST", manifest):
+        drifted = reconcile.database_evidence(
+            database,
+            deployed_sha=NEW_SHA,
+            observer_cutoff=cutoff,
+        )
+    assert not reconcile._fresh_matches_plan(
+        {
+            "database": hot._file_identity(database),
+            "database_reconciliation": reviewed,
+        },
+        {
+            "database": hot._file_identity(database),
+            "database_reconciliation": drifted,
+        },
+    )
+
+
+def _sqlite_qualification_red_smoke(root: Path) -> None:
+    qualification_root = root / "qualification-root"
+    qualification_root.mkdir()
+    database = (root / "qualification.sqlite3").resolve()
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        PRAGMA foreign_keys=OFF;
+        CREATE TABLE parent(id INTEGER PRIMARY KEY);
+        CREATE TABLE child(
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES parent(id)
+        );
+        INSERT INTO parent VALUES(1);
+        INSERT INTO child VALUES(1,1);
+        """
+    )
+    connection.commit()
+    connection.close()
+    expected = hot._file_identity(database)
+    sqlite_connect = sqlite3.connect
+    staged_paths: list[Path] = []
+
+    def portable_connect(database_arg: str, *args: object, **kwargs: object):
+        if "/proc/self/fd/" in database_arg or "/dev/fd/" in database_arg:
+            raise sqlite3.OperationalError("synthetic Linux fd-path failure")
+        if database_arg.startswith("file:") and "mode=ro&immutable=1" in database_arg:
+            staged = Path(database_arg.removeprefix("file:").split("?", 1)[0])
+            assert staged.exists()
+            assert staged.stat().st_mode & 0o777 == 0o600
+            staged_paths.append(staged)
+        return sqlite_connect(database_arg, *args, **kwargs)
+
+    with mock.patch.object(reconcile.sqlite3, "connect", side_effect=portable_connect):
+        qualification = reconcile._qualify_current_sqlite(
+            database,
+            backup_root=qualification_root,
+            expected_source=expected,
+            max_bytes=1024 * 1024,
+            max_seconds=10.0,
+            max_copy_bytes_per_second=1024 * 1024 * 1024,
+        )
+    reconcile._validate_sqlite_qualification(
+        qualification,
+        expected_source=expected,
+    )
+    assert qualification["sqlite"]["integrity_check"] == "ok"
+    assert qualification["sqlite"]["foreign_key_violation_count"] == 0
+    assert qualification["copy"]["anonymous"] is True
+    assert qualification["copy"]["exclusive_create"] is True
+    assert qualification["copy"]["staged_mode"] == 0o600
+    assert qualification["copy"]["unlinked_before_checks"] is True
+    assert qualification["copy"]["zero_leftover"] is True
+    assert len(staged_paths) == 1
+    assert not staged_paths[0].exists()
+    assert list(qualification_root.iterdir()) == []
+
+    with mock.patch.object(
+        reconcile.sqlite3,
+        "connect",
+        side_effect=sqlite3.OperationalError("synthetic open failure"),
+    ):
+        try:
+            reconcile._qualify_current_sqlite(
+                database,
+                backup_root=qualification_root,
+                expected_source=expected,
+                max_bytes=1024 * 1024,
+                max_seconds=10.0,
+                max_copy_bytes_per_second=1024 * 1024 * 1024,
+            )
+        except reconcile.ReconcileExistingError as exc:
+            assert "integrity/FK qualification" in str(exc)
+        else:
+            raise AssertionError("SQLite open failure must fail closed")
+    assert list(qualification_root.iterdir()) == []
+
+    operational_database = _database(
+        (root / "qualification-operational.sqlite3").resolve()
+    )
+    operational_identity = hot._file_identity(operational_database)
+    operational_qualification = reconcile._qualify_current_sqlite(
+        operational_database,
+        backup_root=qualification_root,
+        expected_source=operational_identity,
+        max_bytes=1024 * 1024,
+        max_seconds=10.0,
+        max_copy_bytes_per_second=1024 * 1024 * 1024,
+    )
+    qualified_evidence = reconcile.database_evidence(
+        operational_database,
+        deployed_sha=NEW_SHA,
+        sqlite_qualification=operational_qualification,
+        expected_database_identity=operational_identity,
+    )
+    assert qualified_evidence["sqlite_qualification"] == operational_qualification
+    assert qualified_evidence["sqlite_readback"]["integrity_check"] == "ok"
+
+    unknown = json.loads(json.dumps(qualification))
+    unknown["contract_name"] = "unknown/v2"
+    try:
+        reconcile._validate_sqlite_qualification(unknown, expected_source=expected)
+    except reconcile.ReconcileExistingError as exc:
+        assert "qualification schema" in str(exc)
+    else:
+        raise AssertionError("unknown qualification schema must fail closed")
+
+    drifted_identity = dict(expected)
+    drifted_identity["sha256"] = "0" * 64
+    try:
+        reconcile._qualify_current_sqlite(
+            database,
+            backup_root=qualification_root,
+            expected_source=drifted_identity,
+            max_bytes=1024 * 1024,
+            max_seconds=10.0,
+            max_copy_bytes_per_second=1024 * 1024 * 1024,
+        )
+    except reconcile.ReconcileExistingError as exc:
+        assert "identity drifted" in str(exc)
+    else:
+        raise AssertionError("qualification source identity drift must fail closed")
+
+    foreign_key_database = (root / "qualification-fk.sqlite3").resolve()
+    connection = sqlite3.connect(foreign_key_database)
+    connection.executescript(
+        """
+        PRAGMA foreign_keys=OFF;
+        CREATE TABLE parent(id INTEGER PRIMARY KEY);
+        CREATE TABLE child(
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES parent(id)
+        );
+        INSERT INTO child VALUES(1,999);
+        """
+    )
+    connection.commit()
+    connection.close()
+    try:
+        reconcile._qualify_current_sqlite(
+            foreign_key_database,
+            backup_root=qualification_root,
+            expected_source=hot._file_identity(foreign_key_database),
+            max_bytes=1024 * 1024,
+            max_seconds=10.0,
+            max_copy_bytes_per_second=1024 * 1024 * 1024,
+        )
+    except reconcile.ReconcileExistingError as exc:
+        assert "foreign-key" in str(exc)
+    else:
+        raise AssertionError("foreign-key drift must fail closed")
+
+    corrupt_database = (root / "qualification-corrupt.sqlite3").resolve()
+    corrupt_database.write_bytes(database.read_bytes())
+    with corrupt_database.open("r+b") as handle:
+        handle.seek(4096)
+        handle.write(b"\xff" * 512)
+    try:
+        reconcile._qualify_current_sqlite(
+            corrupt_database,
+            backup_root=qualification_root,
+            expected_source=hot._file_identity(corrupt_database),
+            max_bytes=1024 * 1024,
+            max_seconds=10.0,
+            max_copy_bytes_per_second=1024 * 1024 * 1024,
+        )
+    except reconcile.ReconcileExistingError as exc:
+        assert "integrity" in str(exc)
+    else:
+        raise AssertionError("SQLite corruption must fail closed")
+
+
 def _digest_and_allowed_writer_smoke(root: Path) -> dict[str, object]:
     database = _database(root / "operational.sqlite3")
     before_sha = hot.file_sha256(database)
@@ -1149,6 +1372,7 @@ def _marker_validator_smoke(fixture: dict[str, object]) -> None:
     with (
         mock.patch.object(maintenance, "_load_json_object", side_effect=load),
         mock.patch.object(reconcile.hot, "_file_identity", return_value=result["database_after"]),
+        mock.patch.object(reconcile, "_qualify_current_sqlite", return_value={}),
         mock.patch.object(reconcile, "database_evidence", return_value=evidence),
         mock.patch.object(
             maintenance, "_prepared_abort_breakglass_counters",
@@ -1169,6 +1393,7 @@ def _marker_validator_smoke(fixture: dict[str, object]) -> None:
         mock.patch.object(
             reconcile.hot, "_file_identity", return_value=result["database_after"]
         ),
+        mock.patch.object(reconcile, "_qualify_current_sqlite", return_value={}),
         mock.patch.object(reconcile, "database_evidence", return_value=drifted),
         mock.patch.object(
             maintenance, "_prepared_abort_breakglass_counters",
@@ -1187,6 +1412,102 @@ def _marker_validator_smoke(fixture: dict[str, object]) -> None:
             raise AssertionError("post-marker operational append must fail closed")
 
 
+def _query_only_rehearsal_smoke(root: Path) -> None:
+    runtime = root / "query-only-rehearsal"
+    runtime.mkdir()
+    operation_directory = root / "must-not-be-created"
+    barrier = {
+        "active": True,
+        "phase": "acquiring",
+        "hold_confirmed": False,
+        "window_id": WINDOW,
+        "plan_fingerprint": PLAN_FP,
+        "state_fingerprint": STATE_FP,
+    }
+    timer_states = {
+        unit: {"is_enabled": "disabled", "is_active": "inactive"}
+        for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
+    }
+    qualification = {
+        "contract_name": reconcile.SQLITE_QUALIFICATION_CONTRACT_NAME,
+        "method": reconcile.SQLITE_QUALIFICATION_METHOD,
+        "source": {"size_bytes": 4, "sha256": "1" * 64},
+        "copy": {"anonymous": True, "size_bytes": 4, "sha256": "1" * 64},
+        "sqlite": {
+            "query_only": 1,
+            "journal_mode": "delete",
+            "integrity_check": "ok",
+            "foreign_key_violation_count": 0,
+        },
+    }
+    preflight = {
+        "contract_name": reconcile.CONTRACT_NAME,
+        "mode": reconcile.MODE,
+        "read_only": True,
+        "deployed_sha": NEW_SHA,
+        "source_epoch_deployed_sha": OLD_SHA,
+        "barrier": barrier,
+        "maintenance": {
+            "phase": "abort_quiescing",
+            "timer_states": timer_states,
+            "business_operation_counters": {"submit": 0},
+        },
+        "systemd_jobs": [],
+        "business_writer_timeline": {"event_count": 0},
+        "database": {"size_bytes": 4, "sha256": "1" * 64},
+        "database_reconciliation": {
+            "sqlite_qualification": qualification,
+            "non_operational": {"digest": "sha256:" + "2" * 64},
+            "operational": {"digest": "sha256:" + "3" * 64},
+            "observer_cutoff_tail_cas": {"prefix_digest": "sha256:" + "4" * 64},
+            "sqlite_readback": qualification["sqlite"],
+        },
+        "backup": {
+            "directory": str(operation_directory),
+            "capacity_before": {"available_bytes": 100},
+            "qualification_peak_bytes": 4,
+            "qualification_peak_available_bytes": 96,
+            "projected_reserve_headroom_bytes": 90,
+        },
+    }
+    systemd = mock.Mock()
+    systemd.unit_state.side_effect = lambda unit: timer_states[unit]
+    before_paths = set(root.rglob("*"))
+    with (
+        mock.patch.object(reconcile, "barrier_status", return_value=barrier),
+        mock.patch.object(reconcile, "_preflight", return_value=preflight),
+        mock.patch.object(maintenance, "SystemdClient", return_value=systemd),
+    ):
+        result = reconcile.build_rehearsal(
+            runtime_dir=runtime,
+            backup_root=root,
+            deployed_sha=NEW_SHA,
+            deployed_sha_file=root / "unused-sha",
+            operation_id="5" * 64,
+            reserve_bytes=reconcile.DEFAULT_RESERVE_BYTES,
+            evidence_envelope_bytes=reconcile.DEFAULT_EVIDENCE_ENVELOPE_BYTES,
+            stable_interval_seconds=0,
+        )
+    assert result["contract_name"] == reconcile.REHEARSAL_CONTRACT_NAME
+    assert result["status"] == "READY_FOR_RECOVERY"
+    assert result["phase_count"] == 8
+    assert [phase["phase"] for phase in result["phases"]] == [
+        "preflight",
+        "readiness",
+        "JIT",
+        "worker namespace",
+        "storage admission/private plan persistence",
+        "submit boundary",
+        "query-only readback",
+        "release interruption",
+    ]
+    assert result["private_plan_created"] is False
+    assert result["recovery_job_created"] is False
+    assert result["submit_count"] == 0
+    assert result["marker_created"] is False
+    assert set(root.rglob("*")) == before_paths
+
+
 def main() -> None:
     assert reconcile.EXPECTED_SEALED_ROLLBACK["nonce_hex"] == "5296552f"
     assert reconcile.EXPECTED_SEALED_ROLLBACK["record_count"] == 169
@@ -1199,11 +1520,14 @@ def main() -> None:
         _incident_predicate_order_red_smoke(root)
         _incident_exception_rejection_smoke(root)
         _observer_cutoff_tail_cas_smoke(root)
+        _observer_cutoff_terminal_boundary_red_smoke(root)
+        _sqlite_qualification_red_smoke(root)
         fixture = _digest_and_allowed_writer_smoke(root)
         _semantic_rejection_smoke(root)
         _marker_only_apply_smoke(root, fixture)
         _one_submit_smoke(root)
         _marker_validator_smoke(fixture)
+        _query_only_rehearsal_smoke(root)
     print("sqlite_hot_journal_reconcile_existing_smoke: ok")
 
 

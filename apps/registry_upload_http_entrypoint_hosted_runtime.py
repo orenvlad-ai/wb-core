@@ -4012,7 +4012,18 @@ def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
     if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
         raise ValueError("hot journal recovery requires the canonical runtime dir")
     deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-    if recovery_action == "dry-run":
+    if recovery_action == "rehearsal":
+        if not reconcile_existing:
+            raise ValueError("query-only rehearsal is reconcile-existing only")
+        runner_args = [
+            "python3", "apps/sqlite_hot_journal_reconcile_existing.py",
+            "--runtime-dir", runtime_dir,
+            "--deployed-sha", deployed_sha,
+            "--deployed-sha-file", deployed_sha_file,
+            "--operation-id", str(args.operation_id),
+            "--rehearsal",
+        ]
+    elif recovery_action == "dry-run":
         output = str(args.output or "")
         output_pattern = (
             r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
@@ -4089,7 +4100,7 @@ def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
         text=True,
         capture_output=True,
         cwd=ROOT,
-        timeout=7200 if recovery_action == "dry-run" else 60,
+        timeout=7200 if recovery_action in {"dry-run", "rehearsal"} else 60,
         check=False,
     )
     if completed.returncode != 0:
@@ -13395,6 +13406,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     reconcile_existing_plan.set_defaults(
         handler=run_sqlite_hot_journal_recovery_command,
         hot_journal_action="dry-run",
+        hot_journal_mode="reconcile-existing",
+    )
+
+    reconcile_existing_rehearsal = subparsers.add_parser(
+        "sqlite-hot-journal-reconcile-existing-rehearsal",
+        help=(
+            "Run the eight-phase query-only/no-create/no-submit "
+            "reconcile-existing rehearsal."
+        ),
+    )
+    reconcile_existing_rehearsal.add_argument("--deployed-sha", required=True)
+    reconcile_existing_rehearsal.add_argument("--operation-id", required=True)
+    reconcile_existing_rehearsal.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="rehearsal",
         hot_journal_mode="reconcile-existing",
     )
 

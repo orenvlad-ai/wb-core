@@ -20,6 +20,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Final, Mapping, Sequence, TypedDict
 
@@ -47,6 +48,7 @@ from packages.application.storage_registry import (  # noqa: E402
 
 
 CONTRACT_NAME = "wbc0027_s047_reconcile_existing_rollback_v1"
+REHEARSAL_CONTRACT_NAME = "wbc0027_reconcile_existing_query_only_rehearsal/v1"
 RESULT_CONTRACT_NAME = hot.RESULT_CONTRACT_NAME
 MODE = "reconciled_existing"
 DEFAULT_BACKUP_ROOT = hot.DEFAULT_BACKUP_ROOT
@@ -119,6 +121,18 @@ OBSERVER_EVENT_FAILURE_FIELDS = (
 )
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 OPERATION_PATTERN = re.compile(r"[0-9a-f]{64}")
+SQLITE_QUALIFICATION_CONTRACT_NAME = (
+    "wbc0027_current_sqlite_integrity_fk_qualification/v1"
+)
+SQLITE_QUALIFICATION_METHOD = (
+    "bounded_unlinked_backup_copy_full_integrity_fk_v1"
+)
+SQLITE_QUALIFICATION_MAX_BYTES = EXPECTED_DATABASE_SIZE
+SQLITE_QUALIFICATION_MAX_SECONDS = 3_600
+SQLITE_QUALIFICATION_MAX_COPY_BYTES_PER_SECOND = 64 * 1024 * 1024
+SQLITE_QUALIFICATION_COPY_CHUNK_BYTES = 4 * 1024 * 1024
+SQLITE_QUALIFICATION_CACHE_KIB = 32 * 1024
+SQLITE_QUALIFICATION_PROGRESS_OPS = 10_000
 
 
 class IncidentDigestBinding(TypedDict):
@@ -877,7 +891,9 @@ def _observer_cutoff_tail_cas(
     if requested_cutoff is None:
         cutoff_key = max(jobs_by_key)
     else:
-        if set(requested_cutoff) != {"requested_at", "job_id"}:
+        if set(requested_cutoff) != {
+            "requested_at", "job_id", "terminal_occurred_at",
+        }:
             raise ReconcileExistingError("reviewed observer cutoff shape drifted")
         cutoff_key = (
             str(requested_cutoff.get("requested_at") or ""),
@@ -899,6 +915,20 @@ def _observer_cutoff_tail_cas(
         raise ReconcileExistingError("observer tail is not generic scheduled-only")
 
     all_events = list(operational_rows.get("activation_job_events") or [])
+    cutoff_terminal_events = [
+        row for row in all_events
+        if str(row.get("job_id") or "") == cutoff_key[1]
+        and int(row.get("sequence_no") or 0) == 3
+    ]
+    if len(cutoff_terminal_events) != 1:
+        raise ReconcileExistingError("observer cutoff terminal event is ambiguous")
+    cutoff_terminal_at = str(cutoff_terminal_events[0].get("occurred_at") or "")
+    if (
+        not cutoff_terminal_at
+        or requested_cutoff is not None
+        and requested_cutoff.get("terminal_occurred_at") != cutoff_terminal_at
+    ):
+        raise ReconcileExistingError("reviewed observer cutoff terminal event drifted")
     prefix_events = [
         row for row in all_events if str(row.get("job_id") or "") in prefix_job_ids
     ]
@@ -957,7 +987,7 @@ def _observer_cutoff_tail_cas(
         connection,
         "change_registry_identity_incidents",
         where="observed_at>=? AND observed_at<=?",
-        params=(EXPECTED_IMPLICIT_RECOVERY_NOT_BEFORE, cutoff_key[0]),
+        params=(EXPECTED_IMPLICIT_RECOVERY_NOT_BEFORE, cutoff_terminal_at),
     )
     prefix_rows = {
         "jobs": sorted(prefix_jobs, key=_canonical_json),
@@ -972,7 +1002,11 @@ def _observer_cutoff_tail_cas(
     }
     return {
         "contract_name": "wbc0027_observer_cutoff_tail_cas/v1",
-        "cutoff": {"requested_at": cutoff_key[0], "job_id": cutoff_key[1]},
+        "cutoff": {
+            "requested_at": cutoff_key[0],
+            "job_id": cutoff_key[1],
+            "terminal_occurred_at": cutoff_terminal_at,
+        },
         "cutoff_request_digest": jobs_by_key[cutoff_key].get("request_digest"),
         "prefix_digest": _fingerprint(prefix_rows),
         "prefix_job_count": len(prefix_jobs),
@@ -986,11 +1020,303 @@ def _observer_cutoff_tail_cas(
     }
 
 
+def _validate_sqlite_qualification(
+    qualification: Mapping[str, Any],
+    *,
+    expected_source: Mapping[str, Any],
+) -> None:
+    if set(qualification) != {
+        "contract_name", "method", "limits", "source", "copy", "sqlite",
+    }:
+        raise ReconcileExistingError("SQLite qualification schema is unknown")
+    if (
+        qualification.get("contract_name")
+        != SQLITE_QUALIFICATION_CONTRACT_NAME
+        or qualification.get("method") != SQLITE_QUALIFICATION_METHOD
+    ):
+        raise ReconcileExistingError("SQLite qualification schema is unknown")
+    source = dict(qualification.get("source") or {})
+    if source != dict(expected_source):
+        raise ReconcileExistingError("SQLite qualification source identity drifted")
+    limits = dict(qualification.get("limits") or {})
+    if set(limits) != {
+        "max_bytes", "max_seconds", "max_copy_bytes_per_second",
+        "copy_chunk_bytes", "cache_kib", "progress_ops",
+    } or any(
+        int(limits.get(key) or 0) <= 0
+        for key in limits
+    ) or int(limits["max_bytes"]) < int(source.get("size_bytes") or -1):
+        raise ReconcileExistingError("SQLite qualification limits are invalid")
+    copied = dict(qualification.get("copy") or {})
+    if (
+        set(copied) != {
+            "anonymous", "exclusive_create", "staged_mode", "unlinked_before_checks",
+            "zero_leftover", "filesystem_device", "size_bytes", "sha256",
+        }
+        or copied.get("anonymous") is not True
+        or copied.get("exclusive_create") is not True
+        or int(copied.get("staged_mode") or -1) != 0o600
+        or copied.get("unlinked_before_checks") is not True
+        or copied.get("zero_leftover") is not True
+        or int(copied.get("filesystem_device") or -1) < 0
+        or int(copied.get("size_bytes") or -1)
+        != int(source.get("size_bytes") or -2)
+        or copied.get("sha256") != source.get("sha256")
+        or re.fullmatch(r"[0-9a-f]{64}", str(copied.get("sha256") or ""))
+        is None
+    ):
+        raise ReconcileExistingError("SQLite qualification copy identity drifted")
+    sqlite_readback = dict(qualification.get("sqlite") or {})
+    if (
+        set(sqlite_readback) != {
+            "query_only", "journal_mode", "integrity_check",
+            "foreign_key_violation_count", "schema_version", "user_version",
+            "application_id", "page_size", "page_count", "freelist_count",
+            "encoding",
+        }
+        or int(sqlite_readback.get("query_only") or 0) != 1
+        or sqlite_readback.get("integrity_check") != "ok"
+        or int(sqlite_readback.get("foreign_key_violation_count", -1)) != 0
+        or int(sqlite_readback.get("schema_version", -1)) < 0
+        or int(sqlite_readback.get("user_version", -1)) < 0
+        or int(sqlite_readback.get("application_id", -1)) < 0
+        or int(sqlite_readback.get("page_size") or 0) <= 0
+        or int(sqlite_readback.get("page_count") or 0) <= 0
+        or int(sqlite_readback.get("freelist_count", -1)) < 0
+        or not str(sqlite_readback.get("journal_mode") or "")
+        or not str(sqlite_readback.get("encoding") or "")
+    ):
+        raise ReconcileExistingError("SQLite integrity/FK qualification failed")
+
+
+def _qualify_current_sqlite(
+    database: Path,
+    *,
+    backup_root: Path,
+    expected_source: Mapping[str, Any],
+    max_bytes: int = SQLITE_QUALIFICATION_MAX_BYTES,
+    max_seconds: float = SQLITE_QUALIFICATION_MAX_SECONDS,
+    max_copy_bytes_per_second: int = SQLITE_QUALIFICATION_MAX_COPY_BYTES_PER_SECOND,
+) -> dict[str, Any]:
+    database = database.resolve()
+    backup_root = backup_root.resolve()
+    max_bytes = int(max_bytes)
+    max_seconds_int = int(max_seconds)
+    max_copy_bytes_per_second = int(max_copy_bytes_per_second)
+    if (
+        backup_root.is_symlink()
+        or not backup_root.is_dir()
+        or max_bytes <= 0
+        or max_seconds_int <= 0
+        or max_copy_bytes_per_second <= 0
+    ):
+        raise ReconcileExistingError("SQLite qualification boundary is invalid")
+    current_metadata = hot._file_identity(database, sha256=False)
+    if (
+        not hot._same_file_identity(
+            expected_source,
+            current_metadata,
+            allow_content_change=True,
+        )
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(expected_source.get("sha256") or "")
+        ) is None
+    ):
+        raise ReconcileExistingError("SQLite qualification source identity drifted")
+    source_size = int(expected_source.get("size_bytes") or -1)
+    capacity = hot._filesystem(backup_root)
+    if (
+        source_size <= 0
+        or source_size > max_bytes
+        or int(capacity["available_bytes"]) < source_size
+    ):
+        raise ReconcileExistingError("SQLite qualification copy capacity is insufficient")
+
+    deadline = time.monotonic() + max_seconds_int
+    started = time.monotonic()
+    digest = hashlib.sha256()
+    copied_bytes = 0
+    staging_path: Path | None = None
+    unlinked_before_checks = False
+    try:
+        with (
+            database.open("rb", buffering=0) as source,
+            tempfile.NamedTemporaryFile(
+                mode="w+b",
+                dir=backup_root,
+                prefix=".wbc0027-sqlite-qualification-",
+                suffix=".sqlite3",
+                delete=False,
+            ) as copied,
+        ):
+            staging_path = Path(copied.name).resolve()
+            staged_stat = os.fstat(copied.fileno())
+            if (
+                staging_path.parent != backup_root
+                or staging_path.is_symlink()
+                or staged_stat.st_nlink != 1
+                or staged_stat.st_mode & 0o777 != 0o600
+            ):
+                raise ReconcileExistingError(
+                    "SQLite qualification staging identity is invalid"
+                )
+            while True:
+                if time.monotonic() > deadline:
+                    raise ReconcileExistingError("SQLite qualification copy timed out")
+                chunk = source.read(SQLITE_QUALIFICATION_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                copied_bytes += len(chunk)
+                if copied_bytes > max_bytes:
+                    raise ReconcileExistingError(
+                        "SQLite qualification copy exceeded its byte bound"
+                    )
+                copied.write(chunk)
+                digest.update(chunk)
+                expected_elapsed = copied_bytes / max_copy_bytes_per_second
+                remaining_delay = expected_elapsed - (time.monotonic() - started)
+                if remaining_delay > 0:
+                    time.sleep(min(remaining_delay, 0.25))
+            copied.flush()
+            source_after = hot._file_identity(database, sha256=False)
+            copied_sha256 = digest.hexdigest()
+            if (
+                copied_bytes != source_size
+                or copied_sha256 != expected_source.get("sha256")
+                or not hot._same_file_identity(
+                    expected_source,
+                    source_after,
+                    allow_content_change=True,
+                )
+            ):
+                raise ReconcileExistingError(
+                    "SQLite qualification source identity drifted"
+                )
+            copied.seek(0)
+            with closing(
+                sqlite3.connect(
+                    f"file:{staging_path.as_posix()}?mode=ro&immutable=1",
+                    uri=True,
+                    timeout=120,
+                )
+            ) as connection:
+                staging_path.unlink()
+                unlinked_before_checks = True
+                if staging_path.exists() or os.fstat(copied.fileno()).st_nlink != 0:
+                    raise ReconcileExistingError(
+                        "SQLite qualification staging unlink failed"
+                    )
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute(
+                    f"PRAGMA cache_size=-{SQLITE_QUALIFICATION_CACHE_KIB}"
+                )
+                connection.execute("PRAGMA mmap_size=0")
+
+                def within_deadline() -> int:
+                    return 1 if time.monotonic() > deadline else 0
+
+                connection.set_progress_handler(
+                    within_deadline,
+                    SQLITE_QUALIFICATION_PROGRESS_OPS,
+                )
+                integrity = [
+                    str(row[0])
+                    for row in connection.execute("PRAGMA integrity_check")
+                ]
+                foreign_key_violation = connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchone()
+                if integrity != ["ok"]:
+                    raise ReconcileExistingError(
+                        "SQLite integrity qualification failed"
+                    )
+                if foreign_key_violation is not None:
+                    raise ReconcileExistingError(
+                        "SQLite foreign-key qualification failed"
+                    )
+                sqlite_readback = {
+                    "query_only": int(
+                        connection.execute("PRAGMA query_only").fetchone()[0]
+                    ),
+                    "journal_mode": str(
+                        connection.execute("PRAGMA journal_mode").fetchone()[0]
+                    ),
+                    "integrity_check": "ok",
+                    "foreign_key_violation_count": 0,
+                    "schema_version": int(
+                        connection.execute("PRAGMA schema_version").fetchone()[0]
+                    ),
+                    "user_version": int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    ),
+                    "application_id": int(
+                        connection.execute("PRAGMA application_id").fetchone()[0]
+                    ),
+                    "page_size": int(
+                        connection.execute("PRAGMA page_size").fetchone()[0]
+                    ),
+                    "page_count": int(
+                        connection.execute("PRAGMA page_count").fetchone()[0]
+                    ),
+                    "freelist_count": int(
+                        connection.execute("PRAGMA freelist_count").fetchone()[0]
+                    ),
+                    "encoding": str(
+                        connection.execute("PRAGMA encoding").fetchone()[0]
+                    ),
+                }
+    except ReconcileExistingError:
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        raise ReconcileExistingError(
+            "SQLite integrity/FK qualification failed"
+        ) from exc
+    finally:
+        if staging_path is not None:
+            try:
+                staging_path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise ReconcileExistingError(
+                    "SQLite qualification staging cleanup failed"
+                ) from exc
+    qualification = {
+        "contract_name": SQLITE_QUALIFICATION_CONTRACT_NAME,
+        "method": SQLITE_QUALIFICATION_METHOD,
+        "limits": {
+            "max_bytes": max_bytes,
+            "max_seconds": max_seconds_int,
+            "max_copy_bytes_per_second": max_copy_bytes_per_second,
+            "copy_chunk_bytes": SQLITE_QUALIFICATION_COPY_CHUNK_BYTES,
+            "cache_kib": SQLITE_QUALIFICATION_CACHE_KIB,
+            "progress_ops": SQLITE_QUALIFICATION_PROGRESS_OPS,
+        },
+        "source": dict(expected_source),
+        "copy": {
+            "anonymous": True,
+            "exclusive_create": True,
+            "staged_mode": 0o600,
+            "unlinked_before_checks": unlinked_before_checks,
+            "zero_leftover": staging_path is not None and not staging_path.exists(),
+            "filesystem_device": int(capacity["device"]),
+            "size_bytes": copied_bytes,
+            "sha256": copied_sha256,
+        },
+        "sqlite": sqlite_readback,
+    }
+    _validate_sqlite_qualification(
+        qualification,
+        expected_source=expected_source,
+    )
+    return qualification
+
+
 def database_evidence(
     database: Path,
     *,
     deployed_sha: str,
     observer_cutoff: Mapping[str, Any] | None = None,
+    sqlite_qualification: Mapping[str, Any] | None = None,
+    expected_database_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     with closing(
         sqlite3.connect(
@@ -1022,24 +1348,58 @@ def database_evidence(
             sorted(tables - set(OPERATIONAL_TABLES)),
         )
         operational = _stream_tables(connection, OPERATIONAL_TABLES)
-        integrity = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
-        foreign_keys = list(connection.execute("PRAGMA foreign_key_check"))
-        if integrity != ["ok"] or foreign_keys:
-            raise ReconcileExistingError("query-only SQLite integrity readback failed")
-        sqlite_readback = {
-            "query_only": int(connection.execute("PRAGMA query_only").fetchone()[0]),
-            "journal_mode": str(connection.execute("PRAGMA journal_mode").fetchone()[0]),
-            "integrity_check": "ok",
-            "foreign_key_violation_count": 0,
-            "schema_version": int(connection.execute("PRAGMA schema_version").fetchone()[0]),
-            "user_version": int(connection.execute("PRAGMA user_version").fetchone()[0]),
-        }
+        if sqlite_qualification is not None:
+            if expected_database_identity is None:
+                raise ReconcileExistingError(
+                    "SQLite qualification source identity is absent"
+                )
+            _validate_sqlite_qualification(
+                sqlite_qualification,
+                expected_source=expected_database_identity,
+            )
+            sqlite_readback = {
+                key: dict(sqlite_qualification["sqlite"])[key]
+                for key in (
+                    "query_only", "journal_mode", "integrity_check",
+                    "foreign_key_violation_count", "schema_version",
+                    "user_version",
+                )
+            }
+        else:
+            integrity = [
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+            ]
+            foreign_keys = list(connection.execute("PRAGMA foreign_key_check"))
+            if integrity != ["ok"] or foreign_keys:
+                raise ReconcileExistingError(
+                    "query-only SQLite integrity readback failed"
+                )
+            sqlite_readback = {
+                "query_only": int(
+                    connection.execute("PRAGMA query_only").fetchone()[0]
+                ),
+                "journal_mode": str(
+                    connection.execute("PRAGMA journal_mode").fetchone()[0]
+                ),
+                "integrity_check": "ok",
+                "foreign_key_violation_count": 0,
+                "schema_version": int(
+                    connection.execute("PRAGMA schema_version").fetchone()[0]
+                ),
+                "user_version": int(
+                    connection.execute("PRAGMA user_version").fetchone()[0]
+                ),
+            }
     return {
         "non_operational": non_operational,
         "operational": operational,
         "operational_rows": operational_rows,
         "observer_cutoff_tail_cas": observer_cutoff_tail_cas,
         "sqlite_readback": sqlite_readback,
+        **(
+            {"sqlite_qualification": dict(sqlite_qualification)}
+            if sqlite_qualification is not None else {}
+        ),
     }
 
 
@@ -1247,6 +1607,14 @@ def _preflight(
         or first["sha256"] == hot.EXPECTED_RECOVERED_DATABASE_SHA256
     ):
         raise ReconcileExistingError("implicit-recovery database identity is outside incident")
+    capacity = hot._filesystem(backup_root)
+    qualification_peak_bytes = int(first["size_bytes"])
+    if int(capacity["available_bytes"]) < (
+        reserve_bytes + evidence_envelope_bytes + qualification_peak_bytes
+    ):
+        raise ReconcileExistingError(
+            "SQLite qualification copy would breach Finance reserve"
+        )
     openers = hot._openers({database})
     kernel_locks = hot._kernel_locks({database})
     if kernel_locks:
@@ -1259,10 +1627,17 @@ def _preflight(
             or "wb-core-registry-http.service" not in opener["cgroup"]
         ):
             raise ReconcileExistingError("operational database opener is unknown")
+    sqlite_qualification = _qualify_current_sqlite(
+        database,
+        backup_root=backup_root,
+        expected_source=second,
+    )
     database_snapshot = database_evidence(
         database,
         deployed_sha=control["deployed_sha"],
         observer_cutoff=observer_cutoff,
+        sqlite_qualification=sqlite_qualification,
+        expected_database_identity=second,
     )
     if journal.exists() or hot._file_identity(database) != second:
         raise ReconcileExistingError("database drifted across logical reconciliation")
@@ -1273,7 +1648,6 @@ def _preflight(
         or raw_file["sha256"] != hot.EXPECTED_RAW_SHA256
     ):
         raise ReconcileExistingError("Finance raw/generation manifest identity drifted")
-    capacity = hot._filesystem(backup_root)
     if int(capacity["available_bytes"]) < reserve_bytes + evidence_envelope_bytes:
         raise ReconcileExistingError("reconciliation evidence would breach Finance reserve")
     backup_directory = (
@@ -1311,8 +1685,12 @@ def _preflight(
             "directory": str(backup_directory),
             "reserve_bytes": reserve_bytes,
             "evidence_envelope_bytes": evidence_envelope_bytes,
+            "qualification_peak_bytes": qualification_peak_bytes,
             "capacity_before": capacity,
             "projected_available_bytes": int(capacity["available_bytes"]) - evidence_envelope_bytes,
+            "qualification_peak_available_bytes": (
+                int(capacity["available_bytes"]) - qualification_peak_bytes
+            ),
             "projected_reserve_headroom_bytes": int(capacity["available_bytes"]) - evidence_envelope_bytes - reserve_bytes,
         },
         "expected_effect": {
@@ -1331,6 +1709,149 @@ def build_plan(**kwargs: Any) -> dict[str, Any]:
     return plan
 
 
+def build_rehearsal(
+    *,
+    runtime_dir: Path,
+    backup_root: Path,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+    operation_id: str,
+    reserve_bytes: int,
+    evidence_envelope_bytes: int,
+    stable_interval_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """Run the complete pre-submit contour without durable creation or submit."""
+
+    runtime_dir = runtime_dir.resolve()
+    barrier_before = barrier_status(runtime_dir)
+    window_id = str(barrier_before.get("window_id") or "")
+    plan_fingerprint = str(barrier_before.get("plan_fingerprint") or "")
+    evidence = _preflight(
+        runtime_dir=runtime_dir,
+        backup_root=backup_root,
+        deployed_sha=deployed_sha,
+        deployed_sha_file=deployed_sha_file,
+        operation_id=operation_id,
+        window_id=window_id,
+        plan_fingerprint=plan_fingerprint,
+        reserve_bytes=reserve_bytes,
+        evidence_envelope_bytes=evidence_envelope_bytes,
+        stable_interval_seconds=stable_interval_seconds,
+    )
+    barrier_after = barrier_status(runtime_dir)
+    if barrier_after != barrier_before:
+        raise ReconcileExistingError("barrier drifted across query-only rehearsal")
+    systemd = maintenance.SystemdClient()
+    timer_states_after = {
+        unit: systemd.unit_state(unit)
+        for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
+    }
+    timer_states_before = dict(evidence["maintenance"]["timer_states"])
+    if timer_states_after != timer_states_before:
+        raise ReconcileExistingError("timer state drifted across query-only rehearsal")
+    backup_directory = Path(str(evidence["backup"]["directory"]))
+    if backup_directory.exists():
+        raise ReconcileExistingError("query-only rehearsal created private plan namespace")
+    reconciliation = dict(evidence["database_reconciliation"])
+    qualification = dict(reconciliation["sqlite_qualification"])
+    phases = [
+        {
+            "phase": "preflight",
+            "status": "passed",
+            "evidence": {
+                "contract_name": evidence["contract_name"],
+                "mode": evidence["mode"],
+                "read_only": evidence["read_only"],
+            },
+        },
+        {
+            "phase": "readiness",
+            "status": "passed",
+            "evidence": {
+                "barrier": evidence["barrier"],
+                "maintenance_phase": evidence["maintenance"]["phase"],
+                "timer_states_fingerprint": _fingerprint(timer_states_before),
+                "business_writer_timeline": evidence["business_writer_timeline"],
+            },
+        },
+        {
+            "phase": "JIT",
+            "status": "passed",
+            "evidence": {
+                "qualification_contract_name": qualification["contract_name"],
+                "qualification_method": qualification["method"],
+                "source_identity": qualification["source"],
+                "copy_identity": qualification["copy"],
+                "sqlite": qualification["sqlite"],
+            },
+        },
+        {
+            "phase": "worker namespace",
+            "status": "passed",
+            "evidence": {
+                "systemd_jobs": evidence["systemd_jobs"],
+                "operation_directory": str(backup_directory),
+                "operation_directory_absent": True,
+                "recovery_job_created": False,
+            },
+        },
+        {
+            "phase": "storage admission/private plan persistence",
+            "status": "passed",
+            "evidence": {
+                "capacity_before": evidence["backup"]["capacity_before"],
+                "qualification_peak_bytes": evidence["backup"]["qualification_peak_bytes"],
+                "qualification_peak_available_bytes": evidence["backup"]["qualification_peak_available_bytes"],
+                "projected_reserve_headroom_bytes": evidence["backup"]["projected_reserve_headroom_bytes"],
+                "private_plan_created": False,
+            },
+        },
+        {
+            "phase": "submit boundary",
+            "status": "passed",
+            "evidence": {
+                "submit_count": 0,
+                "business_operation_counters": evidence["maintenance"]["business_operation_counters"],
+                "marker_created": False,
+            },
+        },
+        {
+            "phase": "query-only readback",
+            "status": "passed",
+            "evidence": {
+                "database_identity": evidence["database"],
+                "non_operational": reconciliation["non_operational"],
+                "operational": reconciliation["operational"],
+                "observer_cutoff_tail_cas": reconciliation["observer_cutoff_tail_cas"],
+                "sqlite_readback": reconciliation["sqlite_readback"],
+                "sqlite_write": False,
+            },
+        },
+        {
+            "phase": "release interruption",
+            "status": "passed",
+            "evidence": {
+                "deployed_sha": evidence["deployed_sha"],
+                "source_epoch_deployed_sha": evidence["source_epoch_deployed_sha"],
+                "barrier_fingerprint_unchanged": barrier_before["state_fingerprint"],
+                "timer_states_unchanged": True,
+            },
+        },
+    ]
+    return {
+        "contract_name": REHEARSAL_CONTRACT_NAME,
+        "status": "READY_FOR_RECOVERY",
+        "operation_id": operation_id,
+        "deployed_sha": evidence["deployed_sha"],
+        "phase_count": len(phases),
+        "phases": phases,
+        "private_plan_created": False,
+        "recovery_job_created": False,
+        "submit_count": 0,
+        "marker_created": False,
+    }
+
+
 def _fresh_matches_plan(plan: Mapping[str, Any], fresh: Mapping[str, Any]) -> bool:
     fresh_material = json.loads(_canonical_json(fresh))
     plan_material = json.loads(_canonical_json(plan))
@@ -1345,6 +1866,22 @@ def _fresh_matches_plan(plan: Mapping[str, Any], fresh: Mapping[str, Any]) -> bo
         return False
     plan_reconciliation = dict(plan_material.get("database_reconciliation") or {})
     fresh_reconciliation = dict(fresh_material.get("database_reconciliation") or {})
+    plan_qualification = plan_reconciliation.pop("sqlite_qualification", None)
+    fresh_qualification = fresh_reconciliation.pop("sqlite_qualification", None)
+    if (plan_qualification is None) != (fresh_qualification is None):
+        return False
+    if plan_qualification is not None:
+        try:
+            _validate_sqlite_qualification(
+                plan_qualification,
+                expected_source=plan_database,
+            )
+            _validate_sqlite_qualification(
+                fresh_qualification,
+                expected_source=fresh_database,
+            )
+        except ReconcileExistingError:
+            return False
     plan_cutoff_cas = dict(plan_reconciliation.get("observer_cutoff_tail_cas") or {})
     fresh_cutoff_cas = dict(fresh_reconciliation.get("observer_cutoff_tail_cas") or {})
     stable_cutoff_keys = {
@@ -1536,16 +2073,37 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deployed-sha", required=True)
     parser.add_argument("--deployed-sha-file", type=Path, default=ROOT / ".wb-core-runtime-sha")
     parser.add_argument("--operation-id", required=True)
-    parser.add_argument("--window-id", required=True)
-    parser.add_argument("--plan-fingerprint", required=True)
+    parser.add_argument("--window-id")
+    parser.add_argument("--plan-fingerprint")
     parser.add_argument("--reserve-bytes", type=int, default=DEFAULT_RESERVE_BYTES)
     parser.add_argument("--evidence-envelope-bytes", type=int, default=DEFAULT_EVIDENCE_ENVELOPE_BYTES)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--rehearsal", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.rehearsal:
+        if args.output or args.window_id or args.plan_fingerprint:
+            raise ReconcileExistingError(
+                "query-only rehearsal resolves the active barrier and creates no output"
+            )
+        rehearsal = build_rehearsal(
+            runtime_dir=args.runtime_dir,
+            backup_root=args.backup_root,
+            deployed_sha=args.deployed_sha,
+            deployed_sha_file=args.deployed_sha_file,
+            operation_id=args.operation_id,
+            reserve_bytes=args.reserve_bytes,
+            evidence_envelope_bytes=args.evidence_envelope_bytes,
+        )
+        print(json.dumps(rehearsal, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+    if not args.window_id or not args.plan_fingerprint:
+        raise ReconcileExistingError(
+            "dry-run requires the exact barrier window and plan fingerprint"
+        )
     plan = build_plan(
         runtime_dir=args.runtime_dir,
         backup_root=args.backup_root,

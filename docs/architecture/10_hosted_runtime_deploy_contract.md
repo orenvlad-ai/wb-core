@@ -422,9 +422,19 @@ The same runner owns the only production path for the active functional cutover 
   and publish the exact physical-recovery marker before this same partial
   epoch may continue. Its reconcile-existing alternative may bind only the two
   digest-exact historical observer exceptions documented there; a reviewed
-  prefix-through-cutoff CAS may admit a later tail only when every appended job
-  is a generic scheduled complete/fact-zero outcome. Ordinary hold/restore
-  semantics and payloads remain unchanged;
+  prefix-through-terminal-cutoff CAS may admit a later tail only when every
+  appended job is a generic scheduled complete/fact-zero outcome. Its current
+  full SQLite integrity/FK qualification uses only a bounded O_EXCL/0600 exact
+  byte copy on the distinct backup filesystem, opened by SQLite and immediately
+  unlinked before checks, with guaranteed cleanup, zero-leftover proof,
+  source/copy SHA equality, reserve admission and timeout/throughput/cache
+  bounds; no full integrity scan
+  runs against the live database. The dedicated
+  `sqlite-hot-journal-reconcile-existing-rehearsal` hosted command resolves the
+  active barrier inside the deployed runtime and returns the closed eight-phase
+  query-only proof without creating a plan, job or marker and with submit count
+  zero. Ordinary hold/restore semantics and payloads
+  remain unchanged;
 - The same inventory explicitly pauses and restores the exact pre-hold
   enabled/active state of `wb-core-fbs-warehouse-registry.timer`,
   `wb-core-fbs-shadow-collector.timer`,
