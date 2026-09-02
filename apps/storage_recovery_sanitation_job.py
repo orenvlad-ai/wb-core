@@ -697,9 +697,6 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             is None
             or not material["approval_reference"]
             or len(material["approval_reference"]) > 500
-            or not material["reviewed_plan"].endswith(
-                f"wbc0027-s047-hot-journal-plan-{material['deployed_sha']}.json"
-            )
         ):
             raise SanitationJobError("persisted warm archive request is invalid")
     elif operation == "sqlite-hot-journal-recovery-apply":
@@ -732,6 +729,9 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             )
             or not material["approval_reference"]
             or len(material["approval_reference"]) > 500
+            or not material["reviewed_plan"].endswith(
+                f"wbc0027-s047-hot-journal-plan-{material['deployed_sha']}.json"
+            )
         ):
             raise SanitationJobError(
                 "persisted hot journal recovery request is invalid"
