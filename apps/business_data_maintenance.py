@@ -4265,6 +4265,11 @@ def _validate_hot_journal_recovery_marker(
             and result.get("operational_digest")
             != marker.get("operational_digest")
         )
+        or (
+            reconciled_existing
+            and result.get("observer_cutoff_tail_cas")
+            != marker.get("observer_cutoff_tail_cas")
+        )
     ):
         raise RuntimeError("hot journal recovery marker identity drifted")
     if reconciled_existing:
@@ -4275,19 +4280,28 @@ def _validate_hot_journal_recovery_marker(
         )
         if (
             Path(str(database_path) + "-journal").exists()
-            or reconcile.hot._file_identity(database_path)
-            != marker.get("database_after")
+            or not reconcile.hot._same_file_identity(
+                dict(marker.get("database_after") or {}),
+                reconcile.hot._file_identity(database_path),
+                allow_mtime_change=True,
+                allow_content_change=True,
+            )
             or _prepared_abort_breakglass_counters(runtime_dir) != counters
         ):
             raise RuntimeError("reconciled-existing physical/control CAS drifted")
+        cutoff_cas = dict(marker.get("observer_cutoff_tail_cas") or {})
         current = reconcile.database_evidence(
             database_path,
             deployed_sha=deployed_sha,
+            observer_cutoff=dict(cutoff_cas.get("cutoff") or {}),
         )
+        current_cutoff_cas = dict(current.get("observer_cutoff_tail_cas") or {})
+        for payload in (cutoff_cas, current_cutoff_cas):
+            payload.pop("tail_job_ids", None)
+            payload.pop("tail_job_count", None)
         if (
             current.get("non_operational") != marker.get("non_operational_digest")
-            or current.get("operational") != marker.get("operational_digest")
-            or current.get("operational_rows") != result.get("operational_rows")
+            or current_cutoff_cas != cutoff_cas
             or current.get("sqlite_readback") != marker.get("sqlite_readback")
         ):
             raise RuntimeError("reconciled-existing logical CAS drifted")

@@ -21,7 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Final, Mapping, Sequence, TypedDict
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,8 +90,16 @@ OPERATIONAL_TABLES = (
     "change_registry_observer_job_events",
     "change_registry_checkpoints",
     "change_registry_checkpoint_source_manifests",
+    "change_registry_observation_values",
+    "change_registry_identity_incidents",
+    "change_registry_facts",
+    "change_registry_fact_links",
+    "change_registry_observer_health_events",
+    "change_registry_observer_leases",
     "sheet_vitrina_v1_source_health_status",
 )
+INCIDENT_FACTS_TABLE = "change_registry_facts"
+INCIDENT_FACT_LINKS_TABLE = "change_registry_fact_links"
 ACTIVATION_JOB_PREFIX = "crjob_activation_"
 ACTIVATION_JOB_PATTERN = re.compile(r"crjob_activation_([0-9a-f]{40})")
 SCHEDULED_JOB_PATTERN = re.compile(r"crjob_[0-9a-f]{32}")
@@ -111,6 +119,130 @@ OBSERVER_EVENT_FAILURE_FIELDS = (
 )
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 OPERATION_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+class IncidentDigestBinding(TypedDict):
+    row_count: int
+    digest: str
+
+
+class IncidentExpectedFact(TypedDict):
+    target_kind: str
+    nm_id: int
+    advert_id: int
+    placement: str
+    parameter_field: str
+    before_value_kind: str
+    before_value_integer: int | None
+    before_value_text: str | None
+    after_value_kind: str
+    after_value_integer: int | None
+    after_value_text: str | None
+
+
+class IncidentObserverException(TypedDict):
+    job_id: str
+    scheduled_slot: str
+    checkpoint_id: str
+    event_states: tuple[str, str, str]
+    terminal_fact_count: int
+    checkpoint_completeness: str
+    source_completeness: Mapping[str, str]
+    expected_facts: tuple[IncidentExpectedFact, ...]
+
+
+class IncidentObserverExceptionManifest(TypedDict):
+    contract_name: str
+    validator_contract_name: str
+    historical_deployed_sha: str
+    observer_contract_name: str
+    observer_contract_version: int
+    digests: Mapping[str, IncidentDigestBinding]
+    exceptions: tuple[IncidentObserverException, IncidentObserverException]
+
+
+INCIDENT_OBSERVER_EXCEPTION_MANIFEST: Final[IncidentObserverExceptionManifest] = {
+    "contract_name": "wbc0027_observer_historical_outcome_exceptions/v1",
+    "validator_contract_name": CONTRACT_NAME,
+    "historical_deployed_sha": "e58d9a6b71bd4940ab43f4d6cd240b5e0043b9a1",
+    "observer_contract_name": "wb_change_registry_observer",
+    "observer_contract_version": 1,
+    "digests": {
+        "jobs": {
+            "row_count": 2,
+            "digest": "sha256:e09acb5967e59daa9c55cd4291e490b2875c6dfac4f667fc825f73dd03bc4f18",
+        },
+        "events": {
+            "row_count": 6,
+            "digest": "sha256:c528c100cafaffdd4e7b20bddd14410120a9beeb8e94db98fee6d438dedd2923",
+        },
+        "checkpoints": {
+            "row_count": 2,
+            "digest": "sha256:c36ed5050b3db1e25106d82ea23d0f7bf247ee901b73e07b8f49c9cebfa1c707",
+        },
+        "source_manifests": {
+            "row_count": 4,
+            "digest": "sha256:d5164078f5616b581fd7401871e841f9fb29f1a1d8ac98c26461dce04ac3ca34",
+        },
+        "facts": {
+            "row_count": 2,
+            "digest": "sha256:8bcd709b4051b90f3298c9f6842355924021889392eb3dd9a5e5fa708a829918",
+        },
+        "fact_links": {
+            "row_count": 2,
+            "digest": "sha256:714b3814125a312cffbc37f4880db5da260258a1b188dd9b51659ad212b59fe4",
+        },
+    },
+    "exceptions": (
+        {
+            "job_id": "crjob_2d37204c6d2d1f9aafdac2741db4f4af",
+            "scheduled_slot": "2026-09-02T10:00:00Z",
+            "checkpoint_id": "crcp_1f97684daf992e9301e9b7be049a1e6b",
+            "event_states": ("accepted", "running", "partial"),
+            "terminal_fact_count": 0,
+            "checkpoint_completeness": "partial",
+            "source_completeness": {"ads": "partial", "prices": "complete"},
+            "expected_facts": (),
+        },
+        {
+            "job_id": "crjob_8698f4d3246c01376b028d0b12ae3907",
+            "scheduled_slot": "2026-09-02T12:00:00Z",
+            "checkpoint_id": "crcp_8d8e46543bb97084d2023ad8f1ea109d",
+            "event_states": ("accepted", "running", "complete"),
+            "terminal_fact_count": 2,
+            "checkpoint_completeness": "complete",
+            "source_completeness": {"ads": "complete", "prices": "complete"},
+            "expected_facts": (
+                {
+                    "target_kind": "bid",
+                    "nm_id": 259460529,
+                    "advert_id": 39293049,
+                    "placement": "recommendations",
+                    "parameter_field": "bid_minor",
+                    "before_value_kind": "integer",
+                    "before_value_integer": 500,
+                    "before_value_text": None,
+                    "after_value_kind": "integer",
+                    "after_value_integer": 400,
+                    "after_value_text": None,
+                },
+                {
+                    "target_kind": "campaign",
+                    "nm_id": 259460529,
+                    "advert_id": 39293049,
+                    "placement": "",
+                    "parameter_field": "campaign_state",
+                    "before_value_kind": "text",
+                    "before_value_integer": None,
+                    "before_value_text": "active",
+                    "after_value_kind": "text",
+                    "after_value_integer": None,
+                    "after_value_text": "paused",
+                },
+            ),
+        },
+    ),
+}
 
 
 class ReconcileExistingError(RuntimeError):
@@ -295,6 +427,174 @@ def _validate_job_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     return trigger, deployed_sha
 
 
+def _incident_exception_bindings(
+    connection: sqlite3.Connection,
+    *,
+    jobs: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+    checkpoints: Sequence[Mapping[str, Any]],
+    manifests: Sequence[Mapping[str, Any]],
+    activation_shas: set[str],
+) -> tuple[
+    dict[str, IncidentObserverException],
+    dict[str, IncidentObserverException],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    manifest = INCIDENT_OBSERVER_EXCEPTION_MANIFEST
+    if set(manifest) != {
+        "contract_name", "validator_contract_name", "historical_deployed_sha",
+        "observer_contract_name", "observer_contract_version", "digests",
+        "exceptions",
+    } or any(
+        (
+            manifest.get("contract_name")
+            != "wbc0027_observer_historical_outcome_exceptions/v1",
+            manifest.get("validator_contract_name") != CONTRACT_NAME,
+            manifest.get("observer_contract_name") != "wb_change_registry_observer",
+            manifest.get("observer_contract_version") != 1,
+            re.fullmatch(
+                r"[0-9a-f]{40}", str(manifest.get("historical_deployed_sha") or "")
+            ) is None,
+        )
+    ):
+        raise ReconcileExistingError("incident observer exception manifest is invalid")
+    raw_exceptions = tuple(manifest.get("exceptions") or ())
+    if len(raw_exceptions) != 2:
+        raise ReconcileExistingError("incident observer exception count is not exact")
+    required_exception_keys = {
+        "job_id", "scheduled_slot", "checkpoint_id", "event_states",
+        "terminal_fact_count", "checkpoint_completeness",
+        "source_completeness", "expected_facts",
+    }
+    by_job: dict[str, IncidentObserverException] = {}
+    by_checkpoint: dict[str, IncidentObserverException] = {}
+    for raw in raw_exceptions:
+        if set(raw) != required_exception_keys:
+            raise ReconcileExistingError("incident observer exception shape is invalid")
+        item = raw
+        job_id = str(item.get("job_id") or "")
+        checkpoint_id = str(item.get("checkpoint_id") or "")
+        if (
+            SCHEDULED_JOB_PATTERN.fullmatch(job_id) is None
+            or not checkpoint_id
+            or job_id in by_job
+            or checkpoint_id in by_checkpoint
+            or tuple(item.get("event_states") or ())
+            not in {
+                ("accepted", "running", "partial"),
+                ("accepted", "running", "complete"),
+            }
+            or set(item.get("source_completeness") or {}) != {"ads", "prices"}
+        ):
+            raise ReconcileExistingError("incident observer exception identity is invalid")
+        by_job[job_id] = item
+        by_checkpoint[checkpoint_id] = item
+    if set(by_job) != {
+        "crjob_2d37204c6d2d1f9aafdac2741db4f4af",
+        "crjob_8698f4d3246c01376b028d0b12ae3907",
+    }:
+        raise ReconcileExistingError("incident observer exception identities are not exact")
+    present_exception_jobs = {
+        str(row.get("job_id") or "") for row in jobs
+    } & set(by_job)
+    if not present_exception_jobs:
+        return {}, {}, [], []
+    if present_exception_jobs != set(by_job):
+        raise ReconcileExistingError("incident observer exception job set is incomplete")
+    if str(manifest["historical_deployed_sha"]) not in activation_shas:
+        raise ReconcileExistingError("incident observer deployed binding is absent")
+
+    target_jobs = [row for row in jobs if str(row.get("job_id") or "") in by_job]
+    target_events = [
+        row for row in events if str(row.get("job_id") or "") in by_job
+    ]
+    target_checkpoints = [
+        row for row in checkpoints
+        if str(row.get("checkpoint_id") or "") in by_checkpoint
+    ]
+    target_manifests = [
+        row for row in manifests
+        if str(row.get("checkpoint_id") or "") in by_checkpoint
+    ]
+    checkpoint_ids = tuple(sorted(by_checkpoint))
+    placeholders = ",".join("?" for _ in checkpoint_ids)
+    target_links = _rows(
+        connection,
+        INCIDENT_FACT_LINKS_TABLE,
+        where=f"checkpoint_id IN ({placeholders})",
+        params=checkpoint_ids,
+    )
+    fact_ids = tuple(sorted(str(row.get("fact_id") or "") for row in target_links))
+    target_facts = (
+        _rows(
+            connection,
+            INCIDENT_FACTS_TABLE,
+            where=f"fact_id IN ({','.join('?' for _ in fact_ids)})",
+            params=fact_ids,
+        )
+        if fact_ids else []
+    )
+    row_sets: Mapping[str, Sequence[Mapping[str, Any]]] = {
+        "jobs": target_jobs,
+        "events": target_events,
+        "checkpoints": target_checkpoints,
+        "source_manifests": target_manifests,
+        "facts": target_facts,
+        "fact_links": target_links,
+    }
+    digest_bindings = manifest.get("digests") or {}
+    if set(digest_bindings) != set(row_sets):
+        raise ReconcileExistingError("incident observer digest binding set is invalid")
+    for name, rows in row_sets.items():
+        binding = digest_bindings[name]
+        if (
+            set(binding) != {"row_count", "digest"}
+            or int(binding.get("row_count") or -1) != len(rows)
+            or DIGEST_PATTERN.fullmatch(str(binding.get("digest") or "")) is None
+            or binding.get("digest") != _fingerprint(rows)
+        ):
+            raise ReconcileExistingError(
+                f"incident observer {name.replace('_', ' ')} digest drifted"
+            )
+
+    expected_fact_fields = tuple(IncidentExpectedFact.__required_keys__)
+    expected_fact_rows = tuple(
+        sorted(
+            (
+                {field: row.get(field) for field in expected_fact_fields}
+                for row in target_facts
+            ),
+            key=lambda row: _canonical_json(row),
+        )
+    )
+    manifest_fact_rows = tuple(
+        sorted(
+            (
+                dict(row)
+                for item in raw_exceptions
+                for row in tuple(item.get("expected_facts") or ())
+            ),
+            key=lambda row: _canonical_json(row),
+        )
+    )
+    if expected_fact_rows != manifest_fact_rows:
+        raise ReconcileExistingError("incident observer fact semantics drifted")
+    fact_checkpoint_ids = {
+        str(item["checkpoint_id"])
+        for item in raw_exceptions
+        if int(item["terminal_fact_count"]) > 0
+    }
+    if len(fact_checkpoint_ids) != 1 or any(
+        row.get("link_kind") != "checkpoint"
+        or str(row.get("checkpoint_id") or "")
+        not in fact_checkpoint_ids
+        for row in target_links
+    ):
+        raise ReconcileExistingError("incident observer fact link semantics drifted")
+    return by_job, by_checkpoint, target_facts, target_links
+
+
 def _validate_operational_rows(
     connection: sqlite3.Connection,
     *,
@@ -330,6 +630,7 @@ def _validate_operational_rows(
     if {str(row.get("job_id") or "") for row in events} != job_ids:
         raise ReconcileExistingError("post-recovery observer event set is not exact")
     checkpoints: set[str] = set()
+    events_by_job: dict[str, list[dict[str, Any]]] = {}
     for job_id in sorted(job_ids):
         own = sorted(
             (row for row in events if row.get("job_id") == job_id),
@@ -337,20 +638,8 @@ def _validate_operational_rows(
         )
         if [int(row.get("sequence_no") or 0) for row in own] != [1, 2, 3]:
             raise ReconcileExistingError("observer event sequence is not exact")
-        if [row.get("state") for row in own] != ["accepted", "running", "complete"]:
-            raise ReconcileExistingError("observer event states are not exact")
-        if any(int(row.get("fact_count") or 0) != 0 for row in own):
-            raise ReconcileExistingError("observer job produced business facts")
-        if any(
-            str(row.get(field) or "")
-            for row in own
-            for field in OBSERVER_EVENT_FAILURE_FIELDS
-        ):
-            raise ReconcileExistingError("observer event failure metadata is present")
-        if any(row.get("checkpoint_id") not in (None, "") for row in own[:2]):
-            raise ReconcileExistingError("observer event checkpoint lifecycle drifted")
-        complete = own[-1]
-        checkpoint_id = str(complete.get("checkpoint_id") or "")
+        events_by_job[job_id] = own
+        checkpoint_id = str(own[-1].get("checkpoint_id") or "")
         if not checkpoint_id:
             raise ReconcileExistingError("observer checkpoint is absent")
         checkpoints.add(checkpoint_id)
@@ -373,18 +662,6 @@ def _validate_operational_rows(
     )
     if checkpoints_since_recovery != checkpoint_rows:
         raise ReconcileExistingError("post-recovery checkpoint set is not exact")
-    if any(
-        row.get("seller_id") != EXPECTED_SELLER_ID
-        or row.get("account_scope") != EXPECTED_ACCOUNT_SCOPE
-        or row.get("source_surface") != EXPECTED_SOURCE_SURFACE
-        or row.get("scan_kind") != "observer"
-        or row.get("completeness_status") != "complete"
-        or int(row.get("expected_target_count") or 0)
-        != int(row.get("observed_target_count") or -1)
-        or row.get("mapping_version") != EXPECTED_MAPPING_VERSION
-        for row in checkpoint_rows
-    ):
-        raise ReconcileExistingError("observer checkpoint source semantics drifted")
     manifests = _rows(
         connection,
         "change_registry_checkpoint_source_manifests",
@@ -401,6 +678,98 @@ def _validate_operational_rows(
     )
     if manifests_since_recovery != manifests:
         raise ReconcileExistingError("post-recovery source manifest set is not exact")
+
+    exception_by_job, exception_by_checkpoint, target_facts, target_links = (
+        _incident_exception_bindings(
+            connection,
+            jobs=jobs,
+            events=events,
+            checkpoints=checkpoint_rows,
+            manifests=manifests,
+            activation_shas=activation_shas,
+        )
+    )
+    observer_links = _rows(
+        connection,
+        INCIDENT_FACT_LINKS_TABLE,
+        where=f"checkpoint_id IN ({','.join('?' for _ in checkpoints)})",
+        params=tuple(sorted(checkpoints)),
+    )
+    observer_fact_ids = tuple(
+        sorted(str(row.get("fact_id") or "") for row in observer_links)
+    )
+    observer_facts = (
+        _rows(
+            connection,
+            INCIDENT_FACTS_TABLE,
+            where=f"fact_id IN ({','.join('?' for _ in observer_fact_ids)})",
+            params=observer_fact_ids,
+        )
+        if observer_fact_ids else []
+    )
+    if observer_links != target_links or observer_facts != target_facts:
+        raise ReconcileExistingError("generic observer job produced business facts")
+    for job_id, own in events_by_job.items():
+        exception = exception_by_job.get(job_id)
+        expected_states = (
+            list(exception["event_states"])
+            if exception is not None
+            else ["accepted", "running", "complete"]
+        )
+        if [row.get("state") for row in own] != expected_states:
+            raise ReconcileExistingError("observer event states are not exact")
+        expected_fact_counts = [
+            0,
+            0,
+            int(exception["terminal_fact_count"]) if exception is not None else 0,
+        ]
+        if [int(row.get("fact_count") or 0) for row in own] != expected_fact_counts:
+            raise ReconcileExistingError("observer job produced business facts")
+        expected_source_statuses = [
+            "not_observed",
+            "not_observed",
+            expected_states[-1],
+        ]
+        if "source_status" in own[0] and [
+            str(row.get("source_status") or "") for row in own
+        ] != expected_source_statuses:
+            raise ReconcileExistingError("observer event source semantics drifted")
+        if any(
+            str(row.get(field) or "")
+            for row in own
+            for field in OBSERVER_EVENT_FAILURE_FIELDS
+        ):
+            raise ReconcileExistingError("observer event failure metadata is present")
+        if any(row.get("checkpoint_id") not in (None, "") for row in own[:2]):
+            raise ReconcileExistingError("observer event checkpoint lifecycle drifted")
+        checkpoint_id = str(own[-1].get("checkpoint_id") or "")
+        if exception is not None and checkpoint_id != exception["checkpoint_id"]:
+            raise ReconcileExistingError("incident observer checkpoint identity drifted")
+
+    for row in checkpoint_rows:
+        checkpoint_id = str(row.get("checkpoint_id") or "")
+        exception = exception_by_checkpoint.get(checkpoint_id)
+        expected_status = (
+            exception["checkpoint_completeness"]
+            if exception is not None else "complete"
+        )
+        counts_are_valid = (
+            int(row.get("observed_target_count") or 0)
+            < int(row.get("expected_target_count") or 0)
+            if expected_status == "partial"
+            else int(row.get("expected_target_count") or 0)
+            == int(row.get("observed_target_count") or -1)
+        )
+        if (
+            row.get("seller_id") != EXPECTED_SELLER_ID
+            or row.get("account_scope") != EXPECTED_ACCOUNT_SCOPE
+            or row.get("source_surface") != EXPECTED_SOURCE_SURFACE
+            or row.get("scan_kind") != "observer"
+            or row.get("completeness_status") != expected_status
+            or not counts_are_valid
+            or row.get("mapping_version") != EXPECTED_MAPPING_VERSION
+        ):
+            raise ReconcileExistingError("observer checkpoint source semantics drifted")
     for checkpoint_id in checkpoints:
         sources = {
             str(row.get("source_name") or "")
@@ -409,9 +778,14 @@ def _validate_operational_rows(
         }
         if sources != {"prices", "ads"}:
             raise ReconcileExistingError("observer source manifest set drifted")
-    if any(row.get("completeness_status") != "complete" for row in manifests):
-        raise ReconcileExistingError("observer source manifest semantics drifted")
     for row in manifests:
+        exception = exception_by_checkpoint.get(str(row.get("checkpoint_id") or ""))
+        expected_source_status = (
+            str(exception["source_completeness"].get(row.get("source_name")) or "")
+            if exception is not None else "complete"
+        )
+        if row.get("completeness_status") != expected_source_status:
+            raise ReconcileExistingError("observer source manifest semantics drifted")
         try:
             summary = json.loads(str(row.get("summary_json") or ""))
         except json.JSONDecodeError as exc:
@@ -460,6 +834,17 @@ def _validate_operational_rows(
         "activation_job_events": events,
         "activation_checkpoints": checkpoint_rows,
         "activation_source_manifests": manifests,
+        "incident_exception_job_ids": sorted(exception_by_job),
+        "incident_exception_contract": {
+            key: INCIDENT_OBSERVER_EXCEPTION_MANIFEST[key]
+            for key in (
+                "contract_name", "validator_contract_name",
+                "historical_deployed_sha", "observer_contract_name",
+                "observer_contract_version", "digests",
+            )
+        },
+        "incident_exception_facts": target_facts,
+        "incident_exception_fact_links": target_links,
         "source_health_status": source_health,
         "code_paths": {
             "activation": (
@@ -474,7 +859,159 @@ def _validate_operational_rows(
     }
 
 
-def database_evidence(database: Path, *, deployed_sha: str) -> dict[str, Any]:
+def _observer_cutoff_tail_cas(
+    connection: sqlite3.Connection,
+    *,
+    operational_rows: Mapping[str, Any],
+    requested_cutoff: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    jobs = list(operational_rows.get("activation_jobs") or [])
+    if not jobs:
+        raise ReconcileExistingError("observer cutoff job set is empty")
+    jobs_by_key = {
+        (str(row.get("requested_at") or ""), str(row.get("job_id") or "")): row
+        for row in jobs
+    }
+    if len(jobs_by_key) != len(jobs):
+        raise ReconcileExistingError("observer cutoff job identity is ambiguous")
+    if requested_cutoff is None:
+        cutoff_key = max(jobs_by_key)
+    else:
+        if set(requested_cutoff) != {
+            "requested_at", "job_id", "terminal_occurred_at",
+        }:
+            raise ReconcileExistingError("reviewed observer cutoff shape drifted")
+        cutoff_key = (
+            str(requested_cutoff.get("requested_at") or ""),
+            str(requested_cutoff.get("job_id") or ""),
+        )
+        if cutoff_key not in jobs_by_key:
+            raise ReconcileExistingError("reviewed observer cutoff job is absent")
+    prefix_jobs = [row for key, row in jobs_by_key.items() if key <= cutoff_key]
+    tail_jobs = [row for key, row in jobs_by_key.items() if key > cutoff_key]
+    exception_job_ids = set(operational_rows.get("incident_exception_job_ids") or [])
+    prefix_job_ids = {str(row["job_id"]) for row in prefix_jobs}
+    if exception_job_ids - prefix_job_ids:
+        raise ReconcileExistingError("incident observer exception is after cutoff")
+    if any(
+        row.get("trigger_kind") != "scheduled"
+        or str(row.get("job_id") or "") in exception_job_ids
+        for row in tail_jobs
+    ):
+        raise ReconcileExistingError("observer tail is not generic scheduled-only")
+
+    all_events = list(operational_rows.get("activation_job_events") or [])
+    cutoff_terminal_events = [
+        row for row in all_events
+        if str(row.get("job_id") or "") == cutoff_key[1]
+        and int(row.get("sequence_no") or 0) == 3
+    ]
+    if len(cutoff_terminal_events) != 1:
+        raise ReconcileExistingError("observer cutoff terminal event is ambiguous")
+    cutoff_terminal_at = str(cutoff_terminal_events[0].get("occurred_at") or "")
+    if (
+        not cutoff_terminal_at
+        or requested_cutoff is not None
+        and requested_cutoff.get("terminal_occurred_at") != cutoff_terminal_at
+    ):
+        raise ReconcileExistingError("reviewed observer cutoff terminal event drifted")
+    prefix_events = [
+        row for row in all_events if str(row.get("job_id") or "") in prefix_job_ids
+    ]
+    prefix_checkpoint_ids = {
+        str(row.get("checkpoint_id") or "")
+        for row in prefix_events
+        if int(row.get("sequence_no") or 0) == 3
+    }
+    if "" in prefix_checkpoint_ids or len(prefix_checkpoint_ids) != len(prefix_jobs):
+        raise ReconcileExistingError("observer cutoff checkpoint set is ambiguous")
+    placeholders = ",".join("?" for _ in prefix_checkpoint_ids)
+    checkpoint_params = tuple(sorted(prefix_checkpoint_ids))
+    prefix_checkpoints = _rows(
+        connection,
+        "change_registry_checkpoints",
+        where=f"checkpoint_id IN ({placeholders})",
+        params=checkpoint_params,
+    )
+    prefix_manifests = _rows(
+        connection,
+        "change_registry_checkpoint_source_manifests",
+        where=f"checkpoint_id IN ({placeholders})",
+        params=checkpoint_params,
+    )
+    prefix_observations = _rows(
+        connection,
+        "change_registry_observation_values",
+        where=f"checkpoint_id IN ({placeholders})",
+        params=checkpoint_params,
+    )
+    prefix_fact_links = _rows(
+        connection,
+        INCIDENT_FACT_LINKS_TABLE,
+        where=f"checkpoint_id IN ({placeholders})",
+        params=checkpoint_params,
+    )
+    prefix_fact_ids = tuple(
+        sorted(str(row.get("fact_id") or "") for row in prefix_fact_links)
+    )
+    prefix_facts = (
+        _rows(
+            connection,
+            INCIDENT_FACTS_TABLE,
+            where=f"fact_id IN ({','.join('?' for _ in prefix_fact_ids)})",
+            params=prefix_fact_ids,
+        )
+        if prefix_fact_ids else []
+    )
+    prefix_health = _rows(
+        connection,
+        "change_registry_observer_health_events",
+        where=f"job_id IN ({','.join('?' for _ in prefix_job_ids)})",
+        params=tuple(sorted(prefix_job_ids)),
+    )
+    prefix_identity_incidents = _rows(
+        connection,
+        "change_registry_identity_incidents",
+        where="observed_at>=? AND observed_at<=?",
+        params=(EXPECTED_IMPLICIT_RECOVERY_NOT_BEFORE, cutoff_terminal_at),
+    )
+    prefix_rows = {
+        "jobs": sorted(prefix_jobs, key=_canonical_json),
+        "events": sorted(prefix_events, key=_canonical_json),
+        "checkpoints": prefix_checkpoints,
+        "source_manifests": prefix_manifests,
+        "observation_values": prefix_observations,
+        "identity_incidents": prefix_identity_incidents,
+        "facts": prefix_facts,
+        "fact_links": prefix_fact_links,
+        "health_events": prefix_health,
+    }
+    return {
+        "contract_name": "wbc0027_observer_cutoff_tail_cas/v1",
+        "cutoff": {
+            "requested_at": cutoff_key[0],
+            "job_id": cutoff_key[1],
+            "terminal_occurred_at": cutoff_terminal_at,
+        },
+        "cutoff_request_digest": jobs_by_key[cutoff_key].get("request_digest"),
+        "prefix_digest": _fingerprint(prefix_rows),
+        "prefix_job_count": len(prefix_jobs),
+        "prefix_checkpoint_count": len(prefix_checkpoint_ids),
+        "prefix_table_row_counts": {
+            name: len(rows) for name, rows in prefix_rows.items()
+        },
+        "tail_policy": "generic_scheduled_complete_fact0_only",
+        "tail_job_ids": sorted(str(row["job_id"]) for row in tail_jobs),
+        "tail_job_count": len(tail_jobs),
+    }
+
+
+def database_evidence(
+    database: Path,
+    *,
+    deployed_sha: str,
+    observer_cutoff: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     with closing(
         sqlite3.connect(
             f"file:{database.resolve().as_posix()}?mode=ro&immutable=1",
@@ -494,6 +1031,11 @@ def database_evidence(database: Path, *, deployed_sha: str) -> dict[str, Any]:
         operational_rows = _validate_operational_rows(
             connection,
             deployed_sha=deployed_sha,
+        )
+        observer_cutoff_tail_cas = _observer_cutoff_tail_cas(
+            connection,
+            operational_rows=operational_rows,
+            requested_cutoff=observer_cutoff,
         )
         non_operational = _stream_tables(
             connection,
@@ -516,6 +1058,7 @@ def database_evidence(database: Path, *, deployed_sha: str) -> dict[str, Any]:
         "non_operational": non_operational,
         "operational": operational,
         "operational_rows": operational_rows,
+        "observer_cutoff_tail_cas": observer_cutoff_tail_cas,
         "sqlite_readback": sqlite_readback,
     }
 
@@ -678,6 +1221,7 @@ def _preflight(
     evidence_envelope_bytes: int,
     allow_existing_operation: bool = False,
     allow_reconcile_job: bool = False,
+    observer_cutoff: Mapping[str, Any] | None = None,
     stable_interval_seconds: float = 2.0,
 ) -> dict[str, Any]:
     if reserve_bytes != DEFAULT_RESERVE_BYTES:
@@ -735,7 +1279,11 @@ def _preflight(
             or "wb-core-registry-http.service" not in opener["cgroup"]
         ):
             raise ReconcileExistingError("operational database opener is unknown")
-    database_snapshot = database_evidence(database, deployed_sha=control["deployed_sha"])
+    database_snapshot = database_evidence(
+        database,
+        deployed_sha=control["deployed_sha"],
+        observer_cutoff=observer_cutoff,
+    )
     if journal.exists() or hot._file_identity(database) != second:
         raise ReconcileExistingError("database drifted across logical reconciliation")
     manifest_file = hot._file_identity(runtime_dir / MANIFEST_FILENAME)
@@ -806,6 +1354,51 @@ def build_plan(**kwargs: Any) -> dict[str, Any]:
 def _fresh_matches_plan(plan: Mapping[str, Any], fresh: Mapping[str, Any]) -> bool:
     fresh_material = json.loads(_canonical_json(fresh))
     plan_material = json.loads(_canonical_json(plan))
+    plan_database = dict(plan_material.get("database") or {})
+    fresh_database = dict(fresh_material.get("database") or {})
+    if not hot._same_file_identity(
+        plan_database,
+        fresh_database,
+        allow_mtime_change=True,
+        allow_content_change=True,
+    ):
+        return False
+    plan_reconciliation = dict(plan_material.get("database_reconciliation") or {})
+    fresh_reconciliation = dict(fresh_material.get("database_reconciliation") or {})
+    plan_cutoff_cas = dict(plan_reconciliation.get("observer_cutoff_tail_cas") or {})
+    fresh_cutoff_cas = dict(fresh_reconciliation.get("observer_cutoff_tail_cas") or {})
+    stable_cutoff_keys = {
+        "contract_name", "cutoff", "cutoff_request_digest", "prefix_digest",
+        "prefix_job_count", "prefix_checkpoint_count", "prefix_table_row_counts",
+        "tail_policy",
+    }
+    if (
+        set(plan_cutoff_cas) != stable_cutoff_keys | {"tail_job_ids", "tail_job_count"}
+        or set(fresh_cutoff_cas)
+        != stable_cutoff_keys | {"tail_job_ids", "tail_job_count"}
+        or any(plan_cutoff_cas.get(key) != fresh_cutoff_cas.get(key)
+               for key in stable_cutoff_keys)
+        or int(plan_cutoff_cas.get("tail_job_count") or 0) != 0
+        or list(plan_cutoff_cas.get("tail_job_ids") or [])
+        or int(fresh_cutoff_cas.get("tail_job_count") or 0)
+        != len(list(fresh_cutoff_cas.get("tail_job_ids") or []))
+    ):
+        return False
+    for database in (plan_database, fresh_database):
+        database.pop("mtime_ns", None)
+        database.pop("sha256", None)
+        database.pop("allocated_bytes", None)
+    plan_material["database"] = plan_database
+    fresh_material["database"] = fresh_database
+    for reconciliation in (plan_reconciliation, fresh_reconciliation):
+        reconciliation.pop("operational", None)
+        reconciliation.pop("operational_rows", None)
+        cutoff_cas = dict(reconciliation.get("observer_cutoff_tail_cas") or {})
+        cutoff_cas.pop("tail_job_ids", None)
+        cutoff_cas.pop("tail_job_count", None)
+        reconciliation["observer_cutoff_tail_cas"] = cutoff_cas
+    plan_material["database_reconciliation"] = plan_reconciliation
+    fresh_material["database_reconciliation"] = fresh_reconciliation
     for material in (fresh_material, plan_material):
         material.pop("created_at", None)
         material.pop("fingerprint", None)
@@ -845,6 +1438,9 @@ def apply_plan(
         evidence_envelope_bytes=int(plan["backup"]["evidence_envelope_bytes"]),
         allow_existing_operation=True,
         allow_reconcile_job=True,
+        observer_cutoff=dict(
+            plan["database_reconciliation"]["observer_cutoff_tail_cas"]["cutoff"]
+        ),
     )
     if not _fresh_matches_plan(plan, fresh):
         raise ReconcileExistingError("reviewed reconciliation plan is stale")
@@ -905,6 +1501,9 @@ def apply_plan(
             "non_operational_digest": plan["database_reconciliation"]["non_operational"],
             "operational_digest": plan["database_reconciliation"]["operational"],
             "operational_rows": plan["database_reconciliation"]["operational_rows"],
+            "observer_cutoff_tail_cas": plan["database_reconciliation"][
+                "observer_cutoff_tail_cas"
+            ],
             "business_writer_timeline": plan["business_writer_timeline"],
             "business_operation_counters": plan["maintenance"]["business_operation_counters"],
             "logical_business_delta": 0,
@@ -926,6 +1525,7 @@ def apply_plan(
         "sqlite_readback": result["sqlite_readback"],
         "non_operational_digest": result["non_operational_digest"],
         "operational_digest": result["operational_digest"],
+        "observer_cutoff_tail_cas": result["observer_cutoff_tail_cas"],
         "business_operation_counters": result["business_operation_counters"],
         "result_path": str(result_path),
         "result_fingerprint": result["result_fingerprint"],
