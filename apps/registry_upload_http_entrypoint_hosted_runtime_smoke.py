@@ -5160,6 +5160,9 @@ def main() -> None:
             systemd_install = " ".join(deploy_dry_run["commands"]["systemd_install"])
             systemd_enable = " ".join(deploy_dry_run["commands"]["systemd_enable"])
             systemd_restart = " ".join(deploy_dry_run["commands"]["systemd_restart"])
+            systemd_reconcile = " ".join(
+                deploy_dry_run["commands"]["systemd_reconcile"]
+            )
             if (
                 "wb-core-root-storage-policy.service" not in systemd_install
                 or "wb-core-root-storage-policy.timer" not in systemd_install
@@ -5168,6 +5171,10 @@ def main() -> None:
                 or "wb-core-root-storage-policy.timer" not in systemd_restart
             ):
                 raise AssertionError("deploy must install and activate the root-storage monitor timer")
+            if "apps/hosted_runtime_deploy_barrier.py" not in systemd_reconcile:
+                raise AssertionError(
+                    "deploy must route managed unit mutation through exact barrier reconciliation"
+                )
             command_choices = hosted_runtime.build_arg_parser()._subparsers._group_actions[0].choices
             for required_command in (
                 "root-storage-status",
@@ -5175,6 +5182,9 @@ def main() -> None:
                 "root-storage-admission",
                 "journald-retention-readback",
                 "journald-corrective-readback",
+                "sqlite-hot-journal-recovery-dry-run",
+                "sqlite-hot-journal-recovery-submit",
+                "sqlite-hot-journal-recovery-status",
             ):
                 if required_command not in command_choices:
                     raise AssertionError(f"hosted adapter must expose {required_command}")

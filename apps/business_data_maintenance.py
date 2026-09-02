@@ -56,6 +56,10 @@ PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA = (
 PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA = (
     "business_data_prepared_abort_partial_restore_recovery_v1"
 )
+HOT_JOURNAL_RECOVERY_MARKER_FILENAME = ".sqlite-hot-journal-recovery.json"
+HOT_JOURNAL_RECOVERY_RESULT_CONTRACT = (
+    "wbc0027_s047_split_hot_journal_recovery_result_v1"
+)
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -4177,6 +4181,76 @@ def _prepared_abort_partial_restore_evidence(
     }
 
 
+def _validate_hot_journal_recovery_marker(
+    runtime_dir: Path,
+    *,
+    partial_epoch: Mapping[str, Any],
+    deployed_sha: str,
+    barrier: Mapping[str, Any],
+) -> None:
+    """Admit only the reviewed physical rollback between abort continuations."""
+
+    marker = _load_json_object(
+        runtime_dir / HOT_JOURNAL_RECOVERY_MARKER_FILENAME
+    ) or {}
+    marker_material = dict(marker)
+    marker_fingerprint = str(marker_material.pop("marker_fingerprint", ""))
+    result_path = Path(str(marker.get("result_path") or ""))
+    if re.fullmatch(
+        r"/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
+        r"wbc0027-s047-hot-journal-recovery-[0-9a-f]{8}/"
+        r"[0-9a-f]{64}/result\.json",
+        str(result_path),
+    ) is None:
+        raise RuntimeError("hot journal recovery result path is outside scope")
+    result = _load_json_object(result_path) or {}
+    result_material = dict(result)
+    result_fingerprint = str(result_material.pop("result_fingerprint", ""))
+    counters = dict(marker.get("business_operation_counters") or {})
+    if (
+        marker.get("contract_name") != HOT_JOURNAL_RECOVERY_RESULT_CONTRACT
+        or marker_fingerprint != _stable_fingerprint(marker_material)
+        or marker.get("source_epoch_deployed_sha")
+        != partial_epoch.get("deployed_sha")
+        or marker.get("deployed_sha") != deployed_sha
+        or dict(marker.get("barrier") or {}).get("window_id")
+        != barrier.get("window_id")
+        or dict(marker.get("barrier") or {}).get("plan_fingerprint")
+        != barrier.get("plan_fingerprint")
+        or dict(marker.get("barrier") or {}).get("state_fingerprint")
+        != barrier.get("state_fingerprint")
+        or marker.get("maintenance_partial_epoch_fingerprint")
+        != _stable_fingerprint(partial_epoch)
+        or marker.get("journal_absent") is not True
+        or dict(marker.get("sqlite_readback") or {}).get("integrity_check")
+        != "ok"
+        or int(
+            dict(marker.get("sqlite_readback") or {}).get(
+                "foreign_key_violation_count", -1
+            )
+        )
+        != 0
+        or any(int(value) != 0 for value in counters.values())
+        or result.get("contract_name") != HOT_JOURNAL_RECOVERY_RESULT_CONTRACT
+        or result_fingerprint != _stable_fingerprint(result_material)
+        or result_fingerprint != marker.get("result_fingerprint")
+        or result.get("operation_id") != marker.get("operation_id")
+        or result_path.parent.name != marker.get("operation_id")
+        or result.get("source_epoch_deployed_sha")
+        != marker.get("source_epoch_deployed_sha")
+        or result.get("deployed_sha") != marker.get("deployed_sha")
+        or result.get("barrier") != marker.get("barrier")
+        or result.get("maintenance_partial_epoch_fingerprint")
+        != marker.get("maintenance_partial_epoch_fingerprint")
+        or result.get("database_after") != marker.get("database_after")
+        or result.get("journal_absent") is not True
+        or result.get("sqlite_readback") != marker.get("sqlite_readback")
+        or result.get("business_operation_counters") != counters
+        or result.get("logical_business_delta") != 0
+    ):
+        raise RuntimeError("hot journal recovery marker identity drifted")
+
+
 def _restore_outer_warehouse_timer_for_prepared_abort(
     runtime_dir: Path,
     *,
@@ -4906,6 +4980,19 @@ def maintenance_abort_prepared(
                             "recovery_epoch": partial_restore_epoch,
                         },
                     )
+                partial_deployed_sha = deployed_sha
+                if partial_restore_epoch and str(
+                    partial_restore_epoch.get("deployed_sha") or ""
+                ) != deployed_sha:
+                    _validate_hot_journal_recovery_marker(
+                        runtime_dir,
+                        partial_epoch=partial_restore_epoch,
+                        deployed_sha=deployed_sha,
+                        barrier=barrier,
+                    )
+                    partial_deployed_sha = str(
+                        partial_restore_epoch.get("deployed_sha") or ""
+                    )
                 partial_identity = {
                     "schema_version": (
                         PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
@@ -4917,7 +5004,7 @@ def maintenance_abort_prepared(
                         barrier.get("state_fingerprint") or ""
                     ),
                     "source_deployed_sha": recovery_deployed_sha,
-                    "deployed_sha": deployed_sha,
+                    "deployed_sha": partial_deployed_sha,
                     "source_recovery_fingerprint": source_recovery_fingerprint,
                     "owner_policy_revision": int(expected_revision),
                     "owner_policy_fingerprint": str(

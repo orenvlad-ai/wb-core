@@ -302,16 +302,16 @@ LEGACY_ROOT_LITERAL_DIGESTS = {
         "5ca4a47efe26326d425949a68e3b3d6ef0829e1a18a19405dc4a9149944823e0",
     ),
     "apps/storage_recovery_sanitation_job.py": (
-        3,
-        "635069f957f18490d66d4cd2fc5e07a2b2d62f179adf46c5dc9ceec4b6ae6c1f",
+        5,
+        "b696934723651a9f6a9809d06efce6a3b926141a60c2b9b579a38932a47d2bcf",
     ),
     "apps/production_apply_runner.py": (
         9,
         "5021bf7901dfe93b2f4efba3e9108b0f05456a5ec5bad94e1f46a03afdda3169",
     ),
     "apps/registry_upload_http_entrypoint_hosted_runtime.py": (
-        5,
-        "a897490610c81eebb9485146e1a17d8132eb5032f76d7ce068386782c2217f4e",
+        7,
+        "a347c1fed2ef7432c809f630de832bfdf998b1b5e222617f60082822ccd22f6e",
     ),
     "apps/wbc0008_warm_archive_receipt_reconciliation_probe.py": (
         2,

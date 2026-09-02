@@ -1122,6 +1122,8 @@ def deploy_current_checkout(
             "restart": restart_command,
             "systemd_enable": systemd_commands["enable"],
             "systemd_restart": systemd_commands["restart"],
+            "systemd_reconcile": systemd_commands["reconcile"],
+            "systemd_barrier_preflight": systemd_commands["preflight"],
             "nginx_public_routes_update": nginx_public_routes_command,
             "status": status_command,
             "auth_env_preflight": auth_env_preflight_command,
@@ -1192,15 +1194,20 @@ def deploy_current_checkout(
 
     # Never let a deploy/restart proceed against a missing hosted auth contour.
     run_stage("auth-preflight", auth_env_preflight_command)
-    # Retire obsolete schedulers before sync/dependency work.  This closes the
-    # window in which a legacy timer could start a removed writer flow during
-    # a long deployment.
-    if systemd_commands["retire"]:
-        run_stage("systemd-retire", systemd_commands["retire"])
-        run_stage("daemon-reload", systemd_commands["daemon_reload"])
     run_stage("mkdir", mkdir_command)
     run_stage("sync", rsync_plan)
     run_stage("chown", chown_target_dir_command)
+    # The just-synced exact-SHA code validates an active maintenance barrier
+    # before any systemctl call, including retirement of obsolete units.
+    if systemd_commands["preflight"]:
+        run_stage(
+            "systemd-barrier-preflight",
+            systemd_commands["preflight"],
+            allow_transport_reconciliation=False,
+        )
+    if systemd_commands["retire"]:
+        run_stage("systemd-retire", systemd_commands["retire"])
+        run_stage("daemon-reload", systemd_commands["daemon_reload"])
     run_stage("metadata", deploy_metadata_command)
     if root_storage_commands["status"]:
         run_stage("root-storage-status", root_storage_commands["status"])
@@ -1225,10 +1232,12 @@ def deploy_current_checkout(
     if nginx_public_routes_command:
         run_stage("nginx", nginx_public_routes_command)
     run_stage("restart", restart_command)
-    if systemd_commands["enable"]:
-        run_stage("restart", systemd_commands["enable"])
-    if systemd_commands["restart"]:
-        run_stage("restart", systemd_commands["restart"])
+    if systemd_commands["reconcile"]:
+        run_stage(
+            "restart",
+            systemd_commands["reconcile"],
+            allow_transport_reconciliation=False,
+        )
     if root_storage_commands["status_artifact_readback"]:
         run_stage("readback", root_storage_commands["status_artifact_readback"])
     if status_command:
@@ -3972,6 +3981,98 @@ def run_storage_recovery_sanitation_job_command(
             "result": payload,
         }
     )
+    return 0
+
+
+def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
+    """Dry-run, one-submit, or read back the exact incident recovery."""
+
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    recovery_action = str(args.hot_journal_action)
+    action = f"sqlite-hot-journal-recovery-{recovery_action}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if recovery_action == "submit":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("hot journal recovery requires an exact deployed SHA")
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("hot journal recovery requires the canonical runtime dir")
+    deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    if recovery_action == "dry-run":
+        output = str(args.output or "")
+        if re.fullmatch(
+            r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+            r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json",
+            output,
+        ) is None:
+            raise ValueError("hot journal dry-run output path is outside exact scope")
+        runner_args = [
+            "python3", "apps/sqlite_hot_journal_recovery.py",
+            "--runtime-dir", runtime_dir,
+            "--deployed-sha", deployed_sha,
+            "--deployed-sha-file", deployed_sha_file,
+            "--operation-id", str(args.operation_id),
+            "--window-id", str(args.window_id),
+            "--plan-fingerprint", str(args.plan_fingerprint),
+            "--output", output,
+        ]
+    else:
+        job_id = str(args.job_id or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", job_id):
+            raise ValueError("hot journal recovery requires an exact job id")
+        runner_args = [
+            "python3", "apps/storage_recovery_sanitation_job.py",
+            "--runtime-dir", runtime_dir,
+            "--root-backups", "/opt/wb-core-runtime/backups",
+            "--deployed-sha-file", deployed_sha_file,
+            "status" if recovery_action == "status" else "submit",
+            "--job-id", job_id,
+            "--deployed-sha", deployed_sha,
+        ]
+        if recovery_action == "submit":
+            runner_args.extend(
+                [
+                    "--operation", "sqlite-hot-journal-recovery-apply",
+                    "--reviewed-plan", str(args.reviewed_plan),
+                    "--reviewed-plan-sha256", str(args.reviewed_plan_sha256),
+                    "--confirm-fingerprint", str(args.confirm_fingerprint),
+                    "--approval-reference", str(args.approval_reference),
+                ]
+            )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(deployed_sha_file)
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    completed = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=7200 if recovery_action == "dry-run" else 60,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (completed.stderr.strip() or completed.stdout.strip())
+        )
+    payload = json.loads(completed.stdout)
+    if not isinstance(payload, dict):
+        raise RuntimeError("hot journal recovery returned a non-object payload")
+    _print_json({"action": action, "result": payload})
     return 0
 
 
@@ -13211,6 +13312,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         sanitation_job_action="status",
     )
 
+    hot_journal_plan = subparsers.add_parser(
+        "sqlite-hot-journal-recovery-dry-run",
+        help="Build the exact read-only split hot-journal recovery plan.",
+    )
+    hot_journal_plan.add_argument("--deployed-sha", required=True)
+    hot_journal_plan.add_argument("--operation-id", required=True)
+    hot_journal_plan.add_argument("--window-id", required=True)
+    hot_journal_plan.add_argument("--plan-fingerprint", required=True)
+    hot_journal_plan.add_argument("--output", required=True)
+    hot_journal_plan.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="dry-run",
+    )
+
+    hot_journal_submit = subparsers.add_parser(
+        "sqlite-hot-journal-recovery-submit",
+        help="Submit one reviewed exact recovery plan to the detached worker.",
+    )
+    hot_journal_submit.add_argument("--deployed-sha", required=True)
+    hot_journal_submit.add_argument("--job-id", required=True)
+    hot_journal_submit.add_argument("--reviewed-plan", required=True)
+    hot_journal_submit.add_argument("--reviewed-plan-sha256", required=True)
+    hot_journal_submit.add_argument("--confirm-fingerprint", required=True)
+    hot_journal_submit.add_argument("--approval-reference", required=True)
+    hot_journal_submit.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="submit",
+    )
+
+    hot_journal_status = subparsers.add_parser(
+        "sqlite-hot-journal-recovery-status",
+        help="Read one exact detached hot-journal recovery result.",
+    )
+    hot_journal_status.add_argument("--deployed-sha", required=True)
+    hot_journal_status.add_argument("--job-id", required=True)
+    hot_journal_status.set_defaults(
+        handler=run_sqlite_hot_journal_recovery_command,
+        hot_journal_action="status",
+    )
+
     promo_gc_dry_run = subparsers.add_parser(
         "promo-archive-gc-dry-run",
         help="Build the штатный exact Promo artifact GC plan.",
@@ -15728,6 +15869,8 @@ def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, li
             "daemon_reload": None,
             "enable": None,
             "restart": None,
+            "reconcile": None,
+            "preflight": None,
         }
 
     install_steps: list[str] = []
@@ -15751,6 +15894,15 @@ def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, li
 
     enable_names = [shlex.quote(unit.name) for unit in target.managed_systemd_units if unit.enable]
     restart_names = [shlex.quote(unit.name) for unit in target.managed_systemd_units if unit.restart]
+    runtime_dir = str(
+        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
+    ).strip()
+    reconcile_arguments = [
+        "python3 apps/hosted_runtime_deploy_barrier.py",
+        f"--runtime-dir {shlex.quote(runtime_dir)}",
+        *(f"--enable {unit}" for unit in enable_names),
+        *(f"--restart {unit}" for unit in restart_names),
+    ]
     return {
         "install": _remote_shell_command(target, " && ".join(install_steps)) if install_steps else None,
         "retire": _remote_shell_command(target, "; ".join(retire_steps)) if target.retired_systemd_units else None,
@@ -15763,6 +15915,24 @@ def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, li
         "restart": (
             _remote_shell_command(target, f"systemctl restart {' '.join(restart_names)}")
             if restart_names
+            else None
+        ),
+        "reconcile": (
+            _remote_shell_command(
+                target,
+                f"cd {shlex.quote(target.target_dir)} && "
+                + " ".join(reconcile_arguments),
+            )
+            if enable_names or restart_names
+            else None
+        ),
+        "preflight": (
+            _remote_shell_command(
+                target,
+                f"cd {shlex.quote(target.target_dir)} && "
+                + " ".join([*reconcile_arguments, "--preflight-only"]),
+            )
+            if enable_names or restart_names
             else None
         ),
     }
