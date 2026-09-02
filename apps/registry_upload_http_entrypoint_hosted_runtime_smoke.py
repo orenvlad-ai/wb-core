@@ -3525,6 +3525,102 @@ def main() -> None:
         raise AssertionError(
             "remote prepared continuation accepted partial identity"
         )
+    abort_sha = "d" * 40
+    abort_payload = {
+        "status": "released",
+        "deployed_sha": abort_sha,
+        "restore": {
+            "status": "restored",
+            "exact_prior_state_restored": True,
+        },
+        "barrier": {"active": False, "phase": "released"},
+    }
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps(abort_payload),
+        stderr="",
+    )
+    with mock.patch.object(
+        hosted_runtime.subprocess,
+        "run",
+        return_value=completed,
+    ) as run_mock:
+        captured_abort = (
+            hosted_runtime._run_remote_business_data_maintenance_runner(
+                active_target,
+                action="abort-prepared",
+                expected_revision=59,
+                window_id="prepared-restart-window",
+                plan_fingerprint=continuation_fingerprint,
+                expected_deployed_sha=abort_sha,
+            )
+        )
+    abort_command = " ".join(run_mock.call_args.args[0])
+    if captured_abort != abort_payload or not all(
+        token in abort_command
+        for token in (
+            "abort-prepared",
+            "--expected-revision 59",
+            "--window-id prepared-restart-window",
+            f"--plan-fingerprint {continuation_fingerprint}",
+            f"--expected-deployed-sha {abort_sha}",
+        )
+    ):
+        raise AssertionError(
+            "remote prepared abort lost exact runtime/window binding"
+        )
+    abort_args = hosted_runtime.build_arg_parser().parse_args(
+        [
+            "business-data-maintenance",
+            "abort-prepared",
+            "--expected-revision",
+            "59",
+            "--window-id",
+            "prepared-restart-window",
+            "--plan-fingerprint",
+            continuation_fingerprint,
+            "--expected-deployed-sha",
+            abort_sha,
+        ]
+    )
+    abort_calls: list[dict[str, object]] = []
+
+    def abort_runner(
+        _target: object,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        abort_calls.append(kwargs)
+        return abort_payload
+
+    with (
+        mock.patch.object(
+            hosted_runtime,
+            "load_hosted_runtime_target",
+            return_value=active_target,
+        ),
+        mock.patch.object(
+            hosted_runtime,
+            "_run_remote_business_data_maintenance_runner",
+            side_effect=abort_runner,
+        ),
+        mock.patch.object(hosted_runtime, "_print_json"),
+    ):
+        hosted_runtime.run_business_data_maintenance_command(abort_args)
+    if abort_calls != [
+        {
+            "action": "abort-prepared",
+            "expected_revision": 59,
+            "actor": "repo_owned_cli",
+            "reason": "abort exact prepared maintenance",
+            "window_id": "prepared-restart-window",
+            "plan_fingerprint": continuation_fingerprint,
+            "expected_deployed_sha": abort_sha,
+        }
+    ]:
+        raise AssertionError(
+            "hosted abort-prepared command lost exact recovery arguments"
+        )
     business_restore_args = hosted_runtime.build_arg_parser().parse_args(
         [
             "business-data-maintenance",
