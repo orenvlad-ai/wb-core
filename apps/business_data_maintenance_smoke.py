@@ -680,6 +680,7 @@ def _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation() -> No
             _restore_local_boundaries(old)
         assert restored["status"] == "restored"
         assert restored["exact_prior_state_restored"] is True
+        assert "stable_restore_readback" not in restored
         continuity = restored[
             "pre_hold_service_continuity_readback"
         ]
@@ -696,6 +697,7 @@ def _assert_unconfirmed_hold_abort_preserves_pre_hold_service_generation() -> No
         )
         assert state["phase"] == "restored"
         assert state["pre_hold_service_continuity_readback"] == continuity
+        assert "stable_restore_readback" not in state
         assert maintenance.barrier_status(runtime_dir)["phase"] == "acquiring"
 
 
@@ -2601,8 +2603,355 @@ def _assert_production_timer_execstart_roles_are_exact() -> None:
     )
 
 
+def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime_dir = Path(raw)
+        proc_root = runtime_dir / "proc"
+        proc_root.mkdir()
+        _warehouse_baseline(runtime_dir)
+        operational = runtime_dir / "registry_upload_runtime.sqlite3"
+        with sqlite3.connect(operational) as connection:
+            connection.execute(
+                "CREATE TABLE business_sentinel "
+                "(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO business_sentinel (value) VALUES (?)",
+                ("abort-quiesce-must-not-touch-business-data",),
+            )
+        source_digest = hashlib.sha256(operational.read_bytes()).hexdigest()
+        deployed_sha = "a" * 40
+        deployed_sha_file = runtime_dir / ".wb-core-runtime-sha"
+        deployed_sha_file.write_text(deployed_sha + "\n", encoding="utf-8")
+        window_id = "prepared-abort-quiesce-smoke"
+        plan_fingerprint = "sha256:" + "b" * 64
+        maintenance.acquire_barrier(
+            runtime_dir,
+            window_id=window_id,
+            window_kind="snapshot",
+            plan_fingerprint=plan_fingerprint,
+            approval_reference="root-gate-abort-smoke",
+            actor="smoke",
+            reason="prove exact prepared abort quiesce",
+        )
+        systemd = FakeSystemd()
+        fbs_timer = maintenance.FBS_SHADOW_TIMER_UNIT
+        warehouse_timer = "wb-core-warehouse-functional-sync.timer"
+        fbs_service = maintenance.FBS_SHADOW_SERVICE_UNIT
+        warehouse_service = "wb-core-warehouse-functional-sync.service"
+        systemd.timer_states[fbs_timer].update(
+            {"is_enabled": "disabled", "is_active": "inactive"}
+        )
+        schedules = FakeSchedules()
+        old = _with_quiet_local_boundaries()
+        warehouse_lock = {"held": False}
+
+        def lock_summary(runtime: Path) -> dict[str, Any]:
+            return {
+                "warehouse_functional": {
+                    "path": str(runtime / "warehouse.lock"),
+                    "held": warehouse_lock["held"],
+                },
+                "web_schedule": {
+                    "path": str(runtime / "web.lock"),
+                    "held": False,
+                },
+                "spp_execution": {
+                    "path": str(runtime / "spp.lock"),
+                    "held": False,
+                },
+                "seller_portal": {"busy": False},
+                "finance_backup": {
+                    "path": str(runtime / "finance.lock"),
+                    "held": False,
+                },
+            }
+
+        maintenance._lock_summary = lock_summary
+        try:
+            prepared = maintenance.maintenance_prepare(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                actor="smoke",
+                reason="capture original unit prestate",
+            )
+            assert prepared["status"] == "prepared"
+            state_path = runtime_dir / maintenance.STATE_FILENAME
+            audit_path = runtime_dir / maintenance.AUDIT_FILENAME
+            durable_prepared = json.loads(state_path.read_text())
+            original_baseline = copy.deepcopy(durable_prepared["baseline"])
+            original_signature = copy.deepcopy(
+                durable_prepared["control_signature_before_hold"]
+            )
+            revision = int(
+                maintenance.load_or_initialize_owner_policy(runtime_dir)[
+                    "revision"
+                ]
+            )
+
+            for unit in (fbs_timer, warehouse_timer):
+                systemd.timer_states[unit].update(
+                    {
+                        "is_enabled": "enabled",
+                        "is_active": "active",
+                        "properties": {
+                            "LastTriggerUSec": (
+                                "Wed 2000-01-05 00:00:00 UTC " + unit
+                            )
+                        },
+                    }
+                )
+            active_units = {
+                fbs_service: (
+                    5151,
+                    "Wed 2000-01-05 00:00:01 UTC",
+                    b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0",
+                ),
+                warehouse_service: (
+                    5152,
+                    "Wed 2000-01-05 00:00:02 UTC",
+                    b"/usr/bin/python3\0"
+                    b"apps/warehouse_functional_runner.py\0hourly-sync\0",
+                ),
+            }
+            for unit, (pid, started_at, cmdline) in active_units.items():
+                systemd.service_states[unit].update(
+                    {
+                        "is_active": "activating",
+                        "properties": {
+                            "MainPID": pid,
+                            "ExecMainStartTimestamp": started_at,
+                        },
+                    }
+                )
+                process_dir = proc_root / str(pid)
+                process_dir.mkdir()
+                (process_dir / "cmdline").write_bytes(cmdline)
+            warehouse_lock["held"] = True
+
+            state_before_unknown = state_path.read_bytes()
+            audit_before_unknown = audit_path.read_bytes()
+            mutations_before_unknown = list(systemd.mutations)
+            systemd.unknown_timer = "wb-core-unknown-writer.timer"
+            unavailable_unknown = UnavailableSchedules()
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=unavailable_unknown,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                )
+            except RuntimeError as exc:
+                assert "writer inventory drifted" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared abort accepted an unknown timer"
+                )
+            assert state_path.read_bytes() == state_before_unknown
+            assert audit_path.read_bytes() == audit_before_unknown
+            assert systemd.mutations == mutations_before_unknown
+            assert unavailable_unknown.read_calls == 0
+            systemd.unknown_timer = ""
+
+            exact_disable_now = systemd.disable_now
+            interrupted = {"count": 0}
+
+            def interrupted_disable_now(unit: str) -> None:
+                bound = json.loads(state_path.read_text())
+                assert bound["phase"] == "abort_quiescing"
+                assert bound["prepared_abort_quiesce_binding"][
+                    "pending_disable_unit"
+                ] == unit
+                exact_disable_now(unit)
+                interrupted["count"] += 1
+                if interrupted["count"] == 1:
+                    raise RuntimeError("synthetic abort process restart")
+
+            systemd.disable_now = interrupted_disable_now
+            unavailable_interrupted = UnavailableSchedules()
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=unavailable_interrupted,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                )
+            except RuntimeError as exc:
+                assert "synthetic abort process restart" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared abort did not expose the durable crash point"
+                )
+            interrupted_state = json.loads(state_path.read_text())
+            interrupted_binding = interrupted_state[
+                "prepared_abort_quiesce_binding"
+            ]
+            assert interrupted_state["phase"] == "abort_quiescing"
+            assert interrupted_binding["pending_disable_unit"]
+            assert interrupted_binding["disabled_timer_units"] == []
+            assert maintenance.barrier_status(runtime_dir)["active"] is True
+            assert unavailable_interrupted.read_calls == 0
+
+            pending_unit = interrupted_binding["pending_disable_unit"]
+            recorded_trigger = systemd.timer_states[pending_unit][
+                "properties"
+            ]["LastTriggerUSec"]
+            state_before_retrigger = state_path.read_bytes()
+            audit_before_retrigger = audit_path.read_bytes()
+            systemd.timer_states[pending_unit]["properties"][
+                "LastTriggerUSec"
+            ] = "Thu 2000-01-06 00:00:00 UTC unexpected"
+            unavailable_retrigger = UnavailableSchedules()
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=unavailable_retrigger,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                )
+            except RuntimeError as exc:
+                assert "timer retriggered" in str(exc)
+            else:
+                raise AssertionError(
+                    "prepared abort accepted a post-disable timer trigger"
+                )
+            assert unavailable_retrigger.read_calls == 0
+            assert state_path.read_bytes() == state_before_retrigger
+            assert audit_path.read_bytes() == audit_before_retrigger
+            systemd.timer_states[pending_unit]["properties"][
+                "LastTriggerUSec"
+            ] = recorded_trigger
+
+            systemd.disable_now = exact_disable_now
+            original_unit_state = systemd.unit_state
+            service_reads = {unit: 0 for unit in active_units}
+
+            def draining_unit_state(unit: str) -> dict[str, Any]:
+                if unit in service_reads:
+                    service_reads[unit] += 1
+                    durable = json.loads(state_path.read_text())
+                    binding = durable.get(
+                        "prepared_abort_quiesce_binding"
+                    ) or {}
+                    required = set(binding.get("timer_units_to_disable") or [])
+                    all_disabled = bool(required) and all(
+                        maintenance._unit_state_pair(
+                            systemd.timer_states[timer]
+                        )
+                        == ("disabled", "inactive")
+                        for timer in required
+                    )
+                    if all_disabled and service_reads[unit] > 2:
+                        pid = int(
+                            systemd.service_states[unit]["properties"][
+                                "MainPID"
+                            ]
+                            or 0
+                        )
+                        if pid:
+                            process_dir = proc_root / str(pid)
+                            (process_dir / "cmdline").unlink()
+                            process_dir.rmdir()
+                        started_at = systemd.service_states[unit][
+                            "properties"
+                        ]["ExecMainStartTimestamp"]
+                        systemd.service_states[unit].update(
+                            {
+                                "is_active": "inactive",
+                                "properties": {
+                                    "MainPID": 0,
+                                    "ExecMainStartTimestamp": started_at,
+                                },
+                            }
+                        )
+                        if all(
+                            systemd.service_states[name]["is_active"]
+                            == "inactive"
+                            for name in active_units
+                        ):
+                            warehouse_lock["held"] = False
+                return original_unit_state(unit)
+
+            systemd.unit_state = draining_unit_state
+
+            def restore_warehouse(_: Path) -> dict[str, Any]:
+                systemd.enable_now(warehouse_timer)
+                return {"status": "restored"}
+
+            released = maintenance.maintenance_abort_prepared(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+                expected_revision=revision,
+                window_id=window_id,
+                plan_fingerprint=plan_fingerprint,
+                expected_deployed_sha=deployed_sha,
+                deployed_sha_file=deployed_sha_file,
+                actor="smoke",
+                reason="restore exact prepared prestate",
+                wait_timeout_seconds=1,
+                poll_interval_seconds=0.01,
+                warehouse_restore=restore_warehouse,
+            )
+        finally:
+            _restore_local_boundaries(old)
+
+        final_state = json.loads(state_path.read_text())
+        assert released["status"] == "released"
+        assert released["barrier"]["active"] is False
+        assert released["barrier"]["phase"] == "released"
+        assert released["restore"]["status"] == "restored"
+        assert released["restore"]["exact_prior_state_restored"] is True
+        assert final_state["phase"] == "restored"
+        assert final_state["exact_prior_state_restored"] is True
+        assert final_state["baseline"] == original_baseline
+        assert final_state["control_signature_before_hold"] == (
+            original_signature
+        )
+        assert final_state["stable_restore_readback"][
+            "fingerprint"
+        ] == original_signature["fingerprint"]
+        assert all(service_reads[unit] > 2 for unit in active_units)
+        assert maintenance._unit_state_pair(
+            systemd.timer_states[fbs_timer]
+        ) == maintenance._unit_state_pair(
+            original_baseline["timers"][fbs_timer]
+        )
+        assert maintenance._unit_state_pair(
+            systemd.timer_states[warehouse_timer]
+        ) == ("enabled", "active")
+        assert hashlib.sha256(operational.read_bytes()).hexdigest() == (
+            source_digest
+        )
+
+
 def main() -> int:
     _assert_production_timer_execstart_roles_are_exact()
+    _assert_prepared_abort_quiesces_and_restores_exactly()
     _assert_autoanswers_restore_uses_bound_lifecycle_readback()
     _assert_hold_disables_every_boundary_without_killing_service()
     _assert_prepared_quiet_hold_is_reused_without_lifecycle_replay()

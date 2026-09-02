@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -48,6 +49,7 @@ POLICY_AUDIT_FILENAME = ".auto-updates-policy-audit.jsonl"
 WAREHOUSE_MAINTENANCE_STATE_FILENAME = ".warehouse-functional-maintenance.json"
 RESTORE_LOCK_FILENAME = ".business-data-maintenance-restore.lock"
 QUIET_CONFIRMED_HOLD_CONTINUITY_KIND = "quiet_confirmed_hold"
+PREPARED_ABORT_QUIESCE_SCHEMA = "business_data_prepared_abort_quiesce_v1"
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -617,6 +619,14 @@ def _save_json_0600(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.chmod(0o600)
     os.replace(temporary, path)
     path.chmod(0o600)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _append_audit_0600(path: Path, payload: Mapping[str, Any]) -> None:
@@ -2804,6 +2814,8 @@ def maintenance_restore(
     autoanswers_reconcile: Any | None = None,
     allow_pre_hold_service_continuity: bool = False,
     pre_hold_service_continuity_evidence: Mapping[str, Any] | None = None,
+    require_stable_readback: bool = False,
+    poll_interval_seconds: float = 2.0,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
     maintenance_state = _load_json_object(state_path) or {}
@@ -2847,6 +2859,53 @@ def maintenance_restore(
                 "exact prior maintenance control state was not restored: "
                 f"expected {expected_fingerprint}, got {control['fingerprint']}"
             )
+        stable_restore_readback: dict[str, Any] = {}
+        if require_stable_readback:
+            first_status = dict(final_status)
+            time.sleep(min(2.0, max(0.05, float(poll_interval_seconds))))
+            second_status = maintenance_status(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                proc_root=proc_root,
+            )
+            _require_independent_writer_timers_restored(
+                second_status,
+                independent_writer_timer_restore_plan,
+            )
+            second_control = maintenance_control_signature(
+                second_status,
+                runtime_dir=runtime_dir,
+            )
+            second_policy = owner_policy_readback(
+                runtime_dir,
+                status=second_status,
+            )
+            if (
+                second_control != control
+                or second_control["fingerprint"] != expected_fingerprint
+                or second_policy.get("unknown_processes")
+                or second_policy.get("drift_processes")
+            ):
+                raise RuntimeError(
+                    "exact prior maintenance control state was not stable"
+                )
+            stable_restore_readback = {
+                "first_captured_at": str(
+                    first_status.get("captured_at") or ""
+                ),
+                "second_captured_at": str(
+                    second_status.get("captured_at") or ""
+                ),
+                "fingerprint": second_control["fingerprint"],
+            }
+            final_status = second_status
+            control = second_control
+        stable_restore_payload = (
+            {"stable_restore_readback": stable_restore_readback}
+            if require_stable_readback
+            else {}
+        )
         updated_state = _load_json_object(state_path) or maintenance_state
         updated_state.update(
             {
@@ -2859,6 +2918,7 @@ def maintenance_restore(
                 "pre_hold_service_continuity_readback": dict(
                     service_continuity_readback or {}
                 ),
+                **stable_restore_payload,
             }
         )
         _save_json_0600(state_path, updated_state)
@@ -2873,6 +2933,7 @@ def maintenance_restore(
                 "pre_hold_service_continuity_readback": dict(
                     service_continuity_readback or {}
                 ),
+                **stable_restore_payload,
                 "status": dict(final_status),
             },
         )
@@ -2885,6 +2946,7 @@ def maintenance_restore(
             "pre_hold_service_continuity_readback": dict(
                 service_continuity_readback or {}
             ),
+            **stable_restore_payload,
             "auto_updates": owner_policy_readback(
                 runtime_dir,
                 status=final_status,
@@ -3619,6 +3681,567 @@ def _validate_pause_owned_resume_drain_status(
     return {
         "active_service_units": sorted(active_service_units),
         **boundaries,
+    }
+
+
+def _read_exact_deployed_sha(
+    deployed_sha_file: Path,
+    *,
+    expected_deployed_sha: str,
+) -> str:
+    expected = str(expected_deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected):
+        raise RuntimeError("prepared abort requires an exact deployed SHA")
+    path = Path(deployed_sha_file)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("prepared abort deployed-SHA evidence is unavailable")
+    actual = path.read_text(encoding="utf-8").strip().lower()
+    if actual != expected:
+        raise RuntimeError(
+            "prepared abort deployed SHA drifted: "
+            f"expected {expected}, got {actual}"
+        )
+    return actual
+
+
+def _validate_prepared_abort_quiesce_status(
+    runtime_dir: Path,
+    *,
+    status: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    systemd: SystemdClient,
+    require_disabled: bool,
+) -> dict[str, Any]:
+    if str(binding.get("schema_version") or "") != (
+        PREPARED_ABORT_QUIESCE_SCHEMA
+    ):
+        raise RuntimeError("prepared abort quiesce binding is unsupported")
+    inventory = list(status.get("discovered_wb_core_timers") or [])
+    if (
+        inventory != list(binding.get("timer_inventory") or [])
+        or inventory != sorted(CLASSIFIED_WB_CORE_TIMER_UNITS)
+        or status.get("unknown_wb_core_timers")
+        or status.get("cron_entries")
+    ):
+        raise RuntimeError("prepared abort writer inventory changed")
+    recorded_timers = {
+        str(unit): dict(value or {})
+        for unit, value in dict(binding.get("timer_states") or {}).items()
+    }
+    if set(recorded_timers) != set(ALL_BUSINESS_TIMER_UNITS):
+        raise RuntimeError("prepared abort timer evidence changed")
+    disable_order = list(binding.get("timer_units_to_disable") or [])
+    if disable_order != [
+        unit
+        for unit in ALL_BUSINESS_TIMER_UNITS
+        if _unit_state_pair(recorded_timers[unit])
+        != ("disabled", "inactive")
+    ]:
+        raise RuntimeError("prepared abort timer disable order changed")
+    completed = set(binding.get("disabled_timer_units") or [])
+    pending = str(binding.get("pending_disable_unit") or "")
+    if (
+        not completed.issubset(disable_order)
+        or (pending and pending not in disable_order)
+    ):
+        raise RuntimeError("prepared abort durable timer subset changed")
+    timers = dict(status.get("timers") or {})
+    if set(timers) != set(ALL_BUSINESS_TIMER_UNITS):
+        raise RuntimeError("prepared abort current timer set changed")
+    for unit in ALL_BUSINESS_TIMER_UNITS:
+        current = dict(timers.get(unit) or {})
+        recorded = recorded_timers[unit]
+        if str(current.get("unit") or "") != unit:
+            raise RuntimeError(
+                "prepared abort timer identity changed: " + unit
+            )
+        current_pair = _unit_state_pair(current)
+        recorded_pair = _unit_state_pair(recorded)
+        if unit not in disable_order:
+            if current_pair != ("disabled", "inactive"):
+                raise RuntimeError(
+                    "prepared abort originally paused timer restarted: "
+                    + unit
+                )
+        elif current_pair == ("disabled", "inactive"):
+            if unit not in completed and unit != pending:
+                raise RuntimeError(
+                    "prepared abort timer changed outside durable subset: "
+                    + unit
+                )
+        elif (
+            require_disabled
+            or unit in completed
+            or current_pair != recorded_pair
+        ):
+            raise RuntimeError(
+                "prepared abort timer restarted after quiesce: " + unit
+            )
+        _validate_pause_owned_timer_trigger(
+            unit,
+            recorded=recorded,
+            current=current,
+        )
+    active_inventory = _require_pause_owned_active_service_inventory(
+        systemd
+    )
+    service_evidence, active_service_units = (
+        _pause_owned_service_generation_evidence(
+            dict(status.get("services") or {}),
+            [dict(row) for row in status.get("writer_processes") or []],
+            recorded=dict(binding.get("service_generations") or {}),
+        )
+    )
+    if active_service_units != (
+        active_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
+    ):
+        raise RuntimeError(
+            "prepared abort active service inventory changed"
+        )
+    initially_active = sorted(
+        unit
+        for unit, value in service_evidence.items()
+        if str((value or {}).get("initial_is_active") or "")
+        not in QUIESCENT_SERVICE_STATES
+    )
+    if initially_active != list(binding.get("draining_service_units") or []):
+        raise RuntimeError("prepared abort draining service set changed")
+    boundaries = _pause_owned_resume_boundary_readback(
+        runtime_dir,
+        status=status,
+        active_service_units=active_service_units,
+        recorded={
+            "active_service_units": initially_active,
+            "locks": dict(binding.get("writer_locks") or {}),
+            "sidecars": dict(binding.get("sqlite_sidecars") or {}),
+        },
+    )
+    return {
+        "active_service_units": sorted(active_service_units),
+        **boundaries,
+    }
+
+
+def maintenance_abort_prepared(
+    runtime_dir: Path,
+    *,
+    systemd: SystemdClient,
+    schedules: RuntimeScheduleClient,
+    expected_revision: int,
+    window_id: str,
+    plan_fingerprint: str,
+    expected_deployed_sha: str,
+    deployed_sha_file: Path,
+    proc_root: Path = Path("/proc"),
+    actor: str = "repo_owned_cli",
+    reason: str = "abort exact prepared maintenance",
+    wait_timeout_seconds: float = 1200.0,
+    poll_interval_seconds: float = 2.0,
+    warehouse_restore: Any | None = None,
+    autoanswers_reconcile: Any | None = None,
+) -> dict[str, Any]:
+    """Quiesce one exact prepared revision, restore it, and abort its barrier."""
+
+    runtime_dir = Path(runtime_dir).resolve()
+    deployed_sha = _read_exact_deployed_sha(
+        deployed_sha_file,
+        expected_deployed_sha=expected_deployed_sha,
+    )
+    state_path = runtime_dir / STATE_FILENAME
+    audit_path = runtime_dir / AUDIT_FILENAME
+    state = _load_json_object(state_path) or {}
+    barrier = barrier_status(runtime_dir)
+    if (
+        barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+        or str(barrier.get("window_id") or "") != window_id
+        or str(barrier.get("plan_fingerprint") or "")
+        != plan_fingerprint
+    ):
+        raise RuntimeError("prepared abort barrier identity drifted")
+    phase = str(state.get("phase") or "")
+    if (
+        phase == "restored"
+        and state.get("exact_prior_state_restored") is True
+    ):
+        restore_readback = maintenance_barrier_abort_readback(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+        )
+        released = abort_barrier_acquire(
+            runtime_dir,
+            window_id=window_id,
+            plan_fingerprint=plan_fingerprint,
+            actor=actor,
+            reason=reason,
+            restore_readback=restore_readback,
+        )
+        return {
+            "status": "released",
+            "idempotent": True,
+            "deployed_sha": deployed_sha,
+            "restore": restore_readback,
+            "barrier": released,
+        }
+    binding = dict(state.get("prepared_abort_quiesce_binding") or {})
+    if phase not in {"prepared", "abort_quiescing"}:
+        raise RuntimeError("prepared abort requires prepared/quiescing state")
+    if (phase == "abort_quiescing") != bool(binding):
+        raise RuntimeError("prepared abort quiesce phase/binding is incomplete")
+    baseline = dict(state.get("baseline") or {})
+    prepare_readback = dict(state.get("prepare_readback") or {})
+    persisted_signature = dict(
+        state.get("control_signature_before_hold") or {}
+    )
+    if (
+        str(state.get("schema_version") or "") != SCHEMA_VERSION
+        or str(baseline.get("schema_version") or "") != SCHEMA_VERSION
+        or str(prepare_readback.get("schema_version") or "")
+        != SCHEMA_VERSION
+        or not str(persisted_signature.get("fingerprint") or "")
+        or maintenance_control_signature(
+            baseline,
+            runtime_dir=runtime_dir,
+        )
+        != persisted_signature
+    ):
+        raise RuntimeError("prepared abort original control evidence drifted")
+    full_timers = set(ALL_BUSINESS_TIMER_UNITS)
+    legacy_timers = full_timers - {FBS_SHADOW_TIMER_UNIT}
+    full_services = set(ALL_BUSINESS_SERVICE_UNITS)
+    legacy_services = full_services - {FBS_SHADOW_SERVICE_UNIT}
+
+    def prepared_inventory_kind(value: Mapping[str, Any]) -> str:
+        timers = set(dict(value.get("timers") or {}))
+        observers = set(
+            dict(value.get("continuous_observer_timers") or {})
+        )
+        services = set(dict(value.get("services") or {}))
+        if (
+            timers == full_timers
+            and observers == set(CONTINUOUS_OBSERVER_TIMER_UNITS)
+            and services == full_services
+        ):
+            return "current"
+        if (
+            timers == legacy_timers
+            and observers
+            == set(CONTINUOUS_OBSERVER_TIMER_UNITS)
+            | {FBS_SHADOW_TIMER_UNIT}
+            and services == legacy_services
+        ):
+            return "legacy_fbs_observer"
+        raise RuntimeError("prepared abort captured unit inventory drifted")
+
+    if prepared_inventory_kind(baseline) != prepared_inventory_kind(
+        prepare_readback
+    ):
+        raise RuntimeError("prepared abort captured unit inventory changed")
+    if not _load_json_object(runtime_dir / POLICY_FILENAME):
+        raise RuntimeError("prepared abort owner-policy evidence is missing")
+    policy = load_or_initialize_owner_policy(runtime_dir)
+    if int(policy.get("revision") or 0) != int(expected_revision):
+        raise RuntimeError(
+            "prepared abort owner-policy revision drifted"
+        )
+    prepared_policy = dict(prepare_readback.get("auto_updates") or {})
+    if (
+        int(prepared_policy.get("revision") or 0) != int(expected_revision)
+        or str(prepared_policy.get("policy_fingerprint") or "")
+        != str(policy.get("policy_fingerprint") or "")
+    ):
+        raise RuntimeError("prepared abort owner-policy identity drifted")
+    prepared_runtime_schedules = dict(
+        prepare_readback.get("runtime_schedules") or {}
+    )
+    if set(prepared_runtime_schedules) != {
+        "web_vitrina",
+        "feedback_complaints",
+        "spp",
+    }:
+        raise RuntimeError(
+            "prepared abort runtime-schedule prestate drifted"
+        )
+    # Binding is deliberately independent of the loopback schedule surface.
+    # A busy writer can make that read time out, but the exact known timer and
+    # service generations must be made durable before they are paused.  Fresh
+    # schedule/job state is required immediately after the timers are paused.
+    current = maintenance_status(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+        runtime_schedule_readback=prepared_runtime_schedules,
+    )
+    inventory = list(current.get("discovered_wb_core_timers") or [])
+    if (
+        list(baseline.get("discovered_wb_core_timers") or []) != inventory
+        or list(prepare_readback.get("discovered_wb_core_timers") or [])
+        != inventory
+        or inventory != sorted(CLASSIFIED_WB_CORE_TIMER_UNITS)
+        or current.get("unknown_wb_core_timers")
+        or current.get("cron_entries")
+    ):
+        raise RuntimeError("prepared abort writer inventory drifted")
+    if not binding:
+        timers = {
+            unit: dict((current.get("timers") or {}).get(unit) or {})
+            for unit in ALL_BUSINESS_TIMER_UNITS
+        }
+        if any(
+            str(value.get("unit") or "") != unit
+            or _unit_state_pair(value)
+            not in {
+                ("enabled", "active"),
+                ("disabled", "inactive"),
+            }
+            for unit, value in timers.items()
+        ):
+            raise RuntimeError("prepared abort timer state is not exact")
+        active_inventory = _require_pause_owned_active_service_inventory(
+            systemd
+        )
+        service_generations, active_service_units = (
+            _pause_owned_service_generation_evidence(
+                dict(current.get("services") or {}),
+                [
+                    dict(row)
+                    for row in current.get("writer_processes") or []
+                ],
+            )
+        )
+        if active_service_units != (
+            active_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
+        ):
+            raise RuntimeError(
+                "prepared abort active service inventory changed"
+            )
+        boundaries = _pause_owned_resume_boundary_readback(
+            runtime_dir,
+            status=current,
+            active_service_units=active_service_units,
+        )
+        binding = {
+            "schema_version": PREPARED_ABORT_QUIESCE_SCHEMA,
+            "window_id": window_id,
+            "plan_fingerprint": plan_fingerprint,
+            "barrier_state_fingerprint": str(
+                barrier.get("state_fingerprint") or ""
+            ),
+            "deployed_sha": deployed_sha,
+            "owner_policy_revision": int(expected_revision),
+            "owner_policy_fingerprint": str(
+                policy.get("policy_fingerprint") or ""
+            ),
+            "baseline_fingerprint": _stable_fingerprint(baseline),
+            "prepare_readback_fingerprint": _stable_fingerprint(
+                prepare_readback
+            ),
+            "control_signature": str(
+                persisted_signature.get("fingerprint") or ""
+            ),
+            "timer_inventory": inventory,
+            "timer_states": timers,
+            "timer_units_to_disable": [
+                unit
+                for unit in ALL_BUSINESS_TIMER_UNITS
+                if _unit_state_pair(timers[unit])
+                != ("disabled", "inactive")
+            ],
+            "pending_disable_unit": "",
+            "disabled_timer_units": [],
+            "service_generations": service_generations,
+            "draining_service_units": sorted(active_service_units),
+            "writer_locks": dict(boundaries["locks"]),
+            "sqlite_sidecars": dict(boundaries["sidecars"]),
+            "bound_at": _utc_now(),
+        }
+        state["phase"] = "abort_quiescing"
+        state["prepared_abort_quiesce_binding"] = binding
+        _save_json_0600(state_path, state)
+        _fsync_directory(runtime_dir)
+        _append_audit_0600(
+            audit_path,
+            {
+                "event": "prepared_abort_quiesce_bound",
+                "captured_at": _utc_now(),
+                "binding": binding,
+            },
+        )
+    else:
+        identity = {
+            "window_id": window_id,
+            "plan_fingerprint": plan_fingerprint,
+            "barrier_state_fingerprint": str(
+                barrier.get("state_fingerprint") or ""
+            ),
+            "deployed_sha": deployed_sha,
+            "owner_policy_revision": int(expected_revision),
+            "owner_policy_fingerprint": str(
+                policy.get("policy_fingerprint") or ""
+            ),
+            "baseline_fingerprint": _stable_fingerprint(baseline),
+            "prepare_readback_fingerprint": _stable_fingerprint(
+                prepare_readback
+            ),
+            "control_signature": str(
+                persisted_signature.get("fingerprint") or ""
+            ),
+            "timer_inventory": inventory,
+        }
+        if any(
+            binding.get(key) != value for key, value in identity.items()
+        ):
+            raise RuntimeError("prepared abort durable identity drifted")
+    _validate_prepared_abort_quiesce_status(
+        runtime_dir,
+        status=current,
+        binding=binding,
+        systemd=systemd,
+        require_disabled=False,
+    )
+
+    def persist_binding(*, event: str, unit: str) -> None:
+        state["prepared_abort_quiesce_binding"] = binding
+        _save_json_0600(state_path, state)
+        _fsync_directory(runtime_dir)
+        _append_audit_0600(
+            audit_path,
+            {
+                "event": event,
+                "captured_at": _utc_now(),
+                "unit": unit,
+                "binding": binding,
+            },
+        )
+
+    completed = set(binding.get("disabled_timer_units") or [])
+    for unit in list(binding.get("timer_units_to_disable") or []):
+        current_state = systemd.unit_state(unit)
+        if unit in completed:
+            if _unit_state_pair(current_state) != ("disabled", "inactive"):
+                raise RuntimeError(
+                    "prepared abort completed timer restarted: " + unit
+                )
+            continue
+        binding["pending_disable_unit"] = unit
+        persist_binding(event="prepared_abort_timer_disable_intent", unit=unit)
+        systemd.disable_now(unit)
+        if _unit_state_pair(systemd.unit_state(unit)) != (
+            "disabled",
+            "inactive",
+        ):
+            raise RuntimeError(
+                "prepared abort timer did not become paused: " + unit
+            )
+        completed.add(unit)
+        binding["disabled_timer_units"] = sorted(completed)
+        binding["pending_disable_unit"] = ""
+        persist_binding(event="prepared_abort_timer_disabled", unit=unit)
+
+    deadline = time.monotonic() + max(0.0, float(wait_timeout_seconds))
+    while True:
+        current = maintenance_status(
+            runtime_dir,
+            systemd=systemd,
+            schedules=schedules,
+            proc_root=proc_root,
+        )
+        drain = _validate_prepared_abort_quiesce_status(
+            runtime_dir,
+            status=current,
+            binding=binding,
+            systemd=systemd,
+            require_disabled=True,
+        )
+        if current.get("quiet") is True and not bool(
+            drain.get("sidecars_hot")
+        ):
+            break
+        if time.monotonic() >= deadline:
+            state["prepared_abort_quiesce_last_readback"] = current
+            _save_json_0600(state_path, state)
+            _fsync_directory(runtime_dir)
+            _append_audit_0600(
+                audit_path,
+                {
+                    "event": "prepared_abort_quiesce_timeout",
+                    "captured_at": _utc_now(),
+                    "status": current,
+                },
+            )
+            raise TimeoutError(
+                "timed out waiting for prepared abort quiet window"
+            )
+        time.sleep(max(0.05, float(poll_interval_seconds)))
+    stable = _stable_quiet_readback(
+        runtime_dir,
+        first=current,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+        poll_interval_seconds=poll_interval_seconds,
+        drain_validator=lambda value: (
+            _validate_prepared_abort_quiesce_status(
+                runtime_dir,
+                status=value,
+                binding=binding,
+                systemd=systemd,
+                require_disabled=True,
+            )
+        ),
+    )
+    state["prepared_abort_quiesce_readback"] = {
+        key: value for key, value in stable.items() if key != "status"
+    }
+    _save_json_0600(state_path, state)
+    _fsync_directory(runtime_dir)
+    _append_audit_0600(
+        audit_path,
+        {
+            "event": "prepared_abort_quiesced",
+            "captured_at": _utc_now(),
+            "readback": state["prepared_abort_quiesce_readback"],
+        },
+    )
+    restored = maintenance_restore(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+        actor=actor,
+        reason=reason,
+        expected_revision=int(expected_revision),
+        warehouse_restore=warehouse_restore,
+        autoanswers_reconcile=autoanswers_reconcile,
+        require_stable_readback=True,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    _fsync_directory(runtime_dir)
+    restore_readback = maintenance_barrier_abort_readback(
+        runtime_dir,
+        systemd=systemd,
+        schedules=schedules,
+        proc_root=proc_root,
+    )
+    released = abort_barrier_acquire(
+        runtime_dir,
+        window_id=window_id,
+        plan_fingerprint=plan_fingerprint,
+        actor=actor,
+        reason=reason,
+        restore_readback=restore_readback,
+    )
+    return {
+        "status": "released",
+        "idempotent": False,
+        "deployed_sha": deployed_sha,
+        "abort_quiesce": state["prepared_abort_quiesce_readback"],
+        "restore": restored,
+        "barrier": released,
     }
 
 
@@ -4785,6 +5408,7 @@ def main(argv: list[str] | None = None) -> int:
             "barrier-restoring",
             "barrier-release",
             "barrier-abort",
+            "abort-prepared",
         ),
     )
     parser.add_argument("--runtime-dir", required=True)
@@ -4805,6 +5429,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--plan-fingerprint", default="")
     parser.add_argument("--approval-reference", default="")
+    parser.add_argument("--expected-deployed-sha", default="")
     parser.add_argument(
         "--allow-pre-hold-service-continuity",
         action="store_true",
@@ -4900,7 +5525,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     schedules = RuntimeScheduleClient(base_url=base_url, cookie=_build_web_auth_cookie(env))
     systemd = SystemdClient()
-    if args.action == "barrier-abort":
+    if args.action == "abort-prepared":
+        if (
+            args.expected_revision is None
+            or not args.window_id
+            or not args.plan_fingerprint
+            or not args.expected_deployed_sha
+        ):
+            raise RuntimeError(
+                "abort-prepared requires exact revision, window, plan, "
+                "and deployed SHA"
+            )
+        with _ExclusiveRestoreLock(runtime_dir):
+            result = maintenance_abort_prepared(
+                runtime_dir,
+                systemd=systemd,
+                schedules=schedules,
+                expected_revision=int(args.expected_revision),
+                window_id=str(args.window_id),
+                plan_fingerprint=str(args.plan_fingerprint),
+                expected_deployed_sha=str(args.expected_deployed_sha),
+                deployed_sha_file=ROOT / ".wb-core-runtime-sha",
+                actor=str(args.actor or "repo_owned_cli"),
+                reason=str(args.reason or "abort exact prepared maintenance"),
+                wait_timeout_seconds=float(args.wait_timeout_seconds),
+                poll_interval_seconds=float(args.poll_interval_seconds),
+            )
+    elif args.action == "barrier-abort":
         with _ExclusiveRestoreLock(runtime_dir):
             restore_readback = maintenance_barrier_abort_readback(
                 runtime_dir,

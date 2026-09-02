@@ -10218,6 +10218,7 @@ def _run_remote_business_data_maintenance_runner(
     plan_fingerprint: str = "",
     approval_reference: str = "",
     allow_pre_hold_service_continuity: bool = False,
+    expected_deployed_sha: str = "",
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
@@ -10235,6 +10236,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-restoring",
         "barrier-release",
         "barrier-abort",
+        "abort-prepared",
     }:
         raise ValueError(f"unsupported business-data maintenance action: {action}")
     if action in {
@@ -10247,6 +10249,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-restoring",
         "barrier-release",
         "barrier-abort",
+        "abort-prepared",
     }:
         _ensure_target_allows_mutation(
             target,
@@ -10267,11 +10270,11 @@ def _run_remote_business_data_maintenance_runner(
         "--env-file",
         target.environment_file,
     ]
-    if action == "hold":
+    if action in {"hold", "abort-prepared"}:
         runner_args.extend(
             ["--wait-timeout-seconds", "1200", "--poll-interval-seconds", "2"]
         )
-    if action in {"prepare", "hold", "restore"}:
+    if action in {"prepare", "hold", "restore", "abort-prepared"}:
         runner_args.extend(
             [
                 "--actor",
@@ -10299,7 +10302,30 @@ def _run_remote_business_data_maintenance_runner(
             runner_args.extend(
                 ["--expected-revision", str(int(expected_revision))]
             )
-    if action == "restore":
+    if action == "abort-prepared":
+        if (
+            expected_revision is None
+            or not window_id
+            or not plan_fingerprint
+            or re.fullmatch(r"[0-9a-f]{40}", expected_deployed_sha) is None
+        ):
+            raise ValueError(
+                "business-data maintenance abort-prepared requires exact "
+                "revision, window, plan fingerprint, and deployed SHA"
+            )
+        runner_args.extend(
+            [
+                "--expected-revision",
+                str(int(expected_revision)),
+                "--window-id",
+                window_id,
+                "--plan-fingerprint",
+                plan_fingerprint,
+                "--expected-deployed-sha",
+                expected_deployed_sha,
+            ]
+        )
+    elif action == "restore":
         if expected_revision is None:
             raise ValueError(
                 "business-data maintenance restore requires --expected-revision"
@@ -10385,7 +10411,11 @@ def _run_remote_business_data_maintenance_runner(
         text=True,
         capture_output=True,
         cwd=ROOT,
-        timeout=1500.0 if action in {"hold", "restore"} else 300.0,
+        timeout=(
+            1500.0
+            if action in {"hold", "restore", "abort-prepared"}
+            else 300.0
+        ),
         check=False,
     )
     if result.returncode != 0:
@@ -10407,7 +10437,35 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(target_file)
     action = str(args.action)
     evidence: dict[str, Any] = {}
-    if action == "hold":
+    if action == "abort-prepared":
+        if args.expected_revision is None:
+            raise ValueError(
+                "business-data-maintenance abort-prepared requires "
+                "--expected-revision"
+            )
+        result = _run_remote_business_data_maintenance_runner(
+            target,
+            action="abort-prepared",
+            expected_revision=int(args.expected_revision),
+            actor=str(args.actor or "repo_owned_cli"),
+            reason=str(args.reason or "abort exact prepared maintenance"),
+            window_id=str(args.window_id or ""),
+            plan_fingerprint=str(args.plan_fingerprint or ""),
+            expected_deployed_sha=str(args.expected_deployed_sha or ""),
+        )
+        barrier = dict(result.get("barrier") or {})
+        restore = dict(result.get("restore") or {})
+        if (
+            str(result.get("status") or "") != "released"
+            or barrier.get("active") is not False
+            or str(barrier.get("phase") or "") != "released"
+            or str(restore.get("status") or "") != "restored"
+            or restore.get("exact_prior_state_restored") is not True
+        ):
+            raise RuntimeError(
+                "business-data abort-prepared readback is incomplete"
+            )
+    elif action == "hold":
         evidence["core_prepare"] = _run_remote_business_data_maintenance_runner(
             target,
             action="prepare",
@@ -13287,6 +13345,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "barrier-restoring",
             "barrier-release",
             "barrier-abort",
+            "abort-prepared",
         ),
     )
     business_data_maintenance.add_argument(
@@ -13335,6 +13394,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--approval-reference",
         default="",
         help="Exact human approval reference for barrier acquisition.",
+    )
+    business_data_maintenance.add_argument(
+        "--expected-deployed-sha",
+        default="",
+        help="Exact deployed runtime SHA required by abort-prepared.",
     )
     business_data_maintenance.add_argument(
         "--allow-pre-hold-service-continuity",

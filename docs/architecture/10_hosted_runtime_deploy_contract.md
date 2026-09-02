@@ -375,6 +375,24 @@ The same runner owns the only production path for the active functional cutover 
   window, plan, revision, inventory, prestate or audit remains fail-closed.
   The ordinary uninterrupted quiet path and its persisted payloads/digests are
   unchanged;
+- An acquiring barrier whose exact maintenance revision is still only
+  `prepared` may be released through `business-data-maintenance
+  abort-prepared` only. The command binds the exact deployed SHA, barrier
+  window/fingerprint, owner-policy revision, immutable original baseline and
+  complete classified unit inventory before any control change. It fsyncs the
+  current known pause-owned timer states and active service PID/start/process
+  generations, then records a per-timer disable intent and completion before
+  disabling only that exact known timer set. This identity binding uses the
+  immutable prepared schedule readback and does not depend on a possibly busy
+  loopback schedule call; fresh loopback jobs are mandatory immediately after
+  the timers are paused. Already-running FBS shadow,
+  warehouse and other bound writers drain naturally without kill. A crash may
+  continue only the persisted disabled/pending subset and the same service
+  generations; a new/unknown unit, generation, process, lock, sidecar or timer
+  trigger fails closed. Two stable quiet reads precede restore, and two stable
+  exact control reads precede `exact_prior_state_restored` and acquiring-barrier
+  abort. The path never captures a replacement prestate and never plans or
+  applies business data; ordinary hold/restore semantics are unchanged;
 - The same inventory explicitly pauses and restores the exact pre-hold
   enabled/active state of `wb-core-fbs-warehouse-registry.timer`,
   `wb-core-fbs-shadow-collector.timer`,
