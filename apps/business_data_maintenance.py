@@ -50,6 +50,9 @@ WAREHOUSE_MAINTENANCE_STATE_FILENAME = ".warehouse-functional-maintenance.json"
 RESTORE_LOCK_FILENAME = ".business-data-maintenance-restore.lock"
 QUIET_CONFIRMED_HOLD_CONTINUITY_KIND = "quiet_confirmed_hold"
 PREPARED_ABORT_QUIESCE_SCHEMA = "business_data_prepared_abort_quiesce_v1"
+PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA = (
+    "business_data_prepared_abort_recovery_epoch_v1"
+)
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -3448,7 +3451,6 @@ def _pause_owned_service_generation_evidence(
         if (
             str(expected.get("unit") or "") != unit
             or str(expected.get("is_enabled") or "") != "static"
-            or str(expected.get("started_at") or "") != started_at
         ):
             raise RuntimeError(
                 "prepared maintenance pause-owned service generation changed: "
@@ -3458,15 +3460,37 @@ def _pause_owned_service_generation_evidence(
             str(expected.get("initial_is_active") or "")
             not in QUIESCENT_SERVICE_STATES
         )
-        if active and (
-            not initially_active
-            or main_pid != int(expected.get("main_pid") or 0)
-            or rows_by_pid.get(main_pid, [])
-            != list(expected.get("writer_processes") or [])
-        ):
-            raise RuntimeError(
-                "prepared maintenance pause-owned service restarted: " + unit
-            )
+        expected_started_at = str(expected.get("started_at") or "")
+        if initially_active:
+            if expected_started_at != started_at:
+                raise RuntimeError(
+                    "prepared maintenance pause-owned service generation changed: "
+                    + unit
+                )
+            if active and (
+                main_pid != int(expected.get("main_pid") or 0)
+                or rows_by_pid.get(main_pid, [])
+                != list(expected.get("writer_processes") or [])
+            ):
+                raise RuntimeError(
+                    "prepared maintenance pause-owned service restarted: "
+                    + unit
+                )
+        else:
+            if active:
+                raise RuntimeError(
+                    "prepared maintenance pause-owned service restarted: "
+                    + unit
+                )
+            # systemd may evict the volatile start timestamp after a terminal
+            # oneshot is collected.  Only that terminal/PID-zero/no-process
+            # representation is admissible; a different non-empty timestamp
+            # still proves another generation.
+            if started_at not in {expected_started_at, ""}:
+                raise RuntimeError(
+                    "prepared maintenance pause-owned service generation changed: "
+                    + unit
+                )
         evidence[unit] = expected
     unexpected_processes = [
         row
@@ -3712,9 +3736,10 @@ def _validate_prepared_abort_quiesce_status(
     systemd: SystemdClient,
     require_disabled: bool,
 ) -> dict[str, Any]:
-    if str(binding.get("schema_version") or "") != (
-        PREPARED_ABORT_QUIESCE_SCHEMA
-    ):
+    if str(binding.get("schema_version") or "") not in {
+        PREPARED_ABORT_QUIESCE_SCHEMA,
+        PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA,
+    }:
         raise RuntimeError("prepared abort quiesce binding is unsupported")
     inventory = list(status.get("discovered_wb_core_timers") or [])
     if (
@@ -3822,6 +3847,87 @@ def _validate_prepared_abort_quiesce_status(
     }
 
 
+def _validate_completed_prepared_abort_binding_for_recovery(
+    binding: Mapping[str, Any],
+) -> None:
+    """Validate the immutable completed epoch before one correction deploy."""
+
+    if str(binding.get("schema_version") or "") != (
+        PREPARED_ABORT_QUIESCE_SCHEMA
+    ):
+        raise RuntimeError("prepared abort recovery source binding is unsupported")
+    recorded_timers = {
+        str(unit): dict(value or {})
+        for unit, value in dict(binding.get("timer_states") or {}).items()
+    }
+    if set(recorded_timers) != set(ALL_BUSINESS_TIMER_UNITS):
+        raise RuntimeError("prepared abort recovery source timer set changed")
+    disable_order = list(binding.get("timer_units_to_disable") or [])
+    if disable_order != [
+        unit
+        for unit in ALL_BUSINESS_TIMER_UNITS
+        if _unit_state_pair(recorded_timers[unit])
+        != ("disabled", "inactive")
+    ]:
+        raise RuntimeError("prepared abort recovery source disable order changed")
+    completed = list(binding.get("disabled_timer_units") or [])
+    if (
+        str(binding.get("pending_disable_unit") or "")
+        or len(completed) != len(set(completed))
+        or set(completed) != set(disable_order)
+    ):
+        raise RuntimeError(
+            "prepared abort recovery requires the exact completed timer subset"
+        )
+    recorded_services = {
+        str(unit): dict(value or {})
+        for unit, value in dict(binding.get("service_generations") or {}).items()
+    }
+    if set(recorded_services) != set(ALL_BUSINESS_SERVICE_UNITS):
+        raise RuntimeError("prepared abort recovery source service set changed")
+    initially_active: set[str] = set()
+    for unit in ALL_BUSINESS_SERVICE_UNITS:
+        value = recorded_services[unit]
+        if (
+            str(value.get("unit") or "") != unit
+            or str(value.get("is_enabled") or "") != "static"
+        ):
+            raise RuntimeError(
+                "prepared abort recovery source service identity changed: "
+                + unit
+            )
+        active = (
+            str(value.get("initial_is_active") or "")
+            not in QUIESCENT_SERVICE_STATES
+        )
+        main_pid = int(value.get("main_pid") or 0)
+        rows = [dict(row) for row in value.get("writer_processes") or []]
+        if active:
+            started_at = str(value.get("started_at") or "")
+            _parse_systemd_utc_timestamp(started_at)
+            if (
+                main_pid <= 0
+                or len(rows) != 1
+                or int(rows[0].get("pid") or 0) != main_pid
+                or str(rows[0].get("marker") or "")
+                not in SERVICE_WRITER_PROCESS_MARKERS[unit]
+            ):
+                raise RuntimeError(
+                    "prepared abort recovery source writer identity changed: "
+                    + unit
+                )
+            initially_active.add(unit)
+        elif main_pid != 0 or rows:
+            raise RuntimeError(
+                "prepared abort recovery source terminal service changed: "
+                + unit
+            )
+    if sorted(initially_active) != list(
+        binding.get("draining_service_units") or []
+    ):
+        raise RuntimeError("prepared abort recovery source drain set changed")
+
+
 def maintenance_abort_prepared(
     runtime_dir: Path,
     *,
@@ -3887,10 +3993,15 @@ def maintenance_abort_prepared(
             "barrier": released,
         }
     binding = dict(state.get("prepared_abort_quiesce_binding") or {})
+    recovery_epoch = dict(
+        state.get("prepared_abort_recovery_epoch") or {}
+    )
     if phase not in {"prepared", "abort_quiescing"}:
         raise RuntimeError("prepared abort requires prepared/quiescing state")
     if (phase == "abort_quiescing") != bool(binding):
         raise RuntimeError("prepared abort quiesce phase/binding is incomplete")
+    if recovery_epoch and phase != "abort_quiescing":
+        raise RuntimeError("prepared abort recovery epoch phase is incomplete")
     baseline = dict(state.get("baseline") or {})
     prepare_readback = dict(state.get("prepare_readback") or {})
     persisted_signature = dict(
@@ -4078,7 +4189,6 @@ def maintenance_abort_prepared(
             "barrier_state_fingerprint": str(
                 barrier.get("state_fingerprint") or ""
             ),
-            "deployed_sha": deployed_sha,
             "owner_policy_revision": int(expected_revision),
             "owner_policy_fingerprint": str(
                 policy.get("policy_fingerprint") or ""
@@ -4096,16 +4206,169 @@ def maintenance_abort_prepared(
             binding.get(key) != value for key, value in identity.items()
         ):
             raise RuntimeError("prepared abort durable identity drifted")
+    quiesce = binding
+    quiesce_state_key = "prepared_abort_quiesce_binding"
+    quiesce_event_prefix = "prepared_abort"
+    if binding:
+        bound_deployed_sha = str(binding.get("deployed_sha") or "")
+        if re.fullmatch(r"[0-9a-f]{40}", bound_deployed_sha) is None:
+            raise RuntimeError("prepared abort durable deployed SHA drifted")
+        if bound_deployed_sha == deployed_sha:
+            if recovery_epoch:
+                raise RuntimeError(
+                    "prepared abort recovery epoch deployed SHA moved backwards"
+                )
+        else:
+            _validate_completed_prepared_abort_binding_for_recovery(binding)
+            source_binding_fingerprint = _stable_fingerprint(binding)
+            if not recovery_epoch:
+                timers = {
+                    unit: dict((current.get("timers") or {}).get(unit) or {})
+                    for unit in ALL_BUSINESS_TIMER_UNITS
+                }
+                if any(
+                    str(value.get("unit") or "") != unit
+                    or _unit_state_pair(value)
+                    not in {
+                        ("enabled", "active"),
+                        ("disabled", "inactive"),
+                    }
+                    for unit, value in timers.items()
+                ):
+                    raise RuntimeError(
+                        "prepared abort recovery timer state is not exact"
+                    )
+                source_disable_order = set(
+                    binding.get("timer_units_to_disable") or []
+                )
+                reactivated_units = [
+                    unit
+                    for unit in ALL_BUSINESS_TIMER_UNITS
+                    if _unit_state_pair(timers[unit])
+                    != ("disabled", "inactive")
+                ]
+                if not set(reactivated_units).issubset(source_disable_order):
+                    raise RuntimeError(
+                        "prepared abort recovery found a timer outside the "
+                        "completed source subset"
+                    )
+                active_inventory = (
+                    _require_pause_owned_active_service_inventory(systemd)
+                )
+                service_generations, active_service_units = (
+                    _pause_owned_service_generation_evidence(
+                        dict(current.get("services") or {}),
+                        [
+                            dict(row)
+                            for row in current.get("writer_processes") or []
+                        ],
+                    )
+                )
+                if active_service_units != (
+                    active_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
+                ):
+                    raise RuntimeError(
+                        "prepared abort recovery active service inventory changed"
+                    )
+                boundaries = _pause_owned_resume_boundary_readback(
+                    runtime_dir,
+                    status=current,
+                    active_service_units=active_service_units,
+                )
+                recovery_epoch = {
+                    "schema_version": (
+                        PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA
+                    ),
+                    "epoch": 1,
+                    "window_id": window_id,
+                    "plan_fingerprint": plan_fingerprint,
+                    "barrier_state_fingerprint": str(
+                        barrier.get("state_fingerprint") or ""
+                    ),
+                    "source_deployed_sha": bound_deployed_sha,
+                    "deployed_sha": deployed_sha,
+                    "source_binding_fingerprint": (
+                        source_binding_fingerprint
+                    ),
+                    "owner_policy_revision": int(expected_revision),
+                    "owner_policy_fingerprint": str(
+                        policy.get("policy_fingerprint") or ""
+                    ),
+                    "baseline_fingerprint": _stable_fingerprint(baseline),
+                    "prepare_readback_fingerprint": _stable_fingerprint(
+                        prepare_readback
+                    ),
+                    "control_signature": str(
+                        persisted_signature.get("fingerprint") or ""
+                    ),
+                    "timer_inventory": inventory,
+                    "timer_states": timers,
+                    "timer_units_to_disable": reactivated_units,
+                    "pending_disable_unit": "",
+                    "disabled_timer_units": [],
+                    "service_generations": service_generations,
+                    "draining_service_units": sorted(
+                        active_service_units
+                    ),
+                    "writer_locks": dict(boundaries["locks"]),
+                    "sqlite_sidecars": dict(boundaries["sidecars"]),
+                    "bound_at": _utc_now(),
+                }
+                state["prepared_abort_recovery_epoch"] = recovery_epoch
+                _save_json_0600(state_path, state)
+                _fsync_directory(runtime_dir)
+                _append_audit_0600(
+                    audit_path,
+                    {
+                        "event": "prepared_abort_recovery_epoch_bound",
+                        "captured_at": _utc_now(),
+                        "recovery_epoch": recovery_epoch,
+                    },
+                )
+            recovery_identity = {
+                "schema_version": PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA,
+                "epoch": 1,
+                "window_id": window_id,
+                "plan_fingerprint": plan_fingerprint,
+                "barrier_state_fingerprint": str(
+                    barrier.get("state_fingerprint") or ""
+                ),
+                "source_deployed_sha": bound_deployed_sha,
+                "deployed_sha": deployed_sha,
+                "source_binding_fingerprint": source_binding_fingerprint,
+                "owner_policy_revision": int(expected_revision),
+                "owner_policy_fingerprint": str(
+                    policy.get("policy_fingerprint") or ""
+                ),
+                "baseline_fingerprint": _stable_fingerprint(baseline),
+                "prepare_readback_fingerprint": _stable_fingerprint(
+                    prepare_readback
+                ),
+                "control_signature": str(
+                    persisted_signature.get("fingerprint") or ""
+                ),
+                "timer_inventory": inventory,
+            }
+            if any(
+                recovery_epoch.get(key) != value
+                for key, value in recovery_identity.items()
+            ):
+                raise RuntimeError(
+                    "prepared abort recovery epoch identity drifted"
+                )
+            quiesce = recovery_epoch
+            quiesce_state_key = "prepared_abort_recovery_epoch"
+            quiesce_event_prefix = "prepared_abort_recovery"
     _validate_prepared_abort_quiesce_status(
         runtime_dir,
         status=current,
-        binding=binding,
+        binding=quiesce,
         systemd=systemd,
         require_disabled=False,
     )
 
-    def persist_binding(*, event: str, unit: str) -> None:
-        state["prepared_abort_quiesce_binding"] = binding
+    def persist_quiesce(*, event: str, unit: str) -> None:
+        state[quiesce_state_key] = quiesce
         _save_json_0600(state_path, state)
         _fsync_directory(runtime_dir)
         _append_audit_0600(
@@ -4114,12 +4377,12 @@ def maintenance_abort_prepared(
                 "event": event,
                 "captured_at": _utc_now(),
                 "unit": unit,
-                "binding": binding,
+                "binding": quiesce,
             },
         )
 
-    completed = set(binding.get("disabled_timer_units") or [])
-    for unit in list(binding.get("timer_units_to_disable") or []):
+    completed = set(quiesce.get("disabled_timer_units") or [])
+    for unit in list(quiesce.get("timer_units_to_disable") or []):
         current_state = systemd.unit_state(unit)
         if unit in completed:
             if _unit_state_pair(current_state) != ("disabled", "inactive"):
@@ -4127,8 +4390,11 @@ def maintenance_abort_prepared(
                     "prepared abort completed timer restarted: " + unit
                 )
             continue
-        binding["pending_disable_unit"] = unit
-        persist_binding(event="prepared_abort_timer_disable_intent", unit=unit)
+        quiesce["pending_disable_unit"] = unit
+        persist_quiesce(
+            event=f"{quiesce_event_prefix}_timer_disable_intent",
+            unit=unit,
+        )
         systemd.disable_now(unit)
         if _unit_state_pair(systemd.unit_state(unit)) != (
             "disabled",
@@ -4136,11 +4402,14 @@ def maintenance_abort_prepared(
         ):
             raise RuntimeError(
                 "prepared abort timer did not become paused: " + unit
-            )
+        )
         completed.add(unit)
-        binding["disabled_timer_units"] = sorted(completed)
-        binding["pending_disable_unit"] = ""
-        persist_binding(event="prepared_abort_timer_disabled", unit=unit)
+        quiesce["disabled_timer_units"] = sorted(completed)
+        quiesce["pending_disable_unit"] = ""
+        persist_quiesce(
+            event=f"{quiesce_event_prefix}_timer_disabled",
+            unit=unit,
+        )
 
     deadline = time.monotonic() + max(0.0, float(wait_timeout_seconds))
     while True:
@@ -4153,7 +4422,7 @@ def maintenance_abort_prepared(
         drain = _validate_prepared_abort_quiesce_status(
             runtime_dir,
             status=current,
-            binding=binding,
+            binding=quiesce,
             systemd=systemd,
             require_disabled=True,
         )
@@ -4188,7 +4457,7 @@ def maintenance_abort_prepared(
             _validate_prepared_abort_quiesce_status(
                 runtime_dir,
                 status=value,
-                binding=binding,
+                binding=quiesce,
                 systemd=systemd,
                 require_disabled=True,
             )
@@ -4235,7 +4504,7 @@ def maintenance_abort_prepared(
         reason=reason,
         restore_readback=restore_readback,
     )
-    return {
+    result = {
         "status": "released",
         "idempotent": False,
         "deployed_sha": deployed_sha,
@@ -4243,6 +4512,9 @@ def maintenance_abort_prepared(
         "restore": restored,
         "barrier": released,
     }
+    if recovery_epoch:
+        result["abort_recovery_epoch"] = recovery_epoch
+    return result
 
 
 def _resume_legacy_fbs_pause_ownership(

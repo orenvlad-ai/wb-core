@@ -388,8 +388,18 @@ The same runner owns the only production path for the active functional cutover 
   the timers are paused. Already-running FBS shadow,
   warehouse and other bound writers drain naturally without kill. A crash may
   continue only the persisted disabled/pending subset and the same service
-  generations; a new/unknown unit, generation, process, lock, sidecar or timer
-  trigger fails closed. Two stable quiet reads precede restore, and two stable
+  generations. A terminal-at-bind service may later lose only systemd's
+  volatile `ExecMainStartTimestamp`; it must remain terminal with PID zero and
+  no writer process, while any active/new PID or different non-empty timestamp
+  fails closed. If the fully completed timer subset is interrupted solely by
+  the reviewed correction deploy, one separate fsynced recovery epoch may bind
+  that exact new deployed SHA, the currently reactivated subset of the same
+  known timers and the current exact known service PID/start/process
+  generations. It never changes the original binding or baseline, re-disables
+  only timers from the completed source subset and drains the rebound services
+  naturally. A second SHA transition, incomplete source subset, new/unknown
+  unit, process, lock, sidecar or identity outside that epoch fails closed. Two
+  stable quiet reads precede restore, and two stable
   exact control reads precede `exact_prior_state_restored` and acquiring-barrier
   abort. The path never captures a replacement prestate and never plans or
   applies business data; ordinary hold/restore semantics are unchanged;
