@@ -5186,6 +5186,7 @@ def main() -> None:
                 "sqlite-hot-journal-recovery-submit",
                 "sqlite-hot-journal-recovery-status",
                 "sqlite-hot-journal-reconcile-existing-dry-run",
+                "sqlite-hot-journal-reconcile-existing-rehearsal",
                 "sqlite-hot-journal-reconcile-existing-submit",
                 "sqlite-hot-journal-reconcile-existing-status",
             ):
