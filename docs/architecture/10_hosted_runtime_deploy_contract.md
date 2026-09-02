@@ -402,7 +402,19 @@ The same runner owns the only production path for the active functional cutover 
   stable quiet reads precede restore, and two stable
   exact control reads precede `exact_prior_state_restored` and acquiring-barrier
   abort. The path never captures a replacement prestate and never plans or
-  applies business data; ordinary hold/restore semantics are unchanged;
+  applies business data. If that one recovery epoch completed its exact quiet
+  readback but the nested warehouse restore then returned its later
+  disabled/inactive baseline and the immutable outer owner policy rejected the
+  resulting warehouse drift, one final fsynced partial-restore recovery epoch
+  may admit only that exact footprint and one reviewed correction SHA. It
+  rebinds and drains only the current known timer/service generations, proves
+  zero WBC0027 operation rows in query-only mode, and restores the warehouse
+  timer from the immutable outer maintenance baseline plus owner-policy pair,
+  never from the nested post-pause baseline. Any timer restored enabled may
+  produce only its known paired service/process generation; unknown units or
+  processes fail closed. Two fresh stable outer-control reads precede exact
+  restore and barrier release. A further SHA transition is forbidden, and
+  ordinary hold/restore semantics and payloads remain unchanged;
 - The same inventory explicitly pauses and restores the exact pre-hold
   enabled/active state of `wb-core-fbs-warehouse-registry.timer`,
   `wb-core-fbs-shadow-collector.timer`,

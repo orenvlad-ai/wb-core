@@ -1578,6 +1578,13 @@ def _assert_prepared_nonquiet_restart_resume_is_exact() -> None:
                 warehouse_restore=restore_warehouse,
             )
             assert restored["status"] == "restored"
+            assert "prepared_abort_post_restore_evidence" not in restored
+            assert (
+                "prepared_abort_partial_restore_post_restore_services"
+                not in json.loads(
+                    (runtime_dir / maintenance.STATE_FILENAME).read_text()
+                )
+            )
             assert restored["exact_prior_state_restored"] is True
             released = maintenance.release_barrier(
                 runtime_dir,
@@ -2640,6 +2647,9 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
         fbs_service = maintenance.FBS_SHADOW_SERVICE_UNIT
         warehouse_service = "wb-core-warehouse-functional-sync.service"
         canary_service = "wb-core-sheet-vitrina-canary-restore.service"
+        systemd.timer_states[warehouse_timer].update(
+            {"is_enabled": "enabled", "is_active": "active"}
+        )
         deploy_reactivated_timers = (
             "wb-core-finance-backup-rotation.timer",
             "wb-core-fbs-warehouse-registry.timer",
@@ -2684,6 +2694,9 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                 reason="capture original unit prestate",
             )
             assert prepared["status"] == "prepared"
+            # The outer baseline predates the nested warehouse hold; the
+            # interrupted prepared state already owns this timer as paused.
+            systemd.disable_now(warehouse_timer)
             state_path = runtime_dir / maintenance.STATE_FILENAME
             audit_path = runtime_dir / maintenance.AUDIT_FILENAME
             durable_prepared = json.loads(state_path.read_text())
@@ -3122,9 +3135,148 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
 
             systemd.unit_state = draining_unit_state
 
-            def restore_warehouse(_: Path) -> dict[str, Any]:
-                systemd.enable_now(warehouse_timer)
+            nested_state_path = (
+                runtime_dir / maintenance.WAREHOUSE_MAINTENANCE_STATE_FILENAME
+            )
+
+            def nested_disabled_warehouse_restore(_: Path) -> dict[str, Any]:
+                disabled_timer = copy.deepcopy(
+                    systemd.timer_states[warehouse_timer]
+                )
+                terminal_service = copy.deepcopy(
+                    systemd.service_states[warehouse_service]
+                )
+                nested_state_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": (
+                                "warehouse_functional_maintenance_v1"
+                            ),
+                            "phase": "restored",
+                            "baseline": {
+                                "units": {
+                                    "timer": disabled_timer,
+                                    "service": terminal_service,
+                                }
+                            },
+                            "restore_readback": {
+                                "units": {
+                                    "timer": disabled_timer,
+                                    "service": terminal_service,
+                                }
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 return {"status": "restored"}
+
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=recovery_deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    actor="smoke",
+                    reason="expose nested warehouse baseline drift",
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                    warehouse_restore=nested_disabled_warehouse_restore,
+                )
+            except RuntimeError as exc:
+                assert "post-resume desired/actual drift: warehouse_functional" in str(
+                    exc
+                )
+            else:
+                raise AssertionError(
+                    "nested warehouse baseline unexpectedly restored outer intent"
+                )
+            partial_state = json.loads(state_path.read_text())
+            assert partial_state["phase"] == "abort_quiescing"
+            assert partial_state.get("exact_prior_state_restored") is not True
+            assert maintenance.barrier_status(runtime_dir)["active"] is True
+            assert hashlib.sha256(operational.read_bytes()).hexdigest() == (
+                source_digest
+            )
+
+            correction_deployed_sha = "d" * 40
+            deployed_sha_file.write_text(
+                correction_deployed_sha + "\n", encoding="utf-8"
+            )
+            systemd.timer_states[fbs_timer].update(
+                {
+                    "is_enabled": "enabled",
+                    "is_active": "active",
+                    "properties": {
+                        "LastTriggerUSec": (
+                            "Fri 2000-01-07 00:00:00 UTC " + fbs_timer
+                        )
+                    },
+                }
+            )
+            correction_pid = 7171
+            systemd.service_states[fbs_service].update(
+                {
+                    "is_active": "activating",
+                    "properties": {
+                        "MainPID": correction_pid,
+                        "ExecMainStartTimestamp": (
+                            "Fri 2000-01-07 00:00:01 UTC"
+                        ),
+                    },
+                }
+            )
+            correction_proc = proc_root / str(correction_pid)
+            correction_proc.mkdir()
+            (correction_proc / "cmdline").write_bytes(
+                b"/usr/bin/python3\0apps/wb_fbs_shadow.py\0poll\0"
+            )
+            service_reads[fbs_service] = 0
+
+            nested_restore_calls = {"count": 0}
+
+            def forbidden_nested_restore(_: Path) -> dict[str, Any]:
+                nested_restore_calls["count"] += 1
+                raise AssertionError(
+                    "partial abort recovery reused the nested warehouse baseline"
+                )
+
+            state_before_partial_unknown = state_path.read_bytes()
+            audit_before_partial_unknown = audit_path.read_bytes()
+            mutations_before_partial_unknown = list(systemd.mutations)
+            systemd.unknown_active_service = (
+                "wb-core-unknown-partial-restore-writer.service"
+            )
+            try:
+                maintenance.maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    proc_root=proc_root,
+                    expected_revision=revision,
+                    window_id=window_id,
+                    plan_fingerprint=plan_fingerprint,
+                    expected_deployed_sha=correction_deployed_sha,
+                    deployed_sha_file=deployed_sha_file,
+                    wait_timeout_seconds=1,
+                    poll_interval_seconds=0.01,
+                    warehouse_restore=forbidden_nested_restore,
+                )
+            except RuntimeError as exc:
+                assert "unknown active wb-core service" in str(exc)
+            else:
+                raise AssertionError(
+                    "partial restore recovery accepted an unknown service"
+                )
+            assert state_path.read_bytes() == state_before_partial_unknown
+            assert audit_path.read_bytes() == audit_before_partial_unknown
+            assert systemd.mutations == mutations_before_partial_unknown
+            systemd.unknown_active_service = ""
 
             released = maintenance.maintenance_abort_prepared(
                 runtime_dir,
@@ -3134,13 +3286,13 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
                 expected_revision=revision,
                 window_id=window_id,
                 plan_fingerprint=plan_fingerprint,
-                expected_deployed_sha=recovery_deployed_sha,
+                expected_deployed_sha=correction_deployed_sha,
                 deployed_sha_file=deployed_sha_file,
                 actor="smoke",
-                reason="restore exact prepared prestate",
+                reason="restore immutable outer prepared prestate",
                 wait_timeout_seconds=1,
                 poll_interval_seconds=0.01,
-                warehouse_restore=restore_warehouse,
+                warehouse_restore=forbidden_nested_restore,
             )
         finally:
             _restore_local_boundaries(old)
@@ -3151,6 +3303,10 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
         assert released["barrier"]["phase"] == "released"
         assert released["restore"]["status"] == "restored"
         assert released["restore"]["exact_prior_state_restored"] is True
+        assert released["restore"][
+            "prepared_abort_post_restore_evidence"
+        ]["active_service_units"] == []
+        assert nested_restore_calls["count"] == 0
         assert final_state["phase"] == "restored"
         assert final_state["exact_prior_state_restored"] is True
         assert final_state["baseline"] == original_baseline
@@ -3177,6 +3333,22 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
         assert completed_source_binding == final_state[
             "prepared_abort_quiesce_binding"
         ]
+        partial_epoch = final_state[
+            "prepared_abort_partial_restore_recovery_epoch"
+        ]
+        assert partial_epoch["schema_version"] == (
+            maintenance.PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
+        )
+        assert partial_epoch["source_deployed_sha"] == recovery_deployed_sha
+        assert partial_epoch["deployed_sha"] == correction_deployed_sha
+        assert partial_epoch["nested_warehouse_timer_state"] == {
+            "is_active": "inactive",
+            "is_enabled": "disabled",
+        }
+        assert partial_epoch["outer_warehouse_timer_state"] == {
+            "is_active": "active",
+            "is_enabled": "enabled",
+        }
         assert cleared_terminal_timestamp["done"] is True
         assert maintenance._unit_state_pair(
             systemd.timer_states[fbs_timer]
@@ -3186,6 +3358,21 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
         assert maintenance._unit_state_pair(
             systemd.timer_states[warehouse_timer]
         ) == ("enabled", "active")
+        for unit in maintenance.PREPARED_ABORT_OUTER_TIMER_UNITS:
+            actual_pair = maintenance._unit_state_pair(
+                systemd.timer_states[unit]
+            )
+            expected_pair = maintenance._unit_state_pair(
+                maintenance._prepared_abort_baseline_timer_state(
+                    original_baseline,
+                    unit,
+                )
+            )
+            assert actual_pair == expected_pair, (
+                unit,
+                actual_pair,
+                expected_pair,
+            )
         assert hashlib.sha256(operational.read_bytes()).hexdigest() == (
             source_digest
         )

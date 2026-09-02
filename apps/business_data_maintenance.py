@@ -53,6 +53,9 @@ PREPARED_ABORT_QUIESCE_SCHEMA = "business_data_prepared_abort_quiesce_v1"
 PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA = (
     "business_data_prepared_abort_recovery_epoch_v1"
 )
+PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA = (
+    "business_data_prepared_abort_partial_restore_recovery_v1"
+)
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -105,6 +108,11 @@ ALL_BUSINESS_TIMER_UNITS = (
     + FORCE_OFF_TIMER_UNITS
 )
 ALL_BUSINESS_SERVICE_UNITS = tuple(unit.removesuffix(".timer") + ".service" for unit in ALL_BUSINESS_TIMER_UNITS)
+PREPARED_ABORT_OUTER_TIMER_UNITS = (
+    CORE_TIMER_UNITS
+    + INDEPENDENT_WRITER_TIMER_UNITS
+    + ("wb-core-warehouse-functional-sync.timer",)
+)
 CONTINUOUS_OBSERVER_TIMER_UNITS = (
     "wb-core-change-registry-observer.timer",
     "wb-core-root-storage-policy.timer",
@@ -2818,6 +2826,8 @@ def maintenance_restore(
     allow_pre_hold_service_continuity: bool = False,
     pre_hold_service_continuity_evidence: Mapping[str, Any] | None = None,
     require_stable_readback: bool = False,
+    prepared_abort_outer_timer_restore_plan: Mapping[str, bool] | None = None,
+    prepared_abort_post_restore_validator: Any | None = None,
     poll_interval_seconds: float = 2.0,
 ) -> dict[str, Any]:
     state_path = runtime_dir / STATE_FILENAME
@@ -2833,6 +2843,44 @@ def maintenance_restore(
     independent_writer_timer_restore_plan = (
         _independent_writer_timer_restore_plan(baseline)
     )
+    abort_outer_timer_restore_plan = dict(
+        prepared_abort_outer_timer_restore_plan or {}
+    )
+    if abort_outer_timer_restore_plan and set(
+        abort_outer_timer_restore_plan
+    ) != set(PREPARED_ABORT_OUTER_TIMER_UNITS):
+        raise RuntimeError(
+            "prepared abort outer timer restore plan changed"
+        )
+    if bool(abort_outer_timer_restore_plan) != (
+        prepared_abort_post_restore_validator is not None
+    ):
+        raise RuntimeError(
+            "prepared abort outer restore validation is incomplete"
+        )
+    if abort_outer_timer_restore_plan:
+        partial_epoch = dict(
+            maintenance_state.get(
+                "prepared_abort_partial_restore_recovery_epoch"
+            )
+            or {}
+        )
+        expected_abort_plan = {
+            unit: _unit_state_pair(
+                _prepared_abort_baseline_timer_state(baseline, unit)
+            )
+            == ("enabled", "active")
+            for unit in PREPARED_ABORT_OUTER_TIMER_UNITS
+        }
+        if (
+            str(maintenance_state.get("phase") or "") != "abort_quiescing"
+            or str(partial_epoch.get("schema_version") or "")
+            != PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
+            or abort_outer_timer_restore_plan != expected_abort_plan
+        ):
+            raise RuntimeError(
+                "prepared abort outer restore is outside its exact epoch"
+            )
     prior_master_desired = (baseline.get("auto_updates") or {}).get(
         "master_desired"
     )
@@ -2852,6 +2900,11 @@ def maintenance_restore(
             final_status,
             independent_writer_timer_restore_plan,
         )
+        if abort_outer_timer_restore_plan:
+            _require_prepared_abort_outer_timer_plan_restored(
+                final_status,
+                abort_outer_timer_restore_plan,
+            )
         control = maintenance_control_signature(
             final_status,
             runtime_dir=runtime_dir,
@@ -2876,6 +2929,11 @@ def maintenance_restore(
                 second_status,
                 independent_writer_timer_restore_plan,
             )
+            if abort_outer_timer_restore_plan:
+                _require_prepared_abort_outer_timer_plan_restored(
+                    second_status,
+                    abort_outer_timer_restore_plan,
+                )
             second_control = maintenance_control_signature(
                 second_status,
                 runtime_dir=runtime_dir,
@@ -2904,6 +2962,11 @@ def maintenance_restore(
             }
             final_status = second_status
             control = second_control
+        prepared_abort_post_restore_evidence: dict[str, Any] = {}
+        if prepared_abort_post_restore_validator is not None:
+            prepared_abort_post_restore_evidence = dict(
+                prepared_abort_post_restore_validator(final_status) or {}
+            )
         stable_restore_payload = (
             {"stable_restore_readback": stable_restore_readback}
             if require_stable_readback
@@ -2922,6 +2985,15 @@ def maintenance_restore(
                     service_continuity_readback or {}
                 ),
                 **stable_restore_payload,
+                **(
+                    {
+                        "prepared_abort_partial_restore_post_restore_services": (
+                            prepared_abort_post_restore_evidence
+                        )
+                    }
+                    if prepared_abort_post_restore_evidence
+                    else {}
+                ),
             }
         )
         _save_json_0600(state_path, updated_state)
@@ -2937,6 +3009,15 @@ def maintenance_restore(
                     service_continuity_readback or {}
                 ),
                 **stable_restore_payload,
+                **(
+                    {
+                        "prepared_abort_post_restore_evidence": (
+                            prepared_abort_post_restore_evidence
+                        )
+                    }
+                    if prepared_abort_post_restore_evidence
+                    else {}
+                ),
                 "status": dict(final_status),
             },
         )
@@ -2950,6 +3031,15 @@ def maintenance_restore(
                 service_continuity_readback or {}
             ),
             **stable_restore_payload,
+            **(
+                {
+                    "prepared_abort_post_restore_evidence": (
+                        prepared_abort_post_restore_evidence
+                    )
+                }
+                if prepared_abort_post_restore_evidence
+                else {}
+            ),
             "auto_updates": owner_policy_readback(
                 runtime_dir,
                 status=final_status,
@@ -3088,6 +3178,11 @@ def maintenance_restore(
             systemd,
             independent_writer_timer_restore_plan,
         )
+        if abort_outer_timer_restore_plan:
+            _restore_prepared_abort_outer_timer_plan(
+                systemd,
+                abort_outer_timer_restore_plan,
+            )
         before = maintenance_status(
             runtime_dir,
             systemd=systemd,
@@ -3155,6 +3250,11 @@ def maintenance_restore(
             systemd,
             independent_writer_timer_restore_plan,
         )
+        if abort_outer_timer_restore_plan:
+            _restore_prepared_abort_outer_timer_plan(
+                systemd,
+                abort_outer_timer_restore_plan,
+            )
     except Exception as exc:
         for unit in CORE_TIMER_UNITS + INDEPENDENT_WRITER_TIMER_UNITS + (
             "wb-core-warehouse-functional-sync.timer",
@@ -3739,6 +3839,7 @@ def _validate_prepared_abort_quiesce_status(
     if str(binding.get("schema_version") or "") not in {
         PREPARED_ABORT_QUIESCE_SCHEMA,
         PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA,
+        PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA,
     }:
         raise RuntimeError("prepared abort quiesce binding is unsupported")
     inventory = list(status.get("discovered_wb_core_timers") or [])
@@ -3852,9 +3953,10 @@ def _validate_completed_prepared_abort_binding_for_recovery(
 ) -> None:
     """Validate the immutable completed epoch before one correction deploy."""
 
-    if str(binding.get("schema_version") or "") != (
-        PREPARED_ABORT_QUIESCE_SCHEMA
-    ):
+    if str(binding.get("schema_version") or "") not in {
+        PREPARED_ABORT_QUIESCE_SCHEMA,
+        PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA,
+    }:
         raise RuntimeError("prepared abort recovery source binding is unsupported")
     recorded_timers = {
         str(unit): dict(value or {})
@@ -3928,6 +4030,303 @@ def _validate_completed_prepared_abort_binding_for_recovery(
         raise RuntimeError("prepared abort recovery source drain set changed")
 
 
+def _prepared_abort_baseline_timer_state(
+    baseline: Mapping[str, Any],
+    unit: str,
+) -> dict[str, Any]:
+    state = dict((baseline.get("timers") or {}).get(unit) or {})
+    if not state and unit == FBS_SHADOW_TIMER_UNIT:
+        state = dict(
+            (baseline.get("continuous_observer_timers") or {}).get(unit)
+            or {}
+        )
+    if (
+        str(state.get("unit") or "") != unit
+        or _unit_state_pair(state)
+        not in {
+            ("enabled", "active"),
+            ("disabled", "inactive"),
+        }
+    ):
+        raise RuntimeError(
+            "prepared abort outer timer baseline is not exact: " + unit
+        )
+    return state
+
+
+def _prepared_abort_breakglass_counters(runtime_dir: Path) -> dict[str, int]:
+    """Read exact WBC0027 operation counters without initializing schema."""
+
+    database_path = runtime_dir / "registry_upload_runtime.sqlite3"
+    if database_path.is_symlink() or not database_path.is_file():
+        raise RuntimeError(
+            "prepared abort partial restore business store is unavailable"
+        )
+    tables = (
+        "sheet_vitrina_v1_breakglass_last_good_operations",
+        "sheet_vitrina_v1_breakglass_last_good_cells",
+        "sheet_vitrina_v1_breakglass_last_good_revocations",
+        "sheet_vitrina_v1_breakglass_last_good_revocation_audit",
+    )
+    connection = sqlite3.connect(
+        f"file:{database_path.as_posix()}?mode=ro",
+        uri=True,
+        timeout=5.0,
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        present = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        counters = {
+            table: int(
+                connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            )
+            if table in present
+            else 0
+            for table in tables
+        }
+    finally:
+        connection.close()
+    if any(counters.values()) or any(table in present for table in tables):
+        raise RuntimeError(
+            "prepared abort partial restore found business operation state"
+        )
+    return counters
+
+
+def _prepared_abort_partial_restore_evidence(
+    runtime_dir: Path,
+    *,
+    state: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    recovery_epoch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Admit only the reviewed nested-warehouse partial restore footprint."""
+
+    if (
+        str(state.get("phase") or "") != "abort_quiescing"
+        or state.get("exact_prior_state_restored") is True
+        or not dict(state.get("prepared_abort_quiesce_readback") or {})
+        or state.get("restore_readback")
+        or state.get("stable_restore_readback")
+    ):
+        raise RuntimeError(
+            "prepared abort partial restore outer state is not exact"
+        )
+    _validate_completed_prepared_abort_binding_for_recovery(recovery_epoch)
+    warehouse_timer = "wb-core-warehouse-functional-sync.timer"
+    outer_timer = _prepared_abort_baseline_timer_state(
+        baseline,
+        warehouse_timer,
+    )
+    warehouse_process = dict(
+        (policy.get("processes") or {}).get("warehouse_functional") or {}
+    )
+    if (
+        _unit_state_pair(outer_timer) != ("enabled", "active")
+        or warehouse_process.get("desired") is not True
+    ):
+        raise RuntimeError(
+            "prepared abort partial restore outer warehouse intent is not exact"
+        )
+    nested = _load_json_object(
+        runtime_dir / WAREHOUSE_MAINTENANCE_STATE_FILENAME
+    ) or {}
+    nested_baseline = dict(
+        (((nested.get("baseline") or {}).get("units") or {}).get("timer"))
+        or {}
+    )
+    nested_restore = dict(
+        (
+            ((nested.get("restore_readback") or {}).get("units") or {}).get(
+                "timer"
+            )
+        )
+        or {}
+    )
+    if (
+        str(nested.get("schema_version") or "")
+        != "warehouse_functional_maintenance_v1"
+        or str(nested.get("phase") or "") != "restored"
+        or str(nested_baseline.get("unit") or "") != warehouse_timer
+        or str(nested_restore.get("unit") or "") != warehouse_timer
+        or _unit_state_pair(nested_baseline) != ("disabled", "inactive")
+        or _unit_state_pair(nested_restore) != ("disabled", "inactive")
+    ):
+        raise RuntimeError(
+            "prepared abort partial restore nested warehouse footprint drifted"
+        )
+    counters = _prepared_abort_breakglass_counters(runtime_dir)
+    return {
+        "outer_warehouse_timer_state": {
+            "is_enabled": "enabled",
+            "is_active": "active",
+        },
+        "outer_warehouse_timer_fingerprint": _stable_fingerprint(outer_timer),
+        "nested_warehouse_timer_state": {
+            "is_enabled": "disabled",
+            "is_active": "inactive",
+        },
+        "nested_warehouse_state_fingerprint": _stable_fingerprint(nested),
+        "business_operation_counters": counters,
+    }
+
+
+def _restore_outer_warehouse_timer_for_prepared_abort(
+    runtime_dir: Path,
+    *,
+    baseline: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    systemd: SystemdClient,
+) -> dict[str, Any]:
+    """Restore warehouse ownership from the immutable outer hold only."""
+
+    del runtime_dir
+    timer_unit = "wb-core-warehouse-functional-sync.timer"
+    service_unit = "wb-core-warehouse-functional-sync.service"
+    baseline_timer = _prepared_abort_baseline_timer_state(
+        baseline,
+        timer_unit,
+    )
+    desired = dict(
+        (policy.get("processes") or {}).get("warehouse_functional") or {}
+    ).get("desired")
+    expected_pair = _unit_state_pair(baseline_timer)
+    if desired != (expected_pair == ("enabled", "active")):
+        raise RuntimeError(
+            "prepared abort outer warehouse policy/baseline identity drifted"
+        )
+    current_timer = systemd.unit_state(timer_unit)
+    current_service = systemd.unit_state(service_unit)
+    current_service_properties = dict(current_service.get("properties") or {})
+    if (
+        _unit_state_pair(current_timer) != ("disabled", "inactive")
+        or str(current_service.get("unit") or "") != service_unit
+        or str(current_service.get("is_enabled") or "") != "static"
+        or str(current_service.get("is_active") or "")
+        not in QUIESCENT_SERVICE_STATES
+        or int(current_service_properties.get("MainPID") or 0) != 0
+    ):
+        raise RuntimeError(
+            "prepared abort outer warehouse restore is not terminal"
+        )
+    if expected_pair == ("enabled", "active"):
+        systemd.enable_now(timer_unit)
+    else:
+        systemd.disable_now(timer_unit)
+    restored_timer = systemd.unit_state(timer_unit)
+    if (
+        str(restored_timer.get("unit") or "") != timer_unit
+        or _unit_state_pair(restored_timer) != expected_pair
+    ):
+        systemd.disable_now(timer_unit)
+        raise RuntimeError(
+            "prepared abort outer warehouse timer restore drifted"
+        )
+    return {
+        "status": "restored",
+        "source": "immutable_outer_business_maintenance_baseline",
+        "timer": restored_timer,
+    }
+
+
+def _prepared_abort_post_restore_service_evidence(
+    *,
+    status: Mapping[str, Any],
+    systemd: SystemdClient,
+) -> dict[str, Any]:
+    """Admit only known service generations caused by restored-on timers."""
+
+    active_inventory = _require_pause_owned_active_service_inventory(systemd)
+    service_generations, active_service_units = (
+        _pause_owned_service_generation_evidence(
+            dict(status.get("services") or {}),
+            [dict(row) for row in status.get("writer_processes") or []],
+        )
+    )
+    if active_service_units != (
+        active_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
+    ):
+        raise RuntimeError(
+            "prepared abort post-restore active service inventory changed"
+        )
+    allowed_active_services = {
+        unit.removesuffix(".timer") + ".service"
+        for unit, value in dict(status.get("timers") or {}).items()
+        if unit in ALL_BUSINESS_TIMER_UNITS
+        and _unit_state_pair(dict(value or {})) == ("enabled", "active")
+    }
+    unexpected = sorted(active_service_units - allowed_active_services)
+    if unexpected:
+        raise RuntimeError(
+            "prepared abort post-restore found a new service generation: "
+            + ", ".join(unexpected)
+        )
+    return {
+        "active_service_units": sorted(active_service_units),
+        "allowed_active_service_units": sorted(allowed_active_services),
+        "service_generations": service_generations,
+    }
+
+
+def _restore_prepared_abort_outer_timer_plan(
+    systemd: SystemdClient,
+    plan: Mapping[str, bool],
+) -> None:
+    for unit in PREPARED_ABORT_OUTER_TIMER_UNITS:
+        current = systemd.unit_state(unit)
+        if (
+            str(current.get("unit") or "") != unit
+            or _unit_state_pair(current)
+            not in {
+                ("enabled", "active"),
+                ("disabled", "inactive"),
+            }
+        ):
+            raise RuntimeError(
+                "prepared abort outer timer readback is not exact: " + unit
+            )
+        expected = (
+            ("enabled", "active")
+            if plan.get(unit) is True
+            else ("disabled", "inactive")
+        )
+        if _unit_state_pair(current) == expected:
+            continue
+        if plan.get(unit) is True:
+            systemd.enable_now(unit)
+        else:
+            systemd.disable_now(unit)
+        if _unit_state_pair(systemd.unit_state(unit)) != expected:
+            raise RuntimeError(
+                "prepared abort outer timer restore failed: " + unit
+            )
+
+
+def _require_prepared_abort_outer_timer_plan_restored(
+    status: Mapping[str, Any],
+    plan: Mapping[str, bool],
+) -> None:
+    for unit in PREPARED_ABORT_OUTER_TIMER_UNITS:
+        expected = (
+            ("enabled", "active")
+            if plan.get(unit) is True
+            else ("disabled", "inactive")
+        )
+        actual = _unit_state_pair(
+            dict((status.get("timers") or {}).get(unit) or {})
+        )
+        if actual != expected:
+            raise RuntimeError(
+                "prepared abort outer timer restore is not stable: " + unit
+            )
+
+
 def maintenance_abort_prepared(
     runtime_dir: Path,
     *,
@@ -3996,12 +4395,19 @@ def maintenance_abort_prepared(
     recovery_epoch = dict(
         state.get("prepared_abort_recovery_epoch") or {}
     )
+    partial_restore_epoch = dict(
+        state.get("prepared_abort_partial_restore_recovery_epoch") or {}
+    )
     if phase not in {"prepared", "abort_quiescing"}:
         raise RuntimeError("prepared abort requires prepared/quiescing state")
     if (phase == "abort_quiescing") != bool(binding):
         raise RuntimeError("prepared abort quiesce phase/binding is incomplete")
     if recovery_epoch and phase != "abort_quiescing":
         raise RuntimeError("prepared abort recovery epoch phase is incomplete")
+    if partial_restore_epoch and phase != "abort_quiescing":
+        raise RuntimeError(
+            "prepared abort partial restore recovery phase is incomplete"
+        )
     baseline = dict(state.get("baseline") or {})
     prepare_readback = dict(state.get("prepare_readback") or {})
     persisted_signature = dict(
@@ -4325,6 +4731,11 @@ def maintenance_abort_prepared(
                         "recovery_epoch": recovery_epoch,
                     },
                 )
+            recovery_deployed_sha = (
+                str(recovery_epoch.get("deployed_sha") or "")
+                if recovery_epoch
+                else deployed_sha
+            )
             recovery_identity = {
                 "schema_version": PREPARED_ABORT_RECOVERY_EPOCH_SCHEMA,
                 "epoch": 1,
@@ -4334,7 +4745,7 @@ def maintenance_abort_prepared(
                     barrier.get("state_fingerprint") or ""
                 ),
                 "source_deployed_sha": bound_deployed_sha,
-                "deployed_sha": deployed_sha,
+                "deployed_sha": recovery_deployed_sha,
                 "source_binding_fingerprint": source_binding_fingerprint,
                 "owner_policy_revision": int(expected_revision),
                 "owner_policy_fingerprint": str(
@@ -4359,6 +4770,196 @@ def maintenance_abort_prepared(
             quiesce = recovery_epoch
             quiesce_state_key = "prepared_abort_recovery_epoch"
             quiesce_event_prefix = "prepared_abort_recovery"
+            if recovery_deployed_sha != deployed_sha:
+                _validate_completed_prepared_abort_binding_for_recovery(
+                    recovery_epoch
+                )
+                source_recovery_fingerprint = _stable_fingerprint(
+                    recovery_epoch
+                )
+                if not partial_restore_epoch:
+                    partial_evidence = (
+                        _prepared_abort_partial_restore_evidence(
+                            runtime_dir,
+                            state=state,
+                            baseline=baseline,
+                            policy=policy,
+                            recovery_epoch=recovery_epoch,
+                        )
+                    )
+                    timers = {
+                        unit: dict(
+                            (current.get("timers") or {}).get(unit) or {}
+                        )
+                        for unit in ALL_BUSINESS_TIMER_UNITS
+                    }
+                    if any(
+                        str(value.get("unit") or "") != unit
+                        or _unit_state_pair(value)
+                        not in {
+                            ("enabled", "active"),
+                            ("disabled", "inactive"),
+                        }
+                        for unit, value in timers.items()
+                    ):
+                        raise RuntimeError(
+                            "prepared abort partial restore timer state is not exact"
+                        )
+                    reactivated_units = [
+                        unit
+                        for unit in ALL_BUSINESS_TIMER_UNITS
+                        if _unit_state_pair(timers[unit])
+                        != ("disabled", "inactive")
+                    ]
+                    allowed_reactivated_units = {
+                        unit
+                        for unit in ALL_BUSINESS_TIMER_UNITS
+                        if _unit_state_pair(
+                            _prepared_abort_baseline_timer_state(
+                                baseline,
+                                unit,
+                            )
+                        )
+                        == ("enabled", "active")
+                    }
+                    if not set(reactivated_units).issubset(
+                        allowed_reactivated_units
+                    ):
+                        raise RuntimeError(
+                            "prepared abort partial restore found a timer outside "
+                            "the immutable outer enabled set"
+                        )
+                    active_inventory = (
+                        _require_pause_owned_active_service_inventory(systemd)
+                    )
+                    service_generations, active_service_units = (
+                        _pause_owned_service_generation_evidence(
+                            dict(current.get("services") or {}),
+                            [
+                                dict(row)
+                                for row in current.get("writer_processes") or []
+                            ],
+                        )
+                    )
+                    if active_service_units != (
+                        active_inventory & set(ALL_BUSINESS_SERVICE_UNITS)
+                    ):
+                        raise RuntimeError(
+                            "prepared abort partial restore active service "
+                            "inventory changed"
+                        )
+                    boundaries = _pause_owned_resume_boundary_readback(
+                        runtime_dir,
+                        status=current,
+                        active_service_units=active_service_units,
+                    )
+                    partial_restore_epoch = {
+                        "schema_version": (
+                            PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
+                        ),
+                        "epoch": 2,
+                        "window_id": window_id,
+                        "plan_fingerprint": plan_fingerprint,
+                        "barrier_state_fingerprint": str(
+                            barrier.get("state_fingerprint") or ""
+                        ),
+                        "source_deployed_sha": recovery_deployed_sha,
+                        "deployed_sha": deployed_sha,
+                        "source_recovery_fingerprint": (
+                            source_recovery_fingerprint
+                        ),
+                        "owner_policy_revision": int(expected_revision),
+                        "owner_policy_fingerprint": str(
+                            policy.get("policy_fingerprint") or ""
+                        ),
+                        "baseline_fingerprint": _stable_fingerprint(baseline),
+                        "prepare_readback_fingerprint": _stable_fingerprint(
+                            prepare_readback
+                        ),
+                        "control_signature": str(
+                            persisted_signature.get("fingerprint") or ""
+                        ),
+                        "timer_inventory": inventory,
+                        "timer_states": timers,
+                        "timer_units_to_disable": reactivated_units,
+                        "pending_disable_unit": "",
+                        "disabled_timer_units": [],
+                        "service_generations": service_generations,
+                        "draining_service_units": sorted(active_service_units),
+                        "writer_locks": dict(boundaries["locks"]),
+                        "sqlite_sidecars": dict(boundaries["sidecars"]),
+                        **partial_evidence,
+                        "bound_at": _utc_now(),
+                    }
+                    state[
+                        "prepared_abort_partial_restore_recovery_epoch"
+                    ] = partial_restore_epoch
+                    _save_json_0600(state_path, state)
+                    _fsync_directory(runtime_dir)
+                    _append_audit_0600(
+                        audit_path,
+                        {
+                            "event": (
+                                "prepared_abort_partial_restore_recovery_bound"
+                            ),
+                            "captured_at": _utc_now(),
+                            "recovery_epoch": partial_restore_epoch,
+                        },
+                    )
+                partial_identity = {
+                    "schema_version": (
+                        PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
+                    ),
+                    "epoch": 2,
+                    "window_id": window_id,
+                    "plan_fingerprint": plan_fingerprint,
+                    "barrier_state_fingerprint": str(
+                        barrier.get("state_fingerprint") or ""
+                    ),
+                    "source_deployed_sha": recovery_deployed_sha,
+                    "deployed_sha": deployed_sha,
+                    "source_recovery_fingerprint": source_recovery_fingerprint,
+                    "owner_policy_revision": int(expected_revision),
+                    "owner_policy_fingerprint": str(
+                        policy.get("policy_fingerprint") or ""
+                    ),
+                    "baseline_fingerprint": _stable_fingerprint(baseline),
+                    "prepare_readback_fingerprint": _stable_fingerprint(
+                        prepare_readback
+                    ),
+                    "control_signature": str(
+                        persisted_signature.get("fingerprint") or ""
+                    ),
+                    "timer_inventory": inventory,
+                }
+                if any(
+                    partial_restore_epoch.get(key) != value
+                    for key, value in partial_identity.items()
+                ):
+                    raise RuntimeError(
+                        "prepared abort partial restore recovery identity drifted"
+                    )
+                current_partial_evidence = (
+                    _prepared_abort_partial_restore_evidence(
+                        runtime_dir,
+                        state=state,
+                        baseline=baseline,
+                        policy=policy,
+                        recovery_epoch=recovery_epoch,
+                    )
+                )
+                if any(
+                    partial_restore_epoch.get(key) != value
+                    for key, value in current_partial_evidence.items()
+                ):
+                    raise RuntimeError(
+                        "prepared abort partial restore evidence drifted"
+                    )
+                quiesce = partial_restore_epoch
+                quiesce_state_key = (
+                    "prepared_abort_partial_restore_recovery_epoch"
+                )
+                quiesce_event_prefix = "prepared_abort_partial_restore_recovery"
     _validate_prepared_abort_quiesce_status(
         runtime_dir,
         status=current,
@@ -4476,6 +5077,31 @@ def maintenance_abort_prepared(
             "readback": state["prepared_abort_quiesce_readback"],
         },
     )
+    effective_warehouse_restore = warehouse_restore
+    outer_timer_restore_plan: dict[str, bool] = {}
+    post_restore_validator: Any | None = None
+    if partial_restore_epoch:
+        effective_warehouse_restore = lambda value: (
+            _restore_outer_warehouse_timer_for_prepared_abort(
+                value,
+                baseline=baseline,
+                policy=policy,
+                systemd=systemd,
+            )
+        )
+        outer_timer_restore_plan = {
+            unit: _unit_state_pair(
+                _prepared_abort_baseline_timer_state(baseline, unit)
+            )
+            == ("enabled", "active")
+            for unit in PREPARED_ABORT_OUTER_TIMER_UNITS
+        }
+        post_restore_validator = lambda value: (
+            _prepared_abort_post_restore_service_evidence(
+                status=value,
+                systemd=systemd,
+            )
+        )
     restored = maintenance_restore(
         runtime_dir,
         systemd=systemd,
@@ -4484,9 +5110,11 @@ def maintenance_abort_prepared(
         actor=actor,
         reason=reason,
         expected_revision=int(expected_revision),
-        warehouse_restore=warehouse_restore,
+        warehouse_restore=effective_warehouse_restore,
         autoanswers_reconcile=autoanswers_reconcile,
         require_stable_readback=True,
+        prepared_abort_outer_timer_restore_plan=outer_timer_restore_plan,
+        prepared_abort_post_restore_validator=post_restore_validator,
         poll_interval_seconds=poll_interval_seconds,
     )
     _fsync_directory(runtime_dir)
@@ -4514,6 +5142,10 @@ def maintenance_abort_prepared(
     }
     if recovery_epoch:
         result["abort_recovery_epoch"] = recovery_epoch
+    if partial_restore_epoch:
+        result["abort_partial_restore_recovery_epoch"] = (
+            partial_restore_epoch
+        )
     return result
 
 
