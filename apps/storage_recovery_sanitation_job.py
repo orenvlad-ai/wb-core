@@ -78,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
             "warm-archive-apply",
             "warm-archive-mount-probe",
             "sqlite-hot-journal-recovery-apply",
+            "sqlite-hot-journal-reconcile-existing-apply",
         ),
         required=True,
     )
@@ -144,6 +145,7 @@ def submit_job(
         "warm-archive-apply",
         "warm-archive-mount-probe",
         "sqlite-hot-journal-recovery-apply",
+        "sqlite-hot-journal-reconcile-existing-apply",
     }:
         raise SanitationJobError("unsupported sanitation job operation")
     if int(reserved_free_bytes) < 0:
@@ -195,7 +197,29 @@ def submit_job(
         raise SanitationJobError(
             "warm archive mount probe must not carry mutation inputs"
         )
-    if operation == "sqlite-hot-journal-recovery-apply":
+    if operation in {
+        "sqlite-hot-journal-recovery-apply",
+        "sqlite-hot-journal-reconcile-existing-apply",
+    }:
+        reconcile_existing = operation.endswith("reconcile-existing-apply")
+        plan_stem = (
+            "wbc0027-s047-reconcile-existing-plan-"
+            if reconcile_existing
+            else "wbc0027-s047-hot-journal-plan-"
+        )
+        expected_contract = (
+            "wbc0027_s047_reconcile_existing_rollback_v1"
+            if reconcile_existing
+            else "wbc0027_s047_split_hot_journal_recovery_v1"
+        )
+        plan_pattern = (
+            r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+            r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json"
+        )
+        if reconcile_existing:
+            plan_pattern = plan_pattern.replace(
+                "hot-journal-plan", "reconcile-existing-plan"
+            )
         if (
             root_name
             or family
@@ -205,11 +229,7 @@ def submit_job(
             or goal_operation_id
             or not str(approval_reference or "")
             or len(str(approval_reference)) > 500
-            or re.fullmatch(
-                r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
-                r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json",
-                str(reviewed_plan or ""),
-            )
+            or re.fullmatch(plan_pattern, str(reviewed_plan or ""))
             is None
             or not FINGERPRINT_PATTERN.fullmatch(
                 str(reviewed_plan_sha256 or "")
@@ -229,12 +249,12 @@ def submit_job(
             "sha256:" + file_sha256(Path(str(reviewed_plan)))
             != str(reviewed_plan_sha256)
             or reviewed_payload.get("contract_name")
-            != "wbc0027_s047_split_hot_journal_recovery_v1"
+            != expected_contract
             or reviewed_payload.get("operation_id") != job_id
             or reviewed_payload.get("deployed_sha") != deployed_sha
             or reviewed_payload.get("fingerprint") != confirm_fingerprint
             or not str(reviewed_plan).endswith(
-                f"wbc0027-s047-hot-journal-plan-{deployed_sha}.json"
+                f"{plan_stem}{deployed_sha}.json"
             )
         ):
             raise SanitationJobError(
@@ -273,7 +293,10 @@ def submit_job(
                 "approval_reference": str(approval_reference),
             }
         )
-    elif operation == "sqlite-hot-journal-recovery-apply":
+    elif operation in {
+        "sqlite-hot-journal-recovery-apply",
+        "sqlite-hot-journal-reconcile-existing-apply",
+    }:
         request_material.update(
             {
                 "reviewed_plan": str(reviewed_plan),
@@ -575,6 +598,15 @@ def _execute_request(
             fingerprint=request["confirm_fingerprint"],
             deployed_sha_file=deployed_sha_file,
         )
+    if request["operation"] == "sqlite-hot-journal-reconcile-existing-apply":
+        from apps.sqlite_hot_journal_reconcile_existing import apply_plan
+
+        return apply_plan(
+            plan_path=Path(request["reviewed_plan"]),
+            plan_sha256=request["reviewed_plan_sha256"],
+            fingerprint=request["confirm_fingerprint"],
+            deployed_sha_file=deployed_sha_file,
+        )
     raise SanitationJobError("persisted sanitation operation is invalid")
 
 
@@ -699,7 +731,23 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             or len(material["approval_reference"]) > 500
         ):
             raise SanitationJobError("persisted warm archive request is invalid")
-    elif operation == "sqlite-hot-journal-recovery-apply":
+    elif operation in {
+        "sqlite-hot-journal-recovery-apply",
+        "sqlite-hot-journal-reconcile-existing-apply",
+    }:
+        plan_stem = (
+            "wbc0027-s047-reconcile-existing-plan-"
+            if operation.endswith("reconcile-existing-apply")
+            else "wbc0027-s047-hot-journal-plan-"
+        )
+        plan_pattern = (
+            r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
+            r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json"
+        )
+        if operation.endswith("reconcile-existing-apply"):
+            plan_pattern = plan_pattern.replace(
+                "hot-journal-plan", "reconcile-existing-plan"
+            )
         material.update(
             {
                 "reviewed_plan": str(request.get("reviewed_plan") or ""),
@@ -715,11 +763,7 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             }
         )
         if (
-            re.fullmatch(
-                r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
-                r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json",
-                material["reviewed_plan"],
-            )
+            re.fullmatch(plan_pattern, material["reviewed_plan"])
             is None
             or not FINGERPRINT_PATTERN.fullmatch(
                 material["reviewed_plan_sha256"]
@@ -730,7 +774,7 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
             or not material["approval_reference"]
             or len(material["approval_reference"]) > 500
             or not material["reviewed_plan"].endswith(
-                f"wbc0027-s047-hot-journal-plan-{material['deployed_sha']}.json"
+                f"{plan_stem}{material['deployed_sha']}.json"
             )
         ):
             raise SanitationJobError(
@@ -751,6 +795,7 @@ def _read_request(job_dir: Path) -> dict[str, Any]:
         "warm-archive-apply",
         "warm-archive-mount-probe",
         "sqlite-hot-journal-recovery-apply",
+        "sqlite-hot-journal-reconcile-existing-apply",
     }:
         raise SanitationJobError("persisted sanitation operation is invalid")
     if operation in {"plan", "apply"} and (

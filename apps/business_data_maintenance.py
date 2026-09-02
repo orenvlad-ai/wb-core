@@ -4196,10 +4196,16 @@ def _validate_hot_journal_recovery_marker(
     marker_material = dict(marker)
     marker_fingerprint = str(marker_material.pop("marker_fingerprint", ""))
     result_path = Path(str(marker.get("result_path") or ""))
+    reconciled_existing = marker.get("mode") == "reconciled_existing"
+    result_scope = (
+        r"wbc0027-s047-reconcile-existing-[0-9a-f]{8}/"
+        if reconciled_existing
+        else r"wbc0027-s047-hot-journal-recovery-[0-9a-f]{8}/"
+    )
     if re.fullmatch(
         r"/opt/wb-core-runtime/state/backups/private-evidence/production-goals/"
-        r"wbc0027-s047-hot-journal-recovery-[0-9a-f]{8}/"
-        r"[0-9a-f]{64}/result\.json",
+        + result_scope
+        + r"[0-9a-f]{64}/result\.json",
         str(result_path),
     ) is None:
         raise RuntimeError("hot journal recovery result path is outside scope")
@@ -4247,8 +4253,44 @@ def _validate_hot_journal_recovery_marker(
         or result.get("sqlite_readback") != marker.get("sqlite_readback")
         or result.get("business_operation_counters") != counters
         or result.get("logical_business_delta") != 0
+        or (reconciled_existing and result.get("mode") != "reconciled_existing")
+        or (reconciled_existing and result.get("sqlite_write") is not False)
+        or (
+            reconciled_existing
+            and result.get("non_operational_digest")
+            != marker.get("non_operational_digest")
+        )
+        or (
+            reconciled_existing
+            and result.get("operational_digest")
+            != marker.get("operational_digest")
+        )
     ):
         raise RuntimeError("hot journal recovery marker identity drifted")
+    if reconciled_existing:
+        from apps import sqlite_hot_journal_reconcile_existing as reconcile
+
+        database_path = Path(
+            str(dict(marker.get("database_after") or {}).get("path") or "")
+        )
+        if (
+            Path(str(database_path) + "-journal").exists()
+            or reconcile.hot._file_identity(database_path)
+            != marker.get("database_after")
+            or _prepared_abort_breakglass_counters(runtime_dir) != counters
+        ):
+            raise RuntimeError("reconciled-existing physical/control CAS drifted")
+        current = reconcile.database_evidence(
+            database_path,
+            deployed_sha=deployed_sha,
+        )
+        if (
+            current.get("non_operational") != marker.get("non_operational_digest")
+            or current.get("operational") != marker.get("operational_digest")
+            or current.get("operational_rows") != result.get("operational_rows")
+            or current.get("sqlite_readback") != marker.get("sqlite_readback")
+        ):
+            raise RuntimeError("reconciled-existing logical CAS drifted")
 
 
 def _restore_outer_warehouse_timer_for_prepared_abort(
