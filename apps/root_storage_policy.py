@@ -74,8 +74,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("journald-activate")
     subparsers.add_parser("journald-readback")
-    subparsers.add_parser("journald-corrective-remove")
-    subparsers.add_parser("journald-corrective-readback")
+    corrective_remove = subparsers.add_parser("journald-corrective-remove")
+    corrective_remove.add_argument(
+        "--allow-recovery-scratch-bootstrap-pending",
+        action="store_true",
+    )
+    corrective_remove.add_argument("--recovery-scratch-release-bridge")
+
+    corrective_readback = subparsers.add_parser("journald-corrective-readback")
+    corrective_readback.add_argument(
+        "--allow-recovery-scratch-bootstrap-pending",
+        action="store_true",
+    )
+    corrective_readback.add_argument("--recovery-scratch-release-bridge")
     return parser
 
 
@@ -144,10 +155,26 @@ def main(argv: list[str] | None = None) -> int:
             print(_canonical_json(result))
             return 0 if result.get("ok") else 3
         if args.command == "journald-corrective-remove":
-            print(_canonical_json(remove_journald_retention_dropin(policy)))
+            print(
+                _canonical_json(
+                    remove_journald_retention_dropin(
+                        policy,
+                        allow_recovery_scratch_bootstrap_pending=(
+                            args.allow_recovery_scratch_bootstrap_pending
+                        ),
+                        recovery_scratch_release_bridge=bridge,
+                    )
+                )
+            )
             return 0
         if args.command == "journald-corrective-readback":
-            result = readback_journald_correction(policy)
+            result = readback_journald_correction(
+                policy,
+                allow_recovery_scratch_bootstrap_pending=(
+                    args.allow_recovery_scratch_bootstrap_pending
+                ),
+                recovery_scratch_release_bridge=bridge,
+            )
             print(_canonical_json(result))
             return 0 if result.get("ok") else 3
     except (RootStoragePolicyError, ValueError) as exc:
@@ -156,7 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     raise AssertionError("unreachable root storage policy command")
 
 
-def remove_journald_retention_dropin(policy: Mapping[str, Any]) -> dict[str, Any]:
+def remove_journald_retention_dropin(
+    policy: Mapping[str, Any],
+    *,
+    allow_recovery_scratch_bootstrap_pending: bool = False,
+    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Remove the exact block-003 drop-in and submit one journald restart."""
 
     correction = _journald_correction_policy(policy)
@@ -177,7 +209,13 @@ def remove_journald_retention_dropin(policy: Mapping[str, Any]) -> dict[str, Any
             state = _read_json(state_path)
             if state.get("correction_digest") != correction_digest:
                 raise RootStoragePolicyError("journald correction operation digest drift")
-            readback = readback_journald_correction(policy)
+            readback = readback_journald_correction(
+                policy,
+                allow_recovery_scratch_bootstrap_pending=(
+                    allow_recovery_scratch_bootstrap_pending
+                ),
+                recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+            )
             if readback.get("ok"):
                 return {**readback, "idempotent": True, "operation_retried": False}
             raise RootStoragePolicyError(
@@ -186,7 +224,13 @@ def remove_journald_retention_dropin(policy: Mapping[str, Any]) -> dict[str, Any
             )
 
         operation_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-        preflight = build_journald_correction_preflight(policy)
+        preflight = build_journald_correction_preflight(
+            policy,
+            allow_recovery_scratch_bootstrap_pending=(
+                allow_recovery_scratch_bootstrap_pending
+            ),
+            recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+        )
         _write_json_atomic(manifest_path, preflight, mode=0o600)
         prepared = {
             "contract_version": JOURNAL_CORRECTION_CONTRACT,
@@ -251,6 +295,10 @@ def remove_journald_retention_dropin(policy: Mapping[str, Any]) -> dict[str, Any
         readback = _wait_for_journald_correction_readback(
             policy,
             before_service=preflight["service_before"],
+            allow_recovery_scratch_bootstrap_pending=(
+                allow_recovery_scratch_bootstrap_pending
+            ),
+            recovery_scratch_release_bridge=recovery_scratch_release_bridge,
         )
         if not readback.get("ok"):
             raise RootStoragePolicyError(
@@ -278,6 +326,8 @@ def build_journald_correction_preflight(
     policy: Mapping[str, Any],
     *,
     inventory_reader: Any = None,
+    allow_recovery_scratch_bootstrap_pending: bool = False,
+    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     correction = _journald_correction_policy(policy)
     destination = Path(str(correction["configuration_destination"]))
@@ -297,7 +347,13 @@ def build_journald_correction_preflight(
         or not service_before.get("main_pid")
     ):
         raise RootStoragePolicyError("journald must be active before corrective removal")
-    root_status = collect_root_storage_status(policy=policy)
+    root_status = collect_root_storage_status(
+        policy=policy,
+        allow_recovery_scratch_bootstrap_pending=(
+            allow_recovery_scratch_bootstrap_pending
+        ),
+        recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+    )
     payload = {
         "contract_version": JOURNAL_CORRECTION_CONTRACT,
         "observed_at": _utc_now(),
@@ -324,7 +380,12 @@ def build_journald_correction_preflight(
     return payload
 
 
-def readback_journald_correction(policy: Mapping[str, Any]) -> dict[str, Any]:
+def readback_journald_correction(
+    policy: Mapping[str, Any],
+    *,
+    allow_recovery_scratch_bootstrap_pending: bool = False,
+    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     correction = _journald_correction_policy(policy)
     correction_digest = _digest_payload(correction)
     operation_id = f"journald-correction-{correction_digest.removeprefix('sha256:')[:24]}"
@@ -391,7 +452,13 @@ def readback_journald_correction(policy: Mapping[str, Any]) -> dict[str, Any]:
             "journal_disk_usage": _bounded_text(
                 disk_usage.stdout or disk_usage.stderr
             ),
-            "root_storage_status_after": collect_root_storage_status(policy=policy),
+            "root_storage_status_after": collect_root_storage_status(
+                policy=policy,
+                allow_recovery_scratch_bootstrap_pending=(
+                    allow_recovery_scratch_bootstrap_pending
+                ),
+                recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+            ),
             "durable_completion_readback_digest": state["readback_digest"],
             "durable_completion_reused": True,
         }
@@ -426,7 +493,13 @@ def readback_journald_correction(policy: Mapping[str, Any]) -> dict[str, Any]:
         capture_output=True,
         check=False,
     )
-    root_status = collect_root_storage_status(policy=policy)
+    root_status = collect_root_storage_status(
+        policy=policy,
+        allow_recovery_scratch_bootstrap_pending=(
+            allow_recovery_scratch_bootstrap_pending
+        ),
+        recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+    )
     removal_recorded_at = str(state.get("dropin_removed_at") or "")
     restart_recorded_at = str(state.get("restart_submit_recorded_at") or "")
     removal_precedes_restart = bool(
@@ -989,7 +1062,11 @@ def _assert_journald_correction_preflight_fresh(
 
 
 def _wait_for_journald_correction_readback(
-    policy: Mapping[str, Any], *, before_service: Mapping[str, Any]
+    policy: Mapping[str, Any],
+    *,
+    before_service: Mapping[str, Any],
+    allow_recovery_scratch_bootstrap_pending: bool = False,
+    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     for _ in range(40):
         after = _journald_service_identity()
@@ -1002,9 +1079,21 @@ def _wait_for_journald_correction_readback(
             )
         )
         if changed and after.get("active_state") == "active":
-            return readback_journald_correction(policy)
+            return readback_journald_correction(
+                policy,
+                allow_recovery_scratch_bootstrap_pending=(
+                    allow_recovery_scratch_bootstrap_pending
+                ),
+                recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+            )
         time.sleep(0.25)
-    return readback_journald_correction(policy)
+    return readback_journald_correction(
+        policy,
+        allow_recovery_scratch_bootstrap_pending=(
+            allow_recovery_scratch_bootstrap_pending
+        ),
+        recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+    )
 
 
 def _collect_correction_journal_inventory(journal_root: Path) -> list[dict[str, Any]]:

@@ -16297,6 +16297,11 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             " --recovery-scratch-release-bridge "
             + shlex.quote(encoded_bridge)
         )
+    corrective_bridge_options = (
+        " --allow-recovery-scratch-bootstrap-pending" + bridge_option
+        if encoded_bridge and correction_mode
+        else ""
+    )
     return {
         "release_bridge": bool(encoded_bridge),
         "remote_policy_path": remote_policy_path,
@@ -16322,7 +16327,8 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
                 " journald-corrective-remove"
                 if correction_mode
                 else " journald-activate"
-            ),
+            )
+            + corrective_bridge_options,
         ),
         "action_name": "corrective_remove" if correction_mode else "activate_retention",
         "readback": _remote_shell_command(
@@ -16332,7 +16338,8 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
                 " journald-corrective-readback"
                 if correction_mode
                 else " journald-readback"
-            ),
+            )
+            + corrective_bridge_options,
         ),
     }
 
