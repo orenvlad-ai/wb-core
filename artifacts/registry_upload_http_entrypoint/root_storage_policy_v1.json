@@ -68,7 +68,7 @@
         "partition_number": 1,
         "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",
         "partition_guid": "9a0f40dd-bb7d-4af1-82bc-40a0960dee85",
-        "filesystem_label": "wb-recovery-scratch",
+        "filesystem_label": "wb-recovery-scra",
         "completion_marker": "/opt/wb-core-runtime/state/backups/private-evidence/recovery-scratch-bootstrap/completed.json",
         "require_distinct_from_roles": ["root", "backup", "generation"]
       }

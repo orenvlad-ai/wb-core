@@ -573,6 +573,9 @@ RECOVERY_SCRATCH_PLAN_CONTRACT = (
 RECOVERY_SCRATCH_RESULT_CONTRACT = (
     "wb_core_recovery_scratch_bootstrap_result_v1"
 )
+RECOVERY_SCRATCH_POST_SUBMIT_CONTRACT = (
+    "wb_core_recovery_scratch_post_submit_reconcile_v1"
+)
 
 
 class ApplyError(RuntimeError):
@@ -11231,6 +11234,7 @@ def _validate_recovery_scratch_ready(
         "parent_model": target.get("parent_model"),
         "parent_hctl": target.get("parent_hctl"),
         "filesystem_uuid": target.get("filesystem_uuid"),
+        "filesystem_label": "wb-recovery-scra",
         "filesystem_type": "ext4",
         "directory_mode": target.get("directory_mode"),
         "mountpoint_proven": True,
@@ -11259,10 +11263,179 @@ def _validate_recovery_scratch_ready(
         raise ApplyError("recovery scratch mounted-ready evidence drifted")
 
 
+def _recovery_scratch_post_submit_result(
+    evidence: Mapping[str, Any], *, action: str
+) -> dict[str, Any]:
+    outer = evidence.get("result")
+    if (
+        evidence.get("return_code") != 0
+        or not isinstance(outer, Mapping)
+        or outer.get("action")
+        != f"recovery-scratch-post-submit-reconcile-{action}"
+        or not isinstance(outer.get("result"), Mapping)
+    ):
+        raise ApplyError(f"recovery scratch post-submit {action} evidence is invalid")
+    return dict(outer["result"])
+
+
+def _run_recovery_scratch_post_submit_commands(
+    manifest: Mapping[str, Any], *, approval_reference: str
+) -> dict[str, Any]:
+    expected_commands = {
+        key: [
+            "python3",
+            "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+            f"recovery-scratch-post-submit-reconcile-{action}",
+        ]
+        for key, action in (
+            ("dry_run", "dry-run"),
+            ("apply", "apply"),
+            ("readback", "readback"),
+        )
+    }
+    expected_commands["reconcile"] = [
+        "python3",
+        "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+        "root-storage-readback",
+    ]
+    if dict(manifest.get("commands") or {}) != expected_commands:
+        raise ApplyError("recovery scratch post-submit manifest commands drifted")
+    from apps.recovery_scratch_bootstrap_post_submit_reconcile import (
+        validate_manifest_contract,
+    )
+
+    try:
+        validate_manifest_contract(manifest)
+    except Exception as exc:
+        raise ApplyError("recovery scratch post-submit manifest binding drifted") from exc
+    deployed_sha = exact_sha(
+        str(
+            manifest.get("merge_sha")
+            or os.environ.get("WB_CORE_APPLY_DEPLOYED_SHA")
+            or ""
+        ),
+        "recovery-scratch-post-submit-deployed",
+    )
+    operation = str(manifest.get("operation_id") or "")
+    dry_run = command_evidence(
+        [*expected_commands["dry_run"], "--deployed-sha", deployed_sha],
+        timeout_seconds=240.0,
+    )
+    preflight_error = ""
+    try:
+        preflight = _recovery_scratch_post_submit_result(
+            dry_run, action="dry-run"
+        )
+        preflight_valid = bool(
+            preflight.get("contract_name")
+            == RECOVERY_SCRATCH_POST_SUBMIT_CONTRACT
+            and preflight.get("status") == "READY_TO_RECONCILE"
+            and preflight.get("operation_id") == operation
+            and preflight.get("source_deployed_sha")
+            == "2d4b1ac35c11c6569465dbd8db897f8541efc021"
+            and preflight.get("source_submit_count") == 1
+            and preflight.get("continuation_submit_count") == 0
+            and preflight.get("total_submit_count") == 1
+            and preflight.get("pre_change_digest_value")
+            == manifest.get("pre_change_digest_value")
+            and preflight.get("target_present") is False
+            and preflight.get("completion_present") is False
+            and dict(preflight.get("partial_device") or {}).get("status")
+            == "failed_after_submit_reconciliation_pending"
+            and dict(preflight.get("partial_device") or {}).get(
+                "filesystem_label"
+            )
+            == "wb-recovery-scra"
+            and dict(preflight.get("source_artifacts") or {}).get(
+                "source_submit_count"
+            )
+            == 1
+            and dict(preflight.get("source_artifacts") or {}).get(
+                "retry_allowed"
+            )
+            is False
+        )
+    except ApplyError as exc:
+        preflight_valid = False
+        preflight_error = str(exc)
+    if not preflight_valid:
+        return {
+            "state": "blocked",
+            "apply_count": 0,
+            "dry_run_count": 1,
+            "dry_run": dry_run,
+            "validation_error": (
+                "recovery scratch post-submit dry-run contract drifted"
+                if not preflight_error
+                else preflight_error
+            ),
+        }
+    apply_result = command_evidence(
+        [
+            *expected_commands["apply"],
+            "--deployed-sha",
+            deployed_sha,
+            "--approval-reference",
+            approval_reference,
+        ],
+        timeout_seconds=900.0,
+    )
+    readback = command_evidence(
+        [*expected_commands["readback"], "--deployed-sha", deployed_sha],
+        timeout_seconds=240.0,
+    )
+    try:
+        result = _recovery_scratch_post_submit_result(
+            readback, action="readback"
+        )
+        _validate_recovery_scratch_ready(
+            result,
+            manifest=manifest,
+            deployed_sha=deployed_sha,
+        )
+        readback_valid = bool(
+            result.get("reconciliation_contract")
+            == RECOVERY_SCRATCH_POST_SUBMIT_CONTRACT
+            and result.get("failure_disposition") == "reconciled_preserved"
+            and result.get("source_submit_count") == 1
+            and result.get("continuation_submit_count") == 0
+            and result.get("total_submit_count") == 1
+            and result.get("pre_change_digest_value")
+            == manifest.get("pre_change_digest_value")
+        )
+        if not readback_valid:
+            raise ApplyError("recovery scratch post-submit readback contract drifted")
+    except ApplyError as exc:
+        readback_valid = False
+        readback_error = str(exc)
+    return {
+        "state": "done" if readback_valid else "blocked",
+        "apply_count": 1,
+        "dry_run_count": 1,
+        "source_submit_count": 1,
+        "continuation_submit_count": 0,
+        "total_submit_count": 1,
+        "dry_run": dry_run,
+        "apply": apply_result,
+        "readback": readback,
+        "readback_valid": readback_valid,
+        **({} if readback_valid else {"validation_error": readback_error}),
+    }
+
+
 def _run_recovery_scratch_commands(
     manifest: Mapping[str, Any], *, approval_reference: str
 ) -> dict[str, Any]:
     commands = dict(manifest.get("commands") or {})
+    if any(
+        "recovery-scratch-post-submit-reconcile" in str(part)
+        for command in commands.values()
+        if isinstance(command, list)
+        for part in command
+    ):
+        return _run_recovery_scratch_post_submit_commands(
+            manifest, approval_reference=approval_reference
+        )
     expected_commands = {
         key: [
             "python3",

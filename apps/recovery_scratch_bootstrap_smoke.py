@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import recovery_scratch_bootstrap as bootstrap
+from apps import recovery_scratch_bootstrap_post_submit_reconcile as post_submit
 from apps.recovery_scratch_bootstrap import (
     RecoveryScratchError,
     plan_fingerprint,
@@ -40,7 +41,7 @@ CONTRACT = {
     "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",
     "partition_guid": "9a0f40dd-bb7d-4af1-82bc-40a0960dee85",
     "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
-    "filesystem_label": "wb-recovery-scratch",
+    "filesystem_label": "wb-recovery-scra",
     "filesystem_type": "ext4",
     "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
     "reserve_bytes": 8589934592,
@@ -338,9 +339,188 @@ def _exercise_existing_plan_continuation() -> None:
             bootstrap.collect_blank_device_evidence = original_collect
 
 
+def _exercise_post_submit_reconciliation_apply_path() -> None:
+    forbidden = {"sfdisk", "mkfs.ext4", "mkfs", "wipefs", "e2label", "tune2fs"}
+
+    def run_case(*, fail_after_mount: bool) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_dir = root / "state"
+            state_dir.mkdir()
+            target_path = root / "runtime" / "recovery-scratch"
+            target_path.parent.mkdir()
+            completion = state_dir / "completed.json"
+            deployed = root / "deployed.sha"
+            deployed.write_text("c" * 40 + "\n", encoding="utf-8")
+            fstab = root / "fstab"
+            fstab.write_text("# preserved fstab\n", encoding="utf-8")
+            backup = state_dir / "fstab.before"
+            backup.write_bytes(fstab.read_bytes())
+            plan = state_dir / "plan.json"
+            plan.write_text(
+                json.dumps({"fstab_before": bootstrap._fstab_identity(fstab)}),
+                encoding="utf-8",
+            )
+            failure = state_dir / "failure.json"
+            failure.write_text('{"status":"failed_after_submit"}\n', encoding="utf-8")
+            failure_before = failure.read_bytes()
+            manifest = {
+                "post_submit_reconciliation": {
+                    "source": {
+                        "fstab_backup_path": str(backup),
+                        "plan_path": str(plan),
+                    },
+                    "predecessor_receipts": {
+                        "apply_receipt_sha256": "sha256:" + "4" * 64,
+                    },
+                }
+            }
+            contract = {
+                **CONTRACT,
+                "path": str(target_path),
+                "completion_marker": str(completion),
+            }
+            commands: list[list[str]] = []
+            mounted = False
+            ready_calls = 0
+            original_preflight = post_submit.collect_pre_change_evidence
+            original_verify = bootstrap._verify_deployed_sha
+            original_ready = bootstrap.collect_ready_evidence
+            original_run = bootstrap._run
+            original_ismount = post_submit.os.path.ismount
+            original_source_fstab_sha = post_submit.SOURCE_FSTAB_SHA256
+            original_readback = post_submit.readback
+
+            def fake_run(argv: list[str], **_kwargs):
+                nonlocal mounted
+                commands.append(list(argv))
+                if argv[0] == "mount":
+                    mounted = True
+                elif argv[0] == "umount":
+                    mounted = False
+                return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            def fake_ready(_contract: dict, *, require_completion_marker: bool = True):
+                nonlocal ready_calls
+                ready_calls += 1
+                if fail_after_mount and ready_calls == 1:
+                    raise RecoveryScratchError("forced ready failure")
+                return {
+                    **_ready(),
+                    "path": str(target_path),
+                    "completion_marker_present": require_completion_marker,
+                }
+
+            post_submit.collect_pre_change_evidence = lambda **_kwargs: {
+                "pre_change_digest_value": "sha256:" + "5" * 64,
+            }
+            bootstrap._verify_deployed_sha = lambda sha, _path: sha
+            bootstrap.collect_ready_evidence = fake_ready
+            bootstrap._run = fake_run
+            post_submit.os.path.ismount = lambda path: mounted and Path(path) == target_path
+            post_submit.SOURCE_FSTAB_SHA256 = bootstrap._file_digest(fstab)
+            try:
+                if fail_after_mount:
+                    _expect_error(
+                        lambda: post_submit.apply_reconciliation(
+                            contract=contract,
+                            manifest=manifest,
+                            deployed_sha="c" * 40,
+                            deployed_sha_file=deployed,
+                            approval_reference="exact correction authorization",
+                            fstab_path=fstab,
+                        ),
+                        "forced ready failure",
+                    )
+                    assert [item[0] for item in commands] == ["mount", "umount"]
+                    assert fstab.read_bytes() == backup.read_bytes()
+                    assert not target_path.exists()
+                    assert not completion.exists()
+                else:
+                    result = post_submit.apply_reconciliation(
+                        contract=contract,
+                        manifest=manifest,
+                        deployed_sha="c" * 40,
+                        deployed_sha_file=deployed,
+                        approval_reference="exact correction authorization",
+                        fstab_path=fstab,
+                    )
+                    assert [item[0] for item in commands] == ["mount"]
+                    assert result["failure_disposition"] == "reconciled_preserved"
+                    assert result["source_submit_count"] == 1
+                    assert result["continuation_submit_count"] == 0
+                    assert result["total_submit_count"] == 1
+                    assert completion.is_file()
+                    commands.clear()
+                    post_submit.readback = lambda **_kwargs: {
+                        "status": "READY",
+                        "source_submit_count": 1,
+                        "continuation_submit_count": 0,
+                        "total_submit_count": 1,
+                    }
+                    repeated = post_submit.apply_reconciliation(
+                        contract=contract,
+                        manifest=manifest,
+                        deployed_sha="c" * 40,
+                        deployed_sha_file=deployed,
+                        approval_reference="exact correction authorization",
+                        fstab_path=fstab,
+                    )
+                    assert repeated["already_terminal"] is True
+                    assert repeated["continuation_apply_count_this_call"] == 0
+                    assert commands == []
+                assert failure.read_bytes() == failure_before
+                flattened = {part for command in commands for part in command}
+                assert not forbidden.intersection(flattened), commands
+                assert not (state_dir / "intent.json").exists()
+            finally:
+                post_submit.collect_pre_change_evidence = original_preflight
+                bootstrap._verify_deployed_sha = original_verify
+                bootstrap.collect_ready_evidence = original_ready
+                bootstrap._run = original_run
+                post_submit.os.path.ismount = original_ismount
+                post_submit.SOURCE_FSTAB_SHA256 = original_source_fstab_sha
+                post_submit.readback = original_readback
+
+    run_case(fail_after_mount=False)
+    run_case(fail_after_mount=True)
+
+
+def _exercise_post_submit_manifest_binding() -> None:
+    manifest = json.loads(
+        (
+            ROOT
+            / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+        ).read_text(encoding="utf-8")
+    )
+    binding = post_submit.validate_manifest_contract(manifest)
+    assert manifest["pre_change_digest_value"] == bootstrap._digest(binding)
+    for mutate in (
+        lambda item: item["post_submit_reconciliation"]["source"].__setitem__(
+            "intent_sha256", "sha256:" + "0" * 64
+        ),
+        lambda item: item["post_submit_reconciliation"]["partial_state"].__setitem__(
+            "effective_filesystem_label", "wb-recovery-scratch"
+        ),
+        lambda item: item["post_submit_reconciliation"]["predecessor_receipts"].__setitem__(
+            "apply_count", 0
+        ),
+    ):
+        changed = copy.deepcopy(manifest)
+        mutate(changed)
+        try:
+            post_submit.validate_manifest_contract(changed)
+        except post_submit.PostSubmitReconcileError:
+            pass
+        else:
+            raise AssertionError("expected exact post-submit manifest rejection")
+
+
 def main() -> int:
     _exercise_exact_operation_dry_run()
     _exercise_existing_plan_continuation()
+    _exercise_post_submit_reconciliation_apply_path()
+    _exercise_post_submit_manifest_binding()
     contract = validate_recovery_scratch_contract(
         CONTRACT,
         runtime_dir=Path("/opt/wb-core-runtime/state"),

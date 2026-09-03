@@ -364,6 +364,7 @@ def _recovery_scratch_pending_status(
     policy: Mapping[str, Any],
     *,
     path: Path,
+    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     registry = dict(policy.get("storage_registry") or {})
     raw = dict(dict(registry.get("filesystems") or {}).get("recovery_scratch") or {})
@@ -381,14 +382,38 @@ def _recovery_scratch_pending_status(
         collect_blank_device_evidence,
         validate_recovery_scratch_contract,
     )
+    from apps.recovery_scratch_bootstrap_post_submit_reconcile import (
+        PostSubmitReconcileError,
+        collect_pre_change_evidence,
+    )
 
     try:
         contract = validate_recovery_scratch_contract(
             _recovery_scratch_contract(raw),
             runtime_dir=path.parent,
         )
+        post_submit_manifest = (
+            recovery_scratch_release_bridge.get("post_submit_manifest")
+            if recovery_scratch_release_bridge is not None
+            else None
+        )
+        if isinstance(post_submit_manifest, Mapping):
+            partial = collect_pre_change_evidence(
+                contract=contract,
+                manifest=post_submit_manifest,
+            )
+            return {
+                "path": str(path),
+                "bootstrap_status": "failed_after_submit_reconciliation_pending",
+                "partial_state": partial,
+                "source": None,
+                "filesystem_uuid": contract["filesystem_uuid"],
+                "filesystem_type": contract["filesystem_type"],
+                "mount_options": "",
+                "available_bytes": None,
+            }
         blank = collect_blank_device_evidence(contract)
-    except RecoveryScratchError as exc:
+    except (RecoveryScratchError, PostSubmitReconcileError) as exc:
         raise RootStoragePolicyError(
             "recovery scratch bootstrap-pending evidence is invalid"
         ) from exc
@@ -743,6 +768,7 @@ def collect_root_storage_status(
             filesystems[name] = _recovery_scratch_pending_status(
                 resolved_policy,
                 path=path,
+                recovery_scratch_release_bridge=bridge,
             )
     if "root" not in filesystems:
         filesystems["root"] = _filesystem_status(root_path)
@@ -819,17 +845,20 @@ def _collect_storage_registry_status(
             continue
         contract = dict(role_contracts[role])
         observed = dict(observed_filesystems[role])
-        if role == "recovery_scratch" and observed.get("bootstrap_status") == "pending":
+        if role == "recovery_scratch" and observed.get("bootstrap_status") in {
+            "pending", "failed_after_submit_reconciliation_pending"
+        }:
             role_status[role] = {
                 "identity_ok": False,
                 "identity_error_fields": [],
-                "bootstrap_status": "pending",
+                "bootstrap_status": observed.get("bootstrap_status"),
                 "reserve_mode": str(contract.get("reserve_mode") or ""),
                 "required_reserve_bytes": int(contract.get("reserve_bytes") or 0),
                 "available_bytes": None,
                 "available_after_reserve_bytes": None,
                 "reserve_breached": False,
                 "blank_device": observed.get("blank_device"),
+                "partial_state": observed.get("partial_state"),
             }
             continue
         required_options = {str(item) for item in contract.get("required_mount_options") or []}
@@ -914,7 +943,9 @@ def _collect_storage_registry_status(
     unregistered_destination_violations: list[dict[str, Any]] = []
     for role in ("backup", "generation", "recovery_scratch"):
         observed = observed_filesystems.get(role)
-        if observed is None or observed.get("bootstrap_status") == "pending":
+        if observed is None or observed.get("bootstrap_status") in {
+            "pending", "failed_after_submit_reconciliation_pending"
+        }:
             continue
         unregistered_destination_violations.extend(
             _scan_unregistered_large_destinations(
@@ -1137,7 +1168,9 @@ def read_root_storage_status_artifact(
         )
     roles = dict(storage_registry.get("roles") or {})
     scratch = dict(roles.get("recovery_scratch") or {})
-    if scratch.get("bootstrap_status") == "pending":
+    if scratch.get("bootstrap_status") in {
+        "pending", "failed_after_submit_reconciliation_pending"
+    }:
         if not allow_recovery_scratch_bootstrap_pending:
             raise RootStoragePolicyError(
                 "recovery scratch filesystem is bootstrap-pending"
@@ -1328,6 +1361,17 @@ def _validate_recovery_scratch_release_bridge(
         or manifest.get("release_bridge") != preconditions
     ):
         raise RootStoragePolicyError("recovery scratch manifest binding drifted")
+    if manifest.get("post_submit_reconciliation") is not None:
+        from apps.recovery_scratch_bootstrap_post_submit_reconcile import (
+            validate_manifest_contract,
+        )
+
+        try:
+            validate_manifest_contract(manifest)
+        except Exception as exc:
+            raise RootStoragePolicyError(
+                "recovery scratch post-submit manifest binding drifted"
+            ) from exc
     exact_target = {
         "parent_device": "/dev/sdd",
         "parent_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde",
@@ -1443,6 +1487,9 @@ def _validate_recovery_scratch_release_bridge(
         "release_sha": release_sha,
         "fingerprint": _payload_digest(bridge),
         "finance_health": health,
+        "post_submit_manifest": (
+            manifest if manifest.get("post_submit_reconciliation") is not None else None
+        ),
         "live_preconditions": {
             "barrier": {
                 key: barrier.get(key)

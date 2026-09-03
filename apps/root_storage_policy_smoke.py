@@ -51,6 +51,7 @@ def main() -> int:
     _assert_static_safety()
     _assert_recovery_scratch_release_bridge_is_manifest_bound()
     _assert_recovery_scratch_finance_exception_is_exact()
+    _assert_recovery_scratch_post_submit_pending_is_exact()
     print("root_storage_policy_smoke: ok")
     return 0
 
@@ -198,6 +199,64 @@ def _assert_recovery_scratch_finance_exception_is_exact() -> None:
                 pass
             else:
                 raise AssertionError("invalid Finance release bridge was accepted")
+
+
+def _assert_recovery_scratch_post_submit_pending_is_exact() -> None:
+    from apps import recovery_scratch_bootstrap as bootstrap
+    from apps import recovery_scratch_bootstrap_post_submit_reconcile as post_submit
+
+    policy = deepcopy(load_policy())
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "recovery-scratch"
+        evidence = {
+            "contract_name": post_submit.CONTRACT,
+            "status": "READY_TO_RECONCILE",
+            "source_submit_count": 1,
+            "continuation_submit_count": 0,
+            "total_submit_count": 1,
+        }
+        with mock.patch.object(
+            bootstrap,
+            "validate_recovery_scratch_contract",
+            return_value={
+                **policy["storage_registry"]["filesystems"]["recovery_scratch"],
+                "filesystem_label": "wb-recovery-scra",
+            },
+        ), mock.patch.object(
+            post_submit,
+            "collect_pre_change_evidence",
+            return_value=evidence,
+        ):
+            observed = policy_module._recovery_scratch_pending_status(
+                policy,
+                path=path,
+                recovery_scratch_release_bridge={"post_submit_manifest": {}},
+            )
+        assert observed["bootstrap_status"] == (
+            "failed_after_submit_reconciliation_pending"
+        )
+        assert observed["partial_state"] == evidence
+        with mock.patch.object(
+            bootstrap,
+            "validate_recovery_scratch_contract",
+            return_value=policy["storage_registry"]["filesystems"][
+                "recovery_scratch"
+            ],
+        ), mock.patch.object(
+            post_submit,
+            "collect_pre_change_evidence",
+            side_effect=post_submit.PostSubmitReconcileError("source drift"),
+        ):
+            try:
+                policy_module._recovery_scratch_pending_status(
+                    policy,
+                    path=path,
+                    recovery_scratch_release_bridge={"post_submit_manifest": {}},
+                )
+            except RootStoragePolicyError as exc:
+                assert "bootstrap-pending evidence is invalid" in str(exc)
+            else:
+                raise AssertionError("drifted post-submit state was admitted")
 
 
 def _assert_thresholds(policy: dict[str, object]) -> None:

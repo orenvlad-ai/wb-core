@@ -270,7 +270,7 @@
     "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",
     "partition_guid": "9a0f40dd-bb7d-4af1-82bc-40a0960dee85",
     "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
-    "filesystem_label": "wb-recovery-scratch",
+    "filesystem_label": "wb-recovery-scra",
     "filesystem_type": "ext4",
     "required_mount_options": [
       "rw",
