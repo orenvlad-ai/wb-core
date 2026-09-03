@@ -68,7 +68,7 @@
     ]
   },
   "authorization": {
-    "source": "WBC0035/021 accepted owner outcome",
+    "source": "WBC0035/021 accepted owner outcome; WBC0035/022 same-scope deploy admission correction",
     "effect": "exact new recovery-scratch destination initialization and persistent mount",
     "no_reconfirmation": true
   }
