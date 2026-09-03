@@ -16275,7 +16275,7 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             != "wbc0035_recovery_scratch_release_bridge/v1"
             or bridge.get("target_id") != target.target_id
             or bridge.get("operation_id")
-            != "wbc0035-025-recovery-scratch-a01"
+            != "wbc0035-026-recovery-scratch-a01"
             or bridge.get("release_sha")
             != _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
             or dict(bridge.get("target") or {}).get("parent_device_by_id")

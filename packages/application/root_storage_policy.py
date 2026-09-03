@@ -8,6 +8,7 @@ from fnmatch import fnmatchcase
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -1300,7 +1301,7 @@ def _validate_recovery_scratch_release_bridge(
         or re.fullmatch(r"[0-9a-f]{64}", manifest_sha) is None
         or bridge.get("target_id") != "wb_core_eu_hosted_runtime_active"
         or bridge.get("operation_id")
-        != "wbc0035-025-recovery-scratch-a01"
+        != "wbc0035-026-recovery-scratch-a01"
         or re.fullmatch(r"[0-9a-f]{40}", release_sha) is None
     ):
         raise RootStoragePolicyError("recovery scratch release bridge identity drifted")

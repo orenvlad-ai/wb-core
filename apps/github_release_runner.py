@@ -736,7 +736,7 @@ def build_recovery_scratch_release_bridge(
         },
     }
     if (
-        manifest.get("operation_id") != "wbc0035-025-recovery-scratch-a01"
+        manifest.get("operation_id") != "wbc0035-026-recovery-scratch-a01"
         or manifest.get("target_id") != "wb_core_eu_hosted_runtime_active"
         or manifest.get("deployed_sha_contract") != "exact-merge-sha"
         or manifest.get("target") != expected_target
