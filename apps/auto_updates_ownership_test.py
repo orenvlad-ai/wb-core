@@ -9,9 +9,13 @@ import json
 import unittest
 
 from apps.business_data_maintenance import (
+    FBS_SHADOW_TIMER_UNIT,
+    INDEPENDENT_WRITER_TIMER_UNITS,
     POLICY_FILENAME,
     PROCESS_SPECS,
+    _independent_writer_timer_restore_plan,
     load_or_initialize_owner_policy,
+    update_direct_timer_process_desired_state,
     update_process_desired_state,
 )
 from packages.adapters.registry_upload_http_entrypoint import (
@@ -53,6 +57,7 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
                 "vitrina_closure_retry",
                 "warehouse_functional",
                 "wb_finance_weekly",
+                "fbs_shadow",
             },
         )
         self.assertEqual(
@@ -96,6 +101,69 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
                     )
             self.assertNotIn("autoanswers_readonly", policy["processes"])
             self.assertNotIn("autoanswers_worker", policy["processes"])
+
+    def test_fbs_direct_control_disables_only_its_timer(self) -> None:
+        class FakeSystemd:
+            def __init__(self) -> None:
+                self.disabled: list[str] = []
+                self.enabled: list[str] = []
+
+            def disable_now(self, unit: str) -> None:
+                self.disabled.append(unit)
+
+            def enable_now(self, unit: str) -> None:
+                self.enabled.append(unit)
+
+        with TemporaryDirectory() as directory:
+            runtime_dir = Path(directory)
+            (runtime_dir / POLICY_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "schema_version": "auto_updates_owner_policy_v2",
+                        "master_desired": True,
+                        "revision": 7,
+                        "processes": {
+                            "fbs_shadow": {
+                                "process_key": "fbs_shadow",
+                                "desired": True,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            systemd = FakeSystemd()
+            policy = update_direct_timer_process_desired_state(
+                runtime_dir,
+                systemd=systemd,
+                process_key="fbs_shadow",
+                desired=False,
+                expected_revision=7,
+                actor="test",
+                reason="prevent a new FBS generation",
+            )
+            self.assertEqual(policy["revision"], 8)
+            self.assertIs(policy["processes"]["fbs_shadow"]["desired"], False)
+            self.assertEqual(systemd.disabled, [FBS_SHADOW_TIMER_UNIT])
+            self.assertEqual(systemd.enabled, [])
+
+    def test_fbs_explicit_policy_wins_over_legacy_restore_baseline(self) -> None:
+        baseline = {
+            "timers": {
+                unit: {
+                    "is_enabled": "enabled",
+                    "is_active": "active",
+                }
+                for unit in INDEPENDENT_WRITER_TIMER_UNITS
+            }
+        }
+        legacy_plan = _independent_writer_timer_restore_plan(baseline)
+        managed_plan = _independent_writer_timer_restore_plan(
+            baseline,
+            owner_policy={"processes": {"fbs_shadow": {"desired": False}}},
+        )
+        self.assertIs(legacy_plan[FBS_SHADOW_TIMER_UNIT], True)
+        self.assertIs(managed_plan[FBS_SHADOW_TIMER_UNIT], False)
 
     def test_vitrina_schedule_editor_exists_only_in_settings(self) -> None:
         web_html = _render_sheet_vitrina_web_vitrina_ui(
