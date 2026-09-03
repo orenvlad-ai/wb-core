@@ -144,6 +144,9 @@ def _assert_recovery_scratch_release_bridge_is_manifest_bound() -> None:
             validated = policy_module._validate_recovery_scratch_release_bridge(
                 policy, bridge
             )
+            assert validated["manifest_sha256"] == release_runner.sha256(manifest_raw)
+            assert validated["release_sha"] == release_sha
+            assert validated["target"] == manifest["target"]
             assert validated["operation_id"] == manifest["operation_id"]
             assert validated["live_preconditions"]["writer_processes"] == []
             drifted = {**bridge, "manifest_sha256": "not-a-sha256"}
