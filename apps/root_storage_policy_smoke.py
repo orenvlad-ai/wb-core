@@ -49,9 +49,112 @@ def main() -> int:
     _assert_one_shot_correction(policy)
     _assert_corrective_reconciliation(policy)
     _assert_static_safety()
+    _assert_recovery_scratch_release_bridge_is_manifest_bound()
     _assert_recovery_scratch_finance_exception_is_exact()
     print("root_storage_policy_smoke: ok")
     return 0
+
+
+def _assert_recovery_scratch_release_bridge_is_manifest_bound() -> None:
+    from apps import business_data_maintenance as maintenance
+    from apps import github_release_runner as release_runner
+    from packages.application import business_data_write_barrier as barrier_module
+    from packages.application import finance_storage_backup_rotation as finance_module
+
+    manifest_path = (
+        ROOT
+        / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+    )
+    manifest_raw = manifest_path.read_bytes()
+    manifest = json.loads(manifest_raw)
+    release_sha = "a" * 40
+    bridge = release_runner.build_recovery_scratch_release_bridge(
+        {
+            "path": str(manifest_path.relative_to(ROOT)),
+            "sha256": release_runner.sha256(manifest_raw),
+        },
+        manifest,
+        release_sha,
+    )
+    assert bridge is not None
+    policy = deepcopy(load_policy())
+    expected = manifest["release_bridge"]
+    health = {
+        "status": "degraded",
+        "blockers": [expected["finance"]["only_allowed_blocker"]],
+        "retained_backup_id": expected["finance"]["retained_backup_id"],
+        "canonical_source_bytes": expected["finance"]["canonical_source_bytes"],
+        "next_replacement_required_bytes": expected["finance"][
+            "next_replacement_required_bytes"
+        ],
+        "capacity_basis": expected["finance"]["capacity_basis"],
+        "next_replacement_capacity": True,
+        "available_bytes": 49_479_995_392,
+    }
+    barrier = {
+        **expected["barrier"],
+        "state_fingerprint": "sha256:" + "b" * 64,
+    }
+    timer_state = {"is_enabled": "disabled", "is_active": "inactive"}
+    systemd = SimpleNamespace(unit_state=lambda _: dict(timer_state))
+    with tempfile.TemporaryDirectory() as temporary:
+        repository_root = Path(temporary) / "repo"
+        fake_module = (
+            repository_root / "packages/application/root_storage_policy.py"
+        )
+        fake_module.parent.mkdir(parents=True)
+        fake_module.write_text("# fixture\n", encoding="utf-8")
+        bound_manifest = (
+            repository_root / policy_module.RECOVERY_SCRATCH_MANIFEST_PATH
+        )
+        bound_manifest.parent.mkdir(parents=True)
+        bound_manifest.write_bytes(manifest_raw)
+        (repository_root / ".wb-core-runtime-sha").write_text(
+            release_sha + "\n", encoding="utf-8"
+        )
+        runtime = Path(temporary) / "runtime"
+        runtime.mkdir()
+        (runtime / maintenance.STATE_FILENAME).write_text(
+            json.dumps({"phase": expected["barrier"]["maintenance_phase"]}),
+            encoding="utf-8",
+        )
+        (runtime / maintenance.POLICY_FILENAME).write_text(
+            json.dumps(
+                {
+                    "revision": expected["barrier"]["owner_policy_revision"],
+                    "master_desired": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        policy["storage_registry"]["filesystems"]["backup"]["path"] = str(
+            runtime / "backups"
+        )
+        with mock.patch.object(
+            policy_module, "__file__", str(fake_module)
+        ), mock.patch.object(
+            barrier_module, "barrier_status", return_value=barrier
+        ), mock.patch.object(
+            maintenance, "SystemdClient", return_value=systemd
+        ), mock.patch.object(
+            maintenance, "_writer_processes", return_value=[]
+        ), mock.patch.object(
+            finance_module, "backup_rotation_health", return_value=health
+        ):
+            validated = policy_module._validate_recovery_scratch_release_bridge(
+                policy, bridge
+            )
+            assert validated["operation_id"] == manifest["operation_id"]
+            assert validated["live_preconditions"]["writer_processes"] == []
+            drifted = {**bridge, "manifest_sha256": "not-a-sha256"}
+            try:
+                policy_module._validate_recovery_scratch_release_bridge(
+                    policy, drifted
+                )
+            except RootStoragePolicyError as exc:
+                assert "identity drifted" in str(exc)
+            else:
+                raise AssertionError("invalid release bridge digest was accepted")
 
 
 def _assert_recovery_scratch_finance_exception_is_exact() -> None:

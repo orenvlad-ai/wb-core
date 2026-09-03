@@ -1,7 +1,7 @@
 {
   "schema": "wb-core.production-apply-manifest/v2",
   "contract": "wbc0035_recovery_scratch_bootstrap_passport/v1",
-  "operation_id": "wbc0035-025-recovery-scratch-a01",
+  "operation_id": "wbc0035-026-recovery-scratch-a01",
   "target_id": "wb_core_eu_hosted_runtime_active",
   "deployed_sha_contract": "exact-merge-sha",
   "dry_run_default": true,
@@ -101,7 +101,7 @@
     }
   },
   "authorization": {
-    "source": "WBC0035/025 accepted consolidated correction after WBC0035/024 terminal rehearsal",
+    "source": "WBC0035/026 accepted missing-import correction after exact PR1181 deployment failure",
     "effect": "exact new recovery-scratch destination initialization and persistent mount",
     "no_reconfirmation": true
   }

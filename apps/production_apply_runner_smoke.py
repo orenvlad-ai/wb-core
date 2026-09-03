@@ -2998,7 +2998,7 @@ def main() -> None:
     approval = (
         "/wb-core apply-v2 pr 1 merge " + MERGE_SHA + " deployed "
         + MERGE_SHA + " manifest sha256:" + "b" * 64
-        + " operation wbc0035-025-recovery-scratch-a01"
+        + " operation wbc0035-026-recovery-scratch-a01"
     )
     target = manifest["target"]
     plan_path = (
