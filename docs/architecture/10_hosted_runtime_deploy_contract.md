@@ -423,12 +423,11 @@ The same runner owns the only production path for the active functional cutover 
   epoch may continue. Its reconcile-existing alternative may bind only the two
   digest-exact historical observer exceptions documented there; a reviewed
   prefix-through-terminal-cutoff CAS may admit a later tail only when every
-  appended job is a generic scheduled complete/fact-zero outcome. Its current
-  full SQLite integrity/FK qualification uses only a bounded O_EXCL/0600 exact
-  byte copy on the dedicated `recovery_scratch` filesystem, opened by SQLite
-  and immediately unlinked before checks, with one exclusive active allocation,
-  guaranteed cleanup, zero-leftover proof, source/copy SHA equality, at least
-  source size plus 8 GiB available, and timeout/throughput/cache bounds. The
+  appended job is a generic scheduled complete/fact-zero outcome. Its
+  historical full SQLite integrity/FK qualification used only a bounded
+  O_EXCL/0600 exact byte copy on the dedicated `recovery_scratch` filesystem.
+  The active target has retired that filesystem and its sole producer, so this
+  incident-only qualification now fails before destination allocation. The
   Finance reserve on `backup` covers only durable evidence and never this
   temporary qualification peak; no full integrity scan
   runs against the live database. The dedicated
@@ -1369,31 +1368,14 @@ Live/public verify that creates temporary runtime users must prefer temp/local r
 
 ## Recovery scratch filesystem
 
-The active target owns exactly one fourth root-storage role at
-`/opt/wb-core-runtime/state/recovery-scratch`. It is a single GPT partition on
-the target-bound 50 GiB provider disk, formatted ext4 with the manifest UUID and
-mounted persistently by UUID with `rw,noatime,nodev,nosuid,noexec`, mode `0700`.
-The stable parent/partition by-id, provider serial, exact parent size and current
-major:minor are revalidated immediately before the first write; any signature,
-partition, holder, opener, mount, swap/LVM/md membership or configuration
-reference fails closed.
-
-Deploy admits an exact blank `bootstrap-pending` state but never initializes the
-disk. Only the repo-owned
-`recovery-scratch-bootstrap-dry-run|apply|readback` contour may persist an
-immutable reviewed plan, submit the GPT/ext4/fstab/mount mutation once, and
-prove the exact mounted-ready identity. After completion, ordinary root-storage
-status/readback requires that ready identity and cannot fall back to `/`,
-`backup` or `generation`. The sanitation unit requires this mount and grants its
-write allowlist explicitly.
-
-`recovery_scratch` is only ephemeral emergency/recovery verification space. It
-has zero retention: one O_EXCL `0600` qualification file is opened and unlinked
-before full SQLite integrity/FK checks, then closed with guaranteed zero-leftover
-cleanup. It must never contain Finance data, durable evidence, recovery markers,
-business databases or other business data; those remain on their existing
-canonical roles. Admission preserves at least the current source size plus 8
-GiB, and at most one allocation may be active.
+The former fourth root-storage role at
+`/opt/wb-core-runtime/state/recovery-scratch` is retired. Its provider-disk
+identity remains only as inactive audit metadata; the active target no longer
+binds it, ordinary deploy/status does not inspect or admit its
+`bootstrap-pending` state, and its sole qualification producer has no current
+write authority. The bootstrap and SQLite qualification entrypoints therefore
+fail closed before any disk, mount, fstab, file or database action. Root,
+backup and generation remain the only active storage roles.
 
 ## Finance generation filesystem
 

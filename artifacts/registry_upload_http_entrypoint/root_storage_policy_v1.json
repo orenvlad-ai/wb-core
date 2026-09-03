@@ -15,8 +15,7 @@
   "filesystems": {
     "root": "/",
     "backup": "/opt/wb-core-runtime/state/backups",
-    "generation": "/opt/wb-core-runtime/state/generations",
-    "recovery_scratch": "/opt/wb-core-runtime/state/recovery-scratch"
+    "generation": "/opt/wb-core-runtime/state/generations"
   },
   "storage_registry": {
     "contract_version": "wb_core_storage_registry_v1",
@@ -49,6 +48,7 @@
         "reserve_bytes": 8589934592
       },
       "recovery_scratch": {
+        "active": false,
         "contract_version": "wb_core_recovery_scratch_filesystem_v1",
         "path": "/opt/wb-core-runtime/state/recovery-scratch",
         "source": "/dev/sdd1",
@@ -166,7 +166,7 @@
       {"owner":"legacy_backup_artifacts","current":false,"data_class":"retained_legacy","destination_role":"backup","relative_roots":["proxy-v4-pr948","supplier-26gn527-vtb-recovery","canonical-vitrina-publication","supplier_factual_date_corrections","canonical-cost-engine","wb_finance_stale_cost","lost+found"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
       {"owner":"root_legacy_backup_families","current":false,"data_class":"retained_legacy","destination_role":"root","relative_roots":["opt/wb-core-runtime/backups","opt/wb-core-runtime/evidence","opt/wb-core-runtime/state/private-evidence","opt/wb-core-runtime/state/incident_backups","opt/wb-core-runtime/state/forensics","opt/wb-core-runtime/state/recovery_backups"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
       {"owner":"root_warm_archive_exact_six","current":false,"data_class":"terminal_exact_six","destination_role":"backup","relative_roots":["root-warm-archive-wbc0008-006"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"disabled","max_single_write_bytes":0},
-      {"owner":"sqlite_hot_journal_reconcile_qualification","current":true,"data_class":"ephemeral_recovery_verification","destination_role":"recovery_scratch","relative_roots":[""],"lifecycle_policy":"temporary_candidate","capacity_mode":"source_size_plus_fixed_reserve","max_single_write_bytes":34359738368}
+      {"owner":"sqlite_hot_journal_reconcile_qualification","current":false,"data_class":"disabled","destination_role":"recovery_scratch","relative_roots":[""],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0}
     ]
   },
   "scan_roots": [
@@ -539,7 +539,7 @@
     },
     {
       "owner": "sqlite_hot_journal_reconcile_qualification",
-      "classification": "discretionary_root_writer",
+      "classification": "retained_no_active_writer",
       "path_patterns": []
     }
   ]

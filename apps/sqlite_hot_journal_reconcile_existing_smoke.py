@@ -1595,12 +1595,40 @@ def main() -> None:
         _incident_exception_rejection_smoke(root)
         _observer_cutoff_tail_cas_smoke(root)
         _observer_cutoff_terminal_boundary_red_smoke(root)
-        _sqlite_qualification_red_smoke(root)
+        legacy_policy = json.loads(
+            json.dumps(reconcile.load_root_storage_policy())
+        )
+        scratch = legacy_policy["storage_registry"]["filesystems"][
+            "recovery_scratch"
+        ]
+        scratch["active"] = True
+        legacy_policy["filesystems"]["recovery_scratch"] = scratch["path"]
+        for producer in legacy_policy["storage_registry"]["producers"]:
+            if producer["owner"] == reconcile.SQLITE_QUALIFICATION_SCRATCH_OWNER:
+                producer.update(
+                    {
+                        "current": True,
+                        "data_class": "ephemeral_recovery_verification",
+                        "lifecycle_policy": "temporary_candidate",
+                        "capacity_mode": "source_size_plus_fixed_reserve",
+                        "max_single_write_bytes": 32 * 1024**3,
+                    }
+                )
+        for producer in legacy_policy["producers"]:
+            if producer["owner"] == reconcile.SQLITE_QUALIFICATION_SCRATCH_OWNER:
+                producer["classification"] = "discretionary_root_writer"
+        with mock.patch.object(
+            reconcile, "load_root_storage_policy", return_value=legacy_policy
+        ):
+            _sqlite_qualification_red_smoke(root)
         fixture = _digest_and_allowed_writer_smoke(root)
         _semantic_rejection_smoke(root)
         _marker_only_apply_smoke(root, fixture)
         _one_submit_smoke(root)
-        _marker_validator_smoke(fixture)
+        with mock.patch.object(
+            reconcile, "load_root_storage_policy", return_value=legacy_policy
+        ):
+            _marker_validator_smoke(fixture)
         _query_only_rehearsal_smoke(root)
     print("sqlite_hot_journal_reconcile_existing_smoke: ok")
 
