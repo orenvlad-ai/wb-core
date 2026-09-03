@@ -215,8 +215,132 @@ def _exercise_exact_operation_dry_run() -> None:
             bootstrap._file_digest = original_digest
 
 
+def _exercise_existing_plan_continuation() -> None:
+    deployed_sha = "b" * 40
+    operation_id = "wbc0035-026-recovery-scratch-a01"
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        state_dir = root / "recovery-scratch-bootstrap"
+        state_dir.mkdir()
+        plan_path = state_dir / f"plan-{deployed_sha}.json"
+        deployed = root / "deployed.sha"
+        deployed.write_text(deployed_sha + "\n", encoding="utf-8")
+        fstab = root / "fstab"
+        fstab.write_text("# exact pre-submit fstab\n", encoding="utf-8")
+        target = {
+            **CONTRACT,
+            "path": str(root / "runtime" / "recovery-scratch"),
+            "completion_marker": str(state_dir / "completed.json"),
+        }
+        base_plan = {
+            "contract_name": bootstrap.PLAN_CONTRACT,
+            "status": "ready_to_initialize",
+            "operation_id": operation_id,
+            "deployed_sha": deployed_sha,
+            "approval_reference": "WBC0035/032 existing-plan continuation regression",
+            "target": target,
+            "blank_device": _blank(),
+            "fstab_before": bootstrap._fstab_identity(fstab),
+            "layout": {},
+            "expected_effect": {
+                "disk_initialized": True,
+                "mount_persisted": True,
+                "business_database_mutation": 0,
+                "recovery_submit": 0,
+                "barrier_change": False,
+                "timer_change": False,
+            },
+            "submit_count": 0,
+            "created_at": "2026-09-03T00:00:00Z",
+        }
+
+        def persist_plan(payload: dict) -> tuple[str, str]:
+            material = copy.deepcopy(payload)
+            material["fingerprint"] = plan_fingerprint(material)
+            plan_path.write_text(
+                bootstrap._canonical_json(material) + "\n",
+                encoding="utf-8",
+            )
+            return bootstrap._file_digest(plan_path), material["fingerprint"]
+
+        preflight_calls: list[str] = []
+        original_validate = bootstrap.validate_recovery_scratch_contract
+        original_collect = bootstrap.collect_blank_device_evidence
+        bootstrap.validate_recovery_scratch_contract = (
+            lambda payload, *, runtime_dir: dict(payload)
+        )
+
+        def stop_at_exact_disk_preflight(contract: dict) -> dict:
+            preflight_calls.append(str(contract["parent_device_by_id"]))
+            raise RecoveryScratchError("mocked exact disk preflight reached")
+
+        bootstrap.collect_blank_device_evidence = stop_at_exact_disk_preflight
+        try:
+            plan_sha256, fingerprint = persist_plan(base_plan)
+            _expect_error(
+                lambda: bootstrap.apply_plan(
+                    plan_path=plan_path,
+                    plan_sha256=plan_sha256,
+                    fingerprint=fingerprint,
+                    deployed_sha_file=deployed,
+                    fstab_path=fstab,
+                ),
+                "mocked exact disk preflight reached",
+            )
+            assert preflight_calls == [CONTRACT["parent_device_by_id"]]
+            assert not (state_dir / "intent.json").exists()
+            assert not (state_dir / "failure.json").exists()
+            assert not (state_dir / "completed.json").exists()
+
+            for invalid in (None, "0", 1, 0.0, False):
+                changed = {**base_plan, "submit_count": invalid}
+                plan_sha256, fingerprint = persist_plan(changed)
+                _expect_error(
+                    lambda: bootstrap.apply_plan(
+                        plan_path=plan_path,
+                        plan_sha256=plan_sha256,
+                        fingerprint=fingerprint,
+                        deployed_sha_file=deployed,
+                        fstab_path=fstab,
+                    ),
+                    "plan contract drifted",
+                )
+            changed = dict(base_plan)
+            changed.pop("submit_count")
+            plan_sha256, fingerprint = persist_plan(changed)
+            _expect_error(
+                lambda: bootstrap.apply_plan(
+                    plan_path=plan_path,
+                    plan_sha256=plan_sha256,
+                    fingerprint=fingerprint,
+                    deployed_sha_file=deployed,
+                    fstab_path=fstab,
+                ),
+                "plan contract drifted",
+            )
+            assert preflight_calls == [CONTRACT["parent_device_by_id"]]
+
+            plan_sha256, fingerprint = persist_plan(base_plan)
+            (state_dir / "intent.json").write_text("{}\n", encoding="utf-8")
+            _expect_error(
+                lambda: bootstrap.apply_plan(
+                    plan_path=plan_path,
+                    plan_sha256=plan_sha256,
+                    fingerprint=fingerprint,
+                    deployed_sha_file=deployed,
+                    fstab_path=fstab,
+                ),
+                "prior submit is ambiguous or failed; retry forbidden",
+            )
+            assert preflight_calls == [CONTRACT["parent_device_by_id"]]
+        finally:
+            bootstrap.validate_recovery_scratch_contract = original_validate
+            bootstrap.collect_blank_device_evidence = original_collect
+
+
 def main() -> int:
     _exercise_exact_operation_dry_run()
+    _exercise_existing_plan_continuation()
     contract = validate_recovery_scratch_contract(
         CONTRACT,
         runtime_dir=Path("/opt/wb-core-runtime/state"),

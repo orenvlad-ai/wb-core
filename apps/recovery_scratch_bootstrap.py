@@ -711,12 +711,14 @@ def apply_plan(
     plan = _read_json(plan_path)
     if _file_digest(plan_path) != plan_sha256:
         raise RecoveryScratchError("reviewed recovery scratch plan bytes drifted")
+    submit_count = plan.get("submit_count")
     if (
         plan.get("contract_name") != PLAN_CONTRACT
         or plan.get("status") != "ready_to_initialize"
         or plan.get("fingerprint") != fingerprint
         or plan_fingerprint(plan) != fingerprint
-        or int(plan.get("submit_count") or -1) != 0
+        or type(submit_count) is not int
+        or submit_count != 0
     ):
         raise RecoveryScratchError("reviewed recovery scratch plan contract drifted")
     runtime_dir = Path(str(plan["target"]["path"])).parent
