@@ -30,6 +30,7 @@ CONTRACT = {
     "parent_model": "QEMU HARDDISK",
     "parent_size_bytes": 53687091200,
     "parent_major_minor": "8:48",
+    "parent_hctl": "0:0:0:4",
     "partition_table": "gpt",
     "partition_number": 1,
     "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",
@@ -62,6 +63,7 @@ def _blank() -> dict:
         "parent_size_bytes": CONTRACT["parent_size_bytes"],
         "parent_serial": CONTRACT["parent_serial"],
         "parent_model": CONTRACT["parent_model"],
+        "parent_hctl": CONTRACT["parent_hctl"],
         "parent_type": "disk",
         "read_only": False,
         "removable": False,
@@ -90,6 +92,7 @@ def _ready() -> dict:
         "parent_size_bytes": CONTRACT["parent_size_bytes"],
         "parent_serial": CONTRACT["parent_serial"],
         "parent_model": CONTRACT["parent_model"],
+        "parent_hctl": CONTRACT["parent_hctl"],
         "partition_table": CONTRACT["partition_table"],
         "disk_guid": CONTRACT["disk_guid"],
         "partition_number": 1,
@@ -122,6 +125,7 @@ def main() -> int:
         "parent_serial": "vdc",
         "parent_size_bytes": 1,
         "parent_major_minor": "8:49",
+        "parent_hctl": "0:0:0:3",
         "filesystem_uuid": "bad",
     }.items():
         changed = copy.deepcopy(CONTRACT)

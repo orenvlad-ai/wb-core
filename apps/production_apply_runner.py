@@ -564,6 +564,15 @@ LEGACY_AUTH_RE = re.compile(
     r"deployed (?P<deployed>[0-9a-f]{40}) manifest sha256:(?P<manifest>[0-9a-f]{64}) "
     r"operation (?P<operation>[A-Za-z0-9._:-]{1,160})$"
 )
+RECOVERY_SCRATCH_MANIFEST_CONTRACT = (
+    "wbc0035_recovery_scratch_bootstrap_passport/v1"
+)
+RECOVERY_SCRATCH_PLAN_CONTRACT = (
+    "wb_core_recovery_scratch_bootstrap_plan_v1"
+)
+RECOVERY_SCRATCH_RESULT_CONTRACT = (
+    "wb_core_recovery_scratch_bootstrap_result_v1"
+)
 
 
 class ApplyError(RuntimeError):
@@ -11188,8 +11197,224 @@ def _run_legacy_commands(manifest: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _recovery_scratch_result(
+    evidence: Mapping[str, Any], *, action: str
+) -> dict[str, Any]:
+    outer = evidence.get("result")
+    if (
+        evidence.get("return_code") != 0
+        or not isinstance(outer, Mapping)
+        or outer.get("action") != f"recovery-scratch-bootstrap-{action}"
+        or not isinstance(outer.get("result"), Mapping)
+    ):
+        raise ApplyError(f"recovery scratch {action} evidence is invalid")
+    return dict(outer["result"])
+
+
+def _validate_recovery_scratch_ready(
+    result: Mapping[str, Any],
+    *,
+    manifest: Mapping[str, Any],
+    deployed_sha: str,
+) -> None:
+    target = dict(manifest.get("target") or {})
+    ready = dict(result.get("ready") or {})
+    exact = {
+        "status": "ready",
+        "path": target.get("mountpoint"),
+        "parent_device_by_id": target.get("parent_device_by_id"),
+        "partition_device_by_id": target.get("partition_device_by_id"),
+        "resolved_parent_device": target.get("parent_device"),
+        "parent_major_minor": target.get("parent_major_minor"),
+        "parent_size_bytes": target.get("parent_size_bytes"),
+        "parent_serial": target.get("parent_serial"),
+        "parent_model": target.get("parent_model"),
+        "parent_hctl": target.get("parent_hctl"),
+        "filesystem_uuid": target.get("filesystem_uuid"),
+        "filesystem_type": "ext4",
+        "directory_mode": target.get("directory_mode"),
+        "mountpoint_proven": True,
+        "mount_root": "/",
+        "fstab_exact": True,
+        "completion_marker_present": True,
+    }
+    if (
+        result.get("contract_name") != RECOVERY_SCRATCH_RESULT_CONTRACT
+        or result.get("status") != "READY"
+        or result.get("operation_id") != manifest.get("operation_id")
+        or result.get("deployed_sha") != deployed_sha
+        or int(result.get("submit_count") or 0) != 1
+        or int(result.get("business_database_mutation", -1)) != 0
+        or int(result.get("recovery_submit", -1)) != 0
+        or any(ready.get(key) != value for key, value in exact.items())
+        or not set(target.get("mount_options") or []).issubset(
+            set(ready.get("mount_options") or [])
+        )
+        or dict(ready.get("distinct_from_roles") or {})
+        != {"root": True, "backup": True, "generation": True}
+        or list(ready.get("entries") or [])
+        or int(ready.get("available_bytes") or -1)
+        < int(target.get("minimum_available_bytes") or 0)
+    ):
+        raise ApplyError("recovery scratch mounted-ready evidence drifted")
+
+
+def _run_recovery_scratch_commands(
+    manifest: Mapping[str, Any], *, approval_reference: str
+) -> dict[str, Any]:
+    commands = dict(manifest.get("commands") or {})
+    expected_commands = {
+        key: [
+            "python3",
+            "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+            f"recovery-scratch-bootstrap-{action}",
+        ]
+        for key, action in (
+            ("dry_run", "dry-run"),
+            ("apply", "apply"),
+            ("readback", "readback"),
+        )
+    }
+    expected_commands["reconcile"] = [
+        "python3",
+        "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+        "root-storage-readback",
+    ]
+    if commands != expected_commands:
+        raise ApplyError("recovery scratch manifest commands drifted")
+    deployed_sha = exact_sha(
+        str(manifest.get("merge_sha") or os.environ.get("WB_CORE_APPLY_DEPLOYED_SHA") or ""),
+        "recovery-scratch-deployed",
+    )
+    operation = str(manifest.get("operation_id") or "")
+    plan_path = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/"
+        f"recovery-scratch-bootstrap/plan-{deployed_sha}.json"
+    )
+    dry_command = [
+        *expected_commands["dry_run"],
+        "--deployed-sha", deployed_sha,
+        "--operation-id", operation,
+        "--approval-reference", approval_reference,
+        "--output", plan_path,
+    ]
+    dry_run = command_evidence(dry_command, timeout_seconds=180.0)
+    if dry_run.get("return_code") != 0:
+        return {"state": "blocked", "apply_count": 0, "dry_run": dry_run}
+    try:
+        plan = _recovery_scratch_result(dry_run, action="dry-run")
+    except ApplyError as exc:
+        return {
+            "state": "blocked",
+            "apply_count": 0,
+            "dry_run": dry_run,
+            "validation_error": str(exc),
+        }
+    target = dict(manifest.get("target") or {})
+    plan_target = dict(plan.get("target") or {})
+    blank = dict(plan.get("blank_device") or {})
+    empty_blank_fields = (
+        "children", "signatures", "mounts", "holders", "slaves",
+        "lvm_memberships", "md_memberships", "swap_memberships", "openers",
+        "config_references",
+    )
+    if (
+        plan.get("contract_name") != RECOVERY_SCRATCH_PLAN_CONTRACT
+        or plan.get("status") != "ready_to_initialize"
+        or plan.get("operation_id") != operation
+        or plan.get("deployed_sha") != deployed_sha
+        or plan.get("approval_reference") != approval_reference
+        or plan.get("plan_path") != plan_path
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(plan.get("plan_sha256") or ""))
+        is None
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(plan.get("fingerprint") or ""))
+        is None
+        or int(plan.get("submit_count", -1)) != 0
+        or plan_target.get("path") != target.get("mountpoint")
+        or plan_target.get("parent_device_by_id")
+        != target.get("parent_device_by_id")
+        or plan_target.get("partition_device_by_id")
+        != target.get("partition_device_by_id")
+        or plan_target.get("parent_major_minor")
+        != target.get("parent_major_minor")
+        or plan_target.get("parent_size_bytes")
+        != target.get("parent_size_bytes")
+        or plan_target.get("parent_serial") != target.get("parent_serial")
+        or plan_target.get("parent_model") != target.get("parent_model")
+        or plan_target.get("parent_hctl") != target.get("parent_hctl")
+        or plan_target.get("filesystem_uuid") != target.get("filesystem_uuid")
+        or not set(target.get("mount_options") or []).issubset(
+            set(plan_target.get("required_mount_options") or [])
+        )
+        or blank.get("status") != "blank_ready"
+        or blank.get("parent_device_by_id") != target.get("parent_device_by_id")
+        or blank.get("resolved_parent_device") != target.get("parent_device")
+        or blank.get("parent_major_minor") != target.get("parent_major_minor")
+        or blank.get("parent_size_bytes") != target.get("parent_size_bytes")
+        or blank.get("parent_serial") != target.get("parent_serial")
+        or blank.get("parent_model") != target.get("parent_model")
+        or blank.get("parent_hctl") != target.get("parent_hctl")
+        or blank.get("parent_type") != "disk"
+        or blank.get("read_only") is not False
+        or blank.get("removable") is not False
+        or any(list(blank.get(key) or []) for key in empty_blank_fields)
+        or blank.get("partition_table") not in {None, ""}
+        or dict(plan.get("expected_effect") or {})
+        != {
+            "disk_initialized": True,
+            "mount_persisted": True,
+            "business_database_mutation": 0,
+            "recovery_submit": 0,
+            "barrier_change": False,
+            "timer_change": False,
+        }
+    ):
+        return {
+            "state": "blocked",
+            "apply_count": 0,
+            "dry_run": dry_run,
+            "validation_error": "recovery scratch dry-run contract drifted",
+        }
+    apply_command = [
+        *expected_commands["apply"],
+        "--deployed-sha", deployed_sha,
+        "--plan", plan_path,
+        "--plan-sha256", str(plan["plan_sha256"]),
+        "--fingerprint", str(plan["fingerprint"]),
+    ]
+    apply_result = command_evidence(apply_command, timeout_seconds=900.0)
+    readback_command = [
+        *expected_commands["readback"],
+        "--deployed-sha", deployed_sha,
+    ]
+    readback = command_evidence(readback_command, timeout_seconds=180.0)
+    try:
+        readback_result = _recovery_scratch_result(readback, action="readback")
+        _validate_recovery_scratch_ready(
+            readback_result,
+            manifest=manifest,
+            deployed_sha=deployed_sha,
+        )
+        readback_valid = True
+    except ApplyError as exc:
+        readback_valid = False
+        readback_error = str(exc)
+    return {
+        "state": "done" if readback_valid else "blocked",
+        "apply_count": 1,
+        "dry_run_count": 1,
+        "dry_run": dry_run,
+        "apply": apply_result,
+        "readback": readback,
+        "readback_valid": readback_valid,
+        **({} if readback_valid else {"validation_error": readback_error}),
+    }
+
+
 def _run_legacy_commands_with_deploy_environment(
     manifest: Mapping[str, Any],
+    *,
+    approval_reference: str = "",
 ) -> dict[str, Any]:
     """Materialize the canonical hosted SSH identity for exact-manifest commands."""
 
@@ -11201,6 +11426,11 @@ def _run_legacy_commands_with_deploy_environment(
     try:
         with tempfile.TemporaryDirectory(prefix="production-apply-deploy-") as directory:
             configure_deploy_environment(Path(directory))
+            if manifest.get("contract") == RECOVERY_SCRATCH_MANIFEST_CONTRACT:
+                return _run_recovery_scratch_commands(
+                    manifest,
+                    approval_reference=approval_reference,
+                )
             return _run_legacy_commands(manifest)
     finally:
         for name, value in previous.items():
@@ -11271,8 +11501,14 @@ def _run_legacy_mode(
     manifest = _load_legacy_manifest(manifest_path, str(args.manifest_sha256))
     if manifest.get("operation_id") != operation:
         raise ApplyError("manifest operation id mismatch")
-    result = _run_legacy_commands_with_deploy_environment(manifest)
     approval_body = str(authorization.get("body") or "").strip()
+    if manifest.get("contract") == RECOVERY_SCRATCH_MANIFEST_CONTRACT:
+        manifest = {**manifest, "merge_sha": merge_sha}
+        os.environ["WB_CORE_APPLY_DEPLOYED_SHA"] = deployed_sha
+    result = _run_legacy_commands_with_deploy_environment(
+        manifest,
+        approval_reference=approval_body,
+    )
     receipt = {
         "schema": APPLY_RECEIPT_SCHEMA,
         "state": result["state"],

@@ -3571,8 +3571,51 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
                 ):
                     blockers.append("Finance backup replacement is non-terminal")
                     break
+        registry = StoreRegistry(runtime)
+        source_manifest = registry.load(require_files=True)
+        if (
+            source_manifest.state != "cutover"
+            or source_manifest.canonical_source != "split"
+        ):
+            raise FinanceStorageBackupRotationError(
+                "Finance backup health requires the canonical split source"
+            )
+        generation_root = (runtime / "generations").resolve()
+        source_paths = [
+            registry.resolve("finance_raw", manifest=source_manifest),
+            registry.resolve("operational", manifest=source_manifest),
+        ]
+        source_identities: list[dict[str, Any]] = []
+        for source_path in source_paths:
+            if source_path.is_symlink() or not source_path.is_file():
+                raise FinanceStorageBackupRotationError(
+                    "canonical Finance source identity is unsafe"
+                )
+            try:
+                source_path.relative_to(generation_root)
+            except ValueError as exc:
+                raise FinanceStorageBackupRotationError(
+                    "canonical Finance source escapes generations"
+                ) from exc
+            source_identities.append(
+                _file_identity(source_path, include_sha256=False)
+            )
+        confirmed_manifest = registry.load(require_files=True)
+        confirmed_identities = [
+            _file_identity(path, include_sha256=False) for path in source_paths
+        ]
+        if (
+            confirmed_manifest.manifest_sha256 != source_manifest.manifest_sha256
+            or confirmed_identities != source_identities
+        ):
+            raise FinanceStorageBackupRotationError(
+                "canonical Finance source drifted during capacity readback"
+            )
+        canonical_source_bytes = sum(
+            int(item["size_bytes"]) for item in source_identities
+        )
         next_replacement_required = (
-            retained_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve
+            canonical_source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve
         )
         if capacity["available_bytes"] < next_replacement_required:
             blockers.append("insufficient capacity for atomic next replacement")
@@ -3596,6 +3639,13 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
                 ),
                 "available_bytes": capacity["available_bytes"],
                 "next_replacement_required_bytes": next_replacement_required,
+                "canonical_source_bytes": canonical_source_bytes,
+                "canonical_source_manifest_sha256": (
+                    source_manifest.manifest_sha256
+                ),
+                "capacity_basis": (
+                    "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve"
+                ),
                 "degraded_available_bytes": degraded_available,
                 "next_replacement_capacity": (
                     capacity["available_bytes"] >= next_replacement_required

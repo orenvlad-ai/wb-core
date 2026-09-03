@@ -1031,6 +1031,55 @@ def collect_loopback_surface(
     return evaluation
 
 
+def _bootstrap_recovery_scratch_release_bridge() -> None:
+    """Bridge the one release whose runner process began on the prior main."""
+
+    environment_name = "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE"
+    if os.environ.get(environment_name, "").strip():
+        return
+    release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
+    release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip().lower()
+    if not release_pr.isdigit() or re.fullmatch(r"[0-9a-f]{40}", release_head) is None:
+        return
+    manifest_relative = (
+        "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+    )
+    changed = {
+        line.strip()
+        for line in _git_output(
+            ["git", "diff", "--name-only", "HEAD^", "HEAD"]
+        ).splitlines()
+        if line.strip()
+    }
+    if manifest_relative not in changed:
+        return
+    manifest_path = ROOT / manifest_relative
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    from apps.github_release_runner import (
+        build_recovery_scratch_release_bridge,
+    )
+
+    bridge = build_recovery_scratch_release_bridge(
+        {
+            "path": manifest_relative,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        },
+        manifest,
+        _git_output(["git", "rev-parse", "HEAD"]).strip().lower(),
+    )
+    if bridge is None:
+        raise ValueError("changed recovery scratch manifest lacks exact bridge")
+    os.environ[environment_name] = base64.b64encode(
+        json.dumps(
+            bridge,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+
+
 def deploy_current_checkout(
     target: HostedRuntimeTarget,
     *,
@@ -1039,6 +1088,7 @@ def deploy_current_checkout(
     allow_dirty: bool,
     action: str = "deploy",
 ) -> dict[str, Any]:
+    _bootstrap_recovery_scratch_release_bridge()
     _ensure_target_allows_mutation(target, action=action, dry_run=dry_run)
     missing = _missing_for_deploy(target)
     if missing:
@@ -1246,6 +1296,10 @@ def deploy_current_checkout(
             systemd_commands["reconcile"],
             allow_transport_reconciliation=False,
         )
+    if root_storage_commands.get("release_bridge"):
+        # The managed service has no task-scoped authority and may refresh the
+        # artifact during deploy; publish the exact bridge-bound status last.
+        run_stage("root-storage-status", root_storage_commands["status"])
     if root_storage_commands["status_artifact_readback"]:
         run_stage("readback", root_storage_commands["status_artifact_readback"])
     if status_command:
@@ -16204,19 +16258,62 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
         "python3 apps/root_storage_policy.py "
         f"--policy-file {shlex.quote(remote_policy_path)}"
     )
+    bridge_option = ""
+    encoded_bridge = os.environ.get(
+        "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE", ""
+    ).strip()
+    if encoded_bridge:
+        try:
+            bridge = json.loads(
+                base64.b64decode(encoded_bridge, validate=True).decode("utf-8")
+            )
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("recovery scratch release bridge encoding is invalid") from exc
+        if (
+            not isinstance(bridge, dict)
+            or bridge.get("contract")
+            != "wbc0035_recovery_scratch_release_bridge/v1"
+            or bridge.get("target_id") != target.target_id
+            or bridge.get("operation_id")
+            != "wbc0035-025-recovery-scratch-a01"
+            or bridge.get("release_sha")
+            != _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+            or dict(bridge.get("target") or {}).get("parent_device_by_id")
+            != target.recovery_scratch_filesystem.get("parent_device_by_id")
+            or dict(bridge.get("target") or {}).get("parent_hctl")
+            != target.recovery_scratch_filesystem.get("parent_hctl")
+            or base64.b64encode(
+                json.dumps(
+                    bridge,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).decode("ascii")
+            != encoded_bridge
+        ):
+            raise ValueError("recovery scratch release bridge is not exact")
+        bridge_option = (
+            " --recovery-scratch-release-bridge "
+            + shlex.quote(encoded_bridge)
+        )
     return {
+        "release_bridge": bool(encoded_bridge),
         "remote_policy_path": remote_policy_path,
         "status": _remote_shell_command(
             target,
             prefix
             + " status "
             + f"--output {shlex.quote(status_artifact_path)} "
-            + "--fail-on-unregistered --allow-recovery-scratch-bootstrap-pending",
+            + "--fail-on-unregistered --allow-recovery-scratch-bootstrap-pending"
+            + bridge_option,
         ),
         "status_read_only": _remote_shell_command(target, prefix + " status"),
         "status_artifact_readback": _remote_shell_command(
             target,
-            prefix + " status-readback --allow-recovery-scratch-bootstrap-pending",
+            prefix
+            + " status-readback --allow-recovery-scratch-bootstrap-pending"
+            + bridge_option,
         ),
         "action": _remote_shell_command(
             target,

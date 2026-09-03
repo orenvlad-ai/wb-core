@@ -694,6 +694,20 @@ class FinanceStorageBackupRotationSmoke(unittest.TestCase):
             health = backup_rotation_health(runtime)
             self.assertEqual(health["status"], "healthy")
             self.assertTrue(health["next_replacement_capacity"])
+            source_bytes = raw.stat().st_size + operational.stat().st_size
+            active_policy = json.loads(
+                (backup_root / "retention_policy.json").read_text(encoding="utf-8")
+            )
+            hard_reserve = int(active_policy["policy"]["hard_reserve_bytes"])
+            self.assertEqual(health["canonical_source_bytes"], source_bytes)
+            self.assertEqual(
+                health["next_replacement_required_bytes"],
+                source_bytes + DEFAULT_COPY_OVERHEAD_BYTES + hard_reserve,
+            )
+            self.assertEqual(
+                health["capacity_basis"],
+                "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve",
+            )
             foreign = backup_root / "retained" / "foreign"
             foreign.mkdir()
             degraded = backup_rotation_health(runtime)

@@ -30,7 +30,7 @@ UUID_PATTERN = re.compile(
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-OPERATION_PATTERN = re.compile(r"wbc0035-021-recovery-scratch-[a-z0-9-]{1,48}")
+OPERATION_PATTERN = re.compile(r"wbc0035-025-recovery-scratch-[a-z0-9-]{1,48}")
 REQUIRED_MOUNT_OPTIONS = frozenset({"rw", "noatime", "nodev", "nosuid", "noexec"})
 ROLE_PATHS = {
     "root": Path("/"),
@@ -81,6 +81,7 @@ def validate_recovery_scratch_contract(
     expected_keys = {
         "contract_version", "path", "parent_device_by_id", "partition_device_by_id",
         "parent_serial", "parent_model", "parent_size_bytes", "parent_major_minor",
+        "parent_hctl",
         "partition_table", "partition_number", "disk_guid", "partition_guid",
         "filesystem_uuid", "filesystem_label", "filesystem_type",
         "required_mount_options", "reserve_bytes", "completion_marker",
@@ -107,6 +108,7 @@ def validate_recovery_scratch_contract(
         or str(raw.get("parent_model") or "") != "QEMU HARDDISK"
         or int(raw.get("parent_size_bytes") or 0) != 53_687_091_200
         or str(raw.get("parent_major_minor") or "") != "8:48"
+        or str(raw.get("parent_hctl") or "") != "0:0:0:4"
         or raw.get("partition_table") != "gpt"
         or int(raw.get("partition_number") or 0) != 1
         or any(UUID_PATTERN.fullmatch(item) is None for item in uuids)
@@ -141,6 +143,7 @@ def validate_blank_device_evidence(
         "parent_size_bytes": contract["parent_size_bytes"],
         "parent_serial": contract["parent_serial"],
         "parent_model": contract["parent_model"],
+        "parent_hctl": contract["parent_hctl"],
         "parent_type": "disk",
         "read_only": False,
         "removable": False,
@@ -188,6 +191,7 @@ def validate_ready_evidence(
         "parent_size_bytes": contract["parent_size_bytes"],
         "parent_serial": contract["parent_serial"],
         "parent_model": contract["parent_model"],
+        "parent_hctl": contract["parent_hctl"],
         "partition_table": contract["partition_table"],
         "disk_guid": contract["disk_guid"],
         "partition_number": contract["partition_number"],
@@ -462,6 +466,7 @@ def collect_ready_evidence(
         "parent_size_bytes": int(parent_row.get("size") or 0),
         "parent_serial": str(parent_row.get("serial") or ""),
         "parent_model": str(parent_row.get("model") or "").strip(),
+        "parent_hctl": str(parent_row.get("hctl") or ""),
         "partition_table": str(parent_blkid.get("PTTYPE") or "").lower(),
         "disk_guid": str(parent_blkid.get("PTUUID") or "").lower(),
         "partition_number": int(contract["partition_number"]),
