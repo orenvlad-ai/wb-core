@@ -28,6 +28,7 @@ from packages.application.root_storage_policy import (
     load_policy,
     predict_sqlite_backup_bytes,
     read_root_storage_status_artifact,
+    resolve_runtime_storage_destination,
     storage_destination_root,
     storage_level,
 )
@@ -49,18 +50,15 @@ def main() -> int:
     _assert_one_shot_correction(policy)
     _assert_corrective_reconciliation(policy)
     _assert_static_safety()
-    _assert_recovery_scratch_release_bridge_is_manifest_bound()
+    _assert_recovery_scratch_release_bridge_is_retired()
     _assert_recovery_scratch_finance_exception_is_exact()
     _assert_recovery_scratch_post_submit_pending_is_exact()
     print("root_storage_policy_smoke: ok")
     return 0
 
 
-def _assert_recovery_scratch_release_bridge_is_manifest_bound() -> None:
-    from apps import business_data_maintenance as maintenance
+def _assert_recovery_scratch_release_bridge_is_retired() -> None:
     from apps import github_release_runner as release_runner
-    from packages.application import business_data_write_barrier as barrier_module
-    from packages.application import finance_storage_backup_rotation as finance_module
 
     manifest_path = (
         ROOT
@@ -77,88 +75,7 @@ def _assert_recovery_scratch_release_bridge_is_manifest_bound() -> None:
         manifest,
         release_sha,
     )
-    assert bridge is not None
-    policy = deepcopy(load_policy())
-    expected = manifest["release_bridge"]
-    health = {
-        "status": "degraded",
-        "blockers": [expected["finance"]["only_allowed_blocker"]],
-        "retained_backup_id": expected["finance"]["retained_backup_id"],
-        "canonical_source_bytes": expected["finance"]["canonical_source_bytes"],
-        "next_replacement_required_bytes": expected["finance"][
-            "next_replacement_required_bytes"
-        ],
-        "capacity_basis": expected["finance"]["capacity_basis"],
-        "next_replacement_capacity": True,
-        "available_bytes": 49_479_995_392,
-    }
-    barrier = {
-        **expected["barrier"],
-        "state_fingerprint": "sha256:" + "b" * 64,
-    }
-    timer_state = {"is_enabled": "disabled", "is_active": "inactive"}
-    systemd = SimpleNamespace(unit_state=lambda _: dict(timer_state))
-    with tempfile.TemporaryDirectory() as temporary:
-        repository_root = Path(temporary) / "repo"
-        fake_module = (
-            repository_root / "packages/application/root_storage_policy.py"
-        )
-        fake_module.parent.mkdir(parents=True)
-        fake_module.write_text("# fixture\n", encoding="utf-8")
-        bound_manifest = (
-            repository_root / policy_module.RECOVERY_SCRATCH_MANIFEST_PATH
-        )
-        bound_manifest.parent.mkdir(parents=True)
-        bound_manifest.write_bytes(manifest_raw)
-        (repository_root / ".wb-core-runtime-sha").write_text(
-            release_sha + "\n", encoding="utf-8"
-        )
-        runtime = Path(temporary) / "runtime"
-        runtime.mkdir()
-        (runtime / maintenance.STATE_FILENAME).write_text(
-            json.dumps({"phase": expected["barrier"]["maintenance_phase"]}),
-            encoding="utf-8",
-        )
-        (runtime / maintenance.POLICY_FILENAME).write_text(
-            json.dumps(
-                {
-                    "revision": expected["barrier"]["owner_policy_revision"],
-                    "master_desired": False,
-                }
-            ),
-            encoding="utf-8",
-        )
-        policy["storage_registry"]["filesystems"]["backup"]["path"] = str(
-            runtime / "backups"
-        )
-        with mock.patch.object(
-            policy_module, "__file__", str(fake_module)
-        ), mock.patch.object(
-            barrier_module, "barrier_status", return_value=barrier
-        ), mock.patch.object(
-            maintenance, "SystemdClient", return_value=systemd
-        ), mock.patch.object(
-            maintenance, "_writer_processes", return_value=[]
-        ), mock.patch.object(
-            finance_module, "backup_rotation_health", return_value=health
-        ):
-            validated = policy_module._validate_recovery_scratch_release_bridge(
-                policy, bridge
-            )
-            assert validated["manifest_sha256"] == release_runner.sha256(manifest_raw)
-            assert validated["release_sha"] == release_sha
-            assert validated["target"] == manifest["target"]
-            assert validated["operation_id"] == manifest["operation_id"]
-            assert validated["live_preconditions"]["writer_processes"] == []
-            drifted = {**bridge, "manifest_sha256": "not-a-sha256"}
-            try:
-                policy_module._validate_recovery_scratch_release_bridge(
-                    policy, drifted
-                )
-            except RootStoragePolicyError as exc:
-                assert "identity drifted" in str(exc)
-            else:
-                raise AssertionError("invalid release bridge digest was accepted")
+    assert bridge is None
 
 
 def _assert_recovery_scratch_finance_exception_is_exact() -> None:
@@ -375,6 +292,8 @@ def _assert_storage_registry(policy: dict[str, object]) -> None:
     assert registry["filesystems"]["backup"]["emergency_reserve_bytes"] == 8 * GIB
     assert registry["filesystems"]["generation"]["reserve_bytes"] == 8 * GIB
     scratch = registry["filesystems"]["recovery_scratch"]
+    assert scratch["active"] is False
+    assert "recovery_scratch" not in policy["filesystems"]
     assert scratch["reserve_bytes"] == 8 * GIB
     assert scratch["parent_device_by_id"].endswith("QEMU_HARDDISK_vde")
     assert scratch["filesystem_uuid"] == "da019107-575c-4fe7-b698-e021b3fc83c8"
@@ -393,14 +312,33 @@ def _assert_storage_registry(policy: dict[str, object]) -> None:
     assert producers["finance_storage_split_coherent_source"]["destination_role"] == "generation"
     assert producers["sqlite_hot_journal_reconcile_qualification"] == {
         "owner": "sqlite_hot_journal_reconcile_qualification",
-        "current": True,
-        "data_class": "ephemeral_recovery_verification",
+        "current": False,
+        "data_class": "disabled",
         "destination_role": "recovery_scratch",
         "relative_roots": [""],
-        "lifecycle_policy": "temporary_candidate",
-        "capacity_mode": "source_size_plus_fixed_reserve",
-        "max_single_write_bytes": 32 * GIB,
+        "lifecycle_policy": "retained_legacy_no_writer",
+        "capacity_mode": "disabled",
+        "max_single_write_bytes": 0,
     }
+    assert admission_producers["sqlite_hot_journal_reconcile_qualification"][
+        "classification"
+    ] == "retained_no_active_writer"
+    for resolver in (
+        lambda: storage_destination_root(
+            "sqlite_hot_journal_reconcile_qualification", policy=policy
+        ),
+        lambda: resolve_runtime_storage_destination(
+            "sqlite_hot_journal_reconcile_qualification",
+            Path("/tmp/isolated-runtime"),
+            policy=policy,
+        ),
+    ):
+        try:
+            resolver()
+        except RootStoragePolicyError as exc:
+            assert "no current write authority" in str(exc)
+        else:
+            raise AssertionError("retired recovery scratch writer retained authority")
     assert not [
         item["owner"]
         for item in producers.values()
@@ -427,6 +365,27 @@ def _assert_storage_registry(policy: dict[str, object]) -> None:
             assert "canonical storage producer is invalid" in str(exc)
         else:
             raise AssertionError("unknown storage lifecycle policy did not fail closed")
+    active_writer = deepcopy(policy)
+    for producer in active_writer["storage_registry"]["producers"]:
+        if producer["owner"] == "sqlite_hot_journal_reconcile_qualification":
+            producer.update(
+                {
+                    "current": True,
+                    "data_class": "ephemeral_recovery_verification",
+                    "capacity_mode": "source_size_plus_fixed_reserve",
+                    "max_single_write_bytes": 32 * GIB,
+                }
+            )
+            break
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_text(json.dumps(active_writer), encoding="utf-8")
+        try:
+            load_policy(path)
+        except RootStoragePolicyError as exc:
+            assert "inactive filesystem" in str(exc)
+        else:
+            raise AssertionError("active writer targeted retired recovery scratch")
 
 
 def _assert_admission(policy: dict[str, object]) -> None:
@@ -739,6 +698,10 @@ def _assert_status_artifact(policy: dict[str, object]) -> None:
                 root_path=root,
                 now=fixed_now,
             )
+        assert status["storage_registry"]["roles"]["recovery_scratch"] == {
+            "active": False,
+            "status": "retired",
+        }
         artifact = root / "status.json"
         app._write_json_atomic(artifact, status, mode=0o644)
         readback = read_root_storage_status_artifact(

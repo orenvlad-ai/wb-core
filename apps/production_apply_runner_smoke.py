@@ -3038,13 +3038,17 @@ def main() -> None:
         "fingerprint": "sha256:" + "d" * 64,
         "submit_count": 0,
         "blank_device": blank,
-        "target": json.loads(
-            (
-                ROOT
-                / "artifacts/registry_upload_http_entrypoint/input/"
-                "hosted_runtime_target__europe_api.json"
-            ).read_text(encoding="utf-8")
-        )["recovery_scratch_filesystem"],
+        "target": {
+            key: value
+            for key, value in json.loads(
+                (
+                    ROOT
+                    / "artifacts/registry_upload_http_entrypoint/"
+                    "root_storage_policy_v1.json"
+                ).read_text(encoding="utf-8")
+            )["storage_registry"]["filesystems"]["recovery_scratch"].items()
+            if key not in {"active", "source", "reserve_mode"}
+        },
         "expected_effect": {
             "disk_initialized": True,
             "mount_persisted": True,

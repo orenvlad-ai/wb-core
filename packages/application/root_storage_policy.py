@@ -36,6 +36,7 @@ CANONICAL_FILESYSTEM_ROLES = (
     "generation",
     "recovery_scratch",
 )
+REQUIRED_ACTIVE_FILESYSTEM_ROLES = frozenset({"root", "backup", "generation"})
 RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT = (
     "wbc0035_recovery_scratch_release_bridge/v1"
 )
@@ -238,9 +239,20 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
     ):
         raise RootStoragePolicyError("canonical storage filesystem registry is invalid")
     expected_paths = dict(policy.get("filesystems") or {})
+    active_roles: set[str] = set()
     for role, raw in filesystems.items():
         if not isinstance(raw, Mapping):
             raise RootStoragePolicyError("canonical storage filesystem role is invalid")
+        raw_active = raw.get("active", True)
+        if not isinstance(raw_active, bool):
+            raise RootStoragePolicyError("canonical storage filesystem activity is invalid")
+        active = bool(raw_active)
+        if role in REQUIRED_ACTIVE_FILESYSTEM_ROLES and not active:
+            raise RootStoragePolicyError("required storage filesystem role is inactive")
+        if role != "recovery_scratch" and not active:
+            raise RootStoragePolicyError("only recovery scratch may be retired")
+        if active:
+            active_roles.add(role)
         path = Path(str(raw.get("path") or ""))
         source = str(raw.get("source") or "")
         filesystem_uuid = str(raw.get("filesystem_uuid") or "")
@@ -249,7 +261,8 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
         reserve_mode = str(raw.get("reserve_mode") or "")
         if (
             not path.is_absolute()
-            or str(path) != str(expected_paths.get(role) or "")
+            or (active and str(path) != str(expected_paths.get(role) or ""))
+            or (not active and role in expected_paths)
             or not source.startswith("/dev/")
             or not filesystem_uuid
             or filesystem_type != "ext4"
@@ -286,6 +299,8 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
                 raise RootStoragePolicyError(
                     "canonical recovery scratch filesystem contract is invalid"
                 ) from exc
+    if set(expected_paths) != active_roles:
+        raise RootStoragePolicyError("active storage filesystem registry drifted")
     lifecycle_policies = registry.get("lifecycle_policies")
     if not isinstance(lifecycle_policies, Mapping) or not lifecycle_policies:
         raise RootStoragePolicyError("canonical storage lifecycle registry is empty")
@@ -342,6 +357,14 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             raise RootStoragePolicyError("canonical storage producer has no destination root")
         if producer.get("current") is True and capacity_mode == "disabled":
             raise RootStoragePolicyError("current storage producer cannot be disabled")
+        if (
+            producer.get("current") is True
+            and destination_role in filesystems
+            and dict(filesystems[destination_role]).get("active", True) is not True
+        ):
+            raise RootStoragePolicyError(
+                "current storage producer targets an inactive filesystem"
+            )
         storage_owner_ids.add(owner)
 
 
@@ -512,6 +535,10 @@ def resolve_runtime_storage_destination(
         )
     resolved = dict(policy or load_policy())
     producer = storage_producer_policy(owner, policy=resolved)
+    if producer.get("current") is not True:
+        raise RootStoragePolicyError(
+            f"storage producer has no current write authority: {owner}"
+        )
     role = str(producer.get("destination_role") or "")
     roots = [str(item) for item in producer.get("relative_roots") or []]
     chosen = roots[0] if relative_root is None else str(relative_root)
@@ -841,9 +868,15 @@ def _collect_storage_registry_status(
     role_status: dict[str, dict[str, Any]] = {}
     finance_floor: dict[str, Any] | None = None
     for role in CANONICAL_FILESYSTEM_ROLES:
+        contract = dict(role_contracts[role])
+        if contract.get("active", True) is not True:
+            role_status[role] = {
+                "active": False,
+                "status": "retired",
+            }
+            continue
         if role not in observed_filesystems:
             continue
-        contract = dict(role_contracts[role])
         observed = dict(observed_filesystems[role])
         if role == "recovery_scratch" and observed.get("bootstrap_status") in {
             "pending", "failed_after_submit_reconciliation_pending"

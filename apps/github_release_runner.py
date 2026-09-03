@@ -692,6 +692,8 @@ def build_recovery_scratch_release_bridge(
     )
     target_contract = json.loads(target_file.read_text(encoding="utf-8"))
     scratch = dict(target_contract.get("recovery_scratch_filesystem") or {})
+    if not scratch:
+        return None
     expected_target = {
         "parent_device": "/dev/sdd",
         "parent_device_by_id": scratch.get("parent_device_by_id"),

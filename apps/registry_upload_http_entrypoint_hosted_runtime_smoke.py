@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
-import shlex
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -134,8 +132,7 @@ def _assert_deploy_status_readback_retry() -> None:
         raise AssertionError("persistent service failure must remain fail-closed")
 
 
-def _assert_recovery_scratch_bridge_reaches_ordered_journald_segment() -> None:
-    from apps import root_storage_policy as root_policy_app
+def _assert_retired_recovery_scratch_bridge_is_inert() -> None:
     from apps.github_release_runner import build_recovery_scratch_release_bridge
 
     manifest_path = (
@@ -155,150 +152,8 @@ def _assert_recovery_scratch_bridge_reaches_ordered_journald_segment() -> None:
         manifest,
         release_sha,
     )
-    if bridge is None:
-        raise AssertionError("recovery scratch manifest did not build a release bridge")
-    encoded_bridge = base64.b64encode(
-        json.dumps(
-            bridge,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).decode("ascii")
-    target_file = (
-        ROOT
-        / "artifacts/registry_upload_http_entrypoint/input/"
-        "hosted_runtime_target__europe_api.json"
-    )
-    target = hosted_runtime.load_hosted_runtime_target(target_file)
-    policy = json.loads(
-        (
-            ROOT
-            / "artifacts/registry_upload_http_entrypoint/"
-            "root_storage_policy_v1.json"
-        ).read_text(encoding="utf-8")
-    )
-    events: list[str] = []
-
-    def bridge_bound_root_status(
-        *,
-        policy: object,
-        allow_recovery_scratch_bootstrap_pending: bool = False,
-        recovery_scratch_release_bridge: object = None,
-        **_: object,
-    ) -> dict[str, object]:
-        scratch = Path(str(dict(policy)["filesystems"]["recovery_scratch"]))
-        if scratch.exists():
-            raise AssertionError("regression requires absent recovery scratch")
-        if not allow_recovery_scratch_bootstrap_pending:
-            raise AssertionError("journald status lost bootstrap-pending authority")
-        if recovery_scratch_release_bridge != bridge:
-            raise AssertionError("journald status lost exact manifest-bound bridge")
-        finance = bridge["preconditions"]["finance"]
-        if finance["only_allowed_blocker"] != "retained backup exceeded RPO age":
-            raise AssertionError("journald status widened the Finance exception")
-        events.append("bridge-bound-root-status")
-        return {"status": "below_normal", "alerts": []}
-
-    def corrective_remove(
-        policy: object,
-        *,
-        allow_recovery_scratch_bootstrap_pending: bool = False,
-        recovery_scratch_release_bridge: object = None,
-    ) -> dict[str, object]:
-        events.append("journald-corrective")
-        preflight = root_policy_app.build_journald_correction_preflight(
-            dict(policy),
-            inventory_reader=lambda _path: [],
-            allow_recovery_scratch_bootstrap_pending=(
-                allow_recovery_scratch_bootstrap_pending
-            ),
-            recovery_scratch_release_bridge=recovery_scratch_release_bridge,
-        )
-        return {"ok": True, "manifest_digest": preflight["manifest_digest"]}
-
-    def corrective_readback(
-        policy: object,
-        *,
-        allow_recovery_scratch_bootstrap_pending: bool = False,
-        recovery_scratch_release_bridge: object = None,
-    ) -> dict[str, object]:
-        status = bridge_bound_root_status(
-            policy=policy,
-            allow_recovery_scratch_bootstrap_pending=(
-                allow_recovery_scratch_bootstrap_pending
-            ),
-            recovery_scratch_release_bridge=recovery_scratch_release_bridge,
-        )
-        events.append("journald-corrective-readback")
-        return {"ok": True, "root_storage_status_after": status}
-
-    def run_ordered_segment(command: list[str]) -> None:
-        remote = command[-1]
-        if "apps/hosted_runtime_deploy_barrier.py" in remote:
-            if "--recovery-scratch-release-bridge" not in remote:
-                raise AssertionError(
-                    "scratch bridge deploy did not narrow the root-storage restart"
-                )
-        if "systemctl restart wb-core-registry-http.service" in remote:
-            events.append("activation")
-        if (
-            "apps/root_storage_policy.py" in remote
-            and "journald-corrective" in remote
-        ):
-            tokens = shlex.split(remote)
-            script_index = tokens.index("apps/root_storage_policy.py")
-            returncode = root_policy_app.main(tokens[script_index + 1 :])
-            if returncode:
-                raise subprocess.CalledProcessError(returncode, command)
-        if '\"deployment_complete\":true' in remote:
-            events.append("final-status")
-
-    with mock.patch.dict(
-        os.environ,
-        {"WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE": encoded_bridge},
-    ), mock.patch.object(
-        hosted_runtime, "_run_command", side_effect=run_ordered_segment
-    ), mock.patch.object(
-        root_policy_app, "load_policy", return_value=policy
-    ), mock.patch.object(
-        root_policy_app,
-        "remove_journald_retention_dropin",
-        side_effect=corrective_remove,
-    ), mock.patch.object(
-        root_policy_app,
-        "readback_journald_correction",
-        side_effect=corrective_readback,
-    ), mock.patch.object(
-        root_policy_app, "collect_root_storage_status", side_effect=bridge_bound_root_status
-    ), mock.patch.object(
-        root_policy_app, "_assert_exact_legacy_dropin"
-    ), mock.patch.object(
-        root_policy_app,
-        "_effective_journald_config",
-        return_value={"matches_expected": True},
-    ), mock.patch.object(
-        root_policy_app,
-        "_journald_service_identity",
-        return_value={"active_state": "active", "sub_state": "running", "main_pid": 1},
-    ):
-        hosted_runtime.deploy_current_checkout(
-            target,
-            target_file=target_file,
-            dry_run=False,
-            allow_dirty=True,
-        )
-
-    required = [
-        "activation",
-        "journald-corrective",
-        "bridge-bound-root-status",
-        "journald-corrective-readback",
-        "final-status",
-    ]
-    positions = [events.index(item) for item in required]
-    if positions != sorted(positions):
-        raise AssertionError(f"deploy/journald segment order drifted: {events}")
+    if bridge is not None:
+        raise AssertionError("retired recovery scratch unexpectedly built a release bridge")
 
 
 def _assert_pre_prepare_abort_skips_stale_restore() -> None:
@@ -583,7 +438,7 @@ def main() -> None:
     ):
         raise AssertionError("ordinary semantic probe failure is not transport ambiguity")
     _assert_deploy_status_readback_retry()
-    _assert_recovery_scratch_bridge_reaches_ordered_journald_segment()
+    _assert_retired_recovery_scratch_bridge_is_inert()
     _assert_pre_prepare_abort_skips_stale_restore()
     _assert_wbc0027_opaque_schema_revision_contract()
     _assert_fbs_status_probe_uses_public_contract()
@@ -5080,9 +4935,8 @@ def main() -> None:
                 / "hosted_runtime_target__europe_api.json"
             ).read_text(encoding="utf-8")
         )
-        deploy_target_payload["recovery_scratch_filesystem"] = (
-            active_target_payload["recovery_scratch_filesystem"]
-        )
+        if "recovery_scratch_filesystem" in active_target_payload:
+            raise AssertionError("active target retained abandoned recovery scratch")
         deploy_target_payload["managed_systemd_units"] = [
             *base_target_payload["managed_systemd_units"],
             {
@@ -5100,19 +4954,15 @@ def main() -> None:
             json.dumps(deploy_target_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        recovery_scratch_contract = (
-            hosted_runtime._validate_recovery_scratch_target_contract(
-                hosted_runtime.load_hosted_runtime_target(deploy_target_file)
-            )
+        deploy_target = hosted_runtime.load_hosted_runtime_target(
+            deploy_target_file
         )
-        if recovery_scratch_contract["required_mount_options"] != sorted(
-            deploy_target_payload["recovery_scratch_filesystem"][
-                "required_mount_options"
-            ]
+        if deploy_target.recovery_scratch_filesystem:
+            raise AssertionError("retired recovery scratch remained target-bound")
+        if "recovery_scratch_filesystem" in hosted_runtime._missing_for_deploy(
+            deploy_target
         ):
-            raise AssertionError(
-                "recovery scratch deploy admission must compare normalized mount options"
-            )
+            raise AssertionError("ordinary deploy still requires retired recovery scratch")
         from apps.github_release_runner import (
             build_recovery_scratch_release_bridge,
         )
@@ -5133,79 +4983,8 @@ def main() -> None:
             json.loads(manifest_raw),
             release_sha,
         )
-        encoded_bridge = base64.b64encode(
-            json.dumps(
-                release_bridge,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).decode("ascii")
-        bridge_env = "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE"
-        prior_bridge = os.environ.get(bridge_env)
-        try:
-            os.environ[bridge_env] = encoded_bridge
-            bridge_commands = hosted_runtime._build_root_storage_policy_commands(
-                hosted_runtime.load_hosted_runtime_target(
-                    ROOT
-                    / "artifacts/registry_upload_http_entrypoint/input/"
-                    "hosted_runtime_target__europe_api.json"
-                )
-            )
-        finally:
-            if prior_bridge is None:
-                os.environ.pop(bridge_env, None)
-            else:
-                os.environ[bridge_env] = prior_bridge
-        if (
-            bridge_commands.get("release_bridge") is not True
-            or "--recovery-scratch-release-bridge"
-            not in bridge_commands["status"][-1]
-            or "--recovery-scratch-release-bridge"
-            not in bridge_commands["status_artifact_readback"][-1]
-        ):
-            raise AssertionError("release bridge did not reach canonical adapter")
-        release_pr_env = "WB_CORE_RELEASE_PR"
-        release_head_env = "WB_CORE_RELEASE_HEAD"
-        prior_release_pr = os.environ.get(release_pr_env)
-        prior_release_head = os.environ.get(release_head_env)
-        try:
-            os.environ.pop(bridge_env, None)
-            os.environ[release_pr_env] = "1200"
-            os.environ[release_head_env] = "a" * 40
-
-            def release_git_output(args: list[str]) -> str:
-                if args[:3] == ["git", "diff", "--name-only"]:
-                    return str(manifest_path.relative_to(ROOT)) + "\n"
-                if args == ["git", "rev-parse", "HEAD"]:
-                    return "a" * 40 + "\n"
-                raise AssertionError(args)
-
-            with mock.patch.object(
-                hosted_runtime, "_git_output", side_effect=release_git_output
-            ):
-                hosted_runtime._bootstrap_recovery_scratch_release_bridge()
-                auto_bridge_commands = (
-                    hosted_runtime._build_root_storage_policy_commands(
-                        hosted_runtime.load_hosted_runtime_target(
-                            ROOT
-                            / "artifacts/registry_upload_http_entrypoint/input/"
-                            "hosted_runtime_target__europe_api.json"
-                        )
-                    )
-                )
-            if auto_bridge_commands.get("release_bridge") is not True:
-                raise AssertionError("exact changed manifest did not bootstrap bridge")
-        finally:
-            os.environ.pop(bridge_env, None)
-            for name, value in (
-                (release_pr_env, prior_release_pr),
-                (release_head_env, prior_release_head),
-            ):
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
+        if release_bridge is not None:
+            raise AssertionError("retired recovery scratch still built a release bridge")
         archived_target_payload = dict(deploy_target_payload)
         archived_target_payload.update(
             {

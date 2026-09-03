@@ -16584,6 +16584,8 @@ def _validate_recovery_scratch_target_contract(
         .get("recovery_scratch")
         or {}
     )
+    if role.get("active", True) is not True:
+        raise ValueError("recovery scratch filesystem is retired")
     policy_contract = validate_recovery_scratch_contract(
         {key: role.get(key) for key in contract},
         runtime_dir=runtime_dir,
@@ -16627,7 +16629,7 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
             _resolve_repo_relative_path(target.root_storage_policy_file)
         except Exception:
             missing.append("root_storage_policy_file")
-    if _is_current_live_target(target):
+    if _is_current_live_target(target) and target.recovery_scratch_filesystem:
         try:
             _validate_recovery_scratch_target_contract(target)
         except Exception:

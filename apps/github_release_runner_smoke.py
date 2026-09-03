@@ -159,31 +159,7 @@ def main() -> None:
         recovery_manifest,
         MERGE,
     )
-    assert bridge is not None
-    assert bridge["manifest_sha256"] == recovery_binding["sha256"]
-    assert bridge["release_sha"] == MERGE
-    assert bridge["target"]["parent_hctl"] == "0:0:0:4"
-    for changed in (
-        {**recovery_manifest, "operation_id": "wbc0035-021-recovery-scratch-a01"},
-        {
-            **recovery_manifest,
-            "release_bridge": {
-                **recovery_manifest["release_bridge"],
-                "finance": {
-                    **recovery_manifest["release_bridge"]["finance"],
-                    "next_replacement_required_bytes": 33_608_519_680,
-                },
-            },
-        },
-    ):
-        try:
-            runner.build_recovery_scratch_release_bridge(
-                recovery_binding, changed, MERGE
-            )
-        except runner.RunnerError:
-            pass
-        else:
-            raise AssertionError("drifted recovery scratch bridge was accepted")
+    assert bridge is None
     assert (
         runner.build_recovery_scratch_release_bridge(
             recovery_binding, {"contract": "another/v1"}, MERGE
