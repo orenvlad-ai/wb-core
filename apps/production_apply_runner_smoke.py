@@ -2988,6 +2988,134 @@ def _exercise_fbs_phase_dependency_isolation() -> None:
 
 
 def main() -> None:
+    manifest = json.loads(
+        (
+            ROOT
+            / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+        ).read_text(encoding="utf-8")
+    )
+    manifest["merge_sha"] = MERGE_SHA
+    approval = (
+        "/wb-core apply-v2 pr 1 merge " + MERGE_SHA + " deployed "
+        + MERGE_SHA + " manifest sha256:" + "b" * 64
+        + " operation wbc0035-025-recovery-scratch-a01"
+    )
+    target = manifest["target"]
+    plan_path = (
+        "/opt/wb-core-runtime/state/backups/private-evidence/"
+        f"recovery-scratch-bootstrap/plan-{MERGE_SHA}.json"
+    )
+    blank = {
+        "status": "blank_ready",
+        "parent_device_by_id": target["parent_device_by_id"],
+        "resolved_parent_device": target["parent_device"],
+        "parent_major_minor": target["parent_major_minor"],
+        "parent_size_bytes": target["parent_size_bytes"],
+        "parent_serial": target["parent_serial"],
+        "parent_model": target["parent_model"],
+        "parent_hctl": target["parent_hctl"],
+        "parent_type": "disk",
+        "read_only": False,
+        "removable": False,
+        "partition_table": None,
+        **{
+            key: []
+            for key in (
+                "children", "signatures", "mounts", "holders", "slaves",
+                "lvm_memberships", "md_memberships", "swap_memberships",
+                "openers", "config_references",
+            )
+        },
+    }
+    plan = {
+        "contract_name": apply.RECOVERY_SCRATCH_PLAN_CONTRACT,
+        "status": "ready_to_initialize",
+        "operation_id": manifest["operation_id"],
+        "deployed_sha": MERGE_SHA,
+        "approval_reference": approval,
+        "plan_path": plan_path,
+        "plan_sha256": "sha256:" + "c" * 64,
+        "fingerprint": "sha256:" + "d" * 64,
+        "submit_count": 0,
+        "blank_device": blank,
+        "target": json.loads(
+            (
+                ROOT
+                / "artifacts/registry_upload_http_entrypoint/input/"
+                "hosted_runtime_target__europe_api.json"
+            ).read_text(encoding="utf-8")
+        )["recovery_scratch_filesystem"],
+        "expected_effect": {
+            "disk_initialized": True,
+            "mount_persisted": True,
+            "business_database_mutation": 0,
+            "recovery_submit": 0,
+            "barrier_change": False,
+            "timer_change": False,
+        },
+    }
+    ready = {
+        "status": "ready",
+        "path": target["mountpoint"],
+        "parent_device_by_id": target["parent_device_by_id"],
+        "partition_device_by_id": target["partition_device_by_id"],
+        "resolved_parent_device": target["parent_device"],
+        "parent_major_minor": target["parent_major_minor"],
+        "parent_size_bytes": target["parent_size_bytes"],
+        "parent_serial": target["parent_serial"],
+        "parent_model": target["parent_model"],
+        "parent_hctl": target["parent_hctl"],
+        "filesystem_uuid": target["filesystem_uuid"],
+        "filesystem_type": "ext4",
+        "directory_mode": target["directory_mode"],
+        "mountpoint_proven": True,
+        "mount_root": "/",
+        "fstab_exact": True,
+        "completion_marker_present": True,
+        "mount_options": target["mount_options"],
+        "distinct_from_roles": {
+            "root": True,
+            "backup": True,
+            "generation": True,
+        },
+        "entries": [],
+        "available_bytes": target["minimum_available_bytes"],
+    }
+    terminal = {
+        "contract_name": apply.RECOVERY_SCRATCH_RESULT_CONTRACT,
+        "status": "READY",
+        "operation_id": manifest["operation_id"],
+        "deployed_sha": MERGE_SHA,
+        "submit_count": 1,
+        "business_database_mutation": 0,
+        "recovery_submit": 0,
+        "ready": ready,
+    }
+    responses = [
+        {"return_code": 0, "result": {"action": "recovery-scratch-bootstrap-dry-run", "result": plan}},
+        {"return_code": None, "transport_ambiguous": True},
+        {"return_code": 0, "result": {"action": "recovery-scratch-bootstrap-readback", "result": terminal}},
+    ]
+    observed_commands: list[list[str]] = []
+    original_command_evidence = apply.command_evidence
+    try:
+        def fake_command_evidence(command: list[str], **_kwargs: object) -> dict:
+            observed_commands.append(command)
+            return responses.pop(0)
+
+        apply.command_evidence = fake_command_evidence
+        result = apply._run_recovery_scratch_commands(
+            manifest, approval_reference=approval
+        )
+    finally:
+        apply.command_evidence = original_command_evidence
+    assert result["state"] == "done", result
+    assert result["dry_run_count"] == 1
+    assert result["apply_count"] == 1
+    assert len(observed_commands) == 3
+    assert "recovery-scratch-bootstrap-apply" in observed_commands[1]
+    assert "recovery-scratch-bootstrap-readback" in observed_commands[2]
+
     _exact_pr1143_release_binding_contract()
     _correction_base_ancestry_contract()
     _workflow_dispatch_contract()

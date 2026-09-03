@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import tempfile
 from typing import Any, Mapping
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -18,6 +19,35 @@ if str(ROOT) not in sys.path:
 
 import apps.business_data_maintenance as maintenance
 import packages.application.business_data_write_barrier as write_barrier
+
+
+def _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up() -> None:
+    from apps import sqlite_hot_journal_reconcile_existing as reconcile
+
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = Path(raw) / "runtime"
+        scratch = runtime / "recovery-scratch"
+        scratch.mkdir(parents=True)
+        database = runtime / "operational.sqlite3"
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE fixture(id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO fixture VALUES (1)")
+        database = database.resolve()
+        expected = reconcile.hot._file_identity(database)
+        with mock.patch.object(
+            reconcile, "admit_root_write", return_value={"allowed": True}
+        ):
+            qualification = maintenance._requalify_reconciled_existing_sqlite(
+                runtime,
+                database,
+                expected,
+            )
+        assert qualification["copy"]["filesystem_role"] == "recovery_scratch"
+        assert qualification["copy"]["zero_leftover"] is True
+        assert list(scratch.iterdir()) == []
+        assert (
+            runtime / reconcile.SQLITE_QUALIFICATION_ALLOCATION_LOCK
+        ).is_file()
 
 
 class FakeSystemd:
@@ -3379,6 +3409,7 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
 
 
 def main() -> int:
+    _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up()
     _assert_production_timer_execstart_roles_are_exact()
     _assert_prepared_abort_quiesces_and_restores_exactly()
     _assert_autoanswers_restore_uses_bound_lifecycle_readback()

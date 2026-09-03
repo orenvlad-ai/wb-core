@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime, timezone
 import fcntl
 import gzip
@@ -54,12 +55,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-recovery-scratch-bootstrap-pending",
         action="store_true",
     )
+    status.add_argument("--recovery-scratch-release-bridge")
 
     status_readback = subparsers.add_parser("status-readback")
     status_readback.add_argument(
         "--allow-recovery-scratch-bootstrap-pending",
         action="store_true",
     )
+    status_readback.add_argument("--recovery-scratch-release-bridge")
 
     admission = subparsers.add_parser("admission")
     admission.add_argument("--owner", required=True)
@@ -80,12 +83,30 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         policy = load_policy(args.policy_file)
+        bridge = None
+        if getattr(args, "recovery_scratch_release_bridge", None):
+            try:
+                bridge = json.loads(
+                    base64.b64decode(
+                        args.recovery_scratch_release_bridge,
+                        validate=True,
+                    ).decode("utf-8")
+                )
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RootStoragePolicyError(
+                    "recovery scratch release bridge encoding is invalid"
+                ) from exc
+            if not isinstance(bridge, dict):
+                raise RootStoragePolicyError(
+                    "recovery scratch release bridge must be an object"
+                )
         if args.command == "status":
             result = collect_root_storage_status(
                 policy=policy,
                 allow_recovery_scratch_bootstrap_pending=(
                     args.allow_recovery_scratch_bootstrap_pending
                 ),
+                recovery_scratch_release_bridge=bridge,
             )
             if args.output:
                 _write_json_atomic(args.output, result, mode=0o644)
@@ -99,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 allow_recovery_scratch_bootstrap_pending=(
                     args.allow_recovery_scratch_bootstrap_pending
                 ),
+                recovery_scratch_release_bridge=bridge,
             )
             print(_canonical_json(result))
             return 0 if result.get("ok") else 3

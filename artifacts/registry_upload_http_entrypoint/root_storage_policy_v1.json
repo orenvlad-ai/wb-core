@@ -63,6 +63,7 @@
         "parent_model": "QEMU HARDDISK",
         "parent_size_bytes": 53687091200,
         "parent_major_minor": "8:48",
+        "parent_hctl": "0:0:0:4",
         "partition_table": "gpt",
         "partition_number": 1,
         "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",

@@ -4181,6 +4181,33 @@ def _prepared_abort_partial_restore_evidence(
     }
 
 
+def _requalify_reconciled_existing_sqlite(
+    runtime_dir: Path,
+    database_path: Path,
+    expected_source: Mapping[str, Any],
+) -> dict[str, Any]:
+    from apps import sqlite_hot_journal_reconcile_existing as reconcile
+
+    try:
+        scratch_root = reconcile.resolve_runtime_storage_destination(
+            reconcile.SQLITE_QUALIFICATION_SCRATCH_OWNER,
+            runtime_dir,
+            policy=reconcile.load_root_storage_policy(),
+        )
+    except reconcile.RootStoragePolicyError as exc:
+        raise RuntimeError(
+            "reconciled-existing scratch storage is unavailable"
+        ) from exc
+    return reconcile._qualify_current_sqlite(
+        database_path,
+        scratch_root=scratch_root,
+        allocation_lock_path=(
+            runtime_dir / reconcile.SQLITE_QUALIFICATION_ALLOCATION_LOCK
+        ),
+        expected_source=expected_source,
+    )
+
+
 def _validate_hot_journal_recovery_marker(
     runtime_dir: Path,
     *,
@@ -4291,10 +4318,10 @@ def _validate_hot_journal_recovery_marker(
         ):
             raise RuntimeError("reconciled-existing physical/control CAS drifted")
         cutoff_cas = dict(marker.get("observer_cutoff_tail_cas") or {})
-        sqlite_qualification = reconcile._qualify_current_sqlite(
+        sqlite_qualification = _requalify_reconciled_existing_sqlite(
+            runtime_dir,
             database_path,
-            backup_root=reconcile.DEFAULT_BACKUP_ROOT,
-            expected_source=current_database,
+            current_database,
         )
         current = reconcile.database_evidence(
             database_path,

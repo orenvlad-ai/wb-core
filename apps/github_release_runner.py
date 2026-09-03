@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -46,6 +47,12 @@ ARTIFACT_PREFIX = "test-plan-"
 RECEIPT_MARKER = "wb-core-release-receipt"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TERMINAL_STATES = {"done", "awaiting_apply", "blocked", "superseded"}
+RECOVERY_SCRATCH_MANIFEST_CONTRACT = (
+    "wbc0035_recovery_scratch_bootstrap_passport/v1"
+)
+RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT = (
+    "wbc0035_recovery_scratch_release_bridge/v1"
+)
 
 
 class RunnerError(RuntimeError):
@@ -607,12 +614,23 @@ def configure_deploy_environment(temp_dir: Path) -> None:
     )
 
 
-def deploy_exact(pr: int, head_sha: str, merge_sha: str, temp_dir: Path) -> str:
+def deploy_exact(
+    pr: int,
+    head_sha: str,
+    merge_sha: str,
+    temp_dir: Path,
+    *,
+    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
+) -> str:
     configure_deploy_environment(temp_dir)
     evidence = temp_dir / "deploy-evidence.json"
     env = os.environ.copy()
     env["WB_CORE_RELEASE_PR"] = str(pr)
     env["WB_CORE_RELEASE_HEAD"] = head_sha
+    if recovery_scratch_release_bridge is not None:
+        env["WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE"] = base64.b64encode(
+            canonical_json_bytes(recovery_scratch_release_bridge)
+        ).decode("ascii")
     subprocess.run(
         [
             sys.executable,
@@ -631,7 +649,9 @@ def deploy_exact(pr: int, head_sha: str, merge_sha: str, temp_dir: Path) -> str:
     return merge_sha
 
 
-def read_manifest(binding: Mapping[str, Any], merge_sha: str) -> dict[str, Any]:
+def read_manifest_payload(
+    binding: Mapping[str, Any], merge_sha: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
     path = str(binding.get("path") or "")
     expected = str(binding.get("sha256") or "")
     manifest_path = (ROOT / path).resolve()
@@ -648,7 +668,95 @@ def read_manifest(binding: Mapping[str, Any], merge_sha: str) -> dict[str, Any]:
         raise RunnerError("production-manifest-contract-invalid")
     if str(manifest.get("merge_sha") or "").lower() not in {"", merge_sha}:
         raise RunnerError("production-manifest-merge-binding-mismatch")
-    return {"path": path, "sha256": expected, "operation_id": manifest["operation_id"]}
+    return (
+        {"path": path, "sha256": expected, "operation_id": manifest["operation_id"]},
+        manifest,
+    )
+
+
+def read_manifest(binding: Mapping[str, Any], merge_sha: str) -> dict[str, Any]:
+    compact, _manifest = read_manifest_payload(binding, merge_sha)
+    return compact
+
+
+def build_recovery_scratch_release_bridge(
+    binding: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    merge_sha: str,
+) -> dict[str, Any] | None:
+    if manifest.get("contract") != RECOVERY_SCRATCH_MANIFEST_CONTRACT:
+        return None
+    target_file = ROOT / (
+        "artifacts/registry_upload_http_entrypoint/input/"
+        "hosted_runtime_target__europe_api.json"
+    )
+    target_contract = json.loads(target_file.read_text(encoding="utf-8"))
+    scratch = dict(target_contract.get("recovery_scratch_filesystem") or {})
+    expected_target = {
+        "parent_device": "/dev/sdd",
+        "parent_device_by_id": scratch.get("parent_device_by_id"),
+        "partition_device_by_id": scratch.get("partition_device_by_id"),
+        "parent_serial": scratch.get("parent_serial"),
+        "parent_model": scratch.get("parent_model"),
+        "parent_size_bytes": scratch.get("parent_size_bytes"),
+        "parent_major_minor": scratch.get("parent_major_minor"),
+        "parent_hctl": scratch.get("parent_hctl"),
+        "blank": True,
+        "layout": "single-gpt-partition-ext4",
+        "filesystem_uuid": scratch.get("filesystem_uuid"),
+        "mountpoint": scratch.get("path"),
+        "mount_options": scratch.get("required_mount_options"),
+        "directory_mode": 0o700,
+        "minimum_available_bytes": 35_157_336_064,
+    }
+    expected_preconditions = {
+        "contract": RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT,
+        "barrier": {
+            "active": True,
+            "phase": "acquiring",
+            "hold_confirmed": False,
+            "window_id": "wbc0027-s047-live-last-good-freeze-v2-896b02c0",
+            "plan_fingerprint": "sha256:0d680ca758c1699fe2a9025b01d71f0fa4f8c5bcf7555a7945b5b930cdc5285f",
+            "maintenance_phase": "abort_quiescing",
+            "owner_policy_revision": 59,
+            "all_business_timers_paused": True,
+        },
+        "finance": {
+            "only_allowed_blocker": "retained backup exceeded RPO age",
+            "retained_backup_id": "finance-backup-459a091d48326c9be224",
+            "canonical_source_bytes": 26_567_401_472,
+            "next_replacement_required_bytes": 35_224_444_928,
+            "capacity_basis": "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve",
+            "next_replacement_capacity": True,
+        },
+        "non_target_filesystem_uuids": {
+            "root": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
+            "backup": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
+            "generation": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
+        },
+    }
+    if (
+        manifest.get("operation_id") != "wbc0035-025-recovery-scratch-a01"
+        or manifest.get("target_id") != "wb_core_eu_hosted_runtime_active"
+        or manifest.get("deployed_sha_contract") != "exact-merge-sha"
+        or manifest.get("target") != expected_target
+        or manifest.get("release_bridge") != expected_preconditions
+        or str(binding.get("path") or "")
+        != "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+        or re.fullmatch(r"[0-9a-f]{64}", str(binding.get("sha256") or ""))
+        is None
+    ):
+        raise RunnerError("recovery-scratch-release-bridge-invalid")
+    return {
+        "contract": RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT,
+        "manifest_path": str(binding["path"]),
+        "manifest_sha256": str(binding["sha256"]),
+        "target_id": str(manifest["target_id"]),
+        "operation_id": str(manifest["operation_id"]),
+        "release_sha": exact_sha(merge_sha, "recovery-scratch-release"),
+        "target": expected_target,
+        "preconditions": expected_preconditions,
+    }
 
 
 def route_kind(plan: Mapping[str, Any]) -> tuple[str, bool]:
@@ -738,14 +846,26 @@ def run_once(client: GitHubClient, workflow_run_id: int, output: Path) -> dict[s
     try:
         merge_sha = merge_exact(client, pr_number, head_sha)
         checkout_merge(merge_sha)
-        if kind in {"live_runtime", "production_mutation"}:
-            with tempfile.TemporaryDirectory(prefix="wb-core-deploy-") as directory:
-                deployed_sha = deploy_exact(pr_number, head_sha, merge_sha, Path(directory))
+        manifest_payload: Mapping[str, Any] | None = None
+        release_bridge: Mapping[str, Any] | None = None
         if kind == "production_mutation":
             binding = artifact_plan["release_plan"].get("manifest")
             if not isinstance(binding, Mapping):
                 raise RunnerError("production-manifest-binding-missing")
-            manifest = read_manifest(binding, merge_sha)
+            manifest, manifest_payload = read_manifest_payload(binding, merge_sha)
+            release_bridge = build_recovery_scratch_release_bridge(
+                binding, manifest_payload, merge_sha
+            )
+        if kind in {"live_runtime", "production_mutation"}:
+            with tempfile.TemporaryDirectory(prefix="wb-core-deploy-") as directory:
+                deployed_sha = deploy_exact(
+                    pr_number,
+                    head_sha,
+                    merge_sha,
+                    Path(directory),
+                    recovery_scratch_release_bridge=release_bridge,
+                )
+        if kind == "production_mutation":
             state = "awaiting_apply"
         else:
             state = "done"

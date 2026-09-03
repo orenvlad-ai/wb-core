@@ -1,7 +1,7 @@
 {
   "schema": "wb-core.production-apply-manifest/v2",
   "contract": "wbc0035_recovery_scratch_bootstrap_passport/v1",
-  "operation_id": "wbc0035-021-recovery-scratch-a01",
+  "operation_id": "wbc0035-025-recovery-scratch-a01",
   "target_id": "wb_core_eu_hosted_runtime_active",
   "deployed_sha_contract": "exact-merge-sha",
   "dry_run_default": true,
@@ -15,7 +15,7 @@
   "post_apply_readback": true,
   "reconciliation": true,
   "query_only_manifest_readback": true,
-  "pre_change_digest_value": "sha256:96e0c9781973c12de43f31405c7cc64169c251f6ab08a11f49c4278cb34f428c",
+  "pre_change_digest_value": "sha256:a934bbbca72a41ee6da5346eb89dce0d31085f027d35bd093ef623e9f1224a97",
   "backup_evidence_value": "Immutable mode-0600 plan, pre-submit fstab backup, one-submit intent and terminal result remain on canonical backup; scratch retains no qualification bytes.",
   "expected_affected_record_count": 0,
   "non_target_invariant_ids": [
@@ -52,10 +52,15 @@
     ]
   },
   "target": {
+    "parent_device": "/dev/sdd",
     "parent_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde",
+    "partition_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde-part1",
     "parent_serial": "vde",
+    "parent_model": "QEMU HARDDISK",
     "parent_size_bytes": 53687091200,
     "parent_major_minor": "8:48",
+    "parent_hctl": "0:0:0:4",
+    "blank": true,
     "layout": "single-gpt-partition-ext4",
     "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
     "mountpoint": "/opt/wb-core-runtime/state/recovery-scratch",
@@ -65,10 +70,38 @@
       "nodev",
       "nosuid",
       "noexec"
-    ]
+    ],
+    "directory_mode": 448,
+    "minimum_available_bytes": 35157336064
+  },
+  "release_bridge": {
+    "contract": "wbc0035_recovery_scratch_release_bridge/v1",
+    "barrier": {
+      "active": true,
+      "phase": "acquiring",
+      "hold_confirmed": false,
+      "window_id": "wbc0027-s047-live-last-good-freeze-v2-896b02c0",
+      "plan_fingerprint": "sha256:0d680ca758c1699fe2a9025b01d71f0fa4f8c5bcf7555a7945b5b930cdc5285f",
+      "maintenance_phase": "abort_quiescing",
+      "owner_policy_revision": 59,
+      "all_business_timers_paused": true
+    },
+    "finance": {
+      "only_allowed_blocker": "retained backup exceeded RPO age",
+      "retained_backup_id": "finance-backup-459a091d48326c9be224",
+      "canonical_source_bytes": 26567401472,
+      "next_replacement_required_bytes": 35224444928,
+      "capacity_basis": "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve",
+      "next_replacement_capacity": true
+    },
+    "non_target_filesystem_uuids": {
+      "root": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
+      "backup": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
+      "generation": "284b3362-b890-431d-a7da-7f0fcd2ee0a6"
+    }
   },
   "authorization": {
-    "source": "WBC0035/021 accepted owner outcome; WBC0035/022 same-scope deploy admission correction",
+    "source": "WBC0035/025 accepted consolidated correction after WBC0035/024 terminal rehearsal",
     "effect": "exact new recovery-scratch destination initialization and persistent mount",
     "no_reconfirmation": true
   }

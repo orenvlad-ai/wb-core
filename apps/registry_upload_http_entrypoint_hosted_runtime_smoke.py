@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import sqlite3
@@ -4940,6 +4942,99 @@ def main() -> None:
             raise AssertionError(
                 "recovery scratch deploy admission must compare normalized mount options"
             )
+        from apps.github_release_runner import (
+            build_recovery_scratch_release_bridge,
+        )
+
+        manifest_path = (
+            ROOT
+            / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+        )
+        manifest_raw = manifest_path.read_bytes()
+        release_sha = hosted_runtime._git_output(
+            ["git", "rev-parse", "HEAD"]
+        ).strip()
+        release_bridge = build_recovery_scratch_release_bridge(
+            {
+                "path": str(manifest_path.relative_to(ROOT)),
+                "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            },
+            json.loads(manifest_raw),
+            release_sha,
+        )
+        encoded_bridge = base64.b64encode(
+            json.dumps(
+                release_bridge,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).decode("ascii")
+        bridge_env = "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE"
+        prior_bridge = os.environ.get(bridge_env)
+        try:
+            os.environ[bridge_env] = encoded_bridge
+            bridge_commands = hosted_runtime._build_root_storage_policy_commands(
+                hosted_runtime.load_hosted_runtime_target(
+                    ROOT
+                    / "artifacts/registry_upload_http_entrypoint/input/"
+                    "hosted_runtime_target__europe_api.json"
+                )
+            )
+        finally:
+            if prior_bridge is None:
+                os.environ.pop(bridge_env, None)
+            else:
+                os.environ[bridge_env] = prior_bridge
+        if (
+            bridge_commands.get("release_bridge") is not True
+            or "--recovery-scratch-release-bridge"
+            not in bridge_commands["status"][-1]
+            or "--recovery-scratch-release-bridge"
+            not in bridge_commands["status_artifact_readback"][-1]
+        ):
+            raise AssertionError("release bridge did not reach canonical adapter")
+        release_pr_env = "WB_CORE_RELEASE_PR"
+        release_head_env = "WB_CORE_RELEASE_HEAD"
+        prior_release_pr = os.environ.get(release_pr_env)
+        prior_release_head = os.environ.get(release_head_env)
+        try:
+            os.environ.pop(bridge_env, None)
+            os.environ[release_pr_env] = "1200"
+            os.environ[release_head_env] = "a" * 40
+
+            def release_git_output(args: list[str]) -> str:
+                if args[:3] == ["git", "diff", "--name-only"]:
+                    return str(manifest_path.relative_to(ROOT)) + "\n"
+                if args == ["git", "rev-parse", "HEAD"]:
+                    return "a" * 40 + "\n"
+                raise AssertionError(args)
+
+            with mock.patch.object(
+                hosted_runtime, "_git_output", side_effect=release_git_output
+            ):
+                hosted_runtime._bootstrap_recovery_scratch_release_bridge()
+                auto_bridge_commands = (
+                    hosted_runtime._build_root_storage_policy_commands(
+                        hosted_runtime.load_hosted_runtime_target(
+                            ROOT
+                            / "artifacts/registry_upload_http_entrypoint/input/"
+                            "hosted_runtime_target__europe_api.json"
+                        )
+                    )
+                )
+            if auto_bridge_commands.get("release_bridge") is not True:
+                raise AssertionError("exact changed manifest did not bootstrap bridge")
+        finally:
+            os.environ.pop(bridge_env, None)
+            for name, value in (
+                (release_pr_env, prior_release_pr),
+                (release_head_env, prior_release_head),
+            ):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         archived_target_payload = dict(deploy_target_payload)
         archived_target_payload.update(
             {

@@ -49,8 +49,49 @@ def main() -> int:
     _assert_one_shot_correction(policy)
     _assert_corrective_reconciliation(policy)
     _assert_static_safety()
+    _assert_recovery_scratch_finance_exception_is_exact()
     print("root_storage_policy_smoke: ok")
     return 0
+
+
+def _assert_recovery_scratch_finance_exception_is_exact() -> None:
+    expected = {
+        "only_allowed_blocker": "retained backup exceeded RPO age",
+        "retained_backup_id": "finance-backup-459a091d48326c9be224",
+        "canonical_source_bytes": 26_567_401_472,
+        "next_replacement_required_bytes": 35_224_444_928,
+        "capacity_basis": "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve",
+    }
+    health = {
+        "status": "degraded",
+        "blockers": [expected["only_allowed_blocker"]],
+        "retained_backup_id": expected["retained_backup_id"],
+        "canonical_source_bytes": expected["canonical_source_bytes"],
+        "next_replacement_required_bytes": expected[
+            "next_replacement_required_bytes"
+        ],
+        "capacity_basis": expected["capacity_basis"],
+        "next_replacement_capacity": True,
+        "available_bytes": 49_479_995_392,
+    }
+    policy_module._validate_recovery_scratch_finance_exception(health, expected)
+    invalid = [
+        {**health, "next_replacement_required_bytes": 33_608_519_680},
+        {**health, "blockers": [*health["blockers"], "foreign violation"]},
+        {**health, "retained_backup_id": "finance-backup-00000000000000000000"},
+        {**health, "next_replacement_capacity": False},
+        {**health, "available_bytes": expected["next_replacement_required_bytes"] - 1},
+    ]
+    for candidate in invalid:
+        with mock.patch.object(policy_module, "_payload_digest"):
+            try:
+                policy_module._validate_recovery_scratch_finance_exception(
+                    candidate, expected
+                )
+            except RootStoragePolicyError:
+                pass
+            else:
+                raise AssertionError("invalid Finance release bridge was accepted")
 
 
 def _assert_thresholds(policy: dict[str, object]) -> None:
