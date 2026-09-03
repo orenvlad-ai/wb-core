@@ -29,6 +29,12 @@ CLASS_ESSENTIAL = "essential_bounded_business_writer"
 CLASS_RETAINED = "retained_no_active_writer"
 NON_TARGET_CAS_CONTRACT = "wb_core_non_target_cas_v3"
 MUTABLE_STORE_FILESYSTEM_ROLES = frozenset({"root", "generation"})
+CANONICAL_FILESYSTEM_ROLES = (
+    "root",
+    "backup",
+    "generation",
+    "recovery_scratch",
+)
 MUTABLE_STORE_ACCESS_MODES = frozenset({"read_only", "read_write", "write_only"})
 MUTABLE_STORE_ACCESS_ROLES = {
     "reader": frozenset({"read_only"}),
@@ -217,11 +223,9 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
     ):
         raise RootStoragePolicyError("canonical storage registry is invalid")
     filesystems = registry.get("filesystems")
-    if not isinstance(filesystems, Mapping) or set(filesystems) != {
-        "root",
-        "backup",
-        "generation",
-    }:
+    if not isinstance(filesystems, Mapping) or set(filesystems) != set(
+        CANONICAL_FILESYSTEM_ROLES
+    ):
         raise RootStoragePolicyError("canonical storage filesystem registry is invalid")
     expected_paths = dict(policy.get("filesystems") or {})
     for role, raw in filesystems.items():
@@ -257,6 +261,21 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             raw.get("emergency_reserve_bytes") or 0
         ) != 8 * GIB:
             raise RootStoragePolicyError("canonical backup emergency reserve drift")
+        if role == "recovery_scratch":
+            from apps.recovery_scratch_bootstrap import (
+                RecoveryScratchError,
+                validate_recovery_scratch_contract,
+            )
+
+            try:
+                validate_recovery_scratch_contract(
+                    _recovery_scratch_contract(raw),
+                    runtime_dir=path.parent,
+                )
+            except RecoveryScratchError as exc:
+                raise RootStoragePolicyError(
+                    "canonical recovery scratch filesystem contract is invalid"
+                ) from exc
     lifecycle_policies = registry.get("lifecycle_policies")
     if not isinstance(lifecycle_policies, Mapping) or not lifecycle_policies:
         raise RootStoragePolicyError("canonical storage lifecycle registry is empty")
@@ -289,7 +308,10 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             or not isinstance(producer.get("current"), bool)
             or not str(producer.get("data_class") or "").strip()
             or destination_role
-            not in {"root", "backup", "generation", "canonical_store", "caller_bound", "ephemeral"}
+            not in {
+                "root", "backup", "generation", "recovery_scratch",
+                "canonical_store", "caller_bound", "ephemeral",
+            }
             or not isinstance(relative_roots, list)
             or any(
                 not isinstance(item, str)
@@ -304,11 +326,71 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             or maximum < 0
         ):
             raise RootStoragePolicyError("canonical storage producer is invalid")
-        if destination_role in {"root", "backup", "generation"} and not relative_roots:
+        if destination_role in {
+            "root", "backup", "generation", "recovery_scratch"
+        } and not relative_roots:
             raise RootStoragePolicyError("canonical storage producer has no destination root")
         if producer.get("current") is True and capacity_mode == "disabled":
             raise RootStoragePolicyError("current storage producer cannot be disabled")
         storage_owner_ids.add(owner)
+
+
+def _recovery_scratch_contract(role: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the fourth storage role into its exact bootstrap/readback contract."""
+
+    keys = {
+        "contract_version", "path", "parent_device_by_id", "partition_device_by_id",
+        "parent_serial", "parent_model", "parent_size_bytes", "parent_major_minor",
+        "partition_table", "partition_number", "disk_guid", "partition_guid",
+        "filesystem_uuid", "filesystem_label", "filesystem_type",
+        "required_mount_options", "reserve_bytes", "completion_marker",
+        "require_distinct_from_roles",
+    }
+    return {key: role.get(key) for key in keys}
+
+
+def _recovery_scratch_pending_status(
+    policy: Mapping[str, Any],
+    *,
+    path: Path,
+) -> dict[str, Any]:
+    registry = dict(policy.get("storage_registry") or {})
+    raw = dict(dict(registry.get("filesystems") or {}).get("recovery_scratch") or {})
+    completion = Path(str(raw.get("completion_marker") or ""))
+    if completion.exists():
+        raise RootStoragePolicyError(
+            "recovery scratch completion exists but exact mount is unavailable"
+        )
+    if path.exists() and (path.is_symlink() or not path.is_dir() or any(path.iterdir())):
+        raise RootStoragePolicyError(
+            "recovery scratch bootstrap mountpoint is used or ambiguous"
+        )
+    from apps.recovery_scratch_bootstrap import (
+        RecoveryScratchError,
+        collect_blank_device_evidence,
+        validate_recovery_scratch_contract,
+    )
+
+    try:
+        contract = validate_recovery_scratch_contract(
+            _recovery_scratch_contract(raw),
+            runtime_dir=path.parent,
+        )
+        blank = collect_blank_device_evidence(contract)
+    except RecoveryScratchError as exc:
+        raise RootStoragePolicyError(
+            "recovery scratch bootstrap-pending evidence is invalid"
+        ) from exc
+    return {
+        "path": str(path),
+        "bootstrap_status": "pending",
+        "blank_device": blank,
+        "source": None,
+        "filesystem_uuid": None,
+        "filesystem_type": None,
+        "mount_options": "",
+        "available_bytes": None,
+    }
 
 
 def storage_producer_policy(
@@ -340,7 +422,7 @@ def storage_destination_root(
     if producer.get("current") is not True:
         raise RootStoragePolicyError(f"storage producer has no current write authority: {owner}")
     role = str(producer.get("destination_role") or "")
-    if role not in {"root", "backup", "generation"}:
+    if role not in {"root", "backup", "generation", "recovery_scratch"}:
         raise RootStoragePolicyError(
             f"storage producer does not own a persistent destination root: {owner}"
         )
@@ -397,7 +479,9 @@ def resolve_runtime_storage_destination(
     role = str(producer.get("destination_role") or "")
     roots = [str(item) for item in producer.get("relative_roots") or []]
     chosen = roots[0] if relative_root is None else str(relative_root)
-    if chosen not in roots or role not in {"root", "backup", "generation"}:
+    if chosen not in roots or role not in {
+        "root", "backup", "generation", "recovery_scratch"
+    }:
         raise RootStoragePolicyError(
             f"isolated runtime storage destination is not registered: {owner}:{chosen}"
         )
@@ -405,6 +489,7 @@ def resolve_runtime_storage_destination(
         "root": runtime,
         "backup": runtime / "backups",
         "generation": runtime / "generations",
+        "recovery_scratch": runtime / "recovery-scratch",
     }[role]
     root = (role_base / chosen).resolve(strict=False)
     destination = root.joinpath(*(str(item) for item in relative_parts)).resolve(strict=False)
@@ -515,7 +600,9 @@ def admit_root_write(
             f"owner={normalized_owner}, predicted_peak_bytes={predicted_peak}, "
             f"max_single_write_bytes={maximum}"
         )
-    if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
+    if destination_role in {
+        "root", "backup", "generation", "recovery_scratch"
+    } and enforce_canonical_destination:
         allowed_roots = [
             storage_destination_root(
                 normalized_owner,
@@ -557,7 +644,9 @@ def admit_root_write(
             reason = "large_output_predicted_free_after_below_critical_floor"
     reserve_bytes = 0
     reserve_mode = "domain_guard"
-    if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
+    if destination_role in {
+        "root", "backup", "generation", "recovery_scratch"
+    } and enforce_canonical_destination:
         role_policy = dict(
             dict(dict(resolved_policy["storage_registry"])["filesystems"])[
                 destination_role
@@ -620,13 +709,22 @@ def collect_root_storage_status(
     policy: Mapping[str, Any] | None = None,
     root_path: Path = Path("/"),
     now: datetime | None = None,
+    allow_recovery_scratch_bootstrap_pending: bool = False,
 ) -> dict[str, Any]:
     resolved_policy = dict(policy or load_policy())
     collected_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    filesystems = {
-        name: _filesystem_status(Path(path))
-        for name, path in dict(resolved_policy.get("filesystems") or {}).items()
-    }
+    filesystems: dict[str, dict[str, Any]] = {}
+    for name, raw_path in dict(resolved_policy.get("filesystems") or {}).items():
+        path = Path(str(raw_path))
+        try:
+            filesystems[name] = _filesystem_status(path)
+        except (FileNotFoundError, RootStoragePolicyError):
+            if name != "recovery_scratch" or not allow_recovery_scratch_bootstrap_pending:
+                raise
+            filesystems[name] = _recovery_scratch_pending_status(
+                resolved_policy,
+                path=path,
+            )
     if "root" not in filesystems:
         filesystems["root"] = _filesystem_status(root_path)
     root_status = filesystems["root"]
@@ -684,11 +782,24 @@ def _collect_storage_registry_status(
     alerts: list[dict[str, Any]] = []
     role_status: dict[str, dict[str, Any]] = {}
     finance_floor: dict[str, Any] | None = None
-    for role in ("root", "backup", "generation"):
+    for role in CANONICAL_FILESYSTEM_ROLES:
         if role not in observed_filesystems:
             continue
         contract = dict(role_contracts[role])
         observed = dict(observed_filesystems[role])
+        if role == "recovery_scratch" and observed.get("bootstrap_status") == "pending":
+            role_status[role] = {
+                "identity_ok": False,
+                "identity_error_fields": [],
+                "bootstrap_status": "pending",
+                "reserve_mode": str(contract.get("reserve_mode") or ""),
+                "required_reserve_bytes": int(contract.get("reserve_bytes") or 0),
+                "available_bytes": None,
+                "available_after_reserve_bytes": None,
+                "reserve_breached": False,
+                "blank_device": observed.get("blank_device"),
+            }
+            continue
         required_options = {str(item) for item in contract.get("required_mount_options") or []}
         observed_options = {
             item.strip()
@@ -764,9 +875,9 @@ def _collect_storage_registry_status(
         not in {"canonical_business_store", "protected_excluded_promo_artifact"}
     ]
     unregistered_destination_violations: list[dict[str, Any]] = []
-    for role in ("backup", "generation"):
+    for role in ("backup", "generation", "recovery_scratch"):
         observed = observed_filesystems.get(role)
-        if observed is None:
+        if observed is None or observed.get("bootstrap_status") == "pending":
             continue
         unregistered_destination_violations.extend(
             _scan_unregistered_large_destinations(
@@ -908,6 +1019,7 @@ def read_root_storage_status_artifact(
     policy: Mapping[str, Any] | None = None,
     artifact_path: Path | None = None,
     now: datetime | None = None,
+    allow_recovery_scratch_bootstrap_pending: bool = False,
 ) -> dict[str, Any]:
     """Validate the atomic server-owned status artifact without rescanning storage."""
 
@@ -962,6 +1074,22 @@ def read_root_storage_status_artifact(
         raise RootStoragePolicyError(
             "root storage status artifact lacks canonical storage registry evidence"
         )
+    roles = dict(storage_registry.get("roles") or {})
+    scratch = dict(roles.get("recovery_scratch") or {})
+    if scratch.get("bootstrap_status") == "pending":
+        if not allow_recovery_scratch_bootstrap_pending:
+            raise RootStoragePolicyError(
+                "recovery scratch filesystem is bootstrap-pending"
+            )
+        contract = dict(
+            dict(resolved_policy.get("storage_registry") or {})
+            .get("filesystems", {})
+            .get("recovery_scratch", {})
+        )
+        if Path(str(contract.get("completion_marker") or "")).exists():
+            raise RootStoragePolicyError(
+                "recovery scratch completion exists but mount is not ready"
+            )
     expected_safe = (
         payload.get("status") != "hard"
         and not unregistered

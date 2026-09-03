@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -867,7 +868,8 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
     with mock.patch.object(reconcile.sqlite3, "connect", side_effect=portable_connect):
         qualification = reconcile._qualify_current_sqlite(
             database,
-            backup_root=qualification_root,
+            scratch_root=qualification_root,
+            allocation_lock_path=root / "qualification.lock",
             expected_source=expected,
             max_bytes=1024 * 1024,
             max_seconds=10.0,
@@ -888,6 +890,49 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
     assert not staged_paths[0].exists()
     assert list(qualification_root.iterdir()) == []
 
+    with (root / "qualification.lock").open("a+b") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            reconcile._qualify_current_sqlite(
+                database,
+                scratch_root=qualification_root,
+                allocation_lock_path=root / "qualification.lock",
+                expected_source=expected,
+                max_bytes=1024 * 1024,
+                max_seconds=10.0,
+                max_copy_bytes_per_second=1024 * 1024 * 1024,
+            )
+        except reconcile.ReconcileExistingError as exc:
+            assert "allocation is already active" in str(exc)
+        else:
+            raise AssertionError("concurrent scratch allocation must fail closed")
+    assert list(qualification_root.iterdir()) == []
+
+    too_small = {
+        "device": 42,
+        "available_bytes": (
+            int(expected["size_bytes"])
+            + reconcile.SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES
+            - 1
+        ),
+    }
+    with mock.patch.object(hot, "_filesystem", return_value=too_small):
+        try:
+            reconcile._qualify_current_sqlite(
+                database,
+                scratch_root=qualification_root,
+                allocation_lock_path=root / "qualification.lock",
+                expected_source=expected,
+                max_bytes=1024 * 1024,
+                max_seconds=10.0,
+                max_copy_bytes_per_second=1024 * 1024 * 1024,
+            )
+        except reconcile.ReconcileExistingError as exc:
+            assert "source size plus exact 8 GiB reserve" in str(exc)
+        else:
+            raise AssertionError("insufficient recovery scratch must fail closed")
+    assert list(qualification_root.iterdir()) == []
+
     with mock.patch.object(
         reconcile.sqlite3,
         "connect",
@@ -896,7 +941,8 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
         try:
             reconcile._qualify_current_sqlite(
                 database,
-                backup_root=qualification_root,
+                scratch_root=qualification_root,
+                allocation_lock_path=root / "qualification.lock",
                 expected_source=expected,
                 max_bytes=1024 * 1024,
                 max_seconds=10.0,
@@ -914,7 +960,8 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
     operational_identity = hot._file_identity(operational_database)
     operational_qualification = reconcile._qualify_current_sqlite(
         operational_database,
-        backup_root=qualification_root,
+        scratch_root=qualification_root,
+        allocation_lock_path=root / "qualification.lock",
         expected_source=operational_identity,
         max_bytes=1024 * 1024,
         max_seconds=10.0,
@@ -943,7 +990,8 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
     try:
         reconcile._qualify_current_sqlite(
             database,
-            backup_root=qualification_root,
+            scratch_root=qualification_root,
+            allocation_lock_path=root / "qualification.lock",
             expected_source=drifted_identity,
             max_bytes=1024 * 1024,
             max_seconds=10.0,
@@ -972,7 +1020,8 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
     try:
         reconcile._qualify_current_sqlite(
             foreign_key_database,
-            backup_root=qualification_root,
+            scratch_root=qualification_root,
+            allocation_lock_path=root / "qualification.lock",
             expected_source=hot._file_identity(foreign_key_database),
             max_bytes=1024 * 1024,
             max_seconds=10.0,
@@ -991,7 +1040,8 @@ def _sqlite_qualification_red_smoke(root: Path) -> None:
     try:
         reconcile._qualify_current_sqlite(
             corrupt_database,
-            backup_root=qualification_root,
+            scratch_root=qualification_root,
+            allocation_lock_path=root / "qualification.lock",
             expected_source=hot._file_identity(corrupt_database),
             max_bytes=1024 * 1024,
             max_seconds=10.0,
@@ -1432,7 +1482,19 @@ def _query_only_rehearsal_smoke(root: Path) -> None:
         "contract_name": reconcile.SQLITE_QUALIFICATION_CONTRACT_NAME,
         "method": reconcile.SQLITE_QUALIFICATION_METHOD,
         "source": {"size_bytes": 4, "sha256": "1" * 64},
-        "copy": {"anonymous": True, "size_bytes": 4, "sha256": "1" * 64},
+        "copy": {
+            "anonymous": True,
+            "exclusive_create": True,
+            "staged_mode": 0o600,
+            "unlinked_before_checks": True,
+            "zero_leftover": True,
+            "filesystem_role": "recovery_scratch",
+            "filesystem_device": 42,
+            "reserve_bytes": reconcile.SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES,
+            "allocation_exclusive": True,
+            "size_bytes": 4,
+            "sha256": "1" * 64,
+        },
         "sqlite": {
             "query_only": 1,
             "journal_mode": "delete",
@@ -1465,9 +1527,21 @@ def _query_only_rehearsal_smoke(root: Path) -> None:
         "backup": {
             "directory": str(operation_directory),
             "capacity_before": {"available_bytes": 100},
-            "qualification_peak_bytes": 4,
-            "qualification_peak_available_bytes": 96,
+            "qualification_peak_bytes": 0,
             "projected_reserve_headroom_bytes": 90,
+        },
+        "recovery_scratch": {
+            "path": str(runtime / "recovery-scratch"),
+            "filesystem_role": "recovery_scratch",
+            "reserve_bytes": reconcile.SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES,
+            "source_size_bytes": 4,
+            "required_available_bytes": (
+                4 + reconcile.SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES
+            ),
+            "capacity_before": {"available_bytes": 100},
+            "projected_available_bytes": 96,
+            "allocation_exclusive": True,
+            "zero_leftover": True,
         },
     }
     systemd = mock.Mock()

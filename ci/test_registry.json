@@ -43,6 +43,7 @@
         ["python3", "apps/wbc0008_warm_archive_receipt_reconciliation_probe_smoke.py"],
         ["python3", "apps/wbc0010_autoanswers_budget_recovery_smoke.py"],
         ["python3", "apps/root_storage_policy_smoke.py"],
+        ["python3", "apps/recovery_scratch_bootstrap_smoke.py"],
         ["python3", "apps/registry_upload_http_entrypoint_public_routes_smoke.py"],
         ["python3", "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py"],
         ["python3", "-S", "apps/wbc0027_incident_capsule_target_smoke.py"]
@@ -286,7 +287,7 @@
     },
     {
       "id": "root-storage-policy",
-      "paths": ["apps/root_storage_policy*", "apps/promo_metric_eligibility_recompute.py", "apps/spp_metric_recompute.py", "apps/sqlite_failed_backup_cleanup_smoke.py", "apps/wb_autoanswers_activation*", "apps/wb_autoanswers_runtime_test.py", "packages/application/ads_historical_recovery.py", "packages/application/root_storage_policy.py", "packages/application/wb_autoanswers_runtime.py"],
+      "paths": ["apps/root_storage_policy*", "apps/recovery_scratch_bootstrap*", "apps/promo_metric_eligibility_recompute.py", "apps/spp_metric_recompute.py", "apps/sqlite_failed_backup_cleanup_smoke.py", "apps/wb_autoanswers_activation*", "apps/wb_autoanswers_runtime_test.py", "packages/application/ads_historical_recovery.py", "packages/application/root_storage_policy.py", "packages/application/wb_autoanswers_runtime.py"],
       "suites": ["release_safety", "warehouse_recovery"],
       "release": "live_runtime"
     },

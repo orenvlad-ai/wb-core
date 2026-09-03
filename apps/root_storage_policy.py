@@ -50,8 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status")
     status.add_argument("--output", type=Path)
     status.add_argument("--fail-on-unregistered", action="store_true")
+    status.add_argument(
+        "--allow-recovery-scratch-bootstrap-pending",
+        action="store_true",
+    )
 
-    subparsers.add_parser("status-readback")
+    status_readback = subparsers.add_parser("status-readback")
+    status_readback.add_argument(
+        "--allow-recovery-scratch-bootstrap-pending",
+        action="store_true",
+    )
 
     admission = subparsers.add_parser("admission")
     admission.add_argument("--owner", required=True)
@@ -73,7 +81,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         policy = load_policy(args.policy_file)
         if args.command == "status":
-            result = collect_root_storage_status(policy=policy)
+            result = collect_root_storage_status(
+                policy=policy,
+                allow_recovery_scratch_bootstrap_pending=(
+                    args.allow_recovery_scratch_bootstrap_pending
+                ),
+            )
             if args.output:
                 _write_json_atomic(args.output, result, mode=0o644)
             print(_canonical_json(result))
@@ -81,7 +94,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             return 0
         if args.command == "status-readback":
-            result = read_root_storage_status_artifact(policy=policy)
+            result = read_root_storage_status_artifact(
+                policy=policy,
+                allow_recovery_scratch_bootstrap_pending=(
+                    args.allow_recovery_scratch_bootstrap_pending
+                ),
+            )
             print(_canonical_json(result))
             return 0 if result.get("ok") else 3
         if args.command == "admission":

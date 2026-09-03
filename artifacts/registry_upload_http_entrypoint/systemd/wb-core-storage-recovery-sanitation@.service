@@ -1,7 +1,8 @@
 [Unit]
 Description=WB Core exact detached storage sanitation or guarded SQLite recovery job %i
 After=local-fs.target
-RequiresMountsFor=/opt/wb-core-runtime/state /opt/wb-core-runtime/state/backups /opt/wb-core-runtime/backups
+RequiresMountsFor=/opt/wb-core-runtime/state /opt/wb-core-runtime/state/backups /opt/wb-core-runtime/state/recovery-scratch /opt/wb-core-runtime/backups
+ConditionPathIsMountPoint=/opt/wb-core-runtime/state/recovery-scratch
 StartLimitIntervalSec=300
 StartLimitBurst=3
 
@@ -22,4 +23,4 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/opt/wb-core-runtime/state /opt/wb-core-runtime/backups /opt/wb-core-runtime/evidence
+ReadWritePaths=/opt/wb-core-runtime/state /opt/wb-core-runtime/state/recovery-scratch /opt/wb-core-runtime/backups /opt/wb-core-runtime/evidence

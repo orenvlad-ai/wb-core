@@ -374,6 +374,7 @@ class HostedRuntimeTarget:
     finance_generation_filesystem: dict[str, Any] = field(
         default_factory=dict
     )
+    recovery_scratch_filesystem: dict[str, Any] = field(default_factory=dict)
     root_storage_policy_file: str = ""
     systemd_unit_directory: str = ""
     systemd_units_source_dir: str = ""
@@ -428,6 +429,9 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         raise ValueError(
             "finance_generation_filesystem must be a JSON object"
         )
+    raw_recovery_scratch_filesystem = payload.get("recovery_scratch_filesystem") or {}
+    if not isinstance(raw_recovery_scratch_filesystem, dict):
+        raise ValueError("recovery_scratch_filesystem must be a JSON object")
     raw_managed_systemd_units = payload.get("managed_systemd_units") or []
     if not isinstance(raw_managed_systemd_units, list):
         raise ValueError("managed_systemd_units must be a JSON array")
@@ -487,6 +491,10 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         finance_generation_filesystem={
             str(key): value
             for key, value in raw_finance_generation_filesystem.items()
+        },
+        recovery_scratch_filesystem={
+            str(key): value
+            for key, value in raw_recovery_scratch_filesystem.items()
         },
         root_storage_policy_file=str(payload.get("root_storage_policy_file", "")).strip(),
         systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
@@ -2256,6 +2264,97 @@ def run_root_storage_admission_command(args: argparse.Namespace) -> int:
         f"--predicted-output-bytes {int(args.predicted_output_bytes)}",
     )
     return subprocess.run(command, cwd=ROOT, check=False).returncode
+
+
+def run_recovery_scratch_bootstrap_command(args: argparse.Namespace) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action_name = str(args.recovery_scratch_action)
+    action = f"recovery-scratch-bootstrap-{action_name}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if action_name == "apply":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    contract = _validate_recovery_scratch_target_contract(target)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("recovery scratch bootstrap requires exact deployed SHA")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("recovery scratch bootstrap requires canonical runtime dir")
+    remote_target_file = _remote_repo_relative_path(target, Path(target_file).resolve())
+    deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    runner_args = [
+        "python3", "apps/recovery_scratch_bootstrap.py",
+        "--target-file", remote_target_file,
+        "--deployed-sha", deployed_sha,
+        "--deployed-sha-file", deployed_sha_file,
+        action_name,
+    ]
+    if action_name == "dry-run":
+        output = str(args.output or "")
+        expected_output = str(Path(str(contract["completion_marker"])).parent / f"plan-{deployed_sha}.json")
+        if output != expected_output:
+            raise ValueError("recovery scratch plan output is outside exact durable scope")
+        runner_args.extend(
+            [
+                "--operation-id", str(args.operation_id),
+                "--approval-reference", str(args.approval_reference),
+                "--output", output,
+            ]
+        )
+    elif action_name == "apply":
+        plan = str(args.plan or "")
+        expected_plan = str(Path(str(contract["completion_marker"])).parent / f"plan-{deployed_sha}.json")
+        if plan != expected_plan:
+            raise ValueError("recovery scratch reviewed plan path is outside exact durable scope")
+        runner_args.extend(
+            [
+                "--plan", plan,
+                "--plan-sha256", str(args.plan_sha256),
+                "--fingerprint", str(args.fingerprint),
+            ]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(deployed_sha_file)
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    completed = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=900 if action_name == "apply" else 120,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}")
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("recovery scratch bootstrap returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("recovery scratch bootstrap returned non-object payload")
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": action,
+            "deployed_sha": deployed_sha,
+            "result": payload,
+        }
+    )
+    return 0
 
 
 def run_journald_retention_readback_command(args: argparse.Namespace) -> int:
@@ -11551,6 +11650,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
     root_storage_admission.add_argument("--predicted-output-bytes", type=int, required=True)
     root_storage_admission.set_defaults(handler=run_root_storage_admission_command)
 
+    recovery_scratch_dry_run = subparsers.add_parser(
+        "recovery-scratch-bootstrap-dry-run",
+        help="Prove the exact blank recovery scratch disk and persist one immutable reviewed plan.",
+    )
+    recovery_scratch_dry_run.add_argument("--deployed-sha", required=True)
+    recovery_scratch_dry_run.add_argument("--operation-id", required=True)
+    recovery_scratch_dry_run.add_argument("--approval-reference", required=True)
+    recovery_scratch_dry_run.add_argument("--output", required=True)
+    recovery_scratch_dry_run.set_defaults(
+        handler=run_recovery_scratch_bootstrap_command,
+        recovery_scratch_action="dry-run",
+    )
+
+    recovery_scratch_apply = subparsers.add_parser(
+        "recovery-scratch-bootstrap-apply",
+        help="Initialize and mount the exact reviewed recovery scratch disk once.",
+    )
+    recovery_scratch_apply.add_argument("--deployed-sha", required=True)
+    recovery_scratch_apply.add_argument("--plan", required=True)
+    recovery_scratch_apply.add_argument("--plan-sha256", required=True)
+    recovery_scratch_apply.add_argument("--fingerprint", required=True)
+    recovery_scratch_apply.set_defaults(
+        handler=run_recovery_scratch_bootstrap_command,
+        recovery_scratch_action="apply",
+    )
+
+    recovery_scratch_readback = subparsers.add_parser(
+        "recovery-scratch-bootstrap-readback",
+        help="Read the exact mounted-ready recovery scratch identity without mutation.",
+    )
+    recovery_scratch_readback.add_argument("--deployed-sha", required=True)
+    recovery_scratch_readback.set_defaults(
+        handler=run_recovery_scratch_bootstrap_command,
+        recovery_scratch_action="readback",
+    )
+
     journald_readback = subparsers.add_parser(
         "journald-retention-readback",
         help="Compatibility alias for the current target-bound journald readback.",
@@ -16076,12 +16211,12 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             prefix
             + " status "
             + f"--output {shlex.quote(status_artifact_path)} "
-            + "--fail-on-unregistered",
+            + "--fail-on-unregistered --allow-recovery-scratch-bootstrap-pending",
         ),
         "status_read_only": _remote_shell_command(target, prefix + " status"),
         "status_artifact_readback": _remote_shell_command(
             target,
-            prefix + " status-readback",
+            prefix + " status-readback --allow-recovery-scratch-bootstrap-pending",
         ),
         "action": _remote_shell_command(
             target,
@@ -16146,6 +16281,40 @@ def _ensure_clean_worktree() -> None:
         raise ValueError("deploy requires a clean git worktree; use --allow-dirty only when intentional")
 
 
+def _validate_recovery_scratch_target_contract(
+    target: HostedRuntimeTarget,
+) -> dict[str, Any]:
+    from apps.recovery_scratch_bootstrap import (
+        validate_recovery_scratch_contract,
+    )
+
+    runtime_dir = Path(
+        str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "")
+    )
+    contract = validate_recovery_scratch_contract(
+        target.recovery_scratch_filesystem,
+        runtime_dir=runtime_dir,
+    )
+    if not target.root_storage_policy_file:
+        raise ValueError("recovery scratch requires root-storage policy binding")
+    policy = json.loads(
+        _resolve_repo_relative_path(target.root_storage_policy_file).read_text(
+            encoding="utf-8"
+        )
+    )
+    role = dict(
+        dict(dict(policy.get("storage_registry") or {}).get("filesystems") or {})
+        .get("recovery_scratch")
+        or {}
+    )
+    policy_contract = {key: role.get(key) for key in contract}
+    if policy_contract != contract:
+        raise ValueError(
+            "target recovery scratch contract differs from root-storage policy"
+        )
+    return contract
+
+
 def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
     missing: list[str] = []
     required = {
@@ -16178,6 +16347,11 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
             _resolve_repo_relative_path(target.root_storage_policy_file)
         except Exception:
             missing.append("root_storage_policy_file")
+    if _is_current_live_target(target):
+        try:
+            _validate_recovery_scratch_target_contract(target)
+        except Exception:
+            missing.append("recovery_scratch_filesystem")
     if target.nginx_public_routes:
         nginx_required = {
             "nginx_public_routes.server_config_path": target.nginx_public_routes.server_config_path,

@@ -1,0 +1,75 @@
+{
+  "schema": "wb-core.production-apply-manifest/v2",
+  "contract": "wbc0035_recovery_scratch_bootstrap_passport/v1",
+  "operation_id": "wbc0035-021-recovery-scratch-a01",
+  "target_id": "wb_core_eu_hosted_runtime_active",
+  "deployed_sha_contract": "exact-merge-sha",
+  "dry_run_default": true,
+  "explicit_apply": true,
+  "bounded_scope": true,
+  "pre_change_digest": true,
+  "backup_evidence": true,
+  "expected_affected_records": true,
+  "non_target_invariants": true,
+  "idempotency_or_recovery": true,
+  "post_apply_readback": true,
+  "reconciliation": true,
+  "query_only_manifest_readback": true,
+  "pre_change_digest_value": "sha256:96e0c9781973c12de43f31405c7cc64169c251f6ab08a11f49c4278cb34f428c",
+  "backup_evidence_value": "Immutable mode-0600 plan, pre-submit fstab backup, one-submit intent and terminal result remain on canonical backup; scratch retains no qualification bytes.",
+  "expected_affected_record_count": 0,
+  "non_target_invariant_ids": [
+    "root-backup-generation-device-uuid-capacity-identities",
+    "business-database-bytes-and-rows",
+    "maintenance-barrier-window-plan-and-state-fingerprints",
+    "business-timer-and-service-state",
+    "recovery-submit-count-zero"
+  ],
+  "recovery_contract": {
+    "mode": "bounded-recovery",
+    "id": "wbc0035-recovery-scratch-gpt-ext4-fstab-mount-v1"
+  },
+  "commands": {
+    "dry_run": [
+      "python3",
+      "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+      "recovery-scratch-bootstrap-dry-run"
+    ],
+    "apply": [
+      "python3",
+      "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+      "recovery-scratch-bootstrap-apply"
+    ],
+    "readback": [
+      "python3",
+      "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+      "recovery-scratch-bootstrap-readback"
+    ],
+    "reconcile": [
+      "python3",
+      "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+      "root-storage-readback"
+    ]
+  },
+  "target": {
+    "parent_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde",
+    "parent_serial": "vde",
+    "parent_size_bytes": 53687091200,
+    "parent_major_minor": "8:48",
+    "layout": "single-gpt-partition-ext4",
+    "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
+    "mountpoint": "/opt/wb-core-runtime/state/recovery-scratch",
+    "mount_options": [
+      "rw",
+      "noatime",
+      "nodev",
+      "nosuid",
+      "noexec"
+    ]
+  },
+  "authorization": {
+    "source": "WBC0035/021 accepted owner outcome",
+    "effect": "exact new recovery-scratch destination initialization and persistent mount",
+    "no_reconfirmation": true
+  }
+}

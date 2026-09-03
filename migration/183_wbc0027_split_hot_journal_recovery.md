@@ -56,17 +56,38 @@ inode and size; two stable current physical hashes; query-only integrity/FK;
 unchanged Finance raw/manifest files; the exact acquiring barrier, abort epoch,
 paused writers, empty business-writer timeline and zero operation counters.
 The full `integrity_check` and `foreign_key_check` run only against an
-operation-bounded O_EXCL/0600 byte copy on the distinct backup filesystem. The
-copy is opened by SQLite through its private staging name, then immediately
-unlinked before either check; every failure path performs cleanup and requires
-zero leftover. The source/copy
+operation-bounded O_EXCL/0600 byte copy on the dedicated `recovery_scratch`
+filesystem. One nonblocking allocation lock admits at most one copy. The copy
+is opened by SQLite through its private staging name, then immediately unlinked
+before either check; every failure path performs cleanup and requires zero
+leftover. The source/copy
 size and SHA-256 must match the stable current database identity, the copy is
-byte-, time-, cache- and throughput-bounded, and reserve admission includes its
-temporary peak. The unlinked copy has no durable path during checks and is closed after the
+byte-, time-, cache- and throughput-bounded, and scratch admission requires
+available bytes greater than or equal to the current source size plus exactly
+8 GiB. The Finance reserve on the backup filesystem remains exact and covers
+only the durable evidence envelope, not the qualification peak. The unlinked
+copy has no durable path during checks and is closed after the
 checks; corruption, FK evidence, timeout, capacity, copy identity or source
 drift fails closed. The live database still receives the typed immutable
 query-only semantic read and final physical CAS, but never the ad-hoc full
 integrity scan.
+
+## WBC0035 recovery-scratch bootstrap dependency
+
+The active target contract binds the separate provider disk by stable parent
+and partition by-id, serial `vde`, exact size `53687091200`, current major:minor
+`8:48`, one GPT partition and the reviewed ext4 UUID. Release may land while the
+disk is proven blank: deploy status accepts only that exact `bootstrap-pending`
+state and performs no disk write. Initialization is a distinct repo-owned
+dry-run, one-submit Apply and query-only readback. After completion, missing or
+wrong device, UUID, mount options, mountpoint, fstab line or separation from the
+root/backup/generation devices fails closed.
+
+This filesystem is temporary emergency/recovery verification space only, with
+zero retention. It must never hold Finance data, durable evidence, recovery
+markers, business databases or any other business data. The reconciliation
+plan/result/marker remain on canonical backup; only the anonymous qualification
+copy uses scratch, and successful or failed qualification leaves it empty.
 
 Before a reviewed plan exists, the deployed
 `sqlite-hot-journal-reconcile-existing-rehearsal` command is the only admitted

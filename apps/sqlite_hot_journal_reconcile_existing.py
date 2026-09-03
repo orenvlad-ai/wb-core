@@ -12,15 +12,16 @@ from __future__ import annotations
 import argparse
 from contextlib import closing
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any, Final, Mapping, Sequence, TypedDict
 
@@ -44,6 +45,12 @@ from packages.application.storage_registry import (  # noqa: E402
     MANIFEST_FILENAME,
     StoreRegistry,
     manifest_payload,
+)
+from packages.application.root_storage_policy import (  # noqa: E402
+    RootStoragePolicyError,
+    admit_root_write,
+    load_policy as load_root_storage_policy,
+    resolve_runtime_storage_destination,
 )
 
 
@@ -133,6 +140,14 @@ SQLITE_QUALIFICATION_MAX_COPY_BYTES_PER_SECOND = 64 * 1024 * 1024
 SQLITE_QUALIFICATION_COPY_CHUNK_BYTES = 4 * 1024 * 1024
 SQLITE_QUALIFICATION_CACHE_KIB = 32 * 1024
 SQLITE_QUALIFICATION_PROGRESS_OPS = 10_000
+SQLITE_QUALIFICATION_SCRATCH_OWNER = (
+    "sqlite_hot_journal_reconcile_qualification"
+)
+SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES = 8 * 1024 * 1024 * 1024
+SQLITE_QUALIFICATION_STAGING_PREFIX = ".wbc0027-sqlite-qualification-"
+SQLITE_QUALIFICATION_ALLOCATION_LOCK = (
+    ".wbc0027-recovery-scratch-allocation.lock"
+)
 
 
 class IncidentDigestBinding(TypedDict):
@@ -1051,14 +1066,19 @@ def _validate_sqlite_qualification(
     if (
         set(copied) != {
             "anonymous", "exclusive_create", "staged_mode", "unlinked_before_checks",
-            "zero_leftover", "filesystem_device", "size_bytes", "sha256",
+            "zero_leftover", "filesystem_role", "filesystem_device",
+            "reserve_bytes", "allocation_exclusive", "size_bytes", "sha256",
         }
         or copied.get("anonymous") is not True
         or copied.get("exclusive_create") is not True
         or int(copied.get("staged_mode") or -1) != 0o600
         or copied.get("unlinked_before_checks") is not True
         or copied.get("zero_leftover") is not True
+        or copied.get("filesystem_role") != "recovery_scratch"
         or int(copied.get("filesystem_device") or -1) < 0
+        or int(copied.get("reserve_bytes") or -1)
+        != SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES
+        or copied.get("allocation_exclusive") is not True
         or int(copied.get("size_bytes") or -1)
         != int(source.get("size_bytes") or -2)
         or copied.get("sha256") != source.get("sha256")
@@ -1092,20 +1112,23 @@ def _validate_sqlite_qualification(
 def _qualify_current_sqlite(
     database: Path,
     *,
-    backup_root: Path,
+    scratch_root: Path,
+    allocation_lock_path: Path,
     expected_source: Mapping[str, Any],
     max_bytes: int = SQLITE_QUALIFICATION_MAX_BYTES,
     max_seconds: float = SQLITE_QUALIFICATION_MAX_SECONDS,
     max_copy_bytes_per_second: int = SQLITE_QUALIFICATION_MAX_COPY_BYTES_PER_SECOND,
 ) -> dict[str, Any]:
     database = database.resolve()
-    backup_root = backup_root.resolve()
+    scratch_root = scratch_root.resolve()
+    allocation_lock_path = allocation_lock_path.resolve()
     max_bytes = int(max_bytes)
     max_seconds_int = int(max_seconds)
     max_copy_bytes_per_second = int(max_copy_bytes_per_second)
     if (
-        backup_root.is_symlink()
-        or not backup_root.is_dir()
+        scratch_root.is_symlink()
+        or not scratch_root.is_dir()
+        or allocation_lock_path.parent != scratch_root.parent
         or max_bytes <= 0
         or max_seconds_int <= 0
         or max_copy_bytes_per_second <= 0
@@ -1124,13 +1147,29 @@ def _qualify_current_sqlite(
     ):
         raise ReconcileExistingError("SQLite qualification source identity drifted")
     source_size = int(expected_source.get("size_bytes") or -1)
-    capacity = hot._filesystem(backup_root)
+    capacity = hot._filesystem(scratch_root)
     if (
         source_size <= 0
         or source_size > max_bytes
-        or int(capacity["available_bytes"]) < source_size
+        or int(capacity["available_bytes"])
+        < source_size + SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES
     ):
-        raise ReconcileExistingError("SQLite qualification copy capacity is insufficient")
+        raise ReconcileExistingError(
+            "recovery scratch requires source size plus exact 8 GiB reserve"
+        )
+    try:
+        admit_root_write(
+            owner=SQLITE_QUALIFICATION_SCRATCH_OWNER,
+            destination=scratch_root / (
+                SQLITE_QUALIFICATION_STAGING_PREFIX + "candidate.sqlite3"
+            ),
+            predicted_output_bytes=source_size,
+            policy=load_root_storage_policy(),
+        )
+    except RootStoragePolicyError as exc:
+        raise ReconcileExistingError(
+            f"recovery scratch storage admission failed: {exc}"
+        ) from exc
 
     deadline = time.monotonic() + max_seconds_int
     started = time.monotonic()
@@ -1138,21 +1177,46 @@ def _qualify_current_sqlite(
     copied_bytes = 0
     staging_path: Path | None = None
     unlinked_before_checks = False
+    lock_handle = allocation_lock_path.open("a+b")
+    os.chmod(allocation_lock_path, 0o600)
     try:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ReconcileExistingError(
+                "recovery scratch allocation is already active"
+            ) from exc
+        leftovers = list(scratch_root.glob(f"{SQLITE_QUALIFICATION_STAGING_PREFIX}*"))
+        if leftovers:
+            raise ReconcileExistingError(
+                "recovery scratch has a leftover qualification allocation"
+            )
+        for _attempt in range(16):
+            candidate = scratch_root / (
+                f"{SQLITE_QUALIFICATION_STAGING_PREFIX}"
+                f"{secrets.token_hex(16)}.sqlite3"
+            )
+            try:
+                copied_fd = os.open(
+                    candidate,
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                    0o600,
+                )
+                staging_path = candidate.resolve()
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise ReconcileExistingError(
+                "recovery scratch exclusive allocation failed"
+            )
         with (
             database.open("rb", buffering=0) as source,
-            tempfile.NamedTemporaryFile(
-                mode="w+b",
-                dir=backup_root,
-                prefix=".wbc0027-sqlite-qualification-",
-                suffix=".sqlite3",
-                delete=False,
-            ) as copied,
+            os.fdopen(copied_fd, "w+b", buffering=0) as copied,
         ):
-            staging_path = Path(copied.name).resolve()
             staged_stat = os.fstat(copied.fileno())
             if (
-                staging_path.parent != backup_root
+                staging_path.parent != scratch_root
                 or staging_path.is_symlink()
                 or staged_stat.st_nlink != 1
                 or staged_stat.st_mode & 0o777 != 0o600
@@ -1279,6 +1343,11 @@ def _qualify_current_sqlite(
                 raise ReconcileExistingError(
                     "SQLite qualification staging cleanup failed"
                 ) from exc
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()
+    zero_leftover = not list(
+        scratch_root.glob(f"{SQLITE_QUALIFICATION_STAGING_PREFIX}*")
+    )
     qualification = {
         "contract_name": SQLITE_QUALIFICATION_CONTRACT_NAME,
         "method": SQLITE_QUALIFICATION_METHOD,
@@ -1296,8 +1365,15 @@ def _qualify_current_sqlite(
             "exclusive_create": True,
             "staged_mode": 0o600,
             "unlinked_before_checks": unlinked_before_checks,
-            "zero_leftover": staging_path is not None and not staging_path.exists(),
+            "zero_leftover": (
+                staging_path is not None
+                and not staging_path.exists()
+                and zero_leftover
+            ),
+            "filesystem_role": "recovery_scratch",
             "filesystem_device": int(capacity["device"]),
+            "reserve_bytes": SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES,
+            "allocation_exclusive": True,
             "size_bytes": copied_bytes,
             "sha256": copied_sha256,
         },
@@ -1608,12 +1684,26 @@ def _preflight(
     ):
         raise ReconcileExistingError("implicit-recovery database identity is outside incident")
     capacity = hot._filesystem(backup_root)
-    qualification_peak_bytes = int(first["size_bytes"])
-    if int(capacity["available_bytes"]) < (
-        reserve_bytes + evidence_envelope_bytes + qualification_peak_bytes
-    ):
+    if int(capacity["available_bytes"]) < reserve_bytes + evidence_envelope_bytes:
+        raise ReconcileExistingError("reconciliation evidence would breach Finance reserve")
+    try:
+        scratch_root = resolve_runtime_storage_destination(
+            SQLITE_QUALIFICATION_SCRATCH_OWNER,
+            runtime_dir,
+            policy=load_root_storage_policy(),
+        )
+    except RootStoragePolicyError as exc:
         raise ReconcileExistingError(
-            "SQLite qualification copy would breach Finance reserve"
+            f"recovery scratch destination resolution failed: {exc}"
+        ) from exc
+    scratch_capacity = hot._filesystem(scratch_root)
+    scratch_required_bytes = (
+        int(first["size_bytes"])
+        + SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES
+    )
+    if int(scratch_capacity["available_bytes"]) < scratch_required_bytes:
+        raise ReconcileExistingError(
+            "recovery scratch requires source size plus exact 8 GiB reserve"
         )
     openers = hot._openers({database})
     kernel_locks = hot._kernel_locks({database})
@@ -1629,7 +1719,10 @@ def _preflight(
             raise ReconcileExistingError("operational database opener is unknown")
     sqlite_qualification = _qualify_current_sqlite(
         database,
-        backup_root=backup_root,
+        scratch_root=scratch_root,
+        allocation_lock_path=(
+            runtime_dir / SQLITE_QUALIFICATION_ALLOCATION_LOCK
+        ),
         expected_source=second,
     )
     database_snapshot = database_evidence(
@@ -1685,13 +1778,24 @@ def _preflight(
             "directory": str(backup_directory),
             "reserve_bytes": reserve_bytes,
             "evidence_envelope_bytes": evidence_envelope_bytes,
-            "qualification_peak_bytes": qualification_peak_bytes,
+            "qualification_peak_bytes": 0,
             "capacity_before": capacity,
             "projected_available_bytes": int(capacity["available_bytes"]) - evidence_envelope_bytes,
-            "qualification_peak_available_bytes": (
-                int(capacity["available_bytes"]) - qualification_peak_bytes
-            ),
             "projected_reserve_headroom_bytes": int(capacity["available_bytes"]) - evidence_envelope_bytes - reserve_bytes,
+        },
+        "recovery_scratch": {
+            "path": str(scratch_root),
+            "filesystem_role": "recovery_scratch",
+            "reserve_bytes": SQLITE_QUALIFICATION_SCRATCH_RESERVE_BYTES,
+            "source_size_bytes": int(first["size_bytes"]),
+            "required_available_bytes": scratch_required_bytes,
+            "capacity_before": scratch_capacity,
+            "projected_available_bytes": (
+                int(scratch_capacity["available_bytes"])
+                - int(first["size_bytes"])
+            ),
+            "allocation_exclusive": True,
+            "zero_leftover": sqlite_qualification["copy"]["zero_leftover"],
         },
         "expected_effect": {
             "logical_business_delta": 0,
@@ -1799,10 +1903,10 @@ def build_rehearsal(
             "phase": "storage admission/private plan persistence",
             "status": "passed",
             "evidence": {
-                "capacity_before": evidence["backup"]["capacity_before"],
-                "qualification_peak_bytes": evidence["backup"]["qualification_peak_bytes"],
-                "qualification_peak_available_bytes": evidence["backup"]["qualification_peak_available_bytes"],
-                "projected_reserve_headroom_bytes": evidence["backup"]["projected_reserve_headroom_bytes"],
+                "backup_capacity_before": evidence["backup"]["capacity_before"],
+                "backup_qualification_peak_bytes": 0,
+                "backup_projected_reserve_headroom_bytes": evidence["backup"]["projected_reserve_headroom_bytes"],
+                "recovery_scratch": evidence["recovery_scratch"],
                 "private_plan_created": False,
             },
         },

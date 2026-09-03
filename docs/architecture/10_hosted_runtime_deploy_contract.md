@@ -425,10 +425,12 @@ The same runner owns the only production path for the active functional cutover 
   prefix-through-terminal-cutoff CAS may admit a later tail only when every
   appended job is a generic scheduled complete/fact-zero outcome. Its current
   full SQLite integrity/FK qualification uses only a bounded O_EXCL/0600 exact
-  byte copy on the distinct backup filesystem, opened by SQLite and immediately
-  unlinked before checks, with guaranteed cleanup, zero-leftover proof,
-  source/copy SHA equality, reserve admission and timeout/throughput/cache
-  bounds; no full integrity scan
+  byte copy on the dedicated `recovery_scratch` filesystem, opened by SQLite
+  and immediately unlinked before checks, with one exclusive active allocation,
+  guaranteed cleanup, zero-leftover proof, source/copy SHA equality, at least
+  source size plus 8 GiB available, and timeout/throughput/cache bounds. The
+  Finance reserve on `backup` covers only durable evidence and never this
+  temporary qualification peak; no full integrity scan
   runs against the live database. The dedicated
   `sqlite-hot-journal-reconcile-existing-rehearsal` hosted command resolves the
   active barrier inside the deployed runtime and returns the closed eight-phase
@@ -1364,6 +1366,34 @@ If the task introduces or changes temporal closed-day retry behavior for `sheet_
 The current active public probe target is `https://api.selleros.pro`. Live/public closure for website/operator tasks must verify the HTTPS production domain routes, including `GET /sheet-vitrina-v1/vitrina`, authorized `GET /sheet-vitrina-v1/instructions`, `GET /sheet-vitrina-v1/operator`, `GET /v1/sheet-vitrina-v1/status`, `GET /v1/sheet-vitrina-v1/web-vitrina`, `GET /v1/sheet-vitrina-v1/web-vitrina?surface=page_composition`, `GET /v1/sheet-vitrina-v1/warehouses`, one `GET /v1/sheet-vitrina-v1/warehouses/{warehouse_key}`, and—when the facility/pool surface is in scope—protected `GET /v1/sheet-vitrina-v1/warehouses/ff/facility-pools/capabilities`. `SELLEROS_HTTP_ALLOW_INSECURE_FALLBACK=1` remains a diagnostic-only legacy TLS escape hatch for historical checks and is not part of the active EU target closure.
 
 Live/public verify that creates temporary runtime users must prefer temp/local runtime state. If a hosted verify must create a live runtime user, it must use an unmistakable service/test prefix or marker, run cleanup in a finally-style path, and verify that the default admin users list does not expose those rows. Archived/inactive service rows such as `codex_live_*`, `codex_debug_*`, `smoke_*` or `test_*` are not user-facing users and must be hidden by the default users API/UI even when cleanup cannot hard-delete an historical row; any bounded live cleanup for those prefixes must not touch env principals or real manual users.
+
+## Recovery scratch filesystem
+
+The active target owns exactly one fourth root-storage role at
+`/opt/wb-core-runtime/state/recovery-scratch`. It is a single GPT partition on
+the target-bound 50 GiB provider disk, formatted ext4 with the manifest UUID and
+mounted persistently by UUID with `rw,noatime,nodev,nosuid,noexec`, mode `0700`.
+The stable parent/partition by-id, provider serial, exact parent size and current
+major:minor are revalidated immediately before the first write; any signature,
+partition, holder, opener, mount, swap/LVM/md membership or configuration
+reference fails closed.
+
+Deploy admits an exact blank `bootstrap-pending` state but never initializes the
+disk. Only the repo-owned
+`recovery-scratch-bootstrap-dry-run|apply|readback` contour may persist an
+immutable reviewed plan, submit the GPT/ext4/fstab/mount mutation once, and
+prove the exact mounted-ready identity. After completion, ordinary root-storage
+status/readback requires that ready identity and cannot fall back to `/`,
+`backup` or `generation`. The sanitation unit requires this mount and grants its
+write allowlist explicitly.
+
+`recovery_scratch` is only ephemeral emergency/recovery verification space. It
+has zero retention: one O_EXCL `0600` qualification file is opened and unlinked
+before full SQLite integrity/FK checks, then closed with guaranteed zero-leftover
+cleanup. It must never contain Finance data, durable evidence, recovery markers,
+business databases or other business data; those remain on their existing
+canonical roles. Admission preserves at least the current source size plus 8
+GiB, and at most one allocation may be active.
 
 ## Finance generation filesystem
 

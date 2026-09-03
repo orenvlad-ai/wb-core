@@ -4898,6 +4898,18 @@ def main() -> None:
             **base_target_payload["runtime_env"],
             "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state",
         }
+        active_target_payload = json.loads(
+            (
+                ROOT
+                / "artifacts"
+                / "registry_upload_http_entrypoint"
+                / "input"
+                / "hosted_runtime_target__europe_api.json"
+            ).read_text(encoding="utf-8")
+        )
+        deploy_target_payload["recovery_scratch_filesystem"] = (
+            active_target_payload["recovery_scratch_filesystem"]
+        )
         deploy_target_payload["managed_systemd_units"] = [
             *base_target_payload["managed_systemd_units"],
             {
@@ -5072,6 +5084,15 @@ def main() -> None:
             )
             if "status-readback" not in root_status_readback_command:
                 raise AssertionError("deploy must validate the fresh server-owned root status artifact")
+            if (
+                "--allow-recovery-scratch-bootstrap-pending"
+                not in root_status_command
+                or "--allow-recovery-scratch-bootstrap-pending"
+                not in root_status_readback_command
+            ):
+                raise AssertionError(
+                    "deploy must permit only exact recovery scratch bootstrap-pending state"
+                )
             if deploy_dry_run["commands"]["journald_operation_name"] != "corrective_remove":
                 raise AssertionError("deploy must select the corrective journald operation")
             if "journald-corrective-remove" not in journald_operation_command:
@@ -5180,6 +5201,9 @@ def main() -> None:
                 "root-storage-status",
                 "root-storage-readback",
                 "root-storage-admission",
+                "recovery-scratch-bootstrap-dry-run",
+                "recovery-scratch-bootstrap-apply",
+                "recovery-scratch-bootstrap-readback",
                 "journald-retention-readback",
                 "journald-corrective-readback",
                 "sqlite-hot-journal-recovery-dry-run",
