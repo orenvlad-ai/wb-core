@@ -30,7 +30,7 @@ UUID_PATTERN = re.compile(
 )
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-OPERATION_PATTERN = re.compile(r"wbc0035-025-recovery-scratch-[a-z0-9-]{1,48}")
+OPERATION_PATTERN = re.compile(r"wbc0035-026-recovery-scratch-a01")
 REQUIRED_MOUNT_OPTIONS = frozenset({"rw", "noatime", "nodev", "nosuid", "noexec"})
 ROLE_PATHS = {
     "root": Path("/"),

@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
+import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -12,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps import recovery_scratch_bootstrap as bootstrap
 from apps.recovery_scratch_bootstrap import (
     RecoveryScratchError,
     plan_fingerprint,
@@ -112,7 +116,107 @@ def _ready() -> dict:
     }
 
 
+def _exercise_exact_operation_dry_run() -> None:
+    deployed_sha = "a" * 40
+    exact_operation = "wbc0035-026-recovery-scratch-a01"
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        target = root / "target.json"
+        deployed = root / "deployed.sha"
+        output = Path(
+            "/opt/wb-core-runtime/state/backups/private-evidence/"
+            f"recovery-scratch-bootstrap/plan-{deployed_sha}.json"
+        )
+        target.write_text(
+            json.dumps(
+                {
+                    "runtime_env": {
+                        "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state"
+                    },
+                    "recovery_scratch_filesystem": CONTRACT,
+                }
+            ),
+            encoding="utf-8",
+        )
+        deployed.write_text(deployed_sha + "\n", encoding="utf-8")
+        preflight_calls: list[str] = []
+        written_plans: list[dict] = []
+        original_collect = bootstrap.collect_blank_device_evidence
+        original_fstab = bootstrap._fstab_identity
+        original_write = bootstrap.write_plan
+        original_digest = bootstrap._file_digest
+        bootstrap.collect_blank_device_evidence = lambda contract: (
+            preflight_calls.append(str(contract["parent_device_by_id"])) or _blank()
+        )
+        bootstrap._fstab_identity = lambda _: {
+            "path": "/etc/fstab",
+            "sha256": "sha256:" + "0" * 64,
+            "size_bytes": 0,
+            "mode": 0o644,
+            "uid": 0,
+            "gid": 0,
+        }
+        bootstrap.write_plan = lambda path, plan: written_plans.append(dict(plan))
+        bootstrap._file_digest = lambda _: "sha256:" + "1" * 64
+        try:
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = bootstrap.main(
+                    [
+                        "--target-file",
+                        str(target),
+                        "--deployed-sha",
+                        deployed_sha,
+                        "--deployed-sha-file",
+                        str(deployed),
+                        "dry-run",
+                        "--operation-id",
+                        exact_operation,
+                        "--approval-reference",
+                        "WBC0035/031 exact operation binding regression",
+                        "--output",
+                        str(output),
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+            assert result == 0
+            assert payload["status"] == "ready_to_initialize"
+            assert payload["operation_id"] == exact_operation
+            assert written_plans[0]["operation_id"] == exact_operation
+            assert preflight_calls == [CONTRACT["parent_device_by_id"]]
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = bootstrap.main(
+                    [
+                        "--target-file",
+                        str(target),
+                        "--deployed-sha",
+                        deployed_sha,
+                        "--deployed-sha-file",
+                        str(deployed),
+                        "dry-run",
+                        "--operation-id",
+                        "wbc0035-025-recovery-scratch-a01",
+                        "--approval-reference",
+                        "WBC0035/031 wrong operation regression",
+                        "--output",
+                        str(output),
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+            assert result == 2
+            assert payload["error"] == "recovery scratch operation/approval binding is invalid"
+            assert preflight_calls == [CONTRACT["parent_device_by_id"]]
+        finally:
+            bootstrap.collect_blank_device_evidence = original_collect
+            bootstrap._fstab_identity = original_fstab
+            bootstrap.write_plan = original_write
+            bootstrap._file_digest = original_digest
+
+
 def main() -> int:
+    _exercise_exact_operation_dry_run()
     contract = validate_recovery_scratch_contract(
         CONTRACT,
         runtime_dir=Path("/opt/wb-core-runtime/state"),
