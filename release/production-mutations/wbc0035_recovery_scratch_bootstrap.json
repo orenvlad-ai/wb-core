@@ -101,7 +101,7 @@
     }
   },
   "authorization": {
-    "source": "WBC0035/030 accepted journald corrective recovery-scratch bridge correction",
+    "source": "WBC0035/031 accepted exact recovery-scratch operation binding correction",
     "effect": "exact new recovery-scratch destination initialization and persistent mount",
     "no_reconfirmation": true
   }
