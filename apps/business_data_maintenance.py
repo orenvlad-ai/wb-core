@@ -286,6 +286,17 @@ PROCESS_SPECS: tuple[dict[str, Any], ...] = (
         "desired_source": "auto_updates_owner_policy",
     },
     {
+        "key": "fbs_shadow",
+        "display_name": "FBS lifecycle (shadow)",
+        "timer": FBS_SHADOW_TIMER_UNIT,
+        "control_owner": "settings",
+        "control_location": "Настройки → Автообновления",
+        "control_capability": "manage",
+        "desired_source": "auto_updates_owner_policy",
+        "direct_timer_control": True,
+        "legacy_desired_from_timer": True,
+    },
+    {
         "key": "feedback_complaints",
         "display_name": "Авто-жалобы",
         "timer": "wb-core-feedbacks-auto-complaints-tick.timer",
@@ -714,6 +725,12 @@ def _initial_owner_policy(runtime_dir: Path) -> dict[str, Any]:
         if spec["key"] == "warehouse_functional" and warehouse_baseline:
             timer_evidence = warehouse_baseline
             evidence_source = "warehouse_functional_maintenance.baseline"
+        if spec["key"] == "fbs_shadow" and not timer_evidence:
+            timer_evidence = dict(
+                (baseline.get("continuous_observer_timers") or {}).get(timer)
+                or {}
+            )
+            evidence_source = "business_data_maintenance.legacy_fbs_baseline"
         if not timer_evidence:
             desired: bool | None = None
         else:
@@ -877,6 +894,42 @@ def update_process_desired_state(
             "policy_fingerprint": policy["policy_fingerprint"],
         },
     )
+    return policy
+
+
+def update_direct_timer_process_desired_state(
+    runtime_dir: Path,
+    *,
+    systemd: SystemdClient,
+    process_key: str,
+    desired: bool,
+    expected_revision: int,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist one allowlisted desired state and control only its timer."""
+
+    spec = _process_spec(process_key)
+    if spec.get("direct_timer_control") is not True:
+        raise RuntimeError(
+            f"{process_key} does not support direct timer control"
+        )
+    policy = update_process_desired_state(
+        runtime_dir,
+        process_key=process_key,
+        desired=desired,
+        expected_revision=expected_revision,
+        actor=actor,
+        reason=reason,
+    )
+    if bool(policy.get("master_desired")):
+        timer_unit = str(spec["timer"])
+        if desired:
+            systemd.enable_now(timer_unit)
+        else:
+            # Disabling the timer prevents a new generation. It intentionally
+            # leaves an already-running oneshot service alone.
+            systemd.disable_now(timer_unit)
     return policy
 
 
@@ -1436,6 +1489,8 @@ def _process_actual_state(
         desired = bool(schedule.get("enabled"))
     else:
         desired = process.get("desired")
+        if desired is None and spec.get("legacy_desired_from_timer") is True:
+            desired = timer_on
     suspended = not bool(policy.get("master_desired"))
     if schedule_key == "feedback_complaints":
         actual = timer_on and bool(schedule.get("enabled_ids"))
@@ -1507,6 +1562,10 @@ def _process_actual_state(
             process.get("provenance")
             if capability == "manage"
             else str(spec.get("desired_source") or "feature")
+        ) or (
+            "legacy_timer_state"
+            if spec.get("legacy_desired_from_timer") is True
+            else None
         ),
     }
 
@@ -2139,6 +2198,7 @@ def maintenance_control_signature(
     process_desired = {
         str(item.get("process_key") or ""): item.get("desired")
         for item in process_rows
+        if str(item.get("process_key") or "") != "fbs_shadow"
     }
     if process_desired.get("autoanswers") is None:
         autoanswer_units = (
@@ -2160,7 +2220,7 @@ def maintenance_control_signature(
             str(spec.get("key") or "")
         )
         for spec in PROCESS_SPECS
-        if spec.get("timer")
+        if spec.get("timer") and spec.get("key") != "fbs_shadow"
     }
     timer_control_intent["autoanswers"] = process_desired.get("autoanswers")
     independent_writer_timer_intent = {
@@ -2220,6 +2280,8 @@ def maintenance_control_signature(
 
 def _independent_writer_timer_restore_plan(
     baseline: Mapping[str, Any],
+    *,
+    owner_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, bool]:
     """Validate the exact representable pre-hold state before any restore."""
 
@@ -2245,6 +2307,12 @@ def _independent_writer_timer_restore_plan(
                 "independent writer timer baseline is not exactly "
                 f"restorable: {unit}={pair!r}"
             )
+    fbs_desired = dict(
+        ((owner_policy or {}).get("processes") or {}).get("fbs_shadow")
+        or {}
+    ).get("desired")
+    if isinstance(fbs_desired, bool):
+        plan[FBS_SHADOW_TIMER_UNIT] = fbs_desired
     return plan
 
 
@@ -2851,8 +2919,12 @@ def maintenance_restore(
         raise RuntimeError(
             "exact prior maintenance control state is missing; restore is fail-closed"
         )
+    raw_policy = _load_json_object(runtime_dir / POLICY_FILENAME) or {}
     independent_writer_timer_restore_plan = (
-        _independent_writer_timer_restore_plan(baseline)
+        _independent_writer_timer_restore_plan(
+            baseline,
+            owner_policy=raw_policy,
+        )
     )
     abort_outer_timer_restore_plan = dict(
         prepared_abort_outer_timer_restore_plan or {}
@@ -3057,7 +3129,6 @@ def maintenance_restore(
             ),
         }
 
-    raw_policy = _load_json_object(runtime_dir / POLICY_FILENAME) or {}
     restore_legacy_schedule_hold = (
         str(raw_policy.get("schema_version") or "")
         == "auto_updates_owner_policy_v1"
@@ -6988,14 +7059,22 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "set-process requires --process-key, --desired and --expected-revision"
             )
-        policy = update_process_desired_state(
-            runtime_dir,
-            process_key=args.process_key,
-            desired=args.desired == "on",
-            expected_revision=args.expected_revision,
-            actor=args.actor,
-            reason=args.reason or "owner settings change",
+        spec = _process_spec(args.process_key)
+        update = (
+            update_direct_timer_process_desired_state
+            if spec.get("direct_timer_control") is True
+            else update_process_desired_state
         )
+        update_kwargs: dict[str, Any] = {
+            "process_key": args.process_key,
+            "desired": args.desired == "on",
+            "expected_revision": args.expected_revision,
+            "actor": args.actor,
+            "reason": args.reason or "owner settings change",
+        }
+        if spec.get("direct_timer_control") is True:
+            update_kwargs["systemd"] = systemd
+        policy = update(runtime_dir, **update_kwargs)
         status = maintenance_status(runtime_dir, systemd=systemd, schedules=schedules)
         result = {
             "status": "updated",

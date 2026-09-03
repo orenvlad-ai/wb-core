@@ -2615,6 +2615,7 @@ class RegistryUploadHttpEntrypoint:
             maintenance_hold,
             maintenance_restore,
             maintenance_status,
+            update_direct_timer_process_desired_state,
             update_process_desired_state,
         )
 
@@ -2673,15 +2674,32 @@ class RegistryUploadHttpEntrypoint:
                     f"{'ON' if desired else 'OFF'}"
                 )
             master_desired = bool(current_auto_updates.get("master_desired"))
-            policy = update_process_desired_state(
-                self.runtime.runtime_dir,
-                process_key=process_key,
-                desired=desired,
-                expected_revision=expected_revision,
-                actor=actor,
-                reason=reason,
-            )
-            if master_desired:
+            if process_key == "fbs_shadow":
+                policy = update_direct_timer_process_desired_state(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    process_key=process_key,
+                    desired=desired,
+                    expected_revision=expected_revision,
+                    actor=actor,
+                    reason=reason,
+                )
+                status = maintenance_status(
+                    self.runtime.runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                )
+                final_readback = dict(status.get("auto_updates") or {})
+            else:
+                policy = update_process_desired_state(
+                    self.runtime.runtime_dir,
+                    process_key=process_key,
+                    desired=desired,
+                    expected_revision=expected_revision,
+                    actor=actor,
+                    reason=reason,
+                )
+            if master_desired and process_key != "fbs_shadow":
                 from packages.application.warehouse_functional_maintenance import (
                     maintenance_hold as hold_warehouse_timer,
                 )
@@ -2709,7 +2727,7 @@ class RegistryUploadHttpEntrypoint:
                     ),
                 )
                 final_readback = dict(restored.get("auto_updates") or {})
-            else:
+            elif process_key != "fbs_shadow":
                 status = maintenance_status(
                     self.runtime.runtime_dir,
                     systemd=systemd,
