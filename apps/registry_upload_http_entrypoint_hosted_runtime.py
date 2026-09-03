@@ -1032,7 +1032,7 @@ def collect_loopback_surface(
 
 
 def _bootstrap_recovery_scratch_release_bridge() -> None:
-    """Bridge the one release whose runner process began on the prior main."""
+    """Bridge the exact incident release whose runner began on the prior main."""
 
     environment_name = "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE"
     if os.environ.get(environment_name, "").strip():
@@ -1051,10 +1051,26 @@ def _bootstrap_recovery_scratch_release_bridge() -> None:
         ).splitlines()
         if line.strip()
     }
-    if manifest_relative not in changed:
+    abandonment_release_paths = {
+        "apps/business_data_maintenance.py",
+        "apps/business_data_maintenance_smoke.py",
+        "apps/hosted_runtime_deploy_barrier.py",
+        "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+        "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py",
+        "apps/sqlite_hot_journal_recovery_smoke.py",
+    }
+    manifest_changed = manifest_relative in changed
+    code_only_abandonment_release = changed == abandonment_release_paths
+    if not manifest_changed and not code_only_abandonment_release:
         return
     manifest_path = ROOT / manifest_relative
     raw = manifest_path.read_bytes()
+    if (
+        code_only_abandonment_release
+        and hashlib.sha256(raw).hexdigest()
+        != "5ea696c70e052a6386a4dfcca7f8bba63cef25ab2a3eac90be889d3a07651623"
+    ):
+        raise ValueError("recovery scratch bridge manifest drifted")
     manifest = json.loads(raw)
     from apps.github_release_runner import (
         build_recovery_scratch_release_bridge,
@@ -1134,7 +1150,12 @@ def deploy_current_checkout(
     autoanswers_prepare_capacity_command = _build_autoanswers_prepare_capacity_command(target)
     autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
     root_storage_commands = _build_root_storage_policy_commands(target)
-    systemd_commands = _build_managed_systemd_commands(target)
+    systemd_commands = _build_managed_systemd_commands(
+        target,
+        recovery_scratch_release_bridge=bool(
+            root_storage_commands.get("release_bridge")
+        ),
+    )
     change_registry_activation_command = _build_change_registry_activation_command(target)
     auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
@@ -10603,6 +10624,8 @@ def _run_remote_business_data_maintenance_runner(
     approval_reference: str = "",
     allow_pre_hold_service_continuity: bool = False,
     expected_deployed_sha: str = "",
+    abandon_hot_journal_recovery: bool = False,
+    eligibility_only: bool = False,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
@@ -10634,7 +10657,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-release",
         "barrier-abort",
         "abort-prepared",
-    }:
+    } and not (action == "abort-prepared" and eligibility_only):
         _ensure_target_allows_mutation(
             target,
             action=f"business-data-maintenance-{action}",
@@ -10709,6 +10732,10 @@ def _run_remote_business_data_maintenance_runner(
                 expected_deployed_sha,
             ]
         )
+        if abandon_hot_journal_recovery:
+            runner_args.append("--abandon-hot-journal-recovery")
+        if eligibility_only:
+            runner_args.append("--eligibility-only")
     elif action == "restore":
         if expected_revision is None:
             raise ValueError(
@@ -10836,10 +10863,30 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
             window_id=str(args.window_id or ""),
             plan_fingerprint=str(args.plan_fingerprint or ""),
             expected_deployed_sha=str(args.expected_deployed_sha or ""),
+            abandon_hot_journal_recovery=bool(
+                args.abandon_hot_journal_recovery
+            ),
+            eligibility_only=bool(args.eligibility_only),
         )
         barrier = dict(result.get("barrier") or {})
         restore = dict(result.get("restore") or {})
-        if (
+        if args.eligibility_only:
+            if (
+                str(result.get("status") or "") != "eligible"
+                or str(
+                    dict(result.get("recovery_abandonment") or {}).get(
+                        "status"
+                    )
+                    or ""
+                )
+                != "eligible"
+                or barrier.get("active") is not True
+                or str(barrier.get("phase") or "") != "acquiring"
+            ):
+                raise RuntimeError(
+                    "business-data abort-prepared eligibility is incomplete"
+                )
+        elif (
             str(result.get("status") or "") != "released"
             or barrier.get("active") is not False
             or str(barrier.get("phase") or "") != "released"
@@ -13938,6 +13985,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Exact deployed runtime SHA required by abort-prepared.",
     )
     business_data_maintenance.add_argument(
+        "--abandon-hot-journal-recovery",
+        action="store_true",
+        help="Use the exact WBC0027 S047 clean recovery-abandonment path.",
+    )
+    business_data_maintenance.add_argument(
+        "--eligibility-only",
+        action="store_true",
+        help="Run only the recovery-abandonment admission readback.",
+    )
+    business_data_maintenance.add_argument(
         "--allow-pre-hold-service-continuity",
         action="store_true",
         help=(
@@ -16257,7 +16314,11 @@ def _validate_managed_systemd_units(target: HostedRuntimeTarget) -> None:
                 raise FileNotFoundError(f"managed systemd unit file not found: {unit_path}")
 
 
-def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, list[str] | None]:
+def _build_managed_systemd_commands(
+    target: HostedRuntimeTarget,
+    *,
+    recovery_scratch_release_bridge: bool = False,
+) -> dict[str, list[str] | None]:
     if not target.has_managed_systemd_units and not target.retired_systemd_units:
         return {
             "install": None,
@@ -16298,6 +16359,11 @@ def _build_managed_systemd_commands(target: HostedRuntimeTarget) -> dict[str, li
         f"--runtime-dir {shlex.quote(runtime_dir)}",
         *(f"--enable {unit}" for unit in enable_names),
         *(f"--restart {unit}" for unit in restart_names),
+        *(
+            ["--recovery-scratch-release-bridge"]
+            if recovery_scratch_release_bridge
+            else []
+        ),
     ]
     return {
         "install": _remote_shell_command(target, " && ".join(install_steps)) if install_steps else None,

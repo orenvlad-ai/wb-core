@@ -58,6 +58,9 @@ ACTIVE_BARRIER_RESTART_UNITS = frozenset(
         "wb-core-data-mcp.service",
     }
 )
+RECOVERY_SCRATCH_BRIDGE_SKIPPED_RESTART_UNIT = (
+    "wb-core-root-storage-policy.service"
+)
 
 
 class DeployBarrierError(RuntimeError):
@@ -150,6 +153,7 @@ def reconcile(
     enable: list[str],
     restart: list[str],
     mutate: bool = True,
+    recovery_scratch_release_bridge: bool = False,
 ) -> dict[str, Any]:
     preserved = _preserved_units(runtime_dir.resolve())
     expected = set(RECOVERY_PAUSE_OWNED_TIMERS)
@@ -162,6 +166,19 @@ def reconcile(
         raise DeployBarrierError("managed unit inventory cannot preserve exact freeze")
     filtered_enable = [unit for unit in enable if unit not in preserved]
     filtered_restart = [unit for unit in restart if unit not in preserved]
+    if recovery_scratch_release_bridge:
+        if (
+            not preserved
+            or RECOVERY_SCRATCH_BRIDGE_SKIPPED_RESTART_UNIT not in restart
+        ):
+            raise DeployBarrierError(
+                "recovery scratch release bridge cannot narrow this restart"
+            )
+        filtered_restart = [
+            unit
+            for unit in filtered_restart
+            if unit != RECOVERY_SCRATCH_BRIDGE_SKIPPED_RESTART_UNIT
+        ]
     # Every ambiguity is resolved above.  No systemctl mutation occurs earlier.
     if mutate and filtered_enable:
         subprocess.run(
@@ -176,6 +193,11 @@ def reconcile(
         "preserved_pause_owned_units": sorted(preserved),
         "enabled_units": filtered_enable,
         "restarted_units": filtered_restart,
+        "recovery_scratch_bridge_skipped_restart_units": (
+            [RECOVERY_SCRATCH_BRIDGE_SKIPPED_RESTART_UNIT]
+            if recovery_scratch_release_bridge
+            else []
+        ),
     }
 
 
@@ -185,12 +207,19 @@ def main() -> int:
     parser.add_argument("--enable", action="append", default=[])
     parser.add_argument("--restart", action="append", default=[])
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument(
+        "--recovery-scratch-release-bridge",
+        action="store_true",
+    )
     args = parser.parse_args()
     print(json.dumps(reconcile(
         runtime_dir=args.runtime_dir,
         enable=list(args.enable),
         restart=list(args.restart),
         mutate=not bool(args.preflight_only),
+        recovery_scratch_release_bridge=bool(
+            args.recovery_scratch_release_bridge
+        ),
     ), sort_keys=True))
     return 0
 

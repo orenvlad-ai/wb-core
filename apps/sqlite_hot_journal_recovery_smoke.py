@@ -279,11 +279,17 @@ def _deploy_barrier_smoke(root: Path) -> None:
         mock.patch.object(deploy_barrier.subprocess, "run", side_effect=run),
     ):
         held = deploy_barrier.reconcile(
-            runtime_dir=root, enable=enabled, restart=restarted
+            runtime_dir=root,
+            enable=enabled,
+            restart=restarted,
+            recovery_scratch_release_bridge=True,
         )
     assert held["preserved_pause_owned_units"] == sorted(
         recovery.RECOVERY_PAUSE_OWNED_TIMERS
     )
+    assert held["recovery_scratch_bridge_skipped_restart_units"] == [
+        deploy_barrier.RECOVERY_SCRATCH_BRIDGE_SKIPPED_RESTART_UNIT
+    ]
     assert calls == [
         [
             "systemctl", "enable",
@@ -291,7 +297,13 @@ def _deploy_barrier_smoke(root: Path) -> None:
         ],
         [
             "systemctl", "restart",
-            *[unit for unit in restarted if unit not in recovery.RECOVERY_PAUSE_OWNED_TIMERS],
+            *[
+                unit
+                for unit in restarted
+                if unit not in recovery.RECOVERY_PAUSE_OWNED_TIMERS
+                and unit
+                != deploy_barrier.RECOVERY_SCRATCH_BRIDGE_SKIPPED_RESTART_UNIT
+            ],
         ],
     ]
     calls.clear()
