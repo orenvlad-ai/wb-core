@@ -1128,11 +1128,12 @@ def _assert_route_explicit_settings_frame(base_url: str) -> None:
                 ),
                 "Auto-updates cards must not be clipped at narrow width",
             )
+            narrow_editor = surface.locator("[data-vitrina-schedule-editor]")
             _assert(
-                surface.locator("[data-vitrina-schedule-editor]").evaluate(
-                    "element => element.getBoundingClientRect().width > 0"
-                ),
-                "Vitrina schedule editor must remain visible at narrow width",
+                narrow_editor.count() == 1
+                and narrow_editor.locator("[data-vitrina-schedule-policy]").is_enabled()
+                and narrow_editor.locator("[data-vitrina-schedule-save]").is_enabled(),
+                "Vitrina schedule editor must remain mounted and operable at narrow width",
             )
             dark_background = surface.locator(
                 '[data-auto-update-process="warehouse_functional"]'

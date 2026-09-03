@@ -3066,6 +3066,7 @@ def main() -> None:
         "parent_model": target["parent_model"],
         "parent_hctl": target["parent_hctl"],
         "filesystem_uuid": target["filesystem_uuid"],
+        "filesystem_label": "wb-recovery-scra",
         "filesystem_type": "ext4",
         "directory_mode": target["directory_mode"],
         "mountpoint_proven": True,
@@ -3083,18 +3084,56 @@ def main() -> None:
     }
     terminal = {
         "contract_name": apply.RECOVERY_SCRATCH_RESULT_CONTRACT,
+        "reconciliation_contract": apply.RECOVERY_SCRATCH_POST_SUBMIT_CONTRACT,
         "status": "READY",
         "operation_id": manifest["operation_id"],
         "deployed_sha": MERGE_SHA,
         "submit_count": 1,
         "business_database_mutation": 0,
         "recovery_submit": 0,
+        "failure_disposition": "reconciled_preserved",
+        "source_submit_count": 1,
+        "continuation_submit_count": 0,
+        "total_submit_count": 1,
+        "pre_change_digest_value": manifest["pre_change_digest_value"],
         "ready": ready,
     }
+    preflight = {
+        "contract_name": apply.RECOVERY_SCRATCH_POST_SUBMIT_CONTRACT,
+        "status": "READY_TO_RECONCILE",
+        "operation_id": manifest["operation_id"],
+        "source_deployed_sha": "2d4b1ac35c11c6569465dbd8db897f8541efc021",
+        "source_submit_count": 1,
+        "continuation_submit_count": 0,
+        "total_submit_count": 1,
+        "pre_change_digest_value": manifest["pre_change_digest_value"],
+        "target_present": False,
+        "completion_present": False,
+        "partial_device": {
+            "status": "failed_after_submit_reconciliation_pending",
+            "filesystem_label": "wb-recovery-scra",
+        },
+        "source_artifacts": {
+            "source_submit_count": 1,
+            "retry_allowed": False,
+        },
+    }
     responses = [
-        {"return_code": 0, "result": {"action": "recovery-scratch-bootstrap-dry-run", "result": plan}},
+        {
+            "return_code": 0,
+            "result": {
+                "action": "recovery-scratch-post-submit-reconcile-dry-run",
+                "result": preflight,
+            },
+        },
         {"return_code": None, "transport_ambiguous": True},
-        {"return_code": 0, "result": {"action": "recovery-scratch-bootstrap-readback", "result": terminal}},
+        {
+            "return_code": 0,
+            "result": {
+                "action": "recovery-scratch-post-submit-reconcile-readback",
+                "result": terminal,
+            },
+        },
     ]
     observed_commands: list[list[str]] = []
     original_command_evidence = apply.command_evidence
@@ -3112,9 +3151,17 @@ def main() -> None:
     assert result["state"] == "done", result
     assert result["dry_run_count"] == 1
     assert result["apply_count"] == 1
+    assert result["source_submit_count"] == 1
+    assert result["continuation_submit_count"] == 0
+    assert result["total_submit_count"] == 1
     assert len(observed_commands) == 3
-    assert "recovery-scratch-bootstrap-apply" in observed_commands[1]
-    assert "recovery-scratch-bootstrap-readback" in observed_commands[2]
+    assert "recovery-scratch-post-submit-reconcile-apply" in observed_commands[1]
+    assert "recovery-scratch-post-submit-reconcile-readback" in observed_commands[2]
+    assert not any(
+        part in {"sfdisk", "mkfs", "mkfs.ext4", "wipefs", "e2label", "tune2fs"}
+        for command in observed_commands
+        for part in command
+    )
 
     _exact_pr1143_release_binding_contract()
     _correction_base_ancestry_contract()

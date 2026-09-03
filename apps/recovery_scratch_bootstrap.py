@@ -113,7 +113,7 @@ def validate_recovery_scratch_contract(
         or int(raw.get("partition_number") or 0) != 1
         or any(UUID_PATTERN.fullmatch(item) is None for item in uuids)
         or len(set(uuids)) != 3
-        or not str(raw.get("filesystem_label") or "")
+        or str(raw.get("filesystem_label") or "") != "wb-recovery-scra"
         or str(raw.get("filesystem_type") or "").lower() != "ext4"
         or not REQUIRED_MOUNT_OPTIONS.issubset(options)
         or int(raw.get("reserve_bytes") or 0) != 8 * GIB
@@ -259,7 +259,7 @@ def _run(
 def _lsblk(device: str) -> dict[str, Any]:
     columns = (
         "NAME,KNAME,PATH,MAJ:MIN,SIZE,TYPE,FSTYPE,LABEL,UUID,MOUNTPOINTS,"
-        "MODEL,SERIAL,HCTL,RO,RM,HOTPLUG,PKNAME,PARTUUID"
+        "MODEL,SERIAL,HCTL,RO,RM,HOTPLUG,PKNAME,START,PARTUUID,PARTTYPE"
     )
     payload = json.loads(
         _run(["lsblk", "-b", "-J", "-p", "-o", columns, device]).stdout

@@ -2408,6 +2408,97 @@ def run_recovery_scratch_bootstrap_command(args: argparse.Namespace) -> int:
             "result": payload,
         }
     )
+
+
+def run_recovery_scratch_post_submit_reconcile_command(
+    args: argparse.Namespace,
+) -> int:
+    target_file = args.target_file or resolve_target_file()
+    target = load_hosted_runtime_target(target_file)
+    action_name = str(args.recovery_scratch_post_submit_action)
+    action = f"recovery-scratch-post-submit-reconcile-{action_name}"
+    _ensure_active_hosted_runtime_target(target, action=action)
+    if action_name == "apply":
+        _ensure_target_allows_mutation(target, action=action, dry_run=False)
+    _validate_recovery_scratch_target_contract(target)
+    deployed_sha = str(args.deployed_sha or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
+        raise ValueError("recovery scratch post-submit reconcile requires exact deployed SHA")
+    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
+    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
+        raise ValueError("recovery scratch post-submit reconcile requires canonical runtime dir")
+    local_manifest = (
+        ROOT
+        / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+    ).resolve()
+    remote_target_file = _remote_repo_relative_path(target, Path(target_file).resolve())
+    remote_manifest = _remote_repo_relative_path(target, local_manifest)
+    deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
+    runner_args = [
+        "python3",
+        "apps/recovery_scratch_bootstrap_post_submit_reconcile.py",
+        "--target-file",
+        remote_target_file,
+        "--manifest",
+        remote_manifest,
+        "--deployed-sha",
+        deployed_sha,
+        "--deployed-sha-file",
+        deployed_sha_file,
+        action_name,
+    ]
+    if action_name == "apply":
+        runner_args.extend(
+            ["--approval-reference", str(args.approval_reference or "")]
+        )
+    command = " && ".join(
+        [
+            f"cd {shlex.quote(target.target_dir)}",
+            (
+                "test \"$(tr -d '\\r\\n' < "
+                + shlex.quote(deployed_sha_file)
+                + ")\" = "
+                + shlex.quote(deployed_sha)
+            ),
+            " ".join(shlex.quote(item) for item in runner_args),
+        ]
+    )
+    completed = subprocess.run(
+        _remote_shell_command(target, command),
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        timeout=900 if action_name == "apply" else 180,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{action} failed: "
+            + (
+                completed.stderr.strip()
+                or completed.stdout.strip()
+                or f"exit {completed.returncode}"
+            )
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "recovery scratch post-submit reconcile returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "recovery scratch post-submit reconcile returned non-object payload"
+        )
+    _print_json(
+        {
+            "target_id": target.target_id,
+            "ssh_destination": target.ssh_destination,
+            "action": action,
+            "deployed_sha": deployed_sha,
+            "result": payload,
+        }
+    )
     return 0
 
 
@@ -11739,6 +11830,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         handler=run_recovery_scratch_bootstrap_command,
         recovery_scratch_action="readback",
     )
+
+    for action_name in ("dry-run", "apply", "readback"):
+        command = subparsers.add_parser(
+            f"recovery-scratch-post-submit-reconcile-{action_name}",
+            help=(
+                "Continue the exact already-submitted recovery scratch operation "
+                "without a second disk submit."
+            ),
+        )
+        command.add_argument("--deployed-sha", required=True)
+        if action_name == "apply":
+            command.add_argument("--approval-reference", required=True)
+        command.set_defaults(
+            handler=run_recovery_scratch_post_submit_reconcile_command,
+            recovery_scratch_post_submit_action=action_name,
+        )
 
     journald_readback = subparsers.add_parser(
         "journald-retention-readback",
