@@ -235,6 +235,11 @@ def _assert_recovery_scratch_bridge_reaches_ordered_journald_segment() -> None:
 
     def run_ordered_segment(command: list[str]) -> None:
         remote = command[-1]
+        if "apps/hosted_runtime_deploy_barrier.py" in remote:
+            if "--recovery-scratch-release-bridge" not in remote:
+                raise AssertionError(
+                    "scratch bridge deploy did not narrow the root-storage restart"
+                )
         if "systemctl restart wb-core-registry-http.service" in remote:
             events.append("activation")
         if (
@@ -3782,6 +3787,8 @@ def main() -> None:
             "window_id": "prepared-restart-window",
             "plan_fingerprint": continuation_fingerprint,
             "expected_deployed_sha": abort_sha,
+            "abandon_hot_journal_recovery": False,
+            "eligibility_only": False,
         }
     ]:
         raise AssertionError(

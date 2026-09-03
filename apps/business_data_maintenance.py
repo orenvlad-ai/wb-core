@@ -60,6 +60,13 @@ HOT_JOURNAL_RECOVERY_MARKER_FILENAME = ".sqlite-hot-journal-recovery.json"
 HOT_JOURNAL_RECOVERY_RESULT_CONTRACT = (
     "wbc0027_s047_split_hot_journal_recovery_result_v1"
 )
+WBC0027_RECOVERY_ABANDONMENT_CONTRACT = (
+    "wbc0027_s047_recovery_abandonment_readiness/v1"
+)
+WBC0027_RECOVERY_ABANDONMENT_PLAN_FINGERPRINT = (
+    "sha256:0d680ca758c1699fe2a9025b01d71f0fa4f8c5bcf7555a7945b5b930cdc5285f"
+)
+WBC0027_RECOVERY_ABANDONMENT_POLICY_REVISION = 59
 QUIESCENT_SERVICE_STATES = frozenset({"inactive", "failed"})
 ACTIVE_RUNTIME_STATES = frozenset(
     {
@@ -4102,6 +4109,166 @@ def _prepared_abort_breakglass_counters(runtime_dir: Path) -> dict[str, int]:
     return counters
 
 
+def _wbc0027_recovery_abandonment_readiness(
+    runtime_dir: Path,
+    *,
+    state: Mapping[str, Any],
+    status: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    recovery_epoch: Mapping[str, Any],
+    partial_epoch: Mapping[str, Any],
+    deployed_sha: str,
+    barrier: Mapping[str, Any],
+    proc_root: Path,
+) -> dict[str, Any]:
+    """Admit only the exact clean S047 abort without data recovery."""
+
+    from apps import sqlite_hot_journal_recovery as hot
+
+    if (
+        str(state.get("phase") or "") != "abort_quiescing"
+        or state.get("exact_prior_state_restored") is True
+        or barrier.get("active") is not True
+        or str(barrier.get("phase") or "") != "acquiring"
+        or barrier.get("hold_confirmed") is not False
+        or str(barrier.get("window_id") or "") != hot.EXPECTED_WINDOW_ID
+        or str(barrier.get("plan_fingerprint") or "")
+        != WBC0027_RECOVERY_ABANDONMENT_PLAN_FINGERPRINT
+        or str(partial_epoch.get("schema_version") or "")
+        != PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
+        or int(partial_epoch.get("epoch") or 0) != 2
+        or str(partial_epoch.get("deployed_sha") or "")
+        != hot.EXPECTED_SOURCE_EPOCH_SHA
+        or str(partial_epoch.get("source_deployed_sha") or "")
+        != str(recovery_epoch.get("deployed_sha") or "")
+        or str(partial_epoch.get("source_recovery_fingerprint") or "")
+        != _stable_fingerprint(recovery_epoch)
+        or str(partial_epoch.get("window_id") or "")
+        != hot.EXPECTED_WINDOW_ID
+        or str(partial_epoch.get("plan_fingerprint") or "")
+        != WBC0027_RECOVERY_ABANDONMENT_PLAN_FINGERPRINT
+        or str(partial_epoch.get("barrier_state_fingerprint") or "")
+        != str(barrier.get("state_fingerprint") or "")
+        or int(policy.get("revision") or 0)
+        != WBC0027_RECOVERY_ABANDONMENT_POLICY_REVISION
+        or policy.get("master_desired") is not False
+        or deployed_sha == str(partial_epoch.get("deployed_sha") or "")
+    ):
+        raise RuntimeError("WBC0027 recovery abandonment identity drifted")
+    marker_path = runtime_dir / HOT_JOURNAL_RECOVERY_MARKER_FILENAME
+    if marker_path.exists() or marker_path.is_symlink():
+        raise RuntimeError("WBC0027 recovery abandonment found a recovery marker")
+
+    timers = dict(status.get("timers") or {})
+    services = dict(status.get("services") or {})
+    runtime = dict(status.get("runtime_schedules") or {})
+    locks = dict(status.get("writer_locks") or {})
+    if (
+        set(timers) != set(ALL_BUSINESS_TIMER_UNITS)
+        or any(
+            _unit_state_pair(value) != ("disabled", "inactive")
+            for value in timers.values()
+        )
+        or set(services) != set(ALL_BUSINESS_SERVICE_UNITS)
+        or any(
+            str(value.get("is_active") or "") not in QUIESCENT_SERVICE_STATES
+            or int((value.get("properties") or {}).get("MainPID") or 0) != 0
+            for value in services.values()
+        )
+        or status.get("writer_processes")
+        or status.get("unknown_wb_core_timers")
+        or status.get("cron_entries")
+        or bool((runtime.get("web_vitrina") or {}).get("active"))
+        or list((runtime.get("feedback_complaints") or {}).get("active_runs") or [])
+        or (runtime.get("spp") or {}).get("active_job") is not None
+        or any(
+            bool(value.get("held"))
+            for key, value in locks.items()
+            if key != "seller_portal"
+        )
+        or bool((locks.get("seller_portal") or {}).get("busy"))
+    ):
+        raise RuntimeError("WBC0027 recovery abandonment is not fully quiescent")
+    jobs = hot._systemd_jobs()
+    if jobs:
+        raise RuntimeError("WBC0027 recovery abandonment found a systemd job")
+
+    registry = StoreRegistry(runtime_dir)
+    manifest = registry.load(require_files=True)
+    operational = registry.resolve("operational", manifest=manifest)
+    expected_operational = (
+        runtime_dir / "generations" / hot.EXPECTED_GENERATION_ID
+        / "operational.sqlite3"
+    )
+    if (
+        manifest.state != "cutover"
+        or manifest.canonical_source != "split"
+        or operational != expected_operational
+        or operational.is_symlink()
+        or not operational.is_file()
+    ):
+        raise RuntimeError("WBC0027 recovery abandonment store identity drifted")
+    sidecars = _sqlite_sidecar_readback(runtime_dir)
+    if any(
+        bool(item.get("exists"))
+        for item in dict(sidecars.get("sidecars") or {}).values()
+    ):
+        raise RuntimeError("WBC0027 recovery abandonment found a SQLite sidecar")
+
+    connection = sqlite3.connect(
+        f"file:{operational.as_posix()}?mode=ro&immutable=1",
+        uri=True,
+        timeout=5.0,
+    )
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        query_only = int(connection.execute("PRAGMA query_only").fetchone()[0])
+        quick_check = [
+            str(row[0])
+            for row in connection.execute("PRAGMA quick_check(1)").fetchall()
+        ]
+    finally:
+        connection.close()
+    if query_only != 1 or quick_check != ["ok"]:
+        raise RuntimeError("WBC0027 recovery abandonment SQLite readback failed")
+
+    openers = hot._openers({operational}, proc_root=proc_root)
+    for opener in openers:
+        if (
+            opener.get("access") != "read_only"
+            or "apps/registry_upload_http_entrypoint_live.py"
+            not in str(opener.get("command") or "")
+            or "wb-core-registry-http.service"
+            not in str(opener.get("cgroup") or "")
+        ):
+            raise RuntimeError("WBC0027 recovery abandonment database opener is unknown")
+    if hot._kernel_locks({operational}):
+        raise RuntimeError("WBC0027 recovery abandonment found a kernel lock")
+    counters = _prepared_abort_breakglass_counters(runtime_dir)
+    if set(counters) != {
+        "sheet_vitrina_v1_breakglass_last_good_operations",
+        "sheet_vitrina_v1_breakglass_last_good_cells",
+        "sheet_vitrina_v1_breakglass_last_good_revocations",
+        "sheet_vitrina_v1_breakglass_last_good_revocation_audit",
+    } or any(int(value) != 0 for value in counters.values()):
+        raise RuntimeError("WBC0027 recovery abandonment counters drifted")
+    return {
+        "contract": WBC0027_RECOVERY_ABANDONMENT_CONTRACT,
+        "status": "eligible",
+        "logical_business_delta": 0,
+        "recovery_marker_absent": True,
+        "sqlite_sidecars_absent": True,
+        "sqlite_query_only": True,
+        "sqlite_quick_check": "ok",
+        "business_operation_counters": counters,
+        "business_writer_count": 0,
+        "systemd_job_count": 0,
+        "kernel_lock_count": 0,
+        "database_opener_count": len(openers),
+        "database_openers_allowlisted_read_only": True,
+    }
+
+
 def _prepared_abort_partial_restore_evidence(
     runtime_dir: Path,
     *,
@@ -4511,9 +4678,15 @@ def maintenance_abort_prepared(
     poll_interval_seconds: float = 2.0,
     warehouse_restore: Any | None = None,
     autoanswers_reconcile: Any | None = None,
+    abandon_hot_journal_recovery: bool = False,
+    eligibility_only: bool = False,
 ) -> dict[str, Any]:
     """Quiesce one exact prepared revision, restore it, and abort its barrier."""
 
+    if eligibility_only and not abandon_hot_journal_recovery:
+        raise RuntimeError(
+            "abort-prepared eligibility requires explicit recovery abandonment"
+        )
     runtime_dir = Path(runtime_dir).resolve()
     deployed_sha = _read_exact_deployed_sha(
         deployed_sha_file,
@@ -4565,6 +4738,14 @@ def maintenance_abort_prepared(
     partial_restore_epoch = dict(
         state.get("prepared_abort_partial_restore_recovery_epoch") or {}
     )
+    recovery_abandonment: dict[str, Any] | None = None
+    if eligibility_only and (
+        not binding or not recovery_epoch or not partial_restore_epoch
+    ):
+        raise RuntimeError(
+            "WBC0027 recovery abandonment readiness requires the exact "
+            "completed partial epoch"
+        )
     if phase not in {"prepared", "abort_quiescing"}:
         raise RuntimeError("prepared abort requires prepared/quiescing state")
     if (phase == "abort_quiescing") != bool(binding):
@@ -5077,12 +5258,13 @@ def maintenance_abort_prepared(
                 if partial_restore_epoch and str(
                     partial_restore_epoch.get("deployed_sha") or ""
                 ) != deployed_sha:
-                    _validate_hot_journal_recovery_marker(
-                        runtime_dir,
-                        partial_epoch=partial_restore_epoch,
-                        deployed_sha=deployed_sha,
-                        barrier=barrier,
-                    )
+                    if not abandon_hot_journal_recovery:
+                        _validate_hot_journal_recovery_marker(
+                            runtime_dir,
+                            partial_epoch=partial_restore_epoch,
+                            deployed_sha=deployed_sha,
+                            barrier=barrier,
+                        )
                     partial_deployed_sha = str(
                         partial_restore_epoch.get("deployed_sha") or ""
                     )
@@ -5147,6 +5329,31 @@ def maintenance_abort_prepared(
         systemd=systemd,
         require_disabled=False,
     )
+    if abandon_hot_journal_recovery:
+        if not partial_restore_epoch or str(
+            partial_restore_epoch.get("deployed_sha") or ""
+        ) == deployed_sha:
+            raise RuntimeError(
+                "WBC0027 recovery abandonment is not applicable to this state"
+            )
+        recovery_abandonment = _wbc0027_recovery_abandonment_readiness(
+            runtime_dir,
+            state=state,
+            status=current,
+            policy=policy,
+            recovery_epoch=recovery_epoch,
+            partial_epoch=partial_restore_epoch,
+            deployed_sha=deployed_sha,
+            barrier=barrier,
+            proc_root=proc_root,
+        )
+        if eligibility_only:
+            return {
+                "status": "eligible",
+                "deployed_sha": deployed_sha,
+                "recovery_abandonment": recovery_abandonment,
+                "barrier": barrier,
+            }
 
     def persist_quiesce(*, event: str, unit: str) -> None:
         state[quiesce_state_key] = quiesce
@@ -5326,6 +5533,8 @@ def maintenance_abort_prepared(
         result["abort_partial_restore_recovery_epoch"] = (
             partial_restore_epoch
         )
+    if recovery_abandonment is not None:
+        result["recovery_abandonment"] = recovery_abandonment
     return result
 
 
@@ -6515,6 +6724,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval-reference", default="")
     parser.add_argument("--expected-deployed-sha", default="")
     parser.add_argument(
+        "--abandon-hot-journal-recovery",
+        action="store_true",
+        help=(
+            "Use the incident-only clean WBC0027 S047 abandonment path instead "
+            "of requiring the missing recovery marker."
+        ),
+    )
+    parser.add_argument(
+        "--eligibility-only",
+        action="store_true",
+        help="Run the recovery-abandonment guards without restoring or releasing.",
+    )
+    parser.add_argument(
         "--allow-pre-hold-service-continuity",
         action="store_true",
         help=(
@@ -6620,7 +6842,7 @@ def main(argv: list[str] | None = None) -> int:
                 "abort-prepared requires exact revision, window, plan, "
                 "and deployed SHA"
             )
-        with _ExclusiveRestoreLock(runtime_dir):
+        if args.eligibility_only:
             result = maintenance_abort_prepared(
                 runtime_dir,
                 systemd=systemd,
@@ -6634,7 +6856,30 @@ def main(argv: list[str] | None = None) -> int:
                 reason=str(args.reason or "abort exact prepared maintenance"),
                 wait_timeout_seconds=float(args.wait_timeout_seconds),
                 poll_interval_seconds=float(args.poll_interval_seconds),
+                abandon_hot_journal_recovery=bool(
+                    args.abandon_hot_journal_recovery
+                ),
+                eligibility_only=True,
             )
+        else:
+            with _ExclusiveRestoreLock(runtime_dir):
+                result = maintenance_abort_prepared(
+                    runtime_dir,
+                    systemd=systemd,
+                    schedules=schedules,
+                    expected_revision=int(args.expected_revision),
+                    window_id=str(args.window_id),
+                    plan_fingerprint=str(args.plan_fingerprint),
+                    expected_deployed_sha=str(args.expected_deployed_sha),
+                    deployed_sha_file=ROOT / ".wb-core-runtime-sha",
+                    actor=str(args.actor or "repo_owned_cli"),
+                    reason=str(args.reason or "abort exact prepared maintenance"),
+                    wait_timeout_seconds=float(args.wait_timeout_seconds),
+                    poll_interval_seconds=float(args.poll_interval_seconds),
+                    abandon_hot_journal_recovery=bool(
+                        args.abandon_hot_journal_recovery
+                    ),
+                )
     elif args.action == "barrier-abort":
         with _ExclusiveRestoreLock(runtime_dir):
             restore_readback = maintenance_barrier_abort_readback(

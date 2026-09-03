@@ -21,6 +21,108 @@ import apps.business_data_maintenance as maintenance
 import packages.application.business_data_write_barrier as write_barrier
 
 
+def _assert_exact_s047_recovery_abandonment_is_query_only() -> None:
+    from apps import sqlite_hot_journal_recovery as hot
+
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = Path(raw)
+        operational = (
+            runtime / "generations" / hot.EXPECTED_GENERATION_ID
+            / "operational.sqlite3"
+        )
+        operational.parent.mkdir(parents=True)
+        with sqlite3.connect(operational) as connection:
+            connection.execute("CREATE TABLE sentinel(id INTEGER PRIMARY KEY)")
+        with sqlite3.connect(runtime / "registry_upload_runtime.sqlite3") as connection:
+            connection.execute("CREATE TABLE sentinel(id INTEGER PRIMARY KEY)")
+        recovery_epoch = {"deployed_sha": "c" * 40}
+        barrier = {
+            "active": True,
+            "phase": "acquiring",
+            "hold_confirmed": False,
+            "window_id": hot.EXPECTED_WINDOW_ID,
+            "plan_fingerprint": (
+                maintenance.WBC0027_RECOVERY_ABANDONMENT_PLAN_FINGERPRINT
+            ),
+            "state_fingerprint": "sha256:" + "d" * 64,
+        }
+        partial_epoch = {
+            "schema_version": (
+                maintenance.PREPARED_ABORT_PARTIAL_RESTORE_RECOVERY_SCHEMA
+            ),
+            "epoch": 2,
+            "deployed_sha": hot.EXPECTED_SOURCE_EPOCH_SHA,
+            "source_deployed_sha": recovery_epoch["deployed_sha"],
+            "source_recovery_fingerprint": maintenance._stable_fingerprint(
+                recovery_epoch
+            ),
+            "window_id": hot.EXPECTED_WINDOW_ID,
+            "plan_fingerprint": (
+                maintenance.WBC0027_RECOVERY_ABANDONMENT_PLAN_FINGERPRINT
+            ),
+            "barrier_state_fingerprint": barrier["state_fingerprint"],
+        }
+        status = {
+            "timers": {
+                unit: {
+                    "unit": unit,
+                    "is_enabled": "disabled",
+                    "is_active": "inactive",
+                }
+                for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
+            },
+            "services": {
+                unit: {
+                    "unit": unit,
+                    "is_enabled": "static",
+                    "is_active": "inactive",
+                    "properties": {"MainPID": 0},
+                }
+                for unit in maintenance.ALL_BUSINESS_SERVICE_UNITS
+            },
+            "runtime_schedules": {
+                "web_vitrina": {"active": False},
+                "feedback_complaints": {"active_runs": []},
+                "spp": {"active_job": None},
+            },
+            "writer_processes": [],
+            "writer_locks": {
+                "warehouse_functional": {"held": False},
+                "finance_backup": {"held": False},
+                "web_schedule": {"held": False},
+                "spp_execution": {"held": False},
+                "seller_portal": {"busy": False},
+            },
+            "unknown_wb_core_timers": [],
+            "cron_entries": [],
+        }
+        fake_manifest = mock.Mock(state="cutover", canonical_source="split")
+        fake_registry = mock.Mock()
+        fake_registry.load.return_value = fake_manifest
+        fake_registry.resolve.return_value = operational
+        with (
+            mock.patch.object(maintenance, "StoreRegistry", return_value=fake_registry),
+            mock.patch.object(hot, "_systemd_jobs", return_value=[]),
+            mock.patch.object(hot, "_openers", return_value=[]),
+            mock.patch.object(hot, "_kernel_locks", return_value=[]),
+        ):
+            ready = maintenance._wbc0027_recovery_abandonment_readiness(
+                runtime,
+                state={"phase": "abort_quiescing"},
+                status=status,
+                policy={"revision": 59, "master_desired": False},
+                recovery_epoch=recovery_epoch,
+                partial_epoch=partial_epoch,
+                deployed_sha="e" * 40,
+                barrier=barrier,
+                proc_root=runtime / "proc",
+            )
+        assert ready["status"] == "eligible"
+        assert ready["logical_business_delta"] == 0
+        assert ready["sqlite_query_only"] is True
+        assert ready["sqlite_quick_check"] == "ok"
+
+
 def _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up() -> None:
     from apps import sqlite_hot_journal_reconcile_existing as reconcile
 
@@ -3409,6 +3511,7 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
 
 
 def main() -> int:
+    _assert_exact_s047_recovery_abandonment_is_query_only()
     _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up()
     _assert_production_timer_execstart_roles_are_exact()
     _assert_prepared_abort_quiesces_and_restores_exactly()
