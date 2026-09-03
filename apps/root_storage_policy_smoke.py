@@ -168,6 +168,10 @@ def _assert_storage_registry(policy: dict[str, object]) -> None:
     assert registry["filesystems"]["root"]["reserve_bytes"] == 25 * GIB
     assert registry["filesystems"]["backup"]["emergency_reserve_bytes"] == 8 * GIB
     assert registry["filesystems"]["generation"]["reserve_bytes"] == 8 * GIB
+    scratch = registry["filesystems"]["recovery_scratch"]
+    assert scratch["reserve_bytes"] == 8 * GIB
+    assert scratch["parent_device_by_id"].endswith("QEMU_HARDDISK_vde")
+    assert scratch["filesystem_uuid"] == "da019107-575c-4fe7-b698-e021b3fc83c8"
     producers = {item["owner"]: item for item in registry["producers"]}
     admission_producers = {item["owner"]: item for item in policy["producers"]}
     assert storage_destination_root(
@@ -181,6 +185,16 @@ def _assert_storage_registry(policy: dict[str, object]) -> None:
         "path_patterns": [],
     }
     assert producers["finance_storage_split_coherent_source"]["destination_role"] == "generation"
+    assert producers["sqlite_hot_journal_reconcile_qualification"] == {
+        "owner": "sqlite_hot_journal_reconcile_qualification",
+        "current": True,
+        "data_class": "ephemeral_recovery_verification",
+        "destination_role": "recovery_scratch",
+        "relative_roots": [""],
+        "lifecycle_policy": "temporary_candidate",
+        "capacity_mode": "source_size_plus_fixed_reserve",
+        "max_single_write_bytes": 32 * GIB,
+    }
     assert not [
         item["owner"]
         for item in producers.values()
@@ -1040,7 +1054,18 @@ def _assert_static_safety() -> None:
     ).read_text(encoding="utf-8")
     assert "StateDirectory=wb-core-root-storage-policy" in unit
     assert "status.json --fail-on-unregistered" in unit
+    assert "--allow-recovery-scratch-bootstrap-pending" in unit
     assert "journald" not in unit.lower()
+    sanitation_unit = (
+        ROOT
+        / "artifacts"
+        / "registry_upload_http_entrypoint"
+        / "systemd"
+        / "wb-core-storage-recovery-sanitation@.service"
+    ).read_text(encoding="utf-8")
+    assert "ConditionPathIsMountPoint=/opt/wb-core-runtime/state/recovery-scratch" in sanitation_unit
+    assert "ReadWritePaths=" in sanitation_unit
+    assert "/opt/wb-core-runtime/state/recovery-scratch" in sanitation_unit
 
 
 def _legacy_activation_policy(policy: dict[str, object]) -> dict[str, object]:

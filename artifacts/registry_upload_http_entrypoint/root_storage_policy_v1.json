@@ -15,7 +15,8 @@
   "filesystems": {
     "root": "/",
     "backup": "/opt/wb-core-runtime/state/backups",
-    "generation": "/opt/wb-core-runtime/state/generations"
+    "generation": "/opt/wb-core-runtime/state/generations",
+    "recovery_scratch": "/opt/wb-core-runtime/state/recovery-scratch"
   },
   "storage_registry": {
     "contract_version": "wb_core_storage_registry_v1",
@@ -46,6 +47,29 @@
         "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
         "reserve_mode": "fixed",
         "reserve_bytes": 8589934592
+      },
+      "recovery_scratch": {
+        "contract_version": "wb_core_recovery_scratch_filesystem_v1",
+        "path": "/opt/wb-core-runtime/state/recovery-scratch",
+        "source": "/dev/sdd1",
+        "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
+        "filesystem_type": "ext4",
+        "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
+        "reserve_mode": "fixed",
+        "reserve_bytes": 8589934592,
+        "parent_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde",
+        "partition_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde-part1",
+        "parent_serial": "vde",
+        "parent_model": "QEMU HARDDISK",
+        "parent_size_bytes": 53687091200,
+        "parent_major_minor": "8:48",
+        "partition_table": "gpt",
+        "partition_number": 1,
+        "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",
+        "partition_guid": "9a0f40dd-bb7d-4af1-82bc-40a0960dee85",
+        "filesystem_label": "wb-recovery-scratch",
+        "completion_marker": "/opt/wb-core-runtime/state/backups/private-evidence/recovery-scratch-bootstrap/completed.json",
+        "require_distinct_from_roles": ["root", "backup", "generation"]
       }
     },
     "lifecycle_policies": {
@@ -140,7 +164,8 @@
       {"owner":"warehouse_opening","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["warehouse-opening"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"legacy_backup_artifacts","current":false,"data_class":"retained_legacy","destination_role":"backup","relative_roots":["proxy-v4-pr948","supplier-26gn527-vtb-recovery","canonical-vitrina-publication","supplier_factual_date_corrections","canonical-cost-engine","wb_finance_stale_cost","lost+found"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
       {"owner":"root_legacy_backup_families","current":false,"data_class":"retained_legacy","destination_role":"root","relative_roots":["opt/wb-core-runtime/backups","opt/wb-core-runtime/evidence","opt/wb-core-runtime/state/private-evidence","opt/wb-core-runtime/state/incident_backups","opt/wb-core-runtime/state/forensics","opt/wb-core-runtime/state/recovery_backups"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
-      {"owner":"root_warm_archive_exact_six","current":false,"data_class":"terminal_exact_six","destination_role":"backup","relative_roots":["root-warm-archive-wbc0008-006"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"disabled","max_single_write_bytes":0}
+      {"owner":"root_warm_archive_exact_six","current":false,"data_class":"terminal_exact_six","destination_role":"backup","relative_roots":["root-warm-archive-wbc0008-006"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"disabled","max_single_write_bytes":0},
+      {"owner":"sqlite_hot_journal_reconcile_qualification","current":true,"data_class":"ephemeral_recovery_verification","destination_role":"recovery_scratch","relative_roots":[""],"lifecycle_policy":"temporary_candidate","capacity_mode":"source_size_plus_fixed_reserve","max_single_write_bytes":34359738368}
     ]
   },
   "scan_roots": [
@@ -508,6 +533,11 @@
     },
     {
       "owner": "canonical_cost_preflight_candidate",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "sqlite_hot_journal_reconcile_qualification",
       "classification": "discretionary_root_writer",
       "path_patterns": []
     }

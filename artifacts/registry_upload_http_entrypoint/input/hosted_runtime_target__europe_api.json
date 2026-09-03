@@ -254,5 +254,36 @@
       "noexec"
     ],
     "require_distinct_device": true
+  },
+  "recovery_scratch_filesystem": {
+    "contract_version": "wb_core_recovery_scratch_filesystem_v1",
+    "path": "/opt/wb-core-runtime/state/recovery-scratch",
+    "parent_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde",
+    "partition_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde-part1",
+    "parent_serial": "vde",
+    "parent_model": "QEMU HARDDISK",
+    "parent_size_bytes": 53687091200,
+    "parent_major_minor": "8:48",
+    "partition_table": "gpt",
+    "partition_number": 1,
+    "disk_guid": "b19fe03c-84c7-438c-91db-2e57bbf2a06e",
+    "partition_guid": "9a0f40dd-bb7d-4af1-82bc-40a0960dee85",
+    "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
+    "filesystem_label": "wb-recovery-scratch",
+    "filesystem_type": "ext4",
+    "required_mount_options": [
+      "rw",
+      "noatime",
+      "nodev",
+      "nosuid",
+      "noexec"
+    ],
+    "reserve_bytes": 8589934592,
+    "completion_marker": "/opt/wb-core-runtime/state/backups/private-evidence/recovery-scratch-bootstrap/completed.json",
+    "require_distinct_from_roles": [
+      "root",
+      "backup",
+      "generation"
+    ]
   }
 }
