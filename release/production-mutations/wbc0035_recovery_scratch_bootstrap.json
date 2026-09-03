@@ -101,7 +101,7 @@
     }
   },
   "authorization": {
-    "source": "WBC0035/029 accepted direct operation release after PR1183 status-readback blocker",
+    "source": "WBC0035/030 accepted journald corrective recovery-scratch bridge correction",
     "effect": "exact new recovery-scratch destination initialization and persistent mount",
     "no_reconfirmation": true
   }

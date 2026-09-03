@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,6 +132,168 @@ def _assert_deploy_status_readback_retry() -> None:
             raise AssertionError("persistent service failure must halt after the exact bound") from exc
     else:
         raise AssertionError("persistent service failure must remain fail-closed")
+
+
+def _assert_recovery_scratch_bridge_reaches_ordered_journald_segment() -> None:
+    from apps import root_storage_policy as root_policy_app
+    from apps.github_release_runner import build_recovery_scratch_release_bridge
+
+    manifest_path = (
+        ROOT
+        / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
+    )
+    manifest_raw = manifest_path.read_bytes()
+    manifest = json.loads(manifest_raw)
+    release_sha = hosted_runtime._git_output(
+        ["git", "rev-parse", "HEAD"]
+    ).strip()
+    bridge = build_recovery_scratch_release_bridge(
+        {
+            "path": str(manifest_path.relative_to(ROOT)),
+            "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        },
+        manifest,
+        release_sha,
+    )
+    if bridge is None:
+        raise AssertionError("recovery scratch manifest did not build a release bridge")
+    encoded_bridge = base64.b64encode(
+        json.dumps(
+            bridge,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+    target_file = (
+        ROOT
+        / "artifacts/registry_upload_http_entrypoint/input/"
+        "hosted_runtime_target__europe_api.json"
+    )
+    target = hosted_runtime.load_hosted_runtime_target(target_file)
+    policy = json.loads(
+        (
+            ROOT
+            / "artifacts/registry_upload_http_entrypoint/"
+            "root_storage_policy_v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    events: list[str] = []
+
+    def bridge_bound_root_status(
+        *,
+        policy: object,
+        allow_recovery_scratch_bootstrap_pending: bool = False,
+        recovery_scratch_release_bridge: object = None,
+        **_: object,
+    ) -> dict[str, object]:
+        scratch = Path(str(dict(policy)["filesystems"]["recovery_scratch"]))
+        if scratch.exists():
+            raise AssertionError("regression requires absent recovery scratch")
+        if not allow_recovery_scratch_bootstrap_pending:
+            raise AssertionError("journald status lost bootstrap-pending authority")
+        if recovery_scratch_release_bridge != bridge:
+            raise AssertionError("journald status lost exact manifest-bound bridge")
+        finance = bridge["preconditions"]["finance"]
+        if finance["only_allowed_blocker"] != "retained backup exceeded RPO age":
+            raise AssertionError("journald status widened the Finance exception")
+        events.append("bridge-bound-root-status")
+        return {"status": "below_normal", "alerts": []}
+
+    def corrective_remove(
+        policy: object,
+        *,
+        allow_recovery_scratch_bootstrap_pending: bool = False,
+        recovery_scratch_release_bridge: object = None,
+    ) -> dict[str, object]:
+        events.append("journald-corrective")
+        preflight = root_policy_app.build_journald_correction_preflight(
+            dict(policy),
+            inventory_reader=lambda _path: [],
+            allow_recovery_scratch_bootstrap_pending=(
+                allow_recovery_scratch_bootstrap_pending
+            ),
+            recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+        )
+        return {"ok": True, "manifest_digest": preflight["manifest_digest"]}
+
+    def corrective_readback(
+        policy: object,
+        *,
+        allow_recovery_scratch_bootstrap_pending: bool = False,
+        recovery_scratch_release_bridge: object = None,
+    ) -> dict[str, object]:
+        status = bridge_bound_root_status(
+            policy=policy,
+            allow_recovery_scratch_bootstrap_pending=(
+                allow_recovery_scratch_bootstrap_pending
+            ),
+            recovery_scratch_release_bridge=recovery_scratch_release_bridge,
+        )
+        events.append("journald-corrective-readback")
+        return {"ok": True, "root_storage_status_after": status}
+
+    def run_ordered_segment(command: list[str]) -> None:
+        remote = command[-1]
+        if "systemctl restart wb-core-registry-http.service" in remote:
+            events.append("activation")
+        if (
+            "apps/root_storage_policy.py" in remote
+            and "journald-corrective" in remote
+        ):
+            tokens = shlex.split(remote)
+            script_index = tokens.index("apps/root_storage_policy.py")
+            returncode = root_policy_app.main(tokens[script_index + 1 :])
+            if returncode:
+                raise subprocess.CalledProcessError(returncode, command)
+        if '\"deployment_complete\":true' in remote:
+            events.append("final-status")
+
+    with mock.patch.dict(
+        os.environ,
+        {"WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE": encoded_bridge},
+    ), mock.patch.object(
+        hosted_runtime, "_run_command", side_effect=run_ordered_segment
+    ), mock.patch.object(
+        root_policy_app, "load_policy", return_value=policy
+    ), mock.patch.object(
+        root_policy_app,
+        "remove_journald_retention_dropin",
+        side_effect=corrective_remove,
+    ), mock.patch.object(
+        root_policy_app,
+        "readback_journald_correction",
+        side_effect=corrective_readback,
+    ), mock.patch.object(
+        root_policy_app, "collect_root_storage_status", side_effect=bridge_bound_root_status
+    ), mock.patch.object(
+        root_policy_app, "_assert_exact_legacy_dropin"
+    ), mock.patch.object(
+        root_policy_app,
+        "_effective_journald_config",
+        return_value={"matches_expected": True},
+    ), mock.patch.object(
+        root_policy_app,
+        "_journald_service_identity",
+        return_value={"active_state": "active", "sub_state": "running", "main_pid": 1},
+    ):
+        hosted_runtime.deploy_current_checkout(
+            target,
+            target_file=target_file,
+            dry_run=False,
+            allow_dirty=True,
+        )
+
+    required = [
+        "activation",
+        "journald-corrective",
+        "bridge-bound-root-status",
+        "journald-corrective-readback",
+        "final-status",
+    ]
+    positions = [events.index(item) for item in required]
+    if positions != sorted(positions):
+        raise AssertionError(f"deploy/journald segment order drifted: {events}")
 
 
 def _assert_pre_prepare_abort_skips_stale_restore() -> None:
@@ -415,6 +578,7 @@ def main() -> None:
     ):
         raise AssertionError("ordinary semantic probe failure is not transport ambiguity")
     _assert_deploy_status_readback_retry()
+    _assert_recovery_scratch_bridge_reaches_ordered_journald_segment()
     _assert_pre_prepare_abort_skips_stale_restore()
     _assert_wbc0027_opaque_schema_revision_contract()
     _assert_fbs_status_probe_uses_public_contract()
