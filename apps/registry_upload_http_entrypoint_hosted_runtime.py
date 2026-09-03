@@ -16307,7 +16307,10 @@ def _validate_recovery_scratch_target_contract(
         .get("recovery_scratch")
         or {}
     )
-    policy_contract = {key: role.get(key) for key in contract}
+    policy_contract = validate_recovery_scratch_contract(
+        {key: role.get(key) for key in contract},
+        runtime_dir=runtime_dir,
+    )
     if policy_contract != contract:
         raise ValueError(
             "target recovery scratch contract differs from root-storage policy"

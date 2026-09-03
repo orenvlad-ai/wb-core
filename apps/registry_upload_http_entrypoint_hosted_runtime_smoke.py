@@ -4927,6 +4927,19 @@ def main() -> None:
             json.dumps(deploy_target_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        recovery_scratch_contract = (
+            hosted_runtime._validate_recovery_scratch_target_contract(
+                hosted_runtime.load_hosted_runtime_target(deploy_target_file)
+            )
+        )
+        if recovery_scratch_contract["required_mount_options"] != sorted(
+            deploy_target_payload["recovery_scratch_filesystem"][
+                "required_mount_options"
+            ]
+        ):
+            raise AssertionError(
+                "recovery scratch deploy admission must compare normalized mount options"
+            )
         archived_target_payload = dict(deploy_target_payload)
         archived_target_payload.update(
             {
