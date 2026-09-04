@@ -277,6 +277,7 @@ def checkout_merge(merge: str) -> None:
 
 
 def configure_ssh(directory: Path) -> None:
+    """Write credential material byte-for-byte into protected temporary files."""
     key = os.environ.get("WB_CORE_DEPLOY_SSH_KEY", "")
     known_hosts = os.environ.get("WB_CORE_DEPLOY_KNOWN_HOSTS", "")
     if not key.strip() or not known_hosts.strip():
