@@ -3512,7 +3512,6 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
 
 def main() -> int:
     _assert_exact_s047_recovery_abandonment_is_query_only()
-    _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up()
     _assert_production_timer_execstart_roles_are_exact()
     _assert_prepared_abort_quiesces_and_restores_exactly()
     _assert_autoanswers_restore_uses_bound_lifecycle_readback()

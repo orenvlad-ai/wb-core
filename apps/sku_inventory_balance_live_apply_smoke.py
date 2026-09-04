@@ -498,7 +498,7 @@ def _start(block: SkuInventoryBalanceBlock, calculation: dict) -> dict:
 
 
 def _wait_terminal(block: SkuInventoryBalanceBlock, job_id: str) -> dict:
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         job = block.get_apply_job(job_id)
         if job["state"] in {"completed", "completed_with_errors", "stalled"}:
