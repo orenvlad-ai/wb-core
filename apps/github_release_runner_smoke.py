@@ -214,6 +214,32 @@ def main() -> None:
         "raw": True,
     }
 
+    transition_receipt = {
+        "schema": runner.TRANSITION_RECEIPT_SCHEMA,
+        "pull_request": 1041,
+        "base_sha": BASE,
+        "head_sha": HEAD,
+        "protected_paths": [".github/workflows/pr-gate.yml"],
+        "validator_sha256": "d" * 64,
+        "result": "success",
+    }
+    transition_zip = io.BytesIO()
+    with zipfile.ZipFile(transition_zip, "w") as archive:
+        archive.writestr(
+            "wbc-transition-receipt.json",
+            canonical_json_bytes(transition_receipt),
+        )
+    assert runner.extract_transition_receipt(transition_zip.getvalue()) == transition_receipt
+
+    class NoBoundaryClient:
+        def get(self, path: str) -> list[dict]:
+            assert path == "/pulls/1041/files?per_page=100&page=1"
+            return []
+
+    assert runner.transition_receipt_reasons(
+        NoBoundaryClient(), pr_number=1041, base_sha=BASE, head_sha=HEAD
+    ) == []
+
     reasons = runner.admission_reasons(
         repository="orenvlad-ai/wb-core",
         run=workflow(),
