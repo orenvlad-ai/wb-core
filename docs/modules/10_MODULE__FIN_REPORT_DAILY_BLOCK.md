@@ -6,12 +6,9 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по уже перенесённому блоку `fin_report_daily_block`."
 scope: "Legacy-source, target contract, артефакты, кодовые части и подтверждённый official-api checkpoint для daily financial snapshot."
 source_basis:
-  - "migration/53_fin_report_daily_block_contract.md"
-  - "migration/56_fin_report_daily_block_legacy_sample_source.md"
   - "artifacts/fin_report_daily_block/evidence/initial__fin-report-daily__evidence.md"
   - "apps/fin_report_daily_block_smoke.py"
   - "apps/fin_report_daily_block_http_smoke.py"
-  - "migration/164_finance_daily_supported_transport_and_recovery.md"
 related_modules:
   - "packages/contracts/fin_report_daily_block.py"
   - "packages/adapters/fin_report_daily_block.py"
@@ -26,10 +23,6 @@ related_runners:
   - "apps/finance_daily_historical_recovery.py"
 related_docs:
   - "00_INDEX__MODULES.md"
-  - "migration/53_fin_report_daily_block_contract.md"
-  - "migration/54_fin_report_daily_block_parity_matrix.md"
-  - "migration/55_fin_report_daily_block_evidence_checklist.md"
-  - "migration/56_fin_report_daily_block_legacy_sample_source.md"
   - "artifacts/fin_report_daily_block/evidence/initial__fin-report-daily__evidence.md"
 source_of_truth_level: "module_canonical"
 update_note: "Daily Vitrina переведена на поддерживаемый Finance POST, общий server-owned rate gate и exact-date recovery."

@@ -10,8 +10,6 @@
 
 ## Source Basis
 
-- `migration/86_registry_upload_contract.md`
-- `migration/87_registry_upload_bundle_v1.md`
 - `artifacts/registry_upload_bundle_v1/target/registry_upload_bundle__fixture.json`
 - `artifacts/registry_upload_file_backed_service/input/registry_upload_bundle__fixture.json`
 - `artifacts/registry_upload_file_backed_service/target/*.json`

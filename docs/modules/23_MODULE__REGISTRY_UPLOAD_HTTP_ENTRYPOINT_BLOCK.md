@@ -6,9 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_http_entrypoint_block`."
 scope: "Первый live inbound HTTP entrypoint для V2-реестров, separate `COST_PRICE` upload contour и narrow operator surface для `sheet_vitrina_v1`: canonical bundle request, sibling cost-price request, thin request -> runtime -> response wiring, server-side `activated_at`, separated refresh/load actions, date-aware plan/status read, compact read-only daily/stock/plan-execution report surfaces, repo-owned orchestration-first operator page, sibling phase-4 web-vitrina page composition поверх stable seams и existing read route, read-only `Отзывы` tab/feedbacks route over official WB API, bounded server-side factory-order supply contour, common-shell system actions `Инструкции`/`Настройки` and server-owned section-based runtime users/admin auth model without SPA/build pipeline."
 source_basis:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/89_registry_upload_db_backed_runtime.md"
-  - "migration/90_registry_upload_http_entrypoint.md"
   - "artifacts/registry_upload_http_entrypoint/input/registry_upload_bundle__fixture.json"
   - "artifacts/registry_upload_http_entrypoint/evidence/initial__registry-upload-http-entrypoint__evidence.md"
 related_modules:
@@ -248,9 +245,6 @@ related_runners:
   - "apps/sheet_vitrina_v1_business_time_smoke.py"
   - "apps/registry_upload_db_backed_runtime_smoke.py"
 related_docs:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/89_registry_upload_db_backed_runtime.md"
-  - "migration/90_registry_upload_http_entrypoint.md"
   - "docs/architecture/10_hosted_runtime_deploy_contract.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
@@ -274,8 +268,6 @@ current_update_note: "`Настройки` встроены в общий WebCor
   - `registry_upload_bundle_v1_block`
   - `registry_upload_file_backed_service_block`
   - `registry_upload_db_backed_runtime_block`
-  - `migration/86_registry_upload_contract.md`
-  - `migration/90_registry_upload_http_entrypoint.md`
 - Семантика блока: принять bundle по HTTP, делегировать ingest/refresh/status-read в существующий DB-backed runtime и отдать наружу канонические JSON/results плюс один narrow operator HTML page на том же server contour.
 
 # 3. Target contract и смысл результата

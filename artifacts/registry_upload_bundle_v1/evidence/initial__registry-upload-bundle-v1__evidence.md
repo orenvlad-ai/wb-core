@@ -10,7 +10,6 @@
 
 ## Source Basis
 
-- `migration/86_registry_upload_contract.md`
 - `artifacts/registry_upload_bundle_v1/input/config_v2__fixture.json`
 - `artifacts/registry_upload_bundle_v1/input/metrics_v2__fixture.json`
 - `artifacts/registry_upload_bundle_v1/input/formulas_v2__fixture.json`
@@ -21,7 +20,6 @@
 
 - upload path больше не существует только как контракт: есть живой artifact-backed bundle в канонической форме `bundle_version + uploaded_at + config_v2 + metrics_v2 + formulas_v2`
 - bundle собирается из трёх отдельных input fixtures и проверяется локальным validator-слоем
-- validator проверяет правила `migration/86` без раннего API/БД слоя
 - bundle остаётся table-facing и не тащит внутрь server runtime semantics
 - runtime registry используется только как внешний validation seed для `calc_ref` resolution
 - bounded scope покрывает:

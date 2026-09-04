@@ -13,7 +13,15 @@ from typing import Any, Protocol
 from urllib import parse as urllib_parse
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import Browser, BrowserContext, Download, Page, Playwright, sync_playwright
+try:
+    from playwright.sync_api import Browser, BrowserContext, Download, Page, Playwright, sync_playwright
+except ModuleNotFoundError as exc:
+    if exc.name not in {"playwright", "playwright.sync_api"}:
+        raise
+    Browser = BrowserContext = Download = Page = Playwright = Any
+
+    def sync_playwright() -> Any:
+        raise RuntimeError("playwright is required to run the promo XLSX collector")
 
 from packages.contracts.promo_xlsx_collector_block import (
     CampaignManifestItem,

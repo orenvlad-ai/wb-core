@@ -6,8 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `wide_data_matrix_delivery_bundle_v1_block`."
 scope: "Sheet-ready delivery bundle, input/target fixtures, кодовый минимум, подтверждённый artifact-backed smoke и границы первого handoff-ready checkpoint."
 source_basis:
-  - "migration/81_wide_data_matrix_delivery_contract.md"
-  - "migration/82_wide_data_matrix_delivery_bundle_v1.md"
   - "artifacts/wide_data_matrix_delivery_bundle_v1/evidence/initial__wide-data-matrix-delivery-bundle-v1__evidence.md"
   - "apps/wide_data_matrix_delivery_bundle_v1_smoke.py"
 related_modules:
@@ -18,8 +16,6 @@ related_endpoints: []
 related_runners:
   - "apps/wide_data_matrix_delivery_bundle_v1_smoke.py"
 related_docs:
-  - "migration/81_wide_data_matrix_delivery_contract.md"
-  - "migration/82_wide_data_matrix_delivery_bundle_v1.md"
   - "artifacts/wide_data_matrix_delivery_bundle_v1/evidence/initial__wide-data-matrix-delivery-bundle-v1__evidence.md"
 source_of_truth_level: "module_canonical"
 update_note: "Создан как канонический модульный документ для первого sheet-ready delivery bundle новой wide-by-date витрины."
@@ -41,7 +37,6 @@ update_note: "Создан как канонический модульный д
   - `table_projection_bundle_block`
   - `sku_display_bundle_block`
   - `registry/pilot_bundle`
-  - `migration/81_wide_data_matrix_delivery_contract.md`
 - Семантика блока: не делать Google Sheet и не писать Apps Script, а зафиксировать первый handoff-ready delivery artifact для будущих листов `DATA_VITRINA` и `STATUS`.
 
 # 3. Target contract и смысл результата

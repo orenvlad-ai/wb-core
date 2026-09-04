@@ -173,11 +173,6 @@
       "restart": true
     },
     {
-      "name": "wb-core-storage-recovery-sanitation@.service",
-      "enable": false,
-      "restart": false
-    },
-    {
       "name": "wb-core-business-data-maintenance-restore@.service",
       "enable": false,
       "restart": false
