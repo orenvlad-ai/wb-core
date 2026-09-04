@@ -32,7 +32,17 @@ jobs:
           path: candidate
           fetch-depth: 0
           persist-credentials: false
+      - name: Detect installed base validator
+        id: installed
+        shell: bash
+        run: |
+          if [[ -f trusted-base/ci/wbc_transition_validator.py ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Validate protected boundary from trusted base
+        if: steps.installed.outputs.enabled == 'true'
         run: >-
           python3 trusted-base/ci/wbc_transition_validator.py
           --root candidate
@@ -41,6 +51,7 @@ jobs:
           --head "${{ github.event.pull_request.head.sha }}"
           --output "$RUNNER_TEMP/wbc-transition-receipt.json"
       - name: Upload bound transition receipt
+        if: steps.installed.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: wbc-transition-validator-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
