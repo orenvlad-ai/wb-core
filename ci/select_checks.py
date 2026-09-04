@@ -19,9 +19,9 @@ PLAN_SCHEMA = "wb-core.check-plan/v1"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 KNOWN_ROOTS = {".github", "apps", "artifacts", "ci", "docs", "gas", "packages", "registry"}
 KNOWN_ROOT_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "README.md"}
-KNOWN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".py", ".toml", ".yaml", ".yml"}
-REPO_ONLY_PREFIXES = (".github/", "ci/", "docs/")
-REPO_ONLY_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "README.md"}
+KNOWN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".py", ".service", ".toml", ".yaml", ".yml"}
+REPO_ONLY_PREFIXES = (".github/", "ci/", "docs/", "migration/", "reports/", "workspaces/")
+REPO_ONLY_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "IMPLEMENTATION_REPORT.md", "README.md"}
 
 
 class PlanError(RuntimeError):
@@ -43,15 +43,15 @@ def exact_sha(value: str, label: str) -> str:
     return normalized
 
 
-def safe_path(path: str) -> str:
+def safe_path(path: str, *, allow_legacy: bool = False) -> str:
     normalized = path.strip().replace("\\", "/")
     if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
         raise PlanError(f"unsafe changed path: {path!r}")
     root = normalized.split("/", 1)[0]
-    if normalized not in KNOWN_ROOT_FILES and root not in KNOWN_ROOTS:
+    if not allow_legacy and normalized not in KNOWN_ROOT_FILES and root not in KNOWN_ROOTS:
         raise PlanError(f"unclassified top-level path: {normalized}")
     suffix = Path(normalized).suffix.lower()
-    if suffix not in KNOWN_SUFFIXES:
+    if not allow_legacy and suffix not in KNOWN_SUFFIXES:
         raise PlanError(f"unclassified file type: {normalized}")
     return normalized
 
@@ -78,7 +78,7 @@ def changed_paths(base: str, head: str) -> list[str]:
         if not fields:
             continue
         for value in fields[1:]:
-            paths.append(safe_path(value))
+            paths.append(safe_path(value, allow_legacy=True))
     return sorted(set(paths))
 
 
@@ -101,7 +101,9 @@ def build_plan_from_paths(
     file_exists: Callable[[str, str], bool],
 ) -> dict[str, Any]:
     mapping, mapping_sha = load_map()
-    safe_paths = [safe_path(path) for path in paths]
+    safe_paths = [
+        safe_path(path, allow_legacy=not file_exists(head, path)) for path in paths
+    ]
     groups: list[str] = []
     commands: list[list[str]] = []
     pip: list[str] = []

@@ -15,6 +15,7 @@ def exists(_head: str, path: str) -> bool:
         "packages/application/finance_value_smoke.py",
         "apps/example.py",
         "apps/example_smoke.py",
+        "unknown.bin",
     }
 
 
@@ -47,6 +48,16 @@ def main() -> None:
         pass
     else:
         raise AssertionError("unknown path was accepted")
+
+    deleted_history = build_plan_from_paths(
+        pull_request=4,
+        base=BASE,
+        head=HEAD,
+        paths=["migration/old-note.md"],
+        file_exists=exists,
+    )
+    verify_plan(deleted_history)
+    assert deleted_history["release_kind"] == "repo_only"
     print("select_checks_smoke: ok")
 
 
