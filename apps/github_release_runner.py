@@ -277,9 +277,9 @@ def checkout_merge(merge: str) -> None:
 
 
 def configure_ssh(directory: Path) -> None:
-    key = os.environ.get("WB_CORE_DEPLOY_SSH_KEY", "").strip()
-    known_hosts = os.environ.get("WB_CORE_DEPLOY_KNOWN_HOSTS", "").strip()
-    if not key or not known_hosts:
+    key = os.environ.get("WB_CORE_DEPLOY_SSH_KEY", "")
+    known_hosts = os.environ.get("WB_CORE_DEPLOY_KNOWN_HOSTS", "")
+    if not key.strip() or not known_hosts.strip():
         raise RunnerError("deploy-credentials-missing")
     target = json.loads((ROOT / "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json").read_text())
     host = str(target.get("host_ip") or "").strip()
@@ -287,8 +287,8 @@ def configure_ssh(directory: Path) -> None:
         raise RunnerError("deploy-target-missing")
     key_path = directory / "key"
     hosts_path = directory / "known-hosts"
-    key_path.write_text(key)
-    hosts_path.write_text(known_hosts)
+    key_path.write_text(key, encoding="utf-8")
+    hosts_path.write_text(known_hosts, encoding="utf-8")
     key_path.chmod(0o600)
     hosts_path.chmod(0o600)
     os.environ["WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE"] = str(key_path)

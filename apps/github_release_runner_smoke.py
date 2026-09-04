@@ -3,7 +3,9 @@
 
 import io
 import json
+import os
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -48,6 +50,30 @@ def main() -> None:
         pass
     else:
         raise AssertionError("short SHA accepted")
+
+    names = (
+        "WB_CORE_DEPLOY_SSH_KEY",
+        "WB_CORE_DEPLOY_KNOWN_HOSTS",
+        "WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE",
+        "WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS",
+    )
+    previous = {name: os.environ.get(name) for name in names}
+    key = "-----BEGIN OPENSSH PRIVATE KEY-----\nbody\n-----END OPENSSH PRIVATE KEY-----\n"
+    known_hosts = "example.invalid ssh-ed25519 AAAA\n"
+    try:
+        os.environ["WB_CORE_DEPLOY_SSH_KEY"] = key
+        os.environ["WB_CORE_DEPLOY_KNOWN_HOSTS"] = known_hosts
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner.configure_ssh(root)
+            assert (root / "key").read_text(encoding="utf-8") == key
+            assert (root / "known-hosts").read_text(encoding="utf-8") == known_hosts
+    finally:
+        for name, old in previous.items():
+            if old is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old
     print("github_release_runner_smoke: ok")
 
 
