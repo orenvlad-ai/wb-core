@@ -1,0 +1,78 @@
+{
+  "schema": "wb-core.check-map/v1",
+  "groups": {
+    "process": {
+      "patterns": [
+        ".github/workflows/**",
+        "ci/**",
+        "apps/github_release_runner.py",
+        "apps/github_release_runner_smoke.py",
+        "apps/production_apply_launcher.py",
+        "apps/production_apply_launcher_smoke.py"
+      ],
+      "commands": [
+        ["python3", "ci/select_checks_smoke.py"],
+        ["python3", "apps/github_release_runner_smoke.py"],
+        ["python3", "apps/production_apply_launcher_smoke.py"]
+      ],
+      "pip": []
+    },
+    "autoanswers": {
+      "patterns": [
+        "apps/*autoanswers*.py",
+        "packages/**/*autoanswers*.py",
+        "packages/node/wb_autoanswers_v1_4_2/**"
+      ],
+      "commands": [
+        ["python3", "apps/wb_autoanswers_store_rollback_smoke.py"]
+      ],
+      "pip": []
+    },
+    "finance": {
+      "patterns": [
+        "apps/*finance*.py",
+        "packages/**/*finance*.py",
+        "packages/**/*cost*.py"
+      ],
+      "commands": [
+        ["python3", "apps/wb_finance_weekly_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
+    },
+    "warehouse": {
+      "patterns": [
+        "apps/*warehouse*.py",
+        "apps/ff_stock*.py",
+        "packages/**/*warehouse*.py",
+        "packages/**/*ff_stock*.py"
+      ],
+      "commands": [
+        ["python3", "apps/warehouse_stocks_smoke.py"],
+        ["python3", "apps/ff_stock_ledger_smoke.py"]
+      ],
+      "pip": []
+    },
+    "web_vitrina": {
+      "patterns": [
+        "apps/*web_vitrina*.py",
+        "packages/**/*web_vitrina*.py",
+        "packages/adapters/templates/sheet_vitrina_v1_operator.html"
+      ],
+      "commands": [
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"]
+      ],
+      "pip": []
+    },
+    "supply": {
+      "patterns": [
+        "apps/*supply*.py",
+        "packages/**/*supply*.py",
+        "packages/**/*shipment*.py"
+      ],
+      "commands": [
+        ["python3", "apps/wb_regional_supply_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    }
+  }
+}

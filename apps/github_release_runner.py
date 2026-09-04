@@ -53,6 +53,16 @@ RECOVERY_SCRATCH_MANIFEST_CONTRACT = (
 RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT = (
     "wbc0035_recovery_scratch_release_bridge/v1"
 )
+TRANSITION_WORKFLOW_NAME = "WBC Transition Validator"
+TRANSITION_WORKFLOW_PATH = ".github/workflows/wbc-transition-validator.yml"
+TRANSITION_JOB_NAME = "transition-validator"
+TRANSITION_ARTIFACT_PREFIX = "wbc-transition-validator-"
+TRANSITION_RECEIPT_SCHEMA = "wb-core.transition-validator/v1"
+TRANSITION_PROTECTED_PATHS = {
+    ".github/workflows/pr-gate.yml",
+    ".github/workflows/release-runner.yml",
+    "apps/github_release_runner.py",
+}
 
 
 class RunnerError(RuntimeError):
@@ -213,6 +223,109 @@ def collect_workflow_plan(client: GitHubClient, workflow_run_id: int) -> tuple[d
         raw=True,
     )
     return run, artifact, extract_plan(raw_zip)
+
+
+def extract_transition_receipt(zip_bytes: bytes) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+            names = [name for name in archive.namelist() if name.rstrip("/") == "wbc-transition-receipt.json"]
+            if names != ["wbc-transition-receipt.json"]:
+                raise RunnerError("transition-receipt-artifact-shape-invalid")
+            raw = archive.read(names[0])
+    except zipfile.BadZipFile as exc:
+        raise RunnerError("transition-receipt-artifact-zip-invalid") from exc
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerError("transition-receipt-json-invalid") from exc
+    if not isinstance(value, dict):
+        raise RunnerError("transition-receipt-shape-invalid")
+    return value
+
+
+def pull_request_paths(client: GitHubClient, pr_number: int) -> set[str]:
+    paths: set[str] = set()
+    for page in range(1, 31):
+        payload = client.get(f"/pulls/{pr_number}/files?per_page=100&page={page}")
+        if not isinstance(payload, list):
+            raise RunnerError("transition-pr-files-shape-invalid")
+        for item in payload:
+            if not isinstance(item, Mapping) or not isinstance(item.get("filename"), str):
+                raise RunnerError("transition-pr-file-invalid")
+            paths.add(str(item["filename"]))
+        if len(payload) < 100:
+            return paths
+    raise RunnerError("transition-pr-files-pagination-bound-exceeded")
+
+
+def transition_receipt_reasons(
+    client: GitHubClient, *, pr_number: int, base_sha: str, head_sha: str
+) -> list[str]:
+    protected = sorted(TRANSITION_PROTECTED_PATHS.intersection(pull_request_paths(client, pr_number)))
+    if not protected:
+        return []
+    payload = client.get(f"/commits/{head_sha}/check-runs?filter=latest&per_page=100")
+    checks = payload.get("check_runs") if isinstance(payload, Mapping) else None
+    if not isinstance(checks, list):
+        return ["transition-checks-shape-invalid"]
+    matches = [
+        item
+        for item in checks
+        if isinstance(item, Mapping)
+        and item.get("name") == TRANSITION_JOB_NAME
+        and item.get("app", {}).get("slug") == "github-actions"
+    ]
+    if len(matches) != 1:
+        return ["transition-check-count-invalid"]
+    check = matches[0]
+    if check.get("status") != "completed" or check.get("conclusion") != "success":
+        return ["transition-check-not-successful"]
+    details = str(check.get("details_url") or "")
+    match = re.search(r"/actions/runs/(\d+)/job/", details)
+    if match is None:
+        return ["transition-check-run-id-missing"]
+    run_id = int(match.group(1))
+    run = client.get(f"/actions/runs/{run_id}")
+    run_prs = run.get("pull_requests") if isinstance(run, Mapping) else None
+    run_numbers = [item.get("number") for item in run_prs if isinstance(item, Mapping)] if isinstance(run_prs, list) else []
+    reasons: list[str] = []
+    if run.get("name") != TRANSITION_WORKFLOW_NAME or run.get("path") != TRANSITION_WORKFLOW_PATH:
+        reasons.append("transition-workflow-identity-invalid")
+    if run.get("event") != "pull_request" or run.get("run_attempt") != 1:
+        reasons.append("transition-workflow-provenance-invalid")
+    if run.get("status") != "completed" or run.get("conclusion") != "success":
+        reasons.append("transition-workflow-not-successful")
+    if exact_sha(run.get("head_sha"), "transition-workflow-head") != head_sha:
+        reasons.append("transition-workflow-head-mismatch")
+    if run_numbers != [pr_number]:
+        reasons.append("transition-workflow-pr-mismatch")
+    artifacts_payload = client.get(f"/actions/runs/{run_id}/artifacts?per_page=100")
+    artifacts = artifacts_payload.get("artifacts") if isinstance(artifacts_payload, Mapping) else None
+    expected_name = f"{TRANSITION_ARTIFACT_PREFIX}{pr_number}-{head_sha}"
+    values = [
+        item for item in artifacts or []
+        if isinstance(item, Mapping) and item.get("name") == expected_name and item.get("expired") is not True
+    ]
+    if len(values) != 1:
+        return reasons + ["transition-receipt-artifact-count-invalid"]
+    raw_zip = client.request(
+        "GET",
+        f"/actions/artifacts/{int(values[0]['id'])}/zip",
+        accept="application/vnd.github+json",
+        raw=True,
+    )
+    receipt = extract_transition_receipt(raw_zip)
+    if receipt.get("schema") != TRANSITION_RECEIPT_SCHEMA or receipt.get("result") != "success":
+        reasons.append("transition-receipt-result-invalid")
+    if receipt.get("pull_request") != pr_number:
+        reasons.append("transition-receipt-pr-mismatch")
+    if receipt.get("base_sha") != base_sha or receipt.get("head_sha") != head_sha:
+        reasons.append("transition-receipt-sha-mismatch")
+    if sorted(receipt.get("protected_paths") or []) != protected:
+        reasons.append("transition-receipt-paths-mismatch")
+    if re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("validator_sha256") or "")) is None:
+        reasons.append("transition-receipt-validator-invalid")
+    return reasons
 
 
 def collect_workflow_jobs(
@@ -507,7 +620,8 @@ def recompute_plan(pr: int, base_sha: str, head_sha: str) -> dict[str, Any]:
     )
     if resolved_head != head_sha:
         raise RunnerError("pull-ref-head-mismatch", state="superseded")
-    require_unchanged_pr_gate_workflow(base_sha, head_sha)
+    # Changes to the PR/release boundary are admitted only by the separate
+    # base-owned transition receipt checked in run_once.
     with tempfile.TemporaryDirectory(prefix="wb-core-release-plan-") as directory:
         output = Path(directory) / "test-plan.json"
         env = os.environ.copy()
@@ -811,6 +925,17 @@ def run_once(client: GitHubClient, workflow_run_id: int, output: Path) -> dict[s
         trusted_main_sha=trusted,
     )
     reasons.extend(workflow_job_reasons(jobs, artifact_plan))
+    try:
+        reasons.extend(
+            transition_receipt_reasons(
+                client,
+                pr_number=pr_number,
+                base_sha=base_sha,
+                head_sha=head_sha,
+            )
+        )
+    except RunnerError as exc:
+        reasons.append(exc.reason)
     if not reasons:
         try:
             recomputed = recompute_plan(pr_number, base_sha, head_sha)
