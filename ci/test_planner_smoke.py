@@ -560,9 +560,9 @@ def main() -> None:
     assert task_name_pattern_text in protocol_text
     task_name_pattern = re.compile(rf"\A{task_name_pattern_text}\Z")
     for task_name in (
+        "wbc_0001_051_uprostit",
         "wbc_0028_001_karta_propuskov",
-        "wbc_0028_002_svyaz_s_0027",
-        "wbc_0028_003_vosstanovlenie",
+        "wbc_9999_314_proverka_42",
     ):
         assert task_name_pattern.fullmatch(task_name), task_name
     for obsolete_task_name in (
@@ -585,14 +585,51 @@ def main() -> None:
         "active не более одного mutating/implementation subagent"
         in compact_protocol_text
     )
-    assert (
-        "zero-or-more независимых bounded diagnostic/read-only subagents"
-        in compact_protocol_text
+    assert re.search(
+        r"minimum-sufficient bounded diagnostic packages.*ближайш(?:его|ий) decision transition",
+        compact_protocol_text,
     )
-    assert (
-        "Один и тот же question параллельно не дублируется"
-        in compact_protocol_text
+    assert re.search(
+        r"Несколько questions входят в один package.*sources, authority, immutable/snapshot boundary и один stop condition",
+        compact_protocol_text,
     )
+    assert "adaptive `0/1/N`" in compact_protocol_text
+    assert "без fixed/default count" in compact_protocol_text
+    assert "fork_turns:\"none\"" in compact_protocol_text
+    assert re.search(
+        r"Post-merge same-family correction реактивирует того же mutator",
+        compact_protocol_text,
+    )
+    assert re.search(
+        r"До merge same-scope review finding.*исходного mutating subagent.*том же implementation block и PR",
+        compact_protocol_text,
+    )
+    assert re.search(
+        r"family counter монотонно.*[Нн]овый PR, subagent, operation nonce, rebase",
+        compact_protocol_text,
+    )
+    assert "diagnostic не сбрасывает его" in compact_protocol_text
+    assert re.search(
+        r"все доступные и применимые local, staging и no-submit production-shaped checks",
+        compact_protocol_text,
+    )
+    assert re.search(
+        r"superseded.*inactive.*immutable history.*active critical path",
+        compact_protocol_text,
+    )
+    assert re.search(
+        r"submitted.*ambiguous.*partial external effect.*query-only readback, reconciliation и terminalization exact same operation",
+        compact_protocol_text,
+    )
+    assert re.search(
+        r"Optional one-shot frozen review.*ordinary diagnostic(?:/read-only)? package",
+        compact_protocol_text,
+    )
+    assert "не замена tests" in compact_protocol_text
+    assert "не новая роль, approval или universal gate" in compact_protocol_text
+    assert "Один параллельный dispatch трёх blocks" not in compact_protocol_text
+    assert "с одним bounded evidence question" not in compact_protocol_text
+    assert "на каждый независимый compact evidence question" not in compact_protocol_text
     assert (
         "immutable/exact snapshot boundary либо ждёт stable boundary"
         in compact_protocol_text

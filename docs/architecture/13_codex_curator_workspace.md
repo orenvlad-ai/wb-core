@@ -19,13 +19,16 @@ owner-facing gate нужен valid receipt
 
 ## Visible internal execution
 
-Каждый technical execution block получает один fresh visible internal subagent
-через `collaboration.spawn_agent`. Он виден в `Subagents`/`Activity`, не
-pin-ится и не создаёт sidebar task или `::created-thread`. Одновременно active
-допустим максимум один mutating/implementation subagent и zero-or-more
-независимых bounded diagnostic/read-only subagents; WBC не задаёт read-only
-blocks numeric cap сверх capacity platform. Exact naming, compact passport,
-`fork_turns:"none"`, diagnostic/implementation boundaries и one-branch/one-PR
+Каждый technical execution block имеет одного visible internal subagent. Каждый
+diagnostic package и первый implementation block получают fresh actor через
+`collaboration.spawn_agent` с `fork_turns:"none"`. Actor виден в
+`Subagents`/`Activity`, не pin-ится и не создаёт sidebar task или
+`::created-thread`. Same-scope correction до merge и post-merge same-family
+correction реактивируют исходного mutator по execution protocol, не создавая
+duplicate actor. Одновременно active допустим максимум один mutating/
+implementation subagent и adaptive `0/1/N` minimum-sufficient bounded
+diagnostic packages без numeric preference/cap сверх capacity platform. Exact
+naming, compact passport, package/implementation boundaries и one-branch/one-PR
 ownership задаёт execution protocol, а не workspace UI.
 
 После successful spawn main сохраняет текущий turn активным до meaningful
@@ -45,10 +48,13 @@ target language. Правило относится только к видимы�
 
 ## One owner surface and continuation
 
-Diagnostic handoff возвращается только owning main task; read-only block не
-передаёт его sibling executor-у и не запускает mutating continuation. После
-handoff только owning main task публикует итог, задаёт допустимый business-вопрос
-и dispatch-ит continuation. Другой main curator может один раз
+Diagnostic package handoff возвращается только owning main task, закрывает его
+scoped questions одним stop condition и не передаётся sibling executor-у.
+Read-only block не запускает mutating continuation. Optional one-shot frozen
+review следует тому же package/handoff path: это не постоянная reviewer role,
+не universal gate и не замена tests. После handoff только owning main task
+публикует итог, задаёт допустимый business-вопрос и dispatch-ит continuation.
+Другой main curator может один раз
 передать owner-у structured evidence и exact pointer, но не ведёт параллельный
 monitoring или управление той же целью, не пишет исполнителю повторно и не
 публикует второй status либо question. Duplicate pending/answered gate и subset

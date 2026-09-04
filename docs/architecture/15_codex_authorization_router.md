@@ -136,11 +136,21 @@ question запрещён.
 Owning main применяет те же closed outcomes до implementation spawn, используя
 существующий compact task passport и exact available evidence, а не новый
 artifact или gate. Однозначный accepted outcome/acceptance/boundary и dominant
-technical path дают `AUTO_CONTINUE`. Недостающее substantive technical
-evidence даёт `EVIDENCE_BLOCKED` и отдельный automatic bounded diagnostic/
-read-only block на каждый независимый compact evidence question без human gate;
-один question параллельно не дублируется, а diagnostic dispatch сам эту
+technical path дают `AUTO_CONTINUE` и `0` diagnostic packages. Недостающее
+substantive technical evidence даёт `EVIDENCE_BLOCKED` и `1/N`
+minimum-sufficient bounded diagnostic packages для одного ближайшего decision
+transition без human gate и без fixed/default count. Связанные questions
+объединяются только при общих или совместимых sources, authority,
+immutable/snapshot boundary и одном stop condition; broad audit запрещён.
+Independent packages могут идти параллельно.
+Dependent package откладывается только когда зависит от результата другого,
+будет с существенной вероятностью invalidated с material waste либо требует
+несовместимой live boundary; дешёвый независимый package не сериализуется по
+умолчанию. Question/package не дублируется, а diagnostic dispatch сам эту
 проверку не требует.
+
+Таким образом diagnostic dispatch adaptive `0/1/N` по available evidence и
+dependency graph, без numeric preference или default.
 
 `HUMAN_REQUIRED` возникает только когда exact evidence оставляет два или
 более различных допустимых business outcomes без dominant technical choice,

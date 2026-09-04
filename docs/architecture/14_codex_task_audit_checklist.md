@@ -46,9 +46,13 @@ tightening. Любое замедление допустимо только дл
    finding, если owner-facing conclusion потребовал нового evidence из
    repository/code, logs, server, database, external API либо длительного
    ожидания. Curator-control reads, pure conceptual/clarification/design ответ
-   и вывод из уже существующего exact handoff отклонением не являются. Finding
-   проходит обычный cost-first decision order ниже; он не означает
-   автоматический `TIGHTEN`, новый task gate или отдельное human confirmation.
+   и вывод из уже существующего exact handoff отклонением не являются. Для
+   diagnostic work проверь minimum-sufficient package boundary: artificial
+   fragmentation совместимых questions, duplicate package/question и
+   необоснованная сериализация дешёвого независимого package являются findings;
+   fixed/default dispatch count не используется. Finding проходит обычный
+   cost-first decision order ниже; он не означает automatic `TIGHTEN`, новый
+   task gate или отдельное human confirmation.
 4. **State split.** Отдельно зафиксируй terminal state technical execution block и
    business outcome main task. `Done` subagent-а не означает автоматически
    завершённый business outcome.
@@ -74,7 +78,7 @@ tightening. Любое замедление допустимо только дл
 
 | Contour | Process treatment |
 | --- | --- |
-| Diagnostic/read-only technical execution | Audit отличает отдельные fresh-subagent blocks с неповторяющимися bounded evidence questions от curator-control reads. Независимые read-only blocks могут идти параллельно; main-owned substantive сбор, mutating capability внутри diagnostic block или duplicate question является actor/context finding и проходит обычный cost-first decision order, а не автоматически `TIGHTEN`. |
+| Diagnostic/read-only technical execution | Audit проверяет cohesive minimum-sufficient packages для ближайшего decision transition: related questions объединены только при совместимых sources/authority/snapshot и одном stop condition; dependent либо несовместимые packages разделены, а дешёвые независимые не сериализованы без dependency, likely invalidation/material waste или incompatible live boundary. Artificial fragmentation, duplicate package/question, main-owned substantive сбор и mutating capability внутри diagnostic package являются actor/context findings. Число packages выводится из evidence/dependency graph без numeric norm; finding проходит cost-first decision order, а не автоматически `TIGHTEN`. |
 | Standard OS maintenance | Использовать штатную OS-процедуру в accepted scope с proportional target/recovery/readback evidence. Сам факт production host не создаёт blanket PR requirement. |
 | Bounded reversible one-off infrastructure maintenance | Допустимо выполнить быстро без PR, только если заранее exact scope/identity, recovery, один mutation submit, non-target protection, post-action readback и durable receipt. Local `/tmp` допустим как working evidence, но никогда не как единственное terminal evidence destructive/production operation. |
 | Recurring automation | Implementation должна быть repo-owned и проходить обычный repository/release flow. Audit не проектирует и не запускает automation. |

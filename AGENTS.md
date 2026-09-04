@@ -49,31 +49,46 @@ compatibility не является blocker, current canonical source acquisitio
   существующих полях compact passport exact outcome/acceptance,
   included/excluded boundary и только известные связанные final effects,
   способные изменить acceptance/business outcome. Однозначность даёт
-  `AUTO_CONTINUE`; missing substantive evidence — отдельный bounded automatic
-  diagnostic на каждый независимый evidence question, exact unresolved
-  business fork — один вопрос по doc15. Required technical dependency внутри
-  accepted final meaning включается автоматически; новый artifact/gate и
-  ordinary-task overhead запрещены.
-- `Read-only` задаёт mutation boundary, не actor. Каждый новый compact evidence
-  question или long wait получает отдельный fresh visible internal subagent без
-  branch/worktree/PR/mutation. Независимые diagnostic/read-only blocks могут
-  идти параллельно без WBC numeric cap; один question не дублируется. Если
-  implementation меняет затронутый resource, diagnostic использует immutable/
-  exact snapshot boundary либо ждёт stable boundary. Curator-control read
-  ограничен exact immutable receipt/status readback без нового domain evidence
-  или inference. Exact routing определяет doc07.
+  `AUTO_CONTINUE` без diagnostic package; missing substantive evidence — `1/N`
+  minimum-sufficient bounded diagnostic packages для одного ближайшего decision
+  transition. Итого dispatch adaptive `0/1/N` по evidence/dependency graph без
+  fixed/default count; exact unresolved business fork — один вопрос по doc15.
+  Связанные evidence questions можно объединить только при совместимых sources,
+  authority и snapshot boundary и одном stop condition. Required technical
+  dependency внутри accepted final meaning включается автоматически; новый
+  artifact/gate и ordinary-task overhead запрещены.
+- `Read-only` задаёт mutation boundary, не actor. Каждый diagnostic package или
+  long wait получает одного fresh visible internal subagent без branch/worktree/PR/
+  mutation. Независимые packages могут идти параллельно без WBC numeric cap;
+  dependent package откладывается только по dependency/invalidation/live-
+  boundary причинам из doc07, question/package не дублируется. Optional one-shot
+  frozen review — ordinary diagnostic package, не новая роль/gate и не замена
+  tests; постоянный duplicate reviewer/monitor запрещён. Для меняемого resource
+  используется immutable/exact snapshot boundary либо stable boundary.
+  Curator-control read ограничен exact immutable receipt/status readback без
+  нового domain evidence или inference. Exact routing определяет doc07.
 - В одной main task одновременно active не более одного subagent, способного
   менять files/code/runtime/data/external state либо создавать branch/PR. Этот
   bounded implementation block владеет одной branch и, без stop-line, одним
-  non-draft PR. Same-scope correction продолжает тот же block/PR; новый
-  mutating scope или PR требует terminal предыдущего implementation block.
+  non-draft PR. Same-scope correction до merge возвращается исходному mutator в
+  тот же PR; post-merge same-family correction реактивирует его же в новом
+  последовательном block/PR. Новый mutator допустим только для materially new
+  outcome/target/destination/effect либо доказанной необратимой недоступности
+  прежнего; любой новый PR требует terminal предыдущего implementation block.
   Internal execution создаётся только через `collaboration.spawn_agent`, не
   через user-owned sidebar task.
 - После двух terminal pre-submit failures или двух sequential correction
-  releases одной family третий narrow retry запрещён. Применяется consolidated
-  terminal query-only/no-submit rehearsal и следующий consolidated correction
+  releases одной family третий narrow retry запрещён. Family counter монотонен:
+  новый PR/subagent/operation nonce/rebase/diagnostic его не сбрасывает. После
+  threshold применяется один consolidated package со всеми доступными local/
+  staging/no-submit production-shaped checks и следующий consolidated correction
   PR строго по doc07; ordinary tasks и post-submit same-operation reconciliation
   не получают этот overhead.
+- Отменённая strategy/dependency на critical path помечается superseded/inactive,
+  но её immutable history сохраняется; исключается только active path. До submit
+  выполняется safe stop. После submitted/ambiguous/partial effect сначала идут
+  exact same-operation readback, reconciliation и terminalization, и только
+  затем выбирается новый active path.
 - Evidence read обязан разрешать acceptance predicate, blocker или current
   failure hypothesis. Full logs/manifests/receipts остаются durable; active
   context и handoff используют bounded conclusion и exact pointers/digests.

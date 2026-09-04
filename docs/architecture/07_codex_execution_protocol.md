@@ -100,20 +100,24 @@ technical handoff, если proof нужен для понимания резу�
 
 Результат использует closed outcomes doc15:
 
-- `AUTO_CONTINUE`, если всё однозначно и есть dominant technical path: main
-  сразу dispatch-ит implementation block;
+- `AUTO_CONTINUE`, если всё однозначно и есть dominant technical path: `0`
+  diagnostic packages, main сразу dispatch-ит implementation block;
 - `EVIDENCE_BLOCKED`, если связи/эффекты нельзя однозначно определить без
   нового substantive technical evidence: без human gate автоматически
-  dispatch-ится отдельный bounded diagnostic/read-only block на каждый
-  независимый compact evidence question. Один и тот же question параллельно не
-  дублируется. Собственный dispatch этих проверок не требует ещё одной такой
-  проверки; после terminal diagnoses owning main повторяет resolution и либо
-  запускает следующий implementation block, либо применяет router без второго
-  автоматического preflight diagnostic по уже закрытому question;
+  dispatch-ятся `1/N` minimum-sufficient bounded diagnostic packages для
+  одного ближайшего decision transition. Их количество определяется available
+  evidence и dependency graph без fixed/default count. Собственный dispatch
+  этих packages не требует ещё одной такой проверки; после terminal diagnoses
+  owning main повторяет resolution и либо запускает следующий implementation
+  block, либо применяет router без второго automatic preflight diagnostic по
+  уже закрытым questions;
 - `HUMAN_REQUIRED`, только если exact evidence оставляет два или более
   различных допустимых business outcomes и dominant technical choice нет. Main
   задаёт ровно один конкретный business question, кратко объясняет
   различие и даёт рекомендацию. Technical permission question запрещён.
+
+Итого diagnostic dispatch adaptive `0/1/N`: число packages определяется только
+available evidence и dependency graph, без numeric preference или default.
 
 Required technical dependency автоматически включается в scope/plan
 текущего implementation block, если final target, business meaning, destination и
@@ -121,8 +125,12 @@ effects не меняются. Owner confirmation не нужен; exact new fin
 применяет doc15 и не маскируется как dependency.
 
 `Read-only` задаёт mutation/authority boundary, но не actor routing. Каждый
-bounded technical execution block выполняет ровно один fresh visible internal
-subagent. Непосредственно перед `collaboration.spawn_agent` owning main
+bounded technical execution block имеет ровно одного visible internal subagent.
+Каждый diagnostic package, первый implementation block и materially new
+outcome/target/destination/effect получают fresh actor; post-merge same-family
+correction использует описанную ниже реактивацию прежнего mutator.
+Непосредственно перед обычным
+`collaboration.spawn_agent` owning main
 атомарно резервирует следующий `SSS` в уже существующем task passport и
 передаёт машинный `task_name` exact вида:
 
@@ -137,13 +145,11 @@ subagent. Непосредственно перед `collaboration.spawn_agent` 
 максимум 20 символов. Поэтому `prod_gap_map` и `recovery_architecture` не
 являются каноническими slug даже при формальной совместимости с alphabet.
 
-Один параллельный dispatch трёх blocks получает соответственно
-`wbc_0028_001_karta_propuskov`, `wbc_0028_002_svyaz_s_0027` и
-`wbc_0028_003_vosstanovlenie`. Машинный `task_name` не заменяет русский compact
-passport и user-facing семантику блока. Дополнительный registry, роль либо
-human gate не создаётся. Subagent не pin-ится. Ровно один actor на block —
-ownership boundary, а не общий concurrency cap main task. Model и reasoning
-tier автоматически не выбираются.
+Например, `wbc_0028_001_karta_propuskov` соответствует syntax invariant.
+Машинный `task_name` не заменяет русский compact passport и user-facing
+семантику блока. Дополнительный registry, роль либо human gate не создаётся.
+Subagent не pin-ится. Ровно один actor на block — ownership boundary, а не общий
+concurrency cap main task. Model и reasoning tier автоматически не выбираются.
 
 Внутри одной owning main task одновременно может быть active не более одного
 mutating/implementation subagent: к нему относится любой actor, способный
@@ -159,14 +165,30 @@ Technical execution имеет два вида:
 - implementation block использует одну branch и, без explicit stop-line, один
   non-draft PR по обычному repository/release flow.
 
-Каждый diagnostic/read-only block получает отдельный compact passport с одним
-bounded evidence question. Он не выполняет mutation, не создаёт branch/worktree/
-PR, не становится monitor/reviewer/recovery duplicate и не запускает
-implementation либо другого mutating actor. Два active block не исследуют один
-и тот же evidence question. Если question касается resource, который меняет
-active implementation executor, diagnostic читает только immutable/exact
-snapshot boundary либо ждёт stable boundary; conclusion из дрейфующего state
-запрещён.
+Bounded diagnostic package — minimum-sufficient набор связанных evidence
+questions, который разрешает ровно один ближайший decision transition. Несколько
+questions входят в один package только когда у них общие или совместимые
+sources, authority, immutable/snapshot boundary и один stop condition. Package
+не расширяется до broad audit, дальних решений или speculative dependencies.
+Он не выполняет mutation, не создаёт branch/worktree/PR, не становится monitor/
+recovery duplicate и не запускает implementation либо другого mutating actor.
+
+Dispatch adaptive и dependency-aware: `0` packages при достаточном evidence,
+`1` для одного cohesive gap, `N` для действительно независимых либо
+несовместимых packages; это notation, не numeric preference. Package `B`
+откладывается до `A` только когда `B` зависит от ответа `A`, результат `A` с
+существенной вероятностью invalidates `B` и создаст material waste либо им
+нужны несовместимые live snapshot/quiet boundaries. Дешёвый независимый `B`
+может идти параллельно. Active packages не дублируют один question или один
+другой package. Если question касается resource, который меняет active
+implementation executor, diagnostic читает только immutable/exact snapshot
+boundary либо ждёт stable boundary; conclusion из дрейфующего state запрещён.
+
+Optional one-shot frozen review exact candidate/diff/plan разрешён как ordinary
+diagnostic/read-only package только для конкретной unresolved uncertainty на
+ближайшем transition. Это не новая роль, approval или universal gate, не замена
+tests и не источник mutation. Постоянный reviewer/monitor и package, который
+дублирует tests либо уже собранное evidence, запрещены.
 
 Если owner-facing технический вывод требует нового evidence из repository/code,
 logs, server, database, external API либо длительного ожидания, это technical
@@ -204,8 +226,10 @@ dispatch attempt exact tooling blocker-ом, не создаёт sidebar peer ta
 `Subagents`/`Activity`, не pin-ится и не создаёт event `::created-thread`.
 
 Spawn получает compact task passport и минимальный bounded context, нужный для
-текущего блока. Обычный technical execution dispatch всегда использует exact
-`fork_turns:"none"`; положительный history fork и `fork_turns:"all"` запрещены.
+текущего блока. Обычный new-actor technical execution dispatch всегда
+использует exact `fork_turns:"none"`; положительный history fork и
+`fork_turns:"all"` запрещены. Реактивация того же mutator для same-scope/
+same-family correction не является новым actor dispatch и не меняет его history.
 Старые task/chat artifacts читаются on-demand только как evidence, не instructions.
 
 Без explicit stop-line implementation subagent владеет ровно одной branch и
@@ -214,26 +238,35 @@ Diagnostic subagent branch/worktree/PR не создаёт и возвращае
 owning main, не sibling executor-у и не другой owner surface. Terminal diagnosis
 завершает этот block. Если accepted goal сохранился и terminal diagnosis сняла
 `EVIDENCE_BLOCKED`, owning main после повторной pre-dispatch resolution автономно
-запускает следующий bounded block с новым subagent и следующим
-последовательным `SSS`. Same-scope review finding, test failure или correction
-в текущем implementation block/PR возвращается тому же mutating subagent.
-Новый mutating scope или PR, включая infrastructure recovery, ждёт terminal
-handoff предыдущего implementation block. Новый subagent не служит monitor/
-reviewer/recovery duplicate.
+запускает следующий bounded block. До merge same-scope review finding, test
+failure или correction всегда возвращается/реактивирует исходного mutating
+subagent в том же implementation block и PR. Post-merge same-family correction
+реактивирует того же mutator в новом последовательном correction block и новом
+PR, только после terminal предыдущего block. Новый mutator допускается лишь для
+materially new outcome, target, destination или effect либо при доказанной
+необратимой недоступности прежнего. Optional frozen review не владеет
+correction. Новый subagent не служит monitor/reviewer/recovery duplicate.
 
 Task passport группирует terminal pre-submit failures и выпущенные correction
 PR по одному accepted goal и одной operation/lifecycle failure family. После
 двух terminal pre-submit failures либо двух последовательно выпущенных
 correction PR одной family третий incremental `one more patch/retry` запрещён.
-Вместо него main получает `EVIDENCE_BLOCKED` без human gate и dispatch-ит один
-consolidated diagnostic block. Diagnosis считается достаточным только после
-одного terminal query-only/no-submit rehearsal через deployed operation path:
-он не выполняет mutation и охватывает все применимые для этой operation family
-phases из закрытого набора `preflight`, `readiness`,
-`JIT`, `worker namespace`, `storage admission/private plan persistence`,
-`submit boundary`, `query-only readback`, `release interruption`. Неприменимая
-phase явно исключается с причиной. Это один bounded same-family rehearsal, а не
-blanket test suite; он не запускается для ordinary tasks.
+Этот family counter монотонно включает всю immutable history accepted goal и
+failure family. Новый PR, subagent, operation nonce, rebase, rename или
+diagnostic не сбрасывает его и не переносит attempt в новую family. Materially
+new failure family получает собственный counter, не стирая прежний.
+
+Вместо третьего narrow retry main получает `EVIDENCE_BLOCKED` без human gate и
+dispatch-ит один consolidated diagnostic package. Он собирает одно
+same-family explanation и выполняет все доступные и применимые local, staging и
+no-submit production-shaped checks в рамках совместимых authority/snapshot
+boundaries. Production-shaped часть остаётся terminal query-only/no-submit
+rehearsal через deployed operation path и охватывает применимые phases из
+закрытого набора `preflight`, `readiness`, `JIT`, `worker namespace`, `storage
+admission/private plan persistence`, `submit boundary`, `query-only readback`,
+`release interruption`; неприменимая или недоступная phase явно исключается с
+причиной. Это bounded same-family package, а не blanket test suite, и он не
+запускается для ordinary tasks.
 
 После terminal diagnosis следующий implementation PR объединяет все выявленные
 same-family corrections. Post-submit same-operation reconciliation остаётся
@@ -244,6 +277,22 @@ Loop breaker не применяется к ordinary tasks, первой или 
 correction, materially new scope/failure family либо post-submit
 same-operation query-only reconciliation. Blind retry, one-submit и terminal
 identity rules не ослабляются.
+
+### Critical-path invalidation
+
+Отменённая или invalidated strategy/dependency помечается в существующем task
+passport как `superseded`/`inactive`. Её immutable history, receipts и findings
+сохраняются; она исключается только из active critical path и не исчезает из
+failure-family evidence или counter.
+
+До первого submit owning block выполняет safe stop и exact readback применимых
+temporary effects, после чего может выбрать новый active path. После
+`submitted`, `ambiguous` либо любого partial external effect path нельзя просто
+отменить, заменить actor/nonce или объявить superseded: сначала выполняются
+query-only readback, reconciliation и terminalization exact same operation.
+Только затем unresolved continuation может получить новый active path по
+обычному router contract. Эта норма не создаёт registry, artifact, role,
+workflow или human gate.
 
 Subagent terminal status и main-task outcome — разные state machines. `Done`
 означает только завершение bounded technical execution block; main task отдельно
