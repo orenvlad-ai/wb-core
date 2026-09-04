@@ -1,285 +1,70 @@
----
-title: "Индекс канонической модульной документации wb-core"
-doc_id: "WB-CORE-MODULE-00-INDEX"
-doc_type: "index"
-status: "active"
-purpose: "Дать единый navigation entrypoint для канонической модульной документации `wb-core`."
-scope: "Папка `docs/modules/`, её naming rules, статус source of truth и полный список модульных документов `01–52`."
-source_basis:
-  - "docs/modules/01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
-  - "docs/modules/02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
-  - "docs/modules/03_MODULE__PRICES_SNAPSHOT_BLOCK.md"
-  - "docs/modules/04_MODULE__SF_PERIOD_BLOCK.md"
-  - "docs/modules/05_MODULE__SPP_BLOCK.md"
-  - "docs/modules/06_MODULE__ADS_BIDS_BLOCK.md"
-  - "docs/modules/07_MODULE__STOCKS_BLOCK.md"
-  - "docs/modules/08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md"
-  - "docs/modules/09_MODULE__ADS_COMPACT_BLOCK.md"
-  - "docs/modules/10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
-  - "docs/modules/11_MODULE__PROMO_BY_PRICE_BLOCK.md"
-  - "docs/modules/12_MODULE__COGS_BY_GROUP_BLOCK.md"
-  - "docs/modules/13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md"
-  - "docs/modules/14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md"
-  - "docs/modules/15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md"
-  - "docs/modules/16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md"
-  - "docs/modules/17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
-  - "docs/modules/18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
-  - "docs/modules/19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
-  - "docs/modules/20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
-  - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
-  - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
-  - "docs/modules/23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
-  - "docs/modules/24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
-  - "docs/modules/25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
-  - "docs/modules/26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-  - "docs/modules/27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
-  - "docs/modules/28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
-  - "docs/modules/29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
-  - "docs/modules/30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
-  - "docs/modules/31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
-  - "docs/modules/32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
-  - "docs/modules/33_MODULE__ONEC_STOCKS_BLOCK.md"
-  - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
-  - "docs/modules/35_MODULE__SPP_PROXY_BLOCK.md"
-  - "docs/modules/36_MODULE__WB_SUPPLIES_BLOCK.md"
-  - "docs/modules/37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
-  - "docs/modules/38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
-  - "docs/modules/39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
-  - "docs/modules/40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
-  - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
-  - "docs/modules/42_MODULE__WB_SPP_TESTER_BLOCK.md"
-  - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
-  - "docs/modules/44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
-  - "docs/modules/45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
-  - "docs/modules/46_MODULE__SKU_MANAGEMENT_BLOCK.md"
-  - "docs/modules/47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
-  - "docs/modules/48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
-  - "docs/modules/49_MODULE__WB_AUTOANSWERS_SERVER.md"
-  - "docs/modules/50_MODULE__PARTNER_REPORT_BLOCK.md"
-  - "docs/modules/51_MODULE__WAREHOUSE_RECOVERY_POLICY.md"
-  - "docs/modules/52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md"
-related_modules: []
-related_tables: []
-related_endpoints: []
-related_runners: []
-related_docs:
-  - "01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md"
-  - "02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md"
-  - "03_MODULE__PRICES_SNAPSHOT_BLOCK.md"
-  - "04_MODULE__SF_PERIOD_BLOCK.md"
-  - "05_MODULE__SPP_BLOCK.md"
-  - "06_MODULE__ADS_BIDS_BLOCK.md"
-  - "07_MODULE__STOCKS_BLOCK.md"
-  - "08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md"
-  - "09_MODULE__ADS_COMPACT_BLOCK.md"
-  - "10_MODULE__FIN_REPORT_DAILY_BLOCK.md"
-  - "11_MODULE__PROMO_BY_PRICE_BLOCK.md"
-  - "12_MODULE__COGS_BY_GROUP_BLOCK.md"
-  - "13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md"
-  - "14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md"
-  - "15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md"
-  - "16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md"
-  - "17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md"
-  - "18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md"
-  - "19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md"
-  - "20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
-  - "21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
-  - "22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
-  - "23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md"
-  - "24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md"
-  - "25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md"
-  - "26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md"
-  - "27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md"
-  - "28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md"
-  - "29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md"
-  - "30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md"
-  - "31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md"
-  - "32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md"
-  - "33_MODULE__ONEC_STOCKS_BLOCK.md"
-  - "34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
-  - "35_MODULE__SPP_PROXY_BLOCK.md"
-  - "36_MODULE__WB_SUPPLIES_BLOCK.md"
-  - "37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
-  - "38_MODULE__WEBCORE_DATA_MCP_BLOCK.md"
-  - "39_MODULE__FULFILLMENT_SERVICES_BLOCK.md"
-  - "40_MODULE__OUR_WB_COST_MODEL_BLOCK.md"
-  - "41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"
-  - "42_MODULE__WB_SPP_TESTER_BLOCK.md"
-  - "43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
-  - "44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md"
-  - "45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md"
-  - "46_MODULE__SKU_MANAGEMENT_BLOCK.md"
-  - "47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md"
-  - "48_MODULE__WAREHOUSE_STOCKS_BLOCK.md"
-  - "49_MODULE__WB_AUTOANSWERS_SERVER.md"
-  - "50_MODULE__PARTNER_REPORT_BLOCK.md"
-  - "51_MODULE__WAREHOUSE_RECOVERY_POLICY.md"
-  - "52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md"
-source_of_truth_level: "navigation_only"
-update_note: "Обновлён through module 52: compact typed inventory history extends the main Web Vitrina without a duplicate general-stock metric."
----
+# Предметные документы
 
-# 1. Назначение индекса
+Эти документы описывают действующую логику продукта. Они не являются общими
+инструкциями и читаются только для затронутой области. История переходов и
+закрытые инциденты хранятся в Git.
 
-`docs/modules/` — это канонический source of truth для модульной документации `wb-core`.
+## Данные и витрина
 
-Полные модульные документы живут здесь. В других местах репозитория могут оставаться:
-- migration contracts;
-- parity/checklist документы;
-- evidence;
-- короткие указатели.
+- [Источники web-данных](01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md)
+- [Воронка продаж](02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md)
+- [Цены](03_MODULE__PRICES_SNAPSHOT_BLOCK.md)
+- [Периодические данные](04_MODULE__SF_PERIOD_BLOCK.md)
+- [SPP](05_MODULE__SPP_BLOCK.md)
+- [Рекламные ставки](06_MODULE__ADS_BIDS_BLOCK.md)
+- [Остатки](07_MODULE__STOCKS_BLOCK.md)
+- [История воронки](08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md)
+- [Компактные данные рекламы](09_MODULE__ADS_COMPACT_BLOCK.md)
+- [Дневные финансовые отчёты](10_MODULE__FIN_REPORT_DAILY_BLOCK.md)
+- [Промо и цены](11_MODULE__PROMO_BY_PRICE_BLOCK.md)
+- [Себестоимость по группам](12_MODULE__COGS_BY_GROUP_BLOCK.md)
+- [Карточки SKU](13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md)
+- [Табличные проекции](14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md)
+- [Широкая матрица данных](15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md)
+- [Доставка широкой матрицы](16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md)
 
-Но канонический свод по модулю должен отражаться в `docs/modules/`.
+## Хранилище и Web Витрина
 
-# 1.1 Текущий Checkpoint Main
+- [Пакет загрузки](20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md)
+- [Файловая загрузка](21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md)
+- [Загрузка в базу](22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md)
+- [HTTP-вход](23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md)
+- [Цикл Web Витрины](26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md)
+- [Сборщик промо-файлов](27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md)
+- [Источник промо](28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md)
+- [Модель представления](29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md)
+- [Табличный адаптер](30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md)
+- [Сборка страницы](31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md)
+- [Сравнение групп SKU](32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md)
+- [Остатки 1С](33_MODULE__ONEC_STOCKS_BLOCK.md)
+- [Поставки поставщиков](34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md)
+- [SPP proxy](35_MODULE__SPP_PROXY_BLOCK.md)
+- [Поставки WB](36_MODULE__WB_SUPPLIES_BLOCK.md)
+- [Оператор рекламы](37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md)
 
-Канонический индекс охватывает modules `01–52`. Modules `40` и `45` — compatibility read sides единого functional warehouse/cost engine: canonical WB WAC обслуживает WB cost/P&L/Proxy 3, а six-stage balances обслуживают товарный капитал. Module `44` consumes that same cost truth across all Finance history without an independent retro-cost value. Module `46` adds an operator action/read model without parallel metric truth; module `47` is the protected internal knowledge base; module `48` owns active warehouse/cost state; module `49` owns server-native WB autoanswers. Module `50` owns server-versioned Partner settings, indexed UI preview and digest-bound XLSX. Module `51` owns centralized warehouse recovery. Module `52` owns compact typed Web Vitrina inventory history and its separately gated backfill.
+## Склады, финансы и операции
 
-Подтверждённый main-confirmed contour:
-- `sku_display_bundle_block`
-- `table_projection_bundle_block`
-- `registry_pilot_bundle`
-- `wide_data_matrix_v1_fixture_block`
-- `wide_data_matrix_delivery_bundle_v1_block`
-- `sheet_vitrina_v1_scaffold_block`
+- [Фулфилмент](39_MODULE__FULFILLMENT_SERVICES_BLOCK.md)
+- [Себестоимость WB](40_MODULE__OUR_WB_COST_MODEL_BLOCK.md)
+- [Управление ценами](41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md)
+- [Проверка SPP](42_MODULE__WB_SPP_TESTER_BLOCK.md)
+- [Складской журнал FF](43_MODULE__FF_STOCK_LEDGER_BLOCK.md)
+- [Недельные финансы](44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md)
+- [Капитал в товаре](45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md)
+- [Управление SKU](46_MODULE__SKU_MANAGEMENT_BLOCK.md)
+- [Инструкции оператора](47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md)
+- [Складские остатки](48_MODULE__WAREHOUSE_STOCKS_BLOCK.md)
+- [Autoanswers](49_MODULE__WB_AUTOANSWERS_SERVER.md)
+- [Отчёт партнёра](50_MODULE__PARTNER_REPORT_BLOCK.md)
+- [Восстановление складских данных](51_MODULE__WAREHOUSE_RECOVERY_POLICY.md)
+- [История остатков витрины](52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md)
+- [Баланс запасов SKU](53_MODULE__SKU_INVENTORY_BALANCE.md)
 
-Дополнительно в `main` уже есть:
-- archived `sheet_vitrina_v1_write_bridge_block`;
-- archived `sheet_vitrina_v1_presentation_block`;
-- `registry_upload_bundle_v1_block` как первый artifact-backed upload bundle и local validator для V2-реестров.
-- `registry_upload_file_backed_service_block` как первый file-backed accept/store/activate слой для V2-реестров.
-- `registry_upload_db_backed_runtime_block` как первый DB-backed runtime ingest и current-truth слой для V2-реестров.
-- `registry_upload_http_entrypoint_block` как первый live HTTP entrypoint для V2-реестров and repo-owned hosted public route allowlist/deploy publication boundary with simple WebCore app-level auth.
-- archived `sheet_vitrina_v1_registry_upload_trigger_block` как former Apps Script trigger отправки `CONFIG / METRICS / FORMULAS`.
-- archived `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` как former compact v3 bootstrap для Google Sheets.
-- `promo_xlsx_collector_block` как bounded repo-owned local collector precursor для promo XLSX + metadata sidecar.
-- `promo_live_source_wiring_block` как bounded live wiring этого precursor обратно в current `sheet_vitrina_v1` refresh/runtime/read-side contour.
-- `web_vitrina_view_model_block` как bounded phase-2 presentation-domain слой между stable `web_vitrina_contract` и concrete grid/page layers.
-- `web_vitrina_gravity_table_adapter_block` как bounded phase-3 concrete adapter для `@gravity-ui/table` над stable `view_model`.
-- `supplier_shipments_block` как server-owned supplier invoice registry с XLSX parser/runtime storage/API/UI/auth boundary, operator-owned persisted `order_status`, operator-only nomenclature settings with `purchase_price_yuan` and XLSX export/import dry-run, two-step delete confirmation and optional factory-order inbound source over deterministic matched supplier rows.
-- `web_vitrina_page_composition_block` как bounded phase-4 live page composition на `/sheet-vitrina-v1/vitrina` с existing read route, вкладкой `Отзывы` поверх read-only WB feedbacks route including official WB review tags/chips, current-server-week feedback default and current-date presets with v3/TTL stale-range guard, transient AI prompt/analyze flow с real WB complaint category schema, tag-aware input и `reason` как текстом для WB `Опишите ситуацию`, runtime-журналом `Жалобы`, runtime schedule UI `Авто-жалобы`, async deep read-only status sync job из WB `Мои жалобы` with canonical-supplier route-specific status checks, direct status URL pagination/scroll, public polling, default local `Ждёт ответа` scope and shared Seller Portal automation lock, auth-protected operator-selected async submit job plus runtime-scheduled auto complaint runs over non-journaled 1–2★ AI yes/review rows through the existing guarded Seller Portal runner/resolver plus per-row attempt overlay, description field value/payload evidence, review-tag contradiction guard, historical hard denylist, disabled/already-complained action classification and shared `Есть ответ`/`Ждут ответа` status/date/star/search/virtual-scroll filter-aware actionable-row resolver, read-only single-feedback confirmation/detail-network probe runners, read-only Seller Portal complaint scout + filter DOM scout + target-row probe + no-submit matching replay/dry-run runners, bounded complaint batch wrapper with explicit not-submitted reason taxonomy, canonical EU bot storage-state/no-local-fallback policy и minimal inline client island.
-- `research_sku_group_comparison_block` как первый read-only MVP-контур вкладки `Исследования`: ретроспективное сравнение двух непересекающихся групп SKU по non-financial метрикам поверх persisted ready snapshots, с candidate-only chip `Товар в акции`, compact date-range period controls и scrollable table/grid result.
-- `onec_stocks_block` как active bounded 1C/Soykasoft source для остатков, себестоимости WB и товарного капитала, с отдельным parser/normalizer, date-specific historical load, dynamic stage names, explicit stage-mapping boundary, web-vitrina source group `onec_product_capital` и runtime-extended 1C profitability metrics.
-- `spp_proxy_block` как active bounded anonymous public WB card source для `SPP-прокси`: current-only buyer price, formula over existing `prices_snapshot.price_seller_discounted`, accepted-current preservation and separate web-vitrina source group `WB public card / бот`; existing `spp` remains unchanged.
-- `wb_supplies_block` как active bounded read-only WB/FBW supplies registry: official WB Supplies API adapter, server-side runtime cache/state/run/warehouse tables, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and preservation of accepted/historical rows, numeric `Основные от 250 шт` / `Мелкие до 249 шт` size filters without status overrides, checkbox multi-status filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date server sort, year-aware date display, compact operator table and pagination without WB mutations.
-- `sheet_vitrina_v1_ads_operator_block` как active SKU-first operator-раздел `Реклама`: active SKU/nm_id universe from `registry_upload_config_v2`, enrichment from `sheet_vitrina_v1_nomenclature_items`, WB Promotion reverse index `nm_id -> campaigns[] -> placements[]`, read routes for SKU table/drawer, guarded backend-only bid `preview -> commit -> audit -> delayed refresh` workflow over one nm_id/advert_id/placement, and explicit no-bulk/no-auto-bidding/no-direct-frontend-PATCH boundary.
-- `wb_prices_management_block` как guarded operator-раздел `Цены`: WB Prices and Discounts read table, server-side preview diff/quarantine-risk calculation, `WB_PRICES_WRITE_ENABLED` commit guard, upload task status/detail/quarantine readback and fake-upstream smokes without live price mutations.
-- `wb_spp_tester_block` как bounded operator-инструмент `Цены → Проверка СПП`: one-nmID manual live check точного ordered list из 1–6 цен, exact authenticated-buyer capability preflight, progressive compact result/history/log, separate `WB_SPP_TEST_ENABLED` + `WB_PRICES_WRITE_ENABLED`, execution lock и обязательный seller-tuple restore proof.
-- `webcore_data_mcp_block` как archived compatibility implementation: прежний repo-implemented/live-gated read-only MCP gateway retained for historical/legacy-call evidence only. Он не является normal prompt/source/acquisition path, prerequisite или fallback; current production reads use the canonical server-side SSH/query-only/document contour.
-- `fulfillment_services_block` как server-owned operator supply contour: PNG-derived XLSX template, protected upload/list/detail/PDF routes, SQLite upload/line persistence, stable PDF-виза payment validation and approved-only `Поставки -> Wildberries` overlay without changing WB official evidence, 1C cost truth, ЕБД metric truth or final товарная себестоимость.
-- `operator_instructions_knowledge_base` как системный protected knowledge-base contour: Git-tracked structured content, web-native `Инструкции` shell surface, server-owned `instructions` capability in `Настройки -> Пользователи`, no CMS/public/DOCX download path and no supplier access by default.
-- legacy `canonical_cost_engine` как immutable migration/audit evidence; active functional engine использует frozen 24.06 cost map только для bounded cost history с `2026-07-01`, а full warehouse history начинается production functional cutover.
+## Реестр изменений и здоровье
 
-Главный незакрытый gap текущей линии:
-- текущий `main` уже содержит server upload line and bounded refresh/read split for website/operator web-vitrina;
-- former reverse-load обратно в Google Sheets `DATA_VITRINA` is archived/do-not-use;
-- bounded promo collector contour теперь уже repo-owned и live-wired обратно в current refresh/read-side contour;
-- незакрытым остаются full legacy parity, plus production storage binding и broader parity questions вокруг уже repo-owned deploy contract.
-
-# 2. Naming rules комплекта
-
-Все файлы пакета именуются по шаблону:
-
-`NN_MODULE__MODULE_NAME.md`
-
-Где:
-- `NN` — двузначный порядок внутри каталога;
-- `MODULE` — фиксированный doc-class для модульных документов;
-- `MODULE_NAME` — machine-friendly идентификатор модуля в ASCII и uppercase.
-
-Каждый файл использует общий YAML front matter:
-- `title`
-- `doc_id`
-- `doc_type`
-- `status`
-- `purpose`
-- `scope`
-- `source_basis`
-- `related_*`
-- `source_of_truth_level`
-- `update_note`
-
-Для модульных документов в `wb-core` используется:
-- `doc_type: "module"`
-
-# 3. Что фиксирует каждый модульный документ
-
-Каждый файл в этом пакете должен фиксировать:
-- идентификатор модуля и его текущий статус;
-- семейство модуля;
-- legacy-source и legacy semantics;
-- target contract и смысл результата;
-- состав артефактов;
-- кодовые части `contracts / adapters / application / smoke`;
-- подтверждённый тип smoke;
-- что уже доказано;
-- что ещё не является частью финальной production-сборки.
-
-# 4. Список уже задокументированных модулей
-
-| Файл | Модуль | Семейство | Короткий статус |
-| --- | --- | --- | --- |
-| `01_MODULE__WEB_SOURCE_SNAPSHOT_BLOCK.md` | `web_source_snapshot_block` | `web-source` | перенесён, проверен, смёржен в `main` |
-| `02_MODULE__SELLER_FUNNEL_SNAPSHOT_BLOCK.md` | `seller_funnel_snapshot_block` | `web-source` | перенесён, проверен, смёржен в `main` |
-| `03_MODULE__PRICES_SNAPSHOT_BLOCK.md` | `prices_snapshot_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `04_MODULE__SF_PERIOD_BLOCK.md` | `sf_period_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `05_MODULE__SPP_BLOCK.md` | `spp_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `06_MODULE__ADS_BIDS_BLOCK.md` | `ads_bids_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `07_MODULE__STOCKS_BLOCK.md` | `stocks_block` | `official-api` | перенесён, dual current+historical checkpoint подтверждён server-side, смёржен в `main` |
-| `08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md` | `sales_funnel_history_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `09_MODULE__ADS_COMPACT_BLOCK.md` | `ads_compact_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `10_MODULE__FIN_REPORT_DAILY_BLOCK.md` | `fin_report_daily_block` | `official-api` | перенесён, подтверждён server-side, смёржен в `main` |
-| `11_MODULE__PROMO_BY_PRICE_BLOCK.md` | `promo_by_price_block` | `rule-based` | перенесён, проверен, смёржен в `main` |
-| `12_MODULE__COGS_BY_GROUP_BLOCK.md` | `cogs_by_group_block` | `rule-based` | перенесён, проверен, смёржен в `main` |
-| `13_MODULE__SKU_DISPLAY_BUNDLE_BLOCK.md` | `sku_display_bundle_block` | `table-facing` | перенесён, проверен, смёржен в `main` |
-| `14_MODULE__TABLE_PROJECTION_BUNDLE_BLOCK.md` | `table_projection_bundle_block` | `projection` | перенесён, проверен, смёржен в `main` |
-| `15_MODULE__WIDE_DATA_MATRIX_V1_FIXTURE_BLOCK.md` | `wide_data_matrix_v1_fixture_block` | `wide-matrix` | перенесён, проверен, смёржен в `main` |
-| `16_MODULE__WIDE_DATA_MATRIX_DELIVERY_BUNDLE_V1_BLOCK.md` | `wide_data_matrix_delivery_bundle_v1_block` | `delivery` | перенесён, проверен, смёржен в `main` |
-| `17_MODULE__SHEET_VITRINA_V1_SCAFFOLD_BLOCK.md` | `sheet_vitrina_v1_scaffold_block` | `sheet-side` | archived / do not use; former scaffold retained as migration evidence |
-| `18_MODULE__SHEET_VITRINA_V1_WRITE_BRIDGE_BLOCK.md` | `sheet_vitrina_v1_write_bridge_block` | `sheet-side` | archived / do not use; former live bridge retained as migration evidence |
-| `19_MODULE__SHEET_VITRINA_V1_PRESENTATION_BLOCK.md` | `sheet_vitrina_v1_presentation_block` | `sheet-side` | archived / do not use; former live formatting retained as migration evidence |
-| `20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md` | `registry_upload_bundle_v1_block` | `registry` | artifact-backed bundle и validator подтверждены, смёржены в `main` |
-| `21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md` | `registry_upload_file_backed_service_block` | `registry` | file-backed accept/store/activate/result подтверждены, смёржены в `main` |
-| `22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md` | `registry_upload_db_backed_runtime_block` | `registry` | DB-backed runtime ingest, role-aware temporal slot cache и persisted closure-retry state подтверждены, смёржены в `main` |
-| `23_MODULE__REGISTRY_UPLOAD_HTTP_ENTRYPOINT_BLOCK.md` | `registry_upload_http_entrypoint_block` | `registry` | live HTTP entrypoint, simple WebCore app-level auth, hosted public route allowlist/deploy publication, strict feedbacks load/export/AI prompt-model discovery routes, protected submit-selected job routes, feedback auto-complaints schedule/run/tick routes plus repo-owned systemd due-check timer, shared Seller Portal automation lock/busy responses, canonical EU storage-state/no-local-fallback policy, plan-report canonical WB/VB ordinary UI with backend-compatible annual-even query mode, factory-order full target-window inbound coverage with manual/supplier-registry source selection, shared `Остатки ФФ` source selection (`manual_excel` or read-only `onec_ff_stock` over materialized 1C `FF_STOCK`/`onec_FF_STOCK_qty` with check/XLSX diagnostics), WB regional supply share ladder (`full clean -> partial district-day observations -> SKU group prior -> global prior -> seed floor`) with operator-selected federal districts, human-readable Russian diagnostics, included-only district result/download surfaces, operator XLSX without `Дефицит`, atomic per-recommendation folder ZIP with canonical WB `Баркод / Количество` template, exact barcode/quantity reconciliation and fail-closed export, row-level share source/confidence diagnostics, seed as last-resort test box, compact fallback/share-source/seed diagnostics and marginal-saved-units allocation tail, thin runtime wiring, source-aware web-source closed-day acceptance/retry, explicit seller-session probe и permanent operator-facing seller-session block (`session-check/start/status/stop/launcher`, safe stop, per-run `run_id`/final outcome, hardened noVNC launcher) подтверждены, смёржены в `main` |
-| `24_MODULE__SHEET_VITRINA_V1_REGISTRY_UPLOAD_TRIGGER_BLOCK.md` | `sheet_vitrina_v1_registry_upload_trigger_block` | `sheet-side` | archived / do not use; former Apps Script upload trigger retained as migration evidence |
-| `25_MODULE__SHEET_VITRINA_V1_REGISTRY_SEED_V3_BOOTSTRAP_BLOCK.md` | `sheet_vitrina_v1_registry_seed_v3_bootstrap_block` | `sheet-side` | archived / do not use; former compact v3 bootstrap retained as migration evidence |
-| `26_MODULE__SHEET_VITRINA_V1_MVP_END_TO_END_BLOCK.md` | `sheet_vitrina_v1_mvp_end_to_end_block` | `web/operator` | current website/operator/web-vitrina contour active, including compact supply district XLSX/ZIP actions, WB regional district selector, human-readable diagnostics UI and included-only district summary/download table, plan-report canonical WB/VB ordinary UI and read-only `Отзывы` tab; former Google Sheets load/write path archived |
-| `27_MODULE__PROMO_XLSX_COLLECTOR_BLOCK.md` | `promo_xlsx_collector_block` | `browser-capture` | первый repo-owned bounded promo XLSX collector contour: canonical hydration/modal/drawer seams, truthful sidecar contract и bounded live integration smoke подтверждены, смёржен в `main` |
-| `28_MODULE__PROMO_LIVE_SOURCE_WIRING_BLOCK.md` | `promo_live_source_wiring_block` | `browser-capture/live-source` | bounded live wiring promo collector output обратно в current refresh/runtime/read-side contour подтверждён, смёржен в `main` |
-| `29_MODULE__WEB_VITRINA_VIEW_MODEL_BLOCK.md` | `web_vitrina_view_model_block` | `web-vitrina` | phase-2 library-agnostic `view_model` layer поверх stable `web_vitrina_contract`, с canonical mapper/filter/sort/formatter/state schema, подтверждён и смёржен в `main` |
-| `30_MODULE__WEB_VITRINA_GRAVITY_TABLE_ADAPTER_BLOCK.md` | `web_vitrina_gravity_table_adapter_block` | `web-vitrina` | phase-3 concrete `@gravity-ui/table` adapter поверх stable `view_model`, с isolated Gravity-specific columns/rows/renderers/options/state surface, подтверждён и смёржен в `main` |
-| `31_MODULE__WEB_VITRINA_PAGE_COMPOSITION_BLOCK.md` | `web_vitrina_page_composition_block` | `web-vitrina` | phase-4 server-driven sibling page composition поверх existing read route, truthful reporting blocks, feedbacks tab with snapshot-independent bounded period picker defaulting to the current server week, strict period/star load diagnostics, official WB review tags/chips in table/export/AI input, transient AI prompt/model discovery flow with WB complaint categories/reason-as-description semantics, complaint status join plus runtime submit-attempt overlay, selected-row checkboxes and auth-protected submit-selected job log, runtime-журналом `Жалобы`, `Авто-жалобы` schedule/run UI over runtime state and guarded daily 1–2★ AI yes/review complaint runs, async deep read-only status sync job + route-specific complaints status checks + canonical-supplier direct status URL pagination/scroll + public polling with default local `Ждёт ответа` scope and final/error skip counters, shared Seller Portal automation lock/busy responses, guarded instrumented submit runner with pre-click `Опишите ситуацию` value proof, sanitized payload description evidence, review-tag contradiction guard, historical hard denylist and shared status/date/star/search/virtual-scroll filter-aware actionable-row resolver, disabled/already-complained action classification, bounded complaint batch wrapper with explicit not-submitted reason taxonomy, read-only single-feedback confirmation/detail-network probe runners, read-only Seller Portal complaint scout + filter DOM scout + target-row probe + no-submit matching replay/dry-run runners, operator stock-report manual-calculate full active-SKU sortable table with compact controls, horizontal scroll, sticky `SKU` and browser-local column visibility, resizable columns и browser island подтверждены, смёржены в `main` |
-| `32_MODULE__RESEARCH_SKU_GROUP_COMPARISON_BLOCK.md` | `research_sku_group_comparison_block` | `web/operator/research` | read-only MVP вкладки `Исследования`: SKU group comparison over accepted truth / ready snapshots, non-financial metrics only, promo candidate chip, compact period pickers and scrollable result grid |
-| `33_MODULE__ONEC_STOCKS_BLOCK.md` | `onec_stocks_block` | `external-1c-source` | active technical 1C/Soykasoft source/parser with date-specific lineage; duplicate 1C capital, Proxy 2 and profitability rows are archived and excluded from active web-vitrina/API while source evidence remains available for audit |
-| `34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md` | `supplier_shipments_block` | `web/operator/supply` | server-owned supplier invoice registry under `Поставки -> От поставщика`: XLSX parse/storage, deterministic nomenclature matching, persisted per-line invoice price conformity against `purchase_price_yuan`, operator-only manual price recheck, operator-only nomenclature settings with XLSX export/import dry-run, operator-owned `order_status`, safe delete confirmation, optional supplier-only role isolation and optional factory-order `Товары в пути от фабрики` source using matched `nmId` rows with `shipment_date + 30 days` acceptance default |
-| `35_MODULE__SPP_PROXY_BLOCK.md` | `spp_proxy_block` | `public-web/live-source` | active anonymous public WB card source for `SPP-прокси`: buyer price extraction, formula over `prices_snapshot.price_seller_discounted`, current-only accepted-current preservation, `WB public card / бот` loading group and fixture/integration smokes |
-| `36_MODULE__WB_SUPPLIES_BLOCK.md` | `wb_supplies_block` | `web/operator/supply/official-api` | read-only `Поставки -> Wildberries` registry over official WB FBW Supplies API: runtime cache/history, protected list/incremental sync/full backfill/sync-status/detail routes, targeted active-status reconciliation with hard-delete for confirmed removed active rows and historical accepted-row preservation, warehouse/checkbox-status/search/size filters with persisted UI state, route/warehouse/quantity/cost evidence normalization, empty-date-bottom supply-date sort, year-aware date display, numeric `Основные от 250 шт` filter, compact table and pagination; no WB mutations, no ЕБД metric truth writes |
-| `37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md` | `sheet_vitrina_v1_ads_operator_block` | `web/operator/wb-promotion` | SKU-first `Реклама` tab over WB Promotion API: active SKU/nm_id table from `registry_upload_config_v2`, nomenclature enrichment, reverse index `nm_id -> campaigns[] -> placements[]`, drawer with campaign metrics/min/recommended/current bids, guarded backend-only one-row bid preview/commit/audit/delayed-refresh workflow; no bulk changes, no auto-bidding, no direct frontend WB/PATCH writes |
-| `38_MODULE__WEBCORE_DATA_MCP_BLOCK.md` | `webcore_data_mcp_block` | `archived-compatibility/read-only-data-gateway` | archived compatibility implementation retained for legacy calls/evidence only; not a normal prompt/source/acquisition path, prerequisite or fallback; historical read-only/OAuth/redaction/limit boundaries remain documented |
-| `39_MODULE__FULFILLMENT_SERVICES_BLOCK.md` | `fulfillment_services_block` | `web/operator/supply/runtime-upload` | server-owned `Поставки -> Услуги ФФ`: PNG-derived XLSX template with `Склад`, protected XLSX upload/parser, `STORAGE` row allocation across ordinary matched WB supplies, SQLite upload/line persistence with soft-delete, accepted-only `Загруженные документы`, OK-only PDF-виза на оплату and active approved-only `Услуги ФФ` overlay in `Поставки -> Wildberries`; no final cost truth, no 1C/ЕБД truth switch |
-| `40_MODULE__OUR_WB_COST_MODEL_BLOCK.md` | `our_wb_cost_model` | `web/operator/supply/runtime-cost-read-side` | Forward-only exact WB+FF inventory WAC for visible `our_wb_unit_cost_rub` and indicative Proxy 3/4, separated from exact channel/location Finance/Partner sale COGS; owns no independent warehouse baseline |
-| `41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md` | `wb_prices_management_block` | `web/operator/official-api/prices` | Guarded `Цены` tab over WB Prices and Discounts API: active nmID price/discount table, inline drafts, server preview with quarantine risk, explicit env-gated upload-task commit, status/detail/quarantine readback and SPP tester subtab boundary; no size-price writes, WB Club writes, B2B writes or live writes in tests |
-| `42_MODULE__WB_SPP_TESTER_BLOCK.md` | `wb_spp_tester_block` | `web/operator/official-api/prices/spp-test` | Bounded manual `Цены → Проверка СПП`: exact ordered 1–6 prices, authenticated buyer readback, compact history/log, runtime lock and mandatory seller restore proof |
-| `43_MODULE__FF_STOCK_LEDGER_BLOCK.md` | `ff_stock_ledger_block` | `web/operator/supply/runtime-ledger` | Server-owned `ФФ -> Остатки ФФ`: append-only physical and WB-reservation ledgers, manual receipt/writeoff preview-confirm documents, supplier auto receipts, whole-composition guarded WB fulfillment with validated downstream cost, physical/reserved/available/unsecured balances and audit trail without Google Sheets/GAS or WB mutations |
-| `44_MODULE__WB_FINANCE_WEEKLY_REPORT_BLOCK.md` | `wb_finance_weekly_report_block` | `web/operator/reports/official-api` | Official WB Finance weekly raw/report/aggregate contour, exact FBS handoff/WB daily per-operation COGS, quality-aware coverage, exact-dependency short-CAS stale-week recalculation and Europe/Moscow schedule |
-| `45_MODULE__OWN_PRODUCT_CAPITAL_BLOCK.md` | `own_product_capital_block` | `web/operator/runtime-capital-read-side` | Canonical active block of six mutually exclusive stages × quantity/WAC/capital plus three totals; paid-equivalent, coverage, confirmation, underaccepted and old profitability rows are technical archive |
-| `46_MODULE__SKU_MANAGEMENT_BLOCK.md` | `sku_management_block` | `web/operator/sku-actions` | Calculation-only deficit forecast, guarded one-row price/bid operator action workflow and confirmed action-event history without a parallel metric/source-of-truth contour |
-| `47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md` | `operator_instructions_knowledge_base` | `web/operator/knowledge-base` | Protected repo-owned web-native instructions with server-owned `instructions` access, a structured supply-management reference and no CMS/public document-download surface |
-| `48_MODULE__WAREHOUSE_STOCKS_BLOCK.md` | `warehouse_functional` | `web/operator/warehouses/runtime-ledger` | Active six-stage Decimal engine with exact-date history, stable nomenclature identity, versioned unmatched audit, localized evidence UI, hourly bounded sync, Proxy 3 and guarded atomic cutover |
-| `49_MODULE__WB_AUTOANSWERS_SERVER.md` | `wb_autoanswers_server_v1` | `web/operator/feedbacks/ai-publication` | Production contour with canonical content/media classification, strict content rating `1→2→3→4→5` processing/publication priority before rating-only, bounded immutable runs, frozen v1.4.2 Node pipeline, durable readback and split all/content progress UI |
-| `50_MODULE__PARTNER_REPORT_BLOCK.md` | `partner_report` | `web/operator/reports/ui-first-xlsx` | Single-SKU Decimal profitability report with versioned server-owned settings, indexed Finance projection, root/nested accepted ads, on-screen preview and source-digest-bound light XLSX; no active finalization/ZIP/raw export |
-| `51_MODULE__WAREHOUSE_RECOVERY_POLICY.md` | `warehouse_recovery_policy` | `warehouse/recovery/control-plane` | Central T0/T1/T2/T3 recovery, capacity, retention and query-only operator status contract |
-| `52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md` | `web_vitrina_inventory_history` | `web-vitrina/runtime-history` | Compact typed TOTAL/SKU WB+FBS history, closed-day supersession, partial numeric totals and owner-gated historical backfill |
-| `53_MODULE__SKU_INVENTORY_BALANCE.md` | `sku_inventory_balance` | `web/operator/sku-decisions` | Compact inline `Управление SKU → Баланс запасов`: latest immutable calculation/freshness, exact CPC/CPM targets and overrides, durable confirmed live apply with progress/readback/Registry provenance and primary `Решения` XLSX |
-| `59_MODULE__WEB_VITRINA_HEALTH.md` | `web_vitrina_health` | `web-vitrina/runtime-health` | Server-owned two-role expectation matrix, independent closure/current/BOT signals, append-only shadow receipts, 30-day bot gap detection and bounded 06:30/07:30 recovery contour without UI or performance changes |
-
-# 5. Как эта папка используется дальше
-
-- при добавлении нового модульного документа обновлять этот файл вместе с соответствующим `NN_MODULE__*.md`;
-- считать этот файл navigation entrypoint для пакета `docs/modules/`;
-- не документировать здесь как часть `main` блоки, которые существуют только на незамёрженных ветках или ещё не дошли до merge;
-- не дублировать полный канонический модульный текст в других местах репозитория.
-Canonical cost cutover diagnostics are owned by `apps/canonical_cost_engine_diagnostic.py` and `migration/99_unified_canonical_cost_engine.md`: pre-cutover movements are audit-only, while any bounded post-cutover composition normalization requires an exact versioned manifest and supply-level quantity/capital conservation. The separate exact `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V1` covers only the approved 10 supplies / 11 source-evidence units already present in official WB stock; it runs before direct/FIFO, creates no quantity/capital/confirmation/underaccepted delta and has no future wildcard.
-
-V1 remains immutable. `CUTOVER_UNMATCHED_DOPRINATO_ABSORPTION_V2` separately pins 9 additional exact supply/SKU rows / 12 units, including empty original-supply identity and raw row/line/semantic fingerprints, with the same zero-delta official-WB-stock absorption semantics. The strict runner also reports fail-closed layer-cost continuity; aggregate WAC across stages is composition-dependent and is not required to be monotonic.
+- [Основа реестра изменений](54_MODULE__CHANGE_REGISTRY_FOUNDATION.md)
+- [Получение источников](55_MODULE__CHANGE_REGISTRY_SOURCE_ACQUISITION.md)
+- [Базовые снимки](56_MODULE__CHANGE_REGISTRY_BASELINE_ENGINE.md)
+- [Наблюдение](57_MODULE__CHANGE_REGISTRY_OBSERVER.md)
+- [Внутренние записи](58_MODULE__CHANGE_REGISTRY_INTERNAL_WRITERS.md)
+- [Здоровье Web Витрины](59_MODULE__WEB_VITRINA_HEALTH.md)

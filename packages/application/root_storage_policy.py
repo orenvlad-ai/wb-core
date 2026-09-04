@@ -34,18 +34,8 @@ CANONICAL_FILESYSTEM_ROLES = (
     "root",
     "backup",
     "generation",
-    "recovery_scratch",
 )
 REQUIRED_ACTIVE_FILESYSTEM_ROLES = frozenset({"root", "backup", "generation"})
-RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT = (
-    "wbc0035_recovery_scratch_release_bridge/v1"
-)
-RECOVERY_SCRATCH_MANIFEST_CONTRACT = (
-    "wbc0035_recovery_scratch_bootstrap_passport/v1"
-)
-RECOVERY_SCRATCH_MANIFEST_PATH = (
-    "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
-)
 MUTABLE_STORE_ACCESS_MODES = frozenset({"read_only", "read_write", "write_only"})
 MUTABLE_STORE_ACCESS_ROLES = {
     "reader": frozenset({"read_only"}),
@@ -249,8 +239,8 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
         active = bool(raw_active)
         if role in REQUIRED_ACTIVE_FILESYSTEM_ROLES and not active:
             raise RootStoragePolicyError("required storage filesystem role is inactive")
-        if role != "recovery_scratch" and not active:
-            raise RootStoragePolicyError("only recovery scratch may be retired")
+        if not active:
+            raise RootStoragePolicyError("canonical storage filesystem role is inactive")
         if active:
             active_roles.add(role)
         path = Path(str(raw.get("path") or ""))
@@ -284,21 +274,6 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             raw.get("emergency_reserve_bytes") or 0
         ) != 8 * GIB:
             raise RootStoragePolicyError("canonical backup emergency reserve drift")
-        if role == "recovery_scratch":
-            from apps.recovery_scratch_bootstrap import (
-                RecoveryScratchError,
-                validate_recovery_scratch_contract,
-            )
-
-            try:
-                validate_recovery_scratch_contract(
-                    _recovery_scratch_contract(raw),
-                    runtime_dir=path.parent,
-                )
-            except RecoveryScratchError as exc:
-                raise RootStoragePolicyError(
-                    "canonical recovery scratch filesystem contract is invalid"
-                ) from exc
     if set(expected_paths) != active_roles:
         raise RootStoragePolicyError("active storage filesystem registry drifted")
     lifecycle_policies = registry.get("lifecycle_policies")
@@ -334,8 +309,8 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             or not str(producer.get("data_class") or "").strip()
             or destination_role
             not in {
-                "root", "backup", "generation", "recovery_scratch",
-                "canonical_store", "caller_bound", "ephemeral",
+                "root", "backup", "generation", "canonical_store",
+                "caller_bound", "ephemeral",
             }
             or not isinstance(relative_roots, list)
             or any(
@@ -351,9 +326,7 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             or maximum < 0
         ):
             raise RootStoragePolicyError("canonical storage producer is invalid")
-        if destination_role in {
-            "root", "backup", "generation", "recovery_scratch"
-        } and not relative_roots:
+        if destination_role in {"root", "backup", "generation"} and not relative_roots:
             raise RootStoragePolicyError("canonical storage producer has no destination root")
         if producer.get("current") is True and capacity_mode == "disabled":
             raise RootStoragePolicyError("current storage producer cannot be disabled")
@@ -366,90 +339,6 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
                 "current storage producer targets an inactive filesystem"
             )
         storage_owner_ids.add(owner)
-
-
-def _recovery_scratch_contract(role: Mapping[str, Any]) -> dict[str, Any]:
-    """Project the fourth storage role into its exact bootstrap/readback contract."""
-
-    keys = {
-        "contract_version", "path", "parent_device_by_id", "partition_device_by_id",
-        "parent_serial", "parent_model", "parent_size_bytes", "parent_major_minor",
-        "parent_hctl",
-        "partition_table", "partition_number", "disk_guid", "partition_guid",
-        "filesystem_uuid", "filesystem_label", "filesystem_type",
-        "required_mount_options", "reserve_bytes", "completion_marker",
-        "require_distinct_from_roles",
-    }
-    return {key: role.get(key) for key in keys}
-
-
-def _recovery_scratch_pending_status(
-    policy: Mapping[str, Any],
-    *,
-    path: Path,
-    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    registry = dict(policy.get("storage_registry") or {})
-    raw = dict(dict(registry.get("filesystems") or {}).get("recovery_scratch") or {})
-    completion = Path(str(raw.get("completion_marker") or ""))
-    if completion.exists():
-        raise RootStoragePolicyError(
-            "recovery scratch completion exists but exact mount is unavailable"
-        )
-    if path.exists() and (path.is_symlink() or not path.is_dir() or any(path.iterdir())):
-        raise RootStoragePolicyError(
-            "recovery scratch bootstrap mountpoint is used or ambiguous"
-        )
-    from apps.recovery_scratch_bootstrap import (
-        RecoveryScratchError,
-        collect_blank_device_evidence,
-        validate_recovery_scratch_contract,
-    )
-    from apps.recovery_scratch_bootstrap_post_submit_reconcile import (
-        PostSubmitReconcileError,
-        collect_pre_change_evidence,
-    )
-
-    try:
-        contract = validate_recovery_scratch_contract(
-            _recovery_scratch_contract(raw),
-            runtime_dir=path.parent,
-        )
-        post_submit_manifest = (
-            recovery_scratch_release_bridge.get("post_submit_manifest")
-            if recovery_scratch_release_bridge is not None
-            else None
-        )
-        if isinstance(post_submit_manifest, Mapping):
-            partial = collect_pre_change_evidence(
-                contract=contract,
-                manifest=post_submit_manifest,
-            )
-            return {
-                "path": str(path),
-                "bootstrap_status": "failed_after_submit_reconciliation_pending",
-                "partial_state": partial,
-                "source": None,
-                "filesystem_uuid": contract["filesystem_uuid"],
-                "filesystem_type": contract["filesystem_type"],
-                "mount_options": "",
-                "available_bytes": None,
-            }
-        blank = collect_blank_device_evidence(contract)
-    except (RecoveryScratchError, PostSubmitReconcileError) as exc:
-        raise RootStoragePolicyError(
-            "recovery scratch bootstrap-pending evidence is invalid"
-        ) from exc
-    return {
-        "path": str(path),
-        "bootstrap_status": "pending",
-        "blank_device": blank,
-        "source": None,
-        "filesystem_uuid": None,
-        "filesystem_type": None,
-        "mount_options": "",
-        "available_bytes": None,
-    }
 
 
 def storage_producer_policy(
@@ -481,7 +370,7 @@ def storage_destination_root(
     if producer.get("current") is not True:
         raise RootStoragePolicyError(f"storage producer has no current write authority: {owner}")
     role = str(producer.get("destination_role") or "")
-    if role not in {"root", "backup", "generation", "recovery_scratch"}:
+    if role not in {"root", "backup", "generation"}:
         raise RootStoragePolicyError(
             f"storage producer does not own a persistent destination root: {owner}"
         )
@@ -542,9 +431,7 @@ def resolve_runtime_storage_destination(
     role = str(producer.get("destination_role") or "")
     roots = [str(item) for item in producer.get("relative_roots") or []]
     chosen = roots[0] if relative_root is None else str(relative_root)
-    if chosen not in roots or role not in {
-        "root", "backup", "generation", "recovery_scratch"
-    }:
+    if chosen not in roots or role not in {"root", "backup", "generation"}:
         raise RootStoragePolicyError(
             f"isolated runtime storage destination is not registered: {owner}:{chosen}"
         )
@@ -552,7 +439,6 @@ def resolve_runtime_storage_destination(
         "root": runtime,
         "backup": runtime / "backups",
         "generation": runtime / "generations",
-        "recovery_scratch": runtime / "recovery-scratch",
     }[role]
     root = (role_base / chosen).resolve(strict=False)
     destination = root.joinpath(*(str(item) for item in relative_parts)).resolve(strict=False)
@@ -663,9 +549,7 @@ def admit_root_write(
             f"owner={normalized_owner}, predicted_peak_bytes={predicted_peak}, "
             f"max_single_write_bytes={maximum}"
         )
-    if destination_role in {
-        "root", "backup", "generation", "recovery_scratch"
-    } and enforce_canonical_destination:
+    if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
         allowed_roots = [
             storage_destination_root(
                 normalized_owner,
@@ -707,9 +591,7 @@ def admit_root_write(
             reason = "large_output_predicted_free_after_below_critical_floor"
     reserve_bytes = 0
     reserve_mode = "domain_guard"
-    if destination_role in {
-        "root", "backup", "generation", "recovery_scratch"
-    } and enforce_canonical_destination:
+    if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
         role_policy = dict(
             dict(dict(resolved_policy["storage_registry"])["filesystems"])[
                 destination_role
@@ -772,31 +654,13 @@ def collect_root_storage_status(
     policy: Mapping[str, Any] | None = None,
     root_path: Path = Path("/"),
     now: datetime | None = None,
-    allow_recovery_scratch_bootstrap_pending: bool = False,
-    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_policy = dict(policy or load_policy())
-    bridge = (
-        _validate_recovery_scratch_release_bridge(
-            resolved_policy, recovery_scratch_release_bridge
-        )
-        if recovery_scratch_release_bridge is not None
-        else None
-    )
     collected_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     filesystems: dict[str, dict[str, Any]] = {}
     for name, raw_path in dict(resolved_policy.get("filesystems") or {}).items():
         path = Path(str(raw_path))
-        try:
-            filesystems[name] = _filesystem_status(path)
-        except (FileNotFoundError, RootStoragePolicyError):
-            if name != "recovery_scratch" or not allow_recovery_scratch_bootstrap_pending:
-                raise
-            filesystems[name] = _recovery_scratch_pending_status(
-                resolved_policy,
-                path=path,
-                recovery_scratch_release_bridge=bridge,
-            )
+        filesystems[name] = _filesystem_status(path)
     if "root" not in filesystems:
         filesystems["root"] = _filesystem_status(root_path)
     root_status = filesystems["root"]
@@ -823,7 +687,6 @@ def collect_root_storage_status(
     storage_status = _collect_storage_registry_status(
         resolved_policy,
         observed_filesystems=filesystems,
-        recovery_scratch_release_bridge=bridge,
     )
     alerts.extend(storage_status["alerts"])
     return {
@@ -836,17 +699,6 @@ def collect_root_storage_status(
         "large_root_files": large_files,
         "unregistered_large_root_files": unregistered,
         "storage_registry": storage_status,
-        "recovery_scratch_release_bridge": (
-            {
-                "fingerprint": bridge["fingerprint"],
-                "manifest_sha256": bridge["manifest_sha256"],
-                "operation_id": bridge["operation_id"],
-                "release_sha": bridge["release_sha"],
-                "live_preconditions": bridge["live_preconditions"],
-            }
-            if bridge is not None
-            else None
-        ),
         "alerts": alerts,
         "safe_for_discretionary_root_writes": (
             level != "hard"
@@ -860,7 +712,6 @@ def _collect_storage_registry_status(
     policy: Mapping[str, Any],
     *,
     observed_filesystems: Mapping[str, Mapping[str, Any]],
-    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     registry = dict(policy.get("storage_registry") or {})
     role_contracts = dict(registry.get("filesystems") or {})
@@ -878,22 +729,6 @@ def _collect_storage_registry_status(
         if role not in observed_filesystems:
             continue
         observed = dict(observed_filesystems[role])
-        if role == "recovery_scratch" and observed.get("bootstrap_status") in {
-            "pending", "failed_after_submit_reconciliation_pending"
-        }:
-            role_status[role] = {
-                "identity_ok": False,
-                "identity_error_fields": [],
-                "bootstrap_status": observed.get("bootstrap_status"),
-                "reserve_mode": str(contract.get("reserve_mode") or ""),
-                "required_reserve_bytes": int(contract.get("reserve_bytes") or 0),
-                "available_bytes": None,
-                "available_after_reserve_bytes": None,
-                "reserve_breached": False,
-                "blank_device": observed.get("blank_device"),
-                "partial_state": observed.get("partial_state"),
-            }
-            continue
         required_options = {str(item) for item in contract.get("required_mount_options") or []}
         observed_options = {
             item.strip()
@@ -912,12 +747,7 @@ def _collect_storage_registry_status(
         reserve_error = ""
         try:
             if role == "backup":
-                finance_floor = _finance_backup_floor(
-                    policy,
-                    recovery_scratch_release_bridge=(
-                        recovery_scratch_release_bridge
-                    ),
-                )
+                finance_floor = _finance_backup_floor(policy)
                 reserve_bytes = int(finance_floor["required_reserve_bytes"])
             else:
                 reserve_bytes = _required_reserve_bytes(
@@ -974,11 +804,9 @@ def _collect_storage_registry_status(
         not in {"canonical_business_store", "protected_excluded_promo_artifact"}
     ]
     unregistered_destination_violations: list[dict[str, Any]] = []
-    for role in ("backup", "generation", "recovery_scratch"):
+    for role in ("backup", "generation"):
         observed = observed_filesystems.get(role)
-        if observed is None or observed.get("bootstrap_status") in {
-            "pending", "failed_after_submit_reconciliation_pending"
-        }:
+        if observed is None:
             continue
         unregistered_destination_violations.extend(
             _scan_unregistered_large_destinations(
@@ -1120,19 +948,10 @@ def read_root_storage_status_artifact(
     policy: Mapping[str, Any] | None = None,
     artifact_path: Path | None = None,
     now: datetime | None = None,
-    allow_recovery_scratch_bootstrap_pending: bool = False,
-    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate the atomic server-owned status artifact without rescanning storage."""
 
     resolved_policy = dict(policy or load_policy())
-    bridge = (
-        _validate_recovery_scratch_release_bridge(
-            resolved_policy, recovery_scratch_release_bridge
-        )
-        if recovery_scratch_release_bridge is not None
-        else None
-    )
     path = Path(artifact_path or root_storage_status_artifact_path(resolved_policy))
     if path.is_symlink() or not path.is_file():
         raise RootStoragePolicyError(f"root storage status artifact is unavailable: {path}")
@@ -1183,40 +1002,6 @@ def read_root_storage_status_artifact(
         raise RootStoragePolicyError(
             "root storage status artifact lacks canonical storage registry evidence"
         )
-    recorded_bridge = payload.get("recovery_scratch_release_bridge")
-    if bridge is None:
-        if recorded_bridge is not None:
-            raise RootStoragePolicyError(
-                "root storage status artifact has an unbound release bridge"
-            )
-    elif (
-        not isinstance(recorded_bridge, dict)
-        or recorded_bridge.get("fingerprint") != bridge["fingerprint"]
-        or recorded_bridge.get("manifest_sha256") != bridge["manifest_sha256"]
-        or recorded_bridge.get("operation_id") != bridge["operation_id"]
-        or recorded_bridge.get("release_sha") != bridge["release_sha"]
-    ):
-        raise RootStoragePolicyError(
-            "root storage status artifact release bridge drifted"
-        )
-    roles = dict(storage_registry.get("roles") or {})
-    scratch = dict(roles.get("recovery_scratch") or {})
-    if scratch.get("bootstrap_status") in {
-        "pending", "failed_after_submit_reconciliation_pending"
-    }:
-        if not allow_recovery_scratch_bootstrap_pending:
-            raise RootStoragePolicyError(
-                "recovery scratch filesystem is bootstrap-pending"
-            )
-        contract = dict(
-            dict(resolved_policy.get("storage_registry") or {})
-            .get("filesystems", {})
-            .get("recovery_scratch", {})
-        )
-        if Path(str(contract.get("completion_marker") or "")).exists():
-            raise RootStoragePolicyError(
-                "recovery scratch completion exists but mount is not ready"
-            )
     expected_safe = (
         payload.get("status") != "hard"
         and not unregistered
@@ -1311,247 +1096,7 @@ def _assert_filesystem_identity(
     return observed
 
 
-def _read_exact_json(path: Path, *, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise RootStoragePolicyError(f"{label} is unavailable")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RootStoragePolicyError(f"{label} is invalid") from exc
-    if not isinstance(payload, dict):
-        raise RootStoragePolicyError(f"{label} is not an object")
-    return payload
-
-
-def _validate_recovery_scratch_finance_exception(
-    health: Mapping[str, Any], expected: Mapping[str, Any]
-) -> None:
-    if (
-        health.get("status") != "degraded"
-        or list(health.get("blockers") or [])
-        != [expected["only_allowed_blocker"]]
-        or health.get("retained_backup_id") != expected["retained_backup_id"]
-        or int(health.get("canonical_source_bytes") or 0)
-        != expected["canonical_source_bytes"]
-        or int(health.get("next_replacement_required_bytes") or 0)
-        != expected["next_replacement_required_bytes"]
-        or health.get("capacity_basis") != expected["capacity_basis"]
-        or health.get("next_replacement_capacity") is not True
-        or int(health.get("available_bytes") or 0)
-        < expected["next_replacement_required_bytes"]
-    ):
-        raise RootStoragePolicyError(
-            "recovery scratch Finance exception is not exact"
-        )
-
-
-def _validate_recovery_scratch_release_bridge(
-    policy: Mapping[str, Any],
-    payload: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Validate the sole manifest-bound WBC0035 bootstrap exception."""
-
-    if not isinstance(payload, Mapping):
-        raise RootStoragePolicyError("recovery scratch release bridge is required")
-    bridge = dict(payload)
-    if set(bridge) != {
-        "contract", "manifest_path", "manifest_sha256", "target_id",
-        "operation_id", "release_sha", "target", "preconditions",
-    }:
-        raise RootStoragePolicyError("recovery scratch release bridge shape drifted")
-    release_sha = str(bridge.get("release_sha") or "").lower()
-    manifest_sha = str(bridge.get("manifest_sha256") or "").lower()
-    if (
-        bridge.get("contract") != RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT
-        or bridge.get("manifest_path") != RECOVERY_SCRATCH_MANIFEST_PATH
-        or re.fullmatch(r"[0-9a-f]{64}", manifest_sha) is None
-        or bridge.get("target_id") != "wb_core_eu_hosted_runtime_active"
-        or bridge.get("operation_id")
-        != "wbc0035-026-recovery-scratch-a01"
-        or re.fullmatch(r"[0-9a-f]{40}", release_sha) is None
-    ):
-        raise RootStoragePolicyError("recovery scratch release bridge identity drifted")
-    repository_root = Path(__file__).resolve().parents[2]
-    manifest_path = (repository_root / RECOVERY_SCRATCH_MANIFEST_PATH).resolve()
-    if repository_root not in manifest_path.parents:
-        raise RootStoragePolicyError("recovery scratch manifest escapes repository")
-    raw_manifest = manifest_path.read_bytes()
-    if hashlib.sha256(raw_manifest).hexdigest() != manifest_sha:
-        raise RootStoragePolicyError("recovery scratch manifest digest drifted")
-    try:
-        manifest = json.loads(raw_manifest)
-    except json.JSONDecodeError as exc:
-        raise RootStoragePolicyError("recovery scratch manifest JSON is invalid") from exc
-    target = dict(bridge.get("target") or {})
-    preconditions = dict(bridge.get("preconditions") or {})
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("contract") != RECOVERY_SCRATCH_MANIFEST_CONTRACT
-        or manifest.get("operation_id") != bridge["operation_id"]
-        or manifest.get("target_id") != bridge["target_id"]
-        or manifest.get("deployed_sha_contract") != "exact-merge-sha"
-        or manifest.get("target") != target
-        or manifest.get("release_bridge") != preconditions
-    ):
-        raise RootStoragePolicyError("recovery scratch manifest binding drifted")
-    if manifest.get("post_submit_reconciliation") is not None:
-        from apps.recovery_scratch_bootstrap_post_submit_reconcile import (
-            validate_manifest_contract,
-        )
-
-        try:
-            validate_manifest_contract(manifest)
-        except Exception as exc:
-            raise RootStoragePolicyError(
-                "recovery scratch post-submit manifest binding drifted"
-            ) from exc
-    exact_target = {
-        "parent_device": "/dev/sdd",
-        "parent_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde",
-        "partition_device_by_id": "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_vde-part1",
-        "parent_serial": "vde",
-        "parent_model": "QEMU HARDDISK",
-        "parent_size_bytes": 53_687_091_200,
-        "parent_major_minor": "8:48",
-        "parent_hctl": "0:0:0:4",
-        "blank": True,
-        "layout": "single-gpt-partition-ext4",
-        "filesystem_uuid": "da019107-575c-4fe7-b698-e021b3fc83c8",
-        "mountpoint": "/opt/wb-core-runtime/state/recovery-scratch",
-        "mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
-        "directory_mode": 0o700,
-        "minimum_available_bytes": 35_157_336_064,
-    }
-    if target != exact_target:
-        raise RootStoragePolicyError("recovery scratch exact target drifted")
-    barrier_expected = {
-        "active": True,
-        "phase": "acquiring",
-        "hold_confirmed": False,
-        "window_id": "wbc0027-s047-live-last-good-freeze-v2-896b02c0",
-        "plan_fingerprint": "sha256:0d680ca758c1699fe2a9025b01d71f0fa4f8c5bcf7555a7945b5b930cdc5285f",
-        "maintenance_phase": "abort_quiescing",
-        "owner_policy_revision": 59,
-        "all_business_timers_paused": True,
-    }
-    finance_expected = {
-        "only_allowed_blocker": "retained backup exceeded RPO age",
-        "retained_backup_id": "finance-backup-459a091d48326c9be224",
-        "canonical_source_bytes": 26_567_401_472,
-        "next_replacement_required_bytes": 35_224_444_928,
-        "capacity_basis": "canonical_current_split_source_size_plus_copy_overhead_plus_hard_reserve",
-        "next_replacement_capacity": True,
-    }
-    non_targets_expected = {
-        "root": "d77f6a25-e90f-4292-a85d-9bcc1cecf9e2",
-        "backup": "bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0",
-        "generation": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
-    }
-    if (
-        set(preconditions) != {
-            "contract", "barrier", "finance", "non_target_filesystem_uuids"
-        }
-        or preconditions.get("contract")
-        != RECOVERY_SCRATCH_RELEASE_BRIDGE_CONTRACT
-        or dict(preconditions.get("barrier") or {}) != barrier_expected
-        or dict(preconditions.get("finance") or {}) != finance_expected
-        or dict(preconditions.get("non_target_filesystem_uuids") or {})
-        != non_targets_expected
-    ):
-        raise RootStoragePolicyError("recovery scratch release preconditions drifted")
-    policy_roles = dict(dict(policy.get("storage_registry") or {}).get("filesystems") or {})
-    if any(
-        str(dict(policy_roles.get(role) or {}).get("filesystem_uuid") or "") != uuid
-        for role, uuid in non_targets_expected.items()
-    ):
-        raise RootStoragePolicyError("recovery scratch non-target identity drifted")
-    deployed_sha_path = repository_root / ".wb-core-runtime-sha"
-    if (
-        not deployed_sha_path.is_file()
-        or deployed_sha_path.read_text(encoding="utf-8").strip().lower()
-        != release_sha
-    ):
-        raise RootStoragePolicyError("recovery scratch deployed SHA drifted")
-    runtime = Path(str(dict(policy_roles["backup"])["path"])).resolve().parent
-    from apps import business_data_maintenance as maintenance
-    from packages.application.business_data_write_barrier import barrier_status
-    from packages.application.finance_storage_backup_rotation import (
-        backup_rotation_health,
-    )
-
-    barrier = barrier_status(runtime)
-    state = _read_exact_json(
-        runtime / maintenance.STATE_FILENAME,
-        label="business maintenance state",
-    )
-    owner_policy = _read_exact_json(
-        runtime / maintenance.POLICY_FILENAME,
-        label="business owner policy",
-    )
-    if (
-        barrier.get("active") is not True
-        or barrier.get("phase") != barrier_expected["phase"]
-        or barrier.get("hold_confirmed") is not False
-        or barrier.get("window_id") != barrier_expected["window_id"]
-        or barrier.get("plan_fingerprint") != barrier_expected["plan_fingerprint"]
-        or state.get("phase") != barrier_expected["maintenance_phase"]
-        or int(owner_policy.get("revision") or 0)
-        != barrier_expected["owner_policy_revision"]
-        or owner_policy.get("master_desired") is not False
-    ):
-        raise RootStoragePolicyError("recovery scratch live barrier binding drifted")
-    systemd = maintenance.SystemdClient()
-    timer_states = {
-        unit: systemd.unit_state(unit) for unit in maintenance.ALL_BUSINESS_TIMER_UNITS
-    }
-    if any(
-        item.get("is_enabled") != "disabled"
-        or item.get("is_active") != "inactive"
-        for item in timer_states.values()
-    ):
-        raise RootStoragePolicyError("recovery scratch business timers are not paused")
-    if maintenance._writer_processes(Path("/proc")):
-        raise RootStoragePolicyError("recovery scratch business writers are active")
-    health = backup_rotation_health(runtime)
-    _validate_recovery_scratch_finance_exception(health, finance_expected)
-    return {
-        **bridge,
-        "manifest_sha256": manifest_sha,
-        "release_sha": release_sha,
-        "fingerprint": _payload_digest(bridge),
-        "finance_health": health,
-        "post_submit_manifest": (
-            manifest if manifest.get("post_submit_reconciliation") is not None else None
-        ),
-        "live_preconditions": {
-            "barrier": {
-                key: barrier.get(key)
-                for key in (
-                    "active", "phase", "hold_confirmed", "window_id",
-                    "plan_fingerprint", "state_fingerprint",
-                )
-            },
-            "maintenance_phase": state.get("phase"),
-            "owner_policy_revision": int(owner_policy.get("revision") or 0),
-            "business_timers_paused": sorted(timer_states),
-            "writer_processes": [],
-            "finance": {
-                key: health.get(key)
-                for key in (
-                    "status", "retained_backup_id", "blockers",
-                    "canonical_source_bytes", "next_replacement_required_bytes",
-                    "available_bytes", "next_replacement_capacity", "capacity_basis",
-                )
-            },
-        },
-    }
-
-
-def _finance_backup_floor(
-    policy: Mapping[str, Any],
-    *,
-    recovery_scratch_release_bridge: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
+def _finance_backup_floor(policy: Mapping[str, Any]) -> dict[str, Any]:
     registry = dict(policy.get("storage_registry") or {})
     role = dict(dict(registry.get("filesystems") or {})["backup"])
     backup_root = Path(str(role["path"]))
@@ -1560,11 +1105,7 @@ def _finance_backup_floor(
             backup_rotation_health,
         )
 
-        health = (
-            dict(recovery_scratch_release_bridge["finance_health"])
-            if recovery_scratch_release_bridge is not None
-            else backup_rotation_health(backup_root.parent)
-        )
+        health = backup_rotation_health(backup_root.parent)
     except Exception as exc:  # pragma: no cover - fail-closed environment boundary
         raise RootStoragePolicyError(
             f"Finance backup reserve evidence is unavailable: {type(exc).__name__}: {exc}"
@@ -1572,15 +1113,10 @@ def _finance_backup_floor(
     next_replacement = int(health.get("next_replacement_required_bytes") or 0)
     emergency = int(role.get("emergency_reserve_bytes") or 0)
     blockers = list(health.get("blockers") or [])
-    allowed_rpo_bridge = bool(
-        recovery_scratch_release_bridge is not None
-        and health.get("status") == "degraded"
-        and blockers == ["retained backup exceeded RPO age"]
-    )
     if (
-        (health.get("status") != "healthy" and not allowed_rpo_bridge)
+        health.get("status") != "healthy"
         or health.get("next_replacement_capacity") is not True
-        or (blockers and not allowed_rpo_bridge)
+        or blockers
         or next_replacement <= 0
         or emergency != 8 * GIB
     ):
@@ -1597,7 +1133,6 @@ def _finance_backup_floor(
         "retained_bytes": int(health.get("retained_bytes") or 0),
         "rpo_seconds": int(health.get("rpo_seconds") or 0),
         "rto_seconds": int(health.get("rto_seconds") or 0),
-        "release_bridge_rpo_exception": allowed_rpo_bridge,
     }
 
 

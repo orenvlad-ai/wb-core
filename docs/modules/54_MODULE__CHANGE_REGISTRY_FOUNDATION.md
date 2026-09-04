@@ -8,7 +8,6 @@ scope: "Additive operational SQLite schema, deterministic scalar canonicalizatio
 source_basis:
   - "AGENTS.md"
   - "docs/architecture/11_github_release_train.md"
-  - "migration/124_finance_raw_storage_split_design.md"
   - "docs/modules/22_MODULE__REGISTRY_UPLOAD_DB_BACKED_RUNTIME_BLOCK.md"
   - "docs/modules/37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md"
   - "docs/modules/41_MODULE__WB_PRICES_MANAGEMENT_BLOCK.md"

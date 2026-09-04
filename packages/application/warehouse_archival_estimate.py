@@ -30,9 +30,9 @@ from packages.application.warehouse_recovery_policy import (
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST_PATH = (
     ROOT
-    / "migration"
-    / "data"
-    / "warehouse_business_approved_archival_estimate_20260701.json"
+    / "artifacts"
+    / "warehouse_archival_estimate"
+    / "approved_estimate.json"
 )
 FUNCTIONAL_CUTOVER_ID = "warehouse_functional_cutover_v1"
 CONTRACT_NAME = "warehouse_business_approved_archival_estimate"

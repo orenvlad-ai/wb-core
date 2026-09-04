@@ -6,8 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `wide_data_matrix_v1_fixture_block`."
 scope: "Wide-by-date input/target fixtures, кодовый минимум, подтверждённый artifact-backed smoke и границы первого рабочего checkpoint."
 source_basis:
-  - "migration/79_wide_data_matrix_contract.md"
-  - "migration/80_wide_data_matrix_v1_fixture.md"
   - "artifacts/wide_data_matrix_v1/evidence/initial__wide-data-matrix-v1__evidence.md"
   - "apps/wide_data_matrix_v1_smoke.py"
 related_modules:
@@ -18,8 +16,6 @@ related_endpoints: []
 related_runners:
   - "apps/wide_data_matrix_v1_smoke.py"
 related_docs:
-  - "migration/79_wide_data_matrix_contract.md"
-  - "migration/80_wide_data_matrix_v1_fixture.md"
   - "artifacts/wide_data_matrix_v1/evidence/initial__wide-data-matrix-v1__evidence.md"
 source_of_truth_level: "module_canonical"
 update_note: "Создан как канонический модульный документ для первого artifact-backed implementation шага wide-by-date витрины."
@@ -40,7 +36,6 @@ update_note: "Создан как канонический модульный д
   - `sku_display_bundle_block`
   - `table_projection_bundle_block`
   - `registry/pilot_bundle`
-  - `migration/79_wide_data_matrix_contract.md`
 - Семантика блока: не создавать новую таблицу и не писать Apps Script, а зафиксировать первый artifact-backed wide-by-date fixture для новой витрины.
 - Для `TOTAL` и `GROUP` используется только safe aggregate subset; главным рабочим блоком V1 остаётся `SKU`.
 

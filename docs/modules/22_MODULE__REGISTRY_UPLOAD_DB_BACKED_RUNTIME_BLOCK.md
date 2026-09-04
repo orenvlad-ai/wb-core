@@ -6,9 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_db_backed_runtime_block`."
 scope: "Локальный SQLite-backed runtime ingest для V2-реестров: persistent current state, version history, upload result, exact-date temporal source snapshots, role-aware temporal slot truth (`provisional_current / closed_day_candidate / accepted_closed`), persisted closure-retry state, supplier invoice shipment registry state and CNY account ledger state без Apps Script UI и внешнего API."
 source_basis:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/88_registry_upload_file_backed_service.md"
-  - "migration/89_registry_upload_db_backed_runtime.md"
   - "artifacts/registry_upload_db_backed_runtime/input/registry_upload_bundle__fixture.json"
   - "artifacts/registry_upload_db_backed_runtime/evidence/initial__registry-upload-db-backed-runtime__evidence.md"
 related_modules:
@@ -60,9 +57,6 @@ related_runners:
   - "apps/ff_stock_ledger_smoke.py"
   - "apps/ff_stock_ledger_http_smoke.py"
 related_docs:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/88_registry_upload_file_backed_service.md"
-  - "migration/89_registry_upload_db_backed_runtime.md"
   - "docs/modules/21_MODULE__REGISTRY_UPLOAD_FILE_BACKED_SERVICE_BLOCK.md"
   - "docs/modules/34_MODULE__SUPPLIER_SHIPMENTS_BLOCK.md"
   - "docs/modules/43_MODULE__FF_STOCK_LEDGER_BLOCK.md"
@@ -84,8 +78,6 @@ update_note: "Обновлён под current temporal closure seam, plan-report
 - Upstream/source basis фиксируется как связка:
   - `registry_upload_bundle_v1_block`
   - `registry_upload_file_backed_service_block`
-  - `migration/86_registry_upload_contract.md`
-  - `migration/89_registry_upload_db_backed_runtime.md`
 - Семантика блока: принять уже собранный bundle, переиспользовать текущий validator и materialize-ить current server-side truth в DB-backed runtime storage до любого live API entrypoint.
 
 # 3. Target contract и смысл результата

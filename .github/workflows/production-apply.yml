@@ -1,600 +1,73 @@
-name: Production Apply Runner
+name: Production Apply
 
 on:
   workflow_dispatch:
     inputs:
-      authorization_mode:
-        description: Task-scoped goal or legacy exact-manifest authorization
+      action:
+        description: Preview, apply or read back one exact operation
         required: true
-        default: scope-goal
         type: choice
-        options:
-          - scope-goal
-          - exact-manifest
-          - receipt-recovery
-          - warm-archive-readiness
-          - warm-archive-mount-probe
-          - warm-archive-receipt-reconciliation
-          - wbc0027-receipt-reconciliation
-          - fbs-mapping-qualification
-          - fbs-impact-generation
-          - fbs-recovery-qualification
-          - fbs-mapping-apply
-          - fbs-recovery-apply
-      pr:
-        description: Exact merged PR number
+        options: [preview, apply, readback]
+      adapter:
+        description: Registered domain adapter
         required: true
-        type: number
-      release_operation_id:
-        description: Exact one-shot Release Runner operation id
-        required: false
-        type: string
-      merge_sha:
-        description: Legacy exact-manifest merge SHA
-        required: false
-        type: string
-      deployed_sha:
-        description: Legacy exact-manifest deployed SHA
-        required: false
-        type: string
-      manifest_sha256:
-        description: Legacy manifest SHA-256 or exact FBS mapping readback digest
-        required: false
         type: string
       operation_id:
-        description: Legacy manifest or recovered receipt operation id
+        description: Stable operation identity
+        required: true
+        type: string
+      request_json:
+        description: Adapter-specific request without secrets
+        required: true
+        default: "{}"
+        type: string
+      expected_prestate:
+        description: Exact sha256 from preview; required for apply
         required: false
         type: string
-      source_run_id:
-        description: Failed Production Apply run containing the immutable done receipt
-        required: false
-        type: number
-      source_artifact_id:
-        description: Exact immutable source receipt artifact id
-        required: false
-        default: 0
-        type: number
-      source_artifact_name:
-        description: Exact immutable receipt artifact name for recovery
+      expected_candidate:
+        description: Exact sha256 from preview; required for apply
         required: false
         type: string
-      source_receipt_sha256:
-        description: Exact SHA-256 of production-apply-receipt.json for recovery
-        required: false
-        type: string
-      authorization_comment_id:
-        description: Exact OWNER or MEMBER authorization comment id
-        required: false
-        default: 0
-        type: number
-      blocked_comment_id:
-        description: Exact blocked marker or ordered FBS predecessor marker comment id
-        required: false
-        default: 0
-        type: number
-      reconciliation_pr:
-        description: Exact merged reconciliation release PR
-        required: false
-        default: 0
-        type: number
-      reconciliation_release_operation_id:
-        description: Exact Release Runner operation for reconciliation code
-        required: false
-        type: string
-      prior_reconciliation_run_id:
-        description: Exact immutable legacy reconciliation a01 run
-        required: false
-        default: 0
-        type: number
-      prior_reconciliation_artifact_id:
-        description: Exact immutable legacy reconciliation a01 artifact id
-        required: false
-        default: 0
-        type: number
-      prior_reconciliation_artifact_name:
-        description: Exact immutable legacy reconciliation a01 artifact name
-        required: false
-        type: string
-      prior_reconciliation_receipt_sha256:
-        description: Exact legacy reconciliation a01 receipt SHA-256 without prefix
-        required: false
-        type: string
-      prior_reconciliation_comment_id:
-        description: Exact immutable legacy reconciliation a01 marker comment id
-        required: false
-        default: 0
-        type: number
-      prior_reconciliation_a02_run_id:
-        description: Exact exhausted legacy reconciliation a02 run
-        required: false
-        default: 0
-        type: number
-      prior_reconciliation_a02_artifact_id:
-        description: Exact exhausted legacy reconciliation a02 artifact id
-        required: false
-        default: 0
-        type: number
-      prior_reconciliation_a02_artifact_name:
-        description: Exact exhausted legacy reconciliation a02 artifact name
-        required: false
-        type: string
-      prior_reconciliation_a02_receipt_sha256:
-        description: Exact exhausted legacy a02 receipt SHA-256 without prefix
-        required: false
-        type: string
-      prior_reconciliation_a02_comment_id:
-        description: Exact exhausted legacy reconciliation a02 marker comment id
-        required: false
-        default: 0
-        type: number
 
 permissions:
   contents: read
 
 jobs:
-  apply_once:
-    name: Exact bounded production goal apply and reconciliation
-    if: inputs.authorization_mode != 'receipt-recovery' && inputs.authorization_mode != 'warm-archive-readiness' && inputs.authorization_mode != 'warm-archive-mount-probe' && inputs.authorization_mode != 'warm-archive-receipt-reconciliation' && inputs.authorization_mode != 'wbc0027-receipt-reconciliation' && inputs.authorization_mode != 'fbs-mapping-qualification' && inputs.authorization_mode != 'fbs-impact-generation' && inputs.authorization_mode != 'fbs-recovery-qualification' && inputs.authorization_mode != 'fbs-mapping-apply' && inputs.authorization_mode != 'fbs-recovery-apply'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-      pull-requests: write
+  apply:
+    name: One exact production operation
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
     environment: production
     steps:
-      - name: Checkout trusted main apply runner
+      - name: Checkout trusted main
         uses: actions/checkout@v5
         with:
           ref: main
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Install canonical apply dependencies
-        run: >-
-          python3 -m pip install --disable-pip-version-check
-          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
-          pypdf==6.4.1 reportlab==4.4.5
-
-      - name: Validate exact task passport, qualify dynamic manifest and apply once
-        # Exact two-phase profiles are closed and profile-specific: WBC0013 runs
-        # dense-A then historical-B; WBC0027 runs product then fresh economics.
-        # Each phase has one submit and must reconcile query-only before the next.
+      - name: Run registered adapter once
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
           WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-          WB_CORE_SCOPE_GOAL_PROFILE_ALLOWLIST: inventory-history-backfill,root-warm-archive-six,dense-fbs-historical-recovery,historical-analytical-cost-carry-forward,historical-missing-repair,product-capital-qualified-economics
+          APPLY_ACTION: ${{ inputs.action }}
+          APPLY_ADAPTER: ${{ inputs.adapter }}
+          APPLY_OPERATION_ID: ${{ inputs.operation_id }}
+          APPLY_REQUEST_JSON: ${{ inputs.request_json }}
+          APPLY_EXPECTED_PRESTATE: ${{ inputs.expected_prestate }}
+          APPLY_EXPECTED_CANDIDATE: ${{ inputs.expected_candidate }}
         run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode "${{ inputs.authorization_mode }}"
-          --pr "${{ inputs.pr }}"
-          --release-operation-id "${{ inputs.release_operation_id }}"
-          --merge-sha "${{ inputs.merge_sha }}"
-          --deployed-sha "${{ inputs.deployed_sha }}"
-          --manifest-sha256 "${{ inputs.manifest_sha256 }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
+          python3 apps/production_apply_launcher.py "$APPLY_ACTION"
+          --adapter "$APPLY_ADAPTER"
+          --operation-id "$APPLY_OPERATION_ID"
+          --request-json "$APPLY_REQUEST_JSON"
+          --expected-prestate "$APPLY_EXPECTED_PRESTATE"
+          --expected-candidate "$APPLY_EXPECTED_CANDIDATE"
           --output "$RUNNER_TEMP/production-apply-receipt.json"
-
-      - name: Upload immutable apply receipt
+      - name: Upload receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: production-apply-receipt-pr-${{ inputs.pr }}-run-${{ github.run_id }}
+          name: production-apply-${{ github.run_id }}
           path: ${{ runner.temp }}/production-apply-receipt.json
           if-no-files-found: warn
           retention-days: 90
-
-  fbs_v2:
-    name: WBC0027 FBS closed qualification or one-submit Apply
-    if: inputs.authorization_mode == 'fbs-mapping-qualification' || inputs.authorization_mode == 'fbs-impact-generation' || inputs.authorization_mode == 'fbs-recovery-qualification' || inputs.authorization_mode == 'fbs-mapping-apply' || inputs.authorization_mode == 'fbs-recovery-apply'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-      pull-requests: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    environment: production
-    steps:
-      - name: Checkout trusted main FBS runner
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Install canonical apply dependencies
-        run: >-
-          python3 -m pip install --disable-pip-version-check
-          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
-          pypdf==6.4.1 reportlab==4.4.5
-
-      - name: Validate both releases and collect closed FBS receipt
-        id: collect
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode "${{ inputs.authorization_mode }}"
-          --execution-phase collect
-          --pr "${{ inputs.pr }}"
-          --release-operation-id "${{ inputs.release_operation_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --manifest-sha256 "${{ inputs.manifest_sha256 }}"
-          --github-output "$GITHUB_OUTPUT"
-          --output "$RUNNER_TEMP/production-apply-receipt.json"
-
-      - name: Upload immutable FBS receipt before marker
-        if: steps.collect.outputs.publication_required == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-apply-receipt-pr-${{ inputs.pr }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/production-apply-receipt.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Verify downloaded artifact and publish exact marker
-        if: steps.collect.outputs.publication_required == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode "${{ inputs.authorization_mode }}"
-          --execution-phase publish
-          --pr "${{ inputs.pr }}"
-          --release-operation-id "${{ inputs.release_operation_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --manifest-sha256 "${{ inputs.manifest_sha256 }}"
-          --output "$RUNNER_TEMP/production-apply-receipt.json"
-
-  warm_archive_mount_probe:
-    name: Exact-worker query-only mount candidate probe
-    if: inputs.authorization_mode == 'warm-archive-mount-probe'
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: production
-    steps:
-      - name: Checkout trusted main mount probe runner
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Run one exact-worker query-only mount candidate probe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode warm-archive-mount-probe
-          --pr "${{ inputs.pr }}"
-          --release-operation-id "${{ inputs.release_operation_id }}"
-          --output "$RUNNER_TEMP/root-warm-archive-mount-probe-receipt.json"
-
-      - name: Upload immutable mount probe receipt
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: root-warm-archive-mount-probe-pr-${{ inputs.pr }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/root-warm-archive-mount-probe-receipt.json
-          if-no-files-found: warn
-          retention-days: 90
-
-  warm_archive_readiness:
-    name: Bounded query-only warm archive readiness
-    if: inputs.authorization_mode == 'warm-archive-readiness'
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 300
-    environment: production
-    steps:
-      - name: Checkout trusted main readiness runner
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Run one bounded query-only stabilization and full projection
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode warm-archive-readiness
-          --pr "${{ inputs.pr }}"
-          --release-operation-id "${{ inputs.release_operation_id }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --output "$RUNNER_TEMP/root-warm-archive-readiness-receipt.json"
-
-      - name: Upload immutable readiness receipt
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: root-warm-archive-readiness-pr-${{ inputs.pr }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/root-warm-archive-readiness-receipt.json
-          if-no-files-found: warn
-          retention-days: 90
-
-  recover_receipt:
-    name: Verify immutable done receipt and publish once (no production access)
-    if: inputs.authorization_mode == 'receipt-recovery'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-      pull-requests: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout trusted main receipt recovery
-        uses: actions/checkout@v5
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify exact immutable receipt and publish idempotently
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode receipt-recovery
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --output "$RUNNER_TEMP/production-apply-receipt.json"
-
-      - name: Upload verified recovered receipt
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-apply-recovery-pr-${{ inputs.pr }}-source-run-${{ inputs.source_run_id }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/production-apply-receipt.json
-          if-no-files-found: warn
-          retention-days: 90
-
-  warm_archive_receipt_reconciliation:
-    name: Query-only reconciliation of one existing warm archive operation
-    if: inputs.authorization_mode == 'warm-archive-receipt-reconciliation'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-      pull-requests: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    environment: production
-    steps:
-      - name: Checkout exact trusted-main reconciliation runner
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Validate exact source and suppress an already terminal operation
-        id: preflight
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode warm-archive-receipt-reconciliation
-          --reconciliation-phase preflight
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --reconciliation-attempt v2-a01
-          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
-          --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
-          --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
-          --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
-          --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
-          --prior-reconciliation-a02-run-id "${{ inputs.prior_reconciliation_a02_run_id }}"
-          --prior-reconciliation-a02-artifact-id "${{ inputs.prior_reconciliation_a02_artifact_id }}"
-          --prior-reconciliation-a02-artifact-name "${{ inputs.prior_reconciliation_a02_artifact_name }}"
-          --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
-          --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
-          --github-output "$GITHUB_OUTPUT"
-          --output "$RUNNER_TEMP/root-warm-archive-reconciliation-preflight.json"
-
-      - name: Execute one bounded query-only SSH probe
-        if: steps.preflight.outputs.probe_required == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode warm-archive-receipt-reconciliation
-          --reconciliation-phase collect
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --reconciliation-attempt v2-a01
-          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
-          --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
-          --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
-          --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
-          --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
-          --prior-reconciliation-a02-run-id "${{ inputs.prior_reconciliation_a02_run_id }}"
-          --prior-reconciliation-a02-artifact-id "${{ inputs.prior_reconciliation_a02_artifact_id }}"
-          --prior-reconciliation-a02-artifact-name "${{ inputs.prior_reconciliation_a02_artifact_name }}"
-          --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
-          --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
-          --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
-
-      - name: Upload full immutable reconciliation evidence first
-        if: steps.preflight.outputs.probe_required == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: root-warm-archive-reconciliation-pr-${{ inputs.pr }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/root-warm-archive-reconciliation-receipt.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Verify uploaded evidence and publish one compact supersession marker
-        if: steps.preflight.outputs.probe_required == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode warm-archive-receipt-reconciliation
-          --reconciliation-phase publish
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --reconciliation-attempt v2-a01
-          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
-          --prior-reconciliation-artifact-id "${{ inputs.prior_reconciliation_artifact_id }}"
-          --prior-reconciliation-artifact-name "${{ inputs.prior_reconciliation_artifact_name }}"
-          --prior-reconciliation-receipt-sha256 "${{ inputs.prior_reconciliation_receipt_sha256 }}"
-          --prior-reconciliation-comment-id "${{ inputs.prior_reconciliation_comment_id }}"
-          --prior-reconciliation-a02-run-id "${{ inputs.prior_reconciliation_a02_run_id }}"
-          --prior-reconciliation-a02-artifact-id "${{ inputs.prior_reconciliation_a02_artifact_id }}"
-          --prior-reconciliation-a02-artifact-name "${{ inputs.prior_reconciliation_a02_artifact_name }}"
-          --prior-reconciliation-a02-receipt-sha256 "${{ inputs.prior_reconciliation_a02_receipt_sha256 }}"
-          --prior-reconciliation-a02-comment-id "${{ inputs.prior_reconciliation_a02_comment_id }}"
-          --output "$RUNNER_TEMP/root-warm-archive-reconciliation-receipt.json"
-
-  wbc0027_receipt_reconciliation:
-    name: Query-only finalize of the existing WBC0027 economics operation
-    if: inputs.authorization_mode == 'wbc0027-receipt-reconciliation'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-      pull-requests: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    environment: production
-    steps:
-      - name: Checkout exact trusted-main WBC0027 reconciliation runner
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Validate exact source and suppress an already terminal operation
-        id: preflight
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode wbc0027-receipt-reconciliation
-          --reconciliation-phase preflight
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-id "${{ inputs.source_artifact_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
-          --github-output "$GITHUB_OUTPUT"
-          --output "$RUNNER_TEMP/wbc0027-reconciliation-preflight.json"
-
-      - name: Execute one fixed query-only finalize probe
-        id: collect
-        if: steps.preflight.outputs.probe_required == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
-          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode wbc0027-receipt-reconciliation
-          --reconciliation-phase collect
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-id "${{ inputs.source_artifact_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
-          --github-output "$GITHUB_OUTPUT"
-          --output "$RUNNER_TEMP/wbc0027-existing-operation-reconciliation-receipt.json"
-
-      - name: Upload full immutable WBC0027 reconciliation evidence first
-        if: >-
-          ${{ always() && steps.preflight.outcome == 'success' &&
-          steps.preflight.outputs.probe_required == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: wbc0027-existing-operation-reconciliation-pr-${{ inputs.pr }}-run-${{ github.run_id }}
-          path: ${{ runner.temp }}/wbc0027-existing-operation-reconciliation-receipt.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Verify uploaded evidence and publish one supersession marker
-        if: >-
-          ${{ success() && steps.preflight.outputs.probe_required == 'true' &&
-          steps.collect.outputs.receipt_qualified == 'true' }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          python3 apps/production_apply_runner.py
-          --authorization-mode wbc0027-receipt-reconciliation
-          --reconciliation-phase publish
-          --pr "${{ inputs.pr }}"
-          --operation-id "${{ inputs.operation_id }}"
-          --source-run-id "${{ inputs.source_run_id }}"
-          --source-artifact-id "${{ inputs.source_artifact_id }}"
-          --source-artifact-name "${{ inputs.source_artifact_name }}"
-          --source-receipt-sha256 "${{ inputs.source_receipt_sha256 }}"
-          --authorization-comment-id "${{ inputs.authorization_comment_id }}"
-          --blocked-comment-id "${{ inputs.blocked_comment_id }}"
-          --reconciliation-pr "${{ inputs.reconciliation_pr }}"
-          --reconciliation-release-operation-id "${{ inputs.reconciliation_release_operation_id }}"
-          --prior-reconciliation-run-id "${{ inputs.prior_reconciliation_run_id }}"
-          --output "$RUNNER_TEMP/wbc0027-existing-operation-reconciliation-receipt.json"

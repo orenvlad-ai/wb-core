@@ -38,14 +38,14 @@ RECOVERY_DIRNAME = "warehouse-recovery"
 CHECKPOINT_DIRNAME = "domain-checkpoints"
 MANIFEST_SUFFIX = ".manifest.json"
 TEMP_SUFFIX = ".tmp"
+SANITATION_AUDIT_DIRNAME = "storage-recovery-sanitation"
+SANITATION_CONTRACT_NAME = "storage_recovery_sanitation_v1"
 T2_RETENTION_MIN_COUNT = 2
 T2_RETENTION_MAX_COUNT = 3
 T2_RETENTION_MAX_BYTES = 2 * 1024 * 1024 * 1024
 T2_RETENTION_MAX_AGE_HOURS = 24
 T2_DEGRADED_FREE_BYTES = 8 * 1024 * 1024 * 1024
 T2_HARD_STOP_FREE_BYTES = 4 * 1024 * 1024 * 1024
-SANITATION_AUDIT_DIRNAME = "storage-recovery-sanitation"
-SANITATION_CONTRACT_NAME = "storage_recovery_sanitation_v1"
 
 
 class RecoveryPolicyError(RuntimeError):
@@ -205,16 +205,6 @@ OPERATION_POLICIES: Mapping[str, OperationPolicy] = {
     ),
     "functional_economics_historical_repair": _policy(
         "functional_economics_historical_repair", RecoveryTier.T1, "sku_date"
-    ),
-    "wbc0027_product_capital_version_bound_recovery": _policy(
-        "wbc0027_product_capital_version_bound_recovery",
-        RecoveryTier.T1,
-        "sku_date",
-    ),
-    "wbc0027_functional_economics_missing_recovery": _policy(
-        "wbc0027_functional_economics_missing_recovery",
-        RecoveryTier.T1,
-        "sku_date",
     ),
     "calculation_parameters_update": _policy(
         "calculation_parameters_update", RecoveryTier.T1, "date"

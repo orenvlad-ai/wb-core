@@ -374,7 +374,6 @@ class HostedRuntimeTarget:
     finance_generation_filesystem: dict[str, Any] = field(
         default_factory=dict
     )
-    recovery_scratch_filesystem: dict[str, Any] = field(default_factory=dict)
     root_storage_policy_file: str = ""
     systemd_unit_directory: str = ""
     systemd_units_source_dir: str = ""
@@ -429,9 +428,6 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         raise ValueError(
             "finance_generation_filesystem must be a JSON object"
         )
-    raw_recovery_scratch_filesystem = payload.get("recovery_scratch_filesystem") or {}
-    if not isinstance(raw_recovery_scratch_filesystem, dict):
-        raise ValueError("recovery_scratch_filesystem must be a JSON object")
     raw_managed_systemd_units = payload.get("managed_systemd_units") or []
     if not isinstance(raw_managed_systemd_units, list):
         raise ValueError("managed_systemd_units must be a JSON array")
@@ -492,10 +488,6 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
             str(key): value
             for key, value in raw_finance_generation_filesystem.items()
         },
-        recovery_scratch_filesystem={
-            str(key): value
-            for key, value in raw_recovery_scratch_filesystem.items()
-        },
         root_storage_policy_file=str(payload.get("root_storage_policy_file", "")).strip(),
         systemd_unit_directory=str(payload.get("systemd_unit_directory", "")).strip(),
         systemd_units_source_dir=str(payload.get("systemd_units_source_dir", "")).strip(),
@@ -553,20 +545,10 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
             ]
         )
     deploy_sequence.append("sync current checked-out worktree to target_dir via rsync")
-    journald_operation_step: str | None = None
     if target.root_storage_policy_file:
-        root_storage_commands = _build_root_storage_policy_commands(target)
         deploy_sequence.append(
             "publish root-storage warning/critical/hard status and reject unregistered large root producers"
         )
-        if root_storage_commands["action_name"] == "corrective_remove":
-            journald_operation_step = (
-                "remove the exact block-003 journald drop-in and submit one corrective journald restart"
-            )
-        elif root_storage_commands["action"]:
-            journald_operation_step = (
-                "materialize the private expired-archived-journal manifest and activate versioned journald retention at most once"
-            )
     deploy_sequence.extend([
         "install required host OS packages for seller-portal recovery and browser launch",
         "install required host OS packages for seller-portal owner capture runtime",
@@ -589,7 +571,6 @@ def build_deploy_plan(target: HostedRuntimeTarget) -> dict[str, Any]:
     deploy_sequence.extend(
         [
             "restart hosted runtime via restart_command",
-            *([journald_operation_step] if journald_operation_step else []),
             "probe loopback/runtime contour",
             "probe public contour",
         ]
@@ -1031,71 +1012,6 @@ def collect_loopback_surface(
     return evaluation
 
 
-def _bootstrap_recovery_scratch_release_bridge() -> None:
-    """Bridge the exact incident release whose runner began on the prior main."""
-
-    environment_name = "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE"
-    if os.environ.get(environment_name, "").strip():
-        return
-    release_pr = os.environ.get("WB_CORE_RELEASE_PR", "").strip()
-    release_head = os.environ.get("WB_CORE_RELEASE_HEAD", "").strip().lower()
-    if not release_pr.isdigit() or re.fullmatch(r"[0-9a-f]{40}", release_head) is None:
-        return
-    manifest_relative = (
-        "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
-    )
-    changed = {
-        line.strip()
-        for line in _git_output(
-            ["git", "diff", "--name-only", "HEAD^", "HEAD"]
-        ).splitlines()
-        if line.strip()
-    }
-    abandonment_release_paths = {
-        "apps/business_data_maintenance.py",
-        "apps/business_data_maintenance_smoke.py",
-        "apps/hosted_runtime_deploy_barrier.py",
-        "apps/registry_upload_http_entrypoint_hosted_runtime.py",
-        "apps/registry_upload_http_entrypoint_hosted_runtime_smoke.py",
-        "apps/sqlite_hot_journal_recovery_smoke.py",
-    }
-    manifest_changed = manifest_relative in changed
-    code_only_abandonment_release = changed == abandonment_release_paths
-    if not manifest_changed and not code_only_abandonment_release:
-        return
-    manifest_path = ROOT / manifest_relative
-    raw = manifest_path.read_bytes()
-    if (
-        code_only_abandonment_release
-        and hashlib.sha256(raw).hexdigest()
-        != "5ea696c70e052a6386a4dfcca7f8bba63cef25ab2a3eac90be889d3a07651623"
-    ):
-        raise ValueError("recovery scratch bridge manifest drifted")
-    manifest = json.loads(raw)
-    from apps.github_release_runner import (
-        build_recovery_scratch_release_bridge,
-    )
-
-    bridge = build_recovery_scratch_release_bridge(
-        {
-            "path": manifest_relative,
-            "sha256": hashlib.sha256(raw).hexdigest(),
-        },
-        manifest,
-        _git_output(["git", "rev-parse", "HEAD"]).strip().lower(),
-    )
-    if bridge is None:
-        raise ValueError("changed recovery scratch manifest lacks exact bridge")
-    os.environ[environment_name] = base64.b64encode(
-        json.dumps(
-            bridge,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).decode("ascii")
-
-
 def deploy_current_checkout(
     target: HostedRuntimeTarget,
     *,
@@ -1104,7 +1020,6 @@ def deploy_current_checkout(
     allow_dirty: bool,
     action: str = "deploy",
 ) -> dict[str, Any]:
-    _bootstrap_recovery_scratch_release_bridge()
     _ensure_target_allows_mutation(target, action=action, dry_run=dry_run)
     missing = _missing_for_deploy(target)
     if missing:
@@ -1150,12 +1065,7 @@ def deploy_current_checkout(
     autoanswers_prepare_capacity_command = _build_autoanswers_prepare_capacity_command(target)
     autoanswers_prepare_deploy_command = _build_autoanswers_prepare_deploy_command(target)
     root_storage_commands = _build_root_storage_policy_commands(target)
-    systemd_commands = _build_managed_systemd_commands(
-        target,
-        recovery_scratch_release_bridge=bool(
-            root_storage_commands.get("release_bridge")
-        ),
-    )
+    systemd_commands = _build_managed_systemd_commands(target)
     change_registry_activation_command = _build_change_registry_activation_command(target)
     auth_env_preflight_command = _build_auth_env_preflight_command(target)
     nginx_public_routes_command = _build_nginx_public_routes_command(target, target_file=target_file, dry_run=dry_run)
@@ -1192,9 +1102,6 @@ def deploy_current_checkout(
             "root_storage_status_artifact_readback": root_storage_commands[
                 "status_artifact_readback"
             ],
-            "journald_operation": root_storage_commands["action"],
-            "journald_operation_name": root_storage_commands["action_name"],
-            "journald_operation_readback": root_storage_commands["readback"],
             "systemd_install": systemd_commands["install"],
             "systemd_retire": systemd_commands["retire"],
             "systemd_daemon_reload": systemd_commands["daemon_reload"],
@@ -1338,17 +1245,6 @@ def deploy_current_checkout(
             change_registry_activation_command,
             allow_transport_reconciliation=False,
         )
-    # All ordinary deploy mutations precede the bounded journald operation.
-    # After this one submit, only query-only readback and durable receipt
-    # publication remain; no dependency, nginx or other service mutation runs.
-    if root_storage_commands["action"]:
-        _run_journald_operation_once(
-            operation_command=root_storage_commands["action"],
-            readback_command=root_storage_commands["readback"],
-            summary=summary,
-        )
-    if root_storage_commands["readback"]:
-        run_stage("readback", root_storage_commands["readback"])
     # The exact SHA markers are written before dependency/schema work so an
     # interrupted rollout is observable, but only this final atomic metadata
     # update proves that every required deploy stage completed.  A disconnect
@@ -2339,206 +2235,6 @@ def run_root_storage_admission_command(args: argparse.Namespace) -> int:
         f"--predicted-output-bytes {int(args.predicted_output_bytes)}",
     )
     return subprocess.run(command, cwd=ROOT, check=False).returncode
-
-
-def run_recovery_scratch_bootstrap_command(args: argparse.Namespace) -> int:
-    target_file = args.target_file or resolve_target_file()
-    target = load_hosted_runtime_target(target_file)
-    action_name = str(args.recovery_scratch_action)
-    action = f"recovery-scratch-bootstrap-{action_name}"
-    _ensure_active_hosted_runtime_target(target, action=action)
-    if action_name == "apply":
-        _ensure_target_allows_mutation(target, action=action, dry_run=False)
-    contract = _validate_recovery_scratch_target_contract(target)
-    deployed_sha = str(args.deployed_sha or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
-        raise ValueError("recovery scratch bootstrap requires exact deployed SHA")
-    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
-    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
-        raise ValueError("recovery scratch bootstrap requires canonical runtime dir")
-    remote_target_file = _remote_repo_relative_path(target, Path(target_file).resolve())
-    deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-    runner_args = [
-        "python3", "apps/recovery_scratch_bootstrap.py",
-        "--target-file", remote_target_file,
-        "--deployed-sha", deployed_sha,
-        "--deployed-sha-file", deployed_sha_file,
-        action_name,
-    ]
-    if action_name == "dry-run":
-        output = str(args.output or "")
-        expected_output = str(Path(str(contract["completion_marker"])).parent / f"plan-{deployed_sha}.json")
-        if output != expected_output:
-            raise ValueError("recovery scratch plan output is outside exact durable scope")
-        runner_args.extend(
-            [
-                "--operation-id", str(args.operation_id),
-                "--approval-reference", str(args.approval_reference),
-                "--output", output,
-            ]
-        )
-    elif action_name == "apply":
-        plan = str(args.plan or "")
-        expected_plan = str(Path(str(contract["completion_marker"])).parent / f"plan-{deployed_sha}.json")
-        if plan != expected_plan:
-            raise ValueError("recovery scratch reviewed plan path is outside exact durable scope")
-        runner_args.extend(
-            [
-                "--plan", plan,
-                "--plan-sha256", str(args.plan_sha256),
-                "--fingerprint", str(args.fingerprint),
-            ]
-        )
-    command = " && ".join(
-        [
-            f"cd {shlex.quote(target.target_dir)}",
-            (
-                "test \"$(tr -d '\\r\\n' < "
-                + shlex.quote(deployed_sha_file)
-                + ")\" = "
-                + shlex.quote(deployed_sha)
-            ),
-            " ".join(shlex.quote(item) for item in runner_args),
-        ]
-    )
-    completed = subprocess.run(
-        _remote_shell_command(target, command),
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        timeout=900 if action_name == "apply" else 120,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"{action} failed: "
-            + (completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}")
-        )
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("recovery scratch bootstrap returned invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("recovery scratch bootstrap returned non-object payload")
-    _print_json(
-        {
-            "target_id": target.target_id,
-            "ssh_destination": target.ssh_destination,
-            "action": action,
-            "deployed_sha": deployed_sha,
-            "result": payload,
-        }
-    )
-
-
-def run_recovery_scratch_post_submit_reconcile_command(
-    args: argparse.Namespace,
-) -> int:
-    target_file = args.target_file or resolve_target_file()
-    target = load_hosted_runtime_target(target_file)
-    action_name = str(args.recovery_scratch_post_submit_action)
-    action = f"recovery-scratch-post-submit-reconcile-{action_name}"
-    _ensure_active_hosted_runtime_target(target, action=action)
-    if action_name == "apply":
-        _ensure_target_allows_mutation(target, action=action, dry_run=False)
-    _validate_recovery_scratch_target_contract(target)
-    deployed_sha = str(args.deployed_sha or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
-        raise ValueError("recovery scratch post-submit reconcile requires exact deployed SHA")
-    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
-    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
-        raise ValueError("recovery scratch post-submit reconcile requires canonical runtime dir")
-    local_manifest = (
-        ROOT
-        / "release/production-mutations/wbc0035_recovery_scratch_bootstrap.json"
-    ).resolve()
-    remote_target_file = _remote_repo_relative_path(target, Path(target_file).resolve())
-    remote_manifest = _remote_repo_relative_path(target, local_manifest)
-    deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-    runner_args = [
-        "python3",
-        "apps/recovery_scratch_bootstrap_post_submit_reconcile.py",
-        "--target-file",
-        remote_target_file,
-        "--manifest",
-        remote_manifest,
-        "--deployed-sha",
-        deployed_sha,
-        "--deployed-sha-file",
-        deployed_sha_file,
-        action_name,
-    ]
-    if action_name == "apply":
-        runner_args.extend(
-            ["--approval-reference", str(args.approval_reference or "")]
-        )
-    command = " && ".join(
-        [
-            f"cd {shlex.quote(target.target_dir)}",
-            (
-                "test \"$(tr -d '\\r\\n' < "
-                + shlex.quote(deployed_sha_file)
-                + ")\" = "
-                + shlex.quote(deployed_sha)
-            ),
-            " ".join(shlex.quote(item) for item in runner_args),
-        ]
-    )
-    completed = subprocess.run(
-        _remote_shell_command(target, command),
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        timeout=900 if action_name == "apply" else 180,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"{action} failed: "
-            + (
-                completed.stderr.strip()
-                or completed.stdout.strip()
-                or f"exit {completed.returncode}"
-            )
-        )
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "recovery scratch post-submit reconcile returned invalid JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            "recovery scratch post-submit reconcile returned non-object payload"
-        )
-    _print_json(
-        {
-            "target_id": target.target_id,
-            "ssh_destination": target.ssh_destination,
-            "action": action,
-            "deployed_sha": deployed_sha,
-            "result": payload,
-        }
-    )
-    return 0
-
-
-def run_journald_retention_readback_command(args: argparse.Namespace) -> int:
-    target = load_hosted_runtime_target(args.target_file)
-    _warn_if_rollback_read_only_target(target, action="journald-retention-readback")
-    command = _build_root_storage_policy_commands(target)["readback"]
-    if not command:
-        raise ValueError("root storage policy is not configured for this target")
-    return subprocess.run(command, cwd=ROOT, check=False).returncode
-
-
-def run_journald_corrective_readback_command(args: argparse.Namespace) -> int:
-    target = load_hosted_runtime_target(args.target_file)
-    _warn_if_rollback_read_only_target(target, action="journald-corrective-readback")
-    commands = _build_root_storage_policy_commands(target)
-    if commands["action_name"] != "corrective_remove" or not commands["readback"]:
-        raise ValueError("journald corrective removal is not configured for this target")
-    return subprocess.run(commands["readback"], cwd=ROOT, check=False).returncode
 
 
 def run_deploy_command(args: argparse.Namespace) -> int:
@@ -4124,260 +3820,6 @@ def run_storage_recovery_sanitation_command(args: argparse.Namespace) -> int:
     )
     return 0
 
-
-def run_storage_recovery_sanitation_job_command(
-    args: argparse.Namespace,
-) -> int:
-    """Submit or read one durable detached sanitation job."""
-
-    target_file = args.target_file or resolve_target_file()
-    target = load_hosted_runtime_target(target_file)
-    job_action = str(args.sanitation_job_action)
-    action = f"storage-recovery-sanitation-{job_action}"
-    _ensure_active_hosted_runtime_target(target, action=action)
-    if job_action == "submit":
-        _ensure_target_allows_mutation(target, action=action, dry_run=False)
-    if "wb-core-storage-recovery-sanitation@.service" not in {
-        unit.name for unit in target.managed_systemd_units
-    }:
-        raise ValueError(
-            "detached sanitation requires the repo-owned managed systemd template"
-        )
-    deployed_sha = str(args.deployed_sha or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
-        raise ValueError("detached sanitation requires an exact deployed SHA")
-    job_id = str(args.job_id or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", job_id):
-        raise ValueError(
-            "detached sanitation requires an exact 64-hex caller-known job id"
-        )
-    runtime_dir = str(
-        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
-    ).strip()
-    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
-        raise ValueError("detached sanitation requires the canonical runtime dir")
-    runner_args = [
-        "python3",
-        "apps/storage_recovery_sanitation_job.py",
-        "--runtime-dir",
-        runtime_dir,
-        "--root-backups",
-        "/opt/wb-core-runtime/backups",
-        "--deployed-sha-file",
-        f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha",
-        job_action,
-        "--job-id",
-        job_id,
-        "--deployed-sha",
-        deployed_sha,
-    ]
-    if job_action == "submit":
-        operation = str(args.operation)
-        fingerprint = str(args.fingerprint or "").strip()
-        if operation == "apply" and not re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            fingerprint,
-        ):
-            raise ValueError(
-                "detached sanitation apply requires an exact fingerprint"
-            )
-        if operation == "plan" and fingerprint:
-            raise ValueError(
-                "detached sanitation plan must not carry an apply fingerprint"
-            )
-        runner_args.extend(
-            [
-                "--operation",
-                operation,
-                "--root",
-                str(args.sanitation_root),
-                "--family",
-                str(args.family),
-                "--reserved-free-bytes",
-                str(int(args.reserved_free_bytes)),
-            ]
-        )
-        if fingerprint:
-            runner_args.extend(["--fingerprint", fingerprint])
-    shell_command = " && ".join(
-        [
-            f"cd {shlex.quote(target.target_dir)}",
-            (
-                "test \"$(tr -d '\\r\\n' < "
-                + shlex.quote(
-                    f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-                )
-                + ")\" = "
-                + shlex.quote(deployed_sha)
-            ),
-            " ".join(shlex.quote(item) for item in runner_args),
-        ]
-    )
-    result = subprocess.run(
-        _remote_shell_command(target, shell_command),
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        timeout=60.0,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"{action} failed: "
-            + (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or f"exit {result.returncode}"
-            )
-        )
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("detached sanitation returned invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("detached sanitation returned a non-object payload")
-    _print_json(
-        {
-            "target_id": target.target_id,
-            "ssh_destination": target.ssh_destination,
-            "runtime_dir": runtime_dir,
-            "action": action,
-            "job_id": job_id,
-            "result": payload,
-        }
-    )
-    return 0
-
-
-def run_sqlite_hot_journal_recovery_command(args: argparse.Namespace) -> int:
-    """Dry-run, one-submit, or read back the exact incident recovery."""
-
-    target_file = args.target_file or resolve_target_file()
-    target = load_hosted_runtime_target(target_file)
-    recovery_action = str(args.hot_journal_action)
-    reconcile_existing = (
-        str(getattr(args, "hot_journal_mode", "recovery"))
-        == "reconcile-existing"
-    )
-    action_stem = (
-        "sqlite-hot-journal-reconcile-existing"
-        if reconcile_existing
-        else "sqlite-hot-journal-recovery"
-    )
-    action = f"{action_stem}-{recovery_action}"
-    _ensure_active_hosted_runtime_target(target, action=action)
-    if recovery_action == "submit":
-        _ensure_target_allows_mutation(target, action=action, dry_run=False)
-    deployed_sha = str(args.deployed_sha or "").strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{40}", deployed_sha):
-        raise ValueError("hot journal recovery requires an exact deployed SHA")
-    runtime_dir = str(
-        target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""
-    ).strip()
-    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
-        raise ValueError("hot journal recovery requires the canonical runtime dir")
-    deployed_sha_file = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-    if recovery_action == "rehearsal":
-        if not reconcile_existing:
-            raise ValueError("query-only rehearsal is reconcile-existing only")
-        runner_args = [
-            "python3", "apps/sqlite_hot_journal_reconcile_existing.py",
-            "--runtime-dir", runtime_dir,
-            "--deployed-sha", deployed_sha,
-            "--deployed-sha-file", deployed_sha_file,
-            "--operation-id", str(args.operation_id),
-            "--rehearsal",
-        ]
-    elif recovery_action == "dry-run":
-        output = str(args.output or "")
-        output_pattern = (
-            r"/opt/wb-core-runtime/state/private-evidence/production-goals/"
-            r"wbc0027-s047-hot-journal-plan-[0-9a-f]{40}\.json"
-        )
-        if reconcile_existing:
-            output_pattern = output_pattern.replace(
-                "hot-journal-plan", "reconcile-existing-plan"
-            )
-        if re.fullmatch(
-            output_pattern,
-            output,
-        ) is None:
-            raise ValueError("hot journal dry-run output path is outside exact scope")
-        runner_args = [
-            "python3",
-            (
-                "apps/sqlite_hot_journal_reconcile_existing.py"
-                if reconcile_existing
-                else "apps/sqlite_hot_journal_recovery.py"
-            ),
-            "--runtime-dir", runtime_dir,
-            "--deployed-sha", deployed_sha,
-            "--deployed-sha-file", deployed_sha_file,
-            "--operation-id", str(args.operation_id),
-            "--window-id", str(args.window_id),
-            "--plan-fingerprint", str(args.plan_fingerprint),
-            "--output", output,
-        ]
-    else:
-        job_id = str(args.job_id or "").strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{64}", job_id):
-            raise ValueError("hot journal recovery requires an exact job id")
-        runner_args = [
-            "python3", "apps/storage_recovery_sanitation_job.py",
-            "--runtime-dir", runtime_dir,
-            "--root-backups", "/opt/wb-core-runtime/backups",
-            "--deployed-sha-file", deployed_sha_file,
-            "status" if recovery_action == "status" else "submit",
-            "--job-id", job_id,
-            "--deployed-sha", deployed_sha,
-        ]
-        if recovery_action == "submit":
-            runner_args.extend(
-                [
-                    "--operation", "sqlite-hot-journal-recovery-apply",
-                    "--reviewed-plan", str(args.reviewed_plan),
-                    "--reviewed-plan-sha256", str(args.reviewed_plan_sha256),
-                    "--confirm-fingerprint", str(args.confirm_fingerprint),
-                    "--approval-reference", str(args.approval_reference),
-                ]
-            )
-            if reconcile_existing:
-                operation_index = runner_args.index(
-                    "sqlite-hot-journal-recovery-apply"
-                )
-                runner_args[operation_index] = (
-                    "sqlite-hot-journal-reconcile-existing-apply"
-                )
-    command = " && ".join(
-        [
-            f"cd {shlex.quote(target.target_dir)}",
-            (
-                "test \"$(tr -d '\\r\\n' < "
-                + shlex.quote(deployed_sha_file)
-                + ")\" = "
-                + shlex.quote(deployed_sha)
-            ),
-            " ".join(shlex.quote(item) for item in runner_args),
-        ]
-    )
-    completed = subprocess.run(
-        _remote_shell_command(target, command),
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        timeout=7200 if recovery_action in {"dry-run", "rehearsal"} else 60,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"{action} failed: "
-            + (completed.stderr.strip() or completed.stdout.strip())
-        )
-    payload = json.loads(completed.stdout)
-    if not isinstance(payload, dict):
-        raise RuntimeError("hot journal recovery returned a non-object payload")
-    _print_json({"action": action, "result": payload})
-    return 0
 
 
 def run_business_data_maintenance_restore_job_command(
@@ -7922,216 +7364,6 @@ def run_finance_daily_recovery_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_wbc0027_capital_recovery_command(args: argparse.Namespace) -> int:
-    target = load_hosted_runtime_target(args.target_file or resolve_target_file())
-    action = str(args.wbc0027_capital_action)
-    payload = _run_remote_wbc0027_capital_recovery(
-        target,
-        action=action,
-        deployed_sha=str(args.deployed_sha or ""),
-        operation_id=str(args.operation_id or ""),
-        evidence_dir=str(args.evidence_dir or ""),
-        manifest_path=str(getattr(args, "manifest", "") or ""),
-        manifest_sha256=str(getattr(args, "manifest_sha256", "") or ""),
-        phase_operation_id=str(getattr(args, "phase_operation_id", "") or ""),
-        phase_fingerprint=str(getattr(args, "phase_fingerprint", "") or ""),
-        approval_reference=str(args.approval_reference or ""),
-        phase=str(getattr(args, "phase", "") or ""),
-        product_phase_operation_id=str(
-            getattr(args, "product_phase_operation_id", "") or ""
-        ),
-        no_create=bool(getattr(args, "no_create", False)),
-    )
-    output = str(args.output or "").strip()
-    if output:
-        output_path = Path(output).resolve()
-        if output_path == ROOT or ROOT in output_path.parents:
-            raise ValueError("WBC0027 evidence must stay outside the Git checkout")
-        _write_private_json(output_path, payload)
-    _print_json(
-        {
-            "target_id": target.target_id,
-            "ssh_destination": target.ssh_destination,
-            "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
-            "action": f"wbc0027-capital-{action}",
-            "result": payload,
-        }
-    )
-    return 0
-
-
-def _run_remote_wbc0027_capital_recovery(
-    target: HostedRuntimeTarget,
-    *,
-    action: str,
-    deployed_sha: str,
-    operation_id: str,
-    evidence_dir: str,
-    manifest_path: str,
-    manifest_sha256: str,
-    phase_operation_id: str,
-    phase_fingerprint: str,
-    approval_reference: str,
-    phase: str,
-    product_phase_operation_id: str,
-    no_create: bool,
-) -> dict[str, Any]:
-    _ensure_active_hosted_runtime_target(target, action=f"wbc0027-capital-{action}")
-    if action not in {"plan", "apply", "readback"}:
-        raise ValueError(f"unsupported WBC0027 capital recovery action: {action}")
-    if action == "apply":
-        _ensure_target_allows_mutation(target, action="wbc0027-capital-apply", dry_run=False)
-    runtime_dir = str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "").strip()
-    if runtime_dir != ACTIVE_HOSTED_RUNTIME_RUNTIME_DIR:
-        raise ValueError("WBC0027 recovery requires the canonical active runtime dir")
-    deployed_sha = deployed_sha.strip().lower()
-    if re.fullmatch(r"[0-9a-f]{40}", deployed_sha) is None:
-        raise ValueError("WBC0027 recovery requires one exact deployed SHA")
-    if re.fullmatch(r"production-goal-v1-[0-9a-f]{32}", operation_id) is None:
-        raise ValueError("WBC0027 recovery requires one fresh scope-goal operation")
-    if phase not in {"product", "economics"}:
-        raise ValueError("WBC0027 recovery phase is invalid")
-    normalized_evidence = posixpath.normpath(evidence_dir)
-    if (
-        not evidence_dir.startswith("/")
-        or normalized_evidence != evidence_dir
-        or posixpath.basename(evidence_dir) != operation_id
-        or posixpath.basename(posixpath.dirname(evidence_dir)) != "production-goals"
-    ):
-        raise ValueError("WBC0027 private evidence namespace is invalid")
-    runtime_sha_path = f"{target.target_dir.rstrip('/')}/.wb-core-runtime-sha"
-    runner_args = [
-        "python3",
-        "apps/wbc0027_capital_recovery.py",
-        "--runtime-dir",
-        runtime_dir,
-        "--deployed-sha-file",
-        runtime_sha_path,
-        "--expected-deployed-sha",
-        deployed_sha,
-        "--profile",
-        "product-capital-qualified-economics",
-        "--target-id",
-        target.target_id,
-        "--operation-id",
-        operation_id,
-        "--evidence-dir",
-        evidence_dir,
-        action,
-        "--phase",
-        phase,
-    ]
-    if action == "plan":
-        if phase == "economics":
-            if re.fullmatch(r"recovery_[0-9a-f]{32}", product_phase_operation_id) is None:
-                raise ValueError("WBC0027 economics predecessor identity is invalid")
-            runner_args.extend(
-                ["--product-phase-operation-id", product_phase_operation_id]
-            )
-        if no_create:
-            runner_args.append("--no-create")
-    else:
-        if (
-            posixpath.dirname(posixpath.normpath(manifest_path)) != evidence_dir
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256) is None
-            or re.fullmatch(r"recovery_[0-9a-f]{32}", phase_operation_id) is None
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", phase_fingerprint) is None
-        ):
-            raise ValueError("WBC0027 reviewed phase binding is invalid")
-        runner_args.extend(
-            [
-                "--manifest",
-                manifest_path,
-                "--manifest-sha256",
-                manifest_sha256,
-                "--phase-operation-id",
-                phase_operation_id,
-                "--phase-fingerprint",
-                phase_fingerprint,
-            ]
-        )
-        if action == "apply":
-            if not approval_reference.strip():
-                raise ValueError("WBC0027 apply requires immutable approval reference")
-            runner_args.extend(
-                ["--approval-reference", approval_reference.strip()]
-            )
-    shell_command = " && ".join(
-        [
-            f"test -s {shlex.quote(runtime_sha_path)}",
-            f"cd {shlex.quote(target.target_dir)}",
-            " ".join(shlex.quote(item) for item in runner_args),
-        ]
-    )
-    result = subprocess.run(
-        _remote_shell_command(target, shell_command),
-        text=True,
-        capture_output=True,
-        cwd=ROOT,
-        timeout=1800,
-        check=False,
-    )
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"WBC0027 capital {action} failed: "
-            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
-        ) from exc
-    if result.returncode != 0 and not (
-        isinstance(payload, dict)
-        and payload.get("status") in {"not_applied", "ambiguous"}
-    ):
-        raise RuntimeError(
-            f"WBC0027 capital {action} failed: "
-            + (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
-        )
-    if not isinstance(payload, dict) or payload.get("status") == "blocked":
-        raise RuntimeError("WBC0027 capital runner returned an incomplete result")
-    generation = payload.get("storage_generation")
-    generation_id = generation.get("generation_id") if isinstance(generation, dict) else None
-    schema_revision = generation.get("schema_revision") if isinstance(generation, dict) else None
-    generation_manifest_sha256 = (
-        generation.get("manifest_sha256") if isinstance(generation, dict) else None
-    )
-    exact_generation = bool(
-        isinstance(generation_id, str)
-        and generation_id
-        and generation_id.strip() == generation_id
-        and isinstance(schema_revision, str)
-        and schema_revision
-        and schema_revision.strip() == schema_revision
-        and isinstance(generation_manifest_sha256, str)
-        and re.fullmatch(r"sha256:[0-9a-f]{64}", generation_manifest_sha256)
-    )
-    terminal_pre_submit_failure = bool(
-        action == "apply" and payload.get("status") in {"not_applied", "ambiguous"}
-    )
-    if not (
-        payload.get("profile") == "product-capital-qualified-economics"
-        and payload.get("target_id") == target.target_id
-        and payload.get("goal_operation_id") == operation_id
-        and payload.get("phase") == phase
-        and (
-            payload.get("deployed_sha") == deployed_sha
-            or payload.get("status") in {"not_applied", "ambiguous"}
-        )
-        and (terminal_pre_submit_failure or exact_generation)
-        and (
-            action == "plan"
-            or terminal_pre_submit_failure
-            or payload.get("phase_operation_id") == phase_operation_id
-            and payload.get("phase_fingerprint") == phase_fingerprint
-        )
-    ):
-        raise RuntimeError("WBC0027 capital runner binding drifted")
-    if action == "plan" and bool(
-        (payload.get("plan_persistence") or {}).get("no_create")
-    ) is not no_create:
-        raise RuntimeError("WBC0027 no-create persistence receipt drifted")
-    return payload
-
-
 def _run_remote_finance_daily_recovery(
     target: HostedRuntimeTarget,
     *,
@@ -10623,9 +9855,6 @@ def _run_remote_business_data_maintenance_runner(
     plan_fingerprint: str = "",
     approval_reference: str = "",
     allow_pre_hold_service_continuity: bool = False,
-    expected_deployed_sha: str = "",
-    abandon_hot_journal_recovery: bool = False,
-    eligibility_only: bool = False,
 ) -> dict[str, Any]:
     _ensure_active_hosted_runtime_target(
         target, action=f"business-data-maintenance-{action}"
@@ -10643,7 +9872,6 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-restoring",
         "barrier-release",
         "barrier-abort",
-        "abort-prepared",
     }:
         raise ValueError(f"unsupported business-data maintenance action: {action}")
     if action in {
@@ -10656,8 +9884,7 @@ def _run_remote_business_data_maintenance_runner(
         "barrier-restoring",
         "barrier-release",
         "barrier-abort",
-        "abort-prepared",
-    } and not (action == "abort-prepared" and eligibility_only):
+    }:
         _ensure_target_allows_mutation(
             target,
             action=f"business-data-maintenance-{action}",
@@ -10677,11 +9904,11 @@ def _run_remote_business_data_maintenance_runner(
         "--env-file",
         target.environment_file,
     ]
-    if action in {"hold", "abort-prepared"}:
+    if action == "hold":
         runner_args.extend(
             ["--wait-timeout-seconds", "1200", "--poll-interval-seconds", "2"]
         )
-    if action in {"prepare", "hold", "restore", "abort-prepared"}:
+    if action in {"prepare", "hold", "restore"}:
         runner_args.extend(
             [
                 "--actor",
@@ -10709,34 +9936,7 @@ def _run_remote_business_data_maintenance_runner(
             runner_args.extend(
                 ["--expected-revision", str(int(expected_revision))]
             )
-    if action == "abort-prepared":
-        if (
-            expected_revision is None
-            or not window_id
-            or not plan_fingerprint
-            or re.fullmatch(r"[0-9a-f]{40}", expected_deployed_sha) is None
-        ):
-            raise ValueError(
-                "business-data maintenance abort-prepared requires exact "
-                "revision, window, plan fingerprint, and deployed SHA"
-            )
-        runner_args.extend(
-            [
-                "--expected-revision",
-                str(int(expected_revision)),
-                "--window-id",
-                window_id,
-                "--plan-fingerprint",
-                plan_fingerprint,
-                "--expected-deployed-sha",
-                expected_deployed_sha,
-            ]
-        )
-        if abandon_hot_journal_recovery:
-            runner_args.append("--abandon-hot-journal-recovery")
-        if eligibility_only:
-            runner_args.append("--eligibility-only")
-    elif action == "restore":
+    if action == "restore":
         if expected_revision is None:
             raise ValueError(
                 "business-data maintenance restore requires --expected-revision"
@@ -10824,7 +10024,7 @@ def _run_remote_business_data_maintenance_runner(
         cwd=ROOT,
         timeout=(
             1500.0
-            if action in {"hold", "restore", "abort-prepared"}
+            if action in {"hold", "restore"}
             else 300.0
         ),
         check=False,
@@ -10848,55 +10048,7 @@ def run_business_data_maintenance_command(args: argparse.Namespace) -> int:
     target = load_hosted_runtime_target(target_file)
     action = str(args.action)
     evidence: dict[str, Any] = {}
-    if action == "abort-prepared":
-        if args.expected_revision is None:
-            raise ValueError(
-                "business-data-maintenance abort-prepared requires "
-                "--expected-revision"
-            )
-        result = _run_remote_business_data_maintenance_runner(
-            target,
-            action="abort-prepared",
-            expected_revision=int(args.expected_revision),
-            actor=str(args.actor or "repo_owned_cli"),
-            reason=str(args.reason or "abort exact prepared maintenance"),
-            window_id=str(args.window_id or ""),
-            plan_fingerprint=str(args.plan_fingerprint or ""),
-            expected_deployed_sha=str(args.expected_deployed_sha or ""),
-            abandon_hot_journal_recovery=bool(
-                args.abandon_hot_journal_recovery
-            ),
-            eligibility_only=bool(args.eligibility_only),
-        )
-        barrier = dict(result.get("barrier") or {})
-        restore = dict(result.get("restore") or {})
-        if args.eligibility_only:
-            if (
-                str(result.get("status") or "") != "eligible"
-                or str(
-                    dict(result.get("recovery_abandonment") or {}).get(
-                        "status"
-                    )
-                    or ""
-                )
-                != "eligible"
-                or barrier.get("active") is not True
-                or str(barrier.get("phase") or "") != "acquiring"
-            ):
-                raise RuntimeError(
-                    "business-data abort-prepared eligibility is incomplete"
-                )
-        elif (
-            str(result.get("status") or "") != "released"
-            or barrier.get("active") is not False
-            or str(barrier.get("phase") or "") != "released"
-            or str(restore.get("status") or "") != "restored"
-            or restore.get("exact_prior_state_restored") is not True
-        ):
-            raise RuntimeError(
-                "business-data abort-prepared readback is incomplete"
-            )
-    elif action == "hold":
+    if action == "hold":
         evidence["core_prepare"] = _run_remote_business_data_maintenance_runner(
             target,
             action="prepare",
@@ -11841,72 +10993,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     root_storage_admission.add_argument("--destination", required=True)
     root_storage_admission.add_argument("--predicted-output-bytes", type=int, required=True)
     root_storage_admission.set_defaults(handler=run_root_storage_admission_command)
-
-    recovery_scratch_dry_run = subparsers.add_parser(
-        "recovery-scratch-bootstrap-dry-run",
-        help="Prove the exact blank recovery scratch disk and persist one immutable reviewed plan.",
-    )
-    recovery_scratch_dry_run.add_argument("--deployed-sha", required=True)
-    recovery_scratch_dry_run.add_argument("--operation-id", required=True)
-    recovery_scratch_dry_run.add_argument("--approval-reference", required=True)
-    recovery_scratch_dry_run.add_argument("--output", required=True)
-    recovery_scratch_dry_run.set_defaults(
-        handler=run_recovery_scratch_bootstrap_command,
-        recovery_scratch_action="dry-run",
-    )
-
-    recovery_scratch_apply = subparsers.add_parser(
-        "recovery-scratch-bootstrap-apply",
-        help="Initialize and mount the exact reviewed recovery scratch disk once.",
-    )
-    recovery_scratch_apply.add_argument("--deployed-sha", required=True)
-    recovery_scratch_apply.add_argument("--plan", required=True)
-    recovery_scratch_apply.add_argument("--plan-sha256", required=True)
-    recovery_scratch_apply.add_argument("--fingerprint", required=True)
-    recovery_scratch_apply.set_defaults(
-        handler=run_recovery_scratch_bootstrap_command,
-        recovery_scratch_action="apply",
-    )
-
-    recovery_scratch_readback = subparsers.add_parser(
-        "recovery-scratch-bootstrap-readback",
-        help="Read the exact mounted-ready recovery scratch identity without mutation.",
-    )
-    recovery_scratch_readback.add_argument("--deployed-sha", required=True)
-    recovery_scratch_readback.set_defaults(
-        handler=run_recovery_scratch_bootstrap_command,
-        recovery_scratch_action="readback",
-    )
-
-    for action_name in ("dry-run", "apply", "readback"):
-        command = subparsers.add_parser(
-            f"recovery-scratch-post-submit-reconcile-{action_name}",
-            help=(
-                "Continue the exact already-submitted recovery scratch operation "
-                "without a second disk submit."
-            ),
-        )
-        command.add_argument("--deployed-sha", required=True)
-        if action_name == "apply":
-            command.add_argument("--approval-reference", required=True)
-        command.set_defaults(
-            handler=run_recovery_scratch_post_submit_reconcile_command,
-            recovery_scratch_post_submit_action=action_name,
-        )
-
-    journald_readback = subparsers.add_parser(
-        "journald-retention-readback",
-        help="Compatibility alias for the current target-bound journald readback.",
-    )
-    journald_readback.set_defaults(handler=run_journald_retention_readback_command)
-
-    journald_corrective_readback = subparsers.add_parser(
-        "journald-corrective-readback",
-        help="Query-only reconcile the versioned removal of the block-003 journald drop-in.",
-    )
-    journald_corrective_readback.set_defaults(
-        handler=run_journald_corrective_readback_command
-    )
 
     deploy = subparsers.add_parser("deploy", help="Sync current checkout to hosted runtime and restart the service.")
     deploy.add_argument("--dry-run", action="store_true", help="Print commands without executing remote update.")
@@ -13192,63 +12278,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         actor="",
     )
 
-    wbc0027_plan = subparsers.add_parser(
-        "wbc0027-capital-recovery-plan",
-        help="Build one query-only JIT WBC0027 phase candidate.",
-    )
-    wbc0027_plan.add_argument("--deployed-sha", required=True)
-    wbc0027_plan.add_argument("--operation-id", required=True)
-    wbc0027_plan.add_argument("--evidence-dir", required=True)
-    wbc0027_plan.add_argument("--phase", choices=("product", "economics"), required=True)
-    wbc0027_plan.add_argument("--product-phase-operation-id", default="")
-    wbc0027_plan.add_argument("--no-create", action="store_true")
-    wbc0027_plan.add_argument("--output", default="")
-    wbc0027_plan.set_defaults(
-        handler=run_wbc0027_capital_recovery_command,
-        wbc0027_capital_action="plan",
-        approval_reference="",
-    )
-
-    wbc0027_apply = subparsers.add_parser(
-        "wbc0027-capital-recovery-apply",
-        help="Apply one exact reviewed WBC0027 phase once.",
-    )
-    wbc0027_apply.add_argument("--deployed-sha", required=True)
-    wbc0027_apply.add_argument("--operation-id", required=True)
-    wbc0027_apply.add_argument("--evidence-dir", required=True)
-    wbc0027_apply.add_argument("--manifest", required=True)
-    wbc0027_apply.add_argument("--manifest-sha256", required=True)
-    wbc0027_apply.add_argument("--phase-operation-id", required=True)
-    wbc0027_apply.add_argument("--phase-fingerprint", required=True)
-    wbc0027_apply.add_argument("--approval-reference", required=True)
-    wbc0027_apply.add_argument("--phase", choices=("product", "economics"), required=True)
-    wbc0027_apply.add_argument("--output", default="")
-    wbc0027_apply.set_defaults(
-        handler=run_wbc0027_capital_recovery_command,
-        wbc0027_capital_action="apply",
-    )
-
-    wbc0027_readback = subparsers.add_parser(
-        "wbc0027-capital-recovery-readback",
-        help="Run same-operation query-only readback for one WBC0027 phase.",
-    )
-    wbc0027_readback.add_argument("--deployed-sha", required=True)
-    wbc0027_readback.add_argument("--operation-id", required=True)
-    wbc0027_readback.add_argument("--evidence-dir", required=True)
-    wbc0027_readback.add_argument("--manifest", required=True)
-    wbc0027_readback.add_argument("--manifest-sha256", required=True)
-    wbc0027_readback.add_argument("--phase-operation-id", required=True)
-    wbc0027_readback.add_argument("--phase-fingerprint", required=True)
-    wbc0027_readback.add_argument("--phase", choices=("product", "economics"), required=True)
-    wbc0027_readback.add_argument("--output", default="")
-    wbc0027_readback.set_defaults(
-        handler=run_wbc0027_capital_recovery_command,
-        wbc0027_capital_action="readback",
-        approval_reference="",
-        product_phase_operation_id="",
-        no_create=False,
-    )
-
     vitrina_incident_dry_run = subparsers.add_parser(
         "vitrina-incident-rematerialization-dry-run",
         help=(
@@ -13606,6 +12635,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         recovery_retention_apply=True,
     )
 
+
     sanitation_inventory = subparsers.add_parser(
         "storage-recovery-sanitation-inventory",
         help="Inventory both canonical backup roots without mutation.",
@@ -13651,149 +12681,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         storage_sanitation_action="apply",
     )
 
-    sanitation_submit = subparsers.add_parser(
-        "storage-recovery-sanitation-submit",
-        help=(
-            "Persist one exact plan/apply request and start the fixed detached "
-            "sanitation worker."
-        ),
-    )
-    sanitation_submit.add_argument("--deployed-sha", required=True)
-    sanitation_submit.add_argument("--job-id", required=True)
-    sanitation_submit.add_argument(
-        "--operation",
-        choices=("plan", "apply"),
-        required=True,
-    )
-    sanitation_submit.add_argument(
-        "--root",
-        dest="sanitation_root",
-        choices=("root", "backup"),
-        required=True,
-    )
-    sanitation_submit.add_argument("--family", required=True)
-    sanitation_submit.add_argument("--fingerprint", default="")
-    sanitation_submit.add_argument(
-        "--reserved-free-bytes",
-        type=int,
-        default=256 * 1024 * 1024,
-    )
-    sanitation_submit.set_defaults(
-        handler=run_storage_recovery_sanitation_job_command,
-        sanitation_job_action="submit",
-    )
-
-    sanitation_status = subparsers.add_parser(
-        "storage-recovery-sanitation-status",
-        help="Read one durable detached sanitation job result without mutation.",
-    )
-    sanitation_status.add_argument("--deployed-sha", required=True)
-    sanitation_status.add_argument("--job-id", required=True)
-    sanitation_status.set_defaults(
-        handler=run_storage_recovery_sanitation_job_command,
-        sanitation_job_action="status",
-    )
-
-    hot_journal_plan = subparsers.add_parser(
-        "sqlite-hot-journal-recovery-dry-run",
-        help="Build the exact read-only split hot-journal recovery plan.",
-    )
-    hot_journal_plan.add_argument("--deployed-sha", required=True)
-    hot_journal_plan.add_argument("--operation-id", required=True)
-    hot_journal_plan.add_argument("--window-id", required=True)
-    hot_journal_plan.add_argument("--plan-fingerprint", required=True)
-    hot_journal_plan.add_argument("--output", required=True)
-    hot_journal_plan.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="dry-run",
-        hot_journal_mode="recovery",
-    )
-
-    hot_journal_submit = subparsers.add_parser(
-        "sqlite-hot-journal-recovery-submit",
-        help="Submit one reviewed exact recovery plan to the detached worker.",
-    )
-    hot_journal_submit.add_argument("--deployed-sha", required=True)
-    hot_journal_submit.add_argument("--job-id", required=True)
-    hot_journal_submit.add_argument("--reviewed-plan", required=True)
-    hot_journal_submit.add_argument("--reviewed-plan-sha256", required=True)
-    hot_journal_submit.add_argument("--confirm-fingerprint", required=True)
-    hot_journal_submit.add_argument("--approval-reference", required=True)
-    hot_journal_submit.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="submit",
-        hot_journal_mode="recovery",
-    )
-
-    hot_journal_status = subparsers.add_parser(
-        "sqlite-hot-journal-recovery-status",
-        help="Read one exact detached hot-journal recovery result.",
-    )
-    hot_journal_status.add_argument("--deployed-sha", required=True)
-    hot_journal_status.add_argument("--job-id", required=True)
-    hot_journal_status.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="status",
-        hot_journal_mode="recovery",
-    )
-
-    reconcile_existing_plan = subparsers.add_parser(
-        "sqlite-hot-journal-reconcile-existing-dry-run",
-        help="Build the exact query-only implicit-rollback reconciliation plan.",
-    )
-    reconcile_existing_plan.add_argument("--deployed-sha", required=True)
-    reconcile_existing_plan.add_argument("--operation-id", required=True)
-    reconcile_existing_plan.add_argument("--window-id", required=True)
-    reconcile_existing_plan.add_argument("--plan-fingerprint", required=True)
-    reconcile_existing_plan.add_argument("--output", required=True)
-    reconcile_existing_plan.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="dry-run",
-        hot_journal_mode="reconcile-existing",
-    )
-
-    reconcile_existing_rehearsal = subparsers.add_parser(
-        "sqlite-hot-journal-reconcile-existing-rehearsal",
-        help=(
-            "Run the eight-phase query-only/no-create/no-submit "
-            "reconcile-existing rehearsal."
-        ),
-    )
-    reconcile_existing_rehearsal.add_argument("--deployed-sha", required=True)
-    reconcile_existing_rehearsal.add_argument("--operation-id", required=True)
-    reconcile_existing_rehearsal.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="rehearsal",
-        hot_journal_mode="reconcile-existing",
-    )
-
-    reconcile_existing_submit = subparsers.add_parser(
-        "sqlite-hot-journal-reconcile-existing-submit",
-        help="Submit one reviewed marker-only implicit-rollback reconciliation.",
-    )
-    reconcile_existing_submit.add_argument("--deployed-sha", required=True)
-    reconcile_existing_submit.add_argument("--job-id", required=True)
-    reconcile_existing_submit.add_argument("--reviewed-plan", required=True)
-    reconcile_existing_submit.add_argument("--reviewed-plan-sha256", required=True)
-    reconcile_existing_submit.add_argument("--confirm-fingerprint", required=True)
-    reconcile_existing_submit.add_argument("--approval-reference", required=True)
-    reconcile_existing_submit.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="submit",
-        hot_journal_mode="reconcile-existing",
-    )
-
-    reconcile_existing_status = subparsers.add_parser(
-        "sqlite-hot-journal-reconcile-existing-status",
-        help="Read one detached implicit-rollback reconciliation result.",
-    )
-    reconcile_existing_status.add_argument("--deployed-sha", required=True)
-    reconcile_existing_status.add_argument("--job-id", required=True)
-    reconcile_existing_status.set_defaults(
-        handler=run_sqlite_hot_journal_recovery_command,
-        hot_journal_action="status",
-        hot_journal_mode="reconcile-existing",
-    )
 
     promo_gc_dry_run = subparsers.add_parser(
         "promo-archive-gc-dry-run",
@@ -13929,7 +12816,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "barrier-restoring",
             "barrier-release",
             "barrier-abort",
-            "abort-prepared",
         ),
     )
     business_data_maintenance.add_argument(
@@ -13978,21 +12864,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--approval-reference",
         default="",
         help="Exact human approval reference for barrier acquisition.",
-    )
-    business_data_maintenance.add_argument(
-        "--expected-deployed-sha",
-        default="",
-        help="Exact deployed runtime SHA required by abort-prepared.",
-    )
-    business_data_maintenance.add_argument(
-        "--abandon-hot-journal-recovery",
-        action="store_true",
-        help="Use the exact WBC0027 S047 clean recovery-abandonment path.",
-    )
-    business_data_maintenance.add_argument(
-        "--eligibility-only",
-        action="store_true",
-        help="Run only the recovery-abandonment admission readback.",
     )
     business_data_maintenance.add_argument(
         "--allow-pre-hold-service-continuity",
@@ -16316,8 +15187,6 @@ def _validate_managed_systemd_units(target: HostedRuntimeTarget) -> None:
 
 def _build_managed_systemd_commands(
     target: HostedRuntimeTarget,
-    *,
-    recovery_scratch_release_bridge: bool = False,
 ) -> dict[str, list[str] | None]:
     if not target.has_managed_systemd_units and not target.retired_systemd_units:
         return {
@@ -16359,11 +15228,6 @@ def _build_managed_systemd_commands(
         f"--runtime-dir {shlex.quote(runtime_dir)}",
         *(f"--enable {unit}" for unit in enable_names),
         *(f"--restart {unit}" for unit in restart_names),
-        *(
-            ["--recovery-scratch-release-bridge"]
-            if recovery_scratch_release_bridge
-            else []
-        ),
     ]
     return {
         "install": _remote_shell_command(target, " && ".join(install_steps)) if install_steps else None,
@@ -16407,194 +15271,43 @@ def _build_root_storage_policy_commands(target: HostedRuntimeTarget) -> dict[str
             "status": None,
             "status_read_only": None,
             "status_artifact_readback": None,
-            "action": None,
-            "action_name": None,
-            "readback": None,
         }
     local_policy = _resolve_repo_relative_path(target.root_storage_policy_file)
     policy_payload = json.loads(local_policy.read_text(encoding="utf-8"))
-    if not isinstance(policy_payload, dict):
-        raise ValueError("root storage policy must contain a JSON object")
-    status_artifact = policy_payload.get("status_artifact") or {}
+    status_artifact = (
+        policy_payload.get("status_artifact")
+        if isinstance(policy_payload, dict)
+        else None
+    )
     if not isinstance(status_artifact, dict):
-        raise ValueError("root storage status artifact policy must contain a JSON object")
+        raise ValueError("root storage status artifact policy must be an object")
     status_artifact_path = str(status_artifact.get("path") or "")
     if not status_artifact_path.startswith("/"):
         raise ValueError("root storage status artifact path must be absolute")
-    journald_policy = policy_payload.get("journald") or {}
-    if not isinstance(journald_policy, dict):
-        raise ValueError("root storage journald policy must contain a JSON object")
-    correction_mode = journald_policy.get("mode") == "remove_block_003_dropin"
     remote_policy_path = _remote_repo_relative_path(target, local_policy)
     prefix = (
         f"cd {shlex.quote(target.target_dir)} && "
         "python3 apps/root_storage_policy.py "
         f"--policy-file {shlex.quote(remote_policy_path)}"
     )
-    bridge_option = ""
-    encoded_bridge = os.environ.get(
-        "WB_CORE_RECOVERY_SCRATCH_RELEASE_BRIDGE", ""
-    ).strip()
-    if encoded_bridge:
-        try:
-            bridge = json.loads(
-                base64.b64decode(encoded_bridge, validate=True).decode("utf-8")
-            )
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("recovery scratch release bridge encoding is invalid") from exc
-        if (
-            not isinstance(bridge, dict)
-            or bridge.get("contract")
-            != "wbc0035_recovery_scratch_release_bridge/v1"
-            or bridge.get("target_id") != target.target_id
-            or bridge.get("operation_id")
-            != "wbc0035-026-recovery-scratch-a01"
-            or bridge.get("release_sha")
-            != _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
-            or dict(bridge.get("target") or {}).get("parent_device_by_id")
-            != target.recovery_scratch_filesystem.get("parent_device_by_id")
-            or dict(bridge.get("target") or {}).get("parent_hctl")
-            != target.recovery_scratch_filesystem.get("parent_hctl")
-            or base64.b64encode(
-                json.dumps(
-                    bridge,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ).decode("ascii")
-            != encoded_bridge
-        ):
-            raise ValueError("recovery scratch release bridge is not exact")
-        bridge_option = (
-            " --recovery-scratch-release-bridge "
-            + shlex.quote(encoded_bridge)
-        )
-    corrective_bridge_options = (
-        " --allow-recovery-scratch-bootstrap-pending" + bridge_option
-        if encoded_bridge and correction_mode
-        else ""
-    )
     return {
-        "release_bridge": bool(encoded_bridge),
         "remote_policy_path": remote_policy_path,
         "status": _remote_shell_command(
             target,
-            prefix
-            + " status "
+            prefix + " status "
             + f"--output {shlex.quote(status_artifact_path)} "
-            + "--fail-on-unregistered --allow-recovery-scratch-bootstrap-pending"
-            + bridge_option,
+            + "--fail-on-unregistered",
         ),
         "status_read_only": _remote_shell_command(target, prefix + " status"),
         "status_artifact_readback": _remote_shell_command(
-            target,
-            prefix
-            + " status-readback --allow-recovery-scratch-bootstrap-pending"
-            + bridge_option,
-        ),
-        "action": _remote_shell_command(
-            target,
-            prefix
-            + (
-                " journald-corrective-remove"
-                if correction_mode
-                else " journald-activate"
-            )
-            + corrective_bridge_options,
-        ),
-        "action_name": "corrective_remove" if correction_mode else "activate_retention",
-        "readback": _remote_shell_command(
-            target,
-            prefix
-            + (
-                " journald-corrective-readback"
-                if correction_mode
-                else " journald-readback"
-            )
-            + corrective_bridge_options,
+            target, prefix + " status-readback"
         ),
     }
-
-
-def _run_journald_operation_once(
-    *,
-    operation_command: list[str],
-    readback_command: list[str] | None,
-    summary: dict[str, Any],
-) -> None:
-    """Submit one journald operation; SSH ambiguity permits readback only."""
-
-    try:
-        _run_command(operation_command)
-    except subprocess.CalledProcessError as exc:
-        if exc.returncode != 255:
-            raise
-        if not readback_command:
-            raise RuntimeError(
-                "transport-indeterminate during journald operation; readback command is unavailable"
-            ) from exc
-        readback = subprocess.run(
-            readback_command,
-            check=False,
-            text=True,
-            cwd=ROOT,
-            capture_output=True,
-        )
-        summary["journald_transport_reconciliation"] = {
-            "returncode": readback.returncode,
-            "stdout": readback.stdout.strip(),
-            "stderr": readback.stderr.strip(),
-            "operation_retried": False,
-        }
-        if readback.returncode != 0:
-            raise RuntimeError(
-                "transport-indeterminate during journald operation; query-only reconciliation halted"
-            ) from exc
 
 
 def _ensure_clean_worktree() -> None:
     if _git_output(["git", "status", "--short"]):
         raise ValueError("deploy requires a clean git worktree; use --allow-dirty only when intentional")
-
-
-def _validate_recovery_scratch_target_contract(
-    target: HostedRuntimeTarget,
-) -> dict[str, Any]:
-    from apps.recovery_scratch_bootstrap import (
-        validate_recovery_scratch_contract,
-    )
-
-    runtime_dir = Path(
-        str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or "")
-    )
-    contract = validate_recovery_scratch_contract(
-        target.recovery_scratch_filesystem,
-        runtime_dir=runtime_dir,
-    )
-    if not target.root_storage_policy_file:
-        raise ValueError("recovery scratch requires root-storage policy binding")
-    policy = json.loads(
-        _resolve_repo_relative_path(target.root_storage_policy_file).read_text(
-            encoding="utf-8"
-        )
-    )
-    role = dict(
-        dict(dict(policy.get("storage_registry") or {}).get("filesystems") or {})
-        .get("recovery_scratch")
-        or {}
-    )
-    if role.get("active", True) is not True:
-        raise ValueError("recovery scratch filesystem is retired")
-    policy_contract = validate_recovery_scratch_contract(
-        {key: role.get(key) for key in contract},
-        runtime_dir=runtime_dir,
-    )
-    if policy_contract != contract:
-        raise ValueError(
-            "target recovery scratch contract differs from root-storage policy"
-        )
-    return contract
 
 
 def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
@@ -16629,11 +15342,6 @@ def _missing_for_deploy(target: HostedRuntimeTarget) -> list[str]:
             _resolve_repo_relative_path(target.root_storage_policy_file)
         except Exception:
             missing.append("root_storage_policy_file")
-    if _is_current_live_target(target) and target.recovery_scratch_filesystem:
-        try:
-            _validate_recovery_scratch_target_contract(target)
-        except Exception:
-            missing.append("recovery_scratch_filesystem")
     if target.nginx_public_routes:
         nginx_required = {
             "nginx_public_routes.server_config_path": target.nginx_public_routes.server_config_path,

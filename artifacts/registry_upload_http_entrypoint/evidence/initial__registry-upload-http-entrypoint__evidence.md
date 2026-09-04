@@ -11,8 +11,6 @@
 
 ## Source Basis
 
-- `migration/86_registry_upload_contract.md`
-- `migration/89_registry_upload_db_backed_runtime.md`
 - `artifacts/registry_upload_http_entrypoint/input/registry_upload_bundle__fixture.json`
 - `artifacts/registry_upload_http_entrypoint/target/*.json`
 - `packages/application/registry_upload_db_backed_runtime.py`

@@ -6,8 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_bundle_v1_block`."
 scope: "Artifact-backed upload bundle для полного uploaded compact registry package `CONFIG_V2`, `METRICS_V2`, `FORMULAS_V2`, локальный validator и smoke без API/БД."
 source_basis:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/87_registry_upload_bundle_v1.md"
   - "artifacts/registry_upload_bundle_v1/target/registry_upload_bundle__fixture.json"
   - "artifacts/registry_upload_bundle_v1/evidence/initial__registry-upload-bundle-v1__evidence.md"
   - "artifacts/registry_upload_bundle_v1/input/metric_runtime_registry__fixture.json"
@@ -22,11 +20,6 @@ related_endpoints: []
 related_runners:
   - "apps/registry_upload_bundle_v1_smoke.py"
 related_docs:
-  - "migration/75_registry_v2_minimal_schema.md"
-  - "migration/76_metric_runtime_registry_minimal_schema.md"
-  - "migration/77_registry_implementation_path.md"
-  - "migration/86_registry_upload_contract.md"
-  - "migration/87_registry_upload_bundle_v1.md"
 source_of_truth_level: "module_canonical"
 update_note: "Обновлён под uploaded compact package: bundle и validator работают с полным current authoritative registry set `33 / 102 / 7` и валидируют structure/runtime correctness без hardcoded row-count caps."
 ---
@@ -43,8 +36,6 @@ update_note: "Обновлён под uploaded compact package: bundle и valida
 # 2. Upstream/source basis и semantics
 
 - Upstream/source basis фиксируется как связка:
-  - `migration/86_registry_upload_contract.md`
-  - `migration/87_registry_upload_bundle_v1.md`
   - `artifacts/registry_upload_bundle_v1/input/*.json`
   - `registry/pilot_bundle/metric_runtime_registry.json`
 - Семантика блока: собрать один канонический upload bundle из uploaded compact registry package и локально проверить его contract-consistency до любого API или ingest.
@@ -115,7 +106,6 @@ update_note: "Обновлён под uploaded compact package: bundle и valida
 # 7. Что уже доказано по модулю
 
 - upload path больше не только договорённость в migration-doc: есть materialized bundle fixture.
-- Первый bounded validator уже выражает contract rules из `migration/86` без раннего server ingest.
 - Bundle остаётся table-facing и не смешивает display-слой с runtime registry в одном payload.
 - Full uploaded compact package уже проходит локальную сборку и validation без тихого возврата к `5 / 12 / 2` pilot-subset.
 - Row-count coupling к фиксированным caps удалён: bounded validator принимает фактические registry list lengths, если сохраняется schema/runtime correctness.

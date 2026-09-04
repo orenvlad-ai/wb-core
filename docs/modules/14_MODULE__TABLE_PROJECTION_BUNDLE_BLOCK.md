@@ -6,9 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `table_projection_bundle_block`."
 scope: "Upstream source basis, target contract, артефакты, кодовые части, подтверждённый composition smoke и границы первого рабочего checkpoint."
 source_basis:
-  - "migration/65_new_table_minimum_data_contract.md"
-  - "migration/70_table_projection_bundle_block_contract.md"
-  - "migration/73_table_projection_bundle_block_source_note.md"
   - "artifacts/table_projection_bundle_block/evidence/initial__table-projection-bundle__evidence.md"
   - "apps/table_projection_bundle_block_smoke.py"
   - "apps/table_projection_bundle_block_composed_smoke.py"
@@ -22,10 +19,6 @@ related_runners:
   - "apps/table_projection_bundle_block_smoke.py"
   - "apps/table_projection_bundle_block_composed_smoke.py"
 related_docs:
-  - "migration/70_table_projection_bundle_block_contract.md"
-  - "migration/71_table_projection_bundle_block_parity_matrix.md"
-  - "migration/72_table_projection_bundle_block_evidence_checklist.md"
-  - "migration/73_table_projection_bundle_block_source_note.md"
   - "artifacts/table_projection_bundle_block/evidence/initial__table-projection-bundle__evidence.md"
 source_of_truth_level: "module_canonical"
 update_note: "Создан как канонический модульный документ в рамках первого bounded checkpoint для server-side composition/projection блока `table_projection_bundle_block`."
@@ -55,7 +48,6 @@ update_note: "Создан как канонический модульный д
   - `ads_compact_block`
   - `fin_report_daily_block`
   - `sales_funnel_history_block`
-  - `migration/65_new_table_minimum_data_contract.md`
 - Семантика модуля: не тянуть новые данные, а склеить один table-facing projection bundle поверх уже подтверждённых bounded outputs.
 
 # 3. Target contract и смысл результата

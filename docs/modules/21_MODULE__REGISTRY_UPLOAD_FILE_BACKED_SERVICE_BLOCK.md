@@ -6,9 +6,6 @@ status: "active"
 purpose: "Зафиксировать канонический модульный reference по bounded checkpoint блока `registry_upload_file_backed_service_block`."
 scope: "Локальный file-backed upload service для V2-реестров: accepted version artifact, current marker, канонический upload result и smoke полного flow без API/БД/GAS UI."
 source_basis:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/87_registry_upload_bundle_v1.md"
-  - "migration/88_registry_upload_file_backed_service.md"
   - "artifacts/registry_upload_file_backed_service/input/registry_upload_bundle__fixture.json"
   - "artifacts/registry_upload_file_backed_service/evidence/initial__registry-upload-file-backed-service__evidence.md"
 related_modules:
@@ -25,9 +22,6 @@ related_runners:
   - "apps/registry_upload_bundle_v1_smoke.py"
   - "apps/registry_upload_file_backed_service_smoke.py"
 related_docs:
-  - "migration/86_registry_upload_contract.md"
-  - "migration/87_registry_upload_bundle_v1.md"
-  - "migration/88_registry_upload_file_backed_service.md"
   - "docs/modules/20_MODULE__REGISTRY_UPLOAD_BUNDLE_V1_BLOCK.md"
 source_of_truth_level: "module_canonical"
 update_note: "Создан как канонический модульный документ для первого file-backed accept/store/activate слоя registry upload."
@@ -46,8 +40,6 @@ update_note: "Создан как канонический модульный д
 
 - Upstream/source basis фиксируется как связка:
   - `registry_upload_bundle_v1_block`
-  - `migration/86_registry_upload_contract.md`
-  - `migration/88_registry_upload_file_backed_service.md`
   - `registry/pilot_bundle/metric_runtime_registry.json`
 - Семантика блока: принять уже собранный bundle, переиспользовать текущий validator и materialize-ить локальный analog `accept/store/activate/result` до любого live endpoint или DB runtime.
 
