@@ -123,7 +123,7 @@ def _assert_exact_s047_recovery_abandonment_is_query_only() -> None:
         assert ready["sqlite_quick_check"] == "ok"
 
 
-def _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up() -> None:
+def _assert_reconciled_existing_disabled_writer_fails_closed() -> None:
     from apps import sqlite_hot_journal_reconcile_existing as reconcile
 
     with tempfile.TemporaryDirectory() as raw:
@@ -136,20 +136,27 @@ def _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up() -> None:
             connection.execute("INSERT INTO fixture VALUES (1)")
         database = database.resolve()
         expected = reconcile.hot._file_identity(database)
-        with mock.patch.object(
-            reconcile, "admit_root_write", return_value={"allowed": True}
-        ):
-            qualification = maintenance._requalify_reconciled_existing_sqlite(
-                runtime,
-                database,
-                expected,
-            )
-        assert qualification["copy"]["filesystem_role"] == "recovery_scratch"
-        assert qualification["copy"]["zero_leftover"] is True
+        with mock.patch.object(reconcile, "_qualify_current_sqlite") as qualify:
+            try:
+                maintenance._requalify_reconciled_existing_sqlite(
+                    runtime,
+                    database,
+                    expected,
+                )
+            except RuntimeError as exc:
+                assert str(exc) == (
+                    "reconciled-existing scratch storage is unavailable"
+                )
+                assert isinstance(exc.__cause__, reconcile.RootStoragePolicyError)
+                assert "no current write authority" in str(exc.__cause__)
+            else:
+                raise AssertionError("retired recovery scratch writer was admitted")
+        qualify.assert_not_called()
+        assert reconcile.hot._file_identity(database) == expected
         assert list(scratch.iterdir()) == []
-        assert (
+        assert not (
             runtime / reconcile.SQLITE_QUALIFICATION_ALLOCATION_LOCK
-        ).is_file()
+        ).exists()
 
 
 class FakeSystemd:
@@ -3512,7 +3519,7 @@ def _assert_prepared_abort_quiesces_and_restores_exactly() -> None:
 
 def main() -> int:
     _assert_exact_s047_recovery_abandonment_is_query_only()
-    _assert_reconciled_existing_uses_canonical_scratch_and_cleans_up()
+    _assert_reconciled_existing_disabled_writer_fails_closed()
     _assert_production_timer_execstart_roles_are_exact()
     _assert_prepared_abort_quiesces_and_restores_exactly()
     _assert_autoanswers_restore_uses_bound_lifecycle_readback()
