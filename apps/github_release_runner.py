@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Trusted one-shot PR merge and exact-SHA release runner.
 
-Only the checked-out merge commit can become a deployed runtime.
+Only the checked-out merge commit can become a deployed runtime. Release
+readback is bounded to exact identity, enabled services and one public surface.
 """
 
 from __future__ import annotations
