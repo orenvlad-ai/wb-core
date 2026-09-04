@@ -74,6 +74,26 @@ def main() -> None:
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = old
+
+    readback = runner.runtime_readback_payload(
+        {
+            "target_dir": "/srv/app",
+            "loopback_base_url": "http://127.0.0.1:8765",
+            "public_base_url": "https://example.invalid",
+            "managed_systemd_units": [
+                {"name": "primary.service", "enable": True},
+                {"name": "worker.service", "enable": False},
+                {"name": "schedule.timer", "enable": True},
+            ],
+        },
+        "4" * 40,
+    )
+    assert readback["expected_commit"] == "4" * 40
+    assert readback["services"] == ["primary.service"]
+    assert readback["urls"] == [
+        "http://127.0.0.1:8765/login",
+        "https://example.invalid/login",
+    ]
     print("github_release_runner_smoke: ok")
 
 

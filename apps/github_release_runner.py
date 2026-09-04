@@ -12,9 +12,11 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -299,21 +301,111 @@ def configure_ssh(directory: Path) -> None:
     )
 
 
+def runtime_readback_payload(target: Mapping[str, Any], merge: str) -> dict[str, Any]:
+    services = sorted(
+        str(unit.get("name") or "")
+        for unit in target.get("managed_systemd_units") or []
+        if isinstance(unit, Mapping)
+        and unit.get("enable") is True
+        and str(unit.get("name") or "").endswith(".service")
+    )
+    payload = {
+        "expected_commit": exact_sha(merge, "deploy-readback"),
+        "target_dir": str(target.get("target_dir") or "").rstrip("/"),
+        "services": services,
+        "urls": [
+            str(target.get("loopback_base_url") or "").rstrip("/") + "/login",
+            str(target.get("public_base_url") or "").rstrip("/") + "/login",
+        ],
+    }
+    if not payload["target_dir"].startswith("/") or not services:
+        raise RunnerError("deploy-readback-contract-invalid")
+    if any(not url.startswith(("http://", "https://")) for url in payload["urls"]):
+        raise RunnerError("deploy-readback-contract-invalid")
+    return payload
+
+
+def runtime_readback(target: Mapping[str, Any], merge: str) -> None:
+    destination = str(target.get("ssh_destination") or "").strip()
+    identity = os.environ.get("WB_CORE_HOSTED_RUNTIME_SSH_IDENTITY_FILE", "").strip()
+    options = os.environ.get("WB_CORE_HOSTED_RUNTIME_SSH_OPTIONS", "").strip()
+    if not destination or not identity or not options:
+        raise RunnerError("deploy-readback-contract-invalid")
+    payload = runtime_readback_payload(target, merge)
+    script = f"""
+import json
+import subprocess
+import urllib.request
+from pathlib import Path
+
+expected = {payload!r}
+root = Path(expected["target_dir"])
+commit = (root / ".wb-core-runtime-sha").read_text(encoding="utf-8").strip()
+metadata = json.loads((root / ".wb-core-deploy.json").read_text(encoding="utf-8"))
+if commit != expected["expected_commit"]:
+    raise SystemExit(2)
+if metadata.get("commit") != commit or metadata.get("deployment_complete") is not True:
+    raise SystemExit(3)
+for service in expected["services"]:
+    subprocess.run(["systemctl", "is-active", "--quiet", service], check=True)
+for url in expected["urls"]:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        if response.status != 200:
+            raise SystemExit(4)
+print(json.dumps({{"commit": commit, "services": expected["services"], "urls": expected["urls"]}}, sort_keys=True))
+"""
+    command = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=10",
+        "-o", "ServerAliveCountMax=2",
+        "-i", identity,
+        *shlex.split(options),
+        destination,
+        "python3", "-",
+    ]
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                command,
+                input=script,
+                text=True,
+                capture_output=True,
+                timeout=35,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            result = None
+        if result is not None and result.returncode == 0:
+            try:
+                observed = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                observed = {}
+            if observed.get("commit") == merge:
+                return
+        if attempt < 2:
+            time.sleep(5)
+    raise RunnerError("deploy-readback-failed")
+
+
 def deploy_exact(pr: int, head: str, merge: str) -> str:
     with tempfile.TemporaryDirectory(prefix="wb-core-deploy-") as directory:
         configure_ssh(Path(directory))
-        evidence = Path(directory) / "evidence.json"
         env = os.environ.copy()
         env["WB_CORE_RELEASE_PR"] = str(pr)
         env["WB_CORE_RELEASE_HEAD"] = head
         subprocess.run(
-            [sys.executable, "apps/registry_upload_http_entrypoint_hosted_runtime.py", "deploy-and-verify", "--output", str(evidence)],
+            [sys.executable, "apps/registry_upload_http_entrypoint_hosted_runtime.py", "deploy"],
             cwd=ROOT,
             env=env,
             check=True,
         )
-        payload = json.loads(evidence.read_text())
-    if payload.get("ok") is not True or trusted_main_sha() != merge:
+        target = json.loads(
+            (ROOT / "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json").read_text()
+        )
+        runtime_readback(target, merge)
+    if trusted_main_sha() != merge:
         raise RunnerError("deploy-readback-failed")
     return merge
 
