@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Trusted one-shot PR merge and exact-SHA release runner."""
+"""Trusted one-shot PR merge and exact-SHA release runner.
+
+Only the checked-out merge commit can become a deployed runtime.
+"""
 
 from __future__ import annotations
 
