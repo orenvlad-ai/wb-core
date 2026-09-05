@@ -22,6 +22,11 @@ from packages.adapters.wb_content import (
 )
 from packages.adapters.wb_fbs_orders import HttpBackedWbFbsOrdersSource
 from packages.application.ff_pool_foundation import BALANCES_TABLE, FACILITIES_TABLE
+from packages.application.wb_fbs_mapping_evidence import (
+    effective_mapping_official_evidence,
+    ensure_wb_fbs_mapping_evidence_schema,
+    latest_mapping_evidence_version,
+)
 from packages.application.wb_fbs_orders import (
     WAREHOUSE_MAPPINGS_TABLE,
     ensure_wb_fbs_orders_schema,
@@ -205,6 +210,7 @@ def ensure_wb_fbs_warehouse_registry_schema(conn: sqlite3.Connection) -> None:
         STOCK_ROWS_TABLE,
         (("provenance", "TEXT NOT NULL DEFAULT 'legacy_explicit_wb_row'"),),
     )
+    ensure_wb_fbs_mapping_evidence_schema(conn)
 
 
 class WbFbsWarehouseRegistry:
@@ -534,19 +540,26 @@ class WbFbsWarehouseRegistry:
                     "warehouse_count": 0,
                     "warehouses": [],
                 }
-            mappings = [
-                dict(row)
-                for row in conn.execute(
-                    f"""SELECT mapping.*,facility.name AS facility_name,
-                                facility.updated_at AS facility_updated_at
-                           FROM {WAREHOUSE_MAPPINGS_TABLE} mapping
-                           JOIN {FACILITIES_TABLE} facility
-                             ON facility.facility_id=mapping.facility_id
-                          WHERE mapping.active=1 AND facility.active=1
-                          ORDER BY mapping.seller_warehouse_id,mapping.facility_id,
-                                   mapping.created_at,mapping.mapping_id"""
+            mappings = []
+            for row in conn.execute(
+                f"""SELECT mapping.*,facility.name AS facility_name,
+                            facility.updated_at AS facility_updated_at
+                       FROM {WAREHOUSE_MAPPINGS_TABLE} mapping
+                       JOIN {FACILITIES_TABLE} facility
+                         ON facility.facility_id=mapping.facility_id
+                      WHERE mapping.active=1 AND facility.active=1
+                      ORDER BY mapping.seller_warehouse_id,mapping.facility_id,
+                               mapping.created_at,mapping.mapping_id"""
+            ):
+                raw_mapping = dict(row)
+                mappings.append(
+                    effective_mapping_official_evidence(
+                        raw_mapping,
+                        latest_mapping_evidence_version(
+                            conn, str(raw_mapping["mapping_id"])
+                        ),
+                    )
                 )
-            ]
         seller_targets: dict[int, set[str]] = {}
         facility_sources: dict[str, set[int]] = {}
         for mapping in mappings:
@@ -604,6 +617,15 @@ class WbFbsWarehouseRegistry:
                     "official_office_city": str(official["office_city"]),
                     "mapping_official_evidence_digest": str(
                         mapping["official_evidence_digest"]
+                    ),
+                    "official_evidence_version_id": str(
+                        mapping.get("official_evidence_version_id") or ""
+                    ),
+                    "official_evidence_version_kind": str(
+                        mapping.get("official_evidence_version_kind") or ""
+                    ),
+                    "official_evidence_version_digest": str(
+                        mapping.get("official_evidence_version_digest") or ""
                     ),
                     "current_official_evidence_digest": str(official["evidence_digest"]),
                 }

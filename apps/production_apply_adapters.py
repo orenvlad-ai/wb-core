@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from apps.production_apply_contract import AmbiguousSubmit
+from apps.wb_fbs_mapping_evidence_production_adapter import (
+    WbFbsMappingEvidenceProductionAdapter,
+)
+
 
 class Adapter(Protocol):
     def preview(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]: ...
@@ -15,6 +20,9 @@ class Adapter(Protocol):
     def readback(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]: ...
 
 
-# Deliberately empty after retirement of historical WBC recovery modes.
-# A future repeated operation adds one reviewed, domain-owned adapter object.
-ADAPTERS: dict[str, Adapter] = {}
+ADAPTERS: dict[str, Adapter] = {
+    "wb_fbs_mapping_evidence_v1": WbFbsMappingEvidenceProductionAdapter(),
+}
+
+
+__all__ = ["ADAPTERS", "Adapter", "AmbiguousSubmit"]

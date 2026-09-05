@@ -53,6 +53,22 @@ def main() -> None:
     else:
         raise AssertionError("drift was accepted")
     assert drift.apply_count == 0
+
+    sensitive = launcher.make_receipt(
+        action="preview",
+        adapter="fake",
+        operation_id="operation-0004",
+        state="preview",
+        preview={
+            "target": "production-row-identity",
+            "scope": {"seller_warehouse_id": 123456789},
+            "prestate_sha256": D1,
+            "candidate_sha256": D2,
+            "recovery": {"kind": "undo"},
+        },
+    )
+    assert "production-row-identity" not in str(launcher.log_summary(sensitive))
+    assert "123456789" not in str(launcher.log_summary(sensitive))
     print("production_apply_launcher_smoke: ok")
 
 
