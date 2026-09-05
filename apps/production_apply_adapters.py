@@ -12,6 +12,8 @@ from apps.production_apply_contract import AmbiguousSubmit
 from apps.wb_fbs_mapping_evidence_production_adapter import (
     WbFbsMappingEvidenceProductionAdapter,
 )
+from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter
+from apps.web_vitrina_wb_history_recovery import WebVitrinaWbHistoryRecoveryAdapter
 
 
 class Adapter(Protocol):
@@ -21,6 +23,8 @@ class Adapter(Protocol):
 
 
 ADAPTERS: dict[str, Adapter] = {
+    "web_vitrina_management_history_v1": WebVitrinaManagementHistoryAdapter(),
+    "web_vitrina_wb_history_recovery_v1": WebVitrinaWbHistoryRecoveryAdapter(),
     "wb_fbs_mapping_evidence_v1": WbFbsMappingEvidenceProductionAdapter(),
 }
 

@@ -410,11 +410,15 @@ class RegistryUploadDbBackedRuntime:
             materialize_current_official_fbs_estimate,
             load_materialized_official_fbs_presentation,
         )
+        from packages.application.web_vitrina_management_history import carry_forward, load_presentations, dated_parameters, recalculate_current_envelope
+        from packages.business_time import current_business_date_iso
 
+        publication_now = datetime.now(timezone.utc)
+        publication_date = current_business_date_iso(publication_now)
         estimate = build_current_official_fbs_estimate(
             self.db_path,
             nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
-            now=datetime.now(timezone.utc),
+            now=publication_now,
         )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
@@ -432,6 +436,11 @@ class RegistryUploadDbBackedRuntime:
                     conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
                 ),
             )
+            plan = carry_forward(plan, presentation=load_presentations(
+                conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
+            ), business_date=publication_date)
+            plan = recalculate_current_envelope(plan, business_date=publication_date,
+                parameters=dated_parameters(conn, publication_date) if estimate.get('available') else None)
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,
@@ -741,8 +750,9 @@ class RegistryUploadDbBackedRuntime:
         date_key = str(column_date or "").strip()
         if not date_key:
             raise ValueError("column_date is required for cross-bundle ready snapshot read")
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
+        with sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
             row = conn.execute(
                 """
                 SELECT snapshot.plan_json

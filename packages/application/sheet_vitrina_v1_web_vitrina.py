@@ -19,6 +19,8 @@ from packages.application.web_vitrina_official_fbs import (
     build_current_official_fbs_estimate,
     restore_materialized_official_fbs_estimates,
 )
+from packages.application.web_vitrina_management_history import restore_rows as restore_management_history
+from packages.application.web_vitrina_management_history import recalculate_current_rows, dated_parameters
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.calculation_parameters_v4 import (
     ProxyV4Parameters,
@@ -138,6 +140,13 @@ class _PeriodDateBinding:
     snapshot_as_of_date: str
     column_date: str
     missing: bool = False
+    covering_snapshot: SheetVitrinaV1Envelope | None = None
+
+    @property
+    def storage_key(self) -> str:
+        if self.covering_snapshot is not None:
+            return self.snapshot_as_of_date + "|" + self.covering_snapshot.snapshot_id
+        return self.snapshot_as_of_date
 
 
 class SheetVitrinaV1WebVitrinaBlock:
@@ -411,15 +420,25 @@ class SheetVitrinaV1WebVitrinaBlock:
             rows,
             presentation=dict(snapshot.metadata or {}).get("server_cell_presentation", {}),
         )
+        rows = restore_management_history(
+            rows, presentation=dict(snapshot.metadata or {}).get("server_cell_presentation", {}),
+            business_date=current_business_date_iso(now),
+        )
         if current_business_date_iso(now) in snapshot.date_columns:
+            current_estimate = build_current_official_fbs_estimate(
+                self.runtime.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled], now=now,
+            )
             rows = apply_current_official_fbs_estimate(
                 rows,
-                estimate=build_current_official_fbs_estimate(
-                    self.runtime.db_path,
-                    nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
-                    now=now,
-                ),
+                estimate=current_estimate,
             )
+            import sqlite3
+            with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA query_only=ON')
+                parameters = dated_parameters(conn, current_business_date_iso(now)) if current_estimate.get('available') else None
+            rows = recalculate_current_rows(rows, business_date=current_business_date_iso(now), parameters=parameters,
+                original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}), snapshot_id=snapshot.snapshot_id)
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(
@@ -729,8 +748,9 @@ def _build_period_snapshot(
         if binding.missing:
             continue
         snapshots_by_as_of_date.setdefault(
-            binding.snapshot_as_of_date,
-            runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=binding.snapshot_as_of_date),
+            binding.storage_key,
+            binding.covering_snapshot
+            or runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=binding.snapshot_as_of_date),
         )
     materialized_bindings = [binding for binding in period_date_bindings if not binding.missing]
     if not materialized_bindings:
@@ -744,7 +764,7 @@ def _build_period_snapshot(
     template_rows = _merge_period_template_rows(template_sheets)
     value_maps = {
         binding.requested_date: _extract_snapshot_values_by_row_id(
-            _require_data_sheet(snapshots_by_as_of_date[binding.snapshot_as_of_date]),
+            _require_data_sheet(snapshots_by_as_of_date[binding.storage_key]),
             expected_date=binding.column_date,
         )
         for binding in period_date_bindings
@@ -807,7 +827,7 @@ def _build_period_snapshot(
             "warehouse_nm_ids_by_date": {
                 binding.requested_date: sorted(
                     _warehouse_nm_ids_in_snapshot(
-                        snapshots_by_as_of_date[binding.snapshot_as_of_date]
+                        snapshots_by_as_of_date[binding.storage_key]
                     )
                 )
                 for binding in period_date_bindings
@@ -826,7 +846,7 @@ def _merge_period_incident_projection_quality(
     for binding in period_date_bindings:
         if binding.missing:
             continue
-        snapshot = snapshots_by_as_of_date[binding.snapshot_as_of_date]
+        snapshot = snapshots_by_as_of_date[binding.storage_key]
         quality_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
             "incident_projection_quality_by_date"
         )
@@ -892,7 +912,7 @@ def _merge_period_warehouse_history_coverage(
     for binding in period_date_bindings:
         if binding.missing:
             continue
-        snapshot = snapshots_by_as_of_date[binding.snapshot_as_of_date]
+        snapshot = snapshots_by_as_of_date[binding.storage_key]
         coverage_by_date = dict(getattr(snapshot, "metadata", {}) or {}).get(
             "warehouse_history_coverage"
         )
@@ -956,7 +976,7 @@ def _merge_period_server_cell_presentation(
                     "source": "WebCore",
                 }
             continue
-        snapshot = snapshots_by_as_of_date[binding.snapshot_as_of_date]
+        snapshot = snapshots_by_as_of_date[binding.storage_key]
         raw = dict(getattr(snapshot, "metadata", {}) or {}).get(
             "server_cell_presentation"
         )
@@ -983,12 +1003,12 @@ def _period_template_sheets(
     if default_visible_snapshot is not None:
         preferred_snapshot_keys.append(default_visible_snapshot.as_of_date)
     preferred_snapshot_keys.extend(
-        binding.snapshot_as_of_date
+        binding.storage_key
         for binding in reversed(materialized_bindings)
         if binding.snapshot_as_of_date
     )
     preferred_snapshot_keys.extend(
-        binding.snapshot_as_of_date
+        binding.storage_key
         for binding in materialized_bindings
         if binding.snapshot_as_of_date
     )
@@ -1069,6 +1089,26 @@ def _resolve_period_date_bindings(
                     requested_date=requested_date,
                     snapshot_as_of_date=default_visible_snapshot.as_of_date,
                     column_date=requested_date,
+                )
+            )
+            continue
+        # An interrupted daily publication can leave the exact column in an
+        # older two-day plan without an outer snapshot key for that date.
+        try:
+            covering = runtime.load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(
+                column_date=requested_date,
+            )
+        except ValueError:
+            covering = None
+        from packages.application.web_vitrina_management_history import has_complete_recovery
+        if (covering is not None and requested_date in covering.date_columns
+            and has_complete_recovery(covering.metadata, requested_date)):
+            period_date_bindings.append(
+                _PeriodDateBinding(
+                    requested_date=requested_date,
+                    snapshot_as_of_date=covering.as_of_date,
+                    column_date=requested_date,
+                    covering_snapshot=covering,
                 )
             )
             continue

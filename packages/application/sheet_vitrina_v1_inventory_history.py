@@ -736,7 +736,12 @@ def _append_closed_date_ready_capture(
     for scope_key in sorted(scope_keys, key=_scope_sort_key):
         scope_kind = "TOTAL" if scope_key == "TOTAL" else "SKU"
         nm_id = None if scope_kind == "TOTAL" else int(scope_key.split(":", 1)[1])
-        if scope_key in ready_wb:
+        if (scope_key in previous_wb and previous_wb[scope_key]['state'] in {'exact','exact_zero'}
+            and ready_wb.get(scope_key) is None):
+            # An ordinary missing projection is not evidence superseding an
+            # immutable exact historical observation.
+            components.append(dict(previous_wb[scope_key]))
+        elif scope_key in ready_wb:
             wb_value = ready_wb[scope_key]
             components.append(
                 _component(
