@@ -15,7 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from packages.application.ff_pool_cutover import MANIFESTS_TABLE
 from packages.application.ff_pool_fbs_lifecycle import (
@@ -209,7 +209,14 @@ class InventoryPlanningReadModel:
             }
         )
 
-    def current(self) -> dict[str, Any]:
+    def current(
+        self,
+        *,
+        lifecycle_quality_resolver: Callable[
+            [str, Iterable[int] | None], Mapping[str, Any]
+        ]
+        | None = None,
+    ) -> dict[str, Any]:
         with _connect_readonly(self.db_path) as conn:
             tables = _tables(conn)
             missing = sorted(_required_tables() - tables)
@@ -253,6 +260,7 @@ class InventoryPlanningReadModel:
                 conn,
                 seller_id=seller_id,
                 requested_nm_ids=[item["nm_id"] for item in wb_items],
+                lifecycle_quality_resolver=lifecycle_quality_resolver,
             )
             fbs_total = fbs["available_total"]
             wb_effective = (
@@ -613,6 +621,10 @@ def _fbs_facilities(
     seller_id: str,
     requested_nm_ids: list[int],
     include_seller_stock_reconciliation: bool = True,
+    lifecycle_quality_resolver: Callable[
+        [str, Iterable[int] | None], Mapping[str, Any]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     canonical_as_of_date = current_business_date()
     manifest = conn.execute(
@@ -710,10 +722,14 @@ def _fbs_facilities(
         int(item["nm_id"]) for item in stock_managed_nomenclature(conn)
     }
     coverage_nm_ids = active_stock_nm_ids | sku_scope
-    lifecycle_quality = fbs_lifecycle_quality_coverage(
-        conn,
-        as_of_date=canonical_as_of_date,
-        requested_nm_ids=coverage_nm_ids,
+    lifecycle_quality = (
+        dict(lifecycle_quality_resolver(canonical_as_of_date, coverage_nm_ids))
+        if lifecycle_quality_resolver is not None
+        else fbs_lifecycle_quality_coverage(
+            conn,
+            as_of_date=canonical_as_of_date,
+            requested_nm_ids=coverage_nm_ids,
+        )
     )
     if epoch_ready:
         for balance in conn.execute(
