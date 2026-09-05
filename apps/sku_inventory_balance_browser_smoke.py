@@ -269,6 +269,8 @@ def main() -> None:
         row_heights = page.locator(".inventory-balance-main-row").evaluate_all(
             "rows => rows.map(row => row.getBoundingClientRect().height)"
         )
+        assert page.locator(".inventory-balance-selection-status").first.evaluate(
+            "node => getComputedStyle(node).whiteSpace") == "nowrap"
         assert all(height <= 63 for height in row_heights), row_heights
         visible_line_counts = page.locator(
             ".inventory-balance-main-row .inventory-balance-two-line"
