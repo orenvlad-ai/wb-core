@@ -2468,8 +2468,9 @@ class SkuManagementBlock:
                 row["fbs_stock_evidence"] = {
                     "source": official.get("source"), "date": official.get("date"),
                     "quantity": row["stock_ff"], "mode": "official_declared_fbs_only",
-                    "facilities": [{"facility_id": f["facility_id"], "source": f["stock_source"]}
-                                   for f in facilities],
+                    "facilities": [{"facility_id": f["facility_id"], "quantity": quantity,
+                                    "source": f["stock_source"], "source_blocker": f.get("source_blocker", "")}
+                                   for f, quantity in zip(facilities, values)],
                     "legacy_ledger_used": False, "lifecycle_used": False,
                 }
                 if row["stock_ff"] is None:

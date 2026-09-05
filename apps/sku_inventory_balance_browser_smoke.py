@@ -388,6 +388,7 @@ def main() -> None:
         assert page.locator('[data-inventory-balance-override="101:8001:search"]').input_value() == ""
         unavailable_override = page.locator('[data-inventory-balance-override="303:9303:search"]')
         assert unavailable_override.input_value() == ""
+        assert page.evaluate("inventoryBalancePaceHint({pace_change_pct:null})") == ""
         assert unavailable_override.get_attribute("placeholder") == "Новая"
         neutral_state = page.locator(
             '[data-inventory-balance-nm-id="303"] .inventory-balance-state-status.neutral'
