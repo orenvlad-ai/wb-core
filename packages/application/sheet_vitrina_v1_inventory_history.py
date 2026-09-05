@@ -1158,15 +1158,22 @@ def _ready_wb_components(
         if len(row) <= max(1, column_index):
             continue
         row_key = str(row[1] or "")
+        value = row[column_index]
+        presentation = dict(plan.metadata or {}).get("server_cell_presentation", {}).get(row_key, {}).get(business_date, {})
+        if presentation.get("source") == "official_fbs_management_inventory_v1":
+            # This public row is WB + official FBS. Only its frozen WB operand
+            # belongs in the canonical WB history component, including closure.
+            # A missing operand must never fall back to the combined number.
+            value = presentation.get("wb_component_value")
         if row_key == "TOTAL|total_stock_total":
-            result["TOTAL"] = _optional_integer(row[column_index])
+            result["TOTAL"] = _optional_integer(value)
         elif row_key.startswith("SKU:") and row_key.endswith("|stock_total"):
             scope_key = row_key.split("|", 1)[0]
             try:
                 int(scope_key.split(":", 1)[1])
             except (IndexError, ValueError):
                 continue
-            result[scope_key] = _optional_integer(row[column_index])
+            result[scope_key] = _optional_integer(value)
     return result
 
 
