@@ -112,6 +112,12 @@ def main():
         assert build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)["skus"][2]["cost"] is None
         conn.execute("UPDATE sheet_vitrina_v1_wb_fbs_stock_snapshot_rows SET amount=0,provenance='omitted_requested_zero' WHERE run_id='A' AND nm_id=2")
         conn.commit()
+        conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_balances SET quantity='0',capital_rub='0',cost_covered_quantity='0',wb_quantity='0',wac_rub=NULL WHERE nm_id=2 AND warehouse_key='wb'")
+        conn.commit()
+        zero = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)
+        assert zero["skus"][2]["cost"] is None and zero["total"]["cost"] == zero["skus"][1]["cost"]
+        conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_balances SET quantity='2',capital_rub='80',cost_covered_quantity='2',wb_quantity='2',wac_rub='40' WHERE nm_id=2 AND warehouse_key='wb'")
+        conn.commit()
         assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now + timedelta(hours=1))["available"]
         assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now + timedelta(days=1))["available"]
         assert not build_current_official_fbs_estimate(path, nm_ids=[1, 2, 3], now=now)["available"]
@@ -155,6 +161,10 @@ def main():
         state = runtime.load_current_state()
         plan = replace(plan, sheets=[*plan.sheets, SheetVitrinaWriteTarget(
             "STATUS", "A1", "A1:A1", "A:A", "replace", False, ["status"], [], 0, 1)])
+        shifted = replace(plan, sheets=[replace(plan.sheets[0], write_start_cell="B5", write_rect="B5:E7"), plan.sheets[1]])
+        shifted_saved = materialize_current_official_fbs_estimate(shifted, estimate=model)
+        assert shifted_saved.sheets[1] is shifted.sheets[1]
+        assert shifted_saved.sheets[0].write_rect == "B5:E" + str(5 + len(shifted_saved.sheets[0].rows))
         with patch("packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate", return_value=model):
             runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at="2026-09-05T10:10:00Z", plan=plan)
         tomorrow = replace(plan, as_of_date="2026-09-05", snapshot_id="tomorrow",

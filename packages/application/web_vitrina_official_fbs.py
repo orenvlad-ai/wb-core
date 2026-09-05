@@ -182,7 +182,8 @@ def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
         "stock_quantity": (sum((r["stock_quantity"] for r in result["skus"].values()), ZERO)
                            if all(r["stock_quantity"] is not None for r in result["skus"].values()) else None),
     }
-    if all(r.get("cost") is not None for r in result["skus"].values()):
+    if all(r.get("cost") is not None or (r.get("quantity") == ZERO and r.get("capital") == ZERO)
+           for r in result["skus"].values()):
         quantity = sum((r["quantity"] for r in result["skus"].values()), ZERO)
         capital = sum((r["capital"] for r in result["skus"].values()), ZERO)
         result["total"].update(quantity=quantity, capital=capital, cost=capital / quantity if quantity else None)
@@ -319,6 +320,9 @@ def materialize_current_official_fbs_estimate(
     metadata["server_cell_presentation"] = presentation
     sheets = []
     for sheet in plan.sheets:
+        if sheet.sheet_name != "DATA_VITRINA":
+            sheets.append(sheet)
+            continue
         new_rows = []
         for row in sheet.rows:
             updated = list(row)
@@ -343,8 +347,11 @@ def materialize_current_official_fbs_estimate(
                     value = cell.get("management_value", "") if cell.get("source") == SOURCE else ""
                     values.append(float(value) if value != "" else "")
                 new_rows.append(["Остатки и себестоимость: оценка по WB", row_id, *values])
+        start = re.fullmatch(r"[A-Z]+([1-9][0-9]*)", sheet.write_start_cell)
+        if start is None:
+            raise ValueError("unsupported_data_sheet_start_cell")
         sheets.append(replace(sheet, rows=new_rows, row_count=len(new_rows),
-                              write_rect=re.sub(r"\d+$", str(len(new_rows) + 1), sheet.write_rect)))
+                              write_rect=re.sub(r"\d+$", str(len(new_rows) + int(start[1])), sheet.write_rect)))
     return replace(plan, metadata=metadata, sheets=sheets)
 
 
