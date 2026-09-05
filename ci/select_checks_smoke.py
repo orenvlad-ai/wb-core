@@ -14,6 +14,7 @@ def exists(_head: str, path: str) -> bool:
         "packages/application/finance_value.py",
         "packages/application/finance_value_smoke.py",
         "packages/application/web_vitrina_value.py",
+        "packages/application/warehouse_value.py",
         "apps/example.py",
         "apps/example_smoke.py",
         "unknown.bin",
@@ -52,9 +53,20 @@ def main() -> None:
     assert "web_vitrina" in web_vitrina["groups"]
     assert "openpyxl==3.1.5" in web_vitrina["pip"]
 
+    warehouse = build_plan_from_paths(
+        pull_request=4,
+        base=BASE,
+        head=HEAD,
+        paths=["packages/application/warehouse_value.py"],
+        file_exists=exists,
+    )
+    verify_plan(warehouse)
+    assert "warehouse" in warehouse["groups"]
+    assert "openpyxl==3.1.5" in warehouse["pip"]
+
     try:
         build_plan_from_paths(
-            pull_request=4, base=BASE, head=HEAD, paths=["unknown.bin"], file_exists=exists
+            pull_request=5, base=BASE, head=HEAD, paths=["unknown.bin"], file_exists=exists
         )
     except PlanError:
         pass
@@ -62,7 +74,7 @@ def main() -> None:
         raise AssertionError("unknown path was accepted")
 
     deleted_history = build_plan_from_paths(
-        pull_request=5,
+        pull_request=6,
         base=BASE,
         head=HEAD,
         paths=["migration/old-note.md"],
