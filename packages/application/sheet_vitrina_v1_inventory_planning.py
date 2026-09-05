@@ -75,6 +75,98 @@ def is_inventory_planning_presentation_metric_key(metric_key: str) -> bool:
     } or normalized.startswith(INVENTORY_FBS_FACILITY_PREFIX)
 
 
+def apply_fbs_last_good_presentation(
+    rows: Iterable[WebVitrinaContractRow],
+    *,
+    reason_ru: str,
+    last_good_at: str,
+    source_as_of_date: str,
+) -> list[WebVitrinaContractRow]:
+    """Label only non-empty FBS-dependent cells as incident last-good values."""
+
+    result: list[WebVitrinaContractRow] = []
+    for row in rows:
+        normalized_key = str(row.metric_key).removeprefix("total_")
+        fbs_dependent = (
+            normalized_key in {COMBINED_TOTAL_ALIAS_KEY, INVENTORY_FBS_TOTAL_KEY}
+            or normalized_key.startswith(INVENTORY_FBS_FACILITY_PREFIX)
+        )
+        if not fbs_dependent:
+            result.append(row)
+            continue
+        presentation = dict(row.presentation_by_date)
+        changed = False
+        for business_date, value in row.values_by_date.items():
+            if value in {None, ""}:
+                continue
+            current = dict(presentation.get(business_date) or {})
+            existing_reason = str(
+                current.get("quality_reason") or current.get("reason") or ""
+            ).strip()
+            combined_reason = reason_ru
+            if existing_reason and existing_reason not in combined_reason:
+                combined_reason = f"{combined_reason} {existing_reason}"
+            current.update(
+                {
+                    "state": "",
+                    "tone": "warning",
+                    "reason": combined_reason,
+                    "source": FORMULA_VERSION,
+                    "quality_state": "fbs_last_good_owner_paused",
+                    "quality_label": "Последние подтверждённые данные",
+                    "quality_reason": combined_reason,
+                    "last_good_at": last_good_at,
+                    "last_good_source_as_of_date": source_as_of_date,
+                }
+            )
+            presentation[business_date] = current
+            changed = True
+        result.append(
+            replace(row, presentation_by_date=presentation) if changed else row
+        )
+    return result
+
+
+def apply_fbs_unavailable_presentation(
+    rows: Iterable[WebVitrinaContractRow],
+    *,
+    reason_ru: str,
+) -> list[WebVitrinaContractRow]:
+    """Keep an unadmitted FBS source missing even after legacy overlays."""
+
+    result: list[WebVitrinaContractRow] = []
+    for row in rows:
+        normalized_key = str(row.metric_key).removeprefix("total_")
+        fbs_dependent = (
+            normalized_key in {COMBINED_TOTAL_ALIAS_KEY, INVENTORY_FBS_TOTAL_KEY}
+            or normalized_key.startswith(INVENTORY_FBS_FACILITY_PREFIX)
+        )
+        if not fbs_dependent:
+            result.append(row)
+            continue
+        values = dict(row.values_by_date)
+        presentation = dict(row.presentation_by_date)
+        for business_date in values:
+            values[business_date] = ""
+            presentation[business_date] = {
+                "state": "unavailable",
+                "tone": "warning",
+                "reason": reason_ru,
+                "source": FORMULA_VERSION,
+                "quality_state": "fbs_unavailable_owner_paused",
+                "quality_label": "Нет данных",
+                "quality_reason": reason_ru,
+            }
+        result.append(
+            replace(
+                row,
+                values_by_date=values,
+                presentation_by_date=presentation,
+            )
+        )
+    return result
+
+
 def inventory_planning_sku_metric_keys(planning: Mapping[str, Any]) -> list[str]:
     return [spec.sku_key for spec in _public_metric_specs(planning)]
 

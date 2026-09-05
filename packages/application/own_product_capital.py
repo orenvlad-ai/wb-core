@@ -2032,12 +2032,22 @@ class OwnProductCapitalBlock:
         *,
         requested_nm_ids: Iterable[int] | None = None,
         revalidate_current_sources: bool = False,
+        lifecycle_quality_resolver: Callable[
+            [str, Iterable[int] | None], Mapping[str, Any]
+        ]
+        | None = None,
     ) -> dict[int, dict[str, Any]]:
         as_of_date = _iso_date(as_of_date, "as_of_date")
+        functional_arguments: dict[str, Any] = {}
+        if lifecycle_quality_resolver is not None:
+            functional_arguments["lifecycle_quality_resolver"] = (
+                lifecycle_quality_resolver
+            )
         functional = self._load_functional_daily_metric_lookup(
             as_of_date,
             requested_nm_ids=requested_nm_ids,
             revalidate_current_sources=revalidate_current_sources,
+            **functional_arguments,
         )
         if functional is not None:
             from packages.application.warehouse_business_projection import (
@@ -2163,6 +2173,10 @@ class OwnProductCapitalBlock:
         *,
         requested_nm_ids: Iterable[int] | None = None,
         revalidate_current_sources: bool = False,
+        lifecycle_quality_resolver: Callable[
+            [str, Iterable[int] | None], Mapping[str, Any]
+        ]
+        | None = None,
     ) -> dict[int, dict[str, Any]] | None:
         """Read product-capital metrics from the sole post-cutover read model.
 
@@ -2244,15 +2258,20 @@ class OwnProductCapitalBlock:
                    WHERE version_id=? ORDER BY nm_id,warehouse_key""",
                 (version["version_id"],),
             ).fetchall()
-            from packages.application.ff_pool_fbs_lifecycle import (
-                fbs_lifecycle_quality_coverage,
-            )
+            if lifecycle_quality_resolver is not None:
+                lifecycle_quality = dict(
+                    lifecycle_quality_resolver(as_of_date, requested_nm_ids)
+                )
+            else:
+                from packages.application.ff_pool_fbs_lifecycle import (
+                    fbs_lifecycle_quality_coverage,
+                )
 
-            lifecycle_quality = fbs_lifecycle_quality_coverage(
-                conn,
-                as_of_date=as_of_date,
-                requested_nm_ids=requested_nm_ids,
-            )
+                lifecycle_quality = fbs_lifecycle_quality_coverage(
+                    conn,
+                    as_of_date=as_of_date,
+                    requested_nm_ids=requested_nm_ids,
+                )
             active = (
                 conn.execute(
                     "SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1"

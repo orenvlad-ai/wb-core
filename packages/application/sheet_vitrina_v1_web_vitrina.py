@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import math
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.inventory_cost_blend import (
@@ -38,6 +38,8 @@ from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
 )
 from packages.application.sheet_vitrina_v1_inventory_planning import (
+    apply_fbs_last_good_presentation,
+    apply_fbs_unavailable_presentation,
     extend_rows_with_inventory_planning,
 )
 from packages.application.sheet_vitrina_v1_inventory_history import (
@@ -45,6 +47,9 @@ from packages.application.sheet_vitrina_v1_inventory_history import (
 )
 from packages.application.sheet_vitrina_v1_breakglass_last_good import (
     apply_breakglass_last_good_overlay,
+)
+from packages.application.web_vitrina_fbs_lifecycle_last_good import (
+    load_owner_paused_fallback,
 )
 from packages.application.sheet_vitrina_v1_our_wb_costs import extend_metrics_with_our_wb_cost_metrics
 from packages.application.sheet_vitrina_v1_proxy_v4 import (
@@ -213,6 +218,14 @@ class SheetVitrinaV1WebVitrinaBlock:
         date_to: str | None = None,
     ) -> WebVitrinaContractV1:
         now = self.now_factory()
+        fbs_lifecycle_fallback = load_owner_paused_fallback(
+            self.runtime.runtime_dir
+        )
+        lifecycle_quality_resolver = (
+            fbs_lifecycle_fallback.resolve
+            if fbs_lifecycle_fallback is not None
+            else None
+        )
         current_state = self.runtime.load_current_state()
         _validate_period_request(as_of_date=as_of_date, date_from=date_from, date_to=date_to)
         read_model = WEB_VITRINA_READ_MODEL
@@ -297,12 +310,18 @@ class SheetVitrinaV1WebVitrinaBlock:
             str(item.metric_key): item
             for item in effective_metrics
         }
+        presentation_arguments: dict[str, Any] = {}
+        if lifecycle_quality_resolver is not None:
+            presentation_arguments["lifecycle_quality_resolver"] = (
+                lifecycle_quality_resolver
+            )
         server_cell_presentation = _read_time_warehouse_cell_presentation(
             runtime=self.runtime,
             now=now,
             snapshot=snapshot,
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
             displayed_metrics=effective_metrics,
+            **presentation_arguments,
         )
         rows = _normalize_rows(
             data_sheet.rows,
@@ -335,12 +354,24 @@ class SheetVitrinaV1WebVitrinaBlock:
             metric=metrics_by_key[BUYOUT_PERCENT_METRIC_KEY],
             current_business_date=date.fromisoformat(current_business_date_iso(now)),
         )
-        inventory_planning = InventoryPlanningReadModel(
+        inventory_planning_model = InventoryPlanningReadModel(
             db_path=self.runtime.db_path
-        ).current()
+        )
+        inventory_planning = (
+            inventory_planning_model.current(
+                lifecycle_quality_resolver=lifecycle_quality_resolver
+            )
+            if lifecycle_quality_resolver is not None
+            else inventory_planning_model.current()
+        )
         inventory_current_date = str(
             (inventory_planning.get("wb") or {}).get("snapshot_date") or ""
         )
+        history_arguments: dict[str, Any] = {}
+        if lifecycle_quality_resolver is not None:
+            history_arguments["lifecycle_quality_resolver"] = (
+                lifecycle_quality_resolver
+            )
         rows = extend_rows_with_inventory_planning(
             rows,
             planning=inventory_planning,
@@ -348,6 +379,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 self.runtime.db_path,
                 dates=snapshot.date_columns,
                 current_date=inventory_current_date,
+                **history_arguments,
             ),
             date_columns=list(snapshot.date_columns),
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
@@ -357,6 +389,19 @@ class SheetVitrinaV1WebVitrinaBlock:
             db_path=self.runtime.db_path,
             date_columns=snapshot.date_columns,
         )
+        if fbs_lifecycle_fallback is not None:
+            if fbs_lifecycle_fallback.has_last_good:
+                rows = apply_fbs_last_good_presentation(
+                    rows,
+                    reason_ru=fbs_lifecycle_fallback.reason_ru,
+                    last_good_at=fbs_lifecycle_fallback.last_good_at,
+                    source_as_of_date=fbs_lifecycle_fallback.source_as_of_date,
+                )
+            else:
+                rows = apply_fbs_unavailable_presentation(
+                    rows,
+                    reason_ru=fbs_lifecycle_fallback.reason_ru,
+                )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(
@@ -437,6 +482,10 @@ def _read_time_warehouse_cell_presentation(
     snapshot: SheetVitrinaV1Envelope,
     enabled_config: list[ConfigV2Item],
     displayed_metrics: list[MetricV2Item],
+    lifecycle_quality_resolver: Callable[
+        [str, Iterable[int] | None], Mapping[str, Any]
+    ]
+    | None = None,
 ) -> dict[str, dict[str, dict[str, str]]]:
     """Revalidate the active warehouse date before serving persisted UI state.
 
@@ -466,10 +515,16 @@ def _read_time_warehouse_cell_presentation(
         current_enabled_config=enabled_config,
         business_date=business_date,
     )
+    lookup_arguments: dict[str, Any] = {}
+    if lifecycle_quality_resolver is not None:
+        lookup_arguments["lifecycle_quality_resolver"] = (
+            lifecycle_quality_resolver
+        )
     exact_state = capital.load_daily_metric_lookup(
         business_date,
         requested_nm_ids=[item.nm_id for item in frozen_config],
         revalidate_current_sources=True,
+        **lookup_arguments,
     )
 
     # A persisted warning or implicit green state is only valid for the frozen

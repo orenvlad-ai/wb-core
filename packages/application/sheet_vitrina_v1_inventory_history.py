@@ -12,7 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from packages.application.inventory_planning_read_model import (
     FORMULA_VERSION,
@@ -487,6 +487,10 @@ def read_inventory_history_window(
     *,
     dates: Iterable[str],
     current_date: str,
+    lifecycle_quality_resolver: Callable[
+        [str, Iterable[int] | None], Mapping[str, Any]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Read already-folded component revisions for a bounded date window."""
 
@@ -545,14 +549,19 @@ def read_inventory_history_window(
                     ORDER BY scope_kind,scope_key,component_kind,component_id""",
                 (str(capture["capture_id"]),),
             ).fetchall()
-            lifecycle_quality = fbs_lifecycle_quality_coverage(
-                conn,
-                as_of_date=business_date,
-                requested_nm_ids={
-                    int(row["nm_id"])
-                    for row in rows
-                    if row["nm_id"] is not None and int(row["nm_id"]) > 0
-                },
+            requested_nm_ids = {
+                int(row["nm_id"])
+                for row in rows
+                if row["nm_id"] is not None and int(row["nm_id"]) > 0
+            }
+            lifecycle_quality = (
+                dict(lifecycle_quality_resolver(business_date, requested_nm_ids))
+                if lifecycle_quality_resolver is not None
+                else fbs_lifecycle_quality_coverage(
+                    conn,
+                    as_of_date=business_date,
+                    requested_nm_ids=requested_nm_ids,
+                )
             )
             scopes: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
