@@ -294,7 +294,7 @@ def main() -> None:
         assert abs(
             sticky_product_box["x"]
             - (sticky_select_box["x"] + sticky_select_box["width"])
-        ) <= 2
+        ) <= 2, {"select": sticky_select_box, "product": sticky_product_box, "shell": shell_box}
         table_shell.evaluate("node => { node.scrollLeft = 0; }")
         assert "CPC · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
         assert "CPM · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
