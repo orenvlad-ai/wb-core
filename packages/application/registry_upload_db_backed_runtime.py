@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -405,6 +405,17 @@ class RegistryUploadDbBackedRuntime:
         plan: SheetVitrinaV1Envelope,
     ) -> SheetVitrinaV1RefreshResult:
         _validate_timestamp(refreshed_at, field_name="refreshed_at")
+        from packages.application.web_vitrina_official_fbs import (
+            build_current_official_fbs_estimate,
+            materialize_current_official_fbs_estimate,
+            load_materialized_official_fbs_presentation,
+        )
+
+        estimate = build_current_official_fbs_estimate(
+            self.db_path,
+            nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
+            now=datetime.now(timezone.utc),
+        )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
@@ -414,6 +425,13 @@ class RegistryUploadDbBackedRuntime:
             )
 
             ensure_warehouse_business_projection_schema(conn)
+            plan = materialize_current_official_fbs_estimate(
+                plan,
+                estimate=estimate,
+                previous_presentation=load_materialized_official_fbs_presentation(
+                    conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
+                ),
+            )
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,
