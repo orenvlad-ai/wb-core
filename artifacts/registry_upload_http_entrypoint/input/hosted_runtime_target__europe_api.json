@@ -144,8 +144,8 @@
     },
     {
       "name": "wb-core-fbs-shadow-collector.timer",
-      "enable": true,
-      "restart": true
+      "enable": false,
+      "restart": false
     },
     {
       "name": "wb-core-change-registry-observer.service",

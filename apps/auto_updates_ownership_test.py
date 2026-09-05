@@ -250,6 +250,7 @@ class AutoUpdatesOwnershipTest(unittest.TestCase):
             "wb-core-sheet-vitrina-closure-retry.timer",
             "wb-core-feedbacks-auto-complaints-tick.timer",
             "wb-core-wb-finance-weekly.timer",
+            "wb-core-fbs-shadow-collector.timer",
             "wb-core-warehouse-functional-sync.timer",
             "wb-core-autoanswers-readonly-sync.timer",
             "wb-core-autoanswers-worker.timer",

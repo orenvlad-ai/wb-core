@@ -15,7 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.business_data_maintenance import ALL_BUSINESS_TIMER_UNITS  # noqa: E402
+from apps.business_data_maintenance import (  # noqa: E402
+    ALL_BUSINESS_TIMER_UNITS,
+    FBS_SHADOW_TIMER_UNIT,
+    POLICY_FILENAME,
+    POLICY_SCHEMA_VERSION,
+)
 from packages.application.business_data_write_barrier import barrier_status  # noqa: E402
 
 
@@ -54,10 +59,38 @@ def preserved_units(runtime_dir: Path, requested: set[str]) -> set[str]:
     return preserved
 
 
+def owner_policy_preserved_units(runtime_dir: Path, requested: set[str]) -> set[str]:
+    """Keep an explicitly disabled direct-control timer disabled on deploy."""
+
+    policy_path = runtime_dir.resolve() / POLICY_FILENAME
+    if not policy_path.is_file():
+        return set()
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DeployBarrierError("auto-updates owner policy is unreadable") from exc
+    if not isinstance(policy, dict) or policy.get("schema_version") != POLICY_SCHEMA_VERSION:
+        raise DeployBarrierError("auto-updates owner policy schema is ambiguous")
+    processes = policy.get("processes")
+    if not isinstance(processes, dict):
+        raise DeployBarrierError("auto-updates owner policy processes are ambiguous")
+    fbs_shadow = processes.get("fbs_shadow")
+    if fbs_shadow is None:
+        return set()
+    if not isinstance(fbs_shadow, dict) or not isinstance(fbs_shadow.get("desired"), bool):
+        raise DeployBarrierError("FBS shadow owner policy is ambiguous")
+    if fbs_shadow["desired"] is False and FBS_SHADOW_TIMER_UNIT in requested:
+        return {FBS_SHADOW_TIMER_UNIT}
+    return set()
+
+
 def reconcile(
     *, runtime_dir: Path, enable: list[str], restart: list[str], mutate: bool = True
 ) -> dict[str, Any]:
-    preserved = preserved_units(runtime_dir, set(enable) | set(restart))
+    requested = set(enable) | set(restart)
+    barrier_preserved = preserved_units(runtime_dir, requested)
+    owner_policy_preserved = owner_policy_preserved_units(runtime_dir, requested)
+    preserved = barrier_preserved | owner_policy_preserved
     filtered_enable = [unit for unit in enable if unit not in preserved]
     filtered_restart = [unit for unit in restart if unit not in preserved]
     if mutate and filtered_enable:
@@ -66,7 +99,8 @@ def reconcile(
         subprocess.run(["systemctl", "restart", *filtered_restart], timeout=300, check=True)
     return {
         "status": "applied" if mutate else "validated",
-        "preserved_data_writer_timers": sorted(preserved),
+        "preserved_data_writer_timers": sorted(barrier_preserved),
+        "preserved_owner_policy_timers": sorted(owner_policy_preserved),
         "enabled_units": filtered_enable,
         "restarted_units": filtered_restart,
     }
