@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Offline behavior checks for the one-submit launcher."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
+import tempfile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from apps import production_apply_launcher as launcher
 
 
@@ -69,6 +73,38 @@ def main() -> None:
     )
     assert "production-row-identity" not in str(launcher.log_summary(sensitive))
     assert "123456789" not in str(launcher.log_summary(sensitive))
+
+    with tempfile.TemporaryDirectory(prefix="production-apply-cli-") as raw:
+        output = Path(raw) / "receipt.json"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(ROOT / "apps/production_apply_launcher.py"),
+                "readback",
+                "--adapter",
+                "fixture-not-registered",
+                "--operation-id",
+                "operation-0005",
+                "--request-json",
+                "{}",
+                "--output",
+                str(output),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode == 2
+        cli_receipt = json.loads(output.read_text(encoding="utf-8"))
+        assert cli_receipt["reason"] == "adapter-not-registered"
+
+    workflow = (ROOT / ".github/workflows/production-apply.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "APPLY_REQUEST_JSON:" not in workflow
+    assert "GITHUB_EVENT_PATH" in workflow
     print("production_apply_launcher_smoke: ok")
 
 
