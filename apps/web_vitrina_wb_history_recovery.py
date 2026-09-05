@@ -27,10 +27,17 @@ class WebVitrinaWbHistoryRecoveryAdapter(WebVitrinaManagementHistoryAdapter):
             raise ValueError('exact-WB-source-invalid')
         base=conn.execute('SELECT capture.* FROM '+FINALS+' finalized JOIN '+CAPTURES+' capture ON capture.capture_id=finalized.capture_id '
             'WHERE finalized.business_date=? ORDER BY finalized.finalization_sequence DESC LIMIT 1',(day,)).fetchone()
-        if base is None: raise ValueError('same-date-published-inventory-capture-missing')
+        initial_publication=base is None
+        if initial_publication:
+            if request.get('allow_initial_publication') is not True:
+                raise ValueError('same-date-published-inventory-capture-missing')
+            base=conn.execute('SELECT * FROM '+CAPTURES+' WHERE business_date=? ORDER BY capture_sequence DESC LIMIT 1',(day,)).fetchone()
+            if base is None: raise ValueError('same-date-inventory-capture-missing')
         columns='scope_kind,scope_key,nm_id,component_kind,component_id,component_label,state,quantity,source_revision,source_digest,source_watermark,provenance_json'
         stored=conn.execute('SELECT '+columns+' FROM '+COMPONENTS+' WHERE capture_id=? ORDER BY scope_kind,scope_key,component_kind,component_id',(base['capture_id'],)).fetchall()
         before=[_stored_component(r) for r in stored]; after=deepcopy(before)
+        if initial_publication and (not before or any(c['state']!='missing' or c['quantity'] is not None for c in before)):
+            raise ValueError('initial-publication-would-expose-unpublished-components')
         values={f"SKU:{int(i['nm_id'])}":i['stock_total'] for i in source['items']}
         if len(values)!=source['count'] or set(values)!=set(request['scopes']):
             raise ValueError('exact-WB-roster-mismatch')
@@ -61,6 +68,8 @@ class WebVitrinaWbHistoryRecoveryAdapter(WebVitrinaManagementHistoryAdapter):
         unchanged_after=[x for x in after if x['component_kind']!='WB' or x['scope_key'] not in changed]
         if digest(unchanged_before)!=digest(unchanged_after): raise ValueError('non-target-inventory-changed')
         return {'arguments':arguments,'capture_id':preview['capture_id'],'changed_scopes':changed,
+            'publication_before':'unpublished' if initial_publication else 'finalized',
+            'rollback_semantics':'published_all_missing_append_only' if initial_publication else 'prior_finalized_capture',
             'prestate_sha256':digest({'base':dict(base),'components':before,'pointer':pointer}),
             'before_capture':dict(base),'before_components':before,'before_pointer':pointer,
             'non_target_digest':digest(unchanged_before)}
@@ -73,7 +82,8 @@ class WebVitrinaWbHistoryRecoveryAdapter(WebVitrinaManagementHistoryAdapter):
             with readonly(db) as conn: candidate=self.build(request,operation_id,conn)
         return {'operation_id':operation_id,'target':str(db),'scope':{'date':request['target_date'],'changed_WB_cells':len(candidate['changed_scopes'])},
             'prestate_sha256':candidate['prestate_sha256'],'candidate_sha256':digest(candidate),'candidate':candidate,
-            'recovery':{'kind':'append-only prior immutable capture preserved','prior_capture_id':candidate['before_capture']['capture_id']}}
+            'recovery':{'kind':'append-only prior immutable capture preserved','prior_capture_id':candidate['before_capture']['capture_id'],
+                'publication_before':candidate['publication_before'],'semantics':candidate['rollback_semantics']}}
 
     def apply(self, request, operation_id, preview):
         runtime,db=self.target(request)
