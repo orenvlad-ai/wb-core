@@ -1130,7 +1130,19 @@ class SkuManagementBlock:
     ) -> dict[str, Any]:
         """Build the explicit all-fronts stock/demand/supplier read model."""
 
-        source = self.build_table(user_key=user_key)
+        # Balance reads only its own sources: never build the general forecast,
+        # FF lifecycle/ledger, regional supplies, price or commercial projections.
+        settings_payload = self.get_settings(user_key=user_key)
+        active = self._active_skus()
+        evidence = self._collect_forecast_evidence(
+            active=active, settings=validate_forecast_settings(settings_payload["forecast"]),
+            inventory_balance_only=True,
+        )
+        source = {"settings": settings_payload, "generated_at": self.timestamp_factory(),
+                  "meta": {"metric_policy": {"business_date": current_business_date_iso(self.now_factory())}},
+                  "rows": [{**sku, **evidence[int(sku["nm_id"])],
+                            "quality_warnings": evidence[int(sku["nm_id"])]["warnings"]}
+                           for sku in active]}
         rows = [dict(item) for item in source.get("rows") or []]
         nm_ids = [int(item.get("nm_id") or 0) for item in rows if int(item.get("nm_id") or 0) > 0]
         as_of_date = str(
@@ -1221,7 +1233,7 @@ class SkuManagementBlock:
                 )
         result = dict(source)
         result["rows"] = rows
-        result["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v2"
+        result["contract_name"] = "sheet_vitrina_v1_sku_inventory_balance_evidence/v3"
         result["meta"] = {
             **dict(source.get("meta") or {}),
             "inventory_balance_evidence": {
@@ -2325,6 +2337,7 @@ class SkuManagementBlock:
         *,
         active: Sequence[Mapping[str, Any]],
         settings: ForecastSettings,
+        inventory_balance_only: bool = False,
     ) -> dict[int, dict[str, Any]]:
         today = current_business_date_iso(self.now_factory())
         nm_ids = [int(item["nm_id"]) for item in active]
@@ -2441,6 +2454,27 @@ class SkuManagementBlock:
             except Exception as exc:
                 for row in result.values():
                     row["warnings"].append(f"stocks evidence error: {exc}")
+        if inventory_balance_only:
+            from packages.application.official_fbs_stock_read import current_official_fbs_facilities
+            official = current_official_fbs_facilities(
+                self.runtime.db_path, requested_nm_ids=nm_ids, now=self.now_factory(),
+            )
+            facilities = official.get("facilities") or []
+            complete = bool(facilities) and all(f.get("available") is not None for f in facilities)
+            for nm_id, row in result.items():
+                values = [next((v["available"] for v in f["sku_values"] if int(v["nm_id"]) == nm_id), None)
+                          for f in facilities]
+                row["stock_ff"] = sum(values) if complete and all(v is not None for v in values) else None
+                row["fbs_stock_evidence"] = {
+                    "source": official.get("source"), "date": official.get("date"),
+                    "quantity": row["stock_ff"], "mode": "official_declared_fbs_only",
+                    "facilities": [{"facility_id": f["facility_id"], "source": f["stock_source"]}
+                                   for f in facilities],
+                    "legacy_ledger_used": False, "lifecycle_used": False,
+                }
+                if row["stock_ff"] is None:
+                    row["warnings"].append("Нет полного свежего официального снимка остатков FBS; старый учёт не используется.")
+            return result
         try:
             activation = self.runtime.load_ff_stock_activation_operation()
             if not activation:

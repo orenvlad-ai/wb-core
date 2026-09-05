@@ -565,26 +565,57 @@ def _aggregate_wb_balance_fallback_checks() -> None:
     assert "остаётся неизвестным" in malformed_warning
 
 
+def _official_fbs_balance_checks():
+    from apps.web_vitrina_official_fbs_smoke import fixture
+    from packages.application.wb_fbs_warehouse_registry import FACILITIES_TABLE
+    from packages.application.ff_pool_foundation import FACILITY_PROFILES_TABLE
+    from packages.application.sku_management import validate_forecast_settings
+    now = datetime(2026, 9, 5, 10, 10, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "official.sqlite3"
+        conn = fixture(path)
+        for column in ("code", "name"):
+            conn.execute(f"ALTER TABLE {FACILITIES_TABLE} ADD COLUMN {column} TEXT")
+        conn.execute(f"UPDATE {FACILITIES_TABLE} SET name='ФФ',code=facility_id")
+        conn.execute(f"CREATE TABLE {FACILITY_PROFILES_TABLE}(facility_id,city)")
+        conn.commit()
+        block = object.__new__(SkuManagementBlock)
+        # No ledger, lifecycle, supplier, sales, or price API is even available here.
+        block.runtime = SimpleNamespace(db_path=path)
+        block.stocks_block = None
+        block.now_factory = lambda: now
+        def read():
+            return block._collect_forecast_evidence(
+                active=[{"nm_id": 1}, {"nm_id": 2}], settings=validate_forecast_settings({}),
+                inventory_balance_only=True)
+        before = path.read_bytes()
+        evidence = read()
+        assert evidence[1]["stock_ff"] == 8  # exact A=3 + B=5, no ledger added
+        assert evidence[2]["stock_ff"] == 0  # proven dense zero is not missing
+        assert evidence[1]["fbs_stock_evidence"]["legacy_ledger_used"] is False
+        assert path.read_bytes() == before
+        block.now_factory = lambda: now + timedelta(days=1)
+        assert all(v["stock_ff"] is None for v in read().values())
+        block.now_factory = lambda: now
+        conn.execute("DELETE FROM sheet_vitrina_v1_wb_fbs_stock_snapshot_rows WHERE run_id='A' AND nm_id=2")
+        conn.commit()
+        assert all(v["stock_ff"] is None for v in read().values())
+        conn.close()
+
+
 def main() -> None:
+    _official_fbs_balance_checks()
     _aggregate_wb_balance_fallback_checks()
     evidence_block = object.__new__(SkuManagementBlock)
     evidence_block.sales_history = FakeBalanceSalesHistory()
     evidence_block.runtime = FakeBalanceEvidenceRuntime()
     evidence_block.now_factory = lambda: datetime(2026, 8, 26, 8, tzinfo=timezone.utc)
-    evidence_block.build_table = lambda user_key: {  # type: ignore[method-assign]
-        "contract_name": "sheet_vitrina_v1_sku_management_table",
-        "generated_at": "2026-08-26T08:00:00+00:00",
-        "settings": {"forecast": {"factory_to_ff_lead_days": 99}},
-        "meta": {"metric_policy": {"business_date": "2026-08-26"}},
-        "rows": [
-            {
-                "nm_id": 101,
-                "stock_wb": 50,
-                "stock_ff": 20,
-                "quality_warnings": [],
-            }
-        ],
-    }
+    evidence_block.timestamp_factory = lambda: "2026-08-26T08:00:00+00:00"
+    evidence_block.get_settings = lambda user_key: {"forecast": {"factory_to_ff_lead_days": 99}}
+    evidence_block._active_skus = lambda: [{"nm_id": 101}]
+    evidence_block._collect_forecast_evidence = lambda **kw: {101: {
+        "stock_wb": 50, "stock_ff": 20, "warnings": []}}
+    evidence_block.build_table = lambda **kw: (_ for _ in ()).throw(AssertionError("general forecast must not run"))
     seven_day_evidence = evidence_block.build_inventory_balance_evidence(
         user_key="operator",
         sales_period_days=7,
@@ -829,7 +860,7 @@ def main() -> None:
         calculation = block.calculate({}, user_key="operator", actor="operator")
         assert calculation["registry_immutable"] is True
         assert calculation["automatic_ml_or_training"] is False
-        assert calculation["formula_version"] == "sku_inventory_balance_conservative_pace_v2"
+        assert calculation["formula_version"] == "sku_inventory_balance_official_fbs_manual_v3"
         assert calculation["previous_calculation_id"] is None
         assert calculation["source_digest"].startswith("sha256:")
         assert {row["nm_id"] for row in calculation["rows"]}.isdisjoint(
@@ -860,9 +891,9 @@ def main() -> None:
         cpc = deficit["new_cpc_campaigns"][0]
         assert cpc["cpo_rub"] == 30
         assert cpc["can_apply"] is False
-        assert cpc["allocation_action"] == "hold_other_group"
+        assert cpc["allocation_action"] is None
         cpm = deficit["old_cpm_campaigns"][0]
-        assert cpm["recommendation_item_id"].startswith("ibr_")
+        assert cpm["recommendation_item_id"].startswith("ibmd_")
         assert cpm["action_type"] == "bid_change"
         assert cpm["exact_target"] == {
             "seller_id": "",
@@ -877,22 +908,24 @@ def main() -> None:
         assert cpm["manual_pending_available"] is False
         calculated_bid = cpm["calculated_target_bid_rub"]
         assert cpm["cpo_rub"] == 80
-        assert cpm["can_apply"] is True
-        assert cpm["allocation_action"] == "decrease_less_efficient_group"
-        assert cpm["relative_efficiency"]["selected_group"] == "old_cpm"
+        assert cpm["can_apply"] is False
+        assert cpm["allocation_action"] is None
+        assert cpm["recommendation_quality"] == "not_generated"
         excess = calculation["rows"][1]
         excess_cpc = excess["new_cpc_campaigns"][0]
         excess_cpm = excess["old_cpm_campaigns"][0]
-        assert excess_cpc["allocation_action"] == "increase_more_efficient_group"
-        assert excess_cpc["can_apply"] is True
-        assert excess_cpm["allocation_action"] == "hold_other_group"
+        assert excess_cpc["allocation_action"] is None
+        assert excess_cpc["can_apply"] is False
+        assert excess_cpm["allocation_action"] is None
         assert excess_cpm["can_apply"] is False
         no_supply_campaign = calculation["rows"][2]["new_cpc_campaigns"][0]
-        assert no_supply_campaign["manual_override_allowed"] is False
+        assert no_supply_campaign["manual_override_allowed"] is True
         assert no_supply_campaign["can_apply"] is False
         pending_registry = FakeManualPendingRegistry()
         block.manual_pending_registry = pending_registry  # type: ignore[assignment]
         block.seller_id = "seller-primary"
+        block.save_override(calculation["calculation_id"],
+                            {"target_key": cpm["target_key"], "manual_target_bid_rub": 725.25}, actor="operator")
         configured = block.get_calculation(calculation["calculation_id"])
         configured_cpm = configured["rows"][0]["old_cpm_campaigns"][0]
         assert configured_cpm["manual_pending_available"] is True
@@ -920,16 +953,12 @@ def main() -> None:
                 "requested_value": configured_cpm["final_target_bid_minor"],
             }
         ]
-        try:
-            block.save_override(
-                calculation["calculation_id"],
-                {"target_key": no_supply_campaign["target_key"], "manual_target_bid_rub": 4.25},
-                actor="operator",
-            )
-        except SkuInventoryBalanceError as exc:
-            assert exc.http_status == 422
-        else:  # pragma: no cover
-            raise AssertionError("manual override unexpectedly bypassed unknown inventory evidence")
+        missing_stock_manual = block.save_override(
+            calculation["calculation_id"],
+            {"target_key": no_supply_campaign["target_key"], "manual_target_bid_rub": 4.25},
+            actor="operator",
+        )
+        assert missing_stock_manual["rows"][2]["new_cpc_campaigns"][0]["can_apply"]
 
         overridden = block.save_override(
             calculation["calculation_id"],
@@ -957,7 +986,7 @@ def main() -> None:
                 8001,
                 "search",
             )
-            assert float(stored_override[5]) == calculated_bid
+            assert stored_override[5] == "" and calculated_bid is None
             assert float(stored_override[6]) == 725.25
             assert stored_override[8] == "operator"
             try:

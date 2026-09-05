@@ -37,7 +37,7 @@ from packages.business_time import current_business_date_iso
 
 
 CALCULATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance/v2"
-FORMULA_VERSION = "sku_inventory_balance_conservative_pace_v2"
+FORMULA_VERSION = "sku_inventory_balance_official_fbs_manual_v3"
 CALCULATION_OPERATION_CONTRACT = "sheet_vitrina_v1_sku_inventory_balance_operation/v1"
 CALCULATION_OPERATION_ACCEPTANCE_CONTRACT = (
     "sheet_vitrina_v1_sku_inventory_balance_operation_acceptance/v1"
@@ -1004,6 +1004,7 @@ class SkuInventoryBalanceBlock:
                 )
                 continue
             row = calculate_inventory_balance_row(raw, settings=settings)
+            row["fbs_stock_evidence"] = dict(raw.get("fbs_stock_evidence") or {})
             try:
                 ads_detail = self.sku_management_block.ads_block.build_sku_detail(
                     int(row["nm_id"]),
@@ -1026,10 +1027,6 @@ class SkuInventoryBalanceBlock:
                 )
                 for item in campaign_rows
             ]
-            recommendations = _allocate_campaign_targets(
-                recommendations,
-                pace_ratio=row.get("pace_ratio"),
-            )
             row["campaign_recommendations"] = recommendations
             row["new_cpc_campaigns"] = [
                 item for item in recommendations if item["campaign_group"] == "new_cpc"
@@ -1100,6 +1097,7 @@ class SkuInventoryBalanceBlock:
                         "matched_rows": excluded_rows,
                         "identity_rule": "exact_nm_id_only",
                     },
+                    "fbs_stock_evidence": [{"nm_id": item["nm_id"], **item["fbs_stock_evidence"]} for item in rows],
                     "wb_stock_evidence": [
                         {
                             "nm_id": int(item.get("nm_id") or 0),
@@ -1110,6 +1108,7 @@ class SkuInventoryBalanceBlock:
                 },
                 "excluded_rows": excluded_rows,
                 "apply_protocols": self._apply_protocols(),
+                "automatic_advertising_recommendations": False,
                 "automatic_ml_or_training": False,
             }
             digest = _digest(
@@ -1209,7 +1208,7 @@ class SkuInventoryBalanceBlock:
             raise SkuInventoryBalanceError("calculation target not found", http_status=404)
         if not target.get("manual_override_allowed"):
             raise SkuInventoryBalanceError(
-                "manual target override is unavailable without complete inventory pacing evidence",
+                "manual target override is unavailable without exact campaign evidence",
                 http_status=422,
             )
         raw_manual = payload.get("manual_target_bid_rub")
@@ -1230,7 +1229,7 @@ class SkuInventoryBalanceBlock:
                     int(target["nm_id"]),
                     int(target["advert_id"]),
                     str(target["placement"]),
-                    str(target["calculated_target_bid_rub"]),
+                    "" if target["calculated_target_bid_rub"] is None else str(target["calculated_target_bid_rub"]),
                     None if manual is None else str(manual),
                     now,
                     actor,
@@ -1345,7 +1344,7 @@ class SkuInventoryBalanceBlock:
             requested_state = "active" if action == "start" else "paused"
             state_target_key = f"state:{nm_id}:{advert_id}"
             recommendation_basis = {
-                "contract": "sku_inventory_balance_campaign_state_recommendation/v1",
+                "contract": "sku_inventory_balance_manual_campaign_state_decision/v1",
                 "calculation_id": calculation_id,
                 "target": {
                     "seller_id": self.seller_id,
@@ -1374,7 +1373,7 @@ class SkuInventoryBalanceBlock:
                     "requested_campaign_state": requested_state,
                     "state_action": action,
                     "state_action_label": str(source_target.get("state_action_label") or action),
-                    "recommendation_item_id": "ibsr_"
+                    "recommendation_item_id": "ibms_"
                     + sha256(
                         json.dumps(
                             recommendation_basis,
@@ -2996,6 +2995,8 @@ class SkuInventoryBalanceBlock:
             ("sales_evidence_window", _json((calculation.get("lineage") or {}).get("sales_evidence_window") or {})),
             ("supplier_eta_evidence", _json((calculation.get("lineage") or {}).get("supplier_eta_evidence") or {})),
             ("wb_stock_evidence", _json((calculation.get("lineage") or {}).get("wb_stock_evidence") or [])),
+            ("fbs_stock_evidence", _json((calculation.get("lineage") or {}).get("fbs_stock_evidence") or [])),
+            ("advertising_recommendations", "не формировались" if calculation.get("automatic_advertising_recommendations") is False else "исторический расчёт"),
             ("exclusion_policy", _json((calculation.get("lineage") or {}).get("exclusion_policy") or {})),
             ("excluded_rows", _json(calculation.get("excluded_rows") or [])),
             ("settings", _json(calculation.get("settings") or {})),
@@ -3052,9 +3053,14 @@ class SkuInventoryBalanceBlock:
                     if override is not None and override["manual_target_bid_rub"] is not None
                     else None
                 )
+                # A historical immutable recommendation is evidence only, never a
+                # default for a new manual action under the current policy.
+                target["manual_override_allowed"] = bool(target.get("identity_valid") and target.get("current_bid_rub") is not None)
+                target["decision_source"] = "manual_operator"
+                target["new_action_policy"] = "manual_operator"
                 target["manual_target_bid_rub"] = manual
                 target["final_target_bid_rub"] = (
-                    manual if manual is not None else target.get("calculated_target_bid_rub")
+                    manual
                 )
                 target["override_updated_at"] = str(override["updated_at"]) if override else ""
                 target["override_updated_by"] = str(override["updated_by"]) if override else ""
@@ -3082,7 +3088,7 @@ class SkuInventoryBalanceBlock:
                     "parameter_field": "bid_minor",
                 }
                 recommendation_basis = {
-                    "contract": "sku_inventory_balance_bid_recommendation/v1",
+                    "contract": "sku_inventory_balance_manual_bid_decision/v1",
                     "calculation_id": str(row["calculation_id"]),
                     "target": target["exact_target"],
                     "before_value": target["current_bid_minor"],
@@ -3090,7 +3096,7 @@ class SkuInventoryBalanceBlock:
                     "override_updated_at": target.get("override_updated_at") or "",
                 }
                 target["recommendation_item_id"] = (
-                    "ibr_" + sha256(
+                    "ibmd_" + sha256(
                         json.dumps(
                             recommendation_basis,
                             ensure_ascii=False,
@@ -3110,7 +3116,7 @@ class SkuInventoryBalanceBlock:
                 )
                 target["requested_campaign_state"] = requested_campaign_state
                 state_basis = {
-                    "contract": "sku_inventory_balance_campaign_state_recommendation/v1",
+                    "contract": "sku_inventory_balance_manual_campaign_state_decision/v1",
                     "calculation_id": str(row["calculation_id"]),
                     "target": {
                         "seller_id": self.seller_id,
@@ -3125,7 +3131,7 @@ class SkuInventoryBalanceBlock:
                     "requested_value": requested_campaign_state,
                 }
                 target["campaign_state_recommendation_item_id"] = (
-                    "ibsr_" + sha256(
+                    "ibms_" + sha256(
                         json.dumps(
                             state_basis,
                             ensure_ascii=False,
@@ -3570,13 +3576,7 @@ def _campaign_recommendation(
     group = "new_cpc" if payment_type == "cpc" else "old_cpm" if payment_type == "cpm" else "other"
     current = _optional_float(raw.get("current_bid_rub"))
     min_bid = _optional_float(raw.get("min_bid_rub"))
-    ratio = min(max(float(pace_ratio if pace_ratio is not None else 1.0), 0.25), 2.0)
-    calculated = None
-    if current is not None and current > 0:
-        calculated = current * ratio
-        if min_bid is not None:
-            calculated = max(calculated, min_bid)
-        calculated = float(Decimal(str(calculated)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    calculated = None  # Manual-only: no advertising recommendation is generated.
     spend = _optional_float(raw.get("spend_rub") if "spend_rub" in raw else raw.get("sum"))
     orders = _optional_float(raw.get("orders"))
     cpo = spend / orders if spend is not None and orders and orders > 0 else None
@@ -3622,14 +3622,17 @@ def _campaign_recommendation(
         "min_bid_rub": min_bid,
         "identity_valid": identity_valid,
         "inventory_evidence_actionable": pace_ratio is not None,
-        "manual_override_allowed": bool(identity_valid and pace_ratio is not None),
+        "manual_override_allowed": bool(identity_valid and current is not None),
         "can_apply": bool(
             identity_valid
             and current is not None
             and calculated is not None
             and float(current) != float(calculated)
         ),
-        "calculation_reason": "ставка масштабирована по отношению целевого темпа к текущему; WB minimum является нижней границей",
+        "calculation_reason": "Рекомендация ставки не формировалась; решение принимает оператор.",
+        "recommendation_quality": "not_generated",
+        "decision_source": "manual_operator",
+        "allocation_action": None,
     }
 
 
@@ -3690,99 +3693,6 @@ def _public_preflight_result(value: Mapping[str, Any]) -> dict[str, Any]:
         "safety_warnings",
     }
     return {key: value.get(key) for key in sorted(allowed) if key in value}
-
-
-def _allocate_campaign_targets(
-    recommendations: Sequence[Mapping[str, Any]],
-    *,
-    pace_ratio: float | None,
-) -> list[dict[str, Any]]:
-    """Route growth/cuts using relative group CPO; fail closed on weak evidence."""
-
-    result = [dict(item) for item in recommendations]
-    eligible = [
-        item
-        for item in result
-        if item.get("identity_valid")
-        and item.get("current_bid_rub") is not None
-        and item.get("calculated_target_bid_rub") is not None
-        and item.get("campaign_group") in {"new_cpc", "old_cpm"}
-    ]
-    group_rows: dict[str, list[dict[str, Any]]] = {}
-    for item in eligible:
-        group_rows.setdefault(str(item["campaign_group"]), []).append(item)
-    group_evidence: dict[str, dict[str, Any]] = {}
-    for group, items in group_rows.items():
-        complete = all(
-            item.get("spend_rub") is not None
-            and item.get("orders") is not None
-            and float(item.get("orders") or 0) > 0
-            for item in items
-        )
-        spend = sum(float(item.get("spend_rub") or 0) for item in items)
-        orders = sum(float(item.get("orders") or 0) for item in items)
-        group_evidence[group] = {
-            "campaign_count": len(items),
-            "spend_rub": round(spend, 2),
-            "orders": round(orders, 2),
-            "cpo_rub": round(spend / orders, 2) if complete and orders > 0 else None,
-            "quality": "complete" if complete and orders > 0 else "insufficient_stats",
-        }
-    selected_group: str | None = None
-    action = "hold"
-    quality = "complete"
-    ratio = float(pace_ratio) if pace_ratio is not None else None
-    if ratio is None:
-        quality = "insufficient_inventory_evidence"
-        action = "hold_conservative"
-    elif abs(ratio - 1.0) <= 1e-9:
-        action = "hold_balanced"
-    elif len(group_evidence) == 1:
-        selected_group = next(iter(group_evidence))
-        action = "increase_single_group" if ratio > 1 else "decrease_single_group"
-        quality = "single_group_no_relative_comparison"
-    elif len(group_evidence) >= 2 and all(
-        item["quality"] == "complete" for item in group_evidence.values()
-    ):
-        ranked = sorted(
-            group_evidence,
-            key=lambda group: (float(group_evidence[group]["cpo_rub"]), group),
-        )
-        if ratio > 1:
-            selected_group = ranked[0]
-            action = "increase_more_efficient_group"
-        else:
-            selected_group = ranked[-1]
-            action = "decrease_less_efficient_group"
-    else:
-        quality = "insufficient_stats"
-        action = "hold_conservative"
-    for item in result:
-        selected = selected_group is not None and item.get("campaign_group") == selected_group
-        if not selected:
-            item["calculated_target_bid_rub"] = item.get("current_bid_rub")
-            item["final_target_bid_rub"] = item.get("current_bid_rub")
-            item["can_apply"] = False
-        item["relative_efficiency"] = {
-            "basis": "group_cpo",
-            "groups": group_evidence,
-            "selected_group": selected_group,
-            "quality": quality,
-        }
-        item["recommendation_quality"] = quality
-        item["allocation_action"] = action if selected or selected_group is None else "hold_other_group"
-        item["calculation_reason"] = (
-            "рост направлен в группу с меньшим CPO"
-            if action == "increase_more_efficient_group" and selected
-            else "снижение начато с группы с большим CPO"
-            if action == "decrease_less_efficient_group" and selected
-            else "консервативно без изменения: недостаточно сопоставимой CPO evidence"
-            if action == "hold_conservative"
-            else "группа удерживается, пока изменение направлено в выбранную по CPO группу"
-            if not selected
-            else "единственная eligible группа масштабирована по целевому темпу"
-        )
-    return result
 
 
 def _calculation_wb_stock_evidence(
@@ -3905,7 +3815,9 @@ def _campaigns_label(items: Any) -> str:
         values.append(
             f"{item.get('advert_id')} {item.get('campaign_name') or ''}: "
             f"CPO {item.get('cpo_rub') if item.get('cpo_rub') is not None else '—'}; "
-            f"{item.get('current_bid_rub')} → {item.get('final_target_bid_rub')}"
+            + (f"{item.get('current_bid_rub')} → {item['final_target_bid_rub']}"
+               if item.get('final_target_bid_rub') is not None
+               else f"текущая {item.get('current_bid_rub') if item.get('current_bid_rub') is not None else '—'}; новая не задана")
         )
     return " | ".join(values)
 

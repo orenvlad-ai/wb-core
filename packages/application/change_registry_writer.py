@@ -504,6 +504,15 @@ class InternalWriterRegistry:
             ),
             "stage": operation_basis["stage"],
         }
+        if source == "sku_inventory_balance" and all(
+            str(value[4]).startswith(("ibmd_", "ibms_")) for value in atomic_values
+        ):
+            provenance.update({
+                "decision_source": "manual_operator",
+                "automatic_recommendation_status": "not_generated",
+                "decision_item_id_field": "recommendation_item_id",
+                "decision_item_id_semantics": "manual_decision_identity_not_algorithm_recommendation",
+            })
         try:
             prepared_result = self.repository.prepare_writer_operation(
                 operation_id=operation_id,

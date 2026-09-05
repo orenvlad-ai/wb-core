@@ -174,8 +174,6 @@ def main() -> None:
                 target["manual_target_bid_rub"] = manual_target
                 target["final_target_bid_rub"] = (
                     manual_target
-                    if manual_target is not None
-                    else target["calculated_target_bid_rub"]
                 )
                 target["can_apply"] = (
                     target["final_target_bid_rub"] is not None
@@ -387,10 +385,10 @@ def main() -> None:
         page.set_viewport_size({"width": 1366, "height": 900})
         assert page.locator("[data-inventory-balance-xlsx]").is_enabled()
         assert page.locator('[data-inventory-balance-nm-id="202"] [data-inventory-balance-override]').count() == 3
-        assert page.locator('[data-inventory-balance-override="101:8001:search"]').input_value() == "800"
+        assert page.locator('[data-inventory-balance-override="101:8001:search"]').input_value() == ""
         unavailable_override = page.locator('[data-inventory-balance-override="303:9303:search"]')
         assert unavailable_override.input_value() == ""
-        assert unavailable_override.get_attribute("placeholder") == "Цель"
+        assert unavailable_override.get_attribute("placeholder") == "Новая"
         neutral_state = page.locator(
             '[data-inventory-balance-nm-id="303"] .inventory-balance-state-status.neutral'
         ).first
@@ -510,6 +508,11 @@ def main() -> None:
         )
 
         explicit_checkbox = page.locator('[data-inventory-balance-select="202"]')
+        explicit_bid = page.locator('[data-inventory-balance-override="202:9202:search"]')
+        explicit_bid.fill("12")
+        explicit_bid.press("Enter")
+        page.wait_for_function("inventoryBalanceTargetByKey('202:9202:search').manual_target_bid_rub === 12")
+        explicit_checkbox.uncheck()
         explicit_checkbox.check()
         explicit_state = page.locator(
             '[data-inventory-balance-nm-id="202"] .inventory-balance-state-status.active'
@@ -587,7 +590,7 @@ def main() -> None:
         page.wait_for_timeout(50)
 
         override = page.locator('[data-inventory-balance-override="101:8001:search"]')
-        assert override.input_value() == "800"
+        assert override.input_value() == ""
         override_count_before = len([item for item in requests if item[1].endswith("/override")])
         override.fill("725.25")
         override.press("Enter")
@@ -617,6 +620,12 @@ def main() -> None:
         ) == ["state:101:9001"]
 
         page.locator("[data-inventory-balance-preset]").select_option("all")
+        page.locator("[data-inventory-balance-select-all]").click()
+        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text(), "select-all must not invent bids"
+        second_bid = page.locator('[data-inventory-balance-override="202:9202:search"]')
+        second_bid.fill("1701")
+        second_bid.press("Enter")
+        page.wait_for_function("inventoryBalanceTargetByKey('202:9202:search').manual_target_bid_rub === 1701")
         page.locator("[data-inventory-balance-select-all]").click()
         assert "(3)" in page.locator("[data-inventory-balance-apply]").inner_text()
         assert page.evaluate(
@@ -673,23 +682,23 @@ def main() -> None:
         confirmation = page.locator("[data-inventory-balance-confirm-body]").inner_text()
         normalized_confirmation = confirmation.replace("\xa0", " ")
         assert "Выбрано SKU\n2" in confirmation
-        assert "Ручных ставок\n1" in confirmation
-        assert "Рекомендаций\n1" in confirmation
+        assert "Ручных ставок\n2" in confirmation
+        assert "Рекомендаци" not in confirmation
         assert "Статусов\n1" in confirmation
         assert "Повышений / понижений\n1 / 1" in confirmation
         assert "1 000 → 725,25 ₽/1000 показов" in normalized_confirmation
         assert "10 → 1 701 ₽/клик" in normalized_confirmation
         assert "активна → на паузе (остановить)" in normalized_confirmation
         assert "Ручная ставка · advert_id 8001" in normalized_confirmation
-        assert "Рекомендация · advert_id 9202" in normalized_confirmation
+        assert "Ручная ставка · advert_id 9202" in normalized_confirmation
         assert "Ожидающее действие · advert_id 9001" in normalized_confirmation
         assert "Повышение на 1 691 ₽ превышает прежний контрольный порог 100 ₽" in normalized_confirmation
         assert "Новая ставка 1 701 ₽ превышает прежний контрольный потолок 1 000 ₽" in normalized_confirmation
         assert "Повышение на 16 910% превышает прежний контрольный порог 50%" in normalized_confirmation
         assert "Не включено пустых, равных текущим или недоступных целей: 2" in confirmation
         assert "эти точные изменения будут отправлены в WB" in confirmation
-        assert "one-submit" in confirmation
-        assert "exact readback" in confirmation
+        assert "Перед отправкой проверим актуальные ставки" in confirmation
+        assert "подтвердим результат в WB" in confirmation
         screenshot_modal_path = os.environ.get(
             "SKU_INVENTORY_BALANCE_SCREENSHOT_MODAL", ""
         ).strip()
