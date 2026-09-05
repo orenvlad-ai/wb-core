@@ -538,9 +538,28 @@ def _regular_batch_case(root: Path) -> None:
     assert _table_count(block.runtime.db_path, "change_registry_operations") == 33
     assert _table_count(block.runtime.db_path, "change_registry_items") == 33
     assert _table_count(block.runtime.db_path, "change_registry_facts") == 33
-    again = _start(block, calculation)
+    again = block.get_apply_job(job["job_id"])
     assert again["job_id"] == job["job_id"]
+    try:
+        replay = _start(block, calculation)
+    except SkuInventoryBalanceError as exc:
+        assert exc.http_status == 422
+    else:
+        assert replay["job_id"] == job["job_id"]
+    assert _table_count(block.runtime.db_path, "change_registry_facts") == 33
+    refreshed = block.get_calculation(calculation["calculation_id"])
+    for row in refreshed["rows"]:
+        for target in row["campaign_recommendations"]:
+            assert target["current_bid_rub"] == target["current_bid_evidence"]["bid_rub"]
+            assert target["manual_target_bid_rub"] is None
+            assert target["calculation_current_bid_rub"] != target["current_bid_rub"]
     assert [len(batch) for batch in adapter.accepted_batches] == [1, 10, 10, 10, 2]
+    with sqlite3.connect(block.runtime.db_path) as conn:
+        original = json.loads(conn.execute("SELECT payload_json FROM sheet_vitrina_v1_inventory_balance_calculations WHERE calculation_id=?", (calculation["calculation_id"],)).fetchone()[0])
+        assert original["rows"][0]["campaign_recommendations"][0]["current_bid_rub"] == refreshed["rows"][0]["campaign_recommendations"][0]["calculation_current_bid_rub"]
+        conn.execute("UPDATE sheet_vitrina_v1_inventory_balance_overrides SET updated_at='2099-01-01T00:00:00+00:00' WHERE calculation_id=?", (calculation["calculation_id"],))
+    later_draft = block.get_calculation(calculation["calculation_id"])
+    assert all(target["manual_target_bid_rub"] is not None for row in later_draft["rows"] for target in row["campaign_recommendations"]), "newer operator drafts must survive even with the same numeric value"
     with sqlite3.connect(block.runtime.db_path) as conn:
         linked = conn.execute(
             """SELECT COUNT(*) FROM change_registry_operations
@@ -891,6 +910,11 @@ def _campaign_state_queue_case(root: Path) -> None:
     assert item["current_campaign_state"] == "active"
     assert item["requested_campaign_state"] == "paused"
     assert item["result"]["confirmed_campaign_state"] == "paused"
+    projected = block.get_calculation(calculation["calculation_id"])["rows"][0]["campaign_recommendations"][0]
+    assert projected["campaign_state"] == "paused"
+    assert projected["calculation_campaign_state"] == "active"
+    assert projected["state_action"] == "start"
+    assert projected["current_state_evidence"]["source"] == "confirmed_apply_readback"
     assert item["recommendation_item_id"] == exact[
         "campaign_state_recommendation_item_id"
     ]

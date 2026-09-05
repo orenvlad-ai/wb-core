@@ -80,7 +80,7 @@ def main() -> None:
             path = request.url.split("balance.test", 1)[-1]
             body = json.loads(request.post_data or "{}") if request.post_data else {}
             requests.append((request.method, path, body))
-            if path == "/page":
+            if path.split("?", 1)[0] == "/page":
                 route.fulfill(status=200, content_type="text/html; charset=utf-8", body=html)
                 return
             if path == "/v1/sheet-vitrina-v1/sku-management":
@@ -233,9 +233,9 @@ def main() -> None:
             console_errors,
         )
         assert "WB общим итогом × 0.5" in normalized_balance_text
-        assert "Сейчас 1 000" in normalized_balance_text
-        assert "Сейчас 5" in normalized_balance_text
-        assert "Сейчас 10" in normalized_balance_text
+        assert "1 000" in normalized_balance_text
+        assert "5 ₽/клик" in normalized_balance_text
+        assert "10 ₽/клик" in normalized_balance_text
         assert "₽/1000 показов" in normalized_balance_text
         assert "₽/клик" in normalized_balance_text
         assert "insufficient_stats" not in normalized_balance_text
@@ -271,7 +271,7 @@ def main() -> None:
         )
         assert page.locator(".inventory-balance-selection-status").first.evaluate(
             "node => getComputedStyle(node).whiteSpace") == "nowrap"
-        assert all(height <= 63 for height in row_heights), row_heights
+        assert all(64 <= height <= 90 for height in row_heights), row_heights
         visible_line_counts = page.locator(
             ".inventory-balance-main-row .inventory-balance-two-line"
         ).evaluate_all("nodes => nodes.map(node => node.children.length)")
@@ -339,6 +339,14 @@ def main() -> None:
             }
             """
         )
+        for zoom in [1, .8]:
+            page.evaluate("zoom => document.documentElement.style.zoom=String(zoom)", zoom)
+            geometry = page.locator('.inventory-balance-inline-target').evaluate_all("""nodes => nodes.map(node=>{
+              const input=node.querySelector('input').getBoundingClientRect(), current=node.querySelector('.inventory-balance-current').getBoundingClientRect(), cell=node.closest('td').getBoundingClientRect();
+              return {inputBottom:input.bottom,currentTop:current.top,currentBottom:current.bottom,cellBottom:cell.bottom,font:parseFloat(getComputedStyle(node.querySelector('.inventory-balance-current')).fontSize)};
+            })""")
+            assert all(box["currentTop"] >= box["inputBottom"] and box["currentBottom"] <= box["cellBottom"] and box["font"] >= 12 for box in geometry), (zoom, geometry)
+        page.evaluate("document.documentElement.style.zoom='1'")
         assert layout_1366["viewport"] == 1366, layout_1366
         assert layout_1366["defaultCpc"] == layout_1366["defaultCpm"] == 360, layout_1366
         assert 350 <= layout_1366["cpcWidth"] <= 362, layout_1366
@@ -407,7 +415,7 @@ def main() -> None:
         paused_menu.locator("[data-inventory-balance-state-choice]").click()
         pending_cpm_layout = page.locator(
             '[data-inventory-balance-override="101:8001:search"]'
-        ).locator("xpath=../..").evaluate(
+        ).locator("xpath=../../..").evaluate(
             """
             target => {
               const info=target.querySelector('.inventory-balance-info-button');
@@ -466,8 +474,26 @@ def main() -> None:
         assert page.evaluate(
             "getComputedStyle(document.activeElement).caretColor !== 'rgba(0, 0, 0, 0)'"
         )
+        page.evaluate("""() => { const original = window.fetch; window.fetch = async (...args) => { const response = await original(...args); if(String(args[0]).endsWith('/override')) await new Promise(resolve => setTimeout(resolve, 500)); return response; }; }""")
+        override_requests_before = len([item for item in requests if item[1].endswith("/override")])
+        input_node = manual_override.element_handle()
+        manual_override.press_sequentially("725", delay=600)
+        assert input_node.evaluate("node => node.isConnected && document.activeElement === node")
+        assert manual_override.input_value() == "725"
+        assert len([item for item in requests if item[1].endswith("/override")]) == override_requests_before
+        manual_override.press("Home")
+        manual_override.press("ArrowRight")
+        manual_override.press_sequentially("0", delay=600)
+        assert manual_override.input_value() == "7025"
+        assert input_node.evaluate("node => document.activeElement === node")
         manual_override.fill("725.25")
-        assert "сохраняется" in first_click_cell.inner_text()
+        next_field = page.locator('[data-inventory-balance-override="202:9202:search"]')
+        next_node = next_field.element_handle()
+        next_field.click()
+        assert next_node.evaluate("node => node.isConnected && document.activeElement === node")
+        page.wait_for_timeout(650)
+        assert next_node.evaluate("node => node.isConnected && document.activeElement === node")
+
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-select=\"101\"]').checked && !document.querySelector('#inventory-balance-select-status-101').textContent.includes('сохраняется')"
         )
@@ -486,7 +512,7 @@ def main() -> None:
         ) == []
 
         manual_override.fill("777.77")
-        assert "сохраняется" in first_click_cell.inner_text()
+        manual_override.press("Enter")
         page.wait_for_function(
             "document.querySelector('#inventory-balance-select-status-101').textContent.includes('ошибка сохранения')"
         )
@@ -496,16 +522,19 @@ def main() -> None:
         ).inner_text()
 
         manual_override.fill("710.5")
+        manual_override.press("Enter")
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-select=\"101\"]').checked && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub === 710.5"
         )
         assert first_click_checkbox.is_checked()
         manual_override.fill("")
+        manual_override.press("Enter")
         page.wait_for_function(
             "!document.querySelector('[data-inventory-balance-select=\"101\"]').checked && state.inventoryBalance.overrideSaving.size === 0 && state.inventoryBalance.overrideTimers.size === 0 && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub == null"
         )
         assert page.evaluate("selectedInventoryBalanceTargets().length") == 0
         manual_override.fill("725.25")
+        manual_override.press("Enter")
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-select=\"101\"]').checked && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub === 725.25"
         )
@@ -641,6 +670,7 @@ def main() -> None:
         assert "(3)" in page.locator("[data-inventory-balance-apply]").inner_text()
 
         override.fill("")
+        override.press("Enter")
         page.wait_for_function(
             "state.inventoryBalance.overrideSaving.size === 0 && state.inventoryBalance.overrideTimers.size === 0 && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub == null"
         )
@@ -716,7 +746,8 @@ def main() -> None:
         assert "Применяем изменения" in page.locator("[data-inventory-balance-progress-summary]").inner_text()
         page.reload()
         page.locator('[data-sku-management-subtab="inventory-balance"]').click(force=True)
-        page.locator("[data-inventory-balance-confirm]").wait_for(state="visible")
+        assert page.locator("[data-inventory-balance-confirm]").is_hidden()
+        page.locator("[data-inventory-balance-progress-open]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
         page.wait_for_function(
             "document.querySelector('[data-inventory-balance-progress]').getAttribute('data-state') === 'completed'"
@@ -771,6 +802,11 @@ def main() -> None:
         zero_text = page.locator("[data-inventory-balance-confirm-body]").inner_text().replace("\xa0", " ")
         assert "Повышение на 201 ₽ превышает прежний контрольный порог 100 ₽" in zero_text
         assert "Ставка в WB не отправлялась" in zero_text
+        page.evaluate("""() => { const item=state.inventoryBalance.applyJob.items[0];item.result={preflight:{error_code:'stale_campaign_state',observed_campaign_state:'active'}};renderInventoryBalanceConfirmationProgress(); }""")
+        result_cell=page.locator('[data-inventory-balance-confirm-body] tbody tr').first.locator('td').nth(3)
+        assert "Действие не отправлено; состояние в исходном расчёте устарело." in result_cell.inner_text()
+        assert result_cell.evaluate("node => getComputedStyle(node).whiteSpace === 'normal' && node.scrollHeight <= node.clientHeight + 1"), result_cell.inner_text()
+
 
         latest_job[0] = _job("stalled", 1)
         page.reload()
@@ -783,6 +819,23 @@ def main() -> None:
         ).inner_text()
         assert page.locator("[data-inventory-balance-progress-resume]").is_visible()
 
+        page.evaluate("""() => {
+          const target=inventoryBalanceTargetByKey('101:8001:search');
+          const job={job_id:'test-proof',created_at:'2026-09-01T00:00:00Z',updated_at:'2026-09-01T00:01:00Z',items:[{target_key:target.target_key,nm_id:101,advert_id:8001,action_type:'bid_change',state:'succeeded',final_target_bid_rub:725.25,result:{readback_status:'matching',confirmed_bid_minor:72525}}]};
+          target.manual_target_bid_rub=725.25;target.override_updated_at='2026-08-31T00:00:00Z';
+          applyInventoryBalanceJobObservations(job);
+          if(target.current_bid_rub!==725.25||target.manual_target_bid_rub!==null)throw Error('proven current/draft clear');
+          target.manual_target_bid_rub=725.25;target.override_updated_at='2026-09-02T00:00:00Z';
+          applyInventoryBalanceJobObservations(job);
+          if(target.manual_target_bid_rub!==725.25)throw Error('newer draft lost');
+          target.current_bid_rub=800;target.current_bid_evidence={observed_at:'2026-09-03T00:00:00Z'};
+          applyInventoryBalanceJobObservations(job);
+          if(target.current_bid_rub!==800)throw Error('newer proof overwritten');
+          delete target.current_bid_evidence;state.inventoryBalance.calculation.created_at='2026-09-04T00:00:00Z';
+          applyInventoryBalanceJobObservations(job);
+          if(target.current_bid_rub!==800)throw Error('newer calculation overwritten');
+        }""")
+        _run_navigation_permissions(browser)
         _run_terminal_result_regressions(browser, html)
         browser.close()
 
@@ -828,6 +881,51 @@ def main() -> None:
     print("sku_inventory_balance_browser_smoke: ok")
 
 
+def _run_navigation_permissions(browser) -> None:
+    for sections, expected in [
+        (["sku_management"], ["inventory-balance", "change-registry"]),
+        (["ads"], ["ads"]), (["prices"], ["prices"]),
+        (["prices", "ads"], ["prices", "ads"]),
+        (["sku_management", "prices", "ads"], ["inventory-balance", "prices", "ads", "change-registry"]),
+    ]:
+        html = _render_sheet_vitrina_web_vitrina_ui(
+            read_path="/v1/sheet-vitrina-v1/web-vitrina", operator_path="/sheet-vitrina-v1/operator",
+            refresh_path="/v1/sheet-vitrina-v1/refresh", job_path="/v1/sheet-vitrina-v1/job",
+            role="operator", allowed_sections=sections, active_tab="sku-management")
+        page = browser.new_page()
+        calls = []
+        def handle(route):
+            path = route.request.url.split("navigation.test", 1)[-1]
+            if path.startswith("/page"):
+                route.fulfill(status=200, content_type="text/html", body=html)
+            else:
+                calls.append(path)
+                route.fulfill(status=200, content_type="application/json", body='{"rows":[],"settings":{},"meta":{}}')
+        page.route("**/*", handle)
+        page.goto("http://navigation.test/page?tab=sku-management")
+        assert page.locator('[data-unified-tab-button="sku-management"]').is_visible(), sections
+        assert page.locator('[data-unified-tab-button="prices"]').is_hidden()
+        assert page.locator('[data-unified-tab-button="ads"]').is_hidden()
+        assert page.locator('[data-sku-management-subtab="general"]').count() == 0
+        visible = page.locator('[data-sku-management-subtab]:visible').evaluate_all("nodes => nodes.map(node=>node.dataset.skuManagementSubtab)")
+        assert visible == expected, (sections, visible)
+        assert page.evaluate("state.inventoryBalance.activeSubtab") == expected[0]
+        for name in expected:
+            page.locator(f'[data-sku-management-subtab="{name}"]').click()
+            assert page.locator(f'[data-sku-management-subpanel="{name}"]').is_visible()
+        for name in [item for item in expected if item in {"prices", "ads"}]:
+            page.goto(f"http://navigation.test/page?tab={name}")
+            assert page.evaluate("state.inventoryBalance.activeSubtab") == name
+            page.reload()
+            assert page.evaluate("state.inventoryBalance.activeSubtab") == name
+            page.goto(f"http://navigation.test/page?tab=sku-management&sku_tab={name}")
+            assert page.evaluate("state.inventoryBalance.activeSubtab") == name
+        assert "/v1/sheet-vitrina-v1/sku-management" not in calls, (sections, calls)
+        if "sku_management" not in sections:
+            assert not any("inventory-balance" in path or "change-registry" in path for path in calls), calls
+        page.close()
+
+
 def _run_terminal_result_regressions(browser, html: str) -> None:
     """Initial latest 500 and stale secondary responses cannot hide a result."""
 
@@ -857,7 +955,7 @@ def _run_terminal_result_regressions(browser, html: str) -> None:
         path = request.url.split("balance-regression.test", 1)[-1]
         requests.append((request.method, path))
         body = json.loads(request.post_data or "{}") if request.post_data else {}
-        if path == "/page":
+        if path.split("?", 1)[0] == "/page":
             route.fulfill(
                 status=200, content_type="text/html; charset=utf-8", body=html
             )
@@ -972,9 +1070,6 @@ def _run_terminal_result_regressions(browser, html: str) -> None:
         }
         """
     )
-    page.locator('[data-sku-management-subtab="inventory-balance"]').click(
-        force=True
-    )
     page.wait_for_function(
         "document.querySelector('[data-inventory-balance-error]').textContent.includes('terminal result')"
     )
@@ -1030,6 +1125,7 @@ def _run_terminal_result_regressions(browser, html: str) -> None:
     page.locator(
         '[data-inventory-balance-override="101:8001:search"]'
     ).fill("666")
+    page.locator('[data-inventory-balance-override="101:8001:search"]').press("Enter")
     page.wait_for_function("typeof window.__resolveHeldOverride === 'function'")
     page.locator("[data-inventory-balance-calculate]").click()
     page.wait_for_function(
