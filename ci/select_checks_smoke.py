@@ -64,6 +64,30 @@ def main() -> None:
     assert "warehouse" in warehouse["groups"]
     assert "openpyxl==3.1.5" in warehouse["pip"]
 
+    browser = build_plan_from_paths(
+        pull_request=7, base=BASE, head=HEAD,
+        paths=["packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
+        file_exists=lambda *_: True,
+    )
+    verify_plan(browser)
+    install = ["python3", "-m", "playwright", "install", "--with-deps", "chromium"]
+    smoke = ["python3", "apps/sku_inventory_balance_browser_smoke.py"]
+    assert browser["commands"].index(install) < browser["commands"].index(smoke)
+    assert "playwright==1.58.0" in browser["pip"]
+    assert "openpyxl==3.1.5" in browser["pip"]
+    backend = build_plan_from_paths(
+        pull_request=8, base=BASE, head=HEAD,
+        paths=["packages/application/sku_inventory_balance.py", "packages/application/change_registry_writer.py"],
+        file_exists=lambda *_: True,
+    )
+    verify_plan(backend)
+    assert "inventory_balance" in backend["groups"]
+    assert "change_registry_writer" in backend["groups"]
+    assert "openpyxl==3.1.5" in backend["pip"]
+    assert install not in backend["commands"]
+    assert "playwright==1.58.0" not in finance["pip"]
+    assert install not in docs["commands"]
+
     try:
         build_plan_from_paths(
             pull_request=5, base=BASE, head=HEAD, paths=["unknown.bin"], file_exists=exists

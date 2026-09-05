@@ -73,6 +73,70 @@
         ["python3", "apps/wb_regional_supply_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
+    },
+    "inventory_balance": {
+      "patterns": [
+        "apps/sku_inventory_balance*.py",
+        "packages/application/sku_inventory_balance.py",
+        "packages/application/sku_management.py",
+        "packages/application/official_fbs_stock_read.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/sku_inventory_balance_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/sku_inventory_balance_live_apply_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/sku_management_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
+    "inventory_balance_browser": {
+      "patterns": [
+        "apps/sku_inventory_balance_browser_smoke.py",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+      ],
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "playwright",
+          "install",
+          "--with-deps",
+          "chromium"
+        ],
+        [
+          "python3",
+          "apps/sku_inventory_balance_browser_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5",
+        "playwright==1.58.0"
+      ]
+    },
+    "change_registry_writer": {
+      "patterns": [
+        "packages/application/change_registry_writer.py",
+        "apps/change_registry_internal_writers_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/change_registry_internal_writers_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
     }
   }
 }
