@@ -52,17 +52,20 @@ jobs:
           APPLY_ACTION: ${{ inputs.action }}
           APPLY_ADAPTER: ${{ inputs.adapter }}
           APPLY_OPERATION_ID: ${{ inputs.operation_id }}
-          APPLY_REQUEST_JSON: ${{ inputs.request_json }}
           APPLY_EXPECTED_PRESTATE: ${{ inputs.expected_prestate }}
           APPLY_EXPECTED_CANDIDATE: ${{ inputs.expected_candidate }}
-        run: >-
-          python3 apps/production_apply_launcher.py "$APPLY_ACTION"
-          --adapter "$APPLY_ADAPTER"
-          --operation-id "$APPLY_OPERATION_ID"
-          --request-json "$APPLY_REQUEST_JSON"
-          --expected-prestate "$APPLY_EXPECTED_PRESTATE"
-          --expected-candidate "$APPLY_EXPECTED_CANDIDATE"
-          --output "$RUNNER_TEMP/production-apply-receipt.json"
+        run: |
+          set -euo pipefail
+          request_json="$(
+            python3 -c 'import json,os; print(json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))["inputs"]["request_json"])'
+          )"
+          python3 apps/production_apply_launcher.py "$APPLY_ACTION" \
+            --adapter "$APPLY_ADAPTER" \
+            --operation-id "$APPLY_OPERATION_ID" \
+            --request-json "$request_json" \
+            --expected-prestate "$APPLY_EXPECTED_PRESTATE" \
+            --expected-candidate "$APPLY_EXPECTED_CANDIDATE" \
+            --output "$RUNNER_TEMP/production-apply-receipt.json"
       - name: Upload receipt
         if: always()
         uses: actions/upload-artifact@v4
