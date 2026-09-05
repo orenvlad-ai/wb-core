@@ -296,8 +296,8 @@ def main() -> None:
             - (sticky_select_box["x"] + sticky_select_box["width"])
         ) <= 2, {"select": sticky_select_box, "product": sticky_product_box, "shell": shell_box}
         table_shell.evaluate("node => { node.scrollLeft = 0; }")
-        assert "CPC · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
-        assert "CPM · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
+        assert "CPC · ставка" in page.locator("[data-inventory-balance-head]").inner_text()
+        assert "CPM · ставка" in page.locator("[data-inventory-balance-head]").inner_text()
         layout_1366 = page.evaluate(
             """
             () => {
@@ -348,8 +348,8 @@ def main() -> None:
             assert all(box["currentTop"] >= box["inputBottom"] and box["currentBottom"] <= box["cellBottom"] and box["font"] >= 12 for box in geometry), (zoom, geometry)
         page.evaluate("document.documentElement.style.zoom='1'")
         assert layout_1366["viewport"] == 1366, layout_1366
-        assert layout_1366["defaultCpc"] == layout_1366["defaultCpm"] == 360, layout_1366
-        assert 350 <= layout_1366["cpcWidth"] <= 362, layout_1366
+        assert layout_1366["defaultCpc"] == layout_1366["defaultCpm"] == 200, layout_1366
+        assert 190 <= layout_1366["cpcWidth"] <= 202, layout_1366
         assert abs(layout_1366["cpcWidth"] - layout_1366["cpmWidth"]) <= 1, layout_1366
         assert layout_1366["inputWidth"] >= 90, layout_1366
         assert layout_1366["inputCaret"] != "rgba(0, 0, 0, 0)", layout_1366
@@ -380,7 +380,7 @@ def main() -> None:
             """
         )
         assert layout_narrow["viewport"] == 1100, layout_narrow
-        assert 350 <= layout_narrow["columnWidth"] <= 362, layout_narrow
+        assert 190 <= layout_narrow["columnWidth"] <= 202, layout_narrow
         assert layout_narrow["inputWidth"] >= 90, layout_narrow
         assert layout_narrow["targetScrollWidth"] <= layout_narrow["targetClientWidth"] + 1, layout_narrow
         assert layout_narrow["pageOverflow"] <= 1, layout_narrow
@@ -406,6 +406,12 @@ def main() -> None:
         assert neutral_state.is_disabled()
         assert "Статус WB 7" in (neutral_state.get_attribute("title") or "")
 
+        _run_sort_regressions(page)
+        assert page.locator('.inventory-balance-target-unit').count() == 0
+        assert page.locator('.inventory-balance-campaign-cell .inventory-balance-state-status').count() == 0
+        assert page.locator('.inventory-balance-status-cell .inventory-balance-info-button').count() == 0
+        assert page.locator('.inventory-balance-status-cell .inventory-balance-state-status').count() >= 5
+
         paused_state = page.locator(
             '[data-inventory-balance-nm-id="101"] .inventory-balance-state-status.paused'
         ).first
@@ -413,6 +419,8 @@ def main() -> None:
         paused_menu = page.locator(".inventory-balance-state-menu:popover-open")
         assert paused_menu.inner_text().strip() == "возобновить"
         paused_menu.locator("[data-inventory-balance-state-choice]").click()
+        page.locator('[data-inventory-balance-sort="old_cpm_status"]').click()
+        assert page.locator('[data-inventory-balance-state-pending="state:101:8001"]').count()==1
         pending_cpm_layout = page.locator(
             '[data-inventory-balance-override="101:8001:search"]'
         ).locator("xpath=../../..").evaluate(
@@ -879,6 +887,61 @@ def main() -> None:
     assert any("ERR_CONNECTION_FAILED" in item for item in console_errors), console_errors
     assert any("status of 409" in item for item in console_errors), console_errors
     print("sku_inventory_balance_browser_smoke: ok")
+
+
+def _run_sort_regressions(page) -> None:
+    def ids():
+        return page.locator('.inventory-balance-main-row').evaluate_all("nodes=>nodes.map(node=>Number(node.dataset.inventoryBalanceNmId))")
+    def signature():
+        return page.locator('.inventory-balance-main-row').evaluate_all("nodes=>Object.fromEntries(nodes.map(node=>[node.dataset.inventoryBalanceNmId,{text:node.innerText,inputs:Array.from(node.querySelectorAll('input')).map(input=>[input.dataset.inventoryBalanceOverride||'select',input.value,input.checked])}]))")
+    original = page.evaluate("JSON.parse(JSON.stringify(state.inventoryBalance.calculation))")
+    before = signature()
+    assert page.locator('[data-inventory-balance-sort="select"]').count()==0
+    for column,descending,ascending in [
+        ('new_cpc_campaigns',[303,202,101,404],[101,202,303,404]),
+        ('old_cpm_campaigns',[303,202,101,404],[101,202,303,404]),
+    ]:
+        button=page.locator(f'[data-inventory-balance-sort="{column}"]')
+        button.click()
+        assert ids()==descending, (column,ids())
+        assert button.inner_text().endswith('↓')
+        assert signature()==before, "sorting split SKU data"
+        button.click()
+        assert ids()==ascending, (column,ids())
+        assert button.inner_text().endswith('↑')
+        assert signature()==before
+    page.evaluate("""() => {const rows=state.inventoryBalance.calculation.rows;rows[1].new_cpc_campaigns[0].campaign_state='paused';rows[1].old_cpm_campaigns[0].campaign_state='active';renderInventoryBalance();}""")
+    for column,descending,ascending in [
+        ('new_cpc_status',[101,202,303,404],[202,101,303,404]),
+        ('old_cpm_status',[202,101,303,404],[101,202,303,404]),
+    ]:
+        button=page.locator(f'[data-inventory-balance-sort="{column}"]')
+        button.click();assert ids()==descending,(column,ids())
+        button.click();assert ids()==ascending,(column,ids())
+    # First displayed target wins the comparison, not max/any. Missing stays last.
+    assert page.evaluate("""() => {
+      const rows=[{nm_id:1,new_cpc_campaigns:[{current_bid_rub:5},{current_bid_rub:999}]},{nm_id:2,new_cpc_campaigns:[{current_bid_rub:10},{current_bid_rub:1}]},{nm_id:3,new_cpc_campaigns:[]}];
+      return inventoryBalanceSortRows(rows,{column:'new_cpc_campaigns',direction:'desc'}).map(row=>row.nm_id);
+    }""")==[2,1,3]
+    assert page.evaluate("""() => {
+      const rows=[{nm_id:1,new_cpc_campaigns:[{nm_id:1,advert_id:1,campaign_state:'paused'},{nm_id:1,advert_id:2,campaign_state:'active'}]},{nm_id:2,new_cpc_campaigns:[{nm_id:2,advert_id:3,campaign_state:'active'}]}];
+      return inventoryBalanceSortRows(rows,{column:'new_cpc_status',direction:'desc'}).map(row=>row.nm_id);
+    }""")==[2,1]
+    for column,values in [('known_stock_units',[2,10,None]),('next_inbound',[{'date':'2026-09-01','quantity':2},{'date':'2026-10-01','quantity':1},{}]),('product',['А','Б',None])]:
+        assert page.evaluate("""({column,values})=>{const rows=values.map((value,index)=>({nm_id:index,[column==='product'?'name':column]:value}));return inventoryBalanceSortRows(rows,{column,direction:'asc'}).map(row=>row.nm_id);} """, {'column':column,'values':values})==[0,1,2]
+    page.evaluate("""()=>{window.__sortNativeFetch=window.fetch;window.fetch=async(...args)=>{const response=await window.__sortNativeFetch(...args);if(String(args[0]).endsWith('/override'))await new Promise(resolve=>setTimeout(resolve,300));return response;};}""")
+    entry=page.locator('[data-inventory-balance-override="101:8001:search"]')
+    entry.fill('73')
+    page.locator('[data-inventory-balance-sort="new_cpc_campaigns"]').click()
+    page.wait_for_function("state.inventoryBalance.overrideSaving.has('101:8001:search')")
+    assert entry.input_value()=='73'
+    assert page.evaluate("state.inventoryBalance.overrideDrafts.get('101:8001:search')")=='73'
+    page.wait_for_function("inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub===73 && state.inventoryBalance.overrideSaving.size===0")
+    assert entry.input_value()=='73'
+    entry.fill('');entry.press('Enter')
+    page.wait_for_function("inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub==null && state.inventoryBalance.overrideSaving.size===0")
+    page.evaluate("window.fetch=window.__sortNativeFetch;delete window.__sortNativeFetch")
+    page.evaluate("calculation=>{state.inventoryBalance.calculation=calculation;state.inventoryBalance.table.sort={};renderInventoryBalance();}",original)
 
 
 def _run_navigation_permissions(browser) -> None:
