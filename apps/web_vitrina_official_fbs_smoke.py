@@ -167,10 +167,22 @@ def main():
         assert shifted_saved.sheets[0].write_rect == "B5:E" + str(5 + len(shifted_saved.sheets[0].rows))
         with patch("packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate", return_value=model):
             runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at="2026-09-05T10:10:00Z", plan=plan)
+        from packages.application.sheet_vitrina_v1_inventory_history import append_inventory_history_capture, CAPTURES_TABLE, COMPONENTS_TABLE
+        from apps.sheet_vitrina_v1_inventory_history_smoke import _component
+        with sqlite3.connect(runtime.db_path) as history:
+            append_inventory_history_capture(history, business_date="2026-09-05", capture_kind="accepted_refresh",
+                formula_version="inventory_planning_v1",
+                facility_roster=[dict(facility_id=f, code=f, name=f, active=True, applicable=True,
+                                     effective_from="2026-09-05", display_order=i) for i,f in enumerate(["A","B"])],
+                source_manifest={"fixture": "same-date-FBS"},
+                components=[_component("TOTAL", "TOTAL", None, "WB", "WB", 8),
+                            _component("TOTAL", "TOTAL", None, "FBS_FACILITY", "A", 3),
+                            _component("TOTAL", "TOTAL", None, "FBS_FACILITY", "B", 5)],
+                captured_at="2026-09-05T10:10:01Z")
         tomorrow = replace(plan, as_of_date="2026-09-05", snapshot_id="tomorrow",
                            date_columns=["2026-09-05", "2026-09-06"],
-                           temporal_slots=[SheetVitrinaV1TemporalSlot("previous", "previous", "2026-09-05"),
-                                           SheetVitrinaV1TemporalSlot("current", "current", "2026-09-06")], sheets=[
+                           temporal_slots=[SheetVitrinaV1TemporalSlot("yesterday_closed", "previous", "2026-09-05"),
+                                           SheetVitrinaV1TemporalSlot("today_current", "current", "2026-09-06")], sheets=[
                                replace(plan.sheets[0], header=["label", "key", "2026-09-05", "2026-09-06"]),
                                plan.sheets[1]])
         with patch("packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate", return_value={"available": False}):
@@ -180,6 +192,15 @@ def main():
         assert cost_row[2] == restored.values_by_date["2026-09-05"]
         assert loaded.metadata["server_cell_presentation"][row.row_id]["2026-09-05"]["source"] == SOURCE
         assert any(r[1] == "TOTAL|total_inventory_fbs_total_qty_v1" and r[2] == 8 for r in loaded.sheets[0].rows)
+        with sqlite3.connect(runtime.db_path) as history:
+            latest = history.execute(f"SELECT capture_id FROM {CAPTURES_TABLE} WHERE business_date='2026-09-05' ORDER BY capture_sequence DESC LIMIT 1").fetchone()[0]
+            parts = history.execute(f"SELECT component_kind,quantity FROM {COMPONENTS_TABLE} WHERE capture_id=? AND scope_key='TOTAL'", (latest,)).fetchall()
+            assert sum(q for kind,q in parts if kind == "WB") == 8
+            assert sum(q for kind,q in parts) == 16  # closure must not treat public WB+FBS as WB, then add FBS again
+        from packages.application.sheet_vitrina_v1_inventory_history import _ready_wb_components
+        bad_metadata = json.loads(json.dumps(loaded.metadata))
+        del bad_metadata["server_cell_presentation"]["TOTAL|total_stock_total"]["2026-09-05"]["wb_component_value"]
+        assert _ready_wb_components(replace(loaded,metadata=bad_metadata),business_date="2026-09-05")["TOTAL"] is None
     print("official_fbs: generation, freshness, dense zeros, cost coverage, weighted TOTAL, no writes, frozen date: ok")
 
 

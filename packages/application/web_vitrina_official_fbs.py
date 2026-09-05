@@ -282,6 +282,12 @@ def apply_current_official_fbs_estimate(
             "functional_version_id": estimate["functional_version_id"],
             "management_value": str(value) if value is not None else "",
         }
+        if key == "stock_total":
+            presentation["wb_component_value"] = (
+                str(item["stock_quantity"] - item["fbs_quantity"])
+                if item.get("stock_quantity") is not None else ""
+            )
+            presentation["fbs_component_value"] = str(item["fbs_quantity"])
         result.append(replace(row, values_by_date={**row.values_by_date, day: float(value) if value is not None else ""},
                               presentation_by_date={**row.presentation_by_date, day: presentation}))
     return result
