@@ -4530,7 +4530,7 @@
               <div class="wb-supply-overlay-head">
                 <div>
                   <h2 id="fbsFulfillmentSettingsTitle" class="block-title">Заказ на фулфилмент (FBS)</h2>
-                  <p class="field-note"><strong>Остатки WB не учитываются.</strong> Расчёт использует физический FBS-остаток выбранного ФФ минус подписанный резерв и выбранный охват активных заказов фабрике.</p>
+                  <p class="field-note"><strong>Остатки на складах WB (FBO) не учитываются.</strong> Расчёт использует свежий официальный остаток FBS выбранного ФФ по данным WB и выбранный охват активных заказов фабрике. Дополнительный резерв не вычитается.</p>
                 </div>
                 <span class="source-pill">Общероссийский спрос</span>
               </div>
@@ -4629,8 +4629,8 @@
                 <div class="fbs-readiness-body">
                   <dl class="fbs-readiness-list">
                     <div><dt>Выбранный ФФ</dt><dd id="fbsReadinessFacility">—</dd></div>
-                    <div><dt>Физический остаток</dt><dd id="fbsReadinessPhysical">—</dd></div>
-                    <div><dt>Подписанный резерв</dt><dd id="fbsReadinessReserved">—</dd></div>
+                    <div><dt>Источник остатков</dt><dd id="fbsReadinessPhysical">—</dd></div>
+                    <div><dt>Дата и время снимка</dt><dd id="fbsReadinessReserved">—</dd></div>
                     <div><dt>Доступный FBS-остаток</dt><dd id="fbsReadinessAvailable">—</dd></div>
                     <div><dt>Входящие поставки</dt><dd id="fbsReadinessInbound">—</dd></div>
                     <div><dt>История orderCount</dt><dd id="fbsHistoryCoverage">—</dd></div>
@@ -14232,8 +14232,9 @@
           return;
         }
         fbsReadinessFacility.textContent = valueOrDash(facility.name) + " (" + valueOrDash(facility.facility_id) + ")";
-        fbsReadinessPhysical.textContent = valueOrDash(facility.physical);
-        fbsReadinessReserved.textContent = valueOrDash(facility.reserved);
+        const stockSource = facility.stock_source || {};
+        fbsReadinessPhysical.textContent = stockSource.source ? "Официальный снимок FBS WB" : "—";
+        fbsReadinessReserved.textContent = valueOrDash(stockSource.captured_at);
         fbsReadinessAvailable.textContent = valueOrDash(facility.available);
         const currentInbound = fbsFulfillmentCurrentResult && fbsResultFingerprint(fbsFulfillmentCurrentResult) === fbsFormFingerprint()
           ? fbsFulfillmentCurrentResult.inbound_coverage || {}
@@ -14249,7 +14250,7 @@
         }
         fbsReadinessBlockers.textContent = blockers.length
           ? "Расчёт заблокирован: " + blockers.join("; ")
-          : "Источник выбранного ФФ готов. Другой active ФФ не блокирует этот расчёт.";
+          : "Полный официальный снимок FBS готов к расчёту.";
         fbsReadinessBlockers.className = "section-message " + (blockers.length ? "is-warning" : "is-success");
         fbsFulfillmentCalculateButton.disabled = !facility.calculation_enabled || blockers.length > 0;
       }
@@ -14293,6 +14294,10 @@
         fbsPreviewNote.textContent = rows.length
           ? "Рассчитано " + rows.length + " SKU; заказ нужен по " + recommendedRows.length + "."
           : "В расчёте нет SKU.";
+        const resultSource = result.facility_readiness && result.facility_readiness.stock_source;
+        fbsPreviewNote.textContent += resultSource
+          ? " Остатки: официальный снимок FBS WB от " + valueOrDash(resultSource.captured_at) + "."
+          : " Сохранённый расчёт использует прежний складской учёт; пересчитайте по официальным остаткам.";
         fbsResultScopePill.textContent = valueOrDash(result.target_facility_name);
         fbsResultInboundScope.textContent = inboundScopeText;
         fbsResultInbound.textContent = formatWbNumber(inbound.total_quantity || 0) + " шт. · " + valueOrDash(inbound.included_shipment_count || 0) + " поставок";
@@ -14337,7 +14342,7 @@
         );
         setFbsFulfillmentMessage(
           fbsFulfillmentFacilities.some((facility) => facility.calculation_enabled)
-            ? "Готовность прочитана. Остатки WB не учитываются."
+            ? "Готовность прочитана. Используются официальные остатки FBS; остатки на складах WB (FBO) не учитываются."
             : fbsFulfillmentFacilities.length
               ? "Все active FF facilities сейчас заблокированы; причина показана ниже."
               : "Нет active FF facilities для расчёта.",
@@ -14399,7 +14404,7 @@
           renderFbsFulfillmentResult(payload);
           supplyCalculationRegistryLoaded = false;
           await loadFbsFulfillmentStatus();
-          setFbsFulfillmentMessage("Расчёт завершён. Остатки WB не использованы; неизменяемая запись и XLSX сохранены.", "success");
+          setFbsFulfillmentMessage("Расчёт завершён по официальным остаткам FBS. Остатки на складах WB (FBO) не использованы; результат и Excel сохранены.", "success");
         } catch (error) {
           setFbsFulfillmentMessage("Расчёт завершился с ошибкой: " + (error instanceof Error ? error.message : String(error)), "error");
         } finally {

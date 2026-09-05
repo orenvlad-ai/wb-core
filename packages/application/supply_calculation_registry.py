@@ -131,17 +131,11 @@ def build_fbs_fulfillment_order_calculation_evidence(
         "facility_id": str(result.get("target_facility_id") or ""),
         "name": str(result.get("target_facility_name") or ""),
         "city": str(facility.get("city") or ""),
-        "physical": facility.get("physical"),
-        "reserved": facility.get("reserved"),
         "available": facility.get("available"),
-        "sku_values_fingerprint": canonical_fingerprint(
-            facility.get("sku_values") or []
-        ),
-        "formula_epoch": dict(
-            planning_inventory.get("formula_epoch")
-            if isinstance(planning_inventory.get("formula_epoch"), Mapping)
-            else {}
-        ),
+        "stock_source": dict(facility.get("stock_source") or {}),
+        "lifecycle_used": False,
+        "sku_values": facility.get("sku_values") or [],
+        "sku_values_fingerprint": canonical_fingerprint(facility.get("sku_values") or []),
     }
     demand_basis = {
         "scope": str(result.get("national_demand_scope") or ""),
@@ -160,7 +154,7 @@ def build_fbs_fulfillment_order_calculation_evidence(
     }
     return {
         "contract_name": "wb-core.supply-calculation-evidence.fbs-fulfillment-order",
-        "contract_version": 1,
+        "contract_version": 2,
         "calculation_type": "fbs_fulfillment_order",
         "national_demand_scope": str(result.get("national_demand_scope") or ""),
         "wb_stock_used": False,
