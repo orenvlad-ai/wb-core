@@ -51,13 +51,13 @@ related_runners:
   - "apps/sku_management_metrics_smoke.py"
   - "apps/wb_incident_policy_smoke.py"
 source_of_truth_level: "module_canonical"
-update_note: "Existing surface is preserved as subtab `Общее`; sibling `Баланс запасов` is owned by module 53 and does not change this block's calculation/write semantics."
+update_note: "General is archived from user navigation; its data/API/history remain. SKU workspace defaults to Balance, then authorized Prices, Ads and Registry."
 ---
 
 # 1. Identity, authorization and truth
 
 - `module_id`: `sku_management_block`.
-- Unified tab: `Управление SKU` inside `/sheet-vitrina-v1/vitrina`; this module owns its subtab `Общее`. Sibling `Баланс запасов` is specified by module 53.
+- Unified tab: `Управление SKU` inside `/sheet-vitrina-v1/vitrina`; default/order: `Баланс запасов`, `Цены`, `Реклама`, `Реестр изменений`. `Общее` is archived from user navigation without deleting its API/data/history. Prices and Ads reuse their existing panels and original section authorization; parent visibility is the union of capabilities and never grants SKU access. Old Ads/Prices links select their nested panels. Balance/Registry require `sku_management`, and opening the parent no longer loads General.
 - Authorization section: `sku_management`; it uses the existing `allowed_sections` model and WebCore session. There is no parallel user system.
 - Row universe: enabled rows of canonical `registry_upload_config_v2`; nomenclature only enriches display identity.
 - Forecast and table are read/calculation projections. They do not create orders, supplies, stock operations or accepted business truth.

@@ -3042,6 +3042,30 @@ class SkuInventoryBalanceBlock:
                    WHERE calculation_id=?""",
                 (str(row["calculation_id"]),),
             ).fetchall()
+            observations = conn.execute(
+                """SELECT i.target_key,i.target_json,i.result_json,i.state,i.updated_at,j.job_id,j.created_at
+                   FROM sheet_vitrina_v1_inventory_balance_apply_items i
+                   JOIN sheet_vitrina_v1_inventory_balance_apply_jobs j ON j.job_id=i.job_id
+                   WHERE i.updated_at>=? ORDER BY i.updated_at,j.job_id""",
+                (str(row["created_at"]),),
+            ).fetchall()
+        current_bids = {}
+        current_states = {}
+        for observed in observations:
+            item = json.loads(observed["target_json"])
+            result = json.loads(observed["result_json"])
+            identity = (int(item["nm_id"]), int(item["advert_id"]))
+            proof = {"job_id": observed["job_id"], "observed_at": observed["updated_at"],
+                     "source": "confirmed_apply_readback", "job_created_at": observed["created_at"]}
+            if observed["state"] == "succeeded" and result.get("readback_status") == "matching":
+                if item.get("action_type") == "campaign_state" and result.get("confirmed_campaign_state"):
+                    current_states[identity] = {**proof, "state": result["confirmed_campaign_state"]}
+                elif result.get("confirmed_bid_minor") is not None:
+                    current_bids[str(observed["target_key"])] = {**proof, "bid_rub": int(result["confirmed_bid_minor"])/100,
+                        "applied_bid_rub": item.get("final_target_bid_rub"), "override_updated_at": item.get("override_updated_at", "")}
+            preflight = result.get("preflight") or {}
+            if preflight.get("error_code") == "stale_campaign_state" and preflight.get("observed_campaign_state"):
+                current_states[identity] = {**proof, "source": "preflight_observation_no_submit", "state": preflight["observed_campaign_state"]}
         by_key = {str(item["target_key"]): item for item in overrides}
         payload = deepcopy(payload)
         recommendation_ids: list[str] = []
@@ -3053,6 +3077,24 @@ class SkuInventoryBalanceBlock:
                     if override is not None and override["manual_target_bid_rub"] is not None
                     else None
                 )
+                target["calculation_current_bid_rub"] = target.get("current_bid_rub")
+                target["calculation_campaign_state"] = target.get("campaign_state")
+                bid_observation = current_bids.get(str(target["target_key"]))
+                if bid_observation:
+                    target["current_bid_rub"] = bid_observation["bid_rub"]
+                    target["current_bid_evidence"] = bid_observation
+                    if manual is not None and manual == bid_observation["applied_bid_rub"] and override is not None and str(override["updated_at"]) <= bid_observation["job_created_at"]:
+                        manual = None
+                        target["applied_override_hidden"] = True
+                state_observation = current_states.get((int(target["nm_id"]), int(target["advert_id"])))
+                if state_observation:
+                    factual = state_observation["state"]
+                    target["campaign_state"] = factual
+                    target["campaign_status"] = {"active": 9, "paused": 11, "ready": 4}.get(factual)
+                    target["state_action"] = "pause" if factual == "active" else "start" if factual in {"paused", "ready"} else ""
+                    target["state_action_label"] = "остановить" if factual == "active" else "возобновить"
+                    target["state_action_available"] = bool(target.get("identity_valid") and target["state_action"])
+                    target["current_state_evidence"] = state_observation
                 # A historical immutable recommendation is evidence only, never a
                 # default for a new manual action under the current policy.
                 target["manual_override_allowed"] = bool(target.get("identity_valid") and target.get("current_bid_rub") is not None)
