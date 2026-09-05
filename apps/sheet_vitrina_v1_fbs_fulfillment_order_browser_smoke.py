@@ -145,8 +145,8 @@ def main() -> int:
                 expect(facility.locator("option")).to_have_count(3, timeout=15000)
                 expect(facility).to_have_value(MOSCOW_ID)
                 expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
-                expect(page.locator("#fbsReadinessPhysical")).not_to_have_text("-")
-                expect(page.locator("#fbsReadinessReserved")).not_to_have_text("-")
+                expect(page.locator("#fbsReadinessPhysical")).to_have_text("Официальный снимок FBS WB")
+                expect(page.locator("#fbsReadinessReserved")).to_have_text(NOW_TEXT)
                 expect(page.locator("#fbsReadinessAvailable")).not_to_have_text("-")
                 expect(page.locator("#fbsHistoryCoverage")).to_contain_text(
                     "2026-04-01 — 2026-04-17"
@@ -179,6 +179,7 @@ def main() -> int:
                 expect(page.locator("#fbsHorizonDays")).to_have_text("89")
                 expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_enabled()
                 expect(page.locator("#fbsPreviewNote")).to_contain_text("Рассчитано")
+                expect(page.locator("#fbsPreviewNote")).to_contain_text(NOW_TEXT)
                 expect(page.locator("#fbsResultInboundScope")).to_have_text(
                     "Только для выбранного ФФ"
                 )
@@ -218,6 +219,19 @@ def main() -> int:
                 )
                 expect(page.locator("#fbsInboundScope")).to_be_visible()
                 expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_visible()
+
+                # A historical result must not be relabelled as official current stock.
+                from dataclasses import asdict
+                from packages.application.fbs_fulfillment_order import FbsFulfillmentOrderBlock
+                legacy = asdict(FbsFulfillmentOrderBlock(runtime=runtime,
+                    now_factory=lambda: NOW, timestamp_factory=lambda: NOW_TEXT).calculate(
+                        {"target_facility_id": MOSCOW_ID}))
+                legacy["facility_readiness"].pop("stock_source")
+                runtime.load_fbs_fulfillment_order_result_state = lambda: legacy
+                page.reload(wait_until="domcontentloaded")
+                expect(page.locator("#fbsPreviewNote")).to_contain_text("прежний складской учёт")
+                expect(page.locator("#fbsReadinessPhysical")).to_have_text("Официальный снимок FBS WB")
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
 
                 context.close()
                 browser.close()

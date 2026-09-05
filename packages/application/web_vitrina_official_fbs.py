@@ -15,13 +15,10 @@ import re
 import sqlite3
 from typing import Any, Iterable
 
+from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
 from packages.application.own_product_capital import _inventory_cost_stage_evidence
 from packages.application.warehouse_functional import _watermark
-from packages.application.wb_fbs_warehouse_registry import (
-    _complete_source_generation, _connect_readonly, _freshness,
-    REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE, STOCK_ROWS_TABLE,
-    WAREHOUSE_MAPPINGS_TABLE, FACILITIES_TABLE,
-)
+from packages.application.wb_fbs_warehouse_registry import _connect_readonly
 from packages.business_time import current_business_date_iso
 from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
@@ -61,65 +58,10 @@ def build_current_official_fbs_estimate(
 
 def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
            now: datetime) -> dict[str, Any]:
-    generation = _complete_source_generation(conn)
-    if not generation.get("complete"):
-        raise ValueError("complete_official_generation_unavailable")
-    run = conn.execute(f"SELECT * FROM {REGISTRY_RUNS_TABLE} WHERE run_id=?",
-                       (generation["generation_id"],)).fetchone()
-    scope = json.loads(run["warehouse_scope_json"])
-    catalog = json.loads(run["catalog_scope_json"])
-    if not scope.get("complete") or not catalog.get("complete"):
-        raise ValueError("incomplete_scope")
-    facilities = {str(w["facility_id"]): w for w in scope["warehouses"]}
-    if len(facilities) != scope["warehouse_count"]:
-        raise ValueError("ambiguous_facilities")
-    stocks: dict[int, dict[str, Decimal]] = {nm: {} for nm in universe}
-    identities = None
-    captured = []
-    for facility, warehouse in facilities.items():
-        mapping = conn.execute(
-            f"SELECT m.mapping_id FROM {WAREHOUSE_MAPPINGS_TABLE} m "
-            f"JOIN {FACILITIES_TABLE} f ON f.facility_id=m.facility_id "
-            "WHERE m.mapping_id=? AND m.facility_id=? AND m.active=1 AND f.active=1",
-            (warehouse["mapping_id"], facility),
-        ).fetchone()
-        if mapping is None:
-            raise ValueError("mapping_changed")
-        stock_run = conn.execute(
-            f"SELECT * FROM {STOCK_RUNS_TABLE} WHERE registry_run_id=? AND seller_warehouse_id=?",
-            (run["run_id"], warehouse["seller_warehouse_id"]),
-        ).fetchone()
-        timestamp = str(stock_run["snapshot_at"])
-        if (current_business_date_iso(datetime.fromisoformat(timestamp.replace("Z", "+00:00"))) != day
-                or _freshness(timestamp, now.isoformat()) != "fresh"):
-            raise ValueError("official_snapshot_not_fresh_current_day")
-        captured.append(timestamp)
-        stock_rows = conn.execute(
-            f"SELECT chrt_id,nm_id,amount,provenance FROM {STOCK_ROWS_TABLE} WHERE run_id=?",
-            (stock_run["run_id"],),
-        ).fetchall()
-        identity = {(int(r["chrt_id"]), int(r["nm_id"])) for r in stock_rows}
-        if (len(identity) != int(catalog["requested_chrt_count"])
-                or (identities is not None and identity != identities)):
-            raise ValueError("dense_identity_mismatch")
-        identities = identity
-        for row in stock_rows:
-            if row["provenance"] not in {"explicit_wb_row", "omitted_requested_zero"}:
-                raise ValueError("unsupported_stock_evidence")
-            quantity = _number(row["amount"])
-            if row["provenance"] == "omitted_requested_zero" and quantity != ZERO:
-                raise ValueError("invalid_omission_zero")
-            nm = int(row["nm_id"])
-            if nm in stocks:
-                stocks[nm][facility] = stocks[nm].get(facility, ZERO) + quantity
-    if any(set(value) != set(facilities) for value in stocks.values()):
-        raise ValueError("displayed_sku_outside_complete_catalog")
-    result: dict[str, Any] = {
-        "available": True, "date": day, "source": SOURCE,
-        "generation_id": run["run_id"], "generation_digest": run["generation_digest"],
-        "captured_at": min(captured), "catalog_sku_count": catalog["active_nm_id_count"],
-        "sku_count": len(universe), "facilities": sorted(facilities), "skus": {},
-    }
+    result = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now)
+    result["source"] = SOURCE
+    stocks = {nm: item["facilities"] for nm, item in result["skus"].items()}
+    facilities = result["facilities"]
     # The published exact-date immutable version owns both original operands.
     placeholders = ",".join("?" for _ in universe)
     projections = conn.execute(

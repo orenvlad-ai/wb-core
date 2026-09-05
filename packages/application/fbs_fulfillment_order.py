@@ -14,7 +14,7 @@ from packages.application.demand_estimation import (
 from packages.application.factory_order_sales_history import (
     FactoryOrderAuthoritativeSalesHistory,
 )
-from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
+from packages.application.official_fbs_stock_read import current_official_fbs_facilities
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
@@ -83,12 +83,12 @@ class FbsFulfillmentOrderBlock:
             now_factory=self.now_factory,
             timestamp_factory=self.timestamp_factory,
         )
-        self.inventory = InventoryPlanningReadModel(db_path=runtime.db_path)
 
     def build_status(self) -> FbsFulfillmentOrderStatus:
         active_skus = self._load_active_skus()
-        planning = self.inventory.current_fbs_facilities(
-            requested_nm_ids=[nm_id for nm_id, _ in active_skus]
+        planning = current_official_fbs_facilities(
+            self.runtime.db_path, requested_nm_ids=[nm_id for nm_id, _ in active_skus],
+            now=self.now_factory(),
         )
         facilities = self._facility_readiness(planning, active_skus)
         for facility in facilities:
@@ -143,8 +143,9 @@ class FbsFulfillmentOrderBlock:
         active_skus = self._load_active_skus()
         if not active_skus:
             raise ValueError("Нет active SKU для расчёта")
-        planning = self.inventory.current_fbs_facilities(
-            requested_nm_ids=[nm_id for nm_id, _ in active_skus]
+        planning = current_official_fbs_facilities(
+            self.runtime.db_path, requested_nm_ids=[nm_id for nm_id, _ in active_skus],
+            now=self.now_factory(),
         )
         readiness = self._facility_readiness(planning, active_skus)
         selected = next(
@@ -202,10 +203,7 @@ class FbsFulfillmentOrderBlock:
                 continue
             if demand.demand_warning:
                 warnings.append(f"nmId {nm_id}: {demand.demand_warning}")
-            ledger = selected_sku_values[nm_id]
-            physical = int(ledger["physical"])
-            reserved = int(ledger["reserved"])
-            available = int(ledger["available"])
+            available = int(selected_sku_values[nm_id]["available"])
             inbound_qty = float(inbound_by_nm.get(nm_id, 0.0))
             target_qty = demand.daily_demand_total * horizon_days
             coverage_qty = float(available) + inbound_qty
@@ -227,8 +225,8 @@ class FbsFulfillmentOrderBlock:
                     target_qty=target_qty,
                     coverage_qty=coverage_qty,
                     shortage_qty=shortage_qty,
-                    selected_facility_physical_fbs=physical,
-                    selected_facility_reserved_fbs=reserved,
+                    selected_facility_physical_fbs=None,
+                    selected_facility_reserved_fbs=None,
                     selected_facility_available_fbs=available,
                     remaining_active_inbound_qty=inbound_qty,
                     demand_estimation_mode=demand.demand_estimation_mode,
@@ -364,7 +362,6 @@ class FbsFulfillmentOrderBlock:
                 for nm_id in requested
                 if nm_id not in by_nm_id
                 or str(by_nm_id[nm_id].get("state") or "") == "missing"
-                or by_nm_id[nm_id].get("physical") is None
                 or by_nm_id[nm_id].get("available") is None
                 if nm_id not in inapplicable_nm_ids
             )
@@ -373,12 +370,11 @@ class FbsFulfillmentOrderBlock:
                 or str(raw.get("name") or "").strip() == "FF Москва"
             )
             blockers: list[str] = []
-            if missing_nm_ids:
-                blockers.append(
-                    "Нет полного подтверждённого facility-specific FBS physical ledger "
-                    "для active SKU: "
-                    + ", ".join(str(item) for item in missing_nm_ids)
-                )
+            if raw.get("source_blocker"):
+                blockers.append(str(raw["source_blocker"]))
+            elif missing_nm_ids:
+                blockers.append("В официальном снимке отсутствуют активные товары: "
+                                + ", ".join(str(item) for item in missing_nm_ids))
             if inapplicable_nm_ids:
                 blockers.append(
                     "SKU явно неприменимы к выбранному FBS facility: "
@@ -396,16 +392,15 @@ class FbsFulfillmentOrderBlock:
                     "name": str(raw.get("name") or ""),
                     "city": str(raw.get("city") or ""),
                     "active": True,
-                    "physical": raw.get("physical"),
-                    "reserved": raw.get("reserved"),
+                    "stock_source": dict(raw.get("stock_source") or {}),
                     "available": raw.get("available"),
                     "sku_values": sku_values,
-                    "missing_physical_nm_ids": missing_nm_ids,
+                    "missing_official_stock_nm_ids": missing_nm_ids,
                     "inapplicable_nm_ids": inapplicable_nm_ids,
                     "calculation_enabled": not blockers,
                     "blockers": blockers,
                     "wb_stock_used": False,
-                    "global_fbs_readiness_ignored_for_selected_facility": True,
+                    "lifecycle_used": False,
                 }
             )
         return facilities
@@ -537,9 +532,7 @@ class FbsFulfillmentOrderBlock:
                 "Рекомендованный заказ, шт",
                 "Национальный спрос, шт/день",
                 "Target, шт",
-                "Physical FBS, шт",
-                "Резерв FBS, шт",
-                "Доступно FBS, шт",
+                "Остаток FBS по WB, шт",
                 "Активные входящие, шт",
                 "Coverage, шт",
                 "Режим истории",
@@ -567,8 +560,6 @@ class FbsFulfillmentOrderBlock:
                     item.recommended_order_qty,
                     round(item.national_daily_demand, 6),
                     round(item.target_qty, 6),
-                    item.selected_facility_physical_fbs,
-                    item.selected_facility_reserved_fbs,
                     item.selected_facility_available_fbs,
                     round(item.remaining_active_inbound_qty, 6),
                     round(item.coverage_qty, 6),
@@ -594,7 +585,11 @@ class FbsFulfillmentOrderBlock:
                 [],
                 ["Общее количество", "", result.summary.total_qty],
                 ["Горизонт, дней", "", result.horizon_days],
-                ["Остатки WB учитываются", "", "Нет"],
+                ["Остатки на складах WB (FBO) учитываются", "", "Нет"],
+                ["Источник остатков", "", "Официальный снимок FBS WB"],
+                ["Дата остатков", "", result.facility_readiness["stock_source"].get("date")],
+                ["Время снимка", "", result.facility_readiness["stock_source"].get("captured_at")],
+                ["Поколение источника", "", result.facility_readiness["stock_source"].get("generation_id")],
                 ["Область спроса", "", NATIONAL_DEMAND_SCOPE],
                 [
                     "Охват заказов фабрике",

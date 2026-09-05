@@ -89,19 +89,12 @@ def main() -> int:
         assert status.wb_stock_used is False
         assert status.defaults["inbound_scope"] == "selected_facility"
         assert facilities[MOSCOW_ID]["calculation_enabled"] is True
-        assert facilities[MOSCOW_ID]["physical"] == 100 + 200 * (len(active_nm_ids) - 1)
-        assert facilities[MOSCOW_ID]["reserved"] == 30
-        assert facilities[MOSCOW_ID]["available"] == (
-            100 + 200 * (len(active_nm_ids) - 1) - 30
-        )
+        assert facilities[MOSCOW_ID]["available"] == 100 + 200 * (len(active_nm_ids) - 1)
+        assert facilities[MOSCOW_ID]["stock_source"]["captured_at"] == NOW_TEXT
         assert facilities[MOSCOW_ID]["remaining_active_inbound_qty"] == 15
-        assert all(
-            "seller_stock" not in item
-            for item in facilities[MOSCOW_ID]["sku_values"]
-        )
         assert facilities[ORENBURG_ID]["calculation_enabled"] is False
-        assert facilities[ORENBURG_ID]["physical"] is None
-        assert "physical ledger" in " ".join(facilities[ORENBURG_ID]["blockers"])
+        assert facilities[ORENBURG_ID]["available"] == 40 * len(active_nm_ids)
+        assert "только за FF Москва" in " ".join(facilities[ORENBURG_ID]["blockers"])
 
         last_n = block.calculate(
             {
@@ -124,14 +117,14 @@ def main() -> int:
         rows = {row.nm_id: row for row in last_n.rows}
         first = rows[active_nm_ids[0]]
         second = rows[active_nm_ids[1]]
-        assert first.selected_facility_physical_fbs == 100
-        assert first.selected_facility_reserved_fbs == 30
-        assert first.selected_facility_available_fbs == 70
+        assert first.selected_facility_physical_fbs is None
+        assert first.selected_facility_reserved_fbs is None
+        assert first.selected_facility_available_fbs == 100
         assert first.remaining_active_inbound_qty == 15
         assert second.remaining_active_inbound_qty == 0
-        assert first.coverage_qty == 85
+        assert first.coverage_qty == 115
         assert first.recommended_order_qty == math.ceil(
-            max(first.national_daily_demand * 20 - 85, 0) / 50
+            max(first.national_daily_demand * 20 - 115, 0) / 50
         ) * 50
         assert last_n.wb_stock_used is False
         assert "wb" not in last_n.inbound_coverage
@@ -168,7 +161,7 @@ def main() -> int:
         ] == 0
         assert all_rows[active_nm_ids[0]].remaining_active_inbound_qty == 535
         assert all_rows[active_nm_ids[0]].recommended_order_qty == math.ceil(
-            max(all_rows[active_nm_ids[0]].national_daily_demand * 20 - 605, 0)
+            max(all_rows[active_nm_ids[0]].national_daily_demand * 20 - 635, 0)
             / 50
         ) * 50
 
@@ -262,6 +255,9 @@ def main() -> int:
         assert record["evidence"]["contract_name"] == (
             "wb-core.supply-calculation-evidence.fbs-fulfillment-order"
         )
+        assert record["evidence"]["target_facility"]["stock_source"]["generation_id"] == "official-g1"
+        assert record["evidence"]["target_facility"]["lifecycle_used"] is False
+        assert "formula_epoch" not in record["evidence"]["target_facility"]
         assert record["evidence"]["wb_stock_used"] is False
         assert record["evidence"]["target_facility"]["facility_id"] == MOSCOW_ID
         assert record["payload"]["settings"]["inbound_scope"] == "selected_facility"
@@ -458,6 +454,35 @@ def _seed_facilities(
             ),
         )
         conn.commit()
+    _seed_official_stock(runtime, active_nm_ids)
+
+
+def _seed_official_stock(runtime, nm_ids):
+    from packages.application.wb_fbs_warehouse_registry import (
+        ensure_wb_fbs_warehouse_registry_schema, REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE,
+        STOCK_ROWS_TABLE, WAREHOUSE_MAPPINGS_TABLE, COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+    )
+    with sqlite3.connect(runtime.db_path) as conn:
+        ensure_wb_fbs_warehouse_registry_schema(conn)
+        def insert(table, values):
+            conn.execute(f"INSERT INTO {table}({','.join(values)}) VALUES({','.join('?' for _ in values)})", tuple(values.values()))
+        warehouses = [dict(facility_id=f, mapping_id="official-"+f, seller_warehouse_id=i)
+                      for i, f in enumerate([MOSCOW_ID, ORENBURG_ID], 1)]
+        insert(REGISTRY_RUNS_TABLE, dict(run_id="official-g1", status="success", complete=1,
+            started_at=NOW_TEXT, completed_at=NOW_TEXT, warehouse_count=2, office_count=2,
+            source_digest="official-g1", policy_version=COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            catalog_scope_json=json.dumps(dict(complete=True, requested_chrt_count=len(nm_ids), active_nm_id_count=len(nm_ids))),
+            warehouse_scope_json=json.dumps(dict(complete=True, warehouse_count=2, warehouses=warehouses)), generation_digest="official-g1"))
+        for w in warehouses:
+            insert(WAREHOUSE_MAPPINGS_TABLE, dict(**w, mapping_digest="official", active=1, created_at=NOW_TEXT, created_by="fixture"))
+            run_id="stock-"+w["facility_id"]
+            insert(STOCK_RUNS_TABLE, dict(run_id=run_id, registry_run_id="official-g1", seller_warehouse_id=w["seller_warehouse_id"],
+                status="success", complete=1, snapshot_at=NOW_TEXT, requested_chrt_count=len(nm_ids), returned_chrt_count=len(nm_ids),
+                identity_scope_json="{}", source_digest=run_id, policy_version=COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+                explicit_chrt_count=len(nm_ids), omitted_zero_count=0, dense_row_count=len(nm_ids)))
+            for i,nm in enumerate(nm_ids):
+                insert(STOCK_ROWS_TABLE, dict(run_id=run_id, seller_warehouse_id=w["seller_warehouse_id"], chrt_id=nm, nm_id=nm,
+                    amount=(100 if i==0 else 200) if w["facility_id"]==MOSCOW_ID else 40, evidence_digest="fixture", provenance="explicit_wb_row"))
 
 
 def _seed_sales_history(

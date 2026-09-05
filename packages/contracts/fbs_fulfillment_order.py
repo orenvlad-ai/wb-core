@@ -48,8 +48,8 @@ class FbsFulfillmentOrderRow:
     target_qty: float
     coverage_qty: float
     shortage_qty: float
-    selected_facility_physical_fbs: int
-    selected_facility_reserved_fbs: int
+    selected_facility_physical_fbs: int | None
+    selected_facility_reserved_fbs: int | None
     selected_facility_available_fbs: int
     remaining_active_inbound_qty: float
     demand_estimation_mode: str
