@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from apps.production_apply_adapters import ADAPTERS
+from apps.production_apply_contract import AdapterError, AmbiguousSubmit
 
 
 RECEIPT_SCHEMA = "wb-core.production-apply-receipt/v1"
@@ -19,10 +20,6 @@ OPERATION_RE = re.compile(r"[a-z0-9][a-z0-9._-]{7,127}")
 
 class ApplyError(RuntimeError):
     pass
-
-
-class AmbiguousSubmit(RuntimeError):
-    """The adapter cannot tell whether its single submit reached the target."""
 
 
 def canonical(value: Any) -> bytes:
@@ -77,6 +74,19 @@ def make_receipt(*, action: str, adapter: str, operation_id: str, state: str, pr
         "submit": dict(submit) if submit else None,
         "readback": dict(readback) if readback else None,
         "reason": reason,
+    }
+
+
+def log_summary(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep exact production identities in the receipt artifact, not job logs."""
+
+    return {
+        "schema": receipt["schema"],
+        "action": receipt["action"],
+        "adapter": receipt["adapter"],
+        "operation_id": receipt["operation_id"],
+        "state": receipt["state"],
+        "reason": receipt["reason"],
     }
 
 
@@ -142,11 +152,21 @@ def main() -> int:
             expected_candidate=args.expected_candidate,
         )
     except Exception as exc:
-        reason = str(exc) if isinstance(exc, ApplyError) else type(exc).__name__
+        reason = (
+            str(exc)
+            if isinstance(exc, (ApplyError, AdapterError))
+            else type(exc).__name__
+        )
         receipt = make_receipt(action=args.action, adapter=args.adapter, operation_id=args.operation_id, state="blocked", reason=reason)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(canonical(receipt) + b"\n")
-    print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))
+    print(
+        json.dumps(
+            log_summary(receipt),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0 if receipt["state"] in {"preview", "applied", "no_change", "not_submitted"} else 2
 
 
