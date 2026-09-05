@@ -482,6 +482,17 @@ def _insert_calculation(
             ),
         )
         conn.commit()
+    historical = block.get_calculation(calculation_id)
+    assert all(t["final_target_bid_rub"] is None and not t["can_apply"]
+               for row in historical["rows"] for t in row["campaign_recommendations"])
+    # Legacy immutable targets retain their original algorithm values as history.
+    assert historical["rows"][0]["campaign_recommendations"][0]["calculated_target_bid_rub"] == exact_targets[0]["calculated_target_bid_rub"]
+    # Operator explicitly enters each intended bid; calculation never prefills it.
+    for target in exact_targets:
+        requested = target.get("calculated_target_bid_rub")
+        if requested is not None and requested != target.get("current_bid_rub"):
+            block.save_override(calculation_id, {"target_key": target["target_key"],
+                                "manual_target_bid_rub": requested}, actor="operator")
     return block.get_calculation(calculation_id)
 
 
@@ -540,8 +551,27 @@ def _regular_batch_case(root: Path) -> None:
             """SELECT COUNT(*) FROM change_registry_items
                WHERE recommendation_item_id<>''"""
         ).fetchone()[0]
+    with sqlite3.connect(block.runtime.db_path) as conn:
+        comments = conn.execute("SELECT comment FROM change_registry_annotation_revisions WHERE reason='writer_provenance'").fetchall()
+    assert len(comments) == 33
+    assert all(json.loads(value[0])["decision_source"] == "manual_operator" for value in comments)
+    assert all(json.loads(value[0])["automatic_recommendation_status"] == "not_generated" for value in comments)
     assert int(linked) == 33
     assert int(recommendation_links) == 33
+    # A pending job from the previous release must not be relabelled as a new
+    # manual-policy decision when its writer operation is first prepared.
+    legacy = _writer.prepare_bid(
+        source_surface="sku_inventory_balance", actor="operator",
+        native_operation_id="legacy-before-manual-policy", nm_id=101,
+        advert_id=8001, placement="search", before_bid_minor=1000,
+        requested_bid_minor=900, requested_at=datetime.now(timezone.utc).isoformat(),
+        calculation_id="old_calculation", apply_operation_id="old_job",
+        recommendation_item_id="ibr_old_algorithm_decision",
+    )
+    with sqlite3.connect(block.runtime.db_path) as conn:
+        old_comment = conn.execute("SELECT comment FROM change_registry_annotation_revisions WHERE subject_id=?", (legacy.operation_id,)).fetchone()[0]
+    assert "decision_source" not in json.loads(old_comment)
+
 
 
 def _ads_guard_case(root: Path) -> None:

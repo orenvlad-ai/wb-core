@@ -45,7 +45,10 @@ def main() -> None:
         "table": {
             "visible_columns": [],
             "column_order": [],
-            "column_widths": {},
+            "column_widths": {
+                "new_cpc_campaigns": 600,
+                "old_cpm_campaigns": 600,
+            },
             "filters": {"search": "", "status": ""},
             "preset": "all",
         },
@@ -68,7 +71,7 @@ def main() -> None:
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1500, "height": 1000})
+        page = browser.new_page(viewport={"width": 1366, "height": 900})
         page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
         page.on("pageerror", lambda error: console_errors.append(str(error)))
 
@@ -171,8 +174,6 @@ def main() -> None:
                 target["manual_target_bid_rub"] = manual_target
                 target["final_target_bid_rub"] = (
                     manual_target
-                    if manual_target is not None
-                    else target["calculated_target_bid_rub"]
                 )
                 target["can_apply"] = (
                     target["final_target_bid_rub"] is not None
@@ -232,13 +233,18 @@ def main() -> None:
             console_errors,
         )
         assert "WB общим итогом × 0.5" in normalized_balance_text
-        assert "1 000 ₽/1000 показов" in normalized_balance_text
-        assert "5 ₽/клик" in normalized_balance_text
-        assert "10 ₽/клик" in normalized_balance_text
+        assert "Сейчас 1 000" in normalized_balance_text
+        assert "Сейчас 5" in normalized_balance_text
+        assert "Сейчас 10" in normalized_balance_text
+        assert "₽/1000 показов" in normalized_balance_text
+        assert "₽/клик" in normalized_balance_text
         assert "insufficient_stats" not in normalized_balance_text
         assert "hold_conservative" not in normalized_balance_text
         assert "advert_id" not in normalized_balance_text
-        disclosures = page.locator(".inventory-balance-campaign-disclosure")
+        inline_targets = page.locator(".inventory-balance-inline-target")
+        assert inline_targets.count() >= 5
+        assert all("Кампания" not in text for text in inline_targets.all_inner_texts())
+        disclosures = page.locator(".inventory-balance-info-button")
         assert disclosures.count() >= 5
         first_disclosure = disclosures.first
         assert "Поддерживающая CPC" in (
@@ -249,7 +255,8 @@ def main() -> None:
         disclosure_text = disclosure.inner_text()
         assert "Поддерживающая CPC" in disclosure_text
         assert "advert_id 9001" in disclosure_text
-        assert "активна" in disclosure_text
+        assert "Фактическое состояние: активна" in disclosure_text
+        assert "Identity: exact nmID → advert_id → размещение" in disclosure_text
         page.keyboard.press("Escape")
         assert page.locator("[data-inventory-balance-details-toggle]").count() == 0
         assert page.locator("[data-inventory-balance-details-row]").count() == 0
@@ -262,6 +269,8 @@ def main() -> None:
         row_heights = page.locator(".inventory-balance-main-row").evaluate_all(
             "rows => rows.map(row => row.getBoundingClientRect().height)"
         )
+        assert page.locator(".inventory-balance-selection-status").first.evaluate(
+            "node => getComputedStyle(node).whiteSpace") == "nowrap"
         assert all(height <= 63 for height in row_heights), row_heights
         visible_line_counts = page.locator(
             ".inventory-balance-main-row .inventory-balance-two-line"
@@ -285,67 +294,198 @@ def main() -> None:
         assert abs(
             sticky_product_box["x"]
             - (sticky_select_box["x"] + sticky_select_box["width"])
-        ) <= 2
+        ) <= 2, {"select": sticky_select_box, "product": sticky_product_box, "shell": shell_box}
         table_shell.evaluate("node => { node.scrollLeft = 0; }")
         assert "CPC · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
         assert "CPM · ставка / состояние" in page.locator("[data-inventory-balance-head]").inner_text()
+        layout_1366 = page.evaluate(
+            """
+            () => {
+              const columns=Array.from(document.querySelectorAll('[data-inventory-balance-head] th'));
+              const cpcIndex=columns.findIndex(node => node.dataset.inventoryBalanceColumn === 'new_cpc_campaigns');
+              const cpmIndex=columns.findIndex(node => node.dataset.inventoryBalanceColumn === 'old_cpm_campaigns');
+              const row=document.querySelector('[data-inventory-balance-nm-id="101"]');
+              const cell=row.children[cpmIndex];
+              const target=cell.querySelector('.inventory-balance-inline-target');
+              const input=target.querySelector('.inventory-balance-inline-input');
+              const info=target.querySelector('.inventory-balance-info-button');
+              const visible=Array.from(target.children).filter(node => {
+                const style=getComputedStyle(node);
+                return style.display !== 'none' && !node.matches('[popover]');
+              });
+              const gaps=[];
+              for(let index=1; index<visible.length; index+=1){
+                gaps.push(visible[index].getBoundingClientRect().left-visible[index-1].getBoundingClientRect().right);
+              }
+              const defaults=Object.fromEntries(INVENTORY_BALANCE_COLUMNS.map(item => [item.id,item.width]));
+              return {
+                viewport:innerWidth,
+                defaultCpc:defaults.new_cpc_campaigns,
+                defaultCpm:defaults.old_cpm_campaigns,
+                cpcWidth:columns[cpcIndex].getBoundingClientRect().width,
+                cpmWidth:columns[cpmIndex].getBoundingClientRect().width,
+                inputWidth:input.getBoundingClientRect().width,
+                inputCaret:getComputedStyle(input).caretColor,
+                cellPaddingLeft:parseFloat(getComputedStyle(cell).paddingLeft),
+                cellPaddingRight:parseFloat(getComputedStyle(cell).paddingRight),
+                targetClientWidth:target.clientWidth,
+                targetScrollWidth:target.scrollWidth,
+                targetRight:target.getBoundingClientRect().right,
+                infoRight:info.getBoundingClientRect().right,
+                maxGap:Math.max(...gaps),
+                minGap:Math.min(...gaps),
+                pageOverflow:document.documentElement.scrollWidth-innerWidth,
+              };
+            }
+            """
+        )
+        assert layout_1366["viewport"] == 1366, layout_1366
+        assert layout_1366["defaultCpc"] == layout_1366["defaultCpm"] == 360, layout_1366
+        assert 350 <= layout_1366["cpcWidth"] <= 362, layout_1366
+        assert abs(layout_1366["cpcWidth"] - layout_1366["cpmWidth"]) <= 1, layout_1366
+        assert layout_1366["inputWidth"] >= 90, layout_1366
+        assert layout_1366["inputCaret"] != "rgba(0, 0, 0, 0)", layout_1366
+        assert layout_1366["cellPaddingLeft"] <= 5 and layout_1366["cellPaddingRight"] <= 5, layout_1366
+        assert layout_1366["targetScrollWidth"] <= layout_1366["targetClientWidth"] + 1, layout_1366
+        assert abs(layout_1366["targetRight"] - layout_1366["infoRight"]) <= 6, layout_1366
+        assert 0 <= layout_1366["minGap"] <= layout_1366["maxGap"] <= 8, layout_1366
+        assert layout_1366["pageOverflow"] <= 1, layout_1366
+        page.set_viewport_size({"width": 1100, "height": 820})
+        page.wait_for_timeout(50)
+        layout_narrow = page.evaluate(
+            """
+            () => {
+              const columns=Array.from(document.querySelectorAll('[data-inventory-balance-head] th'));
+              const cpmIndex=columns.findIndex(node => node.dataset.inventoryBalanceColumn === 'old_cpm_campaigns');
+              const row=document.querySelector('[data-inventory-balance-nm-id="101"]');
+              const target=row.children[cpmIndex].querySelector('.inventory-balance-inline-target');
+              const input=target.querySelector('.inventory-balance-inline-input');
+              return {
+                viewport:innerWidth,
+                columnWidth:columns[cpmIndex].getBoundingClientRect().width,
+                inputWidth:input.getBoundingClientRect().width,
+                targetClientWidth:target.clientWidth,
+                targetScrollWidth:target.scrollWidth,
+                pageOverflow:document.documentElement.scrollWidth-innerWidth,
+              };
+            }
+            """
+        )
+        assert layout_narrow["viewport"] == 1100, layout_narrow
+        assert 350 <= layout_narrow["columnWidth"] <= 362, layout_narrow
+        assert layout_narrow["inputWidth"] >= 90, layout_narrow
+        assert layout_narrow["targetScrollWidth"] <= layout_narrow["targetClientWidth"] + 1, layout_narrow
+        assert layout_narrow["pageOverflow"] <= 1, layout_narrow
+        screenshot_narrow_path = os.environ.get(
+            "SKU_INVENTORY_BALANCE_SCREENSHOT_NARROW", ""
+        ).strip()
+        if screenshot_narrow_path:
+            table_shell.evaluate("node => { node.scrollLeft = node.scrollWidth; }")
+            page.wait_for_timeout(50)
+            page.screenshot(path=screenshot_narrow_path, full_page=True)
+            table_shell.evaluate("node => { node.scrollLeft = 0; }")
+        page.set_viewport_size({"width": 1366, "height": 900})
         assert page.locator("[data-inventory-balance-xlsx]").is_enabled()
         assert page.locator('[data-inventory-balance-nm-id="202"] [data-inventory-balance-override]').count() == 3
-        assert page.locator('[data-inventory-balance-override="101:8001:search"]').input_value() == "800"
+        assert page.locator('[data-inventory-balance-override="101:8001:search"]').input_value() == ""
         unavailable_override = page.locator('[data-inventory-balance-override="303:9303:search"]')
         assert unavailable_override.input_value() == ""
-        assert unavailable_override.get_attribute("placeholder") == "Цель"
+        assert page.evaluate("inventoryBalancePaceHint({pace_change_pct:null})") == ""
+        assert unavailable_override.get_attribute("placeholder") == "Новая"
+        neutral_state = page.locator(
+            '[data-inventory-balance-nm-id="303"] .inventory-balance-state-status.neutral'
+        ).first
+        assert neutral_state.is_disabled()
+        assert "Статус WB 7" in (neutral_state.get_attribute("title") or "")
+
+        paused_state = page.locator(
+            '[data-inventory-balance-nm-id="101"] .inventory-balance-state-status.paused'
+        ).first
+        paused_state.click()
+        paused_menu = page.locator(".inventory-balance-state-menu:popover-open")
+        assert paused_menu.inner_text().strip() == "возобновить"
+        paused_menu.locator("[data-inventory-balance-state-choice]").click()
+        pending_cpm_layout = page.locator(
+            '[data-inventory-balance-override="101:8001:search"]'
+        ).locator("xpath=../..").evaluate(
+            """
+            target => {
+              const info=target.querySelector('.inventory-balance-info-button');
+              return {
+                clientWidth:target.clientWidth,
+                scrollWidth:target.scrollWidth,
+                targetRight:target.getBoundingClientRect().right,
+                infoRight:info.getBoundingClientRect().right,
+              };
+            }
+            """
+        )
+        assert pending_cpm_layout["scrollWidth"] <= pending_cpm_layout["clientWidth"] + 1, pending_cpm_layout
+        assert abs(pending_cpm_layout["targetRight"] - pending_cpm_layout["infoRight"]) <= 6, pending_cpm_layout
+        page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-state-pending="state:101:8001"] [data-inventory-balance-state-cancel]'
+        ).click()
+
+        active_state = page.locator(
+            '[data-inventory-balance-nm-id="101"] .inventory-balance-state-status.active'
+        ).first
+        assert active_state.inner_text() == "▶"
+        apply_requests_before_state = len(
+            [item for item in requests if item[1].endswith("/apply-jobs")]
+        )
+        active_state.click()
+        state_menu = page.locator(".inventory-balance-state-menu:popover-open")
+        assert state_menu.is_visible()
+        assert state_menu.inner_text().strip() == "остановить"
+        state_menu.locator("[data-inventory-balance-state-choice]").click()
+        assert page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-state-pending]'
+        ).inner_text().startswith("Ост.")
+        assert active_state.inner_text() == "▶"
+        assert page.locator('[data-inventory-balance-select="101"]').is_checked()
+        assert len([item for item in requests if item[1].endswith("/apply-jobs")]) == apply_requests_before_state
+        page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-state-cancel]'
+        ).click()
+        assert page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-state-pending]'
+        ).count() == 0
+        assert page.locator('[data-inventory-balance-select="101"]').is_checked() is False
 
         first_click_cell = page.locator(
             '[data-inventory-balance-nm-id="101"] [data-inventory-balance-select-cell]'
         )
-        first_click_checkbox = page.locator(
-            '[data-inventory-balance-select="101"]'
+        first_click_checkbox = page.locator('[data-inventory-balance-select="101"]')
+        manual_override = page.locator(
+            '[data-inventory-balance-override="101:8001:search"]'
         )
-        page.evaluate(
-            """
-            () => {
-              const input=document.querySelector('[data-inventory-balance-override="101:8001:search"]');
-              input.value='725.25';
-              input.dispatchEvent(new Event('input',{bubbles:true}));
-            }
-            """
+        manual_override.click()
+        assert page.evaluate(
+            "document.activeElement === document.querySelector('[data-inventory-balance-override=\"101:8001:search\"]')"
         )
-        first_click_cell.click(position={"x": 6, "y": 6})
-        captured_intent = page.evaluate(
-            "Array.from(state.inventoryBalance.selectionIntentNmIds)"
+        assert page.evaluate(
+            "getComputedStyle(document.activeElement).caretColor !== 'rgba(0, 0, 0, 0)'"
         )
-        assert captured_intent == [101]
+        manual_override.fill("725.25")
         assert "сохраняется" in first_click_cell.inner_text()
-        page.wait_for_timeout(700)
-        assert first_click_checkbox.is_checked(), {
-            "cell": first_click_cell.inner_text(),
-            "error": page.locator("[data-inventory-balance-error]").inner_text(),
-            "apply": page.locator("[data-inventory-balance-apply-reason]").inner_text(),
-            "intent": page.evaluate(
-                "Array.from(state.inventoryBalance.selectionIntentNmIds)"
-            ),
-            "selected": page.evaluate(
-                "Array.from(state.inventoryBalance.selectedNmIds)"
-            ),
-            "override_requests": [
-                item for item in requests if item[1].endswith("/override")
-            ],
-        }
-        assert "готово к выбору" in first_click_cell.inner_text()
-        assert "(1)" in page.locator("[data-inventory-balance-apply]").inner_text()
-        first_click_checkbox.uncheck()
-
-        page.evaluate(
-            """
-            () => {
-              const input=document.querySelector('[data-inventory-balance-override="101:8001:search"]');
-              input.value='777.77';
-              input.dispatchEvent(new Event('input',{bubbles:true}));
-            }
-            """
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-select=\"101\"]').checked && !document.querySelector('#inventory-balance-select-status-101').textContent.includes('сохраняется')"
         )
-        first_click_cell.click(position={"x": 6, "y": 6})
+        assert page.evaluate(
+            "selectedInventoryBalanceTargets().map(item => item.target_key)"
+        ) == ["101:8001:search"]
+        assert page.evaluate(
+            "Array.from(state.inventoryBalance.autoSelectionReasons.get(101) || [])"
+        ) == ["bid:101:8001:search"]
+        assert "(1)" in page.locator("[data-inventory-balance-apply]").inner_text()
+
+        first_click_checkbox.uncheck()
+        assert first_click_checkbox.is_checked() is False
+        assert page.evaluate(
+            "Array.from(state.inventoryBalance.autoSelectionReasons.get(101) || [])"
+        ) == []
+
+        manual_override.fill("777.77")
         assert "сохраняется" in first_click_cell.inner_text()
         page.wait_for_function(
             "document.querySelector('#inventory-balance-select-status-101').textContent.includes('ошибка сохранения')"
@@ -354,6 +494,42 @@ def main() -> None:
         assert "controlled override save failure" in page.locator(
             "[data-inventory-balance-error]"
         ).inner_text()
+
+        manual_override.fill("710.5")
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-select=\"101\"]').checked && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub === 710.5"
+        )
+        assert first_click_checkbox.is_checked()
+        manual_override.fill("")
+        page.wait_for_function(
+            "!document.querySelector('[data-inventory-balance-select=\"101\"]').checked && state.inventoryBalance.overrideSaving.size === 0 && state.inventoryBalance.overrideTimers.size === 0 && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub == null"
+        )
+        assert page.evaluate("selectedInventoryBalanceTargets().length") == 0
+        manual_override.fill("725.25")
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-select=\"101\"]').checked && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub === 725.25"
+        )
+
+        explicit_checkbox = page.locator('[data-inventory-balance-select="202"]')
+        explicit_bid = page.locator('[data-inventory-balance-override="202:9202:search"]')
+        explicit_bid.fill("12")
+        explicit_bid.press("Enter")
+        page.wait_for_function("inventoryBalanceTargetByKey('202:9202:search').manual_target_bid_rub === 12")
+        explicit_checkbox.uncheck()
+        explicit_checkbox.check()
+        explicit_state = page.locator(
+            '[data-inventory-balance-nm-id="202"] .inventory-balance-state-status.active'
+        ).first
+        explicit_state.click()
+        page.locator(
+            ".inventory-balance-state-menu:popover-open [data-inventory-balance-state-choice]"
+        ).click()
+        page.locator(
+            '[data-inventory-balance-nm-id="202"] [data-inventory-balance-state-cancel]'
+        ).click()
+        assert explicit_checkbox.is_checked(), "pending cancellation removed explicit selection"
+        explicit_checkbox.uncheck()
+
         screenshot_path = os.environ.get("SKU_INVENTORY_BALANCE_SCREENSHOT", "").strip()
         if screenshot_path:
             page.screenshot(path=screenshot_path, full_page=True)
@@ -415,47 +591,81 @@ def main() -> None:
         page.locator('[data-inventory-balance-column-up="known_stock_units"]').click()
         page.locator("[data-inventory-balance-settings-save]").click()
         page.wait_for_timeout(50)
-        page.locator("[data-inventory-balance-select-all]").click()
-        assert page.locator("[data-inventory-balance-apply]").is_enabled()
-        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text()
 
         override = page.locator('[data-inventory-balance-override="101:8001:search"]')
-        assert override.input_value() == "800"
+        assert override.input_value() == ""
         override_count_before = len([item for item in requests if item[1].endswith("/override")])
         override.fill("725.25")
         override.press("Enter")
-        page.wait_for_timeout(100)
+        page.wait_for_function(
+            "document.querySelector('[data-inventory-balance-select=\"101\"]').checked"
+        )
         assert len([item for item in requests if item[1].endswith("/override")]) == override_count_before + 1, [
             item for item in requests if item[1].endswith("/override")
         ]
         assert override.input_value() == "725.25"
-        page.locator("[data-inventory-balance-preset]").select_option("all")
-        excess_override = page.locator(
-            '[data-inventory-balance-override="202:9202:search"]'
-        )
-        excess_override.fill("")
-        page.wait_for_timeout(650)
-        assert page.locator(
-            '[data-inventory-balance-override="202:9202:search"]'
-        ).input_value() == ""
+        assert page.evaluate(
+            "selectedInventoryBalanceTargets().map(item => item.target_key)"
+        ) == ["101:8001:search"]
+        assert page.locator("[data-inventory-balance-apply]").is_enabled()
         assert "(1)" in page.locator("[data-inventory-balance-apply]").inner_text()
-        page.locator(
-            '[data-inventory-balance-override="202:9202:search"]'
-        ).fill("1701")
-        page.locator(
-            '[data-inventory-balance-override="202:9202:search"]'
-        ).blur()
-        page.wait_for_function(
-            "document.querySelector('[data-inventory-balance-apply]').textContent.includes('(2)')"
-        )
-        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text()
+
         state_action = page.locator(
-            '[data-inventory-balance-state-action="state:101:9001"]'
-        )
-        assert state_action.is_visible()
-        assert state_action.input_value() == "none"
-        state_action.select_option("pause")
+            '[data-inventory-balance-nm-id="101"] .inventory-balance-state-status.active'
+        ).first
+        state_action.click()
+        page.locator(
+            ".inventory-balance-state-menu:popover-open [data-inventory-balance-state-choice]"
+        ).click()
+        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text()
+        assert page.evaluate(
+            "selectedInventoryBalanceStateActions().map(item => item.target_key)"
+        ) == ["state:101:9001"]
+
+        page.locator("[data-inventory-balance-preset]").select_option("all")
+        page.locator("[data-inventory-balance-select-all]").click()
+        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text(), "select-all must not invent bids"
+        second_bid = page.locator('[data-inventory-balance-override="202:9202:search"]')
+        second_bid.fill("1701")
+        second_bid.press("Enter")
+        page.wait_for_function("inventoryBalanceTargetByKey('202:9202:search').manual_target_bid_rub === 1701")
+        page.locator("[data-inventory-balance-select-all]").click()
         assert "(3)" in page.locator("[data-inventory-balance-apply]").inner_text()
+        assert page.evaluate(
+            "selectedInventoryBalanceTargets().map(item => item.target_key)"
+        ) == ["101:8001:search", "202:9202:search"]
+        assert page.evaluate(
+            "Array.from(state.inventoryBalance.selectAllSelectionNmIds).sort((a,b) => a-b)"
+        ) == [101, 202]
+        page.locator("[data-inventory-balance-select-all]").click()
+        assert "(3)" in page.locator("[data-inventory-balance-apply]").inner_text()
+
+        override.fill("")
+        page.wait_for_function(
+            "state.inventoryBalance.overrideSaving.size === 0 && state.inventoryBalance.overrideTimers.size === 0 && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub == null"
+        )
+        assert page.locator('[data-inventory-balance-select="101"]').is_checked()
+        assert page.evaluate(
+            "selectedInventoryBalanceTargets().map(item => item.target_key)"
+        ) == ["202:9202:search"]
+        override.fill("725.25")
+        override.press("Enter")
+        page.wait_for_function(
+            "state.inventoryBalance.overrideSaving.size === 0 && inventoryBalanceTargetByKey('101:8001:search').manual_target_bid_rub === 725.25"
+        )
+
+        page.locator(
+            '[data-inventory-balance-nm-id="101"] [data-inventory-balance-state-cancel]'
+        ).click()
+        assert page.locator('[data-inventory-balance-select="101"]').is_checked()
+        assert "(2)" in page.locator("[data-inventory-balance-apply]").inner_text()
+        state_action.click()
+        page.locator(
+            ".inventory-balance-state-menu:popover-open [data-inventory-balance-state-choice]"
+        ).click()
+        assert "(3)" in page.locator("[data-inventory-balance-apply]").inner_text()
+        assert not [item for item in requests if item[1].endswith("/apply-jobs")]
+
         page.locator("[data-inventory-balance-manual-pending]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
         manual_confirmation = page.locator(
@@ -471,23 +681,27 @@ def main() -> None:
         page.locator("[data-inventory-balance-confirm-close]").first.click()
         page.locator("[data-inventory-balance-apply]").click()
         assert page.locator("[data-inventory-balance-confirm]").is_visible()
+        assert not [item for item in requests if item[1].endswith("/apply-jobs")]
         confirmation = page.locator("[data-inventory-balance-confirm-body]").inner_text()
         normalized_confirmation = confirmation.replace("\xa0", " ")
         assert "Выбрано SKU\n2" in confirmation
-        assert "Ставок\n2" in confirmation
+        assert "Ручных ставок\n2" in confirmation
+        assert "Рекомендаци" not in confirmation
         assert "Статусов\n1" in confirmation
         assert "Повышений / понижений\n1 / 1" in confirmation
         assert "1 000 → 725,25 ₽/1000 показов" in normalized_confirmation
         assert "10 → 1 701 ₽/клик" in normalized_confirmation
         assert "активна → на паузе (остановить)" in normalized_confirmation
-        assert "Состояние · advert_id 9001" in normalized_confirmation
+        assert "Ручная ставка · advert_id 8001" in normalized_confirmation
+        assert "Ручная ставка · advert_id 9202" in normalized_confirmation
+        assert "Ожидающее действие · advert_id 9001" in normalized_confirmation
         assert "Повышение на 1 691 ₽ превышает прежний контрольный порог 100 ₽" in normalized_confirmation
         assert "Новая ставка 1 701 ₽ превышает прежний контрольный потолок 1 000 ₽" in normalized_confirmation
         assert "Повышение на 16 910% превышает прежний контрольный порог 50%" in normalized_confirmation
         assert "Не включено пустых, равных текущим или недоступных целей: 2" in confirmation
         assert "эти точные изменения будут отправлены в WB" in confirmation
-        assert "one-submit" in confirmation
-        assert "exact readback" in confirmation
+        assert "Перед отправкой проверим актуальные ставки" in confirmation
+        assert "подтвердим результат в WB" in confirmation
         screenshot_modal_path = os.environ.get(
             "SKU_INVENTORY_BALANCE_SCREENSHOT_MODAL", ""
         ).strip()
