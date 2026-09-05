@@ -56,7 +56,7 @@ DATA_SHEET_NAME = "DATA_VITRINA"
 STATUS_SHEET_NAME = "STATUS"
 FINANCE_STATUS_KEY = "fin_report_daily[yesterday_closed]"
 PROXY_GAP_ROW_ID = "SKU:428853741|proxy_profit_3_rub"
-ALLOWED_RECOVERY_DATES = frozenset({"2026-08-26", "2026-08-27"})
+ALLOWED_RECOVERY_DATES = frozenset({"2026-08-26", "2026-08-27", "2026-09-01"})
 ALLOWED_PARITY_DATES = frozenset({"2026-08-24", "2026-08-25"})
 
 
@@ -396,6 +396,11 @@ def build_finance_daily_recovery_plan(
     before_manifest = _target_manifest(
         before, target_date=exact_date, expected_values=expected
     )
+    if exact_date == "2026-09-01" and any(
+        cell["value"] not in (None, "") and cell["value"] != float(expected[row_id])
+        for row_id, cell in before_manifest["cells"].items()
+    ):
+        raise ValueError("September 1 recovery may only fill missing financial cells")
     note = _status_note(
         target_date=exact_date,
         generated_at=timestamp,

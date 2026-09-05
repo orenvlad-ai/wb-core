@@ -2643,6 +2643,8 @@ def _transform_snapshot(
                 timestamps[row_id] = str(snapshot.get("refreshed_at") or "")
     if inserted or archived_rows_removed:
         _update_data_dimensions(sheet)
+    from packages.application.web_vitrina_management_history import preserve_applied_estimates
+    preserve_applied_estimates(plan, original=original)
     after = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     after_digest = (
         _targeted_non_target_digest(
