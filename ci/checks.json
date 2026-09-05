@@ -50,7 +50,7 @@
         ["python3", "apps/warehouse_stocks_smoke.py"],
         ["python3", "apps/ff_stock_ledger_smoke.py"]
       ],
-      "pip": []
+      "pip": ["openpyxl==3.1.5"]
     },
     "web_vitrina": {
       "patterns": [
