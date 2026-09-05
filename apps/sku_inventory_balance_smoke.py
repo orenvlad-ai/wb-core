@@ -676,7 +676,7 @@ def main() -> None:
         assert empty["calculation"] is None
         assert empty["apply_capability"]["wb_patch_reachable"] is False
         assert empty["settings"]["calculation"]["wb_confidence_coefficient"] == 0.5
-        assert len(empty["settings"]["table"]["visible_columns"]) == 14
+        assert len(empty["settings"]["table"]["visible_columns"]) == 16
         assert "new_cpc_campaigns" in empty["settings"]["table"]["visible_columns"]
         assert "old_cpm_campaigns" in empty["settings"]["table"]["visible_columns"]
 
@@ -695,14 +695,14 @@ def main() -> None:
             },
             user_key="operator",
         )
-        assert len(empty_table_settings["table"]["visible_columns"]) == 14
+        assert len(empty_table_settings["table"]["visible_columns"]) == 16
         assert empty_table_settings["table"]["column_order"][:2] == [
             "select",
             "product",
         ]
         assert empty_table_settings["table"]["column_widths"] == {
-            "new_cpc_campaigns": 360,
-            "old_cpm_campaigns": 350,
+            "new_cpc_campaigns": 200,
+            "old_cpm_campaigns": 190,
         }
 
         settings = block.save_settings(
@@ -724,6 +724,16 @@ def main() -> None:
         assert settings["revision"] == 2
         assert settings["table"]["column_order"][:2] == ["select", "product"]
         assert settings["table"]["preset"] == "deficit"
+        from packages.application.sku_inventory_balance import _sanitize_table_preferences
+        legacy=_sanitize_table_preferences({"column_order":["select","product","new_cpc_campaigns","quality","old_cpm_campaigns"],"visible_columns":["new_cpc_campaigns","old_cpm_campaigns"],"sort":{"column":"new_cpc_campaigns","direction":"desc"}})
+        for rate,status in (("new_cpc_campaigns","new_cpc_status"),("old_cpm_campaigns","old_cpm_status")):
+            assert legacy["column_order"][legacy["column_order"].index(rate)+1]==status
+            assert status in legacy["visible_columns"]
+        assert _sanitize_table_preferences(legacy)==legacy
+        hidden=dict(legacy,visible_columns=["select","product","new_cpc_campaigns"])
+        assert "new_cpc_status" not in _sanitize_table_preferences(hidden)["visible_columns"]
+        assert legacy["sort"]=={"column":"new_cpc_campaigns","direction":"desc"}
+
 
         all_fronts = calculate_inventory_balance_row(
             {

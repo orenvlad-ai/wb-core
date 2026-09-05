@@ -87,14 +87,16 @@ BALANCE_COLUMNS = (
     "next_inbound",
     "subsequent_inbound",
     "new_cpc_campaigns",
+    "new_cpc_status",
     "old_cpm_campaigns",
+    "old_cpm_status",
     "quality",
 )
 MANDATORY_COLUMNS = ("select", "product")
 DEFAULT_VISIBLE_COLUMNS = BALANCE_COLUMNS
 CAMPAIGN_TABLE_COLUMNS = {"new_cpc_campaigns", "old_cpm_campaigns"}
-CAMPAIGN_TABLE_COLUMN_MIN_WIDTH = 350
-CAMPAIGN_TABLE_COLUMN_MAX_WIDTH = 360
+CAMPAIGN_TABLE_COLUMN_MIN_WIDTH = 190
+CAMPAIGN_TABLE_COLUMN_MAX_WIDTH = 200
 _OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _LOGGER = logging.getLogger(__name__)
 
@@ -3807,6 +3809,12 @@ def _sanitize_table_preferences(raw: Any) -> dict[str, Any]:
     for key in reversed(MANDATORY_COLUMNS):
         if key not in visible:
             visible.insert(0, key)
+    for rate, status in (("new_cpc_campaigns", "new_cpc_status"), ("old_cpm_campaigns", "old_cpm_status")):
+        if status not in (source.get("column_order") or []):
+            order.remove(status)
+            order.insert(order.index(rate) + 1, status)
+            if rate in visible and status not in visible:
+                visible.insert(visible.index(rate) + 1, status)
     widths = {}
     for key, value in (source.get("column_widths") or {}).items():
         if str(key) in allowed and _optional_int(value) is not None:
@@ -3822,6 +3830,7 @@ def _sanitize_table_preferences(raw: Any) -> dict[str, Any]:
                 else 600
             )
             widths[column] = min(max(int(value), minimum), maximum)
+    sort_source = source.get("sort") if isinstance(source.get("sort"), Mapping) else {}
     filters = dict(source.get("filters") or {})
     preset = str(source.get("preset") or "all")
     if preset not in {"all", "deficit", "excess", "actionable"}:
@@ -3835,6 +3844,8 @@ def _sanitize_table_preferences(raw: Any) -> dict[str, Any]:
             "status": str(filters.get("status") or "")[:40],
         },
         "preset": preset,
+        "sort": {"column": sort_source.get("column") if sort_source.get("column") in allowed - {"select"} else "",
+                 "direction": "asc" if sort_source.get("direction") == "asc" else "desc"},
     }
 
 
