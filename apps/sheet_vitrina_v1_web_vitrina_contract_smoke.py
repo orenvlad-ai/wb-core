@@ -871,4 +871,6 @@ def _build_plan(
 
 
 if __name__ == "__main__":
+    from apps.web_vitrina_official_fbs_smoke import main as official_fbs_smoke
+    official_fbs_smoke()
     main()

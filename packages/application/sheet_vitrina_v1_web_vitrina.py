@@ -14,6 +14,11 @@ from packages.application.inventory_cost_blend import (
     INVENTORY_COST_BLEND_EFFECTIVE_DATE,
 )
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
+from packages.application.web_vitrina_official_fbs import (
+    apply_current_official_fbs_estimate,
+    build_current_official_fbs_estimate,
+    restore_materialized_official_fbs_estimates,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.calculation_parameters_v4 import (
     ProxyV4Parameters,
@@ -402,6 +407,19 @@ class SheetVitrinaV1WebVitrinaBlock:
                     rows,
                     reason_ru=fbs_lifecycle_fallback.reason_ru,
                 )
+        rows = restore_materialized_official_fbs_estimates(
+            rows,
+            presentation=dict(snapshot.metadata or {}).get("server_cell_presentation", {}),
+        )
+        if current_business_date_iso(now) in snapshot.date_columns:
+            rows = apply_current_official_fbs_estimate(
+                rows,
+                estimate=build_current_official_fbs_estimate(
+                    self.runtime.db_path,
+                    nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
+                    now=now,
+                ),
+            )
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(

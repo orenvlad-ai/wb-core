@@ -127,6 +127,17 @@ reconciled `facility_id + pool(FBS|FBO)` rows; эти rows не суммирую
 inventory WAC, но остаются самостоятельными стадиями `Общего товарного
 капитала`. Finance/Partner sale COGS не читает этот blend.
 
+Для текущего рабочего дня витрина допускает явно помеченную управленческую
+оценку: FBS quantity берётся из одной полной свежей официальной генерации WB,
+FBS capital оценивается как это quantity × WAC того же SKU и facility из
+reconciled immutable FF decomposition. В знаменатель и числитель входят WB,
+этот FBS и оставшийся FBO FF ровно один раз. Все положительные количества
+требуют положительной доказанной стоимости; неполный SKU блокирует TOTAL.
+Это отдельная информационная оценка `Себестоимость наша`, а не исправление
+физических стадий капитала, финансовых документов или sale COGS. Обычный
+ready-snapshot writer сохраняет значения и provenance вместе; закрытая колонка
+читает только эту сохранённую оценку, без применения новых остатков назад.
+
 # 5. Historical and migration boundary
 
 `warehouse_opening_v1`, legacy own-capital events/daily rows и прежние canonical-cost baseline rows immutable audit-only. Они не суммируются с active functional state. Полная warehouse history начинается с production timestamp `warehouse_functional_cutover_v1`; текущий snapshot назад не копируется.
