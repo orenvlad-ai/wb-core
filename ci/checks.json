@@ -17,6 +17,14 @@
       ],
       "pip": []
     },
+    "promo": {
+      "patterns": ["apps/*promo*.py", "packages/**/*promo*.py"],
+      "commands": [
+        ["python3", "apps/promo_xlsx_collector_contract_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_promo_live_source_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "autoanswers": {
       "patterns": [
         "apps/*autoanswers*.py",
