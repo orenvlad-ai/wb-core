@@ -20,7 +20,10 @@ from packages.application.web_vitrina_official_fbs import (
     restore_materialized_official_fbs_estimates,
 )
 from packages.application.web_vitrina_management_history import restore_rows as restore_management_history
-from packages.application.web_vitrina_management_history import recalculate_current_rows, dated_parameters
+from packages.application.web_vitrina_management_history import (
+    recalculate_current_rows, dated_parameters, recalculate_yesterday_rows, yesterday_date,
+    corrected_proxy_dates, recalculate_corrected_unit_margin_rows,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.calculation_parameters_v4 import (
     ProxyV4Parameters,
@@ -439,6 +442,24 @@ class SheetVitrinaV1WebVitrinaBlock:
                 parameters = dated_parameters(conn, current_business_date_iso(now)) if current_estimate.get('available') else None
             rows = recalculate_current_rows(rows, business_date=current_business_date_iso(now), parameters=parameters,
                 original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}), snapshot_id=snapshot.snapshot_id)
+        yesterday = yesterday_date(current_business_date_iso(now))
+        if yesterday in snapshot.date_columns:
+            import sqlite3
+            with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA query_only=ON')
+                previous_parameters = dated_parameters(conn, yesterday)
+            rows = recalculate_yesterday_rows(rows, business_date=current_business_date_iso(now),
+                parameters=previous_parameters, original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}),
+                snapshot_id=snapshot.snapshot_id)
+        corrected_dates = corrected_proxy_dates(rows)
+        if corrected_dates:
+            import sqlite3
+            with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute('PRAGMA query_only=ON')
+                corrected_parameters = {day: dated_parameters(conn, day) for day in corrected_dates}
+            rows = recalculate_corrected_unit_margin_rows(rows, parameters=corrected_parameters)
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(

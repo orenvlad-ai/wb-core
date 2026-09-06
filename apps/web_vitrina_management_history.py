@@ -23,7 +23,7 @@ from packages.application.calculation_parameters import PROXY_BLOCK_KEY, _parame
 from packages.application.calculation_parameters_v4 import PROXY_V4_BLOCK_KEY, _parameters_from_row as parameters4
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
-from packages.application.web_vitrina_management_history import digest, project, project_complete_day, data_sheet, non_target_digest, capture_current_cost_source, SOURCE
+from packages.application.web_vitrina_management_history import digest, project, project_complete_day, data_sheet, non_target_digest, capture_current_cost_source, SOURCE, recalculate_dated_proxy
 
 
 @contextmanager
@@ -66,7 +66,15 @@ class WebVitrinaManagementHistoryAdapter:
             raise ValueError("estimate-date-scope-invalid")
         if digest(source) != request["source_sha256"]:
             raise ValueError("frozen-source-digest-mismatch")
-        if request.get('current_only'):
+        proxy_only = request.get('recalculate_proxy_only') is True
+        if proxy_only:
+            from packages.business_time import current_business_date_iso
+            if (request.get('current_only') or request.get('complete_day_sources') or source['costs']
+                    or source['column_date'] != current_business_date_iso(datetime.now(timezone.utc))):
+                raise ValueError('proxy-only-repair-scope-invalid')
+            if any(d >= source['column_date'] for d in days):
+                raise ValueError('proxy-only-repair-requires-past-date')
+        elif request.get('current_only'):
             from packages.business_time import current_business_date_iso
             now=datetime.now(timezone.utc)
             if days != [current_business_date_iso(now)]: raise ValueError('current-repair-date-mismatch')
@@ -113,7 +121,15 @@ class WebVitrinaManagementHistoryAdapter:
             if record["bundle_version"] != source["bundle_version"]:
                 continue
             facts=project_complete_day(plan,sources=factual_sources,conn=conn,bundle_version=record['bundle_version'],operation_id=operation_id) if factual_sources else {'plan':plan,'changes':[]}
-            result = project(facts['plan'], dates=days, source=source, parameters=params, operation_id=operation_id)
+            if proxy_only:
+                result = {'plan': plan, 'changes': [], 'remaining': []}
+                for day in days:
+                    revised = recalculate_dated_proxy(result['plan'], day=day, parameters=params[day], operation_id=operation_id)
+                    result['plan'] = revised['plan']
+                    result['changes'].extend(revised['changes'])
+                    result['remaining'].extend(revised['remaining'])
+            else:
+                result = project(facts['plan'], dates=days, source=source, parameters=params, operation_id=operation_id)
             result['changes']=facts['changes']+result['changes']
             if request.get('current_only'):
                 # Current cost is an official management operand, not the

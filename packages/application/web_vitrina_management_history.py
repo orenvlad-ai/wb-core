@@ -412,3 +412,191 @@ def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, paramet
                          'rows':[['',r.row_id,r.values_by_date.get(business_date,'')] for r in rows]}]}
     revised = recalculate_current(pseudo, business_date=business_date, parameters=parameters)
     return restore_rows(rows, presentation=revised['metadata']['server_cell_presentation'])
+
+
+# Ordinary refresh may correct yesterday's derived values, but cannot rewrite
+# the dated cost or any older day. Explicit repair uses the same projection.
+PROXY_RECALCULATION_METRICS = frozenset({
+    'proxy_profit_3_rub', 'total_proxy_profit_3_rub',
+    'proxy_margin_3_pct', 'proxy_margin_3_pct_total',
+    'proxy_profit_4_rub', 'total_proxy_profit_4_rub',
+    'proxy_margin_4_pct', 'proxy_margin_4_pct_total',
+})
+
+
+def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
+                            parameters: tuple[Any, Any] | None,
+                            operation_id: str) -> dict[str, Any]:
+    """Replace only four Proxy metrics from the accepted, same-column operands.
+
+    Warehouse/history guards run before this final projection. Missing inputs
+    stay missing; neither current inventory nor a current parameter version is
+    substituted for the dated input. Cost cells themselves are never changed.
+    """
+    working = deepcopy(plan)
+    sheet = data_sheet(working)
+    if day not in working.get('date_columns', []) or day not in sheet['header']:
+        return {'plan': working, 'changes': [], 'remaining': []}
+    index = sheet['header'].index(day)
+    rows = {r[1]: r for r in sheet['rows']}
+    scopes = sorted(k.split('|')[0] for k in rows if k.startswith('SKU:') and k.endswith('|proxy_profit_3_rub'))
+    if not scopes:
+        return {'plan': working, 'changes': [], 'remaining': []}
+    cells = working.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
+    changes, remaining, results3, results4, inputs = [], [], [], [], {}
+
+    def value(key):
+        row = rows.get(key)
+        return None if row is None or len(row) <= index or row[index] in ('', None) else row[index]
+
+    def put(key, number, evidence):
+        if key not in rows:
+            return
+        old = value(key)
+        after = float(number) if number is not None else ''
+        previous = cells.get(key, {}).get(day, {})
+        evidence = json.loads(json.dumps(evidence, default=str))
+        if (old == (after if after != '' else None) and previous.get('source') == SOURCE
+                and previous.get('evidence') == evidence):
+            return
+        cell = {'source': SOURCE, 'target_date': day, 'source_as_of_date': day,
+                'calculation_contract': 'dated_proxy_recalculation_v1',
+                'management_value': str(number) if number is not None else '',
+                'operation_id': operation_id, 'evidence': evidence,
+                'state': 'unconfirmed' if number is not None else 'unavailable',
+                'tone': 'warning', 'quality_state': 'management_estimate' if number is not None else 'unavailable',
+                'quality_label': 'Управленческая оценка',
+                'reason': 'Расчёт по принятым заказам, рекламе, сохранённой себестоимости и параметрам указанной даты.'
+                    if number is not None else 'Недостаточно датированных входов для расчёта Proxy.'}
+        while len(rows[key]) <= index:
+            rows[key].append('')
+        before = rows[key][index]
+        rows[key][index] = after
+        cells.setdefault(key, {})[day] = cell
+        changes.append({'date': day, 'row_id': key, 'before': before, 'after': after, 'provenance': cell})
+        if number is None:
+            remaining.append({'date': day, 'row_id': key, 'reason': 'missing_operand_or_zero_denominator'})
+
+    p3, p4 = parameters if parameters is not None else (None, None)
+    versions = {'operand_date': day, 'proxy3_version': p3.version_id if p3 else None,
+                'proxy4_version': p4.version_id if p4 else None}
+    for scope in scopes:
+        operands = {name: value(scope + '|' + metric) for name, metric in
+                    (('order_sum', 'orderSum'), ('order_count', 'orderCount'),
+                     ('ads_sum', 'ads_sum'), ('canonical_wb_wac', COST))}
+        cost_cell = cells.get(scope + '|' + COST, {}).get(day, {})
+        if cost_cell.get('source') in (SOURCE, 'official_fbs_management_inventory_v1'):
+            saved_cost = cost_cell.get('management_value')
+            operands['canonical_wb_wac'] = saved_cost if saved_cost not in ('', None) else None
+        inputs[scope] = operands
+        r3 = calculate_proxy_3(**operands, parameters=p3) if p3 else {}
+        r4 = calculate_proxy_4(**operands, parameters=p4, business_date=day) if p4 else {}
+        results3.append(r3)
+        results4.append(r4)
+        evidence = {**versions, 'operands': operands, 'cost_provenance': cost_cell}
+        for metric, number in (
+            ('proxy_profit_3_rub', r3.get('proxy_profit_3')),
+            ('proxy_margin_3_pct', r3.get('proxy_margin_3')),
+            ('proxy_profit_4_rub', r4.get('proxy_profit_4')),
+            ('proxy_margin_4_pct', r4.get('proxy_margin_4')),
+        ):
+            put(scope + '|' + metric, number, evidence)
+    total3 = aggregate_proxy_3(results3)
+    blocked4 = any(r.get('proxy_profit_4') is None and
+                   (inputs[s]['order_sum'] is None or Decimal(str(inputs[s]['order_sum'])) > 0)
+                   for s, r in zip(scopes, results4))
+    total4 = aggregate_proxy_4(results4) if p4 and not blocked4 else {}
+    evidence = {**versions, 'eligible_scope': scopes, 'input_digest': digest(inputs)}
+    for metric, number in (
+        ('total_proxy_profit_3_rub', total3.get('proxy_profit_3')),
+        ('proxy_margin_3_pct_total', total3.get('proxy_margin_3')),
+        ('total_proxy_profit_4_rub', total4.get('proxy_profit_4')),
+        ('proxy_margin_4_pct_total', total4.get('proxy_margin_4')),
+    ):
+        put('TOTAL|' + metric, number, evidence)
+    return {'plan': working, 'changes': changes, 'remaining': remaining}
+
+
+def yesterday_date(business_date: str) -> str:
+    from datetime import date, timedelta
+    return (date.fromisoformat(business_date) - timedelta(days=1)).isoformat()
+
+
+def recalculate_yesterday_envelope(plan: Any, *, business_date: str,
+                                   parameters: tuple[Any, Any] | None) -> Any:
+    from dataclasses import asdict
+    day = yesterday_date(business_date)
+    result = recalculate_dated_proxy(asdict(plan), day=day, parameters=parameters,
+                                     operation_id='yesterday-proxy:' + day)
+    revised = result['plan']
+    return replace(plan, metadata=revised.get('metadata', {}), sheets=[
+        replace(s, rows=data_sheet(revised)['rows']) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
+
+
+def recalculate_yesterday_rows(rows: Iterable[Any], *, business_date: str,
+                               parameters: tuple[Any, Any] | None,
+                               original_presentation: dict[str, Any], snapshot_id: str) -> list[Any]:
+    rows = list(rows)
+    day = yesterday_date(business_date)
+    if not rows or day not in rows[0].values_by_date:
+        return rows
+    presentation = {r.row_id: {day: dict(original_presentation.get(r.row_id, {}).get(day,
+                               r.presentation_by_date.get(day, {})))} for r in rows}
+    pseudo = {'date_columns': [day], 'snapshot_id': snapshot_id,
+              'metadata': {'server_cell_presentation': presentation},
+              'sheets': [{'sheet_name': 'DATA_VITRINA', 'header': ['label', 'key', day],
+                          'rows': [['', r.row_id, r.values_by_date.get(day, '')] for r in rows]}]}
+    result = recalculate_dated_proxy(pseudo, day=day, parameters=parameters,
+                                     operation_id='yesterday-proxy:' + day)
+    target = {c['row_id']: {day: c['provenance']} for c in result['changes']}
+    return restore_rows(rows, presentation=target)
+
+
+def corrected_proxy_dates(rows: Iterable[Any]) -> list[str]:
+    return sorted({day for row in rows if row.row_id.endswith('|proxy_profit_4_rub')
+                   for day, cell in row.presentation_by_date.items()
+                   if cell.get('calculation_contract') == 'dated_proxy_recalculation_v1'})
+
+
+def recalculate_corrected_unit_margin_rows(rows: Iterable[Any], *,
+                                           parameters: dict[str, tuple[Any, Any] | None]) -> list[Any]:
+    """Read-only dependent display, for corrected dates only; no history write."""
+    rows = list(rows)
+    by_key = {r.row_id: r for r in rows}
+    updates = {}
+    for day, dated in parameters.items():
+        p4 = dated[1] if dated else None
+        results = []
+        for key, profit_row in by_key.items():
+            if not key.startswith('SKU:') or not key.endswith('|proxy_profit_4_rub'):
+                continue
+            scope = key.split('|')[0]
+            quantity_row = by_key.get(scope + '|orderCount')
+            revenue_row = by_key.get(scope + '|orderSum')
+            quantity = quantity_row.values_by_date.get(day) if quantity_row else None
+            revenue = revenue_row.values_by_date.get(day) if revenue_row else None
+            profit = profit_row.values_by_date.get(day)
+            quantity = Decimal(str(quantity)) * p4.buyout_rate if quantity not in ('', None) and p4 else None
+            revenue = Decimal(str(revenue)) * p4.buyout_rate if revenue not in ('', None) and p4 else None
+            result = {'proxy_profit_4': profit, 'expected_buyout_qty': quantity, 'expected_buyout_revenue': revenue}
+            results.append(result)
+            updates[(scope + '|proxy_margin_per_unit_rub', day)] = (
+                calculate_proxy_v4_margin_per_unit(proxy_profit_4=profit, expected_buyout_qty=quantity),
+                profit_row.presentation_by_date.get(day, {}))
+        total = by_key.get('TOTAL|total_proxy_profit_4_rub')
+        if total:
+            number = aggregate_proxy_4(results).get('proxy_margin_per_unit') if total.values_by_date.get(day) not in ('', None) else None
+            updates[('TOTAL|proxy_margin_per_unit_rub_total', day)] = (number, total.presentation_by_date.get(day, {}))
+    output = []
+    for row in rows:
+        values, cells = dict(row.values_by_date), dict(row.presentation_by_date)
+        for day in parameters:
+            if (row.row_id, day) not in updates:
+                continue
+            number, profit_cell = updates[(row.row_id, day)]
+            values[day] = float(number) if number is not None else ''
+            cells[day] = {**profit_cell, 'management_value': str(number) if number is not None else '',
+                          'reason': 'Средняя маржа на единицу по исправленной Proxy 4 и датированному ожидаемому количеству.',
+                          'state': 'unconfirmed' if number is not None else 'unavailable'}
+        output.append(replace(row, values_by_date=values, presentation_by_date=cells))
+    return output
