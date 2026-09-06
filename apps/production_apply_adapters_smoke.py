@@ -47,7 +47,7 @@ class Harness(WbFbsMappingEvidenceProductionAdapter):
 
 
 def main() -> None:
-    assert set(ADAPTERS) == {"wb_fbs_mapping_evidence_v1", "web_vitrina_management_history_v1", "web_vitrina_wb_history_recovery_v1"}
+    assert set(ADAPTERS) == {"wb_fbs_mapping_evidence_v1", "web_vitrina_management_history_v1", "web_vitrina_wb_history_recovery_v1", "supplier_invoice_revision_v1"}
     assert isinstance(
         ADAPTERS["wb_fbs_mapping_evidence_v1"],
         WbFbsMappingEvidenceProductionAdapter,
