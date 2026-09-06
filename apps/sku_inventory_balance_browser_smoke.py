@@ -224,6 +224,18 @@ def main() -> None:
         )
         assert page.locator('[data-sku-management-subpanel="general"]').is_hidden()
         assert page.locator('[data-sku-management-subpanel="inventory-balance"]').is_visible()
+        settings_panel = page.locator('[data-inventory-balance-settings]')
+        assert settings_panel.locator('summary').inner_text() == "Настройки расчёта"
+        settings_panel.locator('summary').click()
+        assert settings_panel.locator('[data-inventory-balance-setting]').count() == 3
+        assert page.locator('[data-inventory-balance-column-controls]').count() == 0
+        assert page.locator('[data-inventory-balance-column-width], [data-inventory-balance-column-visible], [data-inventory-balance-column-up], [data-inventory-balance-column-down]').count() == 0
+        assert settings_panel.locator('[data-inventory-balance-preset]').count() == 0
+        assert page.locator('.sku-management-filters [data-inventory-balance-preset]').count() == 1
+        settings_screenshot = os.environ.get("SKU_INVENTORY_BALANCE_SETTINGS_SCREENSHOT", "").strip()
+        if settings_screenshot:
+            settings_panel.screenshot(path=settings_screenshot)
+        settings_panel.locator('summary').click()
         balance_body_text = page.locator("[data-inventory-balance-body]").inner_text()
         normalized_balance_text = balance_body_text.replace("\xa0", " ")
         assert "Дефицит" in balance_body_text, (
@@ -624,10 +636,10 @@ def main() -> None:
         assert coefficient_input.get_attribute("min") == "0"
         assert coefficient_input.get_attribute("max") == "1"
         page.locator("[data-inventory-balance-preset]").select_option("actionable")
-        page.locator('[data-inventory-balance-column-visible="quality"]').uncheck()
-        page.locator('[data-inventory-balance-column-up="known_stock_units"]').click()
+        saved_columns = page.evaluate("JSON.stringify({visible:state.inventoryBalance.table.visible_columns,order:state.inventoryBalance.table.column_order,widths:state.inventoryBalance.table.column_widths})")
         page.locator("[data-inventory-balance-settings-save]").click()
         page.wait_for_timeout(50)
+        assert page.evaluate("JSON.stringify({visible:state.inventoryBalance.table.visible_columns,order:state.inventoryBalance.table.column_order,widths:state.inventoryBalance.table.column_widths})") == saved_columns
 
         override = page.locator('[data-inventory-balance-override="101:8001:search"]')
         assert override.input_value() == ""
@@ -868,8 +880,9 @@ def main() -> None:
     settings_requests = [item for item in requests if item[1].endswith("/inventory-balance/settings")]
     assert settings_requests and settings_requests[-1][2]["table"]["preset"] == "actionable"
     assert settings_requests[-1][2]["calculation"]["wb_confidence_coefficient"] == 0.5
-    assert "quality" not in settings_requests[-1][2]["table"]["visible_columns"]
-    assert settings_requests[-1][2]["table"]["column_order"][2] == "known_stock_units"
+    assert settings_requests[-1][2]["table"]["visible_columns"] == json.loads(saved_columns)["visible"]
+    assert settings_requests[-1][2]["table"]["column_order"] == json.loads(saved_columns)["order"]
+    assert settings_requests[-1][2]["table"]["column_widths"] == json.loads(saved_columns)["widths"]
     registry_requests = [item for item in requests if item[1].endswith("/calculations?limit=20")]
     assert not registry_requests, registry_requests
     calculate_requests = [item for item in requests if item[1].endswith("/inventory-balance/calculate")]

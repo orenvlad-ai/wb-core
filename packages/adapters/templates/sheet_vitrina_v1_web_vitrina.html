@@ -6801,18 +6801,17 @@
             </div>
           </div>
           <details class="sku-management-settings" data-inventory-balance-settings>
-            <summary>Настройки расчёта и колонок</summary>
+            <summary>Настройки расчёта</summary>
             <div class="sku-management-settings-grid" style="margin-top:10px">
               <label class="research-field"><span>Коэффициент WB</span><input class="input" type="number" min="0" max="1" step="0.05" data-inventory-balance-setting="wb_confidence_coefficient"></label>
               <label class="research-field"><span>Страховой запас, дней</span><input class="input" type="number" min="0" max="120" data-inventory-balance-setting="safety_stock_days"></label>
               <label class="research-field"><span>Период продаж, дней</span><select class="input" data-inventory-balance-setting="sales_period_days"><option>7</option><option>14</option><option>30</option><option>60</option></select></label>
-              <label class="research-field"><span>Пресет</span><select class="input" data-inventory-balance-preset><option value="all">Все</option><option value="deficit">Дефицит</option><option value="excess">Переизбыток</option><option value="actionable">Можно применить</option></select></label>
             </div>
-            <div class="sku-column-controls" data-inventory-balance-column-controls style="margin-top:10px"></div>
             <div class="research-actions" style="margin-top:10px"><button class="button primary" type="button" data-inventory-balance-settings-save>Сохранить на сервере</button></div>
           </details>
           <div class="sku-management-filters">
             <label class="research-field"><span>SKU / nmID / название</span><input class="input" type="search" data-inventory-balance-search></label>
+            <label class="research-field"><span>Пресет</span><select class="input" data-inventory-balance-preset><option value="all">Все</option><option value="deficit">Дефицит</option><option value="excess">Переизбыток</option><option value="actionable">Можно применить</option></select></label>
             <button class="button secondary" type="button" data-inventory-balance-select-all>Выбрать все доступные</button>
             <button class="button primary" type="button" data-inventory-balance-apply disabled>Применить изменения</button>
             <span class="panel-meta inventory-balance-apply-reason" data-inventory-balance-apply-reason></span>
@@ -7555,7 +7554,6 @@
     const inventoryBalanceErrorNode = document.querySelector("[data-inventory-balance-error]");
     const inventoryBalanceHeadNode = document.querySelector("[data-inventory-balance-head]");
     const inventoryBalanceBodyNode = document.querySelector("[data-inventory-balance-body]");
-    const inventoryBalanceColumnControlsNode = document.querySelector("[data-inventory-balance-column-controls]");
     const inventoryBalanceCalculationProgressNode = document.querySelector("[data-inventory-balance-calculation-progress]");
     const inventoryBalanceCalculationProgressSummaryNode = document.querySelector("[data-inventory-balance-calculation-progress-summary]");
     const inventoryBalanceCalculationProgressMeterNode = document.querySelector("[data-inventory-balance-calculation-progress-meter]");
@@ -11079,25 +11077,23 @@
       inventoryPlanningMetrics.innerHTML = controls + '<div class="inventory-metric-cards">' + (cards || '<p class="warehouse-empty">Все показатели скрыты.</p>') + '</div>';
       const formula = payload.formula || {};
       const wb = payload.wb || {};
-      const facilities = (payload.fbs && payload.fbs.facilities) || [];
-      const sellerReconciliation = (payload.fbs && payload.fbs.seller_stock_reconciliation) || {};
+      const fbs = payload.fbs || {};
+      const facilities = fbs.facilities || [];
       const facilityRows = facilities.map(function(facility) {
-        const seller = facility.seller_stock || {};
+        const source = facility.stock_source || {};
         return '<tr><td>' + escapeHtml(facility.name || facility.code || facility.facility_id) + '</td>' +
-          '<td class="warehouse-number">' + escapeHtml(facility.physical == null ? "Недоступно" : warehouseNumber(facility.physical)) + '</td>' +
-          '<td class="warehouse-number">' + escapeHtml(facility.reserved == null ? "Недоступно" : warehouseNumber(facility.reserved)) + '</td>' +
           '<td class="warehouse-number">' + escapeHtml(facility.available == null ? "Недоступно" : warehouseNumber(facility.available)) + '</td>' +
-          '<td class="warehouse-number">' + escapeHtml(seller.quantity == null ? "—" : warehouseNumber(seller.quantity)) + '</td>' +
-          '<td class="warehouse-number">' + escapeHtml(seller.delta_to_ledger_physical == null ? "—" : warehouseNumber(seller.delta_to_ledger_physical)) + '</td></tr>';
+          '<td>' + escapeHtml(warehouseDate(source.captured_at)) + '</td>' +
+          '<td>' + escapeHtml(facility.source_blocker || "Полный официальный снимок") + '</td></tr>';
       }).join("");
       inventoryPlanningDisclosure.innerHTML =
-        '<p><strong>Версия:</strong> ' + escapeHtml(formula.version || "—") + ' · с ' + escapeHtml(formula.effective_from || "—") + '. ' + escapeHtml(formula.history_rule || "") + '</p>' +
-        '<p><strong>Формулы:</strong> ' + escapeHtml(formula.stock_total || "") + '; ' + escapeHtml(formula.effective_total || "") + '.</p>' +
-        '<p><strong>WB:</strong> ' + escapeHtml(warehouseDate(wb.fetched_at)) + '. ' + escapeHtml((wb.districts || {}).reason_ru || "Распределение по складам доступно.") + '</p>' +
-        '<div class="warehouse-table-wrap"><table class="warehouse-table"><thead><tr><th>Склад FBS</th><th>Physical</th><th>Reserved</th><th>Available</th><th>Seller readback</th><th>Δ к physical</th></tr></thead><tbody>' +
-        (facilityRows || '<tr><td colspan="6">Активные FBS facilities отсутствуют или reader epoch недоступен.</td></tr>') + '</tbody></table></div>' +
-        '<p class="warehouse-meta">Seller stock — только timestamped reconciliation (' + escapeHtml(sellerReconciliation.mapping_quality || "unavailable") + ', ' + escapeHtml(warehouseDate(sellerReconciliation.captured_at)) + '); physical берётся из facility×FBS ledger. Available сохраняет отрицательные значения.</p>';
-      if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "WB: " + warehouseDate((payload.freshness || {}).wb_fetched_at) + " · FBS: " + warehouseDate((payload.freshness || {}).fbs_updated_at) + " · current planning/read, без изменения six-stage TOTAL.";
+        '<p><strong>Источник FBS:</strong> официальный снимок остатков WB по активным складам FBS. Товаров: ' + escapeHtml(fbs.sku_count == null ? "—" : String(fbs.sku_count)) + '.</p>' +
+        '<p><strong>Общий остаток:</strong> ' + escapeHtml(formula.stock_total || "") + '.</p>' +
+        '<p><strong>WB:</strong> ' + escapeHtml(warehouseDate(wb.fetched_at)) + '</p>' +
+        '<div class="warehouse-table-wrap"><table class="warehouse-table"><thead><tr><th>Склад FBS</th><th>Заявлено на WB, шт.</th><th>Актуальность снимка</th><th>Источник</th></tr></thead><tbody>' +
+        (facilityRows || '<tr><td colspan="4">' + escapeHtml(fbs.source_blocker || "Нет активных складов FBS.") + '</td></tr>') + '</tbody></table></div>' +
+        '<p class="warehouse-meta">' + escapeHtml(formula.history_rule || "") + '</p>';
+      if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "WB: " + warehouseDate((payload.freshness || {}).wb_fetched_at) + " · FBS — официальный снимок WB: " + warehouseDate((payload.freshness || {}).fbs_updated_at);
       if (fbsOrdersFacility) {
         const selected = fbsOrdersFacility.value;
         fbsOrdersFacility.innerHTML = '<option value="">Все активные</option>' + facilities.map(function(facility) {
@@ -11110,7 +11106,7 @@
     async function loadInventoryPlanning(force) {
       if (state.warehouses.inventoryPlanningLoading || (state.warehouses.inventoryPlanningLoaded && !force)) return;
       state.warehouses.inventoryPlanningLoading = true;
-      if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "Загрузка current WB/FBS evidence…";
+      if (inventoryPlanningMeta) inventoryPlanningMeta.textContent = "Загрузка официальных остатков WB и FBS…";
       try {
         const response = await fetch("/v1/sheet-vitrina-v1/warehouses/planning-inventory", {headers: {Accept: "application/json"}});
         const payload = await response.json().catch(function() { return {}; });
@@ -25359,7 +25355,7 @@
       if(inventoryBalanceCalculateButton){inventoryBalanceCalculateButton.disabled=state.inventoryBalance.calculating||state.inventoryBalance.loading;inventoryBalanceCalculateButton.textContent=state.inventoryBalance.calculating?"Расчёт выполняется…":"Новый расчёт";}
       if(inventoryBalanceXlsxButton)inventoryBalanceXlsxButton.disabled=!calculation||state.inventoryBalance.calculating;
       if(inventoryBalanceApplyButton){const live=!!(calculation&&calculation.apply_capability&&calculation.apply_capability.live_wb_available);const bidTargets=selectedInventoryBalanceTargets();const stateActions=selectedInventoryBalanceStateActions();const changeCount=bidTargets.length+stateActions.length;let reason="";if(!calculation)reason="Сначала создайте расчёт.";else if(!live)reason="Live-применение WB сейчас недоступно.";else if(state.inventoryBalance.calculating)reason="Дождитесь завершения расчёта.";else if(state.inventoryBalance.applyRunning)reason="Уже выполняется применение.";else if(!changeCount)reason="Выберите SKU и задайте хотя бы одну новую ставку или действие с кампанией.";else reason="Выбрано "+state.inventoryBalance.selectedNmIds.size+" SKU · "+bidTargets.length+" ставок · "+stateActions.length+" действий.";inventoryBalanceApplyButton.disabled=!changeCount||!live||state.inventoryBalance.applyRunning||state.inventoryBalance.calculating;inventoryBalanceApplyButton.textContent=changeCount?"Применить изменения ("+changeCount+")":"Применить изменения";inventoryBalanceApplyButton.title=reason;if(inventoryBalanceApplyReasonNode)inventoryBalanceApplyReasonNode.textContent=reason;}
-      renderInventoryBalanceCalculationProgress();renderInventoryBalanceColumnControls();renderInventoryBalanceProgress();renderInventoryBalanceConfirmationProgress();
+      renderInventoryBalanceCalculationProgress();renderInventoryBalanceProgress();renderInventoryBalanceConfirmationProgress();
     }
 
     function inventoryBalanceDateTime(value){if(!value)return "—";const dateValue=new Date(value);return Number.isNaN(dateValue.getTime())?String(value):new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short"}).format(dateValue);}
@@ -25371,8 +25367,6 @@
     function inventoryBalanceFreshnessText(calculation,count){const ads=calculation.ads_period||{};const live=!!(calculation.apply_capability&&calculation.apply_capability.live_wb_available);const parts=["Последний расчёт: "+inventoryBalanceDateTime(calculation.created_at),"возраст "+inventoryBalanceAge(calculation.created_at),"данные на "+inventoryBalanceDate(calculation.as_of_date)];if(calculation.source_generated_at)parts.push("источник "+inventoryBalanceDateTime(calculation.source_generated_at));if(ads.date_from||ads.date_to)parts.push("реклама "+inventoryBalanceDate(ads.date_from)+"—"+inventoryBalanceDate(ads.date_to));parts.push("SKU: "+count,"live WB "+(live?"доступен":"недоступен"));return parts.join(" · ");}
 
     function renderInventoryBalanceCalculationProgress(){if(!inventoryBalanceCalculationProgressNode)return;const operation=state.inventoryBalance.calculationOperation;inventoryBalanceCalculationProgressNode.hidden=!operation;if(!operation)return;const stateName=String(operation.state||"accepted");const percent=Math.min(100,Math.max(0,Number((operation.progress||{}).percent)||0));inventoryBalanceCalculationProgressNode.setAttribute("data-state",stateName);if(inventoryBalanceCalculationProgressSummaryNode)inventoryBalanceCalculationProgressSummaryNode.textContent=inventoryBalanceOperationStatus(operation)+" · "+percent+"% · "+String(operation.operation_id||"");if(inventoryBalanceCalculationProgressMeterNode){inventoryBalanceCalculationProgressMeterNode.setAttribute("aria-valuenow",String(percent));inventoryBalanceCalculationProgressMeterNode.setAttribute("aria-valuetext",inventoryBalanceOperationStatus(operation));}if(inventoryBalanceCalculationProgressFillNode)inventoryBalanceCalculationProgressFillNode.style.width=percent+"%";}
-
-    function renderInventoryBalanceColumnControls(){if(!inventoryBalanceColumnControlsNode)return;const visible=new Set(state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS);const order=state.inventoryBalance.table.column_order||INVENTORY_BALANCE_COLUMN_IDS;inventoryBalanceColumnControlsNode.innerHTML=order.map(function(id,index){const column=INVENTORY_BALANCE_COLUMNS.find(function(item){return item.id===id;});if(!column)return "";const mandatory=INVENTORY_BALANCE_MANDATORY_COLUMNS.includes(id);const width=Number((state.inventoryBalance.table.column_widths||{})[id]||column.width||120);const campaign=INVENTORY_BALANCE_CAMPAIGN_COLUMNS.has(id);const minimum=campaign?INVENTORY_BALANCE_CAMPAIGN_COLUMN_MIN_WIDTH:60;const maximum=campaign?INVENTORY_BALANCE_CAMPAIGN_COLUMN_MAX_WIDTH:600;return '<div class="sku-column-row"><label><input type="checkbox" data-inventory-balance-column-visible="'+escapeHtml(id)+'" '+(visible.has(id)?"checked ":"")+(mandatory?"disabled ":"")+'> '+escapeHtml(column.label)+'</label><input class="input" type="number" min="'+minimum+'" max="'+maximum+'" value="'+width+'" data-inventory-balance-column-width="'+escapeHtml(id)+'"><button class="button ghost" type="button" data-inventory-balance-column-up="'+escapeHtml(id)+'" '+(mandatory||index===0?"disabled":"")+'>↑</button><button class="button ghost" type="button" data-inventory-balance-column-down="'+escapeHtml(id)+'" '+(mandatory||index===order.length-1?"disabled":"")+'>↓</button></div>';}).join("");}
 
     function handleInventoryBalanceInput(event){const target=event.target;if(!target)return;if(target.matches("[data-inventory-balance-search]")){state.inventoryBalance.table.filters.search=String(target.value||"").slice(0,200);renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-preset]")){state.inventoryBalance.table.preset=String(target.value||"all");renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-select]")){const id=Number(target.getAttribute("data-inventory-balance-select"));state.inventoryBalance.selectionIntentNmIds.delete(id);if(target.checked){state.inventoryBalance.explicitSelectionNmIds.add(id);inventoryBalanceReconcileRowSelection(id);}else inventoryBalanceClearSelectionOwnership(id);renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-column-visible]")){const id=target.getAttribute("data-inventory-balance-column-visible");const visible=new Set(state.inventoryBalance.table.visible_columns||INVENTORY_BALANCE_COLUMN_IDS);target.checked?visible.add(id):visible.delete(id);INVENTORY_BALANCE_MANDATORY_COLUMNS.forEach(function(key){visible.add(key);});state.inventoryBalance.table.visible_columns=Array.from(visible);renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-column-width]")){const id=target.getAttribute("data-inventory-balance-column-width");const campaign=INVENTORY_BALANCE_CAMPAIGN_COLUMNS.has(id);const minimum=campaign?INVENTORY_BALANCE_CAMPAIGN_COLUMN_MIN_WIDTH:60;const maximum=campaign?INVENTORY_BALANCE_CAMPAIGN_COLUMN_MAX_WIDTH:600;state.inventoryBalance.table.column_widths[id]=Math.min(maximum,Math.max(minimum,Number(target.value)||minimum));renderInventoryBalance();return;}if(target.matches("[data-inventory-balance-override]")){queueInventoryBalanceOverride(target.getAttribute("data-inventory-balance-override"),target.value,event.type==="change");}}
 
