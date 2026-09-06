@@ -57,6 +57,7 @@ def main() -> None:
     if len(requested_nm_ids) < 3:
         raise AssertionError("fixture bundle must expose at least three enabled nm_ids")
 
+    _assert_incomplete_discovery_rejects_zero_success()
     _assert_cross_year_parse_rule()
     metric_truth_note = _assert_candidate_entry_price_metric_cases()
     canonical_note = _assert_canonical_eligible_set_cases(requested_nm_ids)
@@ -73,6 +74,27 @@ def main() -> None:
     print(f"accepted_current_preservation: ok -> {preserved_note}")
     print(f"historical_interval_replay: ok -> {replay_note}")
     print("smoke-check passed")
+
+
+def _assert_incomplete_discovery_rejects_zero_success() -> None:
+    from packages.contracts.promo_xlsx_collector_block import CollectorRunSummary
+
+    for status in ("partial", "blocked", "success"):
+        with TemporaryDirectory() as tmp:
+            collector = SimpleNamespace(execute=lambda request: CollectorRunSummary(
+                run_dir=request.output_root, status=status, started_at="2026-09-06T10:00:00+05:00",
+                timeline_candidates_found=2 if status != "success" else 0,
+                ambiguous_count=2 if status != "success" else 0,
+            ))
+            block = PromoLiveSourceBlock(runtime_dir=Path(tmp), collector_block=collector,
+                now_factory=lambda: datetime.fromisoformat("2026-09-06T10:00:00+05:00"))
+            result = block.execute(PromoLiveSourceRequest(snapshot_date="2026-09-06", nm_ids=[123])).result
+            if status == "success":
+                assert result.kind == "success" and result.items[0].promo_participation == 0
+            else:
+                assert result.kind == "incomplete" and result.items == [] and result.covered_count == 0
+                assert result.missing_nm_ids == [123]
+                assert "incomplete_collector_cannot_confirm_empty_campaign_set=true" in result.detail
 
 
 def _assert_cross_year_parse_rule() -> None:

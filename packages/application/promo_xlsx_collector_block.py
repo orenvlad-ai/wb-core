@@ -1533,7 +1533,9 @@ def extract_card_data(
     if title_index < 0:
         title_index = 0
     card_lines = lines[title_index : title_index + 80]
-    promo_period_text = next((line for line in card_lines[1:] if "→" in line), "")
+    promo_period_text = next(
+        (line for line in card_lines[1:] if re.search(r"\d{2}:\d{2}\s*[→–—-]", line)), ""
+    )
     ui_status_evidence = classify_card_ui_status(
         card_lines=card_lines,
         snapshot=snapshot,
@@ -1547,6 +1549,11 @@ def extract_card_data(
     promo_status_text = next((line for line in card_lines[1:] if line.startswith("Автоакция:")), None)
     promo_start_at, promo_end_at, confidence = parse_period_text(promo_period_text, reference_year=reference_year)
     temporal_classification = classify_temporal_status(promo_status)
+    if temporal_classification == "ambiguous" and title_matched and confidence == "high":
+        observed_at = datetime.fromisoformat(snapshot.ts).astimezone(BUSINESS_TIMEZONE).replace(tzinfo=None)
+        start_at = datetime.fromisoformat(promo_start_at)
+        end_at = datetime.fromisoformat(promo_end_at)
+        temporal_classification = "future" if observed_at < start_at else "past" if observed_at > end_at else "current"
     eligible_count, participating_count, excluded_count = extract_counts(card_lines)
     raw_card_excerpt = "\n".join(card_lines)
     promo_id = parse_promo_id(snapshot.url)
@@ -1710,7 +1717,7 @@ def classify_collector_preflight(card: PromoCardData) -> dict[str, Any]:
 
 def parse_period_text(period_text: str, *, reference_year: int) -> tuple[str | None, str | None, str]:
     match = re.search(
-        r"(?P<start_day>\d{1,2})\s+(?P<start_month>[А-Яа-яё]+)\s+(?P<start_time>\d{2}:\d{2})\s*[→-]\s*(?P<end_day>\d{1,2})\s+(?P<end_month>[А-Яа-яё]+)\s+(?P<end_time>\d{2}:\d{2})",
+        r"(?P<start_day>\d{1,2})\s+(?P<start_month>[А-Яа-яё]+)\s+(?P<start_time>\d{2}:\d{2})\s*[→–—-]\s*(?P<end_day>\d{1,2})\s+(?P<end_month>[А-Яа-яё]+)\s+(?P<end_time>\d{2}:\d{2})",
         period_text,
     )
     if not match:

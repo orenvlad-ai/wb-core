@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import sys
@@ -132,6 +132,21 @@ def main() -> None:
     if ended_card.campaign_identity_match is not True:
         raise AssertionError(f"ended card must keep title-match guard, got {ended_card}")
 
+    # Current WB drawer uses an en dash and participation label, not "Акция идёт".
+    for observed, expected in [("2026-09-03T10:00:00+05:00", "future"), ("2026-09-06T10:00:00+05:00", "current"), ("2026-09-29T10:00:00+05:00", "past")]:
+        card = extract_card_data(
+            snapshot=replace(ended_card.state_snapshot, ts=observed, has_configure=True,
+                body_excerpt="Автоакция.Бархатные скидки\n04 сентября 02:00 – 28 сентября 01:59(24 дня)\nУчаствую\n33 подходящих товара\nНастроить список товаров"),
+            fallback_title="Бархатные скидки", source_tab="Доступные", source_filter_code="AVAILABLE", reference_year=2026,
+        )
+        assert card.promo_start_at == "2026-09-04T02:00"
+        assert card.promo_end_at == "2026-09-28T01:59"
+        assert card.temporal_classification == expected, card
+        assert card.download_action_state == "available", card
+    for label in ["04 - 28 сентября", "28 декабря 02:00 – 04 января 01:59"]:
+        assert parse_period_text(label, reference_year=2026) == (None, None, "low")
+
+    _assert_drawer_capture_is_scoped()
     timeline_candidate = build_timeline_candidate(
         TimelineBlockSnapshot(
             index=0,
@@ -418,6 +433,34 @@ def _assert_manifest_response_callback_never_reads_body() -> None:
         raise AssertionError(f"manifest replay must have one exact bounded GET, got {calls}")
     if not driver.campaign_manifest_snapshot().manifest_loaded_success:
         raise AssertionError("bounded manifest replay must preserve successful manifest semantics")
+
+
+def _assert_drawer_capture_is_scoped() -> None:
+    from tempfile import TemporaryDirectory
+    from unittest.mock import MagicMock
+    from packages.adapters.promo_xlsx_collector_block import DRAWER_ROOT_SELECTOR
+
+    with TemporaryDirectory() as tmp:
+        driver = PlaywrightPromoCollectorDriver(Path(tmp))
+        page = MagicMock()
+        page.url = "https://seller.wildberries.ru/dp-promo-calendar?action=2848"
+        page.title.return_value = "Акции WB"
+        body = MagicMock()
+        body.inner_text.return_value = "Чужая акция\nАкция завершилась"
+        drawer = MagicMock()
+        drawer.inner_text.return_value = "Наша акция\n04 сентября 02:00 – 28 сентября 01:59\nУчаствую"
+        drawer.count.return_value = 1
+        drawer.is_visible.return_value = True
+        page.locator.side_effect = lambda selector: drawer if selector == DRAWER_ROOT_SELECTOR else body
+        driver._page = page
+        driver._count = lambda selector: 0
+        driver._modal_entry_count = lambda: 0
+        driver._has_text = lambda text: False
+        driver._has_generate = driver._has_download = driver._has_ready = driver._cookie_button_visible = lambda: False
+        state = driver.capture_state("card", persist=False)
+        assert state.body_excerpt == drawer.inner_text.return_value
+        drawer.is_visible.return_value = False
+        assert driver.capture_state("timeline", persist=False).body_excerpt == body.inner_text.return_value
 
 
 class _HydrationExceptionDriver:

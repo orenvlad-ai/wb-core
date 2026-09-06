@@ -352,6 +352,9 @@ class PlaywrightPromoCollectorDriver:
     def capture_state(self, label: str, *, persist: bool = True) -> CollectorStateSnapshot:
         page = self._require_page()
         body_text = page.locator("body").inner_text()
+        # Read the open campaign, not neighbouring timeline cards and tooltips.
+        drawer = page.locator(DRAWER_ROOT_SELECTOR)
+        card_text = drawer.inner_text() if drawer.count() and drawer.is_visible() else body_text
         ts = _now_iso()
         screenshot_path = self._artifacts_dir / f"{_ts_slug()}__{label}.png"
         json_path = screenshot_path.with_suffix(".json")
@@ -370,7 +373,7 @@ class PlaywrightPromoCollectorDriver:
             has_download=self._has_download(),
             has_ready=self._has_ready(),
             has_cookie_accept=self._cookie_button_visible(),
-            body_excerpt=body_text[:16000],
+            body_excerpt=card_text[:16000],
             visible_tabs=[tab for tab in VISIBLE_TABS if tab in body_text],
             screenshot=str(screenshot_path),
         )
