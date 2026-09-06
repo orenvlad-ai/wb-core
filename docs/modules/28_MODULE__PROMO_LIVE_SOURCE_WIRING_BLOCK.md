@@ -127,6 +127,12 @@ Refresh diagnostics для `promo_by_price` дополнительно surface-�
 - Later invalid current attempt:
   - не может очищать already accepted same-day promo truth;
   - surface-ится как `resolution_rule=accepted_current_preserved_after_invalid_attempt`.
+- Неполный live collector с пустым набором campaign rows возвращает `incomplete`,
+  а не успешные нули: отсутствие распознанных акций не доказывает их отсутствие.
+  Collector читает открытую панель акции отдельно от timeline; точный период
+  с временем допускает `→`, `-`, `–`, `—`. При отсутствии lifecycle label статус
+  определяется по этому периоду и времени наблюдения, только после title match.
+  Короткие даты без времени и неоднозначный переход года остаются неподтверждёнными.
 
 # 5. Source -> runtime mapping
 

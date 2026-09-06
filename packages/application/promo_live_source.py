@@ -23,6 +23,7 @@ from packages.application.promo_campaign_archive import (
 from packages.application.promo_xlsx_collector_block import PromoXlsxCollectorBlock
 from packages.contracts.promo_live_source import (
     PromoLiveSourceEnvelope,
+    PromoLiveSourceIncomplete,
     PromoLiveSourceRequest,
 )
 from packages.contracts.promo_xlsx_collector_block import PromoXlsxCollectorRequest
@@ -231,6 +232,26 @@ class PromoLiveSourceBlock:
             detail_prefix=detail_prefix,
             diagnostics=diagnostics,
         )
+        if (
+            collector_summary is not None
+            and collector_summary.status != "success"
+            and result.kind == "success"
+            and "no_covering_campaign_rows_for_requested_nm_ids=true" in result.detail
+        ):
+            # An incomplete discovery cannot prove that no campaigns exist.
+            values = asdict(result)
+            values.update(
+                kind="incomplete", covered_count=0, items=[],
+                missing_nm_ids=list(request.nm_ids),
+                detail=result.detail + "; incomplete_collector_cannot_confirm_empty_campaign_set=true",
+            )
+            result = PromoLiveSourceIncomplete(**values)
+            _set_promo_counter(diagnostics, "accepted_row_count", 0)
+            _set_promo_counter(diagnostics, "covered_count", 0)
+            _append_instant_promo_phase(
+                diagnostics, "source_payload_build", status="incomplete",
+                note_kind="incomplete_collector_cannot_confirm_empty_campaign_set",
+            )
         _finish_promo_phase(diagnostics, promo_total_phase, status=str(getattr(result, "kind", "") or "unknown"))
         _finalize_promo_diagnostics(diagnostics)
         result = replace(result, diagnostics=dict(diagnostics))
