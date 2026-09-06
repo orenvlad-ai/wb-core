@@ -450,7 +450,7 @@ def _assert_drawer_capture_is_scoped() -> None:
         drawer = MagicMock()
         drawer.inner_text.return_value = "Наша акция\n04 сентября 02:00 – 28 сентября 01:59\nУчаствую"
         drawer.count.return_value = 1
-        drawer.is_visible.return_value = True
+        drawer.is_visible.return_value = False
         page.locator.side_effect = lambda selector: drawer if selector == DRAWER_ROOT_SELECTOR else body
         driver._page = page
         driver._count = lambda selector: 0
@@ -459,7 +459,7 @@ def _assert_drawer_capture_is_scoped() -> None:
         driver._has_generate = driver._has_download = driver._has_ready = driver._cookie_button_visible = lambda: False
         state = driver.capture_state("card", persist=False)
         assert state.body_excerpt == drawer.inner_text.return_value
-        drawer.is_visible.return_value = False
+        drawer.inner_text.return_value = ""
         assert driver.capture_state("timeline", persist=False).body_excerpt == body.inner_text.return_value
 
 
