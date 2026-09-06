@@ -354,7 +354,9 @@ class PlaywrightPromoCollectorDriver:
         body_text = page.locator("body").inner_text()
         # Read the open campaign, not neighbouring timeline cards and tooltips.
         drawer = page.locator(DRAWER_ROOT_SELECTOR)
-        card_text = drawer.inner_text() if drawer.count() and drawer.is_visible() else body_text
+        # The portal can have zero size while its fixed-position children are visible.
+        drawer_text = drawer.inner_text() if drawer.count() else ""
+        card_text = drawer_text.strip() or body_text
         ts = _now_iso()
         screenshot_path = self._artifacts_dir / f"{_ts_slug()}__{label}.png"
         json_path = screenshot_path.with_suffix(".json")
