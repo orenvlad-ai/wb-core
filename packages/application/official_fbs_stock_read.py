@@ -17,7 +17,7 @@ def _number(value):
         raise ValueError("invalid_nonnegative_integer_stock")
     return result
 
-def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list[int],
+def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list[int] | None,
                                     day: str, now: datetime) -> dict:
     generation = _complete_source_generation(conn)
     if not generation.get("complete"):
@@ -31,7 +31,7 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
     facilities = {str(w["facility_id"]): w for w in scope["warehouses"]}
     if len(facilities) != scope["warehouse_count"]:
         raise ValueError("ambiguous_facilities")
-    stocks: dict[int, dict[str, Decimal]] = {nm: {} for nm in universe}
+    stocks: dict[int, dict[str, Decimal]] = {nm: {} for nm in universe or []}
     identities = None
     captured = []
     facility_evidence = {}
@@ -59,6 +59,8 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
             f"SELECT chrt_id,nm_id,amount,provenance FROM {STOCK_ROWS_TABLE} WHERE run_id=?",
             (stock_run["run_id"],),
         ).fetchall()
+        if universe is None and identities is None:
+            stocks = {nm: {} for nm in sorted({int(r["nm_id"]) for r in stock_rows})}
         identity = {(int(r["chrt_id"]), int(r["nm_id"])) for r in stock_rows}
         if (len(identity) != int(catalog["requested_chrt_count"])
                 or (identities is not None and identity != identities)):
@@ -79,7 +81,7 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
         "available": True, "date": day, "source": OFFICIAL_STOCK_SOURCE,
         "generation_id": run["run_id"], "generation_digest": run["generation_digest"],
         "captured_at": min(captured), "catalog_sku_count": catalog["active_nm_id_count"],
-        "sku_count": len(universe), "facilities": sorted(facilities), "skus": {},
+        "sku_count": len(stocks), "facilities": sorted(facilities), "skus": {},
         "facility_evidence": facility_evidence,
     }
     result["skus"] = {nm: {"facilities": values} for nm, values in stocks.items()}
@@ -87,11 +89,11 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
 
 
 def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
-    """Freeze facility quantities and source identity in one read-only transaction."""
+    """Freeze quantities and source identity; None requests the full admitted catalog."""
     from decimal import InvalidOperation
     from packages.application.wb_fbs_warehouse_registry import _connect_readonly
     from packages.application.ff_pool_foundation import FACILITY_PROFILES_TABLE
-    universe = sorted(set(int(nm) for nm in requested_nm_ids))
+    universe = sorted(set(int(nm) for nm in requested_nm_ids)) if requested_nm_ids is not None else None
     day = current_business_date_iso(now)
     result = {"source": OFFICIAL_STOCK_SOURCE, "date": day, "facilities": []}
     try:
@@ -102,11 +104,13 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                 f"FROM {FACILITIES_TABLE} f LEFT JOIN {FACILITY_PROFILES_TABLE} p "
                 "ON p.facility_id=f.facility_id WHERE f.active=1 ORDER BY f.code,f.facility_id")]
             try:
-                if not universe:
+                if universe == []:
                     raise ValueError("empty_active_catalog")
                 stock = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now)
             except (sqlite3.Error, ValueError, TypeError, KeyError, InvalidOperation) as exc:
                 stock = {"available": False, "reason": str(exc)}
+            result["requested_nm_ids"] = sorted(stock.get("skus", {})) if universe is None else universe
+            result["catalog_sku_count"] = stock.get("catalog_sku_count")
             for facility in facilities:
                 fid = facility["facility_id"]
                 available = stock.get("available") and fid in stock["facilities"]
@@ -115,7 +119,7 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                             "generation_digest": stock.get("generation_digest"),
                             **stock.get("facility_evidence", {}).get(fid, {})}
                 values = [{"nm_id": nm, "available": int(stock["skus"][nm]["facilities"][fid]),
-                           "state": "official_declared_stock"} for nm in universe] if available else []
+                           "state": "official_declared_stock"} for nm in result["requested_nm_ids"]] if available else []
                 reason = stock.get("reason", "facility_outside_complete_scope")
                 reason_ru = (
                     "Официальный снимок остатков FBS устарел: нужен снимок за сегодня не старше 30 минут."

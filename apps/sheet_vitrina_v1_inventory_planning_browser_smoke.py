@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -254,7 +256,6 @@ def main() -> int:
                 "Остаток WB: всего",
                 "Остаток FBS: всего",
                 "Остаток FBS: Москва",
-                "Остаток FBS: Оренбург",
                 "Остаток: всего",
             ]
             control_labels = page.locator(
@@ -271,6 +272,9 @@ def main() -> int:
                 raise AssertionError(
                     f"ordinary planning cards leaked legacy incident metrics: {card_labels}"
                 )
+            # Orenburg is inactive in this fixture; official current cards cover
+            # active facilities only, while legacy history above stays intact.
+            assert "официальный снимок WB" in page.locator('[data-inventory-planning-meta]').inner_text()
             planning_payload = page.evaluate(
                 """async path => {
                   const response = await fetch(path, {headers: {Accept: "application/json"}});
@@ -287,6 +291,31 @@ def main() -> int:
                 raise AssertionError(
                     "presentation cleanup removed retained incident audit evidence"
                 )
+
+            from apps.warehouse_official_fbs_cards_smoke import seed, NOW
+            from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
+            with TemporaryDirectory() as tmp:
+                official_path = Path(tmp) / "official.sqlite3"
+                seed(official_path).close()
+                official_payload = InventoryPlanningReadModel(db_path=official_path).current_official_snapshot(now=NOW)
+            page.route("**" + DEFAULT_INVENTORY_PLANNING_PATH, lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(official_payload)))
+            page.locator('[data-inventory-planning-refresh]').click()
+            expect(page.locator('[data-inventory-planning-metrics] .inventory-metric-card strong')).to_have_text(
+                ["10 шт", "29 008 шт", "29 003 шт", "5 шт", "29 018 шт"], use_inner_text=True)
+            disclosure = page.locator('[data-inventory-planning-disclosure]')
+            disclosure.locator('xpath=..').evaluate('node => { node.open = true; }')
+            assert "Заявлено на WB, шт." in disclosure.inner_text()
+            assert "Physical" not in disclosure.inner_text() and "Reserved" not in disclosure.inner_text()
+            expected_fbs_time = page.evaluate('value => warehouseDate(value)', official_payload['freshness']['fbs_updated_at'])
+            assert expected_fbs_time in page.locator('[data-inventory-planning-meta]').inner_text()
+            screenshots = os.environ.get("INVENTORY_PLANNING_SCREENSHOT_DIR", "").strip()
+            if screenshots:
+                Path(screenshots).mkdir(parents=True, exist_ok=True)
+                page.locator('[data-inventory-planning-card]').screenshot(path=str(Path(screenshots) / "official-fbs-mobile.png"))
+                page.set_viewport_size({"width": 1366, "height": 900})
+                page.locator('[data-inventory-planning-card]').screenshot(path=str(Path(screenshots) / "official-fbs-desktop.png"))
+                page.set_viewport_size({"width": 390, "height": 844})
 
             responsive = page.evaluate(
                 """() => ({

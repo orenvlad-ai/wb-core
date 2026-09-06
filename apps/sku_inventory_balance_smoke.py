@@ -604,6 +604,8 @@ def _official_fbs_balance_checks():
 
 
 def main() -> None:
+    from apps.warehouse_official_fbs_cards_smoke import main as warehouse_official_cards_checks
+    warehouse_official_cards_checks()
     _official_fbs_balance_checks()
     _aggregate_wb_balance_fallback_checks()
     evidence_block = object.__new__(SkuManagementBlock)

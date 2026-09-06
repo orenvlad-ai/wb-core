@@ -9,7 +9,7 @@ unavailable instead of being reconstructed or treated as zero.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -146,6 +146,106 @@ class InventoryPlanningReadModel:
 
     def __init__(self, *, db_path: Path) -> None:
         self.db_path = Path(db_path)
+
+    def current_official_snapshot(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """Warehouse cards only: official declared FBS, never physical/reserved.
+
+        Keep the legacy planning projection used by Web Vitrina independent of
+        this current-only display. Reading cards cannot refresh or rewrite it.
+        """
+        from packages.application.official_fbs_stock_read import current_official_fbs_facilities
+
+        with _connect_readonly(self.db_path) as conn:
+            conn.execute("BEGIN")
+            tables = _tables(conn)
+            snapshot = (
+                _active_wb_snapshot(conn)
+                if {FUNCTIONAL_ACTIVE_TABLE, WB_SNAPSHOTS_TABLE} <= tables else None
+            )
+            wb_items = _wb_items(snapshot) if snapshot is not None else []
+            incident = (
+                _incident_deduction(conn, seller_id=canonical_seller_id(), snapshot=snapshot, wb_items=wb_items)
+                if snapshot is not None and {INCIDENT_POLICY_TABLE, INCIDENT_MANIFESTS_TABLE, INCIDENT_LINES_TABLE} <= tables
+                else {"quantity": None, "quality": "unavailable", "reason_ru": "Нет точных данных об инцидентах WB."}
+            )
+        # Warehouse totals include the full admitted official catalog, including
+        # products outside the narrower SKU Management config and WB stock rows.
+        official = current_official_fbs_facilities(
+            self.db_path, requested_nm_ids=None, now=now or datetime.now(timezone.utc),
+        )
+        nm_ids = official.get("requested_nm_ids") or []
+        facilities = official.get("facilities") or []
+        complete = bool(facilities) and all(f["available"] is not None for f in facilities)
+        fbs_total = sum(f["available"] for f in facilities) if complete else None
+        wb_total = sum(item["quantity"] for item in wb_items) if snapshot is not None else None
+        total = wb_total + fbs_total if wb_total is not None and fbs_total is not None else None
+        blockers = list(dict.fromkeys(f["source_blocker"] for f in facilities if f.get("source_blocker")))
+        fbs_reason = " ".join(blockers) or (
+            "" if complete else str(official.get("reason") or "Нет полного официального снимка остатков FBS.")
+        )
+        wb_reason = "" if snapshot is not None else "Нет активного официального снимка остатков WB."
+        metrics = [
+            _metric("wb_total", "Остаток WB: всего", wb_total,
+                    "exact" if wb_total is not None else "unavailable", reason_ru=wb_reason),
+            _metric("fbs_total", "Остаток FBS: всего", fbs_total,
+                    "official_declared_stock" if complete else "unavailable", reason_ru=fbs_reason),
+        ]
+        metrics.extend(
+            _metric(f"fbs_facility:{f['facility_id']}", f"Остаток FBS: {f['name']}",
+                    f["available"], "official_declared_stock" if f["available"] is not None else "unavailable",
+                    reason_ru=f.get("source_blocker", ""))
+            for f in facilities
+        )
+        metrics.append(_metric("total", "Остаток: всего", total,
+                               "exact" if total is not None else "unavailable",
+                               reason_ru=" ".join(filter(None, (wb_reason, fbs_reason)))))
+        # Retain the hidden incident audit fields without changing their WB rule.
+        wb_effective = wb_total - incident["quantity"] if wb_total is not None and incident["quantity"] is not None else None
+        effective_total = wb_effective + fbs_total if wb_effective is not None and fbs_total is not None else None
+        metrics.extend([
+            _metric("wb_effective_total", "Остаток WB без инц.: всего", wb_effective,
+                    incident["quality"], reason_ru=incident["reason_ru"]),
+            _metric("effective_total", "Остаток без инц.: всего", effective_total,
+                    "exact" if effective_total is not None else "unavailable",
+                    reason_ru=" ".join(filter(None, (incident["reason_ru"], fbs_reason)))),
+        ])
+        captured = [f["stock_source"]["captured_at"] for f in facilities
+                    if f["available"] is not None and f["stock_source"].get("captured_at")]
+        wb_by_nm = {item["nm_id"]: item["quantity"] for item in wb_items}
+        per_facility = {f["facility_id"]: {v["nm_id"]: v["available"] for v in f["sku_values"]}
+                        for f in facilities}
+        skus = []
+        for nm_id in nm_ids:
+            values = [per_facility[f["facility_id"]].get(nm_id) for f in facilities]
+            quantity = sum(values) if complete and all(v is not None for v in values) else None
+            skus.append({"nm_id": nm_id, "wb_total": wb_by_nm.get(nm_id), "fbs_total": quantity,
+                         "fbs_facilities": [{"facility_id": f["facility_id"], "available": value,
+                                             "stock_source": f["stock_source"]}
+                                            for f, value in zip(facilities, values)]})
+        return _etagged({
+            "contract_name": CONTRACT_NAME, "contract_version": 3,
+            "surface": "warehouse_official_stock_cards", "status": "ready",
+            "metrics": metrics, "skus": skus,
+            "formula": {"version": "inventory_planning_official_fbs_v2",
+                        "stock_total": "Остаток WB: всего + официальный остаток FBS: всего",
+                        "fbs_available": "Сумма официально заявленных остатков WB по активным складам FBS",
+                        "history_rule": "Обновляется только текущий источник; история и сохранённые расчёты не меняются.",
+                        "six_stage_total_changed": False, "accounting_operand_added": False},
+            "wb": {"raw_total": wb_total,
+                   "incident_evidence": incident,
+                   "snapshot_id": str(snapshot["snapshot_id"]) if snapshot is not None else None,
+                   "snapshot_date": str(snapshot["snapshot_date"]) if snapshot is not None else None,
+                   "snapshot_digest": str(snapshot["raw_rows_digest"]) if snapshot is not None else None,
+                   "fetched_at": str(snapshot["fetched_at"]) if snapshot is not None else None},
+            "fbs": {"available": fbs_total, "facilities": facilities,
+                    "source": official.get("source"), "date": official.get("date"),
+                    "scope": "complete_official_catalog",
+                    "sku_count": official.get("catalog_sku_count"), "complete": complete,
+                    "source_blocker": fbs_reason, "legacy_ledger_used": False, "lifecycle_used": False},
+            "freshness": {"wb_fetched_at": str(snapshot["fetched_at"]) if snapshot is not None else None,
+                          "fbs_updated_at": min(captured) if complete and captured else None},
+            "privacy": {"contains_pii": False, "contains_raw_wb_payload": False},
+        })
 
     def current_fbs_facilities(
         self,

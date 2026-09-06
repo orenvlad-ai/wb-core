@@ -6165,7 +6165,7 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_inventory_planning_request(self) -> dict[str, Any]:
-        return self.inventory_planning.current()
+        return self.inventory_planning.current_official_snapshot()
 
     def _ff_aggregate_revision(self) -> str:
         detail = self.warehouse_functional_block.compact_warehouse_detail("ff")
