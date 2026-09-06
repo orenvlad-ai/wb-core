@@ -410,7 +410,10 @@ class RegistryUploadDbBackedRuntime:
             materialize_current_official_fbs_estimate,
             load_materialized_official_fbs_presentation,
         )
-        from packages.application.web_vitrina_management_history import carry_forward, load_presentations, dated_parameters, recalculate_current_envelope
+        from packages.application.web_vitrina_management_history import (
+            carry_forward, load_presentations, dated_parameters, recalculate_current_envelope,
+            recalculate_yesterday_envelope, yesterday_date,
+        )
         from packages.business_time import current_business_date_iso
 
         publication_now = datetime.now(timezone.utc)
@@ -441,6 +444,8 @@ class RegistryUploadDbBackedRuntime:
             ), business_date=publication_date)
             plan = recalculate_current_envelope(plan, business_date=publication_date,
                 parameters=dated_parameters(conn, publication_date) if estimate.get('available') else None)
+            plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
+                parameters=dated_parameters(conn, yesterday_date(publication_date)))
             _assert_finance_daily_recovery_values_preserved(
                 conn,
                 bundle_version=current_state.bundle_version,

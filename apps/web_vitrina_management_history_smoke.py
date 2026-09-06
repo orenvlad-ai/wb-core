@@ -142,6 +142,7 @@ def main():
             key=change['row_id']
             assert transformed['metadata']['server_cell_presentation'][key][day]==owned['metadata']['server_cell_presentation'][key][day]
             assert next(r[2] for r in data_sheet(transformed)['rows'] if r[1]==key)==change['after']
+    _dated_proxy_regressions(result['plan'], p3, p4)
     _writer_rollover(rows, p3, p4)
     print('management_history: mixed exact/estimate, no missing-to-zero, dated formulas, eligible TOTAL, idempotency, rollover, cross-bundle exact column: ok')
 
@@ -195,9 +196,114 @@ def _writer_rollover(base_rows,p3,p4):
         with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
             runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-06T10:10:00Z',plan=tomorrow)
         closed=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
-        assert next(r[2] for r in closed.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==lastprofit
+        assert next(r[2] for r in closed.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==''
         assert next(r[2] for r in closed.sheets[0].rows if r[1]=='SKU:1|our_wb_unit_cost_rub')==lastcost
         assert closed.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub']['2026-09-05']['source']=='official_fbs_management_inventory_v1'
+        # Yesterday accepts new orders, while today's inventory cannot leak back.
+        accepted=deepcopy(tomorrow.sheets[0].rows)
+        for row in accepted:
+            metric=row[1].split('|')[1]
+            if metric=='orderSum': row[2]=3000
+            elif metric=='orderCount': row[2]=6
+            elif metric=='ads_sum': row[2]=40
+        tomorrow=replace(tomorrow,snapshot_id='save6-complete',sheets=[replace(tomorrow.sheets[0],rows=accepted),status])
+        current_p4=SimpleNamespace(buyout_rate=Decimal('.2'),included_expense_rate=Decimal('.6'),retained_share=Decimal('.4'),version_id='today-different-v4')
+        current_model=deepcopy(model);current_model['date']='2026-09-06';current_model['skus'][1]['cost']+=Decimal('500')
+        def choose_dated(conn,day):return (p3,p4 if day=='2026-09-05' else current_p4)
+        with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_management_history.dated_parameters',side_effect=choose_dated) as selected, patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value=current_model):
+            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-06T10:20:00Z',plan=tomorrow)
+            complete=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
+            values={r[1]:r[2] for r in complete.sheets[0].rows}
+            exact_cost=Decimal(complete.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub']['2026-09-05']['management_value'])
+            assert abs(values['SKU:1|proxy_profit_4_rub']-float(Decimal(3000)*p4.buyout_rate*p4.retained_share-Decimal(6)*p4.buyout_rate*exact_cost-40))<1e-9
+            assert values['SKU:1|our_wb_unit_cost_rub']==lastcost
+            assert {call.args[1] for call in selected.call_args_list}=={'2026-09-05','2026-09-06'}
+            assert complete.metadata['server_cell_presentation']['SKU:1|proxy_profit_4_rub']['2026-09-05']['evidence']['proxy4_version']==p4.version_id
+            # Repeated ordinary publication must not put back the old profit.
+            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-06T10:30:00Z',plan=tomorrow)
+            repeated=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
+            assert repeated.sheets[0].rows==complete.sheets[0].rows
+        # Once it becomes older history, the accepted correction survives.
+        Clock.current=datetime(2026,9,7,10,10,tzinfo=timezone.utc)
+        with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
+            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-07T10:10:00Z',plan=tomorrow)
+        older=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
+        assert next(r[2] for r in older.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==values['SKU:1|proxy_profit_4_rub']
+
+
+
+def _dated_proxy_regressions(seed, p3, p4):
+    from packages.application.web_vitrina_management_history import (
+        recalculate_dated_proxy, data_sheet, non_target_digest, digest,
+        recalculate_yesterday_rows, recalculate_corrected_unit_margin_rows, corrected_proxy_dates,
+    )
+    from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
+    from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter
+    from apps.production_apply_launcher import execute
+    day='2026-09-01'
+    plan=deepcopy(seed)
+    plan['date_columns']=[day,'2026-08-31']
+    sheet=data_sheet(plan);sheet['header'].append('2026-08-31')
+    for row in sheet['rows']:row.append(777)
+    next(r for r in sheet['rows'] if r[1]=='SKU:1|orderSum')[2]=2000
+    result=recalculate_dated_proxy(plan,day=day,parameters=(p3,p4),operation_id='test-proxy-repair')
+    assert non_target_digest(plan,result['changes'])==non_target_digest(result['plan'],result['changes'])
+    values={r[1]:r[2] for r in data_sheet(result['plan'])['rows']}
+    assert values['SKU:1|proxy_profit_4_rub']==1078
+    assert abs(values['TOTAL|proxy_margin_4_pct_total']-(1078+550)/2400)<1e-12
+    assert all(r[3]==777 for r in data_sheet(result['plan'])['rows'])
+    assert recalculate_dated_proxy(result['plan'],day=day,parameters=(p3,p4),operation_id='another-run')['changes']==[]
+    zero=deepcopy(plan)
+    zero['metadata']['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub'][day]['management_value']=0
+    z=recalculate_dated_proxy(zero,day=day,parameters=(p3,p4),operation_id='zero-cost')
+    assert next(r[2] for r in data_sheet(z['plan'])['rows'] if r[1]=='SKU:1|proxy_profit_4_rub')==1110
+    missing=deepcopy(plan)
+    next(r for r in data_sheet(missing)['rows'] if r[1]=='SKU:1|ads_sum')[2]=''
+    partial=recalculate_dated_proxy(missing,day=day,parameters=(p3,p4),operation_id='missing-input')
+    mv={r[1]:r[2] for r in data_sheet(partial['plan'])['rows']}
+    assert all(mv[k]=='' for k in ['SKU:1|proxy_profit_3_rub','SKU:1|proxy_profit_4_rub',
+        'TOTAL|total_proxy_profit_3_rub','TOTAL|total_proxy_profit_4_rub','TOTAL|proxy_margin_3_pct_total','TOTAL|proxy_margin_4_pct_total'])
+    rows=[WebVitrinaContractRow(row_id=r[1],row_order=i,scope_kind=r[1].split(':')[0],scope_key=r[1].split('|')[0],
+        scope_label='',metric_key=r[1].split('|')[1],metric_label='',row_last_updated_at='',section='',group=None,nm_id=None,format=None,
+        values_by_date={day:r[2],'2026-08-31':r[3]},presentation_by_date=result['plan']['metadata']['server_cell_presentation'].get(r[1],{}))
+        for i,r in enumerate(data_sheet(result['plan'])['rows'])]
+    # Simulate the historical read restore followed by the final projection.
+    stale=restore_rows(rows,presentation=seed['metadata']['server_cell_presentation'],business_date='2026-09-02')
+    read=recalculate_yesterday_rows(stale,business_date='2026-09-02',parameters=(p3,p4),
+        original_presentation=result['plan']['metadata']['server_cell_presentation'],snapshot_id='test')
+    assert next(r for r in read if r.row_id=='SKU:1|proxy_profit_4_rub').values_by_date[day]==1078
+    derived=recalculate_corrected_unit_margin_rows(read,parameters={d:(p3,p4) for d in corrected_proxy_dates(read)})
+    assert next(r for r in derived if r.row_id=='SKU:1|proxy_margin_per_unit_rub').values_by_date[day]==1078/3.2
+    assert next(r for r in derived if r.row_id=='TOTAL|proxy_margin_per_unit_rub_total').values_by_date[day]==1078/3.2
+    assert all(r.values_by_date['2026-08-31']==777 for r in derived)
+    # The existing adapter owns exact before-images, non-target CAS and one submit.
+    with TemporaryDirectory() as tmp:
+        root=Path(tmp);db=root/'operational.sqlite3';runtime=root/'state';runtime.mkdir()
+        conn=sqlite3.connect(db)
+        conn.executescript("CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version TEXT,activated_at TEXT,as_of_date TEXT,snapshot_id TEXT,plan_version TEXT,refreshed_at TEXT,plan_json TEXT);"
+            "CREATE TABLE sheet_vitrina_v1_calculation_parameter_versions(block_key TEXT,effective_date TEXT,revision INTEGER,created_at TEXT);"
+            "CREATE TABLE sheet_vitrina_v1_proxy_v4_parameter_versions(block_key TEXT,effective_date TEXT,revision INTEGER,created_at TEXT);")
+        from packages.application.calculation_parameters import PROXY_BLOCK_KEY
+        from packages.application.calculation_parameters_v4 import PROXY_V4_BLOCK_KEY
+        for table,block in [('sheet_vitrina_v1_calculation_parameter_versions',PROXY_BLOCK_KEY),('sheet_vitrina_v1_proxy_v4_parameter_versions',PROXY_V4_BLOCK_KEY)]:
+            conn.execute('INSERT INTO '+table+' VALUES(?,?,?,?)',(block,'2026-08-01',1,'2026-08-01'))
+        conn.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?,?,?,?)',('b','2026-08-01',day,'s1','v1','2026-09-02',json.dumps(plan)))
+        conn.commit();conn.close()
+        source={'column_date':'2026-09-06','snapshot_id':'dated-accepted-ready-inputs-v1','bundle_version':'b','costs':{}}
+        request={'runtime_dir':str(runtime),'runtime_sha':'a'*40,'source':source,'source_sha256':digest(source),'dates':[day],'recalculate_proxy_only':True}
+        adapter=WebVitrinaManagementHistoryAdapter()
+        with patch.object(adapter,'target',return_value=(runtime,db)), patch('apps.web_vitrina_management_history.parameters3',return_value=p3), patch('apps.web_vitrina_management_history.parameters4',return_value=p4), patch('packages.business_time.current_business_date_iso',return_value='2026-09-06'):
+            preview=adapter.preview(request,'test-proxy-repair')
+            candidate=preview['candidate']
+            assert all(c['row_id'].split('|')[1] in {'proxy_profit_3_rub','total_proxy_profit_3_rub','proxy_margin_3_pct','proxy_margin_3_pct_total','proxy_profit_4_rub','total_proxy_profit_4_rub','proxy_margin_4_pct','proxy_margin_4_pct_total'} for c in candidate['changes'])
+            receipt=execute(action='apply',adapter_name='test',operation_id='test-proxy-repair',request=request,
+                expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters={'test':adapter})
+            assert receipt['state']=='applied' and receipt['readback']['mismatches']==[]
+            assert (runtime/'evidence'/'test-proxy-repair.before.json').is_file()
+            # Same operation is resolved by readback, never resubmitted.
+            with patch.object(adapter,'apply',side_effect=AssertionError('double submit')):
+                assert execute(action='apply',adapter_name='test',operation_id='test-proxy-repair',request=request,
+                    expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters={'test':adapter})['state']=='applied'
 
 
 if __name__ == '__main__':
