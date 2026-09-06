@@ -383,6 +383,84 @@ def parse_china_acceptance_workbook(
     }
 
 
+def build_china_acceptance_form_manifest(
+    *,
+    shipment_lines: Iterable[Mapping[str, Any]],
+    source_revision: str,
+    facilities: Iterable[Mapping[str, Any]],
+    facility_id: str,
+    mode: str,
+    rows: Any = None,
+) -> dict[str, Any]:
+    """Build the same receipt from operator quantities and trusted source only."""
+
+    source = _normalize_source_lines(shipment_lines)
+    if facility_id not in {str(item["facility_id"]) for item in _active_facilities(facilities)}:
+        raise FfPoolXlsxError("unknown_or_inactive_facility", "Выберите действующий склад ФФ.")
+    if mode not in {"FBS", "FBO", "split"}:
+        raise FfPoolXlsxError("invalid_acceptance_mode", "Выберите способ приёмки.")
+
+    def whole(value: Any) -> int:
+        if isinstance(value, bool) or not re.fullmatch(r"[0-9]{1,16}", str(value)) or int(value) > 9_007_199_254_740_991:
+            raise FfPoolXlsxError("invalid_acceptance_quantity", "Количество должно быть целым и неотрицательным.")
+        return int(value)
+
+    supplied: dict[int, Mapping[str, Any]] = {}
+    if rows is not None:
+        if not isinstance(rows, list):
+            raise FfPoolXlsxError("invalid_acceptance_rows", "Некорректный состав приёмки.")
+        for row in rows:
+            if not isinstance(row, Mapping) or set(row) - {
+                "nm_id", "accepted_quantity", "quantity_fbs", "quantity_fbo", "discrepancy_type", "comment"
+            }:
+                raise FfPoolXlsxError("acceptance_fields_not_allowed", "Состав и стоимость поставки определяются сервером.")
+            nm_id = whole(row.get("nm_id"))
+            if nm_id in supplied:
+                raise FfPoolXlsxError("duplicate_resolved_sku", "SKU повторяется в приёмке.")
+            supplied[nm_id] = row
+        if set(supplied) != {int(item["nm_id"]) for item in source}:
+            raise FfPoolXlsxError("incomplete_accepted_composition", "Состав приёмки должен совпадать с поставкой.")
+    elif mode == "split":
+        raise FfPoolXlsxError("incomplete_accepted_composition", "Заполните распределение по каждому SKU.")
+    allocations = []
+    for item in source:
+        nm_id = int(item["nm_id"])
+        row = supplied.get(nm_id, {})
+        expected = int(item["quantity"])
+        accepted = whole(row.get("accepted_quantity", expected))
+        fbs = whole(row.get("quantity_fbs")) if mode == "split" else (accepted if mode == "FBS" else 0)
+        fbo = whole(row.get("quantity_fbo")) if mode == "split" else (accepted if mode == "FBO" else 0)
+        if fbs + fbo != accepted:
+            raise FfPoolXlsxError("allocation_quantity_mismatch", "Сумма FBS и FBO должна равняться фактически принятому количеству.", details={"nm_id": nm_id})
+        derived = "" if accepted == expected else ("shortage" if accepted < expected else "surplus")
+        declared = str(row.get("discrepancy_type") or "")
+        if declared not in {"", "shortage", "surplus", "mis_sort"} or (declared and declared not in {derived, "mis_sort"}):
+            raise FfPoolXlsxError("discrepancy_type_mismatch", "Вид расхождения не соответствует количеству.")
+        allocations.append({
+            "nm_id": nm_id,
+            "barcode": item["barcode"],
+            "sku": item["sku"],
+            "expected_quantity": expected,
+            "accepted_quantity": accepted,
+            "accepted_capital_rub": _decimal_text(Decimal(item["capital_rub"]) * Decimal(accepted) / Decimal(expected)),
+            "quantity_fbs": fbs,
+            "quantity_fbo": fbo,
+            "discrepancy_type": declared or derived,
+            "discrepancy_quantity": abs(accepted - expected),
+            "comment": str(row.get("comment") or "")[:500],
+            "identity_evidence_digest": item["identity_evidence_digest"],
+        })
+    if not any(item["accepted_quantity"] for item in allocations):
+        raise FfPoolXlsxError("empty_actual_acceptance", "Укажите хотя бы одну принятую единицу.")
+    return {
+        "contract_name": CONTRACT_NAME,
+        "profile": "china_acceptance_v1",
+        "facility_id": facility_id,
+        "source_revision": source_revision,
+        "allocations": sorted(allocations, key=lambda item: item["nm_id"]),
+    }
+
+
 def parse_inventory_workbook(
     source_bytes: bytes,
     *,

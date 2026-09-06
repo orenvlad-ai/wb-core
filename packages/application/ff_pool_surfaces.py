@@ -38,6 +38,7 @@ from packages.application.ff_pool_documents import (
 from packages.application.russian_payment_orders import parse_russian_payment_order_pdf
 from packages.application.ff_pool_documents_xlsx import (
     FfPoolXlsxError,
+    build_china_acceptance_form_manifest,
     generate_china_acceptance_workbook,
     generate_inventory_workbook,
 )
@@ -976,6 +977,7 @@ class FfPoolSurface:
         if str(row["document_kind"]) == "china_acceptance":
             allocations = [dict(item) for item in preview.get("allocations") or []]
             preview_summary = {
+                "facility_id": str(preview.get("facility_id") or ""),
                 "expected_quantity": sum(int(item.get("expected_quantity") or 0) for item in allocations),
                 "accepted_quantity": sum(int(item.get("accepted_quantity") or 0) for item in allocations),
                 "quantity_fbs": sum(int(item.get("quantity_fbs") or 0) for item in allocations),
@@ -1994,6 +1996,53 @@ class FfPoolSurface:
             }
         return _etagged(response)
 
+    def china_acceptance_form(self, shipment_id: str) -> dict[str, Any]:
+        shipment, lines, revision = self.supplier_shipment_source(shipment_id)
+        return _etagged({
+            "shipment_id": shipment["shipment_id"],
+            "source_revision": revision,
+            "facilities": self._active_facilities_read(),
+            "lines": [{key: item[key] for key in ("nm_id", "sku", "barcode", "quantity")} for item in lines],
+            "activation": self._guided_acceptance_activation(),
+        })
+
+    def accept_china_form(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        if set(payload) - {"request_id", "shipment_id", "source_revision", "business_date", "facility_id", "mode", "rows", "expenses"}:
+            raise FfPoolSurfaceError("acceptance_fields_not_allowed", "Состав и стоимость поставки определяются сервером.")
+        selected_request = _request_id(payload.get("request_id"))
+        selected_date = _date(payload.get("business_date"), field="business_date")
+        shipment, lines, revision = self.supplier_shipment_source(str(payload.get("shipment_id") or ""))
+        if revision != str(payload.get("source_revision") or ""):
+            raise FfPoolSurfaceError("supplier_source_revision_changed", "Поставка или её стоимость изменились. Откройте приёмку заново.", http_status=409)
+        from packages.business_time import business_date_from_timestamp
+
+        if selected_date > business_date_from_timestamp(self._now()):
+            raise FfPoolSurfaceError("acceptance_date_future", "Фактическая дата приёмки не может быть в будущем.")
+        try:
+            manifest = build_china_acceptance_form_manifest(
+                shipment_lines=lines, source_revision=revision,
+                facilities=self._active_facilities_read(),
+                facility_id=str(payload.get("facility_id") or ""),
+                mode=str(payload.get("mode") or ""), rows=payload.get("rows"),
+            )
+            manifest["expenses"] = payload.get("expenses") or []
+            source_bytes = _json({key: value for key, value in payload.items() if key != "request_id"}).encode("utf-8")
+            identity = DocumentIdentity(
+                request_id=selected_request, source_system="supplier_registry",
+                source_type="china_acceptance_form", source_id=str(shipment["shipment_id"]),
+                source_revision=_guided_request_source_revision(supplier_source_revision=revision, source_sha256=_sha256(source_bytes)),
+                idempotency_epoch=self._preview_epoch(), actor=_actor(actor), business_date=selected_date,
+            )
+            result = self._service(resume=False).accept_preview(
+                identity=identity, document_kind="china_acceptance", manifest=manifest,
+                source_bytes=source_bytes, source_content_type="application/json",
+            )
+        except FfPoolXlsxError as exc:
+            raise _surface_from_xlsx_error(exc) from exc
+        except FfPoolDocumentError as exc:
+            raise _surface_from_document_error(exc) from exc
+        return self.request_status(str(result.get("request_id") or selected_request))
+
     def accept_china_workbook(
         self,
         *,
@@ -2102,7 +2151,8 @@ class FfPoolSurface:
                 )
         self._require_writer()
         try:
-            self._service().post(selected)
+            guided = status.get("document_kind") == "china_acceptance"
+            self._service(resume=not guided).post(selected, defer_replay=guided)
         except FfPoolDocumentError as exc:
             raise _surface_from_document_error(exc) from exc
         return self.request_status(selected)
