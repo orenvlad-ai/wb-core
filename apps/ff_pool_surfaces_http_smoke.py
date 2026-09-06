@@ -166,6 +166,20 @@ def _guided_acceptance_csrf_contract(base: str) -> None:
     )
     assert guarded_preview_code == 404 and guarded_preview["code"] == "supplier_shipment_not_found"
 
+    form_url = f"{base}{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/form"
+    form_body = {
+        "request_id": "fixture:http:form", "business_date": "2026-08-12",
+        "shipment_id": "missing-shipment", "source_revision": "sha256:" + "a" * 64,
+        "facility_id": "fac_missing", "mode": "FBS",
+    }
+    for headers in ({}, {"X-WB-FF-Pool-CSRF": "1", "Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"}):
+        code, payload, _ = _json_request(form_url + "/preview", method="POST", payload=form_body, headers=headers)
+        assert code == 403 and payload["code"] == "csrf_failed"
+    code, payload, _ = _json_request(form_url + "/preview", method="POST", payload=form_body, headers={"X-WB-FF-Pool-CSRF": "1", "Sec-Fetch-Site": "same-origin"})
+    assert code == 404 and payload["code"] == "supplier_shipment_not_found"
+    code, payload, _ = _json_request(form_url + "?shipment_id=missing-shipment")
+    assert code == 404 and payload["code"] == "supplier_shipment_not_found"
+
     confirm_url = f"{base}{DEFAULT_FF_POOL_PATH}/requests/missing-guided-request/confirm"
     confirm_body = {"confirm": True}
     missing_confirm_code, missing_confirm, _ = _json_request(

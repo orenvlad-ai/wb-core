@@ -12,7 +12,10 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +59,13 @@ class Clock:
 
 
 def main() -> None:
+    if sync_playwright is None:
+        print("ff_pool_surfaces_browser_smoke: SKIP (Playwright unavailable)")
+        return
+    with sync_playwright() as browser_check:
+        if not Path(browser_check.chromium.executable_path).exists():
+            print("ff_pool_surfaces_browser_smoke: SKIP (Chromium unavailable)")
+            return
     with TemporaryDirectory(prefix="ff-pool-browser-") as directory:
         root = Path(directory)
         runtime_dir = root / "runtime"
@@ -65,8 +75,6 @@ def main() -> None:
         clock = Clock()
         _seed(runtime, clock)
         _seed_guided_supplier_shipment(runtime)
-        guided_upload_path = root / "guided-acceptance.xlsx"
-        guided_upload_path.write_bytes(b"browser fixture intercepted before parsing")
         overhead_upload_path = root / "synthetic-payment.pdf"
         overhead_upload_path.write_bytes(b"%PDF-browser-synthetic-fixture")
         config = RegistryUploadHttpEntrypointConfig(
@@ -96,7 +104,6 @@ def main() -> None:
                         browser,
                         f"http://127.0.0.1:{config.port}",
                         screenshot_path,
-                        guided_upload_path,
                         overhead_upload_path,
                     )
                 finally:
@@ -228,7 +235,6 @@ def _run(
     browser: object,
     base: str,
     screenshot_path: Path,
-    guided_upload_path: Path,
     overhead_upload_path: Path,
 ) -> None:
     context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -297,58 +303,45 @@ def _run(
 
     page.route(f"**{DEFAULT_FF_POOL_DOCUMENTS_PATH}/overhead/preview", intercept_overhead_mutation)
 
+    guided_hanging_routes = []
+    guided_status = {"state":"not_found"}
+    guided_transport = {"lose_preview":False, "lose_confirm":False, "hang_confirm":False}
+
+    def intercept_guided_source(route: object) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "shipment_id":"sup_guided_csrf_browser", "source_revision":"sha256:" + "a" * 64,
+            "activation":{"effective":True},
+            "facilities":[{"facility_id":"fac_msk","name":"Москва"},{"facility_id":"fac_orb","name":"Оренбург"}],
+            "lines":[{"nm_id":101,"sku":"SKU 101","barcode":"00101","quantity":10}, {"nm_id":202,"sku":"SKU 202","barcode":"00202","quantity":6}],
+        }))
+
     def intercept_guided_mutation(route: object) -> None:
+        nonlocal guided_status
         request = route.request
-        if request.method != "POST":
-            route.continue_()
-            return
-        guided_mutation_requests.append(
-            {
-                "url": request.url,
-                "headers": request.all_headers(),
-                "content_type": request.all_headers().get("content-type", ""),
-            }
-        )
-        if request.url.endswith("/documents/china/preview"):
-            payload = {
-                "request_id": "guided:browser-csrf",
-                "state": "ready",
-                "state_label_ru": "Готово к проведению",
-                "confirm_allowed": True,
-                "guided_acceptance_activation": {"reason_ru": "Локальный mutation fixture."},
-                "preview": {
-                    "available": False,
-                    "summary": {
-                        "expected_quantity": 1,
-                        "accepted_quantity": 1,
-                        "quantity_fbs": 1,
-                        "quantity_fbo": 0,
-                        "discrepancy_quantity": 0,
-                        "capital_normalization": {
-                            "exact_total_rub": "20.0049",
-                            "canonical_total_rub": "20.00",
-                            "total_residual_rub": "-0.0049",
-                        },
-                    },
-                },
+        body = request.post_data_json
+        guided_mutation_requests.append({"url":request.url,"headers":request.all_headers(),"body":body})
+        if request.url.endswith("/form/preview"):
+            if guided_transport["lose_preview"]:
+                guided_status = {"state":"not_found"}
+                route.abort()
+                return
+            guided_status = {
+                "request_id":body["request_id"], "state":"ready", "confirm_allowed":True,
+                "business_date":body["business_date"], "preview":{"summary":{"facility_id":body["facility_id"]}},
             }
         else:
-            payload = {
-                "request_id": "guided:browser-csrf",
-                "state": "complete",
-                "state_label_ru": "Завершено",
-                "confirm_allowed": False,
-                "business_date": "2026-08-12",
-                "guided_acceptance_activation": {"reason_ru": "Локальный mutation fixture."},
-                "summary": {
-                    "expected_quantity": 1,
-                    "accepted_quantity": 1,
-                    "quantity_fbs": 1,
-                    "quantity_fbo": 0,
-                    "discrepancy_quantity": 0,
-                },
-            }
-        route.fulfill(status=200, content_type="application/json", body=json.dumps(payload))
+            guided_status = {**guided_status,"state":"posted","confirm_allowed":False,"document":{"document_id":"doc-browser"}}
+            if guided_transport["hang_confirm"]:
+                guided_hanging_routes.append(route)
+                return
+            if guided_transport["lose_confirm"]:
+                route.abort()
+                return
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(guided_status))
+
+    def intercept_guided_status(route: object) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(guided_status))
+
 
     url = f"{base}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}?tab=warehouses&warehouse=ff"
     response = page.goto(url, wait_until="domcontentloaded")
@@ -581,40 +574,85 @@ def _run(
     assert page.locator("#warehousesGroupPanel").evaluate("node => node.scrollWidth <= node.clientWidth + 1")
     page.screenshot(path=str(screenshot_path.with_name(screenshot_path.stem + "-settings" + screenshot_path.suffix)), full_page=False)
 
-    page.route(f"**{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview", intercept_guided_mutation)
+    page.route(f"**{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/form?*", intercept_guided_source)
+    page.route(f"**{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/form/preview", intercept_guided_mutation)
+    page.route(f"**{DEFAULT_FF_POOL_PATH}/requests/*", intercept_guided_status)
     page.route(f"**{DEFAULT_FF_POOL_PATH}/requests/*/confirm", intercept_guided_mutation)
     response = page.goto(f"{base}{DEFAULT_SHEET_SUPPLIER_UI_PATH}?embedded=operator", wait_until="domcontentloaded")
     assert response is not None and response.status == 200
-    guided_row = page.locator('#shipmentRows tr[data-row="sup_guided_csrf_browser"]')
-    guided_row.wait_for(state="visible")
-    guided_row.click()
+    page.locator('#shipmentRows tr[data-row="sup_guided_csrf_browser"]').click()
     page.locator("#shipmentCard").wait_for(state="visible")
     page.get_by_role("tab", name="Состав поставки").click()
-    guided_acceptance_button = page.locator("#guidedAcceptanceButton")
-    guided_acceptance_button.wait_for(state="visible")
-    assert guided_acceptance_button.inner_text() == "Принять на FF"
-    guided_acceptance_button.click()
-    page.locator("#guidedAcceptanceModal").wait_for(state="visible")
-    page.locator("#guidedAcceptanceFile").set_input_files(str(guided_upload_path))
-    page.get_by_role("button", name="Необратимо провести приёмку").wait_for(state="visible")
-    guided_status = page.locator("#guidedAcceptanceStatus").inner_text()
-    assert "Капитал к проведению: 20.00 ₽" in guided_status
-    assert "остаток нормализации: -0.0049 ₽" in guided_status
-    assert len(guided_mutation_requests) == 1
-    upload_request = guided_mutation_requests[0]
-    assert str(upload_request["url"]).endswith(f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview")
-    assert dict(upload_request["headers"]).get("x-wb-ff-pool-csrf") == "1"
-    assert str(upload_request["content_type"]).startswith("multipart/form-data;")
-    page.get_by_role("button", name="Необратимо провести приёмку").click()
-    page.wait_for_function(
-        "() => document.querySelector('#guidedAcceptanceStatus')?.textContent.includes('Завершено')",
-        timeout=5000,
-    )
-    assert len(guided_mutation_requests) == 2
-    confirm_request = guided_mutation_requests[1]
-    assert str(confirm_request["url"]).endswith("/requests/guided%3Abrowser-csrf/confirm")
-    assert dict(confirm_request["headers"]).get("x-wb-ff-pool-csrf") == "1"
-    assert str(confirm_request["content_type"]).startswith("application/json")
+    status_node = page.locator("#guidedAcceptanceStatus")
+    for mode in ("FBS", "FBO", "split"):
+        page.locator("#guidedAcceptanceButton").click()
+        page.wait_for_function("!document.querySelector('#guidedAcceptanceConfirm').disabled")
+        page.locator("#guidedAcceptanceDate").fill("2026-08-01")
+        page.locator("#guidedAcceptanceFacility").select_option("fac_msk")
+        page.locator("#guidedAcceptanceMode").select_option(mode)
+        assert page.locator("#guidedAcceptanceFile").count() == 0
+        assert page.locator("#guidedAcceptanceComposition").is_visible() == (mode == "split")
+        before_count = len(guided_mutation_requests)
+        if mode == "FBS":
+            page.locator("#guidedAcceptanceFields details").evaluate("node => { node.open = true; }")
+            for invalid_expense in ("-1", "0.001"):
+                page.locator("#guidedExpenseFbs").fill(invalid_expense)
+                page.locator("#guidedAcceptanceConfirm").click()
+                assert len(guided_mutation_requests) == before_count
+                assert "расходов" in status_node.inner_text()
+            page.locator("#guidedExpenseFbs").fill("0")
+            page.locator("#guidedAcceptanceFields details").evaluate("node => { node.open = false; }")
+        if mode == "split":
+            for bad in ("-1", "1.5", "8"):
+                page.locator('[data-nm-id="101"] [data-quantity="quantity_fbs"]').fill(bad)
+                page.locator("#guidedAcceptanceConfirm").click()
+                assert len(guided_mutation_requests) == before_count
+                assert "количеств" in status_node.inner_text().lower() or "целым" in status_node.inner_text()
+            page.locator('[data-nm-id="101"] [data-quantity="quantity_fbs"]').fill("8")
+            page.locator('[data-nm-id="101"] [data-quantity="quantity_fbo"]').fill("2")
+            page.locator("#guidedAcceptanceDiscrepancies").check()
+            page.locator('[data-nm-id="202"] [data-quantity="accepted_quantity"]').fill("5")
+            page.locator('[data-nm-id="202"] [data-quantity="quantity_fbs"]').fill("5")
+            page.locator('[data-nm-id="202"] [data-comment]').fill("Недостача одной единицы")
+            guided_transport["lose_confirm"] = True
+        if mode == "FBO":
+            guided_transport["hang_confirm"] = True
+            page.evaluate("window.__nativeTimer = window.setTimeout; window.setTimeout = (fn, ms, ...args) => window.__nativeTimer(fn, ms === 30000 ? 200 : ms, ...args)")
+        page.locator("#guidedAcceptanceConfirm").evaluate("node => { node.click(); node.click(); }")
+        page.wait_for_function("document.querySelector('#guidedAcceptanceStatus').textContent.includes('Документ проведён')")
+        assert len(guided_mutation_requests) == before_count + 2
+        assert page.locator("#guidedAcceptanceClose").is_enabled()
+        if mode == "FBO":
+            guided_transport["hang_confirm"] = False
+            for pending_route in guided_hanging_routes:
+                pending_route.abort()
+            guided_hanging_routes.clear()
+            page.evaluate("window.setTimeout = window.__nativeTimer")
+        assert guided_mutation_requests[-2]["body"]["mode"] == mode
+        assert guided_mutation_requests[-2]["body"]["business_date"] == "2026-08-01"
+        assert all(item["headers"].get("x-wb-ff-pool-csrf") == "1" for item in guided_mutation_requests)
+        assert "остаток нормализации" not in status_node.inner_text()
+        assert "выключено" not in status_node.inner_text()
+        page.locator("#guidedAcceptanceClose").click()
+
+    # Lost preview before server acceptance is resolved by GET, with explicit edit.
+    guided_transport["lose_preview"] = True
+    page.locator("#guidedAcceptanceButton").click()
+    page.wait_for_function("!document.querySelector('#guidedAcceptanceConfirm').disabled")
+    page.locator("#guidedAcceptanceDate").fill("2026-08-01")
+    page.locator("#guidedAcceptanceFacility").select_option("fac_msk")
+    page.locator("#guidedAcceptanceConfirm").click()
+    page.locator("#guidedAcceptanceEdit").wait_for(state="visible")
+    before_count = len(guided_mutation_requests)
+    page.locator("#guidedAcceptanceClose").click()
+    page.locator("#guidedAcceptanceButton").click()
+    page.locator("#guidedAcceptanceEdit").wait_for(state="visible")
+    assert len(guided_mutation_requests) == before_count
+    page.locator("#guidedAcceptanceEdit").click()
+    page.wait_for_function("!document.querySelector('#guidedAcceptanceConfirm').disabled")
+    assert page.locator("#guidedAcceptanceDate").input_value() == "2026-08-01"
+    assert page.locator("#guidedAcceptanceFacility").input_value() == "fac_msk"
+    page.screenshot(path=str(screenshot_path.with_name(screenshot_path.stem + "-guided" + screenshot_path.suffix)))
     assert not page_errors, page_errors
     fatal_console_errors = [item for item in console_errors if not item.startswith("Failed to load resource:")]
     assert not fatal_console_errors, fatal_console_errors

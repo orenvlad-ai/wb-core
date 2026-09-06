@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
+from packages.business_time import business_date_from_timestamp
 
 from packages.application.canonical_rub_money import (
     RUB_MINOR_UNIT as RUB_QUANTUM,
@@ -707,7 +708,7 @@ class FfPoolDocumentService:
             if (
                 row is None
                 or str(row["document_kind"]) != "china_acceptance"
-                or str(row["source_type"]) != "china_acceptance_workbook"
+                or str(row["source_type"]) not in {"china_acceptance_workbook", "china_acceptance_form"}
                 or str(row["state"]) != "blocked"
                 or str(row["error_code"]) != "supplier_source_revision_changed"
             ):
@@ -770,7 +771,7 @@ class FfPoolDocumentService:
             if (
                 row is None
                 or str(row["document_kind"]) != "china_acceptance"
-                or str(row["source_type"]) != "china_acceptance_workbook"
+                or str(row["source_type"]) not in {"china_acceptance_workbook", "china_acceptance_form"}
                 or str(row["state"]) != "ready"
                 or (
                     bool(readiness.get("confirm_plan_ready"))
@@ -821,7 +822,7 @@ class FfPoolDocumentService:
             if (
                 row is None
                 or str(row["document_kind"]) != "china_acceptance"
-                or str(row["source_type"]) != "china_acceptance_workbook"
+                or str(row["source_type"]) not in {"china_acceptance_workbook", "china_acceptance_form"}
                 or str(row["state"]) != "blocked"
                 or str(row["error_code"])
                 not in {
@@ -1164,7 +1165,7 @@ class FfPoolDocumentService:
             )
         return self.status(request_id=canonical)
 
-    def post(self, request_id: str) -> dict[str, Any]:
+    def post(self, request_id: str, *, defer_replay: bool = False) -> dict[str, Any]:
         """Post one ready request with T0/T1 recovery and bounded drift retry."""
 
         canonical = self._resolve_request_id(request_id)
@@ -1172,14 +1173,14 @@ class FfPoolDocumentService:
         with lock_path.open("a+b") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
-                return self._post_with_retries(canonical)
+                return self._post_with_retries(canonical, defer_replay=defer_replay)
             finally:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
-    def _post_with_retries(self, canonical: str) -> dict[str, Any]:
+    def _post_with_retries(self, canonical: str, *, defer_replay: bool = False) -> dict[str, Any]:
         for attempt in range(POST_RETRY_LIMIT):
             try:
-                result = self._post_once(canonical)
+                result = self._post_once(canonical, defer_replay=defer_replay)
             except FfPoolDocumentError as exc:
                 if exc.code == "concurrent_pool_balance_drift" and attempt + 1 < POST_RETRY_LIMIT:
                     continue
@@ -1570,7 +1571,7 @@ class FfPoolDocumentService:
             conn.commit()
         return canonical, bool(inserted)
 
-    def _post_once(self, request_id: str) -> dict[str, Any]:
+    def _post_once(self, request_id: str, *, defer_replay: bool = False) -> dict[str, Any]:
         # The shared warehouse writer lock is the short confirm barrier.  The
         # live plan, T1 before-image and business commit are all produced while
         # functional publication, pool documents and the normal FBS suffix
@@ -1579,6 +1580,10 @@ class FfPoolDocumentService:
         with warehouse_functional_write_lock(self.runtime_dir):
             result = self._post_once_under_writer_lock(request_id)
         if result is None:
+            if defer_replay:
+                # The receipt, factual date and current pool/aggregate version
+                # are committed. Existing durable resume owns downstream replay.
+                return self.status(request_id=request_id)
             return self._finalize_posted(request_id)
         return result
 
@@ -2569,7 +2574,7 @@ def _require_guided_acceptance_activation(conn: sqlite3.Connection) -> None:
 def _is_guided_china_request(request: Mapping[str, Any]) -> bool:
     return (
         str(request["document_kind"] or "") == "china_acceptance"
-        and str(request["source_type"] or "") == "china_acceptance_workbook"
+        and str(request["source_type"] or "") in {"china_acceptance_workbook", "china_acceptance_form"}
     )
 
 
@@ -3012,8 +3017,9 @@ def _apply_guided_aggregate_projection(
                 else "guided_china_acceptance"
             ),
             source_id=str(request["request_id"]),
-            business_date=str(request["business_date"]),
+            business_date=business_date_from_timestamp(posted_at),
             published_at=posted_at,
+            source_business_date=str(request["business_date"]),
         )
     except WarehouseFbsMaterialError as exc:
         raise FfPoolDocumentError(exc.code, str(exc), details=exc.details) from exc

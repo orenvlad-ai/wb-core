@@ -6305,6 +6305,12 @@ class RegistryUploadHttpEntrypoint:
     def handle_ff_pool_china_preview_request(self, **payload: Any) -> dict[str, Any]:
         return self.ff_pool_surface.accept_china_workbook(**payload)
 
+    def handle_ff_pool_china_form_request(self, shipment_id: str) -> dict[str, Any]:
+        return self.ff_pool_surface.china_acceptance_form(shipment_id)
+
+    def handle_ff_pool_china_form_preview_request(self, payload: Mapping[str, Any], *, actor: str) -> dict[str, Any]:
+        return self.ff_pool_surface.accept_china_form(payload, actor=actor)
+
     def handle_ff_pool_inventory_preview_request(self, **payload: Any) -> dict[str, Any]:
         return self.ff_pool_surface.accept_inventory_workbook(**payload)
 

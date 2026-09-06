@@ -6237,6 +6237,7 @@ def _is_ff_pool_mutation_path(path: str) -> bool:
         DEFAULT_FF_POOL_FACILITY_PREVIEW_PATH,
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
+        f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/form/preview",
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/inventory/preview",
         DEFAULT_FF_POOL_OVERHEAD_PREVIEW_PATH,
         DEFAULT_FF_POOL_WB_BINDING_PREVIEW_PATH,
@@ -6325,6 +6326,10 @@ def _handle_ff_pool_post(
                 handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES
             ),
             actor=actor,
+        )
+    if normalized == f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/form/preview":
+        return entrypoint.handle_ff_pool_china_form_preview_request(
+            _load_request_payload(handler, max_request_bytes=FF_POOL_MAX_JSON_REQUEST_BYTES), actor=actor
         )
     if normalized in {
         f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
@@ -6483,6 +6488,8 @@ def _handle_ff_pool_get(
         return entrypoint.handle_wb_fbs_warehouses_request()
     relative = normalized[len(DEFAULT_FF_POOL_PREFIX) :] if normalized.startswith(DEFAULT_FF_POOL_PREFIX) else ""
     parts = [urllib_parse.unquote(item) for item in relative.split("/") if item]
+    if parts == ["documents", "china", "form"]:
+        return entrypoint.handle_ff_pool_china_form_request(str(params.get("shipment_id") or ""))
     if len(parts) == 2 and parts == ["documents", "china-template.xlsx"]:
         return entrypoint.handle_ff_pool_china_template_request(
             str(params.get("shipment_id") or ""),
@@ -9996,6 +10003,7 @@ def _render_sheet_vitrina_supplier_ui(
         "ff_pool_path": DEFAULT_FF_POOL_PATH,
         "ff_pool_china_template_path": f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china-template.xlsx",
         "ff_pool_china_preview_path": f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/preview",
+        "ff_pool_china_form_path": f"{DEFAULT_FF_POOL_DOCUMENTS_PATH}/china/form",
     }
     price_check_button_html = (
         '<button id="priceCheckButton" type="button" hidden>Проверить цены</button>'
