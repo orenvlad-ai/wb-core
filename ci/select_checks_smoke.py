@@ -64,6 +64,15 @@ def main() -> None:
     assert "warehouse" in warehouse["groups"]
     assert "openpyxl==3.1.5" in warehouse["pip"]
 
+    promo = build_plan_from_paths(
+        pull_request=9, base=BASE, head=HEAD,
+        paths=["packages/application/promo_live_source.py"], file_exists=lambda *_: True,
+    )
+    verify_plan(promo)
+    assert "openpyxl==3.1.5" in promo["pip"]
+    assert ["python3", "apps/promo_xlsx_collector_contract_smoke.py"] in promo["commands"]
+    assert ["python3", "apps/sheet_vitrina_v1_promo_live_source_smoke.py"] in promo["commands"]
+
     browser = build_plan_from_paths(
         pull_request=7, base=BASE, head=HEAD,
         paths=["packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
