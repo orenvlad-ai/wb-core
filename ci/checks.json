@@ -1,6 +1,32 @@
 {
   "schema": "wb-core.check-map/v1",
   "groups": {
+    "fbs_observer": {
+      "patterns": [
+        "packages/application/wb_fbs_observer.py",
+        "packages/application/wb_fbs_orders.py",
+        "apps/wb_fbs_shadow.py",
+        "apps/wb_fbs_observer*.py",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-shadow-collector.*"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/wb_fbs_observer_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_fbs_observer_status_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_fbs_shadow_polling_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
     "process": {
       "patterns": [
         ".github/workflows/**",

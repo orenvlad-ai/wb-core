@@ -1,5 +1,5 @@
 [Unit]
-Description=WB Core dedicated official FBS read-only shadow collector
+Description=WB Core isolated FBS observer without accounting effects
 After=network-online.target
 Wants=network-online.target
 
@@ -8,5 +8,15 @@ Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
 ExecStart=/usr/bin/python3 apps/wb_fbs_shadow.py --runtime-dir /opt/wb-core-runtime/state --env-file /opt/wb-ai/.env poll
 TimeoutStartSec=4m
+Environment=WB_FBS_COLLECTOR_ENABLED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryMax=256M
+ProtectSystem=strict
+ReadWritePaths=/opt/wb-core-runtime/state/fbs_observer /opt/wb-core-runtime/state/official_api_rate_budgets
+NoNewPrivileges=true
 User=root
 Group=root

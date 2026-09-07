@@ -15,9 +15,10 @@ if str(ROOT) not in sys.path:
 
 from packages.application.storage_registry import StoreRegistry  # noqa: E402
 from packages.application.wb_fbs_shadow_polling import (  # noqa: E402
-    WbFbsShadowPollingService,
     build_readiness_report,
 )
+from packages.application.wb_fbs_observer import WbFbsObserver, observer_status  # noqa: E402
+from packages.application.wb_fbs_orders import COLLECTOR_ENABLED_ENV  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("poll")
     commands.add_parser("readiness")
+    commands.add_parser("observer-status")
     return parser
 
 
@@ -34,11 +36,14 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     runtime_dir = Path(str(args.runtime_dir)).resolve()
     if str(args.env_file or "").strip():
         _load_env_file(Path(str(args.env_file)).resolve())
+    if args.command == "observer-status":
+        return observer_status(runtime_dir)
     db_path = StoreRegistry(runtime_dir).resolve("operational")
     if args.command == "poll":
-        return WbFbsShadowPollingService(
+        return WbFbsObserver(
             runtime_dir=runtime_dir,
-            db_path=db_path,
+            canonical_db_path=db_path,
+            enabled=os.environ.get(COLLECTOR_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"},
         ).poll_once()
     return build_readiness_report(db_path=db_path, runtime_dir=runtime_dir)
 
@@ -68,7 +73,7 @@ def main() -> int:
         print(json.dumps({"status": "failed", "error": str(exc)[:1000]}, ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0
+    return 1 if result.get("status") == "failed" else 0
 
 
 if __name__ == "__main__":
