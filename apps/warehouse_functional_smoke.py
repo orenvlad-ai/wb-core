@@ -474,11 +474,18 @@ def _test_heavy_job_lock_does_not_block_interactive_writer() -> None:
 
 
 def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
+    events = []
+
+    def record(name, result):
+        events.append(name)
+        return result
+
     class FakeCalculationParameters:
         def prepare_functional_economics_backup(self):
             return {"status": "ready"}
 
         def process_pending_targeted_recalculations(self, *, verified_backup):
+            events.append("proxy")
             return {"status": "success", "request_count": 0}
 
         def publish_current_functional_economics(self, *, verified_backup):
@@ -503,6 +510,7 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
             }
 
         def apply_plan(self, plan, *, confirm_fingerprint):
+            events.append("wb_published")
             return {
                 "active_version": {
                     "version_id": "whfv_fixture",
@@ -527,8 +535,11 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
     for command, trigger_source in (
         ("hourly-sync", "hourly"),
         ("manual-sync", "manual"),
+        ("sync-apply", None),
     ):
         for changed_rows in (53, 0):
+            events.clear()
+            fbs_result = {"status": "published" if changed_rows else "inactive"}
             with tempfile.TemporaryDirectory(prefix="warehouse-materialization-journal-") as tmp:
                 runtime_dir = Path(tmp) / "runtime"
                 runtime_dir.mkdir()
@@ -571,7 +582,23 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                     ) as supplies_block,
                     patch(
                         "apps.warehouse_functional_runner._recalculate_downstream_finance_cost",
-                        return_value={"status": "success"},
+                        side_effect=lambda *_: record("finance", {"status": "success"}),
+                    ),
+                    patch(
+                        "packages.application.fbs_accounting_runtime.refresh",
+                        side_effect=lambda *_: record("fbs_refreshed", fbs_result),
+                    ) as fbs_refresh,
+                    patch(
+                        "packages.application.fbs_accounting_runtime.publish_ready",
+                        side_effect=lambda *_: record("ready_published", None),
+                    ) as publish_ready,
+                    patch(
+                        "apps.warehouse_functional_runner._read_exact_plan",
+                        return_value=FakeBlock().build_sync_plan(),
+                    ),
+                    patch(
+                        "apps.warehouse_functional_runner._verify_sync_external_recheck",
+                        return_value={"status": "ready"},
                     ),
                 ):
                     supplies_block.return_value.reconcile_functional_ff_state.return_value = {
@@ -582,9 +609,24 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                             runtime_dir=str(runtime_dir),
                             command=command,
                             backup_dir=str(Path(tmp) / "backups"),
+                            plan_file="fixture-plan.json",
+                            fingerprint="sha256:fixture-plan",
                         ),
                         sqlite_busy_timeout_ms=120_000,
                     )
+                fbs_refresh.assert_called_once_with(runtime_dir)
+                _assert(result["fbs_snapshot_accounting"] == fbs_result,
+                        f"{command} returns accounting publication evidence")
+                expected = ["wb_published", "fbs_refreshed"]
+                if changed_rows:
+                    publish_ready.assert_called_once_with(runtime)
+                    expected.append("ready_published")
+                else:
+                    publish_ready.assert_not_called()
+                _assert(events == expected + ["proxy", "finance"],
+                        f"{command} must publish active FBS before dependent costs: {events}")
+                if trigger_source is None:
+                    continue
                 with sqlite3.connect(runtime.db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     phase = conn.execute(
