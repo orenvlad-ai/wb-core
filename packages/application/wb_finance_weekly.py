@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -12,8 +13,11 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from packages.application.shared_sku_cost import SharedSkuCostSnapshot
 
 from packages.adapters.wb_finance_api import (
     FINANCE_URL,
@@ -620,26 +624,34 @@ class WbFinanceWeeklyBlock:
         *,
         seller_id: str = "canonical",
         now_factory: Callable[[], datetime] | None = None,
+        shared_cost_snapshot: SharedSkuCostSnapshot | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.store_registry = StoreRegistry(self.runtime_dir)
         self.db_path = self.store_registry.resolve("operational")
         self.seller_id = seller_id or "canonical"
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+        self._shared_cost_snapshot = shared_cost_snapshot
         self._capitalization_cache_key = ""
         self._capitalization_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._capitalization_cache_connection: sqlite3.Connection | None = None
         self._canonical_cost_snapshot_connection: sqlite3.Connection | None = None
         self._canonical_cost_snapshot: CanonicalChannelCostSnapshot | None = None
         self._canonical_cost_resolution_cache: dict[
-            tuple[str, str, str], dict[str, Any]
+            tuple[str, ...], dict[str, Any]
         ] = {}
         self._nomenclature_cache_connection: sqlite3.Connection | None = None
         self._nomenclature_cache: tuple[
             dict[str, str], set[str], dict[str, str], dict[str, dict[str, Any]]
         ] = ({}, set(), {}, {})
 
+    @property
+    def shared_cost_snapshot(self) -> SharedSkuCostSnapshot | None:
+        return self._shared_cost_snapshot
+
     def ensure_schema(self) -> None:
+        if self.shared_cost_snapshot is not None:
+            raise ValueError("shared_cost_candidate_is_read_only")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         manifest = self.store_registry.load()
         split_storage = (
@@ -1364,6 +1376,8 @@ class WbFinanceWeeklyBlock:
         week_start: date,
         week_end: date,
     ) -> dict[str, Any]:
+        if self.shared_cost_snapshot is not None:
+            raise ValueError("shared_cost_candidate_cannot_replace_active_aggregates")
         projection = self._build_week_target_projection(
             conn,
             week_start=week_start,
@@ -1375,6 +1389,38 @@ class WbFinanceWeeklyBlock:
             images=projection["images"],
         )
         return dict(projection["metrics"])
+
+    def preview_candidate_week(self, week_start: date, week_end: date) -> dict[str, Any]:
+        """Calculate one opt-in candidate week without changing active reports."""
+        with closing(self._connect_shared_cost_preview()) as conn, conn:
+            return self._candidate_week_projection_in_connection(
+                conn, week_start=week_start, week_end=week_end,
+            )
+
+    def _candidate_week_projection_in_connection(
+        self, conn: sqlite3.Connection, *, week_start: date, week_end: date,
+    ) -> dict[str, Any]:
+        if self.shared_cost_snapshot is None:
+            raise ValueError("shared_cost_candidate_required")
+        if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+            raise ValueError("shared_cost_candidate_requires_query_only")
+        if not conn.in_transaction:
+            raise ValueError("shared_cost_candidate_requires_read_transaction")
+        projection = self._build_week_target_projection(
+            conn, week_start=week_start, week_end=week_end,
+        )
+        image = projection["images"]["wb_finance_weekly_sku_aggregates"]
+        return {
+            "candidate_only": True,
+            "shared_cost": self.shared_cost_snapshot.metadata(),
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "aggregate": projection["metrics"],
+            "cost_coverage": projection["coverage"],
+            "sku_projections": [
+                dict(zip(image["columns"], row, strict=True)) for row in image["rows"]
+            ],
+        }
 
     def _build_week_target_projection(
         self,
@@ -1389,6 +1435,25 @@ class WbFinanceWeeklyBlock:
             "SELECT report_id,rrd_id,row_hash,raw_json FROM wb_finance_weekly_raw_rows WHERE seller_id=? AND week_start=? AND week_end=? ORDER BY report_id,rrd_id",
             (self.seller_id, week_start.isoformat(), week_end.isoformat()),
         ).fetchall()
+        if self.shared_cost_snapshot is not None:
+            # In split storage, BEGIN pins each database on its first read.
+            # The raw file may therefore be newer than the operational sync
+            # image. Admit only the exact row set that sync has acknowledged.
+            source = conn.execute(
+                "SELECT content_hash,raw_row_count FROM wb_finance_weekly_sync "
+                "WHERE seller_id=? AND week_start=? AND week_end=?",
+                (self.seller_id, week_start.isoformat(), week_end.isoformat()),
+            ).fetchone()
+            raw_hash = hashlib.sha256(
+                "\n".join(sorted(str(row["row_hash"]) for row in db_rows)).encode("utf-8")
+            ).hexdigest()
+            if (
+                source is None
+                or str(source["content_hash"] or "") != raw_hash
+                or source["raw_row_count"] is None
+                or int(source["raw_row_count"]) != len(db_rows)
+            ):
+                raise ValueError("shared_cost_candidate_raw_week_incomplete")
         rows = [json.loads(row["raw_json"]) for row in db_rows]
         aggregate, coverage, unknown = self._aggregate_rows(conn, rows, week_start)
         reports = conn.execute(
@@ -1523,6 +1588,9 @@ class WbFinanceWeeklyBlock:
         parsed_rows: Iterable[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Materialize an indexed, reproducible per-SKU Finance projection."""
+
+        if persist and self.shared_cost_snapshot is not None:
+            raise ValueError("shared_cost_candidate_cannot_replace_active_aggregates")
 
         records = list(raw_rows)
         parsed = (
@@ -2732,6 +2800,14 @@ class WbFinanceWeeklyBlock:
         operation_date: date,
         operation: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        shared = self.shared_cost_snapshot
+        if shared is not None and shared.applies_to(operation_date):
+            key = (shared.version_id, str(nm_id), operation_date.isoformat(), "shared")
+            if key not in self._canonical_cost_resolution_cache:
+                self._canonical_cost_resolution_cache[key] = shared.resolve(
+                    nm_id=nm_id, operation_date=operation_date,
+                )
+            return dict(self._canonical_cost_resolution_cache[key])
         snapshot = self._canonical_channel_snapshot(conn)
         raw = dict(operation or {})
         channel_classification = classify_finance_channel(
@@ -2785,6 +2861,7 @@ class WbFinanceWeeklyBlock:
         problem_rows: dict[tuple[str, ...], dict[str, Any]] = {}
         detail_rows: list[dict[str, Any]] = []
         dependency_digest = _StreamingCostDependencyDigest()
+        shared_used = False
         source_units = {
             "projected_from_2026_07_01": 0,
             "canonical_exact_date": 0,
@@ -2830,10 +2907,22 @@ class WbFinanceWeeklyBlock:
             )
             revenue = _decimal(row.get("retailPriceWithDisc"))
             order_identity = _finance_sale_identity(row)
-            channel_classification = classify_finance_channel(
-                self._canonical_channel_snapshot(conn),
-                operation=row,
-            )
+            shared = self.shared_cost_snapshot
+            shared_applies = shared is not None and shared.applies_to(operation_date)
+            if shared is not None and (shared_applies or operation_date_source == "week_start_fallback"):
+                # Channel is reporting metadata, never a post-boundary price
+                # selector. Missing dates also must not invoke an old source.
+                tokens = {str(row.get(key) or "").strip().casefold()
+                          for key in ("deliveryType", "delivery_type", "orderType", "order_type")}
+                channel_classification = "fbs_explicit_channel" if "fbs" in tokens else "raw_channel_unspecified"
+            else:
+                channel_classification = classify_finance_channel(
+                    self._canonical_channel_snapshot(conn), operation=row,
+                )
+            if shared_applies and not shared_used:
+                dependency_digest.add({"shared_cost_snapshot": shared.metadata()})
+                shared_used = True
+                source_units["shared_sku_daily"] = 0
             classified_channel = (
                 "FBS" if channel_classification.startswith("fbs_") else "WB"
             )
@@ -2905,6 +2994,11 @@ class WbFinanceWeeklyBlock:
                     operation_date=operation_date,
                     operation=row,
                 )
+            if shared_applies and resolution.get("status") != "resolved":
+                resolution.update(
+                    formula_version=shared.formula_version,
+                    channel="COMMON", pool="WB+FBS+FBO", facility_id="",
+                )
             dependency = {
                 **resolution,
                 "report_id": str(row.get("reportId") or ""),
@@ -2958,7 +3052,7 @@ class WbFinanceWeeklyBlock:
                     uncovered_sales_rub += revenue
                     uncovered_sales_units += gross_qty
                     uncovered_sales_orders.add(order_identity)
-                    if str(resolution.get("channel") or "") == "FBS":
+                    if (classified_channel if shared_applies else str(resolution.get("channel") or "")) == "FBS":
                         uncovered_fbs_sales_rub += revenue
                         uncovered_fbs_sales_units += gross_qty
                         uncovered_fbs_sales_orders.add(order_identity)
@@ -2984,7 +3078,7 @@ class WbFinanceWeeklyBlock:
                         "sku": sku,
                         "nm_id": nm_id,
                         "operation_date": operation_day,
-                        "source": "canonical_our_wb_cost",
+                        "source": "shared_sku_daily_cost" if shared_applies else "canonical_our_wb_cost",
                         "canonical_source_date": canonical_source_date,
                         "reason": reason,
                         "operation_date_source": operation_date_source,
@@ -3021,7 +3115,7 @@ class WbFinanceWeeklyBlock:
                 covered_returns_cogs_rub += abs(signed_cogs)
                 daily["covered_returns_revenue_rub"] += revenue
                 daily["covered_returns_cogs_rub"] += abs(signed_cogs)
-            source_key = (
+            source_key = "shared_sku_daily" if shared_applies else (
                 (
                     "fbs_same_day_common_inventory_fallback"
                     if str(resolution.get("quality") or "")
@@ -3048,7 +3142,7 @@ class WbFinanceWeeklyBlock:
                         "quantity": gross_qty,
                         "signed_quantity": signed_qty,
                         "unit_cost_rub": _money_text(unit_cost),
-                        "cost_source": "canonical_our_wb_cost",
+                        "cost_source": "shared_sku_daily_cost" if shared_applies else "canonical_our_wb_cost",
                         "channel": str(resolution.get("channel") or ""),
                         "facility_id": str(resolution.get("facility_id") or ""),
                         "pool": str(resolution.get("pool") or ""),
@@ -3059,7 +3153,7 @@ class WbFinanceWeeklyBlock:
                         "source_quality": str(resolution["quality"]),
                         "projection_quality": str(resolution["projection_quality"]),
                         "selection_method": str(resolution["selection_method"]),
-                        "formula_version": COST_METHOD_VERSION,
+                        "formula_version": str(resolution.get("formula_version") or COST_METHOD_VERSION),
                         "signed_cogs_rub": _money_text(signed_cogs),
                         "sales_revenue_rub": (
                             _money_text(revenue) if sign > 0 else "0.0000"
@@ -3157,6 +3251,15 @@ class WbFinanceWeeklyBlock:
                 "projection from the same SKU canonical cost on 2026-07-01."
             ),
         }
+        if shared_used:
+            quality.update(
+                cost_method_version=self.shared_cost_snapshot.formula_version,
+                policy_date=self.shared_cost_snapshot.effective_date,
+                shared_cost=self.shared_cost_snapshot.metadata(),
+                shared_sku_units=source_units["shared_sku_daily"],
+                mixed_cost_methods=any(value for key, value in source_units.items() if key != "shared_sku_daily"),
+                return_cost_policy="signed_quantity_at_operation_date",
+            )
         return {
             "matched_units": matched_units,
             "unmatched_units": unmatched_units,
@@ -6415,6 +6518,18 @@ class WbFinanceWeeklyBlock:
         ) != 1:
             raise ValueError("canonical Finance plan lost query_only")
 
+    def _connect_shared_cost_preview(self) -> sqlite3.Connection:
+        """Pin raw rows and report dependencies in one read transaction."""
+        if self.shared_cost_snapshot is None:
+            raise ValueError("shared_cost_candidate_required")
+        conn = self._connect_canonical_plan()
+        try:
+            conn.execute("BEGIN")
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
     def _connect_canonical_plan(self) -> sqlite3.Connection:
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
@@ -6482,6 +6597,8 @@ class WbFinanceWeeklyBlock:
         return versions
 
     def _connect(self) -> sqlite3.Connection:
+        if self.shared_cost_snapshot is not None:
+            return self._connect_shared_cost_preview()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
             "operational",
