@@ -54,6 +54,7 @@
 - [Управление SKU](46_MODULE__SKU_MANAGEMENT_BLOCK.md)
 - [Инструкции оператора](47_MODULE__OPERATOR_INSTRUCTIONS_KNOWLEDGE_BASE.md)
 - [Складские остатки](48_MODULE__WAREHOUSE_STOCKS_BLOCK.md)
+- [Неактивный расчёт стоимости FBS по снимкам](fbs_snapshot_cost.md)
 - [Autoanswers](49_MODULE__WB_AUTOANSWERS_SERVER.md)
 - [Отчёт партнёра](50_MODULE__PARTNER_REPORT_BLOCK.md)
 - [Восстановление складских данных](51_MODULE__WAREHOUSE_RECOVERY_POLICY.md)
