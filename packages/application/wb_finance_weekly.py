@@ -26,6 +26,7 @@ from packages.adapters.wb_finance_api import (
 )
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.wb_finance_payout import loyalty, standalone_adjustment
 from packages.application.finance_raw_storage import (
     FinanceOutboxConsumer,
     FinanceRawIngestor,
@@ -1777,10 +1778,15 @@ class WbFinanceWeeklyBlock:
                 "positive_adjustments",
                 "corrections",
                 "to_seller",
+                "loyalty_points",
+                "loyalty_fee",
             )
         }
         unknown: set[str] = set()
         for row in rows:
+            points, fee = loyalty(row)
+            values["loyalty_points"] += points
+            values["loyalty_fee"] += fee
             doc = str(row.get("docTypeName") or "").casefold()
             quantity = _decimal(row.get("quantity"))
             revenue = _decimal(row.get("retailPriceWithDisc"))
@@ -1827,13 +1833,13 @@ class WbFinanceWeeklyBlock:
             # "Корректировка Вознаграждения Вайлдберриз (ВВ)".  Sale/return
             # values are already reflected in ``forPay`` and therefore in the
             # combined commission control.  Only a standalone adjustment row
-            # (without sale/return sign) is applied separately.
+            # (without sale/return sign) is applied separately: positive
+            # additionalPayment is a charge, negative is its reimbursement.
             if doc not in {"продажа", "возврат"} and adjustment:
                 values["wb_remuneration_adjustment"] += adjustment
-                if adjustment >= ZERO:
-                    values["positive_adjustments"] += adjustment
-                else:
-                    values["corrections"] += abs(adjustment)
+                income, expense = standalone_adjustment(row)
+                values["positive_adjustments"] += income
+                values["corrections"] += expense
         net_revenue = values["revenue_before_returns"] - values["returns_amount"]
         capitalization = self._capitalization_reconciliation(conn, rows)
         capitalized_acceptance = _decimal(capitalization["matched_acceptance_rub"])
@@ -1856,6 +1862,8 @@ class WbFinanceWeeklyBlock:
                     "paid_services",
                     "review_points",
                     "other_deductions",
+                    "loyalty_points",
+                    "loyalty_fee",
                     "corrections",
                 )
             ),
@@ -1945,6 +1953,12 @@ class WbFinanceWeeklyBlock:
             "capitalized_acceptance": _money_text(capitalized_acceptance),
             "capitalized_transit_logistics": _money_text(capitalized_transit),
             "to_seller": _money_text(values["to_seller"]),
+            "loyalty_points": _money_text(values["loyalty_points"]),
+            "loyalty_fee": _money_text(values["loyalty_fee"]),
+            "payout_formula_version": "wb_payout_v1",
+            "calculated_payout": _money_text(
+                net_revenue - total_expenses + values["positive_adjustments"]
+            ),
             "before_cogs_profit": _money_text(before_cogs),
             "before_cogs_margin_pct": _money_text(
                 _ratio(before_cogs, covered_net_revenue)

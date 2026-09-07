@@ -14848,7 +14848,7 @@
           wbFinanceReportStatus.className = "section-message";
           return;
         }
-        wbFinanceReportPeriod.textContent = "Период: " + formatFinanceWeek(weeks[0]) + " — " + formatFinanceWeek(weeks[weeks.length - 1]) + ".";
+        wbFinanceReportPeriod.textContent = "Период: " + formatFinanceWeek(weeks[0]) + " — " + formatFinanceWeek(weeks[weeks.length - 1]) + ". Сумма за товар уже учитывает комиссию и эквайринг. Расчётная выплата — после остальных удержаний и доплат WB, до нашей себестоимости. Одна заявка на выплату может объединять несколько недель; дата зачисления определяется банком.";
         const definitions = [
           {group: "Продажи"},
           {key:"sales_qty", label:"Продажи, шт.", type:"count"}, {key:"returns_qty", label:"Возвраты, шт.", type:"count"},
@@ -14863,6 +14863,8 @@
           {key:"transit_logistics", label:"Транзитная логистика", type:"money", expense:true}, {key:"penalties", label:"Штрафы", type:"money", expense:true},
           {key:"subscriptions", label:"Подписки", type:"money", expense:true}, {key:"paid_services", label:"Платные сервисы", type:"money", expense:true},
           {key:"review_points", label:"Баллы за отзывы", type:"money", expense:true},
+          {key:"loyalty_points", label:"Баллы программы лояльности", type:"money", expense:true},
+          {key:"loyalty_fee", label:"Стоимость участия в программе лояльности", type:"money", expense:true},
           {key:"other_deductions", label:"Прочие удержания", type:"money", expense:true},
           {key:"corrections", label:"Корректировки (расходы)", type:"money", expense:true},
           {key:"wb_remuneration_adjustment", label:"Корректировка Вознаграждения WB · внутри агентского контроля", type:"money"},
@@ -14870,7 +14872,8 @@
           {key:"total_wb_expenses", label:"Расходы WB с маркетингом", type:"money", expense:true},
           {key:"wb_expenses_without_marketing", label:"Расходы WB без маркетинга", type:"money", expense:true},
           {group: "Результат финансового отчёта WB"},
-          {key:"to_seller", label:"К перечислению продавцу", type:"money"},
+          {key:"to_seller", label:"За товар до удержаний", type:"money"},
+          {key:"calculated_payout", label:"Расчётная выплата", type:"money"},
           {key:"before_cogs_profit", label:"Финансовый результат до себестоимости", type:"money"},
           {key:"before_cogs_margin_pct", label:"Рентабельность до себестоимости, %", type:"percent"},
           {internal: true, label:"Внутренние данные WB Core — не входят в финансовый отчёт Wildberries"},
