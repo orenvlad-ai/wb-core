@@ -14,9 +14,10 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Any
+from packages.application.fbs_document_cost import initial_document_state, resolve_document_costs
 
-SCHEMA = "fbs_snapshot_cost_candidate_v1"
-POLICY = "fbs_periodic_snapshot_fixed_opening_wac_v1"
+SCHEMA = "fbs_snapshot_cost_candidate_v2"
+POLICY = "fbs_periodic_snapshot_document_wac_v2"
 ZERO = Decimal(0)
 
 
@@ -78,6 +79,8 @@ def _indexed(rows: list[dict]) -> dict[str, dict]:
 
 
 def _capture(capture: dict) -> tuple[str, dict[str, dict], dict[str, dict]]:
+    if capture.get("contract") not in {None, "fbs_snapshot_cost_sources_v2"}:
+        raise FbsSnapshotCostError("source_capture_requires_document_cost_v2")
     day = str(capture["business_date"])
     _day(day)
     snapshot = capture["quantity_snapshot"]
@@ -108,6 +111,17 @@ def _manifest(documents: dict[str, dict]) -> dict[str, str]:
     return {identity: doc["fingerprint"] for identity, doc in documents.items()}
 
 
+def _observed(doc: dict, quantities: dict) -> dict:
+    raw = doc.get("cost_document", {})
+    keys = {_key(event) for event in doc["events"]}
+    domain = raw.get("domain", {})
+    if doc["kind"] == "pool_overhead" and domain.get("scope") in {"FBS", "both"}:
+        keys.update(k for k, r in quantities.items() if r["facility_id"] == domain.get("facility_id"))
+    return {"fingerprint": doc["fingerprint"], "business_date": doc["business_date"],
+            "affects_fbs": bool(doc["events"] or raw.get("lines") or raw.get("movements") or raw.get("expense_lines")),
+            "affected_keys": sorted(keys)}
+
+
 def initialize_candidate(capture: dict) -> dict:
     """Freeze a reviewable baseline, without setting a production start date."""
     day, quantities, documents = _capture(capture)
@@ -136,15 +150,14 @@ def initialize_candidate(capture: dict) -> dict:
         "business_date": day, "snapshot": deepcopy(capture["quantity_snapshot"]),
         "cost_version_id": basis["version_id"], "rows": rows,
         "absorbed_documents": _manifest(documents), "source_digest": capture["source_digest"],
+        "document_cost_state": initial_document_state(capture),
     }
     baseline["id"] = fingerprint(baseline)
     return {
         "schema": SCHEMA, "policy": POLICY, "candidate_only": True,
         "baseline": baseline, "periods": {}, "pending_documents": [],
         "last_document_capture_at": capture["captured_at"],
-        "observed_documents": {identity: {"fingerprint": doc["fingerprint"],
-            "business_date": doc["business_date"], "affects_fbs": bool(doc["events"]),
-            "affected_keys": sorted({_key(event) for event in doc["events"]})}
+        "observed_documents": {identity: _observed(doc, quantities)
             for identity, doc in documents.items()},
         "last_attempt": {"date": day, "source_digest": capture["source_digest"], "status": "baseline_frozen"},
     }
@@ -178,15 +191,13 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
         if doc is None or doc["fingerprint"] != digest:
             pending.append({"document_id": identity, "reason": "absorbed_document_missing_or_changed"})
     for identity, doc in documents.items():
-        if identity not in known and doc["business_date"] <= closed_day and doc["events"]:
+        if identity not in known and doc["business_date"] <= closed_day and _observed(doc, quantities)["affects_fbs"]:
             pending.append({"document_id": identity, "reason": "late_closed_period_document", "business_date": doc["business_date"]})
     observed = result["observed_documents"]
     for identity, item in observed.items():
         if identity not in documents and identity not in known and item["affects_fbs"]:
             pending.append({"document_id": identity, "reason": "observed_document_missing", **item})
-    observed.update({identity: {"fingerprint": doc["fingerprint"],
-        "business_date": doc["business_date"], "affects_fbs": bool(doc["events"]),
-        "affected_keys": sorted({_key(event) for event in doc["events"]})}
+    observed.update({identity: _observed(doc, quantities)
         for identity, doc in documents.items()})
     result["pending_documents"] = pending
     result["last_attempt"] = {"date": day, "source_digest": capture["source_digest"], "status": "evaluated"}
@@ -224,6 +235,7 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
     opening_facilities = {row["facility_id"] for row in opening.values()}
     if {row["facility_id"] for row in quantities.values()} != opening_facilities:
         raise FbsSnapshotCostError("facility_scope_changed_requires_baseline")
+    documents, document_cost_state, document_valuation = resolve_document_costs(state, capture, opening, known)
     events: dict[str, list[dict]] = {}
     applied = {}
     blocked_keys = {key for item in pending if item.get("business_date") == day
@@ -310,12 +322,15 @@ def evaluate_candidate(state: dict, capture: dict) -> dict:
         "opening_date": closed_day, "opening_rows": deepcopy(opening), "rows": rows,
         "snapshot": deepcopy(capture["quantity_snapshot"]), "source_digest": capture["source_digest"],
         "applied_documents": applied, "diagnostics": diagnostics,
+        "document_cost_state": document_cost_state, "document_valuation": document_valuation,
     }
     return result
 
 
 def close_candidate_period(state: dict, day: str, *, today: str) -> dict:
     """Explicit candidate closure; schedule and final T0 belong to activation."""
+    if state.get("schema") != SCHEMA or state.get("policy") != POLICY or state.get("candidate_only") is not True:
+        raise FbsSnapshotCostError("candidate_requires_document_cost_v2_baseline")
     _day(day)
     if _day(today) <= _day(day):
         raise FbsSnapshotCostError("current_day_cannot_close")
@@ -339,6 +354,8 @@ def close_candidate_period(state: dict, day: str, *, today: str) -> dict:
 
 def candidate_period_view(state: dict, day: str) -> dict:
     """Exact-date interface for future consumers; no latest-price fallback."""
+    if state.get("schema") != SCHEMA or state.get("policy") != POLICY or state.get("candidate_only") is not True:
+        raise FbsSnapshotCostError("candidate_requires_document_cost_v2_baseline")
     _day(day)
     baseline = state["baseline"]
     period = state["periods"].get(day)
@@ -346,9 +363,11 @@ def candidate_period_view(state: dict, day: str) -> dict:
               "state_fingerprint": fingerprint(state), "available": False}
     if period is not None:
         rows, status, quality = period["rows"], period["status"], period["quality"]
+        document_cost_state = period["document_cost_state"]
         source = {"snapshot_id": period["snapshot"]["id"], "source_digest": period["source_digest"]}
     elif day == baseline["business_date"]:
         rows, status, quality = baseline["rows"], "baseline", "accepted_initial_cost"
+        document_cost_state = baseline["document_cost_state"]
         source = {"snapshot_id": baseline["snapshot"]["id"], "source_digest": baseline["source_digest"], "cost_version_id": baseline["cost_version_id"]}
     else:
         return {**result, "reason": "exact_date_cost_unavailable"}
@@ -361,6 +380,13 @@ def candidate_period_view(state: dict, day: str) -> dict:
                       rows=deepcopy(rows), quantity=_text(quantity), capital_rub=_text(capital),
                       wac_rub=_text(capital / quantity) if capital is not None and quantity > ZERO else None,
                       unpriced_keys=missing, pending_documents=deepcopy(state["pending_documents"]), source=source)
+        fbo = document_cost_state["fbo_rows"]
+        fbo_q = sum((_decimal(r["quantity"], integer=True) for r in fbo.values()), ZERO)
+        fbo_capital = sum((_decimal(r["capital_rub"]) for r in fbo.values()), ZERO)
+        # Future total-capital consumers must use the matching FBO allocation,
+        # not add legacy FBO expenses on top of the new FBS share.
+        result["fbo_component"] = {"rows": deepcopy(fbo), "quantity": _text(fbo_q),
+                                   "capital_rub": _text(fbo_capital), "policy": document_cost_state["policy"]}
     return result
 
 
