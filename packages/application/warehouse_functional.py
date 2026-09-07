@@ -4914,8 +4914,11 @@ class WarehouseFunctionalBlock:
             "total": _total_summary(summaries),
         }
 
-    def compact_warehouse_detail(self, warehouse_key: str) -> dict[str, Any]:
+    def compact_warehouse_detail(self, warehouse_key: str, *, fbs_inventory_snapshot=None) -> dict[str, Any]:
         """Read one active compact model without duplicate global readback."""
+
+        if warehouse_key == STAGE_FF and fbs_inventory_snapshot is not None:
+            return fbs_inventory_snapshot.warehouse_detail()
 
         if warehouse_key not in STAGES:
             raise WarehouseFunctionalError(f"unknown warehouse: {warehouse_key}")

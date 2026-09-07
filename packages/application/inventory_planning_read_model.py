@@ -147,12 +147,14 @@ class InventoryPlanningReadModel:
     def __init__(self, *, db_path: Path) -> None:
         self.db_path = Path(db_path)
 
-    def current_official_snapshot(self, *, now: datetime | None = None) -> dict[str, Any]:
+    def current_official_snapshot(self, *, now: datetime | None = None, fbs_inventory_snapshot=None) -> dict[str, Any]:
         """Warehouse cards only: official declared FBS, never physical/reserved.
 
         Keep the legacy planning projection used by Web Vitrina independent of
         this current-only display. Reading cards cannot refresh or rewrite it.
         """
+        if fbs_inventory_snapshot is not None:
+            return fbs_inventory_snapshot.planning_payload()
         from packages.application.official_fbs_stock_read import current_official_fbs_facilities
 
         with _connect_readonly(self.db_path) as conn:

@@ -6157,6 +6157,11 @@ class RegistryUploadHttpEntrypoint:
         return functional if functional.get("status") == "ready" else self.warehouse_stocks_block.overview()
 
     def handle_warehouse_detail_request(self, warehouse_key: str) -> dict[str, Any]:
+        candidate = getattr(self.web_vitrina_block, "fbs_inventory_snapshot", None)
+        if warehouse_key == "ff" and candidate is not None:
+            return self.warehouse_functional_block.compact_warehouse_detail(
+                "ff", fbs_inventory_snapshot=candidate,
+            )
         functional = self.warehouse_functional_block.warehouse_detail(warehouse_key)
         return (
             functional
@@ -6165,6 +6170,9 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_inventory_planning_request(self) -> dict[str, Any]:
+        candidate = getattr(self.web_vitrina_block, "fbs_inventory_snapshot", None)
+        if candidate is not None:
+            return self.inventory_planning.current_official_snapshot(fbs_inventory_snapshot=candidate)
         return self.inventory_planning.current_official_snapshot()
 
     def _ff_aggregate_revision(self) -> str:
