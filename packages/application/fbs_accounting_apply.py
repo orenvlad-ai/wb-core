@@ -19,10 +19,6 @@ def target(request):
     return root
 
 
-def evidence(book):
-    return {"source_digest": book["source_digest"], "baseline": book["state"]["baseline"],
-            "wb_days": book["wb_days"], "retained_days": book["retained_days"]}
-
 
 class FbsAccountingAdapter:
     def preview(self, request, operation_id):
