@@ -441,7 +441,7 @@ class PartnerReportBlock:
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
-        if self.finance.shared_cost_snapshot is None:
+        if not self.finance.shared_cost_is_candidate:
             self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
@@ -459,10 +459,10 @@ class PartnerReportBlock:
             **report,
             "performance": {
                 "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-                "raw_finance_full_scan": self.finance.shared_cost_snapshot is not None,
+                "raw_finance_full_scan": self.finance.shared_cost_is_candidate,
                 "source": (
                     "candidate week projection from raw Finance rows"
-                    if self.finance.shared_cost_snapshot is not None
+                    if self.finance.shared_cost_is_candidate
                     else "wb_finance_weekly_sku_aggregates indexed lookup"
                 ),
             },
@@ -645,7 +645,7 @@ class PartnerReportBlock:
         *,
         expected_source_digest: str = "",
     ) -> tuple[bytes, str, dict[str, Any]]:
-        if self.finance.shared_cost_snapshot is None:
+        if not self.finance.shared_cost_is_candidate:
             self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
@@ -969,7 +969,7 @@ class PartnerReportBlock:
         """Use active indexed projections or an explicit in-memory candidate."""
 
         shared = self.finance.shared_cost_snapshot
-        if shared is not None and finalization:
+        if self.finance.shared_cost_is_candidate and finalization:
             raise PartnerReportError(
                 "shared-cost candidates cannot be finalized",
                 code="shared_cost_candidate_is_read_only",
@@ -1002,7 +1002,7 @@ class PartnerReportBlock:
                         "status": str(sync["status"]),
                     }
                 )
-            if shared is not None:
+            if self.finance.shared_cost_is_candidate:
                 candidate = self.finance._candidate_week_projection_in_connection(
                     conn, week_start=week_start, week_end=week_end,
                 )
@@ -1072,6 +1072,8 @@ class PartnerReportBlock:
                 except ValueError:
                     stale_cost_rows.append({"reason": "operation_date_invalid", **dict(detail)})
                     continue
+                if shared is not None and finalization and shared.applies_to(operation_day) and not shared.closed_for(operation_day.isoformat()):
+                    blockers.append({"code": "shared_cost_day_not_closed", "date": operation_day.isoformat()})
                 if shared is not None:
                     current = resolve_channel_location_cost(
                         conn, nm_id=nm_id, operation_date=operation_day,
@@ -1362,13 +1364,15 @@ class PartnerReportBlock:
             ),
             "preview_source": "indexed_per_sku_weekly_finance_aggregate",
         }
-        if shared is not None:
+        if self.finance.shared_cost_is_candidate:
             report.update(
                 candidate_only=True,
                 shared_cost=shared.metadata(),
                 finance_cost_formula_version=shared.formula_version,
                 preview_source="candidate_in_memory_weekly_finance_projection",
             )
+        if shared is not None and not self.finance.shared_cost_is_candidate:
+            report["shared_cost"] = shared.metadata()
         provenance = {
             "schema_version": "partner_report_provenance_v3",
             "seller_id": self.seller_id,
@@ -2956,7 +2960,7 @@ class PartnerReportBlock:
 
     @contextmanager
     def _preview_connection(self):
-        if self.finance.shared_cost_snapshot is not None:
+        if self.finance.shared_cost_is_candidate:
             with closing(self._connect()) as conn, conn:
                 yield conn
         else:
@@ -2964,7 +2968,8 @@ class PartnerReportBlock:
                 yield conn
 
     def _connect(self) -> sqlite3.Connection:
-        if self.finance.shared_cost_snapshot is not None:
+        self.finance._pin_active_cost()
+        if self.finance.shared_cost_is_candidate:
             return self.finance._connect_shared_cost_preview()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(

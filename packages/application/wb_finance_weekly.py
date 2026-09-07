@@ -633,6 +633,7 @@ class WbFinanceWeeklyBlock:
         self.seller_id = seller_id or "canonical"
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._shared_cost_snapshot = shared_cost_snapshot
+        self.shared_cost_is_candidate = shared_cost_snapshot is not None
         self._capitalization_cache_key = ""
         self._capitalization_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._capitalization_cache_connection: sqlite3.Connection | None = None
@@ -650,8 +651,13 @@ class WbFinanceWeeklyBlock:
     def shared_cost_snapshot(self) -> SharedSkuCostSnapshot | None:
         return self._shared_cost_snapshot
 
+    def _pin_active_cost(self):
+        if not self.shared_cost_is_candidate:
+            from packages.application.fbs_accounting_runtime import load_shared
+            self._shared_cost_snapshot = load_shared(self.runtime_dir)
+
     def ensure_schema(self) -> None:
-        if self.shared_cost_snapshot is not None:
+        if self.shared_cost_is_candidate:
             raise ValueError("shared_cost_candidate_is_read_only")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         manifest = self.store_registry.load()
@@ -1377,7 +1383,7 @@ class WbFinanceWeeklyBlock:
         week_start: date,
         week_end: date,
     ) -> dict[str, Any]:
-        if self.shared_cost_snapshot is not None:
+        if self.shared_cost_is_candidate:
             raise ValueError("shared_cost_candidate_cannot_replace_active_aggregates")
         projection = self._build_week_target_projection(
             conn,
@@ -1590,7 +1596,7 @@ class WbFinanceWeeklyBlock:
     ) -> list[dict[str, Any]]:
         """Materialize an indexed, reproducible per-SKU Finance projection."""
 
-        if persist and self.shared_cost_snapshot is not None:
+        if persist and self.shared_cost_is_candidate:
             raise ValueError("shared_cost_candidate_cannot_replace_active_aggregates")
 
         records = list(raw_rows)
@@ -2934,7 +2940,12 @@ class WbFinanceWeeklyBlock:
                     self._canonical_channel_snapshot(conn), operation=row,
                 )
             if shared_applies and not shared_used:
-                dependency_digest.add({"shared_cost_snapshot": shared.metadata()})
+                metadata = shared.metadata()
+                if not self.shared_cost_is_candidate:
+                    # Per-operation dependencies below already bind exact day
+                    # versions. A new unrelated day must not stale a closed week.
+                    metadata = {k: metadata[k] for k in ("effective_date", "cost_method_version", "candidate_only")}
+                dependency_digest.add({"shared_cost_snapshot": metadata})
                 shared_used = True
                 source_units["shared_sku_daily"] = 0
             classified_channel = (
@@ -3366,6 +3377,7 @@ class WbFinanceWeeklyBlock:
         return {
             "status": "ok",
             "contract_version": "wb_finance_weekly_v1",
+            "shared_cost": self.shared_cost_snapshot.metadata() if self.shared_cost_snapshot is not None else None,
             "weeks": weeks,
             "week_count": len(weeks),
             "classifier_version": CLASSIFIER_VERSION,
@@ -5579,12 +5591,12 @@ class WbFinanceWeeklyBlock:
     def recalculate_stale_cost_weeks(self) -> dict[str, Any]:
         """Rebuild forward-ingress weeks whose canonical derived state changed."""
         self.ensure_schema()
-        plan = self.plan_stale_cost_weeks(
-            date_from=FBS_FINANCE_FORWARD_INGRESS_DATE
-        )
+        self._pin_active_cost()
+        boundary = (date.fromisoformat(self.shared_cost_snapshot.effective_date)
+                    if self.shared_cost_snapshot is not None else FBS_FINANCE_FORWARD_INGRESS_DATE)
+        plan = self.plan_stale_cost_weeks(date_from=boundary)
         return self.apply_stale_cost_weeks(
-            expected_fingerprint=str(plan["fingerprint"]),
-            date_from=FBS_FINANCE_FORWARD_INGRESS_DATE,
+            expected_fingerprint=str(plan["fingerprint"]), date_from=boundary,
         )
 
     def plan_stale_cost_weeks(
@@ -6545,6 +6557,7 @@ class WbFinanceWeeklyBlock:
         return conn
 
     def _connect_canonical_plan(self) -> sqlite3.Connection:
+        self._pin_active_cost()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
             "operational",
@@ -6565,6 +6578,7 @@ class WbFinanceWeeklyBlock:
         return conn
 
     def _connect_stale_cost_plan(self) -> sqlite3.Connection:
+        self._pin_active_cost()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
             "operational",
@@ -6611,7 +6625,8 @@ class WbFinanceWeeklyBlock:
         return versions
 
     def _connect(self) -> sqlite3.Connection:
-        if self.shared_cost_snapshot is not None:
+        self._pin_active_cost()
+        if self.shared_cost_is_candidate:
             return self._connect_shared_cost_preview()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(

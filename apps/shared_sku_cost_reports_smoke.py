@@ -130,7 +130,7 @@ class SharedCostReportTests(unittest.TestCase):
                                                         shared_cost_snapshot=candidate.finance.shared_cost_snapshot)
         self.assertEqual(self.active.db_path.read_bytes(), before)
         self.assertEqual(finance["aggregate"]["cogs"], "300.0000")  # 5*100 - 200 - 200 + 200
-        self.assertEqual(finance["aggregate"]["positive_adjustments"], "37.0000")
+        self.assertEqual(finance["aggregate"]["corrections"], "37.0000")  # positive additionalPayment is a WB charge
         self.assertEqual(resolved["unit_cost_rub"], "100")
         self.assertEqual([d["signed_cogs_rub"] for d in detailed["detail_rows"]],
                          ["200.0000", "300.0000", "-200.0000", "-200.0000", "200.0000"])

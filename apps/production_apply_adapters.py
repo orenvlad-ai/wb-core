@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from apps.production_apply_contract import AmbiguousSubmit
 from packages.application.wb_finance_payout_apply import FinancePayoutAdapter
+from packages.application.fbs_accounting_apply import FbsAccountingAdapter
 from apps.wb_fbs_mapping_evidence_production_adapter import (
     WbFbsMappingEvidenceProductionAdapter,
 )
@@ -25,6 +26,7 @@ class Adapter(Protocol):
 
 
 ADAPTERS: dict[str, Adapter] = {
+    "fbs_snapshot_accounting_v1": FbsAccountingAdapter(),
     "finance_payout_reconcile_v1": FinancePayoutAdapter(),
     "supplier_invoice_revision_v1": SupplierInvoiceRevisionAdapter(),
     "web_vitrina_management_history_v1": WebVitrinaManagementHistoryAdapter(),

@@ -418,7 +418,9 @@ class RegistryUploadDbBackedRuntime:
 
         publication_now = datetime.now(timezone.utc)
         publication_date = current_business_date_iso(publication_now)
-        estimate = build_current_official_fbs_estimate(
+        from packages.application.fbs_accounting_runtime import load_inventory, materialize
+        active_inventory = load_inventory(self.runtime_dir, now=publication_now)
+        estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
             self.db_path,
             nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
             now=publication_now,
@@ -442,8 +444,9 @@ class RegistryUploadDbBackedRuntime:
             plan = carry_forward(plan, presentation=load_presentations(
                 conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
             ), business_date=publication_date)
+            plan = materialize(plan, runtime_dir=self.runtime_dir, now=publication_now)
             plan = recalculate_current_envelope(plan, business_date=publication_date,
-                parameters=dated_parameters(conn, publication_date) if estimate.get('available') else None)
+                parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
             plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
                 parameters=dated_parameters(conn, yesterday_date(publication_date)))
             _assert_finance_daily_recovery_values_preserved(

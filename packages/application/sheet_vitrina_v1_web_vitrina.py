@@ -164,7 +164,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         fbs_inventory_snapshot=None,
     ) -> None:
         self.runtime = runtime
-        self.fbs_inventory_snapshot = fbs_inventory_snapshot
+        self._fbs_inventory_snapshot = fbs_inventory_snapshot
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.proxy_v4_parameters_resolver = proxy_v4_parameters_resolver or (
             lambda business_date: load_proxy_v4_parameters_for_date(
@@ -172,6 +172,17 @@ class SheetVitrinaV1WebVitrinaBlock:
                 effective_date=business_date,
             )
         )
+
+    @property
+    def fbs_inventory_snapshot(self):
+        if self._fbs_inventory_snapshot is not None:
+            return self._fbs_inventory_snapshot
+        from packages.application.fbs_accounting_runtime import load_inventory
+        return load_inventory(self.runtime.runtime_dir, now=self.now_factory())
+
+    @fbs_inventory_snapshot.setter
+    def fbs_inventory_snapshot(self, value):
+        self._fbs_inventory_snapshot = value
 
     def list_readable_dates(
         self,
@@ -421,6 +432,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                     rows,
                     reason_ru=fbs_lifecycle_fallback.reason_ru,
                 )
+        inventory_snapshot = self.fbs_inventory_snapshot
         rows = restore_materialized_official_fbs_estimates(
             rows,
             presentation=dict(snapshot.metadata or {}).get("server_cell_presentation", {}),
@@ -430,8 +442,8 @@ class SheetVitrinaV1WebVitrinaBlock:
             business_date=current_business_date_iso(now),
         )
         if current_business_date_iso(now) in snapshot.date_columns:
-            if self.fbs_inventory_snapshot is not None:
-                rows = self.fbs_inventory_snapshot.apply_rows(rows, business_date=current_business_date_iso(now))
+            if inventory_snapshot is not None:
+                rows = inventory_snapshot.apply_rows(rows, business_date=current_business_date_iso(now))
                 current_estimate = {"available": True}
             else:
                 current_estimate = build_current_official_fbs_estimate(
@@ -471,10 +483,10 @@ class SheetVitrinaV1WebVitrinaBlock:
         )
 
         projection_metadata = deepcopy(dict(snapshot.metadata or {}).get("warehouse_business_projection") or {})
-        if self.fbs_inventory_snapshot is not None and current_business_date_iso(now) in snapshot.date_columns:
-            candidate = self.fbs_inventory_snapshot.payload()
+        if inventory_snapshot is not None and current_business_date_iso(now) in snapshot.date_columns:
+            candidate = inventory_snapshot.payload()
             projection_metadata["fbs_inventory_candidate"] = {
-                "candidate_only": True, "date": candidate["date"], "version_id": candidate["version_id"],
+                "candidate_only": candidate["candidate_only"], "date": candidate["date"], "version_id": candidate["version_id"],
                 "source": candidate["source"],
             }
         return WebVitrinaContractV1(

@@ -10719,6 +10719,7 @@
       if (warehouseTitleNode) warehouseTitleNode.textContent = String(warehouse.warehouse_name || "Склады и себестоимость");
       if (warehouseMetaNode) {
         warehouseMetaNode.textContent = "Актуальность: " + warehouseDate(warehouse.updated_at) + " · Источник: " + String(warehouse.source_basis || "—") +
+          (warehouse.accounting_effective_date ? " · Учёт по снимкам с " + String(warehouse.accounting_effective_date) : "") +
           (warehouse.wb_contour && warehouse.wb_contour.formula_ru ? " · " + String(warehouse.wb_contour.formula_ru) : "") +
           (warehouse.ff_reservations && warehouse.ff_reservations.formula_ru ? " · " + String(warehouse.ff_reservations.formula_ru) : "");
       }
