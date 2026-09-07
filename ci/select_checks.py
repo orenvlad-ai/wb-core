@@ -19,7 +19,7 @@ PLAN_SCHEMA = "wb-core.check-plan/v1"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 KNOWN_ROOTS = {".github", "apps", "artifacts", "ci", "docs", "gas", "packages", "registry"}
 KNOWN_ROOT_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "README.md"}
-KNOWN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".py", ".service", ".toml", ".yaml", ".yml"}
+KNOWN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".py", ".service", ".timer", ".toml", ".yaml", ".yml"}
 REPO_ONLY_PREFIXES = (".github/", "ci/", "docs/", "migration/", "reports/", "workspaces/")
 REPO_ONLY_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "IMPLEMENTATION_REPORT.md", "README.md"}
 
