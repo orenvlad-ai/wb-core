@@ -5514,6 +5514,7 @@
     .warehouse-summary-item { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-subtle); }
     .warehouse-summary-label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
     .warehouse-summary-value { display: block; font-size: 21px; font-weight: 750; }
+    [data-warehouse-summary][data-snapshot-inventory="true"] { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
     .warehouse-ff-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .warehouse-ff-action { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--panel-subtle); }
     .warehouse-ff-action h3 { margin: 0 0 6px; font-size: 16px; }
@@ -10693,6 +10694,7 @@
 
     function warehouseLazyBalanceEvidence(line) {
       if (!line || line.provenance_available === false) return "—";
+      if (line.human_evidence) return warehouseEvidenceDetails(line.human_evidence, "Раскрыть основание", line.provenance);
       const key = String(line.warehouse_key || "") + ":" + String(line.nm_id || "");
       const cached = state.warehouses.balanceDetails[key];
       if (cached) return warehouseEvidenceDetails(cached.human_evidence, "Раскрыть основание", cached.provenance);
@@ -10729,11 +10731,12 @@
         warehouseStatusDetailNode.textContent = String(warehouse.status_description || syncPresentation.description_ru || "");
       }
       if (warehouseSummaryNode) {
+        warehouseSummaryNode.dataset.snapshotInventory = warehouse.snapshot_inventory ? "true" : "false";
         const summaryItems = [
           ["Уникальных SKU", warehouseNumber(warehouse.sku_count)],
-          [warehouse.wb_contour
+          [warehouse.quantity_label || (warehouse.wb_contour
             ? "Всего в контуре WB"
-            : (warehouse.ff_reservations ? "Физический остаток" : "Всего единиц"), warehouseNumber(warehouse.total_quantity)],
+            : (warehouse.ff_reservations ? "Физический остаток" : "Всего единиц")), warehouseNumber(warehouse.total_quantity)],
           ["Товарный капитал", warehouseMoney(warehouse.total_capital_rub)],
           ["Средневзвешенная себестоимость", warehouseMoney(warehouse.average_unit_cost_rub)]
         ];
@@ -10742,6 +10745,12 @@
             ["На складах WB", warehouseNumber(warehouse.wb_contour.quantity)],
             ["В пути к покупателям", warehouseNumber(warehouse.wb_contour.in_way_to_client)],
             ["В пути возврата на WB", warehouseNumber(warehouse.wb_contour.in_way_from_client)]
+          );
+        }
+        if (warehouse.snapshot_inventory) {
+          summaryItems.push(
+            ["Доступно FBS по снимку", warehouseNumber(warehouse.snapshot_inventory.fbs_quantity)],
+            ["FBO по документам", warehouseNumber(warehouse.snapshot_inventory.fbo_quantity)]
           );
         }
         if (warehouse.ff_reservations) {
@@ -10773,6 +10782,7 @@
             '<td>' + escapeHtml(identity || "—") + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseNumber(line.quantity)) +
               reservationFacts +
+              (warehouse.snapshot_inventory ? '<span class="warehouse-balance-reservation">FBS: ' + escapeHtml(warehouseNumber(line.fbs_quantity)) + ' · FBO: ' + escapeHtml(warehouseNumber(line.fbo_quantity)) + '</span>' : '') +
               (line.warning ? '<span class="warehouse-balance-warning" data-tone="' + escapeHtml(line.quality_tone || "warning") + '">' + escapeHtml(line.warning) + '</span>' : '') + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.average_unit_cost_rub)) + '</td>' +
             '<td class="warehouse-number">' + escapeHtml(warehouseMoney(line.capital_rub)) + '</td>' +

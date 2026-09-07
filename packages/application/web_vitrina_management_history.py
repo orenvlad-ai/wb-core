@@ -19,6 +19,8 @@ SOURCE = "web_vitrina_management_history_v1"
 FACT_SOURCE = 'web_vitrina_closed_day_facts_v1'
 FACT_GROUPS = frozenset({'sales_funnel_history','seller_funnel_snapshot','web_source_snapshot','ads_compact'})
 COST = "our_wb_unit_cost_rub"
+INVENTORY_SOURCE = "fbs_snapshot_inventory_presentation_v1"
+COST_SOURCES = (SOURCE, "official_fbs_management_inventory_v1", INVENTORY_SOURCE)
 TARGET_METRICS = frozenset({COST, "total_" + COST, "proxy_profit_3_rub",
     "total_proxy_profit_3_rub", "proxy_margin_3_pct", "proxy_margin_3_pct_total",
     "proxy_profit_4_rub", "total_proxy_profit_4_rub", "proxy_margin_4_pct",
@@ -177,7 +179,7 @@ def project(plan: dict[str, Any], *, dates: list[str], source: dict[str, Any],
                  ("ads_sum", "ads_sum"), ("canonical_wb_wac", COST))}
             # Use the preserved exact estimate instead of its floating display representation.
             cost_cell = presentation.get(scope + "|" + COST, {}).get(day, {})
-            if cost_cell.get("source") in (SOURCE, "official_fbs_management_inventory_v1"):
+            if cost_cell.get("source") in COST_SOURCES:
                 operands["canonical_wb_wac"] = cost_cell["management_value"]
             inputs_by_scope[scope] = operands
             r3 = calculate_proxy_3(**operands, parameters=p3)
@@ -350,9 +352,10 @@ def recalculate_current(plan: dict[str, Any], *, business_date: str, parameters:
     cells = plan.get('metadata', {}).get('server_cell_presentation', {})
     costs = {key: by_date[business_date] for key, by_date in cells.items()
         if key.split('|')[-1] in (COST, 'total_' + COST) and business_date in by_date
-        and by_date[business_date].get('source') == 'official_fbs_management_inventory_v1'
+        and by_date[business_date].get('source') in ('official_fbs_management_inventory_v1', INVENTORY_SOURCE)
         and by_date[business_date].get('source_as_of_date') == business_date
         and by_date[business_date].get('management_value') not in ('', None)}
+    new_inventory = any(by_date.get(business_date, {}).get('source') == INVENTORY_SOURCE for by_date in cells.values())
     cost_rows = [r[1] for r in data_sheet(plan)['rows'] if r[1].split('|')[-1] in (COST, 'total_' + COST)]
     working = deepcopy(plan)
     working.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
@@ -373,7 +376,7 @@ def recalculate_current(plan: dict[str, Any], *, business_date: str, parameters:
             working['metadata']['server_cell_presentation'].setdefault(row[1], {})[business_date] = {}
         if row[1].split('|')[-1] in TARGET_METRICS - {COST, 'total_' + COST}:
             cell = cells.get(row[1], {}).get(business_date, {})
-            if cell.get('source') == SOURCE or row[index] in ('',None):
+            if new_inventory or cell.get('source') == SOURCE or row[index] in ('',None):
                 row[index] = ''
                 working['metadata']['server_cell_presentation'].setdefault(row[1], {})[business_date] = {
                     'source':SOURCE, 'state':'unavailable', 'management_value':'',
@@ -405,7 +408,7 @@ def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, paramet
     # comes from the saved plan; live costs come from the just-applied FBS view.
     for row in rows:
         original = original_presentation.get(row.row_id, {}).get(business_date, {})
-        if original.get('source') == SOURCE:
+        if original.get('source') == SOURCE and presentation[row.row_id][business_date].get('source') != INVENTORY_SOURCE:
             presentation[row.row_id][business_date] = original
     pseudo = {'date_columns':[business_date], 'snapshot_id':snapshot_id, 'metadata':{'server_cell_presentation':presentation},
               'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key',business_date],
@@ -485,7 +488,7 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
                     (('order_sum', 'orderSum'), ('order_count', 'orderCount'),
                      ('ads_sum', 'ads_sum'), ('canonical_wb_wac', COST))}
         cost_cell = cells.get(scope + '|' + COST, {}).get(day, {})
-        if cost_cell.get('source') in (SOURCE, 'official_fbs_management_inventory_v1'):
+        if cost_cell.get('source') in COST_SOURCES:
             saved_cost = cost_cell.get('management_value')
             operands['canonical_wb_wac'] = saved_cost if saved_cost not in ('', None) else None
         inputs[scope] = operands
