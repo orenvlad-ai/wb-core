@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from apps.production_apply_contract import AmbiguousSubmit
+from packages.application.wb_finance_payout_apply import FinancePayoutAdapter
 from apps.wb_fbs_mapping_evidence_production_adapter import (
     WbFbsMappingEvidenceProductionAdapter,
 )
@@ -24,6 +25,7 @@ class Adapter(Protocol):
 
 
 ADAPTERS: dict[str, Adapter] = {
+    "finance_payout_reconcile_v1": FinancePayoutAdapter(),
     "supplier_invoice_revision_v1": SupplierInvoiceRevisionAdapter(),
     "web_vitrina_management_history_v1": WebVitrinaManagementHistoryAdapter(),
     "web_vitrina_wb_history_recovery_v1": WebVitrinaWbHistoryRecoveryAdapter(),

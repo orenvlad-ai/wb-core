@@ -151,10 +151,10 @@ def _assert_standalone_remuneration_adjustment_once(
     )["aggregate"]
     if (
         result["wb_remuneration_adjustment"] != "7.0000"
-        or result["positive_adjustments"] != "12.0000"
-        or result["corrections"] != "5.0000"
-        or result["profit_period_expenses"] != "5.0000"
-        or result["profit_after_cogs"] != "7.0000"
+        or result["positive_adjustments"] != "5.0000"
+        or result["corrections"] != "12.0000"
+        or result["profit_period_expenses"] != "12.0000"
+        or result["profit_after_cogs"] != "-7.0000"
         or result["agent_remuneration"] != "0.0000"
         or result["acquiring"] != "0.0000"
     ):

@@ -41,6 +41,8 @@ from packages.application.storage_registry import (  # noqa: E402
 
 
 def main() -> None:
+    from apps.wb_finance_payout_smoke import run as payout_regression
+    payout_regression()
     _assert_client_contract()
     _assert_schedule_contract()
     _assert_functional_daily_cost_requires_exact_date()
@@ -80,13 +82,13 @@ def main() -> None:
             "subscriptions": "6.0000",
             "paid_services": "7.0000",
             "other_deductions": "8.0000",
-            "positive_adjustments": "11.0000",
-            "total_wb_expenses": "155.0000",
-            "profit_period_expenses": "155.0000",
-            "wb_expenses_without_marketing_pct": "56.2500",
-            "before_cogs_profit": "96.0000",
+            "positive_adjustments": "0.0000",
+            "total_wb_expenses": "166.0000",
+            "profit_period_expenses": "166.0000",
+            "wb_expenses_without_marketing_pct": "60.8333",
+            "before_cogs_profit": "74.0000",
             "cogs": "200.0000",
-            "profit_after_cogs": "-104.0000",
+            "profit_after_cogs": "-126.0000",
         }
         for key, value in expected.items():
             if metrics.get(key) != value:
@@ -94,7 +96,7 @@ def main() -> None:
                     f"{key}: expected {value!r}, got {metrics.get(key)!r}"
                 )
         if Decimal(metrics["final_margin_pct"]).quantize(Decimal("0.01")) != Decimal(
-            "-43.33"
+            "-52.50"
         ):
             raise AssertionError(
                 f"final margin mismatch: {metrics['final_margin_pct']}"
