@@ -5,6 +5,7 @@ import json
 import sqlite3
 from typing import Any
 from packages.business_time import current_business_date_iso
+from packages.application.stock_catalog_scope import read_stock_catalog_scope
 from packages.application.wb_fbs_warehouse_registry import (
     _complete_source_generation, _freshness, REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE,
     STOCK_ROWS_TABLE, WAREHOUSE_MAPPINGS_TABLE, FACILITIES_TABLE,
@@ -19,6 +20,13 @@ def _number(value):
 
 def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list[int] | None,
                                     day: str, now: datetime) -> dict:
+    if universe is None:
+        current_scope = read_stock_catalog_scope(conn)
+        if not current_scope["complete"]:
+            raise ValueError("current_stock_catalog_scope_incomplete")
+        # A last-good generation may predate a newly added SKU. It remains
+        # useful for covered subsets, but cannot certify today's entire catalog.
+        universe = current_scope["nm_ids"]
     generation = _complete_source_generation(conn)
     if not generation.get("complete"):
         raise ValueError("complete_official_generation_unavailable")
@@ -59,8 +67,6 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
             f"SELECT chrt_id,nm_id,amount,provenance FROM {STOCK_ROWS_TABLE} WHERE run_id=?",
             (stock_run["run_id"],),
         ).fetchall()
-        if universe is None and identities is None:
-            stocks = {nm: {} for nm in sorted({int(r["nm_id"]) for r in stock_rows})}
         identity = {(int(r["chrt_id"]), int(r["nm_id"])) for r in stock_rows}
         if (len(identity) != int(catalog["requested_chrt_count"])
                 or (identities is not None and identity != identities)):

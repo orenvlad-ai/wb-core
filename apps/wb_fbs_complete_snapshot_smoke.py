@@ -109,7 +109,7 @@ class OfficialSource:
         ]
 
     def list_stocks(self, *, warehouse_id, chrt_ids):
-        assert chrt_ids == [9001, 9002, 9003], chrt_ids
+        assert chrt_ids == [9001, 9002, 9003, 9303], chrt_ids
         if warehouse_id == MOSCOW_WAREHOUSE_ID:
             return [
                 WbFbsStock(chrt_id=9001, amount=0),
@@ -225,17 +225,19 @@ def main() -> int:
         generation = good["source_generation"]
         assert generation["status"] == "complete" and generation["complete"] is True
         assert generation["policy_version"] == COMPLETE_CATALOG_OMISSION_ZERO_POLICY
-        assert generation["catalog_scope"]["active_nm_id_count"] == 2
-        assert generation["catalog_scope"]["requested_chrt_count"] == 3
+        assert generation["catalog_scope"]["active_nm_id_count"] == 3
+        assert generation["catalog_scope"]["main_nm_id_count"] == 2
+        assert generation["catalog_scope"]["retained_hidden_nm_id_count"] == 1
+        assert generation["catalog_scope"]["requested_chrt_count"] == 4
         assert generation["warehouse_scope"]["warehouse_count"] == 2
         assert generation["cardinality"] == {
             "warehouse_count": 2,
-            "requested_chrt_count": 3,
-            "expected_dense_row_count": 6,
-            "actual_dense_row_count": 6,
+            "requested_chrt_count": 4,
+            "expected_dense_row_count": 8,
+            "actual_dense_row_count": 8,
             "explicit_wb_row_count": 4,
             "explicit_zero_count": 2,
-            "omitted_requested_zero_count": 2,
+            "omitted_requested_zero_count": 4,
         }
         warehouse_pairs = {
             (row["seller_warehouse_id"], row["official_office_id"])
@@ -255,7 +257,9 @@ def main() -> int:
                       ) ORDER BY seller_warehouse_id,chrt_id""",
                 (generation["generation_id"],),
             ).fetchall()
-        assert len(provenance) == 6
+        assert len(provenance) == 8
+        assert (MOSCOW_WAREHOUSE_ID, 9303, 0, "omitted_requested_zero") in provenance
+        assert (ORENBURG_WAREHOUSE_ID, 9303, 0, "omitted_requested_zero") in provenance
         assert (MOSCOW_WAREHOUSE_ID, 9001, 0, "explicit_wb_row") in provenance
         assert (MOSCOW_WAREHOUSE_ID, 9002, 0, "omitted_requested_zero") in provenance
         assert (ORENBURG_WAREHOUSE_ID, 9002, 0, "explicit_wb_row") in provenance

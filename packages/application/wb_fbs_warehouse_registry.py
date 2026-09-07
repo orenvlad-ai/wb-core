@@ -430,21 +430,11 @@ class WbFbsWarehouseRegistry:
                     "requested_chrt_count": 0,
                     "complete": False,
                 }
-            active_rows = [
-                {
-                    "item_id": str(row[0]),
-                    "nm_id": int(row[1]) if row[1] is not None else None,
-                    "updated_at": str(row[2] or ""),
-                }
-                for row in conn.execute(
-                    """SELECT item_id,nm_id,updated_at
-                         FROM sheet_vitrina_v1_nomenclature_items
-                        WHERE is_active=1 AND is_hidden=0
-                        ORDER BY item_id"""
-                )
-            ]
-        active_nm_values = [row["nm_id"] for row in active_rows]
-        positive_nm_ids = {int(value) for value in active_nm_values if value and value > 0}
+            from packages.application.stock_catalog_scope import read_stock_catalog_scope
+
+            query_scope = read_stock_catalog_scope(conn)
+            active_rows = query_scope["identities"]
+        positive_nm_ids = set(query_scope["nm_ids"])
         cards_by_nm: dict[int, list[Any]] = {}
         for card in snapshot.cards:
             if card.nm_id is not None:
@@ -471,11 +461,7 @@ class WbFbsWarehouseRegistry:
             for chrt_id, owners in chrt_candidates.items()
             if len(owners) == 1
         }
-        internal_scope_valid = bool(
-            active_rows
-            and len(active_nm_values) == len(positive_nm_ids)
-            and len(active_nm_values) == len(set(active_nm_values))
-        )
+        internal_scope_valid = query_scope["complete"]
         complete = bool(
             snapshot.complete
             and snapshot.terminal_short_page
@@ -488,6 +474,7 @@ class WbFbsWarehouseRegistry:
         )
         scope_material = {
             "policy_version": COMPLETE_CATALOG_OMISSION_ZERO_POLICY,
+            "query_scope_policy": query_scope["policy"],
             "active_scope": active_rows,
             "catalog_snapshot_digest": snapshot.source_digest,
             "mapping": [
@@ -510,6 +497,11 @@ class WbFbsWarehouseRegistry:
             "mapping_digest": _fingerprint(scope_material["mapping"]),
             "scope_digest": _fingerprint(scope_material),
             "active_nm_id_count": len(positive_nm_ids),
+            "query_scope_policy": query_scope["policy"],
+            "main_nm_id_count": query_scope["main_count"],
+            "retained_hidden_nm_id_count": query_scope["retained_hidden_count"],
+            "invalid_identity_item_ids": query_scope["invalid_identity_item_ids"],
+            "duplicate_nomenclature_nm_ids": query_scope["duplicate_nm_ids"],
             "requested_chrt_count": len(exact),
             "missing_active_nm_ids": missing_nm_ids,
             "duplicate_active_nm_ids": duplicate_nm_ids,

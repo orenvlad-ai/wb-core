@@ -78,6 +78,14 @@ class StocksIncomplete:
     covered_count: int
     missing_nm_ids: list[int]
     detail: str
+    # Observations are not an admitted business snapshot. Only an explicit
+    # display fallback may expose them; there is deliberately no `items` field.
+    observed_items: list[StocksItem] = field(default_factory=list)
+    observed_warehouse_rows: list[StocksWarehouseRow] = field(default_factory=list)
+    warehouse_granularity_complete: bool = False
+    fetched_at: str = ""
+    pagination_complete: bool = False
+    raw_rows_digest: str = ""
 
 
 StocksResult = Union[StocksSuccess, StocksIncomplete]
