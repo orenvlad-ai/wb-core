@@ -21,7 +21,10 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import sqlite3
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
+
+if TYPE_CHECKING:
+    from packages.application.shared_sku_cost import SharedSkuCostSnapshot
 
 from packages.application.warehouse_archival_estimate import (
     QUALITY as BUSINESS_APPROVED_ARCHIVAL_ESTIMATE_QUALITY,
@@ -667,6 +670,7 @@ def resolve_channel_location_cost(
     operation: Mapping[str, Any] | None = None,
     fbs_order_id: int | None = None,
     snapshot: CanonicalChannelCostSnapshot | None = None,
+    shared_cost_snapshot: SharedSkuCostSnapshot | None = None,
 ) -> dict[str, Any]:
     """Resolve one sale/return through the single channel-aware contract.
 
@@ -677,6 +681,10 @@ def resolve_channel_location_cost(
     cost.  Non-FBS rows retain the canonical WB/FBO daily resolver.
     """
 
+    # The opt-in daily source owns all channels after its boundary. Resolve
+    # before loading any legacy value or Lifecycle classification evidence.
+    if shared_cost_snapshot is not None and shared_cost_snapshot.applies_to(operation_date):
+        return shared_cost_snapshot.resolve(nm_id=nm_id, operation_date=operation_date)
     state = snapshot or CanonicalChannelCostSnapshot.from_connection(conn)
     classification = classify_finance_channel(
         state,

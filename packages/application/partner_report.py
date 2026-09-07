@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing, contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
@@ -11,7 +12,7 @@ from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 import zipfile
 
 from openpyxl import Workbook, load_workbook
@@ -36,6 +37,9 @@ from packages.application.canonical_wb_cost_resolver import (
     resolve_channel_location_cost,
 )
 from packages.application.storage_registry import StoreRegistry
+
+if TYPE_CHECKING:
+    from packages.application.shared_sku_cost import SharedSkuCostSnapshot
 
 
 PARTNER_REPORT_FORMULA_VERSION = "partner_report_profitability_ui_first_v4"
@@ -239,6 +243,7 @@ class PartnerReportBlock:
         *,
         seller_id: str = "canonical",
         now_factory: Callable[[], datetime] | None = None,
+        shared_cost_snapshot: SharedSkuCostSnapshot | None = None,
     ) -> None:
         self.runtime_dir = Path(runtime_dir)
         self.store_registry = StoreRegistry(self.runtime_dir)
@@ -249,6 +254,7 @@ class PartnerReportBlock:
             self.runtime_dir,
             seller_id=self.seller_id,
             now_factory=self.now_factory,
+            shared_cost_snapshot=shared_cost_snapshot,
         )
 
     def ensure_schema(self) -> None:
@@ -435,12 +441,13 @@ class PartnerReportBlock:
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
-        self.ensure_schema()
+        if self.finance.shared_cost_snapshot is None:
+            self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
             payload.get("selected_weeks"), require_continuous=False
         )
-        with self._connect() as conn:
+        with self._preview_connection() as conn:
             settings = self._load_settings(conn, nm_id=nm_id)
             report = self._calculate_report(
                 conn,
@@ -452,8 +459,12 @@ class PartnerReportBlock:
             **report,
             "performance": {
                 "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-                "raw_finance_full_scan": False,
-                "source": "wb_finance_weekly_sku_aggregates indexed lookup",
+                "raw_finance_full_scan": self.finance.shared_cost_snapshot is not None,
+                "source": (
+                    "candidate week projection from raw Finance rows"
+                    if self.finance.shared_cost_snapshot is not None
+                    else "wb_finance_weekly_sku_aggregates indexed lookup"
+                ),
             },
         }
 
@@ -634,12 +645,13 @@ class PartnerReportBlock:
         *,
         expected_source_digest: str = "",
     ) -> tuple[bytes, str, dict[str, Any]]:
-        self.ensure_schema()
+        if self.finance.shared_cost_snapshot is None:
+            self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
             payload.get("selected_weeks"), require_continuous=False
         )
-        with self._connect() as conn:
+        with self._preview_connection() as conn:
             settings = self._load_settings(conn, nm_id=nm_id)
             report, provenance = self._calculate_report(
                 conn,
@@ -954,8 +966,14 @@ class PartnerReportBlock:
         selected_weeks: list[str],
         finalization: bool,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Build a preview from indexed Finance projections, never a raw scan."""
+        """Use active indexed projections or an explicit in-memory candidate."""
 
+        shared = self.finance.shared_cost_snapshot
+        if shared is not None and finalization:
+            raise PartnerReportError(
+                "shared-cost candidates cannot be finalized",
+                code="shared_cost_candidate_is_read_only",
+            )
         nm_id = str(settings["nm_id"])
         params = settings["parameters"]
         week_records: list[dict[str, Any]] = []
@@ -984,16 +1002,24 @@ class PartnerReportBlock:
                         "status": str(sync["status"]),
                     }
                 )
-            sku_row = conn.execute(
-                """SELECT * FROM wb_finance_weekly_sku_aggregates
-                   WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id=?""",
-                (self.seller_id, week_start_text, week_end.isoformat(), nm_id),
-            ).fetchone()
-            account_row = conn.execute(
-                """SELECT * FROM wb_finance_weekly_sku_aggregates
-                   WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id='__account__'""",
-                (self.seller_id, week_start_text, week_end.isoformat()),
-            ).fetchone()
+            if shared is not None:
+                candidate = self.finance._candidate_week_projection_in_connection(
+                    conn, week_start=week_start, week_end=week_end,
+                )
+                projections = {item["nm_id"]: item for item in candidate["sku_projections"]}
+                sku_row = projections.get(nm_id)
+                account_row = projections.get("__account__")
+            else:
+                sku_row = conn.execute(
+                    """SELECT * FROM wb_finance_weekly_sku_aggregates
+                       WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id=?""",
+                    (self.seller_id, week_start_text, week_end.isoformat(), nm_id),
+                ).fetchone()
+                account_row = conn.execute(
+                    """SELECT * FROM wb_finance_weekly_sku_aggregates
+                       WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id='__account__'""",
+                    (self.seller_id, week_start_text, week_end.isoformat()),
+                ).fetchone()
             if sku_row is None or account_row is None:
                 blockers.append(
                     {
@@ -1046,20 +1072,31 @@ class PartnerReportBlock:
                 except ValueError:
                     stale_cost_rows.append({"reason": "operation_date_invalid", **dict(detail)})
                     continue
-                current = resolve_channel_location_cost(
-                    conn,
-                    nm_id=nm_id,
-                    operation_date=operation_day,
-                    fbs_order_id=(
-                        int(detail.get("fbs_order_id") or 0) or None
-                    ),
+                if shared is not None:
+                    current = resolve_channel_location_cost(
+                        conn, nm_id=nm_id, operation_date=operation_day,
+                        operation={"deliveryType": "FBS"} if detail.get("channel") == "FBS" else None,
+                        fbs_order_id=int(detail.get("fbs_order_id") or 0) or None,
+                        shared_cost_snapshot=shared,
+                    )
+                else:
+                    current = resolve_channel_location_cost(
+                        conn,
+                        nm_id=nm_id,
+                        operation_date=operation_day,
+                        fbs_order_id=int(detail.get("fbs_order_id") or 0) or None,
+                    )
+                current_formula = (
+                    shared.formula_version
+                    if shared is not None and shared.applies_to(operation_day)
+                    else COST_METHOD_VERSION
                 )
                 if (
                     current.get("status") != "resolved"
                     or str(current.get("source_digest") or "")
                     != str(detail.get("source_digest") or "")
                     or str(detail.get("formula_version") or "")
-                    != COST_METHOD_VERSION
+                    != current_formula
                 ):
                     stale_cost_rows.append(
                         {
@@ -1069,7 +1106,7 @@ class PartnerReportBlock:
                             "expected_formula_version": str(
                                 detail.get("formula_version") or ""
                             ),
-                            "current_formula_version": COST_METHOD_VERSION,
+                            "current_formula_version": current_formula,
                             "current_reason": str(current.get("reason") or ""),
                         }
                     )
@@ -1194,7 +1231,7 @@ class PartnerReportBlock:
                             "daily_rows",
                             "problem_skus",
                             "cost_state_hash",
-                        )
+                        ) + (("quality",) if shared is not None else ())
                     },
                     "ads_date_count": 7,
                     "ads_covered_date_count": 7 - len(ads_blockers),
@@ -1285,6 +1322,8 @@ class PartnerReportBlock:
                 for item in provenance_weeks
             ],
         }
+        if shared is not None:
+            source_manifest["shared_cost"] = shared.metadata()
         source_digest = _sha256_json(source_manifest)
         report = {
             "status": "incomplete" if blockers else "ready",
@@ -1323,6 +1362,13 @@ class PartnerReportBlock:
             ),
             "preview_source": "indexed_per_sku_weekly_finance_aggregate",
         }
+        if shared is not None:
+            report.update(
+                candidate_only=True,
+                shared_cost=shared.metadata(),
+                finance_cost_formula_version=shared.formula_version,
+                preview_source="candidate_in_memory_weekly_finance_projection",
+            )
         provenance = {
             "schema_version": "partner_report_provenance_v3",
             "seller_id": self.seller_id,
@@ -2908,7 +2954,18 @@ class PartnerReportBlock:
         cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", value).strip("._")
         return cleaned[:80]
 
+    @contextmanager
+    def _preview_connection(self):
+        if self.finance.shared_cost_snapshot is not None:
+            with closing(self._connect()) as conn, conn:
+                yield conn
+        else:
+            with self._connect() as conn:
+                yield conn
+
     def _connect(self) -> sqlite3.Connection:
+        if self.finance.shared_cost_snapshot is not None:
+            return self.finance._connect_shared_cost_preview()
         manifest = self.store_registry.load()
         conn = self.store_registry.connect(
             "operational",
