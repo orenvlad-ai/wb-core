@@ -17,6 +17,9 @@ from typing import Any, Mapping
 
 GIB = 1024**3
 MIB = 1024**2
+# Added above the next-copy requirement, which already includes Finance's
+# independent hard reserve. This setting persists across releases.
+BACKUP_ADDITIONAL_RESERVE_BYTES = 4 * GIB
 NORMAL_AVAILABLE_BYTES = 25 * GIB
 WARNING_AVAILABLE_BYTES = 20 * GIB
 CRITICAL_AVAILABLE_BYTES = 15 * GIB
@@ -272,7 +275,7 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             raise RootStoragePolicyError("canonical storage reserve is invalid")
         if reserve_mode == "finance_next_replacement_plus_emergency" and int(
             raw.get("emergency_reserve_bytes") or 0
-        ) != 8 * GIB:
+        ) != BACKUP_ADDITIONAL_RESERVE_BYTES:
             raise RootStoragePolicyError("canonical backup emergency reserve drift")
     if set(expected_paths) != active_roles:
         raise RootStoragePolicyError("active storage filesystem registry drifted")
@@ -1118,7 +1121,7 @@ def _finance_backup_floor(policy: Mapping[str, Any]) -> dict[str, Any]:
         or health.get("next_replacement_capacity") is not True
         or blockers
         or next_replacement <= 0
-        or emergency != 8 * GIB
+        or emergency != BACKUP_ADDITIONAL_RESERVE_BYTES
     ):
         raise RootStoragePolicyError(
             "Finance backup reserve evidence is not healthy: "

@@ -36,7 +36,7 @@
         "filesystem_type": "ext4",
         "required_mount_options": ["rw"],
         "reserve_mode": "finance_next_replacement_plus_emergency",
-        "emergency_reserve_bytes": 8589934592
+        "emergency_reserve_bytes": 4294967296
       },
       "generation": {
         "path": "/opt/wb-core-runtime/state/generations",
