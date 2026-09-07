@@ -24,11 +24,12 @@ class Source:
         self.status_ids = []
         self.cursor = 0
         self.missing = set()
+        self.created_at = '2026-07-01T00:00:00Z'
 
     def list_orders(self, **kwargs):
         self.cursors.append(kwargs['next_cursor'])
         return WbFbsOrdersPage([
-            {'id':i,'nmId':100,'deliveryType':'fbs','createdAt':'2026-07-01T00:00:00Z','rid':f'rid-{i}'}
+            {'id':i,'nmId':100,'deliveryType':'fbs','createdAt':self.created_at,'rid':f'rid-{i}'}
             for i in self.ids], self.cursor, kwargs['limit'],kwargs['date_from'],kwargs['date_to'])
 
     def list_statuses(self, ids):
@@ -71,6 +72,7 @@ class ObserverTests(unittest.TestCase):
             self.assertEqual(first['status'],'success')
             self.assertEqual(first['bootstrap_order_count'],1)
             self.assertIn(1,self.source.status_ids)  # Initial unfinished order older than listing window.
+            self.assertEqual(self.source.status_ids.count(2),1)  # Already refreshed by the listing page.
             self.assertEqual(self.channel(self.observer.db_path),'fbs_exact_identity')
             self.assertEqual(self.channel(self.canonical),'wb_non_fbs')
             self.epoch+=3600
@@ -115,6 +117,17 @@ class ObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'separate'):
             self.observer.poll_once()
         self.assertEqual(self.dump(),before)
+
+    def test_unfinished_priority_and_capacity_for_hourly_scope(self):
+        self.source.ids=[3,4]
+        self.source.created_at=self.timestamp()
+        self.observer.poll_once()
+        with sqlite3.connect(self.observer.db_path) as conn:
+            conn.execute(f"UPDATE {STATUS_CURRENT_TABLE} SET supplier_status='cancel',wb_status='canceled' WHERE order_id=3")
+        self.epoch+=3600
+        pending=self.observer._pending(due_before=self.epoch-2700)
+        self.assertLess(pending.index(4),pending.index(3))
+        self.assertEqual(self.observer.max_status_batches,50)
 
 
 if __name__=='__main__':
