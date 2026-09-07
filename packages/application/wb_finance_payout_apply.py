@@ -274,6 +274,11 @@ class FinancePayoutAdapter:
         plan = preview["prepared"]
         if any(plan[k] != preview[k] for k in ("prestate_sha256", "candidate_sha256")):
             raise ValueError("finance_payout_candidate_drift")
+        if (
+            digest(plan["before"]) != preview["prestate_sha256"]
+            or digest(plan["updates"]) != preview["candidate_sha256"]
+        ):
+            raise ValueError("finance_payout_prepared_image_drift")
         registry, manifest = target(request)
         with closing(connect(registry, manifest, "operational", "rw")) as conn:
             conn.execute("BEGIN IMMEDIATE")

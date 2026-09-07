@@ -14848,7 +14848,7 @@
           wbFinanceReportStatus.className = "section-message";
           return;
         }
-        wbFinanceReportPeriod.textContent = "Период: " + formatFinanceWeek(weeks[0]) + " — " + formatFinanceWeek(weeks[weeks.length - 1]) + ". Расчётная выплата — сумма за товар после удержаний и доплат WB, до нашей себестоимости. Одна заявка на выплату может объединять несколько недель; дата зачисления определяется банком.";
+        wbFinanceReportPeriod.textContent = "Период: " + formatFinanceWeek(weeks[0]) + " — " + formatFinanceWeek(weeks[weeks.length - 1]) + ". Сумма за товар уже учитывает комиссию и эквайринг. Расчётная выплата — после остальных удержаний и доплат WB, до нашей себестоимости. Одна заявка на выплату может объединять несколько недель; дата зачисления определяется банком.";
         const definitions = [
           {group: "Продажи"},
           {key:"sales_qty", label:"Продажи, шт.", type:"count"}, {key:"returns_qty", label:"Возвраты, шт.", type:"count"},
