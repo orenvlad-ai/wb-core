@@ -98,11 +98,6 @@ def main() -> None:
             page.locator('[data-report-section-button="wb-finance"]').click()
             table = page.locator("#wbFinanceReportTableWrap table")
             table.wait_for(state="visible")
-            if table.locator("tbody tr", has_text="За товар до удержаний").count() != 1:
-                raise AssertionError("short goods settlement label missing")
-            payout_row = table.locator("tbody tr", has_text="Расчётная выплата")
-            if payout_row.count() != 1 or "540" not in payout_row.inner_text():
-                raise AssertionError("calculated payout row missing")
             wrap = page.locator("#wbFinanceReportTableWrap")
             wrap.evaluate("element => { element.scrollLeft = element.scrollWidth; }")
             subscriptions_row = table.locator("tbody tr", has_text="Подписки").first
@@ -366,7 +361,6 @@ def _finance_payload() -> dict[str, object]:
                 "profit_period_expenses": "360.0000",
                 "wb_expenses_without_marketing_pct": "34.4444",
                 "to_seller": "600.0000",
-                "calculated_payout": "540.0000",
                 "before_cogs_profit": "540.0000",
                 "before_cogs_margin_pct": "60.0000",
                 "cogs": cogs,

@@ -22,6 +22,10 @@ from packages.application.wb_finance_payout_apply import FinancePayoutAdapter, d
 
 
 def run() -> None:
+    template = (ROOT / "packages/adapters/templates/sheet_vitrina_v1_operator.html").read_text()
+    assert "За товар до удержаний" in template
+    assert "Расчётная выплата" in template
+    assert "calculated_payout" in template
     from apps.wb_finance_weekly_smoke import _fixture_rows, _seed_canonical_cost
     from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
     from packages.application.finance_raw_storage import (
