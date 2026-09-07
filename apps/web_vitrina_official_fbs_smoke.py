@@ -43,6 +43,9 @@ def fixture(path):
       CREATE TABLE sheet_vitrina_v1_ff_pool_balances(facility_id,pool,nm_id,projection_epoch,quantity,capital_rub,wac_rub,source_watermark,updated_at);
       CREATE TABLE sheet_vitrina_v1_warehouse_functional_balances(version_id,nm_id,warehouse_key,
         quantity,capital_rub,wac_rub,cost_covered_quantity,quality,certified,wb_quantity,provenance_json);
+      CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(snapshot_id,version_id,fetched_at,snapshot_date,
+        requested_nm_ids_json,pagination_complete,page_count,page_offsets_json,raw_row_count,
+        raw_rows_digest,raw_rows_json,items_json,created_at);
     """)
     # Resolve canonical table constants so the fixture follows the actual mapping table.
     from packages.application.wb_fbs_warehouse_registry import WAREHOUSE_MAPPINGS_TABLE, FACILITIES_TABLE
@@ -86,9 +89,103 @@ def fixture(path):
     return conn
 
 
+def zero_wb_snapshot(conn, *, items=None, raw=None, requested=None):
+    from packages.application.warehouse_functional import _hash
+    raw = [] if raw is None else raw
+    requested = [1, 2] if requested is None else requested
+    items = [dict(nm_id=nm, quantity="0", in_way_to_client="0", in_way_from_client="0",
+                  wb_contour_quantity="0") for nm in requested] if items is None else items
+    digest = "sha256:" + _hash(sorted(raw, key=lambda row: json.dumps(
+        row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+    conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_wb_snapshots")
+    conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 ("wb-zero", "v1", "2026-09-05T10:00:00Z", "2026-09-05", json.dumps(requested),
+                  1, 1, "[0]", len(raw), digest, json.dumps(raw), json.dumps(items), "2026-09-05T10:01:00Z"))
+    watermarks = json.loads(conn.execute(
+        "SELECT source_watermarks_json FROM sheet_vitrina_v1_warehouse_functional_versions"
+    ).fetchone()[0])
+    watermarks["wb_snapshot"] = dict(snapshot_id="source-zero", fetched_at="2026-09-05T10:00:00Z",
+                                    requested_count=len(requested), raw_row_count=len(raw),
+                                    digest=digest, pagination_complete=True)
+    conn.execute("UPDATE sheet_vitrina_v1_warehouse_functional_versions SET source_watermarks_json=?",
+                 (json.dumps(watermarks),))
+
+
+def check_proven_wb_zero(tmp, now):
+    path = Path(tmp) / "zero-wb.sqlite3"
+    conn = fixture(path)
+    conn.execute("DELETE FROM sheet_vitrina_v1_warehouse_functional_balances WHERE warehouse_key='wb'")
+    zero_wb_snapshot(conn)
+    conn.commit()
+    before = path.read_bytes()
+    model = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)
+    assert model["available"] and model["skus"][1]["stock_quantity"] == 8, model
+    assert model["skus"][1]["quantity"] == 12 and model["skus"][1]["capital"] == 330
+    assert model["skus"][1]["cost"] == Decimal("27.5")  # WB=0; exact FBO plus official FBS capital
+    assert model["skus"][2]["quantity"] == 0 and model["skus"][2]["cost"] is None
+    assert model["total"]["cost"] == Decimal("27.5") and model["total"]["stock_quantity"] == 8
+    assert model["skus"][1]["wb_zero_evidence"]["snapshot_id"] == "wb-zero"
+    empty = build_current_official_fbs_estimate(path, nm_ids=[2], now=now)
+    assert empty["total"]["stock_quantity"] == 0 and empty["total"]["quantity"] == 0
+    assert empty["total"]["cost"] is None
+    assert path.read_bytes() == before
+    from packages.application.web_vitrina_official_fbs import apply_current_official_fbs_estimate
+    row = WebVitrinaContractRow("SKU:1|our_wb_unit_cost_rub", 0, "SKU", "SKU:1", "", "our_wb_unit_cost_rub",
+                               "", "", "", None, 1, None, {"2026-09-05": ""})
+    rendered = apply_current_official_fbs_estimate([row], estimate=model)[0]
+    assert rendered.presentation_by_date["2026-09-05"]["wb_zero_evidence"] == model["skus"][1]["wb_zero_evidence"]
+    # Restore the same baseline after each committed corruption and read-only assertion.
+    mutations = [
+        "DELETE FROM sheet_vitrina_v1_warehouse_wb_snapshots",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET version_id='other'",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET snapshot_date='2026-09-04'",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET pagination_complete=0",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET requested_nm_ids_json='[2]'",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET items_json='[]'",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET page_count=2",
+        "UPDATE sheet_vitrina_v1_warehouse_wb_snapshots SET raw_rows_digest='wrong'",
+        "UPDATE sheet_vitrina_v1_warehouse_functional_versions SET source_watermarks_json='{}'",
+        "UPDATE sheet_vitrina_v1_warehouse_functional_versions SET status='candidate'",
+        "INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots SELECT * FROM sheet_vitrina_v1_warehouse_wb_snapshots",
+    ]
+    snapshot_dump = "\n".join(conn.iterdump())
+    for sql in mutations:
+        conn.execute(sql)
+        conn.commit()
+        before = path.read_bytes()
+        missing = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)
+        assert missing["available"], (sql, missing)
+        assert missing["skus"][1]["stock_quantity"] is None and missing["skus"][1]["cost"] is None, (sql, missing)
+        assert missing["total"]["cost"] is None and path.read_bytes() == before
+        conn.close()
+        path.unlink()
+        conn = sqlite3.connect(path)
+        conn.executescript(snapshot_dump)
+    zero = dict(nm_id=1, quantity="0", in_way_to_client="0", in_way_from_client="0", wb_contour_quantity="0")
+    zero_wb_snapshot(conn, items=[zero], requested=[1],
+                     raw=[dict(nmId=1,chrtId=101,warehouseId=1,quantity=0,inWayToClient=0,inWayFromClient=0)])
+    conn.commit()
+    explicit = build_current_official_fbs_estimate(path, nm_ids=[1], now=now)
+    assert explicit["skus"][1]["cost"] == Decimal("27.5")  # explicit zero and dense omitted zero agree
+    for items, raw, requested in [
+        ([zero, zero], [], [1, 2]),  # duplicate canonical rows cannot prove dense coverage
+        ([dict(zero, nm_id=2)], [], [2]),  # complete capture of another SKU says nothing about this SKU
+        ([dict(zero, in_way_to_client="3", wb_contour_quantity="3")],
+         [dict(nmId=1,chrtId=101,warehouseId=1,quantity=0,inWayToClient=3,inWayFromClient=0)], [1]),
+        ([zero], [dict(nmId=1,chrtId=101,warehouseId=1,quantity=2,inWayToClient=0,inWayFromClient=0)], [1]),
+        ([zero], [dict(nmId=1,chrtId=101,warehouseId=1,quantity=None,inWayToClient=0,inWayFromClient=0)], [1]),
+    ]:
+        zero_wb_snapshot(conn, items=items, raw=raw, requested=requested)
+        conn.commit()
+        missing = build_current_official_fbs_estimate(path, nm_ids=[1, 2], now=now)
+        assert missing["skus"][1]["stock_quantity"] is None and missing["skus"][1]["cost"] is None, missing
+    conn.close()
+
+
 def main():
     now = datetime(2026, 9, 5, 10, 10, tzinfo=timezone.utc)
     with TemporaryDirectory(prefix="official-fbs-estimate-") as tmp:
+        check_proven_wb_zero(tmp, now)
         path = Path(tmp) / "fixture.sqlite3"
         conn = fixture(path)
         before = path.read_bytes()

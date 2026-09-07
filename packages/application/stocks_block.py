@@ -183,18 +183,6 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
             aggregated[nm_id]
         covered_nm_ids = sorted(aggregated.keys())
         missing_nm_ids = []
-    if missing_nm_ids:
-        return StocksEnvelope(
-            result=StocksIncomplete(
-                kind="incomplete",
-                snapshot_date=snapshot_date,
-                requested_count=len(requested_nm_ids),
-                covered_count=len(covered_nm_ids),
-                missing_nm_ids=missing_nm_ids,
-                detail="stocks snapshot coverage is incomplete for requested nmIds",
-            )
-        )
-
     items = [
         StocksItem(
             nm_id=nm_id,
@@ -230,6 +218,27 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> StocksEnvelope:
                 detail,
             )
             if part
+        )
+    if missing_nm_ids:
+        return StocksEnvelope(
+            result=StocksIncomplete(
+                kind="incomplete",
+                snapshot_date=snapshot_date,
+                requested_count=len(requested_nm_ids),
+                covered_count=len(set(requested_nm_ids) & set(covered_nm_ids)),
+                missing_nm_ids=missing_nm_ids,
+                detail="; ".join(part for part in (
+                    "stocks snapshot coverage is incomplete for requested nmIds", detail,
+                ) if part),
+                observed_items=items,
+                observed_warehouse_rows=[
+                    row for nm_id in covered_nm_ids for row in warehouse_rows_by_nm.get(nm_id, [])
+                ],
+                warehouse_granularity_complete=warehouse_granularity_complete,
+                fetched_at=str(data.get("fetched_at") or ""),
+                pagination_complete=bool(data.get("pagination_complete")),
+                raw_rows_digest=str(data.get("raw_rows_digest") or ""),
+            )
         )
     return StocksEnvelope(
         result=StocksSuccess(

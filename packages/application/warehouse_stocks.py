@@ -16,6 +16,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sqlite_contention import connect_sqlite
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.stocks_block import StocksBlock, transform_legacy_payload
+from packages.application.stock_catalog_scope import require_stock_catalog_scope
 from packages.application.supplier_shipment_status import resolve_supplier_shipment_status
 from packages.application.warehouse_recovery_policy import (
     RecoveryState,
@@ -669,26 +670,7 @@ class WarehouseStocksBlock:
         if self.wb_nomenclature_provider is not None:
             rows = list(self.wb_nomenclature_provider())
         else:
-            current_state = self.runtime.load_current_state()
-            nomenclature_by_nm = _nomenclature_index(
-                self.runtime.list_nomenclature_items(active_only=False)
-            )
-            rows = []
-            for item in current_state.config_v2:
-                if not item.enabled:
-                    continue
-                nm_id = int(item.nm_id)
-                nomenclature = nomenclature_by_nm.get(nm_id, {})
-                rows.append(
-                    {
-                        **nomenclature,
-                        "nm_id": nm_id,
-                        "our_sku": str(nomenclature.get("our_sku") or item.display_name),
-                        "nomenclature_name": str(
-                            nomenclature.get("nomenclature_name") or item.display_name
-                        ),
-                    }
-                )
+            rows = require_stock_catalog_scope(self.runtime.db_path)["items"]
         result = []
         seen: set[int] = set()
         for row in rows:
@@ -704,6 +686,11 @@ class WarehouseStocksBlock:
     def _fetch_wb_stock_snapshot(self, nomenclature: list[Mapping[str, Any]]) -> dict[str, Any]:
         now = self.now_factory()
         nm_ids = [int(item["nm_id"]) for item in nomenclature]
+        query_scope = None
+        if self.wb_nomenclature_provider is None:
+            query_scope = require_stock_catalog_scope(self.runtime.db_path)
+            if sorted(nm_ids) != query_scope["nm_ids"]:
+                raise WarehouseOpeningSnapshotError("stock catalog changed before WB snapshot request")
         request = StocksRequest(
             snapshot_type="stocks",
             snapshot_date=business_date_iso(now),
@@ -711,6 +698,14 @@ class WarehouseStocksBlock:
             scenario="normal",
         )
         payload = _json_clone(self.stocks_block.fetch_payload(request))
+        if query_scope is not None:
+            if require_stock_catalog_scope(self.runtime.db_path)["scope_digest"] != query_scope["scope_digest"]:
+                raise WarehouseOpeningSnapshotError("stock catalog changed during WB snapshot request")
+            payload["query_catalog_scope"] = {
+                key: query_scope[key] for key in (
+                    "policy", "scope_digest", "nm_ids", "main_count", "retained_hidden_count",
+                )
+            }
         envelope = transform_legacy_payload(payload)
         result = envelope.result
         if result.kind != "success":

@@ -17,7 +17,7 @@ from typing import Any, Iterable
 
 from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
 from packages.application.own_product_capital import _inventory_cost_stage_evidence
-from packages.application.warehouse_functional import _watermark
+from packages.application.warehouse_functional import _hash, _watermark, _wb_snapshot_integrity
 from packages.application.wb_fbs_warehouse_registry import _connect_readonly
 from packages.business_time import current_business_date_iso
 from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
@@ -92,6 +92,14 @@ def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
                 (version_id, *universe),
             ):
                 balances[(int(row["nm_id"]), row["warehouse_key"])] = dict(row)
+            empty_wb_rows = _verified_empty_wb_rows(conn, dict(version)) if any(
+                (nm, "wb") not in balances for nm in universe
+            ) else {}
+            for nm in universe:
+                if (nm, "wb") not in balances and nm in empty_wb_rows:
+                    balances[(nm, "wb")] = dict(quantity="0", capital_rub="0", cost_covered_quantity="0",
+                        wb_quantity="0", wac_rub=None, quality="empty_exact_official_snapshot", certified=0,
+                        zero_evidence=empty_wb_rows[nm])
             # Published stage defaults alone are not proof. Bind explicit pool
             # zero rows to the exact complete source captured by this version.
             empty_pool_rows = _verified_empty_pool_rows(conn, dict(version)) if any(
@@ -112,6 +120,8 @@ def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
         item: dict[str, Any] = {"facilities": stocks[nm], "fbs_quantity": sum(stocks[nm].values(), ZERO)}
         wb = balances.get((nm, "wb"))
         item["stock_quantity"] = (_number(wb["wb_quantity"]) + item["fbs_quantity"]) if wb else None
+        if wb and wb.get("zero_evidence"):
+            item["wb_zero_evidence"] = wb["zero_evidence"]
         try:
             item.update(_estimate_cost(balances[(nm, "wb")], balances[(nm, "ff")], stocks[nm]))
         except (KeyError, ValueError, TypeError, InvalidOperation) as exc:
@@ -123,6 +133,8 @@ def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
         "cost": None,
         "stock_quantity": (sum((r["stock_quantity"] for r in result["skus"].values()), ZERO)
                            if all(r["stock_quantity"] is not None for r in result["skus"].values()) else None),
+        "wb_zero_evidence": {str(nm): row["wb_zero_evidence"] for nm, row in result["skus"].items()
+                             if row.get("wb_zero_evidence")},
     }
     if all(r.get("cost") is not None or (r.get("quantity") == ZERO and r.get("capital") == ZERO)
            for r in result["skus"].values()):
@@ -130,6 +142,70 @@ def _build(conn: sqlite3.Connection, *, universe: list[int], day: str,
         capital = sum((r["capital"] for r in result["skus"].values()), ZERO)
         result["total"].update(quantity=quantity, capital=capital, cost=capital / quantity if quantity else None)
     return result
+
+
+def _verified_empty_wb_rows(conn: sqlite3.Connection, version: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """A missing balance is zero only within this version's complete dense WB capture."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_warehouse_wb_snapshots WHERE version_id=?",
+            (version["version_id"],),
+        ).fetchall()
+        if len(rows) != 1:
+            return {}
+        snapshot = dict(rows[0])
+        watermarks = json.loads(version["source_watermarks_json"])
+        expected = watermarks.get("wb_snapshot", {}) if isinstance(watermarks, dict) else {}
+        if not isinstance(expected, dict):
+            return {}
+        requested = json.loads(snapshot["requested_nm_ids_json"])
+        items = json.loads(snapshot["items_json"])
+        raw = json.loads(snapshot["raw_rows_json"])
+        offsets = json.loads(snapshot["page_offsets_json"])
+        if not all(isinstance(value, list) for value in (requested, items, raw, offsets)):
+            return {}
+        if (not requested or any(type(nm) is not int or nm <= 0 for nm in requested)
+                or len(set(requested)) != len(requested)
+                or any(not isinstance(row, dict) for row in [*items, *raw])
+                or not offsets or any(type(offset) is not int or offset < 0 for offset in offsets)
+                or offsets[0] != 0 or len(offsets) != snapshot["page_count"]
+                or snapshot["snapshot_date"] != version["business_effective_date"]
+                or snapshot["pagination_complete"] != 1 or expected.get("pagination_complete") is not True
+                or not expected.get("snapshot_id")
+                or expected.get("fetched_at") != snapshot["fetched_at"]
+                or expected.get("requested_count") != len(requested)
+                or expected.get("raw_row_count") != len(raw) or snapshot["raw_row_count"] != len(raw)):
+            return {}
+        digest = "sha256:" + _hash(sorted(raw, key=lambda row: json.dumps(
+            row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
+        if not (digest == snapshot["raw_rows_digest"] == expected.get("digest")):
+            return {}
+        canonical: dict[int, dict[str, Any]] = {}
+        for item in items:
+            nm = item["nm_id"]
+            if type(nm) is not int or nm not in requested or nm in canonical:
+                return {}
+            quantities = [_number(item[key]) for key in ("quantity", "in_way_to_client", "in_way_from_client")]
+            if sum(quantities, ZERO) != _number(item["wb_contour_quantity"]):
+                return {}
+            canonical[nm] = item
+        if set(canonical) != set(requested):
+            return {}
+        for row in raw:
+            if type(row.get("nmId")) is not int or row["nmId"] not in canonical:
+                return {}
+            for key in ("quantity", "inWayToClient", "inWayFromClient"):
+                _number(row[key])
+        integrity = _wb_snapshot_integrity(snapshot)
+        if (not integrity["raw_to_canonical_mapping_matches"] or integrity["exact_duplicate_count"]
+                or integrity["source_key_duplicate_count"]):
+            return {}
+        return {nm: {"snapshot_id": snapshot["snapshot_id"], "raw_rows_digest": digest,
+                     "snapshot_date": snapshot["snapshot_date"], "fetched_at": snapshot["fetched_at"],
+                     "basis": "requested_in_complete_dense_official_snapshot"}
+                for nm, item in canonical.items() if _number(item["wb_contour_quantity"]) == ZERO}
+    except (sqlite3.OperationalError, ValueError, TypeError, KeyError, InvalidOperation):
+        return {}
 
 
 def _verified_empty_pool_rows(conn: sqlite3.Connection, version: dict[str, Any]) -> dict[int, set[str]]:
@@ -224,6 +300,8 @@ def apply_current_official_fbs_estimate(
             "functional_version_id": estimate["functional_version_id"],
             "management_value": str(value) if value is not None else "",
         }
+        if item.get("wb_zero_evidence"):
+            presentation["wb_zero_evidence"] = item["wb_zero_evidence"]
         if key == "stock_total":
             presentation["wb_component_value"] = (
                 str(item["stock_quantity"] - item["fbs_quantity"])

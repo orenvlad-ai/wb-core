@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from packages.adapters.ads_bids_block import HttpBackedAdsBidsSource
@@ -170,6 +171,7 @@ from packages.application.warehouse_functional import _warehouse_balance_status_
 from packages.application.spp_proxy_block import SppProxyBlock
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
+from packages.application.stock_catalog_scope import require_stock_catalog_scope
 from packages.application.wb_incident_policy import (
     VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU,
     build_vitrina_incident_stock_projection,
@@ -1603,16 +1605,7 @@ class SheetVitrinaV1LivePlanBlock:
                         )
                     ).result,
                 ),
-                (
-                    "stocks",
-                    lambda slot=slot: self.stocks_block.execute(
-                        StocksRequest(
-                            snapshot_type="stocks",
-                            snapshot_date=slot.column_date,
-                            nm_ids=requested_nm_ids,
-                        )
-                    ).result,
-                ),
+                ("stocks", None),  # Bound below after the current catalog read.
                 (
                     ONEC_STOCKS_SOURCE_KEY,
                     lambda slot=slot: self.onec_stocks_block.execute(
@@ -1656,6 +1649,22 @@ class SheetVitrinaV1LivePlanBlock:
             ]:
                 if selected_source_keys and source_key not in selected_source_keys:
                     continue
+                source_nm_ids = requested_nm_ids
+                stock_scope = None
+                stock_scope_error = None
+                if source_key == "stocks":
+                    try:
+                        stock_scope = require_stock_catalog_scope(self.runtime.db_path)
+                        source_nm_ids = list(stock_scope["nm_ids"])
+                    except Exception as exc:
+                        source_nm_ids = []
+                        stock_scope_error = exc
+                    loader = lambda slot=slot, nm_ids=source_nm_ids: self.stocks_block.execute(
+                        StocksRequest(
+                            snapshot_type="stocks", snapshot_date=slot.column_date,
+                            nm_ids=nm_ids,
+                        )
+                    ).result
                 temporal_policy = SOURCE_TEMPORAL_POLICIES[source_key]
                 _emit_source_request_log(
                     emit,
@@ -1663,7 +1672,7 @@ class SheetVitrinaV1LivePlanBlock:
                     temporal_slot=slot.slot_key,
                     temporal_policy=temporal_policy,
                     column_date=slot.column_date,
-                    requested_nm_ids=requested_nm_ids,
+                    requested_nm_ids=source_nm_ids,
                 )
                 if not _source_policy_supports_slot(temporal_policy, slot.slot_key):
                     source_started = _start_source_slot_diagnostic(
@@ -1677,7 +1686,7 @@ class SheetVitrinaV1LivePlanBlock:
                         temporal_slot=slot.slot_key,
                         temporal_policy=temporal_policy,
                         column_date=slot.column_date,
-                        requested_count=len(requested_nm_ids),
+                        requested_count=len(source_nm_ids),
                     )
                     statuses.append(gap_status)
                     _append_source_slot_diagnostic(
@@ -1696,20 +1705,42 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_date=slot.column_date,
                     started_at=self._diagnostic_timestamp(),
                 )
-                status, payload = self._capture_slot_source(
+                if stock_scope_error is not None:
+                    # An unavailable catalog must not revive a smaller cache or
+                    # block unrelated sources in this refresh.
+                    def loader(error=stock_scope_error):
+                        raise error
+
+                capture_kwargs = dict(
                     source_key=source_key,
                     temporal_slot=slot.slot_key,
                     temporal_policy=temporal_policy,
                     column_date=slot.column_date,
-                    requested_nm_ids=requested_nm_ids,
+                    requested_nm_ids=source_nm_ids,
                     loader=loader,
-                    execution_mode=execution_mode,
-                    current_web_source_sync_note=(
-                        current_web_source_sync_note
-                        if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT
-                        else None
-                    ),
                 )
+                if stock_scope_error is not None:
+                    status, payload = _capture_live_source(**capture_kwargs)
+                    status, payload = self._preserve_closed_stocks_without_catalog(status)
+                else:
+                    status, payload = self._capture_slot_source(
+                        **capture_kwargs,
+                        execution_mode=execution_mode,
+                        current_web_source_sync_note=(
+                            current_web_source_sync_note
+                            if slot.slot_key == TEMPORAL_SLOT_TODAY_CURRENT
+                            else None
+                        ),
+                    )
+                if stock_scope is not None:
+                    status = replace(status, diagnostics={
+                        **dict(status.diagnostics or {}),
+                        "stock_catalog_scope": {
+                            "policy": stock_scope["policy"],
+                            "scope_digest": stock_scope["scope_digest"],
+                            "requested_nm_ids": source_nm_ids,
+                        },
+                    })
                 statuses.append(status)
                 _append_source_slot_diagnostic(
                     diagnostics,
@@ -1972,6 +2003,32 @@ class SheetVitrinaV1LivePlanBlock:
             source_temporal_policies=dict(SOURCE_TEMPORAL_POLICIES),
         )
 
+    def _preserve_closed_stocks_without_catalog(
+        self, status: LiveSourceStatus,
+    ) -> tuple[LiveSourceStatus, Any | None]:
+        """Keep dated accepted display values while the present scope is unknown."""
+        status = _append_status_note(status, "stock_catalog_scope=unknown")
+        if status.temporal_slot != TEMPORAL_SLOT_YESTERDAY_CLOSED:
+            return status, None
+        try:
+            payload, captured_at = self.runtime.load_temporal_source_slot_snapshot(
+                source_key="stocks", snapshot_date=status.column_date,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CLOSED,
+            )
+        except Exception:
+            return status, None
+        if not _is_exact_snapshot_payload(payload, status.column_date) or not _stock_items_have_unique_identities(payload):
+            return status, None
+        status = _append_status_note(
+            status,
+            "resolution_rule=accepted_closed_stock_display_only; historical_refetch=disabled; "
+            f"snapshot_acceptance=disabled; accepted_at={captured_at or ''}",
+        )
+        return replace(status, diagnostics={
+            **dict(status.diagnostics or {}), "stock_catalog_scope_unknown": True,
+            "preserved_display_nm_ids": [item.nm_id for item in payload.items],
+        }), payload
+
     def _capture_slot_source(
         self,
         *,
@@ -2197,6 +2254,7 @@ class SheetVitrinaV1LivePlanBlock:
     ) -> tuple[LiveSourceStatus, Any | None]:
         now = self.now_factory()
         now_iso = _format_runtime_timestamp(now)
+        partial_stock_snapshot = None
         closure_state = self.runtime.load_temporal_source_closure_state(
             source_key=source_key,
             target_date=column_date,
@@ -2215,6 +2273,21 @@ class SheetVitrinaV1LivePlanBlock:
                 and accepted_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
             ),
         )
+        if (
+            source_key == "stocks"
+            and accepted_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
+            and accepted_snapshot is not None
+        ):
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            note = "resolution_rule=accepted_closed_stock_snapshot_preserved; historical_refetch=disabled"
+            if accepted_at:
+                note += f"; accepted_at={accepted_at}"
+            if accepted_status.missing_nm_ids:
+                note += "; stock_catalog_scope_extended_beyond_closed_snapshot"
+            return _append_status_note(accepted_status, note), accepted_payload
+        if source_key == "stocks" and accepted_snapshot is not None and accepted_snapshot[0].kind != "success":
+            partial_stock_snapshot = accepted_snapshot
+            accepted_snapshot = None
         if accepted_snapshot is None and source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT:
             accepted_snapshot = self._load_slot_snapshot_status(
                 source_key=source_key,
@@ -2288,7 +2361,9 @@ class SheetVitrinaV1LivePlanBlock:
             status = _append_status_note(status, f"closed_day_sync_error={sync_error}")
 
         if payload is not None and _is_exact_snapshot_payload(payload, column_date):
-            if source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS:
+            if source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS and (
+                source_key != "stocks" or status.kind == "success"
+            ):
                 self.runtime.save_temporal_source_snapshot(
                     source_key=source_key,
                     snapshot_date=column_date,
@@ -2330,7 +2405,12 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             temporal_slot=temporal_slot,
         )
-        if payload is not None and _is_exact_snapshot_payload(payload, column_date) and not candidate_valid:
+        if (
+            payload is not None
+            and _is_exact_snapshot_payload(payload, column_date)
+            and not candidate_valid
+            and not (source_key == "stocks" and status.kind == "incomplete")
+        ):
             status = _coerce_invalid_temporal_candidate_status(
                 status=status,
                 requested_nm_ids=requested_nm_ids,
@@ -2420,7 +2500,22 @@ class SheetVitrinaV1LivePlanBlock:
                 temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
                 and source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS
             ),
+            allow_partial_stocks=source_key == "stocks",
         )
+        partial_stock_candidates = []
+        if source_key == "stocks":
+            if status.kind == "incomplete" and _resolve_freshness(payload) == column_date:
+                # Incomplete transport observations stay outside business
+                # contracts and caches. Adapt them only for this display path.
+                display_payload = payload
+                if getattr(payload, "observed_items", None):
+                    display_payload = _stock_partial_display_payload(payload)
+                partial_stock_candidates.append((status, display_payload, "current_attempt"))
+            if partial_stock_snapshot is not None:
+                partial_stock_candidates.append((partial_stock_snapshot[0], partial_stock_snapshot[1], "accepted_current"))
+            if cached_snapshot is not None and cached_snapshot[0].kind != "success":
+                partial_stock_candidates.append((cached_snapshot[0], cached_snapshot[1], "runtime_cache"))
+                cached_snapshot = None
         if accepted_snapshot is None and cached_snapshot is not None:
             accepted_snapshot = (cached_snapshot[0], cached_snapshot[1], None)
 
@@ -2457,6 +2552,22 @@ class SheetVitrinaV1LivePlanBlock:
                 accepted_payload,
             )
 
+        partial_stock_payload = None
+        usable_partial_stocks = [
+            candidate for candidate in partial_stock_candidates
+            if candidate[0].covered_count > 0 and _stock_items_have_unique_identities(candidate[1])
+        ]
+        if usable_partial_stocks:
+            partial_status, partial_stock_payload, partial_origin = max(
+                usable_partial_stocks, key=lambda candidate: candidate[0].covered_count,
+            )
+            partial_stock_payload = _stock_partial_display_payload(partial_stock_payload)
+            status = _append_status_note(
+                partial_status,
+                f"resolution_rule=partial_stock_display_only; origin={partial_origin}; "
+                f"snapshot_acceptance=disabled; latest_attempt_kind={status.kind}",
+            )
+
         if allow_persisted_retry and _source_slot_supports_persisted_retry(
             source_key=source_key,
             temporal_slot=temporal_slot,
@@ -2480,7 +2591,7 @@ class SheetVitrinaV1LivePlanBlock:
                 last_success_at=closure_state.last_success_at if closure_state is not None else None,
                 accepted_at=closure_state.accepted_at if closure_state is not None else None,
             )
-            return _build_closure_retry_status(
+            retry_status = _build_closure_retry_status(
                 source_key=source_key,
                 temporal_slot=temporal_slot,
                 temporal_policy=temporal_policy,
@@ -2498,9 +2609,13 @@ class SheetVitrinaV1LivePlanBlock:
                     last_success_at=closure_state.last_success_at if closure_state is not None else None,
                     accepted_at=closure_state.accepted_at if closure_state is not None else None,
                 ),
-            ), None
+            )
+            if partial_stock_payload is not None:
+                retry_status = replace(retry_status, covered_count=status.covered_count,
+                                       missing_nm_ids=status.missing_nm_ids)
+            return retry_status, partial_stock_payload
 
-        return status, None
+        return status, partial_stock_payload
 
     def _load_slot_snapshot_status(
         self,
@@ -2520,7 +2635,8 @@ class SheetVitrinaV1LivePlanBlock:
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
             return None
-        if require_closed_day_fresh and not _closed_day_capture_is_fresh(
+        preserve_closed_stock = source_key == "stocks" and snapshot_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
+        if require_closed_day_fresh and not preserve_closed_stock and not _closed_day_capture_is_fresh(
             captured_at=cached_at,
             snapshot_date=column_date,
         ):
@@ -2673,6 +2789,7 @@ class SheetVitrinaV1LivePlanBlock:
         requested_nm_ids: list[int],
         runtime_cache_note: str,
         require_closed_day_fresh: bool = False,
+        allow_partial_stocks: bool = False,
     ) -> tuple[LiveSourceStatus, Any | None] | None:
         cached_payload, cached_at = self.runtime.load_temporal_source_snapshot(
             source_key=source_key,
@@ -2693,6 +2810,8 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=lambda: cached_payload,
         )
+        if source_key == "stocks" and cached_status.kind != "success" and not allow_partial_stocks:
+            return None
         cache_note = runtime_cache_note
         if cached_at:
             cache_note = f"{cache_note}; cache_captured_at={cached_at}"
@@ -4190,6 +4309,28 @@ def _expand_selected_source_keys_for_dependencies(source_keys: set[str]) -> set[
     return expanded
 
 
+def _stock_partial_display_payload(payload: Any) -> Any:
+    """Adapt known rows for the UI without mutating or admitting their source."""
+    return SimpleNamespace(
+        kind="incomplete", snapshot_date=str(getattr(payload, "snapshot_date", "")),
+        items=list(getattr(payload, "observed_items", None) or getattr(payload, "items", []) or []),
+        warehouse_rows=list(getattr(payload, "observed_warehouse_rows", None) or getattr(payload, "warehouse_rows", []) or []),
+        warehouse_granularity_complete=bool(getattr(payload, "warehouse_granularity_complete", False)),
+        fetched_at=str(getattr(payload, "fetched_at", "")),
+        pagination_complete=bool(getattr(payload, "pagination_complete", False)),
+        raw_rows_digest=str(getattr(payload, "raw_rows_digest", "")),
+    )
+
+
+def _stock_items_have_unique_identities(payload: Any) -> bool:
+    identities = [getattr(item, "nm_id", None) for item in getattr(payload, "items", []) or []]
+    return (
+        bool(identities)
+        and all(type(nm_id) is int and nm_id > 0 for nm_id in identities)
+        and len(identities) == len(set(identities))
+    )
+
+
 def _capture_live_source(
     *,
     source_key: str,
@@ -4329,6 +4470,21 @@ def _capture_live_source(
         note=_status_note_from_payload(payload),
         diagnostics=payload_diagnostics,
     )
+    if source_key == "stocks" and kind == "success":
+        item_nm_ids = [getattr(item, "nm_id", None) for item in items]
+        duplicate_nm_ids = sorted(nm_id for nm_id in covered_nm_ids if item_nm_ids.count(nm_id) > 1)
+        invalid_items = any(type(nm_id) is not int or nm_id <= 0 for nm_id in item_nm_ids)
+        status = replace(
+            status,
+            covered_count=len(set(requested_nm_ids) & covered_nm_ids),
+        )
+        if status.missing_nm_ids or duplicate_nm_ids or invalid_items:
+            status = replace(
+                status, kind="incomplete",
+                note=(f"{status.note}; " if status.note else "")
+                + "stock_catalog_coverage_incomplete"
+                + f"; duplicate_nm_ids={duplicate_nm_ids}; invalid_item_identity={invalid_items}",
+            )
     return (
         _with_onec_stage_bucket_coverage_status(status, payload),
         payload,

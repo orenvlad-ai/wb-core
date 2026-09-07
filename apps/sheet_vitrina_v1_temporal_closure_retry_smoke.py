@@ -5,9 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from contextlib import ExitStack
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,16 @@ def main() -> None:
         result = runtime.ingest_bundle(bundle, activated_at=ACTIVATED_AT)
         if result.status != "accepted":
             raise AssertionError(f"fixture bundle must be accepted, got {result}")
+        # Stock collection follows the independent nomenclature, not config.
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO sheet_vitrina_v1_nomenclature_items("
+                "item_id,is_active,is_hidden,nm_id,nomenclature_name,product_type,"
+                "match_key,aliases_json,created_at,updated_at) "
+                "VALUES(?,1,0,?,?,'clean',?,'[]',?,?)",
+                [(f"nom-{nm_id}", nm_id, str(nm_id), str(nm_id), ACTIVATED_AT, ACTIVATED_AT)
+                 for nm_id in requested_nm_ids],
+            )
 
         state = _TemporalState(requested_nm_ids=requested_nm_ids)
         plan_block = _build_live_plan(runtime=runtime, state=state, current_date=FIRST_CURRENT_DATE)
@@ -90,12 +103,32 @@ def main() -> None:
             raise AssertionError("stocks must expose accepted yesterday and keep non-required today blank after retry")
 
         state.invalidate_after_acceptance(SECOND_AS_OF_DATE)
-        preserved_plan = plan_block.build_plan(as_of_date=SECOND_AS_OF_DATE)
+        def forbid_stock_write(method):
+            def guarded(**kwargs):
+                if kwargs.get("source_key") == "stocks":
+                    raise AssertionError("accepted closed stocks must not be rewritten")
+                return method(**kwargs)
+            return guarded
+
+        with ExitStack() as stack:
+            stock_loader = stack.enter_context(patch.object(
+                plan_block.stocks_block, "execute",
+                side_effect=AssertionError("accepted closed stocks must not be refetched"),
+            ))
+            for name in ("save_temporal_source_snapshot", "save_temporal_source_slot_snapshot",
+                         "save_temporal_source_closure_state"):
+                stack.enter_context(patch.object(runtime, name, side_effect=forbid_stock_write(getattr(runtime, name))))
+            preserved_plan = plan_block.build_plan(as_of_date=SECOND_AS_OF_DATE)
+        stock_loader.assert_not_called()
         preserved_status_rows = _status_rows(preserved_plan)
         for key in ("web_source_snapshot[yesterday_closed]", "seller_funnel_snapshot[yesterday_closed]", "stocks[yesterday_closed]"):
             if preserved_status_rows[key][1] != "success":
                 raise AssertionError(f"{key} must preserve the accepted closed-day snapshot after a later invalid attempt")
-            if "accepted_closed_preserved_after_invalid_attempt" not in str(preserved_status_rows[key][10]):
+            expected_note = (
+                "accepted_closed_stock_snapshot_preserved" if key.startswith("stocks[")
+                else "accepted_closed_preserved_after_invalid_attempt"
+            )
+            if expected_note not in str(preserved_status_rows[key][10]):
                 raise AssertionError(f"{key} must explain that the accepted closed-day snapshot was preserved")
         preserved_data_rows = _data_rows(preserved_plan)
         if preserved_data_rows[f"SKU:{probe_nm_id}|views_current"][2:] != [100.0, 200.0]:

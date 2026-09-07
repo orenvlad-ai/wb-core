@@ -28,12 +28,15 @@ def seed(path):
     conn.executescript("""
         CREATE TABLE sheet_vitrina_v1_warehouse_functional_active(slot,version_id);
         INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'v1');
-        CREATE TABLE sheet_vitrina_v1_warehouse_wb_snapshots(
-            version_id,snapshot_id,snapshot_date,raw_rows_digest,fetched_at,items_json,created_at);
         CREATE TABLE immutable_calculation(calculation_id,payload_json);
         INSERT INTO immutable_calculation VALUES('old','{"stock_ff":999,"generation_id":"old"}');
+        CREATE TABLE sheet_vitrina_v1_nomenclature_items(item_id,nm_id,is_active,is_hidden,updated_at);
+        INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES
+            ('main1',1,1,0,'2026-09-05T09:00:00Z'),
+            ('main2',2,1,0,'2026-09-05T09:00:00Z'),
+            ('hidden3',3,0,1,'2026-09-05T09:00:00Z');
     """)
-    conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots VALUES(?,?,?,?,?,?,?)",
+    conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(version_id,snapshot_id,snapshot_date,raw_rows_digest,fetched_at,items_json,created_at) VALUES(?,?,?,?,?,?,?)",
                  ("v1", "wb1", "2026-09-05", "sha256:wb", NOW.isoformat(),
                   json.dumps([{"nm_id": 1, "quantity": 10}]), NOW.isoformat()))
     # A positive product outside both WB rows and Balance's two-SKU config must
@@ -92,6 +95,15 @@ def main():
                 assert source["stock_source"]["stock_run_id"] in {"A", "B"}
         assert evidence[2]["stock_ff"] == 0
         assert path.read_bytes() == before
+
+        # A valid old generation cannot claim complete coverage of a newer
+        # catalog. Its explicitly requested covered subset remains usable.
+        conn.execute("INSERT INTO sheet_vitrina_v1_nomenclature_items VALUES('new4',4,1,0,'2026-09-05T10:09:00Z')")
+        conn.commit()
+        assert metric(cards(), "fbs_total") is None
+        assert inputs()[1]["stock_ff"] == 8
+        conn.execute("DELETE FROM sheet_vitrina_v1_nomenclature_items WHERE nm_id=4")
+        conn.commit()
 
         # Partial newest collection cannot replace an admissible complete run.
         conn.execute("INSERT INTO sheet_vitrina_v1_wb_fbs_warehouse_registry_runs SELECT 'partial',2,'partial',0,policy_version,catalog_scope_json,warehouse_scope_json,generation_digest,started_at,completed_at FROM sheet_vitrina_v1_wb_fbs_warehouse_registry_runs WHERE run_id='g1'")

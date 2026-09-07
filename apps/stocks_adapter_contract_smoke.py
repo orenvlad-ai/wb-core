@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -264,6 +265,15 @@ def _assert_live_plan_and_temporal_round_trip() -> None:
         ingested = runtime.ingest_bundle(bundle, activated_at="2026-08-16T06:00:00Z")
         if ingested.status != "accepted":
             raise AssertionError(f"fixture bundle was not accepted: {asdict(ingested)}")
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.executemany(
+                "INSERT INTO sheet_vitrina_v1_nomenclature_items("
+                "item_id,is_active,is_hidden,nm_id,nomenclature_name,product_type,"
+                "match_key,aliases_json,created_at,updated_at) "
+                "VALUES(?,1,0,?,?,'clean',?,'[]',?,?)",
+                [(f"nom-{nm_id}", nm_id, str(nm_id), str(nm_id), CAPTURED_AT, CAPTURED_AT)
+                 for nm_id in enabled_nm_ids],
+            )
         runtime.append_wb_incident_policy_revision(
             seller_id=canonical_seller_id(),
             active=True,
