@@ -43,7 +43,7 @@ def _read_only(path: Path) -> sqlite3.Connection:
 class WbFbsObserver:
     def __init__(self, *, runtime_dir: Path, canonical_db_path: Path,
                  source: Any = None, enabled: bool = True,
-                 max_pages: int = 10, max_status_batches: int = 10,
+                 max_pages: int = 10, max_status_batches: int = 50,
                  unix_time_factory: Any = time.time, timestamp_factory: Any = _now):
         self.runtime_dir = Path(runtime_dir).resolve()
         self.root = self.runtime_dir / 'fbs_observer'
@@ -51,7 +51,7 @@ class WbFbsObserver:
         self.canonical_db_path = Path(canonical_db_path).resolve()
         self.enabled = enabled
         self.max_pages = max(1, min(max_pages, 10))
-        self.max_status_batches = max(1, min(max_status_batches, 10))
+        self.max_status_batches = max(1, min(max_status_batches, 50))
         self.unix = unix_time_factory
         self.timestamp = timestamp_factory
         self.source = source or HttpBackedWbFbsOrdersSource(
@@ -128,6 +128,7 @@ class WbFbsObserver:
 
     def _pending(self, *, due_before: int, limit: int | None = None) -> list[int]:
         cutoff = datetime.fromtimestamp(int(self.unix()) - INITIAL_LOOKBACK_SECONDS, timezone.utc).isoformat().replace('+00:00','Z')
+        due_at = datetime.fromtimestamp(due_before, timezone.utc).isoformat().replace('+00:00','Z')
         with self._connect() as conn:
             return [int(r[0]) for r in conn.execute(f'''
                 SELECT o.order_id FROM {OBSERVATIONS_TABLE} o
@@ -135,9 +136,11 @@ class WbFbsObserver:
                 LEFT JOIN observer_status_checks c ON c.order_id=o.order_id
                 WHERE o.observation_sequence=(SELECT MAX(x.observation_sequence) FROM {OBSERVATIONS_TABLE} x WHERE x.order_id=o.order_id)
                   AND COALESCE(c.last_attempt,0)<?
+                  AND COALESCE(s.local_last_seen_at,'')<?
                   AND ((COALESCE(s.wb_status,'') NOT IN ({TERMINAL}) AND COALESCE(s.supplier_status,'')<>'cancel') OR o.source_created_at>=?)
-                ORDER BY COALESCE(c.last_attempt,0),o.order_id LIMIT ?
-            ''', (due_before,cutoff, limit if limit is not None else -1))]
+                ORDER BY CASE WHEN COALESCE(s.wb_status,'') IN ({TERMINAL}) OR COALESCE(s.supplier_status,'')='cancel' THEN 1 ELSE 0 END,
+                    COALESCE(c.last_attempt,0),o.order_id LIMIT ?
+            ''', (due_before,due_at,cutoff, limit if limit is not None else -1))]
 
     def poll_once(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -152,6 +155,7 @@ class WbFbsObserver:
             'terminal_recheck_created_within_days':30,
             'initial_listing_days':30,
             'unfinished_status_age_limit_days':None,
+            'max_status_batches':self.max_status_batches,
         }
         if not self.enabled:
             return {**result, 'status':'disabled'}
@@ -179,7 +183,7 @@ class WbFbsObserver:
                         if page['complete']:
                             complete = True
                             break
-                    # Oldest attempts first: missing statuses cannot starve later orders.
+                    # Unfinished first; fresh page statuses need no second API request.
                     due_before = int(self.unix()) - 45 * 60
                     for _ in range(self.max_status_batches):
                         ids = self._pending(due_before=due_before, limit=1000)
