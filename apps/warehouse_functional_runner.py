@@ -355,6 +355,14 @@ def _run(
                         finance_cost_recalculation.get("fingerprint") or ""
                     ),
                 )
+                from packages.application.fbs_accounting_runtime import refresh as refresh_fbs_accounting, publish_ready
+                fbs_accounting = _run_sync_phase(
+                    "publish_fbs_snapshot_accounting", phase_timings_ms,
+                    lambda: refresh_fbs_accounting(runtime.runtime_dir),
+                )
+                if fbs_accounting["status"] == "published":
+                    _run_sync_phase("publish_snapshot_accounting_ready_cells", phase_timings_ms,
+                                    lambda: publish_ready(runtime))
                 backup_result = result.get("recovery_policy")
                 return {
                     "status": "success",
@@ -365,6 +373,7 @@ def _run(
                     "recovery_retention_after": retention_after,
                     "supply_refresh": supply_refresh,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
+                    "fbs_snapshot_accounting": fbs_accounting,
                     "wb_finance_cost_recalculation": finance_cost_recalculation,
                     "wb_transit_cost_replays": transit_cost_replays,
                     "ff_state": ff_state,

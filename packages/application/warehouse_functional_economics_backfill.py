@@ -1994,6 +1994,13 @@ def _transform_snapshot(
     )
     for index in relevant_indices:
         day = dates[index]
+        if any(by_date.get(day, {}).get("source") == "fbs_snapshot_inventory_presentation_v1"
+               for by_date in metadata.get("server_cell_presentation", {}).values()):
+            # Snapshot accounting owns these dated costs/capital. The old
+            # functional FF ledger must not overwrite them during normal sync.
+            if isinstance(existing_coverage, dict) and day in existing_coverage:
+                warehouse_coverage[day] = deepcopy(existing_coverage[day])
+            continue
         params = parameters[day]
         day_warehouse = warehouse_metrics.get(day, {})
         warehouse_applicable = day >= CANONICAL_COST_POLICY_DATE.isoformat()

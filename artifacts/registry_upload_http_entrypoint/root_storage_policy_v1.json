@@ -289,6 +289,11 @@
   },
   "producers": [
     {
+      "owner": "fbs_snapshot_accounting",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/fbs-snapshot-accounting.sqlite3*"]
+    },
+    {
       "owner": "wb_fbs_observer",
       "classification": "essential_bounded_business_writer",
       "path_patterns": ["/opt/wb-core-runtime/state/fbs_observer/**"]

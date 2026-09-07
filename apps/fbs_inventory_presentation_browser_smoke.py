@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual FF renderer and Vitrina composition with an explicit candidate."""
+"""Actual FF renderer and Vitrina composition from the active published book."""
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -12,6 +12,8 @@ from apps.sheet_vitrina_v1_inventory_planning_smoke import _seed_inventory_plann
 from apps.fbs_snapshot_cost_smoke import capture
 from apps.fbs_inventory_presentation_smoke import retained
 from packages.application.fbs_snapshot_cost import initialize_candidate
+from packages.application.fbs_accounting_runtime import save as save_accounting, SCHEMA
+from packages.application.shared_sku_cost import build_shared_cost_day
 from packages.application.fbs_inventory_presentation import FbsInventorySnapshot
 from packages.application.web_vitrina_fbs_lifecycle_last_good import OWNER_POLICY_FILENAME, OWNER_POLICY_SCHEMA
 
@@ -36,7 +38,12 @@ def main():
                 dict(nm_id=ids[0],quantity='500',capital_rub='100000',status='available',components={'physical':500}),
                 dict(nm_id=ids[1],quantity='0',capital_rub='0',status='available',components={'physical':0})]}
         candidate=FbsInventorySnapshot(fbs_state=state,wb_capture=wb,retained=retained(wb),day=day)
-        fixture.entrypoint.web_vitrina_block.fbs_inventory_snapshot=candidate
+        book = {"schema": SCHEMA, "active": True, "effective_date": day, "state": state,
+                "shared_days": {day: build_shared_cost_day(state, wb, day)}, "wb_days": {day: wb},
+                "retained_days": {day: retained(wb)}, "presentations": {day: candidate.payload()},
+                "prepared_at": c["captured_at"], "source_digest": c["source_digest"]}
+        save_accounting(runtime.runtime_dir, book, expected=None, operation_id="browser-activation")
+        assert not fixture.entrypoint.web_vitrina_block.fbs_inventory_snapshot.payload()["candidate_only"]
         with patch('packages.application.sheet_vitrina_v1_web_vitrina.build_current_official_fbs_estimate',side_effect=AssertionError('legacy cost')):
             contract=fixture.entrypoint.web_vitrina_block.build(page_route='/sheet-vitrina-v1/vitrina',
                 read_route='/v1/sheet-vitrina-v1/web-vitrina',date_from='2026-04-08',date_to=day)

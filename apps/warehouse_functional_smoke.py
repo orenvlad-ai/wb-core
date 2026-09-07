@@ -4448,6 +4448,17 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
         "source_fingerprint": "sha256:exact-day-probe",
         "cutover_business_date": "2026-07-18",
     }
+    active_probe = copy.deepcopy(exact_day_probe)
+    active_json = json.loads(active_probe["plan_json"])
+    active_json["metadata"] = {"server_cell_presentation": {
+        "SKU:104|own_capital_WB_qty": {"2026-07-20": {
+            "source": "fbs_snapshot_inventory_presentation_v1", "management_value": "999"}}}}
+    active_probe["plan_json"] = json.dumps(active_json)
+    guarded = _transform_snapshot(**{**probe_args, "snapshot": active_probe},
+        warehouse_exact_dates=set(), warehouse_covered_nm_ids={}, warehouse_version_ids={})
+    guarded_rows = {r[1]: r for r in json.loads(guarded["after_plan_json"])["sheets"][0]["rows"]}
+    _assert(guarded_rows["SKU:104|own_capital_WB_qty"][2] == 999,
+            "legacy economics cannot replace a published snapshot-accounting date")
     missing_probe = _transform_snapshot(
         **probe_args,
         warehouse_exact_dates=set(),

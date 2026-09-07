@@ -122,7 +122,7 @@ def _observed(doc: dict, quantities: dict) -> dict:
             "affected_keys": sorted(keys)}
 
 
-def initialize_candidate(capture: dict) -> dict:
+def initialize_candidate(capture: dict, *, open_initial_day: bool = False) -> dict:
     """Freeze a reviewable baseline, without setting a production start date."""
     day, quantities, documents = _capture(capture)
     basis = capture["baseline_costs"]
@@ -152,6 +152,10 @@ def initialize_candidate(capture: dict) -> dict:
         "absorbed_documents": _manifest(documents), "source_digest": capture["source_digest"],
         "document_cost_state": initial_document_state(capture),
     }
+    if open_initial_day:
+        # A live cutover is an intraday opening, not a closed whole day.
+        # Its accepted document manifest is already included in the opening.
+        baseline["calculation_start_date"] = day
     baseline["id"] = fingerprint(baseline)
     return {
         "schema": SCHEMA, "policy": POLICY, "candidate_only": True,
@@ -165,6 +169,8 @@ def initialize_candidate(capture: dict) -> dict:
 
 def _last_closed(state: dict) -> tuple[str, dict]:
     day, rows = state["baseline"]["business_date"], state["baseline"]["rows"]
+    if state["baseline"].get("calculation_start_date") == day:
+        day = (_day(day) - timedelta(days=1)).isoformat()
     for period_day, period in sorted(state["periods"].items()):
         if period["status"] == "closed":
             day, rows = period_day, period["rows"]
