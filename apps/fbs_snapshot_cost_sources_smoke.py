@@ -2,6 +2,7 @@
 """Saved-source contract: complete stock, exact baseline, independent document money."""
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -11,7 +12,6 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.web_vitrina_official_fbs_smoke import fixture as stock_fixture
 from packages.application.fbs_snapshot_cost_sources import capture_current
-from packages.application.fbs_snapshot_cost import evaluate_candidate, initialize_candidate
 from packages.application.warehouse_functional import _watermark
 
 DAY = "2026-09-05"
@@ -28,13 +28,14 @@ def fixture(path):
         CREATE TABLE {P}warehouse_functional_active(slot,version_id);
         INSERT INTO {P}warehouse_functional_active VALUES(1,'v1');
         CREATE TABLE {P}ff_pool_documents(document_id,document_kind,root_document_id,operation_id,
-            source_system,source_type,source_id,source_revision,business_date,posted_at,posted_manifest_sha256);
+            source_system,source_type,source_id,source_revision,idempotency_epoch,business_date,posted_at,
+            posted_manifest_sha256,posted_manifest_json);
         CREATE TABLE {P}ff_pool_document_lines(document_id,line_no,line_role,facility_id,pool,nm_id,
             quantity,capital_rub,expense_rub,metadata_json);
         CREATE TABLE {P}ff_pool_document_expense_lines(document_id,expense_line_no,amount_rub,basis,
             source_file_sha256,metadata_json);
-        CREATE TABLE {P}ff_pool_document_relations(parent_document_id,child_document_id,relation_type);
-        CREATE TABLE {P}ff_pool_movement_lines(operation_id,line_no,facility_id,pool,nm_id,quantity_delta,capital_delta_rub);
+        CREATE TABLE {P}ff_pool_document_relations(parent_document_id,child_document_id,root_document_id,relation_type);
+        CREATE TABLE {P}ff_pool_movement_lines(operation_id,line_no,facility_id,pool,nm_id,quantity_delta,capital_delta_rub,metadata_json);
         CREATE TABLE {P}warehouse_business_operations(operation_id);
     """)
     for facility, pool, quantity, capital in [("A", "FBS", 10, "200"), ("B", "FBS", 20, "600"),
@@ -42,6 +43,7 @@ def fixture(path):
         conn.execute(f"INSERT INTO {P}ff_pool_balances VALUES(?,?,?,?,?,?,?,?,?)",
                      (facility, pool, 1, 1, quantity, capital, str(int(capital)//quantity),
                       "opening", "2026-09-05T09:00:00Z"))
+    conn.execute(f"INSERT INTO {P}ff_pool_balances VALUES('B','FBO',2,1,0,'0',NULL,'opening','2026-09-05T09:00:00Z')")
     bind_pool(conn)
     conn.commit()
     return conn
@@ -56,65 +58,130 @@ def bind_pool(conn):
                  (json.dumps({"ff_pool_detail": _watermark(rows, "updated_at")}),))
 
 
-def document(conn, identity, kind, *, role, q, capital, expense="0", facility="A", pool="FBS", day=DAY):
-    conn.execute(f"INSERT INTO {P}ff_pool_documents VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                 (identity, kind, identity, identity, "fixture", kind, identity, "rev:" + identity,
-                  day, "2026-09-05T10:05:00Z", "sha256:" + identity))
+def document(conn, identity, kind, *, role, q, capital, expense="0", facility="A", pool="FBS", day=DAY,
+             domain=None, root_id=None, relation=None, metadata=None, nm_id=1):
+    root_id = root_id or identity
+    metadata = metadata or {}
+    domain = domain if domain is not None else (
+        {"facility_id": facility, "scope": pool, "amount_rub": capital}
+        if kind == "pool_overhead" else {})
+    posted = {"contract_name": "ff_pool_business_documents_v1", "document_id": identity,
+              "document_kind": kind, "root_document_id": root_id, "business_date": day,
+              "source": {"system": "fixture", "type": kind, "id": identity,
+                         "revision": "rev:" + identity, "idempotency_epoch": 1}, "domain": domain}
+    posted_json = json.dumps(posted, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    posted_hash = "sha256:" + hashlib.sha256(posted_json.encode()).hexdigest()
+    conn.execute(f"INSERT INTO {P}ff_pool_documents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (identity, kind, root_id, identity, "fixture", kind, identity, "rev:" + identity, 1,
+                  day, day + "T10:05:00Z", posted_hash, posted_json))
     conn.execute(f"INSERT INTO {P}warehouse_business_operations VALUES(?)", (identity,))
+    if relation:
+        conn.execute(f"INSERT INTO {P}ff_pool_document_relations VALUES(?,?,?,?)",
+                     (root_id, identity, root_id, relation))
+    if role is None:
+        return
     conn.execute(f"INSERT INTO {P}ff_pool_document_lines VALUES(?,?,?,?,?,?,?,?,?,?)",
-                 (identity, 1, role, facility, pool, 1, q, capital, expense, "{}"))
+                 (identity, 1, role, facility, pool, nm_id, q, capital, expense, json.dumps(metadata)))
     movement_capital = Decimal(capital) + (Decimal(expense) if kind == "china_acceptance" else 0)
-    conn.execute(f"INSERT INTO {P}ff_pool_movement_lines VALUES(?,?,?,?,?,?,?)",
-                 (identity, 1, facility, pool, 1, 0 if kind == "pool_overhead" else q, str(movement_capital)))
+    conn.execute(f"INSERT INTO {P}ff_pool_movement_lines VALUES(?,?,?,?,?,?,?,?)",
+                 (identity, 1, facility, pool, nm_id, 0 if kind == "pool_overhead" else q, str(movement_capital), "{}"))
 
 
-def check_legacy_expense_candidate_boundary(directory):
-    path = Path(directory) / "legacy-expense-boundary.sqlite3"
+def check_authoritative_document_shape(directory):
+    path = Path(directory) / "authoritative-document-shape.sqlite3"
     conn = fixture(path)
-    document(conn, "absorbed-fee", "pool_overhead", role="overhead_allocation", q=987654321,
-             capital="100", expense="100")
-    conn.execute(f"INSERT INTO {P}ff_pool_document_expense_lines VALUES('absorbed-fee',1,'100',"
+    # Old allocation had only FBO stock. The authoritative both-pool header must
+    # survive so the resolver can allocate against the NEW FBS and FBO masses.
+    document(conn, "fee-both", "pool_overhead", role="overhead_allocation", q=987654321,
+             capital="100", expense="100", pool="FBO", facility="B",
+             domain={"facility_id": "B", "scope": "both", "amount_rub": "100", "source_mode": "manual"})
+    conn.execute(f"INSERT INTO {P}ff_pool_document_expense_lines VALUES('fee-both',1,'100',"
                  "'Approved','sha256:old-evidence','{}')")
+    transfer_domain = {"source": {"facility_id": "A", "pool": "FBS"},
+                       "destination": {"facility_id": "B", "pool": "FBO"}}
+    document(conn, "transfer-root", "transfer_root", role=None, q=0, capital="0", domain=transfer_domain)
+    document(conn, "shipment", "transfer_shipment", role="shipped", q=10, capital="777", expense="100",
+             root_id="transfer-root", relation="shipment_of", domain=transfer_domain)
+    conn.execute(f"INSERT INTO {P}ff_pool_document_expense_lines VALUES('shipment',1,'60','Delivery','','{{}}')")
+    conn.execute(f"INSERT INTO {P}ff_pool_document_expense_lines VALUES('shipment',2,'40','Loading','','{{}}')")
+    document(conn, "partial-receipt", "transfer_receipt", role="received", q=6, capital="466.2", expense="60",
+             facility="B", pool="FBO", root_id="transfer-root", relation="receipt_of", domain=transfer_domain,
+             metadata={"terminal_quantity_before": 0})
+    document(conn, "cancel", "transfer_cancellation", role="cancelled", q=4, capital="310.8", expense="40",
+             root_id="transfer-root", relation="cancellation_of",
+             metadata={"expense_terminalized_not_capitalized": True})
+    # Saved writer bytes preserve the order of original integer keys, which
+    # differs from sorting string keys after JSON decoding.
+    document(conn, "numeric-manifest-keys", "pool_inventory", role=None, q=0, capital="0",
+             domain={"diagnostic": {999: "nine", 1000: "ten"}})
     conn.commit()
-    initial_capture = capture_current(path, now=NOW)
-    initial = initialize_candidate(initial_capture)
-    initial_manifest = initial["baseline"]["absorbed_documents"].copy()
-    assert "absorbed-fee" in initial_manifest
-    next_day = "2026-09-06"
-    next_now = NOW + timedelta(days=1)
-    conn.execute(f"UPDATE {P}wb_fbs_stock_snapshot_runs SET snapshot_at=?", (next_day + "T10:00:00Z",))
+    before = path.read_bytes()
+    captured = capture_current(path, now=NOW)
+    assert captured["documents_complete"] and captured["baseline_costs"]["available"], captured
+    assert path.read_bytes() == before
+    documents = {doc["document_id"]: doc for doc in captured["documents"]}
+    numeric = documents["numeric-manifest-keys"]
+    assert numeric["cost_document"]["domain"] == {"diagnostic": {"999": "nine", "1000": "ten"}}
+    fee = documents["fee-both"]["cost_document"]
+    assert fee["domain"] == {"facility_id": "B", "scope": "both", "amount_rub": "100", "source_mode": "manual"}
+    assert {line["pool"] for line in fee["lines"]} == {"FBO"}
+    assert fee["expense_lines"][0]["amount_rub"] == "100"
+    assert fee["lines"][0]["quantity"] == 987654321  # raw evidence, not a new mass
+    root = documents["transfer-root"]["cost_document"]
+    assert root["domain"] == transfer_domain and root["lines"] == []
+    shipment = documents["shipment"]["cost_document"]
+    assert shipment["relations"] == [{"parent_document_id": "transfer-root", "child_document_id": "shipment",
+                                      "root_document_id": "transfer-root", "relation_type": "shipment_of"}]
+    assert sum(Decimal(row["amount_rub"]) for row in shipment["expense_lines"]) == 100
+    partial = documents["partial-receipt"]["cost_document"]
+    assert partial["lines"][0]["pool"] == "FBO" and partial["lines"][0]["quantity"] == 6
+    assert json.loads(partial["lines"][0]["metadata_json"])["terminal_quantity_before"] == 0
+    assert "metadata_json" in partial["movements"][0]
+    assert json.loads(documents["cancel"]["cost_document"]["lines"][0]["metadata_json"])["expense_terminalized_not_capitalized"]
+    fbo = captured["baseline_costs"]["fbo_rows"]
+    assert len(fbo) == 2 and fbo[0]["facility_id"] == "B" and fbo[0]["nm_id"] == 1
+    assert (fbo[0]["quantity"], fbo[0]["capital_rub"], fbo[0]["wac_rub"]) == (4, "120", "30")
+    assert (fbo[1]["quantity"], fbo[1]["capital_rub"], fbo[1]["wac_rub"]) == (0, "0", None)
+    assert fbo[1]["source"]["basis"] == "exact_published_pool_zero"
+    # A new relation belongs to its child; it cannot rewrite the fingerprint
+    # of an already absorbed root or source shipment.
+    document(conn, "late-transfer-fee", "late_expense", role="late_expense_component", q=10,
+             capital="0", expense="20", pool="FBO", facility="B", root_id="transfer-root",
+             relation="late_expense_for", domain={"root_document_id": "transfer-root", "amount_rub": "20"})
+    conn.execute(f"INSERT INTO {P}ff_pool_document_expense_lines VALUES('late-transfer-fee',1,'20','Late delivery','','{{}}')")
     conn.commit()
-    before_expense = evaluate_candidate(initial, capture_current(path, now=next_now, include_baseline=False))
-    before_row = before_expense["periods"][next_day]["rows"]["A:1"]
-    assert before_row["wac_rub"] == "20" and before_row["expense_capital_rub"] == "0"
-    assert before_expense["pending_documents"] == []  # the old fee stays absorbed
-
-    document(conn, "new-legacy-fee", "pool_overhead", role="overhead_allocation", q=123456789,
-             capital="1000000", expense="1000000", day=next_day)
-    conn.execute(f"UPDATE {P}ff_pool_documents SET posted_at=? WHERE document_id='new-legacy-fee'",
-                 (next_day + "T10:05:00Z",))
-    conn.execute(f"INSERT INTO {P}ff_pool_document_expense_lines VALUES('new-legacy-fee',1,'1000000',"
-                 "'Approved','sha256:new-evidence','{}')")
+    after_child = capture_current(path, now=NOW)
+    after_documents = {doc["document_id"]: doc for doc in after_child["documents"]}
+    assert after_documents["transfer-root"]["fingerprint"] == documents["transfer-root"]["fingerprint"]
+    assert after_documents["shipment"]["fingerprint"] == documents["shipment"]["fingerprint"]
+    original_json, original_hash = conn.execute(f"SELECT posted_manifest_json,posted_manifest_sha256 "
+                                               f"FROM {P}ff_pool_documents WHERE document_id='fee-both'").fetchone()
+    # Valid JSON with an unchanged stored hash must not silently alter scope.
+    modified = json.loads(original_json)
+    modified["domain"]["scope"] = "FBO"
+    conn.execute(f"UPDATE {P}ff_pool_documents SET posted_manifest_json=? WHERE document_id='fee-both'", (json.dumps(modified),))
     conn.commit()
-    captured = capture_current(path, now=next_now, include_baseline=False)
-    event = next(d for d in captured["documents"] if d["document_id"] == "new-legacy-fee")["events"][0]
-    assert event["kind"] == "unsupported" and event["capital_rub"] == "0" and event["quantity"] == 0
-    assert event["reason"] == "new_expense_allocation_basis_required"
-    blocked = evaluate_candidate(before_expense, captured)
-    blocked_row = blocked["periods"][next_day]["rows"]["A:1"]
-    assert blocked_row["opening_wac_rub"] == "20" and blocked_row["expense_capital_rub"] == "0"
-    assert blocked_row["wac_rub"] is None and blocked_row["capital_rub"] is None
-    assert blocked["periods"][next_day]["quality"] == "incomplete"
-    assert blocked["periods"][next_day]["rows"]["B:1"]["wac_rub"] == "30"
-    assert blocked["baseline"]["absorbed_documents"] == initial_manifest
-    assert blocked["pending_documents"][0]["document_id"] == "new-legacy-fee"
-    assert evaluate_candidate(blocked, captured) == blocked
+    assert capture_current(path, now=NOW)["documents_reason"] == "posted_document_manifest_hash_mismatch"
+    conn.execute(f"UPDATE {P}ff_pool_documents SET posted_manifest_json=?,posted_manifest_sha256=? WHERE document_id='fee-both'",
+                 (original_json, original_hash))
+    conn.execute(f"UPDATE {P}ff_pool_documents SET source_revision='drift' WHERE document_id='fee-both'")
+    conn.commit()
+    assert capture_current(path, now=NOW)["documents_reason"] == "posted_document_manifest_source_mismatch"
+    conn.execute(f"UPDATE {P}ff_pool_documents SET source_revision='rev:fee-both' WHERE document_id='fee-both'")
+    # A positive FBO pool row that was never disclosed by the published version
+    # cannot silently create a candidate's opening FBO capital.
+    conn.execute(f"UPDATE {P}ff_pool_balances SET quantity=1,capital_rub='10',wac_rub='10' WHERE pool='FBO' AND nm_id=2")
+    bind_pool(conn)
+    conn.commit()
+    absent_basis = capture_current(path, now=NOW)
+    assert absent_basis["documents_complete"] and not absent_basis["baseline_costs"]["available"]
+    assert absent_basis["baseline_costs"]["reason"] == "fbo_initial_published_cost_missing"
     conn.close()
 
 
 def main():
     with TemporaryDirectory(prefix="fbs-cost-sources-") as tmp:
-        check_legacy_expense_candidate_boundary(tmp)
+        check_authoritative_document_shape(tmp)
         path = Path(tmp) / "source.sqlite3"
         conn = fixture(path)
         document(conn, "receipt", "china_acceptance", role="accepted_pool_allocation", q=1000,
@@ -129,7 +196,7 @@ def main():
                  capital="99999999999999999999")
         # Lifecycle records are not business-document cost inputs.
         conn.execute(f"INSERT INTO {P}warehouse_business_operations VALUES('lifecycle')")
-        conn.execute(f"INSERT INTO {P}ff_pool_movement_lines VALUES('lifecycle',1,'A','FBS',1,-12345,'-12345')")
+        conn.execute(f"INSERT INTO {P}ff_pool_movement_lines VALUES('lifecycle',1,'A','FBS',1,-12345,'-12345','{{}}')")
         conn.commit()
         before = path.read_bytes()
         model = capture_current(path, now=NOW)
@@ -188,6 +255,8 @@ def main():
         assert no_baseline["documents_complete"] and no_baseline["quantity_snapshot"]["complete"]
         assert no_baseline["source_digest"] == changed["source_digest"]
         assert no_baseline["baseline_costs"]["reason"] == "not_requested_after_initialization"
+        assert no_baseline["baseline_costs"]["fbo_rows"] == []
+        assert all("cost_document" in doc for doc in no_baseline["documents"])
 
         conn.execute(f"UPDATE {P}ff_pool_movement_lines SET capital_delta_rub='200009' WHERE operation_id='receipt'")
         conn.commit()
@@ -200,7 +269,7 @@ def main():
         conn.execute(f"DELETE FROM {P}ff_pool_movement_lines WHERE operation_id='fee'")
         conn.commit()
         assert capture_current(path, now=NOW, include_baseline=False)["documents_reason"] == "document_money_movement_mismatch"
-        conn.execute(f"INSERT INTO {P}ff_pool_movement_lines VALUES('fee',1,'A','FBS',1,0,'100')")
+        conn.execute(f"INSERT INTO {P}ff_pool_movement_lines VALUES('fee',1,'A','FBS',1,0,'100','{{}}')")
         document(conn, "unmapped", "correction", role="correction", q=1, capital="5")
         conn.execute(f"DELETE FROM {P}ff_pool_document_lines WHERE document_id='unmapped'")
         conn.commit()
@@ -214,7 +283,7 @@ def main():
         conn.commit()
         invalid_fee = capture_current(path, now=NOW)
         assert not invalid_fee["documents_complete"]
-        assert invalid_fee["documents_reason"] == "approved_expense_allocations_incomplete"
+        assert invalid_fee["documents_reason"] == "overhead_authoritative_amount_mismatch"
         conn.execute(f"UPDATE {P}ff_pool_document_expense_lines SET amount_rub='100'")
         conn.execute(f"DELETE FROM {P}warehouse_business_operations WHERE operation_id='receipt'")
         conn.commit()

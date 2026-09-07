@@ -19,7 +19,7 @@ from packages.application.own_product_capital import _inventory_cost_stage_evide
 from packages.application.warehouse_functional import _watermark
 from packages.business_time import current_business_date_iso
 
-CONTRACT = "fbs_snapshot_cost_sources_v1"
+CONTRACT = "fbs_snapshot_cost_sources_v2"
 PREFIX = "sheet_vitrina_v1_"
 ERRORS = (sqlite3.Error, ValueError, TypeError, KeyError, InvalidOperation)
 
@@ -68,7 +68,7 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
         "documents_complete": False, "documents": [], "documents_reason": "",
         "baseline_costs": {"available": False, "version_id": "", "reason": (
             "sources_unavailable" if include_baseline else "not_requested_after_initialization"),
-                           "rows": [], "document_manifest": {}},
+                           "rows": [], "fbo_rows": [], "document_manifest": {}},
     }
     conn = None
     try:
@@ -121,19 +121,29 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
 
 
 def _documents(conn: sqlite3.Connection) -> list[dict]:
+    # FBO's auxiliary book must remain completely document-owned. Unlike the
+    # intentionally excluded FBS observer, an unmapped FBO movement is a source
+    # contract change, not an operand to import from the old ledger.
+    unmapped = conn.execute(
+        f"SELECT 1 FROM {PREFIX}ff_pool_movement_lines m "
+        f"LEFT JOIN {PREFIX}ff_pool_documents d ON d.operation_id=m.operation_id "
+        "WHERE m.pool='FBO' AND d.document_id IS NULL LIMIT 1"
+    ).fetchone()
+    if unmapped is not None:
+        raise ValueError("unmapped_fbo_document_movement")
     documents = _rows(conn, f"SELECT document_id,document_kind,root_document_id,operation_id,"
-                      "source_system,source_type,source_id,source_revision,business_date,posted_at,"
-                      f"posted_manifest_sha256 FROM {PREFIX}ff_pool_documents ORDER BY document_id")
+                      "source_system,source_type,source_id,source_revision,idempotency_epoch,business_date,posted_at,"
+                      f"posted_manifest_sha256,posted_manifest_json FROM {PREFIX}ff_pool_documents ORDER BY document_id")
     lines = _rows(conn, f"SELECT document_id,line_no,line_role,facility_id,pool,nm_id,quantity,"
                   f"capital_rub,expense_rub,metadata_json FROM {PREFIX}ff_pool_document_lines "
                   "ORDER BY document_id,line_no")
     expenses = _rows(conn, f"SELECT document_id,expense_line_no,amount_rub,basis,source_file_sha256,"
                      f"metadata_json FROM {PREFIX}ff_pool_document_expense_lines "
                      "ORDER BY document_id,expense_line_no")
-    relations = _rows(conn, f"SELECT parent_document_id,child_document_id,relation_type "
+    relations = _rows(conn, f"SELECT parent_document_id,child_document_id,root_document_id,relation_type "
                       f"FROM {PREFIX}ff_pool_document_relations ORDER BY child_document_id,relation_type")
     movements = _rows(conn, f"SELECT m.operation_id,m.line_no,m.facility_id,m.pool,m.nm_id,"
-                      f"m.quantity_delta,m.capital_delta_rub FROM {PREFIX}ff_pool_movement_lines m "
+                      f"m.quantity_delta,m.capital_delta_rub,m.metadata_json FROM {PREFIX}ff_pool_movement_lines m "
                       f"JOIN {PREFIX}ff_pool_documents d USING(operation_id) "
                       "ORDER BY m.operation_id,m.line_no")
     operations = {row["operation_id"] for row in conn.execute(
@@ -168,15 +178,64 @@ def _documents(conn: sqlite3.Connection) -> list[dict]:
         own_lines = by_id.get(identity, [])
         own_expenses = by_expense.get(identity, [])
         own_movements = by_movement.get(document["operation_id"], [])
+        posted = _verified_manifest(document)
+        # Read the authoritative scope and total, not the old allocation's
+        # nonzero SKU set or old pool split. Both-pool scope can have allocated
+        # lines in only one pool in the legacy state.
+        domain = posted.get("domain", {})
+        if document["document_kind"] == "pool_overhead":
+            if (not domain.get("facility_id") or domain.get("scope") not in {"FBS", "FBO", "both"}
+                    or _money(domain.get("amount_rub")) <= 0):
+                raise ValueError("overhead_authoritative_header_missing")
+            if _money(domain["amount_rub"]) != sum(
+                (_money(expense["amount_rub"]) for expense in own_expenses), Decimal(0)
+            ):
+                raise ValueError("overhead_authoritative_amount_mismatch")
+        # Its verified hash owns the manifest bytes; do not duplicate potentially
+        # large before-state payloads in every normalized document.
+        document = {key: value for key, value in document.items() if key != "posted_manifest_json"}
         fingerprint = _digest({"document": document, "lines": own_lines,
                                "expenses": own_expenses, "relations": by_relation.get(identity, []),
                                "movements": own_movements})
         normalized = {**document, "kind": document["document_kind"], "fingerprint": fingerprint,
-                      "events": _events(document, own_lines, own_expenses, own_movements)}
+                      "events": _events(document, own_lines, own_expenses, own_movements),
+                      "cost_document": {
+                          "contract": "ff_pool_posted_cost_document_v1",
+                          "domain": domain, "lines": own_lines, "expense_lines": own_expenses,
+                          "relations": by_relation.get(identity, []), "movements": own_movements,
+                          "posted_manifest_sha256": document["posted_manifest_sha256"],
+                      }}
         result.append(normalized)
     if (set(by_id) | set(by_expense)) - seen:
         raise ValueError("orphan_document_lines")
     return result
+
+
+def _verified_manifest(document: dict) -> dict:
+    serialized = document["posted_manifest_json"]
+    # The writer hashes and stores the same serialized bytes. Parsing changes
+    # integer dict keys to strings: re-sorting them can change their order
+    # (e.g. 999 before 1000 becomes "1000" before "999") and is NOT the writer's
+    # fingerprint convention. Verify the exact saved bytes before decoding.
+    exact_hash = "sha256:" + hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    posted = json.loads(serialized)
+    if not isinstance(posted, dict) or exact_hash != document["posted_manifest_sha256"]:
+        raise ValueError("posted_document_manifest_hash_mismatch")
+    if not isinstance(posted.get("domain", {}), dict):
+        raise ValueError("posted_document_domain_invalid")
+    # The exact opening contract predates the general document header. Validate
+    # identities when present without inventing missing opening-manifest fields.
+    for key in ("document_id", "document_kind", "root_document_id", "business_date"):
+        if key in posted and posted[key] != document[key]:
+            raise ValueError("posted_document_manifest_identity_mismatch")
+    source = posted.get("source")
+    if source is not None:
+        if not isinstance(source, dict) or any(source.get(key) != document[column] for key, column in (
+            ("system", "source_system"), ("type", "source_type"), ("id", "source_id"),
+            ("revision", "source_revision"), ("idempotency_epoch", "idempotency_epoch"),
+        )):
+            raise ValueError("posted_document_manifest_source_mismatch")
+    return posted
 
 
 def _events(document: dict, lines: list[dict], expenses: list[dict], movements: list[dict]) -> list[dict]:
@@ -273,7 +332,7 @@ def _events(document: dict, lines: list[dict], expenses: list[dict], movements: 
 
 def _baseline(conn: sqlite3.Connection, *, day: str, quantities: list[dict], documents: list[dict]) -> dict:
     manifest = {document["document_id"]: document["fingerprint"] for document in documents}
-    result = {"available": False, "version_id": "", "reason": "", "rows": [],
+    result = {"available": False, "version_id": "", "reason": "", "rows": [], "fbo_rows": [],
               "document_manifest": manifest, "document_manifest_digest": _digest(manifest)}
     try:
         published = _rows(conn, f"SELECT nm_id,json_extract(provenance_json,'$.functional_version_id') version_id "
@@ -317,11 +376,34 @@ def _baseline(conn: sqlite3.Connection, *, day: str, quantities: list[dict], doc
                     raise ValueError("published_ff_location_duplicate")
                 locations[key] = location
         pool_index = {(int(row["nm_id"]), row["facility_id"], row["pool"]): row for row in pool}
+        if len(pool_index) != len(pool):
+            raise ValueError("current_pool_location_duplicate")
         for key, location in locations.items():
             actual = pool_index.get(key)
             if (actual is None or _money(actual["quantity"]) != _money(location["quantity"])
                     or _money(actual["capital_rub"]) != _money(location["capital_rub"])):
                 raise ValueError("published_location_current_pool_mismatch")
+        for row in pool:
+            if row["pool"] != "FBO":
+                continue
+            key = (int(row["nm_id"]), row["facility_id"], "FBO")
+            basis = locations.get(key)
+            quantity, capital = _quantity(row["quantity"]), _money(row["capital_rub"])
+            if ((quantity == 0) != (capital == 0)
+                    or (quantity > 0 and (basis is None or basis["wac_rub"] is None))):
+                raise ValueError("fbo_initial_published_cost_missing")
+            # Positive operands belong to immutable published locations. Dense
+            # zero rows are bound by the exact whole-pool digest even when the
+            # zero aggregate had no published location array.
+            result["fbo_rows"].append({
+                "nm_id": int(row["nm_id"]), "facility_id": str(row["facility_id"]),
+                "quantity": _quantity(basis["quantity"]) if basis else 0,
+                "capital_rub": str(basis["capital_rub"]) if basis else "0",
+                "wac_rub": basis["wac_rub"] if basis else None,
+                "source": {"version_id": version_id, "pool_detail_digest": watermark["digest"],
+                           "basis": "immutable_published_ff_location" if basis else "exact_published_pool_zero",
+                           "document_manifest_digest": result["document_manifest_digest"]},
+            })
         for row in quantities:
             basis = locations.get((row["nm_id"], row["facility_id"], "FBS"))
             wac = basis["wac_rub"] if basis else None
@@ -335,5 +417,5 @@ def _baseline(conn: sqlite3.Connection, *, day: str, quantities: list[dict], doc
                                               "document_manifest_digest": result["document_manifest_digest"]}})
         result["available"] = True
     except ERRORS as exc:
-        result.update(reason=str(exc), rows=[])
+        result.update(reason=str(exc), rows=[], fbo_rows=[])
     return result
