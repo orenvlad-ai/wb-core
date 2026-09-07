@@ -314,6 +314,7 @@ def _run(
                     reviewed_plan,
                     confirm_fingerprint=str(args.fingerprint),
                 )
+                fbs_accounting = _publish_fbs_snapshot_accounting(runtime)
                 proxy_recalculation = (
                     block.calculation_parameters.process_pending_targeted_recalculations(
                         verified_backup=economics_backup,
@@ -355,14 +356,6 @@ def _run(
                         finance_cost_recalculation.get("fingerprint") or ""
                     ),
                 )
-                from packages.application.fbs_accounting_runtime import refresh as refresh_fbs_accounting, publish_ready
-                fbs_accounting = _run_sync_phase(
-                    "publish_fbs_snapshot_accounting", phase_timings_ms,
-                    lambda: refresh_fbs_accounting(runtime.runtime_dir),
-                )
-                if fbs_accounting["status"] == "published":
-                    _run_sync_phase("publish_snapshot_accounting_ready_cells", phase_timings_ms,
-                                    lambda: publish_ready(runtime))
                 backup_result = result.get("recovery_policy")
                 return {
                     "status": "success",
@@ -498,10 +491,16 @@ def _run(
                         confirm_fingerprint=str(plan["plan_fingerprint"]),
                     ),
                 )
+                fbs_accounting = _run_sync_phase(
+                    "publish_fbs_snapshot_accounting",
+                    phase_timings_ms,
+                    lambda: _publish_fbs_snapshot_accounting(runtime),
+                )
                 journal.phase_finished(
                     durable_run_id,
                     durable_phase,
-                    details=dict(result.get("active_version") or {}),
+                    details={**dict(result.get("active_version") or {}),
+                             "fbs_snapshot_accounting": fbs_accounting},
                 )
                 backup_result = result.get("recovery_policy")
                 durable_phase = "dependent_replay_economics"
@@ -586,6 +585,7 @@ def _run(
                     "supply_refresh": supply_refresh,
                     "wb_transit_cost_collection": transit_cost_collection,
                     "downstream_cost_layers_materialized": downstream_cost_layers,
+                    "fbs_snapshot_accounting": fbs_accounting,
                     "wb_finance_cost_recalculation": finance_cost_recalculation,
                     "wb_transit_cost_replays": transit_cost_replays,
                     "ff_state": ff_state,
@@ -971,6 +971,15 @@ def _collect_autonomous_transit_costs(
         batch_limit=AUTONOMOUS_TRANSIT_COST_BATCH_LIMIT,
         max_batches=AUTONOMOUS_TRANSIT_COST_MAX_BATCHES,
     )
+
+
+def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
+    from packages.application.fbs_accounting_runtime import refresh, publish_ready
+
+    result = refresh(runtime.runtime_dir)
+    if result["status"] == "published":
+        publish_ready(runtime)
+    return result
 
 
 def _recalculate_downstream_finance_cost(
