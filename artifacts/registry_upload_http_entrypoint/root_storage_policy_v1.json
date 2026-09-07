@@ -236,8 +236,8 @@
           },
           {
             "service": "wb-core-fbs-shadow-collector.service",
-            "declared_role": "reader_writer",
-            "allowed_access_modes": ["read_only", "read_write"]
+            "declared_role": "reader",
+            "allowed_access_modes": ["read_only"]
           },
           {
             "service": "wb-core-change-registry-observer.service",

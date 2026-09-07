@@ -1,8 +1,8 @@
 [Unit]
-Description=WB Core five-minute official FBS read-only shadow scheduler
+Description=WB Core hourly isolated FBS observer scheduler
 
 [Timer]
-OnCalendar=*-*-* *:03,08,13,18,23,28,33,38,43,48,53,58:00 Europe/Moscow
+OnCalendar=*-*-* *:38:00 Europe/Moscow
 AccuracySec=15s
 RandomizedDelaySec=10s
 Persistent=true

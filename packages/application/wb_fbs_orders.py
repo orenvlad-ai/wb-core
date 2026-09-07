@@ -7,6 +7,7 @@ inventory document, operation, reservation, movement, balance, or cutover.
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -543,6 +544,7 @@ class WbFbsOrdersCollector:
         if window_to - window_from > 30 * 24 * 60 * 60:
             raise WbFbsOrdersError("window_too_wide", "FBS collector window must not exceed 30 days")
         cursor = _bounded_int(next_cursor, "next_cursor", minimum=0, maximum=2**63 - 1)
+        input_cursor = cursor
         limit = _bounded_int(page_limit, "page_limit", minimum=1, maximum=1000)
         pages_bound = _bounded_int(max_pages, "max_pages", minimum=1, maximum=MAX_PAGES)
         run_id = "fbs_run_" + uuid4().hex
@@ -655,7 +657,7 @@ class WbFbsOrdersCollector:
                 attempted_at=attempted_at,
                 window_from=window_from,
                 window_to=window_to,
-                next_cursor=cursor,
+                next_cursor=input_cursor,
                 pages=len(pages),
                 error=_safe_error(exc),
             )
@@ -684,6 +686,7 @@ class WbFbsOrdersCollector:
             + (["POST /api/v3/orders/status (read semantic)"] if status_observations else []),
             "status_observation_count": len(status_observations),
             "new_status_observation_count": int(persisted["new_status_observation_count"]),
+            "db_write_count": int(persisted["db_write_count"]),
             "transition_count": int(persisted["transition_count"]),
             "reappeared_pair_count": int(persisted["reappeared_pair_count"]),
             "missing_status_count": missing_status_count,
@@ -691,6 +694,92 @@ class WbFbsOrdersCollector:
             "schema_drift_count": schema_drift_count,
             "mutates_wb": False,
             "creates_inventory_movement": False,
+        }
+
+    def refresh_known_statuses(self, order_ids: list[int]) -> dict[str, Any]:
+        """Observe known orders independently of their creation/listing window.
+
+        Only status evidence in this collector's database is updated. Collection
+        cursors and order observations remain untouched, including on failure.
+        """
+        if not self.enabled:
+            return {"status": "disabled", "requested_count": 0, "mutates_wb": False}
+        if len(order_ids) > 1000:
+            raise WbFbsOrdersError("status_batch_too_large", "Status batch must not exceed 1000 orders")
+        ids = [_bounded_int(value, "order_id", minimum=1, maximum=2**63 - 1) for value in order_ids]
+        if len(set(ids)) != len(ids):
+            raise WbFbsOrdersError("duplicate_requested_order", "Status batch contains duplicate order IDs")
+        result = {
+            "status": "success", "requested_count": len(ids),
+            "status_observation_count": 0, "missing_status_count": 0,
+            "new_status_observation_count": 0, "transition_count": 0,
+            "reappeared_pair_count": 0, "schema_drift_count": 0,
+            "duplicate_status_count": 0, "complete": True,
+            "db_write_count": 0,
+            "mutates_wb": False, "creates_inventory_movement": False,
+        }
+        if not ids:
+            return result
+        placeholders = ",".join("?" for _ in ids)
+        query = (
+            f"SELECT order_id,source_revision FROM {OBSERVATIONS_TABLE} "
+            f"WHERE observation_sequence IN (SELECT MAX(observation_sequence) "
+            f"FROM {OBSERVATIONS_TABLE} WHERE order_id IN ({placeholders}) GROUP BY order_id)"
+        )
+        with closing(sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            known = {int(row[0]): str(row[1]) for row in conn.execute(query, ids)}
+        if set(known) != set(ids):
+            raise WbFbsOrdersError("unknown_status_order", "Status refresh requires locally known orders")
+        reader = getattr(self.source, "list_statuses", None)
+        if not callable(reader):
+            raise WbFbsOrdersError("status_reader_missing", "Official status reader is unavailable")
+        observed_at = str(self.timestamp_factory())
+        returned: dict[int, WbFbsOrderStatus] = {}
+        try:
+            for status in reader(ids):
+                order_id = int(status.order_id)
+                if order_id not in known:
+                    raise WbFbsOrdersError("status_scope_drift", "Official status response escaped requested batch", http_status=502)
+                if order_id in returned:
+                    raise WbFbsOrdersError("duplicate_status_response", "Official status response duplicated an order", http_status=502)
+                returned[order_id] = status
+        except (WbFbsOrdersHttpStatusError, WbFbsOrdersTransportError) as exc:
+            raise WbFbsOrdersError("official_fbs_read_failed", _safe_error(exc), http_status=502) from exc
+        observations = [
+            _normalize_status(status, order={"source_revision": known[order_id]}, observed_at=observed_at)
+            for order_id, status in returned.items()
+        ]
+        drift = sum(_status_schema_drifted(status) for status in returned.values())
+        missing = len(set(ids) - set(returned))
+        with closing(sqlite3.connect(self.db_path, timeout=30.0)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            transaction_before = conn.total_changes
+            live = {int(row[0]): str(row[1]) for row in conn.execute(query, ids)}
+            if live != known:
+                raise WbFbsOrdersError("status_order_revision_drift", "Known order revisions changed during status read")
+            transitions = _persist_status_transitions(conn, observations)
+            before = conn.total_changes
+            conn.executemany(
+                f"INSERT OR IGNORE INTO {STATUS_OBSERVATIONS_TABLE}("
+                "observation_id,order_id,order_revision,status_digest,supplier_status,"
+                "wb_status,positive_quantity,observed_at) VALUES(?,?,?,?,?,?,?,?)",
+                [tuple(row[key] for key in (
+                    "observation_id", "order_id", "order_revision", "status_digest",
+                    "supplier_status", "wb_status", "positive_quantity", "observed_at",
+                )) for row in observations],
+            )
+            new_count = conn.total_changes - before
+            db_write_count = conn.total_changes - transaction_before
+            conn.commit()
+        return {
+            **result, "status": "incomplete" if missing or drift else "success",
+            "complete": not (missing or drift),
+            "status_observation_count": len(observations),
+            "missing_status_count": missing, "schema_drift_count": drift,
+            "new_status_observation_count": new_count, **transitions,
+            "db_write_count": db_write_count,
         }
 
     def orders_page(
@@ -967,6 +1056,7 @@ class WbFbsOrdersCollector:
             conn.row_factory = sqlite3.Row
             ensure_wb_fbs_orders_schema(conn)
             before = conn.total_changes
+            transaction_before = before
             conn.executemany(
                 f"""INSERT OR IGNORE INTO {OBSERVATIONS_TABLE}(
                        observation_id,order_id,source_revision,supply_id,delivery_type,
@@ -1024,8 +1114,10 @@ class WbFbsOrdersCollector:
                 ignored_count=ignored_count,
                 complete=complete,
             )
+            db_write_count = conn.total_changes - transaction_before
             conn.commit()
         return {
+            "db_write_count": int(db_write_count),
             "new_order_observation_count": int(new_count),
             "new_status_observation_count": int(new_status_count),
             "transition_count": int(transition_metrics["transition_count"]),
