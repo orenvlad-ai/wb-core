@@ -155,6 +155,33 @@ def main() -> int:
 
         cache_path = runtime.runtime_dir / CACHE_FILENAME
         valid_cache = cache_path.read_bytes()
+
+        # Resuming the isolated observer must not re-enable live accounting
+        # scans in current cells, inventory planning, or historical columns.
+        policy_path = runtime.runtime_dir / OWNER_POLICY_FILENAME
+        paused_policy = policy_path.read_bytes()
+        observer_policy = json.loads(paused_policy)
+        observer_policy["revision"] = 62
+        observer_policy["processes"]["fbs_shadow"]["desired"] = True
+        policy_path.write_text(json.dumps(observer_policy), encoding="utf-8")
+        enabled_policy = policy_path.read_bytes()
+        with patch(
+            "packages.application.web_vitrina_fbs_lifecycle_last_good._source_state",
+            side_effect=_forbidden_live_scan,
+        ):
+            observing = _build(fixture)
+        observing_rows = {row.row_id: row for row in observing.rows}
+        for key in (facility_key, COMBINED_TOTAL_ALIAS_KEY):
+            item = observing_rows[f"SKU:{nm_ids[0]}|{key}"]
+            assert item.values_by_date[CURRENT_DATE] == ""
+            assert item.presentation_by_date[CURRENT_DATE]["quality_label"] == "Нет данных"
+        assert observing_rows[
+            f"SKU:{nm_ids[0]}|{INVENTORY_WB_TOTAL_KEY}"
+        ].values_by_date[CURRENT_DATE] == 10
+        assert policy_path.read_bytes() == enabled_policy
+        assert cache_path.read_bytes() == valid_cache
+        policy_path.write_bytes(paused_policy)
+
         corrupt = json.loads(valid_cache)
         corrupt["generated_at"] = "2026-04-21T12:00:01Z"
         cache_path.write_text(json.dumps(corrupt), encoding="utf-8")
