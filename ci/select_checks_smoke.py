@@ -29,6 +29,14 @@ def main() -> None:
     assert docs["release_kind"] == "repo_only"
     assert docs["commands"] == []
 
+    timer = build_plan_from_paths(
+        pull_request=10, base=BASE, head=HEAD,
+        paths=["artifacts/registry_upload_http_entrypoint/systemd/wb-core-fbs-shadow-collector.timer"],
+        file_exists=lambda *_: True,
+    )
+    verify_plan(timer)
+    assert timer["release_kind"] == "live_runtime"
+
     finance = build_plan_from_paths(
         pull_request=2,
         base=BASE,
