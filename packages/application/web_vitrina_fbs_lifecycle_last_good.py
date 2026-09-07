@@ -5,6 +5,10 @@ it is paused, an interactive request must never rescan the operational status
 backlog.  A separate query-only builder publishes one compact quality snapshot;
 the page reads that snapshot as last-good evidence.  Missing or invalid cache
 evidence fails closed to unavailable FBS cells, never to zero.
+
+The scheduled fbs_shadow command now collects isolated observations only.
+Enabling that collector does not resume accounting Lifecycle or authorize
+interactive scans of its old backlog.
 """
 
 from __future__ import annotations
@@ -97,7 +101,7 @@ class FbsLifecycleQualityFallback:
 def load_owner_paused_fallback(
     runtime_dir: Path,
 ) -> FbsLifecycleQualityFallback | None:
-    """Return a bounded fallback only when FBS is explicitly paused or ambiguous."""
+    """Protect reads for paused, ambiguous, or observation-only FBS collection."""
 
     root = Path(runtime_dir).resolve()
     policy_path = root / OWNER_POLICY_FILENAME
@@ -120,7 +124,13 @@ def load_owner_paused_fallback(
     if not isinstance(process, Mapping) or not isinstance(process.get("desired"), bool):
         return _unavailable_fallback("Состояние фонового обновления FBS неоднозначно.")
     if process.get("desired") is not False:
-        return None
+        # apps/wb_fbs_shadow.py poll uses WbFbsObserver: desired=true enables
+        # collection, not accounting. A cache admitted under a different pause
+        # policy is not evidence of complete current accounting either.
+        return _unavailable_fallback(
+            "Сбор FBS работает только для наблюдений; учётный Lifecycle не обновляется. "
+            "Подтверждённая оценка по старому Lifecycle недоступна."
+        )
     revision = policy.get("revision")
     if not isinstance(revision, int) or revision < 1:
         return _unavailable_fallback("Ревизия политики обновления FBS неоднозначна.")
