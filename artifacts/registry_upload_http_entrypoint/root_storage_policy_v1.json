@@ -289,6 +289,11 @@
   },
   "producers": [
     {
+      "owner": "wb_fbs_observer",
+      "classification": "essential_bounded_business_writer",
+      "path_patterns": ["/opt/wb-core-runtime/state/fbs_observer/**"]
+    },
+    {
       "owner": "registry_operational_store",
       "classification": "essential_bounded_business_writer",
       "path_patterns": []

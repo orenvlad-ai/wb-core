@@ -1052,7 +1052,7 @@ class WbFbsOrdersCollector:
         observations: list[Mapping[str, Any]],
         status_observations: list[Mapping[str, Any]],
     ) -> dict[str, int]:
-        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=30.0)) as conn, conn:
             conn.row_factory = sqlite3.Row
             ensure_wb_fbs_orders_schema(conn)
             before = conn.total_changes
@@ -1196,7 +1196,7 @@ class WbFbsOrdersCollector:
         pages: int,
         error: str,
     ) -> None:
-        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=30.0)) as conn, conn:
             ensure_wb_fbs_orders_schema(conn)
             _upsert_state(
                 conn,
