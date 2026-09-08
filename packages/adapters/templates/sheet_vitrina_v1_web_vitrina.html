@@ -26478,7 +26478,7 @@
           const item = make("article", "ff-pool-list-item");
           const copy = make("div");
           copy.appendChild(make("strong", "", (documentRow.document_label_ru || documentRow.document_kind) + " · " + documentRow.business_date));
-          copy.appendChild(make("small", "", documentRow.root_document_id + " · " + (documentRow.state_label_ru || documentRow.state)));
+          copy.appendChild(make("small", "", documentRow.root_document_id + " · " + ((documentRow.overhead || {}).allocation_label || documentRow.state_label_ru || documentRow.state)));
           copy.appendChild(make("span", "ff-pool-metrics", documentRow.line_count + " строк доказательств · расходов " + money(documentRow.expense_rub)));
           const button = make("button", "button ghost", "Подробнее"); button.type = "button"; button.addEventListener("click", function () { loadDocumentDetail(documentRow.root_document_id); });
           item.append(copy, button); nodes.documents.appendChild(item);
@@ -26704,15 +26704,17 @@
       }
     }
     function renderWorkflow(payload) {
+      const allocation = payload.preview && payload.preview.summary;
+      const snapshotPosted = payload.document && payload.document.document_id && allocation && allocation.allocation_source;
       clear(nodes.workflow); nodes.workflow.hidden=false;
-      nodes.workflow.appendChild(make("h3","",payload.state_label_ru||payload.state||"Статус"));
+      nodes.workflow.appendChild(make("h3","",snapshotPosted ? "Документ проведён" : (payload.state_label_ru||payload.state||"Статус")));
       nodes.workflow.appendChild(make("p","ff-pool-note","Запрос "+(payload.request_id||"—")+" · "+(payload.document_label_ru||payload.document_kind||"")));
       if (payload.payment_duplicate) {
         const duplicate = payload.duplicate_link || {};
         nodes.workflow.appendChild(make("p", "ff-pool-alert", "Этот платёж уже связан с существующим запросом " + (duplicate.request_id || payload.request_id || "—") + (duplicate.document_id ? " и документом " + duplicate.document_id : "") + ". Повторный расход не создан."));
       }
       if (payload.document_kind === "pool_overhead") appendOverheadSummary(nodes.workflow, payload.preview && payload.preview.summary || {});
-      const steps=make("ol","ff-pool-steps"); (payload.steps||[]).forEach(function(step){const item=make("li","ff-pool-step",step.label_ru);item.dataset.status=step.status;steps.appendChild(item);}); nodes.workflow.appendChild(steps);
+      const steps=make("ol","ff-pool-steps"); (snapshotPosted ? [] : (payload.steps||[])).forEach(function(step){const item=make("li","ff-pool-step",step.label_ru);item.dataset.status=step.status;steps.appendChild(item);}); nodes.workflow.appendChild(steps);
       if(payload.error&&payload.error.code)nodes.workflow.appendChild(make("p","ff-pool-alert",payload.error.code+": "+JSON.stringify(payload.error.details||{})));
       const actionsRow=make("div","warehouse-ff-actions-row");
       const preview=make("button","button ghost","Предпросмотр");preview.type="button";preview.addEventListener("click",function(){loadPreview(payload.request_id);});actionsRow.appendChild(preview);
