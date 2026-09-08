@@ -14,8 +14,13 @@
       "commands": [
         ["python3", "apps/warehouse_current_sync_job_smoke.py"],
         ["python3", "apps/warehouse_update_journal_smoke.py"],
-        ["python3", "ci/fixture_process_smoke.py"]
+        ["python3", "apps/warehouse_process_fixture_smoke.py"]
       ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "warehouse_process_fixture": {
+      "patterns": ["ci/fixture_process.py", "apps/warehouse_process_fixture_smoke.py"],
+      "commands": [["python3", "apps/warehouse_process_fixture_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "ready_publication": {
@@ -31,6 +36,14 @@
         ["python3", "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py"]
       ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "historical_ready_import": {
+      "patterns": [
+        "packages/application/web_vitrina_historical_ready_snapshot_import.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_web_vitrina_historical_completion_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "warehouse_targeted_operations": {
@@ -101,13 +114,15 @@
     },
     "supplier_source_operations": {
       "patterns": [
+        "apps/supplier_confirmation_flows_smoke.py",
         "packages/application/supplier_shipments.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py"
       ],
       "commands": [
         ["python3", "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"],
-        ["python3", "apps/supplier_confirmation_flows_smoke.py"]
+        ["python3", "apps/supplier_confirmation_flows_smoke.py"],
+        ["python3", "apps/warehouse_ff_acceptance_form_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
     },
@@ -269,7 +284,7 @@
         ["python3", "apps/github_release_runner_smoke.py"],
         ["python3", "apps/production_apply_launcher_smoke.py"]
       ],
-      "pip": []
+      "pip": ["openpyxl==3.1.5"]
     },
     "promo": {
       "patterns": ["apps/*promo*.py", "packages/**/*promo*.py"],

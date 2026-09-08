@@ -4,9 +4,8 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 
-from fixture_process import checkpoint, fixture_process
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ci.fixture_process import checkpoint, fixture_process
 from packages.application.warehouse_functional_lock import (
     WarehouseFunctionalBusyError,
     warehouse_functional_job_lock,
@@ -48,7 +47,7 @@ def main():
                         child.finish()
                 with lock(root, blocking=False):
                     pass
-    print("fixture_process_smoke: OK (two processes, release and actual termination)")
+    print("warehouse_process_fixture_smoke: OK (two processes, release and actual termination)")
 
 
 if __name__ == "__main__":

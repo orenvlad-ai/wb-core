@@ -16,6 +16,15 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "warehouse_ff_acceptance_form_smoke": (
+        "packages/application/supplier_shipments.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+    ),
+    "sheet_vitrina_v1_web_vitrina_historical_completion_smoke": (
+        "packages/application/web_vitrina_historical_ready_snapshot_import.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+    ),
     "warehouse_current_sync_job_smoke": (
         "apps/warehouse_functional_runner.py",
         "packages/application/warehouse_update_journal.py",
@@ -166,7 +175,11 @@ def boundary_checks():
     helper = build_plan_from_paths(pull_request=23, base=BASE, head=HEAD,
         paths=["ci/fixture_process.py"], file_exists=lambda _, p: (root / p).is_file())
     assert helper["release_kind"] == "repo_only"
-    assert ["python3", "ci/fixture_process_smoke.py"] in helper["commands"]
+    assert ["python3", "apps/warehouse_process_fixture_smoke.py"] in helper["commands"]
+    process = build_plan_from_paths(pull_request=25, base=BASE, head=HEAD,
+        paths=["ci/checks.json"], file_exists=lambda _, p: (root / p).is_file())
+    assert process["groups"] == ["process"]
+    assert process["pip"] == ["openpyxl==3.1.5"], process
     new_helper = "packages/application/example_publication_helper.py"
     sibling = new_helper[:-3] + "_smoke.py"
     plan = build_plan_from_paths(pull_request=24, base=BASE, head=HEAD,
