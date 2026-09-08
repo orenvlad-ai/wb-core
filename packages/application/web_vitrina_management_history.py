@@ -347,6 +347,9 @@ def dated_parameters(conn: Any, day: str) -> tuple[Any, Any] | None:
 
 def recalculate_current(plan: dict[str, Any], *, business_date: str, parameters: tuple[Any, Any] | None) -> dict[str, Any]:
     """Current owned/missing proxy follows the same live cost and dated inputs."""
+    from packages.application.vitrina_economics import EFFECTIVE_DATE, project_catalog_economics
+    if business_date >= EFFECTIVE_DATE:
+        return project_catalog_economics(plan, day=business_date, parameters=parameters)
     if business_date not in plan.get('date_columns', []):
         return plan
     cells = plan.get('metadata', {}).get('server_cell_presentation', {})
@@ -437,6 +440,26 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
     substituted for the dated input. Cost cells themselves are never changed.
     """
     working = deepcopy(plan)
+    from packages.application.vitrina_economics import EFFECTIVE_DATE, project_catalog_economics
+    if day >= EFFECTIVE_DATE:
+        revised = project_catalog_economics(plan, day=day, parameters=parameters)
+        before_sheet, after_sheet = data_sheet(plan), data_sheet(revised)
+        if day not in after_sheet['header']:
+            return {'plan': revised, 'changes': [], 'remaining': []}
+        index = after_sheet['header'].index(day)
+        old_rows = {r[1]: r for r in before_sheet['rows']}
+        changes, remaining = [], []
+        for row in after_sheet['rows']:
+            cell = revised.get('metadata', {}).get('server_cell_presentation', {}).get(row[1], {}).get(day, {})
+            if cell.get('calculation_contract') != 'catalog_economics_v1':
+                continue
+            before = old_rows[row[1]][index]
+            previous_cell = plan.get('metadata', {}).get('server_cell_presentation', {}).get(row[1], {}).get(day, {})
+            if before != row[index] or previous_cell != cell:
+                changes.append({'date': day, 'row_id': row[1], 'before': before, 'after': row[index], 'provenance': cell})
+            if row[index] in ('', None):
+                remaining.append({'date': day, 'row_id': row[1], 'reason': cell['reason']})
+        return {'plan': revised, 'changes': changes, 'remaining': remaining}
     sheet = data_sheet(working)
     if day not in working.get('date_columns', []) or day not in sheet['header']:
         return {'plan': working, 'changes': [], 'remaining': []}
