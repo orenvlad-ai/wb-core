@@ -157,7 +157,7 @@ def _writer_rollover(base_rows,p3,p4):
         current=datetime(2026,9,5,10,10,tzinfo=timezone.utc)
         @classmethod
         def now(cls,tz=None): return cls.current
-    with TemporaryDirectory() as tmp:
+    with TemporaryDirectory() as tmp, patch('packages.business_time.datetime',Clock):
         path=Path(tmp)/'source.sqlite3';conn=fixture(path);conn.close()
         model=build_current_official_fbs_estimate(path,nm_ids=[1,2],now=Clock.current)
         runtime=RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp)/'runtime')

@@ -20,6 +20,7 @@ from ci.fixture_process import fixture_process, checkpoint
 
 WRITERS = {
     "apps/canonical_cost_engine_vitrina_publication.py",
+    "apps/supplier_shipment_publication_chain.py",  # disposable proof, apply remains disabled
     "apps/promo_metric_eligibility_recompute.py",
     "apps/spp_metric_recompute.py",
     "apps/sheet_vitrina_v1_historical_cost_carry_forward.py",
@@ -35,7 +36,6 @@ WRITERS = {
 }
 DIRECT_EXCEPTIONS = {
     "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py": "disabled legacy apply",
-    "apps/supplier_shipment_publication_chain.py": "disposable candidate only",
     "packages/application/warehouse_business_projection.py": "AFTER UPDATE trigger reads ready, writes projection invalidation",
 }
 

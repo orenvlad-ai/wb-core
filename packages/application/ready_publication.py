@@ -35,6 +35,7 @@ class ExpectedReady:
     bundle_version: str
     as_of_date: str
     plan_json: str | None
+    authority: dict | None = None
 
     @property
     def exists(self) -> bool:
@@ -42,7 +43,7 @@ class ExpectedReady:
 
     @property
     def fingerprint(self) -> str:
-        return digest(canonical([self.bundle_version, self.as_of_date, self.exists, self.plan_json]))
+        return digest(canonical([self.bundle_version, self.as_of_date, self.exists, self.plan_json, self.authority]))
 
 
 @contextmanager
@@ -54,17 +55,21 @@ def readonly(db_path):
         yield conn
 
 
-def capture_expected(conn, *, bundle_version: str, as_of_date: str) -> ExpectedReady:
+def capture_expected(conn, *, bundle_version: str, as_of_date: str, authority=None) -> ExpectedReady:
+    if authority is not None:
+        check_pinned_authority(conn, authority)
     row = conn.execute(f"SELECT plan_json FROM {TABLE} WHERE bundle_version=? AND as_of_date=?",
                        (bundle_version, as_of_date)).fetchone()
-    return ExpectedReady(bundle_version, as_of_date, row[0] if row else None)
+    return ExpectedReady(bundle_version, as_of_date, row[0] if row else None, authority)
 
 
 def check_expected(conn, expected: ExpectedReady) -> None:
     if not isinstance(expected, ExpectedReady):
         raise TypeError("exact_expected_ready_required")
+    if expected.authority is not None:
+        check_pinned_authority(conn, expected.authority)
     if capture_expected(conn, bundle_version=expected.bundle_version,
-                        as_of_date=expected.as_of_date) != expected:
+                        as_of_date=expected.as_of_date).plan_json != expected.plan_json:
         raise ReadyPublicationConflict("ready_target_changed:" + expected.bundle_version + ":" + expected.as_of_date)
 
 
@@ -145,12 +150,15 @@ _CAPTURE = ContextVar("ready_publication_input_capture", default=None)
 
 
 @contextmanager
-def capture_build_inputs(db_path):
+def capture_build_inputs(db_path, *, runtime_dir=None):
+    authority = capture_authority(runtime_dir, db_path=db_path) if runtime_dir is not None else None
     with readonly(db_path) as conn:
+        if authority is not None:
+            check_pinned_authority(conn, authority)
         inputs = {"material": capture_material(conn, tables=tuple(
             table for table in MATERIAL_TABLES if table not in PARAMETER_TABLES)),
             "history": [list(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date")],
-            "sources": {}, "consumed": {}, "conflicts": []}
+            "sources": {}, "consumed": {}, "conflicts": [], "authority": authority}
     token = _CAPTURE.set(inputs)
     try:
         yield inputs
@@ -197,6 +205,8 @@ def consume_source(*, source_key, snapshot_date):
 def check_build_inputs(conn, inputs):
     if not inputs:
         return
+    if inputs.get("authority") is not None:
+        check_pinned_authority(conn, inputs["authority"])
     if inputs.get("conflicts"):
         raise ReadyPublicationConflict("ready_source_changed_during_build")
     check_material(conn, inputs["material"])
@@ -328,6 +338,20 @@ def operational_authority(runtime_dir):
 def check_authority(runtime_dir, expected):
     if operational_authority(runtime_dir) != expected:
         raise ReadyPublicationConflict("ready_storage_authority_changed")
+
+
+def capture_authority(runtime_dir, *, db_path=None):
+    path, manifest = operational_authority(runtime_dir)
+    if db_path is not None and Path(db_path).resolve() != path.resolve():
+        raise ReadyPublicationConflict("ready_cached_store_authority_changed")
+    return {"runtime_dir": str(Path(runtime_dir).resolve()), "path": str(path.resolve()), "manifest": manifest}
+
+
+def check_pinned_authority(conn, pin):
+    check_authority(pin["runtime_dir"], (Path(pin["path"]), pin["manifest"]))
+    actual = next((str(row[2]) for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    if not actual or Path(actual).resolve() != Path(pin["path"]).resolve():
+        raise ReadyPublicationConflict("ready_connection_authority_changed")
 
 
 def pin_proxy_repair_sources(conn):

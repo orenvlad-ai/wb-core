@@ -324,6 +324,31 @@ class PublicationTests(unittest.TestCase):
         book._record_prepare_failure(self.root, expected=paused, error="paused_failure")
         self.assertEqual(book.load(self.root)[1], paused)
 
+    def test_generation_switch_with_equal_counters_rejects_prepared_ready_and_book(self):
+        from packages.application.storage_registry import StoreRegistry, atomic_write_manifest, manifest_payload, _sha256, MANIFEST_FILENAME
+        initial, book_expected = make_book(self.root, opening=True)
+        book_version = book.save(self.root, initial, expected=book_expected, operation_id="opening")
+        ready_expected = self.expected()
+        prepared = make_book(self.root, quantity="1900")
+        destination = self.root / "generation-b.sqlite3"
+        with sqlite3.connect(self.runtime.db_path) as source, sqlite3.connect(destination) as target:
+            source.backup(target)
+        old = StoreRegistry(self.root).load()
+        other = replace(old, implicit=False,
+            raw=replace(old.raw, generation_id="B", relative_path=destination.name),
+            operational=replace(old.operational, generation_id="B", relative_path=destination.name),
+            manifest_sha256="")
+        other = replace(other, manifest_sha256=_sha256(manifest_payload(other, include_digest=False)))
+        atomic_write_manifest(self.root / MANIFEST_FILENAME, other)
+        with self.assertRaisesRegex(publication.ReadyPublicationConflict, "authority_changed"):
+            save(self.runtime, make_plan(), expected=ready_expected)
+        with self.assertRaisesRegex(publication.ReadyPublicationConflict, "authority_changed"):
+            book.save(self.root, prepared[0], expected=prepared[1], operation_id="stale-generation")
+        self.assertEqual(book.load(self.root)[1], book_version)
+        for path in (self.runtime.db_path, destination):
+            with publication.readonly(path) as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_ready_snapshots").fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

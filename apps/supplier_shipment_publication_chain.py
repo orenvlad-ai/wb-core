@@ -87,16 +87,11 @@ def _verify_disposable_publication_no_op(
     with _connect(resolved) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for day, plan_json in publication["plans"].items():
-                updated = conn.execute(
-                    "UPDATE sheet_vitrina_v1_ready_snapshots "
-                    "SET plan_json=? WHERE as_of_date=?",
-                    (plan_json, day),
-                )
-                if updated.rowcount != 1:
-                    raise ValueError(
-                        f"disposable publication snapshot identity drift: {day}"
-                    )
+            from packages.application.ready_publication import ExpectedReady, replace_ready
+            for row in publication["before_images"]:
+                key = json.dumps([row["bundle_version"], row["as_of_date"]], separators=(",", ":"))
+                replace_ready(conn, expected=ExpectedReady(row["bundle_version"], row["as_of_date"], row["plan_json"]),
+                              plan_json=publication["plans"][key])
             conn.commit()
         except Exception:
             conn.rollback()

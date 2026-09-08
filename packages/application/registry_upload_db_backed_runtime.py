@@ -399,9 +399,10 @@ class RegistryUploadDbBackedRuntime:
             return [row["dataset_version"] for row in rows]
 
     def prepare_sheet_vitrina_ready_publication(self, *, bundle_version: str, as_of_date: str):
-        from packages.application.ready_publication import readonly, capture_expected
+        from packages.application.ready_publication import readonly, capture_expected, capture_authority
+        authority = capture_authority(self.runtime_dir, db_path=self.db_path)
         with readonly(self.db_path) as conn:
-            return capture_expected(conn, bundle_version=bundle_version, as_of_date=as_of_date)
+            return capture_expected(conn, bundle_version=bundle_version, as_of_date=as_of_date, authority=authority)
 
     def save_sheet_vitrina_ready_snapshot(
         self,
@@ -435,11 +436,14 @@ class RegistryUploadDbBackedRuntime:
             readonly, capture_material, check_material, check_expected, replace_ready, check_build_inputs, capture_history,
             record_intent, complete_publication, digest, ReadyPublicationConflict,
             MATERIAL_TABLES, INVENTORY_PREPARATION_TABLES,
+            check_pinned_authority,
         )
         from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
         from uuid import uuid4
         if (expected.bundle_version, expected.as_of_date) != (current_state.bundle_version, plan.as_of_date):
             raise ReadyPublicationConflict("ready_candidate_target_mismatch")
+        if expected.authority is None:
+            raise ReadyPublicationConflict("ready_preparation_authority_required")
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
         active_inventory = inventory_from_book(book, now=publication_now) if book and book["active"] else None
         if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
@@ -453,6 +457,7 @@ class RegistryUploadDbBackedRuntime:
             if tuple(registry_row or ()) != (current_state.bundle_version, current_state.activated_at):
                 raise ReadyPublicationConflict("ready_registry_changed")
             if _prepared_book is not None:
+                check_pinned_authority(conn, book["publication_authority"])
                 check_material(conn, book["publication_inputs"])
             estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
                 self.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
@@ -506,6 +511,7 @@ class RegistryUploadDbBackedRuntime:
                 raise ReadyPublicationConflict("ready_book_changed")
             record_intent(conn, operation_id=operation_id, attempt_id=attempt_id, kind="book_ready" if _prepared_book else "ready",
                 expected=expected, inputs={"material": material_inputs, "history": history_inputs,
+                    "authority": expected.authority,
                     "build": build_inputs, "business_date": publication_date,
                     "prepared_book": book.get("publication_inputs") if _prepared_book else None}, expected_book=expected_book,
                 book_required=_prepared_book is not None, ready_required=True, created_at=refreshed_at)
@@ -520,6 +526,7 @@ class RegistryUploadDbBackedRuntime:
                 raise ReadyPublicationConflict("ready_business_date_changed")
             book_version = expected_book
             if _prepared_book is not None:
+                check_pinned_authority(conn, book["publication_authority"])
                 book_version = _save_book(self.runtime_dir, book, expected=expected_book,
                                          operation_id=operation_id + ":" + attempt_id)
                 _after_book_commit()
@@ -544,6 +551,7 @@ class RegistryUploadDbBackedRuntime:
             )
             complete_publication(conn, operation_id=operation_id, attempt_id=attempt_id,
                 book_version=book_version, after_digest=digest(serialized_plan), finished_at=refreshed_at)
+            check_pinned_authority(conn, expected.authority)
             conn.commit()
 
         semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)

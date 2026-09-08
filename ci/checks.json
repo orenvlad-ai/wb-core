@@ -201,6 +201,7 @@
     "warehouse_ready_recovery": {
       "patterns": [
         "packages/application/warehouse_historical_recovery.py",
+        "packages/application/warehouse_early_wb_recovery.py",
         "packages/application/warehouse_fbs_material_rematerialization.py"
       ],
       "commands": [
@@ -232,7 +233,7 @@
     },
     "canonical_ready_publication": {
       "patterns": ["apps/canonical_cost_engine_vitrina_publication.py"],
-      "commands": [["python3", "apps/canonical_cost_engine_vitrina_publication_smoke.py"]],
+      "commands": [["python3", "apps/canonical_cost_engine_vitrina_publication_smoke.py"], ["python3", "apps/supplier_shipment_publication_chain_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "historical_cost_ready_publication": {

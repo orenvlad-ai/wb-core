@@ -151,26 +151,31 @@ def save(runtime_dir, book, *, expected, operation_id):
 
 def _commit_book_intent(runtime_dir, book, *, expected, operation_id, inputs, kind):
     """Private phase under the already held warehouse and book owners."""
-    from packages.application.ready_publication import check_material, record_intent, complete_publication
-    db = StoreRegistry(Path(runtime_dir)).resolve("operational")
+    from packages.application.ready_publication import check_material, record_intent, complete_publication, capture_authority, check_pinned_authority
+    authority = book.get("publication_authority") if kind == "book_only" and book["active"] else None
+    authority = authority or capture_authority(runtime_dir)
+    db = Path(authority["path"])
     now = datetime.now(timezone.utc).isoformat()
     with closing(sqlite3.connect(db, timeout=0)) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        check_pinned_authority(conn, authority)
         if inputs:
             check_material(conn, inputs)
         if load(runtime_dir)[1] != expected:
             raise ValueError("fbs_accounting_compare_and_swap_failed")
         record_intent(conn, operation_id=operation_id, attempt_id="1", kind=kind,
-            expected=None, inputs=inputs, expected_book=expected, book_required=True,
+            expected=None, inputs={"material": inputs, "authority": authority}, expected_book=expected, book_required=True,
             ready_required=False, created_at=now, book_operation_id=operation_id)
         conn.commit()  # Deliberately durable before the other database commit.
         conn.execute("BEGIN IMMEDIATE")
+        check_pinned_authority(conn, authority)
         if inputs:
             check_material(conn, inputs)
         version = _save_book(runtime_dir, book, expected=expected, operation_id=operation_id)
         _after_book_commit()
         complete_publication(conn, operation_id=operation_id, attempt_id="1", book_version=version,
                              after_digest=None, finished_at=now)
+        check_pinned_authority(conn, authority)
         conn.commit()
     return version
 
@@ -196,12 +201,16 @@ def prepare(runtime_dir, *, now=None, opening=False):
         raise ValueError("accounting_already_initialized")
     if not opening and (before is None or not before["active"]):
         return None, expected
-    db = StoreRegistry(Path(runtime_dir)).resolve("operational")
-    from packages.application.ready_publication import readonly, capture_material
+    from packages.application.ready_publication import readonly, capture_material, capture_authority, check_pinned_authority
+    authority = capture_authority(runtime_dir)
+    db = Path(authority["path"])
     with readonly(db) as conn:
+        check_pinned_authority(conn, authority)
         inputs = capture_material(conn)
-        return _prepare_from_snapshot(runtime_dir, db=db, conn=conn, now=now, opening=opening,
-                                      before=before, expected=expected, inputs=inputs)
+        prepared, expected = _prepare_from_snapshot(runtime_dir, db=db, conn=conn, now=now, opening=opening,
+                                                   before=before, expected=expected, inputs=inputs)
+        prepared["publication_authority"] = authority
+        return prepared, expected
 
 
 def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expected, inputs):

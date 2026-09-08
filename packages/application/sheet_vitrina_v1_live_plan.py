@@ -1047,7 +1047,7 @@ class SheetVitrinaV1LivePlanBlock:
 
     def build_plan(self, *args, **kwargs) -> SheetVitrinaV1Envelope:
         from packages.application.ready_publication import capture_build_inputs
-        with capture_build_inputs(self.runtime.db_path) as inputs:
+        with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as inputs:
             plan = self._build_plan(*args, **kwargs)
             return replace(plan, metadata={**dict(plan.metadata or {}), "publication_inputs": inputs})
 
