@@ -18,7 +18,8 @@ import sys
 import tempfile
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -170,6 +171,7 @@ def main() -> None:
     _test_initial_settings_preserve_outer_transaction()
     _test_external_optimistic_recheck()
     _test_hourly_and_manual_cost_materialization_journal_details()
+    _test_http_manual_snapshot_publication_order()
     _test_heavy_job_lock_does_not_block_interactive_writer()
     _test_downstream_cost_refresh_recalculates_finance_after_warehouse_commit()
     _test_finance_recalculation_is_the_last_cost_writer()
@@ -471,6 +473,53 @@ def _test_heavy_job_lock_does_not_block_interactive_writer() -> None:
             release.set()
             thread.join(timeout=2)
         _assert(not thread.is_alive(), "heavy job lock fixture did not stop")
+
+
+def _test_http_manual_snapshot_publication_order() -> None:
+    for status in ("published", "not_active", "failed"):
+        events = []
+        def action(name, result):
+            events.append(name)
+            return result
+        entry = RegistryUploadHttpEntrypoint.__new__(RegistryUploadHttpEntrypoint)
+        entry.runtime = SimpleNamespace(runtime_dir=Path("/fixture"),
+            finalize_completed_wb_transit_cost_recalculations=lambda **kw: {})
+        entry.warehouse_update_journal = Mock()
+        entry.calculation_parameters_block = SimpleNamespace(
+            prepare_functional_economics_backup=lambda: {},
+            process_pending_targeted_recalculations=lambda **kw: action("proxy", {"request_count":0}),
+            publish_current_functional_economics=lambda **kw: action("economics", {}))
+        entry.wb_supplies_block = SimpleNamespace(sync_functional_sources=lambda **kw: {},
+            collect_all_due_transit_costs=lambda: {}, reconcile_functional_ff_state=lambda: {})
+        entry.our_wb_cost_block = SimpleNamespace(materialize_wb_supply_cost_layers=lambda **kw: 0)
+        entry.warehouse_functional_block = SimpleNamespace(
+            build_sync_plan=lambda: {"plan_fingerprint":"p", "diff":{}},
+            apply_plan=lambda *args, **kw: action("wb", {}), record_failed_sync=lambda exc: None)
+        entry.inventory_planning = SimpleNamespace(current=lambda: action("planning", {}))
+        entry.wb_finance_weekly_block = SimpleNamespace(recalculate_stale_cost_weeks=lambda: action("finance", {}))
+        entry.activated_at_factory = lambda: "2026-09-08T08:00:00Z"
+        def refresh(root):
+            _assert(root == Path("/fixture"), "manual accounting root")
+            events.append("fbs")
+            if status == "failed":
+                raise ValueError("fbs publication failed")
+            return {"status":status}
+        with patch("packages.application.registry_upload_http_entrypoint.warehouse_sync_lock", return_value=nullcontext()), \
+             patch("packages.application.fbs_accounting_runtime.refresh", side_effect=refresh), \
+             patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=lambda owner: action("ready", {})):
+            if status == "failed":
+                try:
+                    entry.handle_warehouse_manual_sync_request()
+                    raise AssertionError("failed accounting completed manual sync")
+                except ValueError as exc:
+                    _assert(str(exc) == "fbs publication failed", "manual failure propagated")
+                _assert(events == ["wb", "fbs"], "dependent publication after failed FBS")
+                _assert(entry.warehouse_update_journal.finish.call_args.kwargs["status"] == "failed", "failed journal")
+            else:
+                result = entry.handle_warehouse_manual_sync_request()
+                _assert(result["fbs_snapshot_accounting"] == {"status":status}, "manual accounting evidence")
+                expected = ["wb","fbs"] + (["ready"] if status == "published" else [])
+                _assert(events == expected + ["planning","proxy","economics","finance"], "manual accounting order")
 
 
 def _test_hourly_and_manual_cost_materialization_journal_details() -> None:

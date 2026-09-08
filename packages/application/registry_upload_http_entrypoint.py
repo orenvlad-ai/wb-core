@@ -6799,13 +6799,18 @@ class RegistryUploadHttpEntrypoint:
                     "official_complete_wb_stocks",
                     self.warehouse_functional_block.build_sync_plan,
                 )
-                result = run_phase(
-                    "functional_publication",
-                    lambda: self.warehouse_functional_block.apply_plan(
+                def publish_functional() -> dict[str, Any]:
+                    from packages.application.fbs_accounting_runtime import refresh, publish_ready
+                    result = self.warehouse_functional_block.apply_plan(
                         plan,
                         confirm_fingerprint=str(plan["plan_fingerprint"]),
-                    ),
-                )
+                    )
+                    accounting = refresh(self.runtime.runtime_dir)
+                    if accounting["status"] == "published":
+                        publish_ready(self.runtime)
+                    return {**result, "fbs_snapshot_accounting": accounting}
+
+                result = run_phase("functional_publication", publish_functional)
                 planning_inventory_readback = run_phase(
                     "planning_inventory_readback",
                     self.inventory_planning.current,
@@ -6863,6 +6868,7 @@ class RegistryUploadHttpEntrypoint:
         payload = {
             "status": "success",
             "mode": "manual_sync",
+            "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
             "durable_run_id": durable_run_id,
             "official_supply_sync": {
                 "run_id": str(sync.get("run_id") or ""),
