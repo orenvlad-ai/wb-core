@@ -410,6 +410,25 @@ def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, paramet
     rows = list(rows)
     if not rows or business_date not in rows[0].values_by_date:
         return rows
+    from packages.application.vitrina_economics import METRICS, EFFECTIVE_DATE
+    specs = {
+        'proxy_profit_3_rub': ('Proxy прибыль 3', 'rub'),
+        'proxy_margin_3_pct': ('Прокси маржинальность 3', 'percent'),
+        'proxy_profit_4_rub': ('Proxy прибыль 4', 'rub'),
+        'proxy_margin_4_pct': ('Прокси маржинальность 4', 'percent'),
+        'proxy_margin_per_unit_rub': ('Средняя маржа на единицу', 'rub_per_unit'),
+    }
+    existing = {r.row_id for r in rows}
+    anchors = {r.scope_key: r for r in rows if business_date >= EFFECTIVE_DATE and r.scope_kind == 'SKU' and r.metric_key in ('orderSum', COST)}
+    for scope, anchor in anchors.items():
+        for metric in METRICS:
+            key = scope + '|' + metric
+            if key not in existing:
+                label, cell_format = specs[metric]
+                rows.append(replace(anchor, row_id=key, row_order=len(rows) + 1,
+                    metric_key=metric, metric_label=label, section='Экономика', format=cell_format,
+                    values_by_date={day: '' for day in anchor.values_by_date}, presentation_by_date={}))
+                existing.add(key)
     dates = sorted({day for r in rows for day in r.values_by_date})
     presentation = {r.row_id:{day:dict(r.presentation_by_date.get(day, {})) for day in dates} for r in rows}
     # Read-time quality overlays may replace an owned proxy marker. Ownership

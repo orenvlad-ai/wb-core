@@ -106,6 +106,26 @@ def main():
           (4,7,'bad'), (5,11,'2026-09-07T23:00:00Z')]]}
     assert ads._extract_non_archived_advert_ids(roster, snapshot_date=DAY) == [2,3,4,5]
     assert ads._extract_non_archived_advert_ids(roster, snapshot_date='2026-09-07') == [1,2,3,4,5]
+    # Brand-new SKU has no legacy economic rows or manual configuration.
+    from packages.application.vitrina_economics import METRICS
+    from packages.application.web_vitrina_management_history import recalculate_current_rows
+    from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
+    sparse = fixture()
+    sparse['sheets'][0]['rows'] = [row for row in sparse['sheets'][0]['rows']
+        if not (row[1].startswith('SKU:93|') and row[1].split('|')[1] in METRICS)]
+    filled = project(sparse)
+    assert values(filled)['SKU:93|proxy_profit_4_rub'] == 0
+    view_rows = []
+    for index, row in enumerate(sparse['sheets'][0]['rows']):
+        scope, metric = row[1].split('|')
+        view_rows.append(WebVitrinaContractRow(row[1],index,'SKU' if scope.startswith('SKU:') else 'TOTAL',
+            scope,scope,metric,metric,'','Экономика',None,int(scope.split(':')[1]) if ':' in scope else None,
+            'rub',dict(zip(sparse['date_columns'],row[2:])),{}))
+    read_rows = recalculate_current_rows(view_rows,business_date=DAY,parameters=(P,P),original_presentation={},snapshot_id='new-sku')
+    new_rows = {row.metric_key:row for row in read_rows if row.scope_key=='SKU:93'}
+    assert all(metric in new_rows for metric in METRICS)
+    assert new_rows['proxy_profit_4_rub'].values_by_date[DAY] == 0
+    assert new_rows['proxy_profit_4_rub'].values_by_date['2026-09-07'] == ''
     print('daily_pool: 92/37/33, zero sales, sellout, day rollover, stock provenance, ad-only and campaign dates: ok')
 
 

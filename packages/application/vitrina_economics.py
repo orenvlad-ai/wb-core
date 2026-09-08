@@ -55,6 +55,18 @@ def project_catalog_economics(plan, *, day, parameters):
     rows = {r[1]: r for r in sheet['rows']}
     scopes = sorted({k.split('|')[0] for k in rows if k.startswith('SKU:') and
                      k.split('|')[1] in (COST, 'orderSum', 'proxy_profit_4_rub')})
+    # Every discovered SKU owns the same economic rows, including new catalog
+    # entries that have never belonged to the manual management configuration.
+    for scope in scopes:
+        anchor = next(r for key, r in rows.items() if key.startswith(scope + '|'))
+        for metric in METRICS:
+            key = scope + '|' + metric
+            if key not in rows:
+                row = [anchor[0], key, *['' for _ in sheet['header'][2:]]]
+                sheet['rows'].append(row)
+                rows[key] = row
+    if 'row_count' in sheet:
+        sheet['row_count'] = len(sheet['rows'])
     cells = working.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
     p3, p4 = parameters if parameters else (None, None)
     results = {3: {}, 4: {}}
