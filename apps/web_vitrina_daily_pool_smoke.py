@@ -37,6 +37,13 @@ def main():
     assert not coverage(r)['missing_scope'] and coverage(r)['included_count'] == 37
     assert values(r)['TOTAL|total_proxy_profit_4_rub'] == 1188
     assert values(r)['TOTAL|proxy_margin_per_unit_rub_total'] == 22.5
+    # Dense source zeros for the other 55 products do not expand the trading pool.
+    dense = deepcopy(p)
+    for n in range(38, 93):
+        for metric in ('orderSum', 'orderCount', 'ads_sum'):
+            set_value(dense, f'SKU:{n}|{metric}', 0)
+    assert coverage(project(dense))['pool_count'] == 37
+    assert len(coverage(project(dense))['inactive_scope']) == 55
     # Sellout stays in scope; a later missing source cannot hide it.
     set_value(r, 'SKU:34|stock_total', 0)
     set_value(r, 'SKU:34|orderSum', '')

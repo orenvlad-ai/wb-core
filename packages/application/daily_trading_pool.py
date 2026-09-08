@@ -57,8 +57,8 @@ def classify(*, scope, day, rows, header, cells, remembered):
         return 'active', 'Есть доступный остаток WB/FBS.'
     if opening_stock is not None and opening_stock > 0:
         return 'active', 'День начался с доступного остатка WB/FBS.'
-    if all(v == 0 for v in activity):
-        return 'zero_activity', 'За дату подтверждены нулевые заказы и рекламные расходы.'
     if stock == 0:
         return 'inactive', 'Нет доступного остатка WB/FBS и признаков участия в продаже за дату.'
+    if all(v == 0 for v in activity):
+        return 'zero_activity', 'За дату подтверждены нулевые заказы и рекламные расходы.'
     return 'unknown', 'Не удалось определить доступность товара к продаже за дату.'
