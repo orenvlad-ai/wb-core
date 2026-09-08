@@ -55,7 +55,7 @@ def main() -> None:
 
 
 def run_browser_checks(base_url: str) -> dict[str, object]:
-    page_url = f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports"
+    page_url = f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports&stock_report_embed=1"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 980, "height": 850})
@@ -69,7 +69,8 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
         )
         try:
             page.goto(page_url, wait_until="domcontentloaded")
-            page.locator('[data-report-section-button="stock"]').click()
+            # The embedded report selects stock itself; the legacy tab is retired.
+            page.locator("body.stock-report-only").wait_for(timeout=10000)
             page.wait_for_timeout(500)
             if stock_report_requests:
                 raise AssertionError(f"stock report must not auto-fetch before Рассчитать, got {stock_report_requests}")
