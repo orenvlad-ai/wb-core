@@ -990,10 +990,10 @@ def _merge_period_server_cell_presentation(
     period_date_bindings: list[_PeriodDateBinding],
     snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
     template_rows: list[list[Any]],
-) -> dict[str, dict[str, dict[str, str]]]:
+) -> dict[str, dict[str, dict[str, Any]]]:
     """Preserve exact-date warehouse explanations in a multi-day read."""
 
-    result: dict[str, dict[str, dict[str, str]]] = {}
+    result: dict[str, dict[str, dict[str, Any]]] = {}
     canonical_row_ids = {
         str(row[1] or "")
         for row in template_rows
@@ -1026,7 +1026,7 @@ def _merge_period_server_cell_presentation(
             presentation = by_date.get(binding.column_date)
             if isinstance(presentation, Mapping):
                 result.setdefault(str(row_id), {})[binding.requested_date] = {
-                    str(key): str(value) for key, value in presentation.items()
+                    str(key): deepcopy(value) for key, value in presentation.items()
                 }
     return result
 

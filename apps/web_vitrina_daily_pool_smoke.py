@@ -58,6 +58,19 @@ def main():
     fresh = SheetVitrinaV1Envelope('v1','bundle',DAY,p['date_columns'],[],{},[target])
     carried = carry_forward(fresh, presentation=r['metadata']['server_cell_presentation'], business_date=DAY)
     assert 'SKU:34' in carried.metadata['daily_trading_pool'][DAY]
+    # Multi-day page composition must preserve nested evidence and booleans.
+    from dataclasses import replace
+    from packages.application.sheet_vitrina_v1_web_vitrina import _merge_period_server_cell_presentation, _PeriodDateBinding
+    from packages.application.daily_trading_pool import remembered_active
+    saved = replace(fresh, metadata={'server_cell_presentation': r['metadata']['server_cell_presentation']})
+    binding = _PeriodDateBinding(DAY, DAY, DAY)
+    merged = _merge_period_server_cell_presentation(period_date_bindings=[binding],
+        snapshots_by_as_of_date={DAY:saved}, template_rows=sheet['rows'])
+    assert isinstance(merged['SKU:34|proxy_profit_4_rub'][DAY]['evidence'], dict)
+    assert 'SKU:34' in remembered_active(merged, DAY)
+    damaged = deepcopy(merged)
+    damaged['SKU:34|proxy_profit_4_rub'][DAY]['evidence'] = 'old flattened metadata'
+    assert 'SKU:34' in remembered_active(damaged, DAY)
     # Membership is dated and does not leak into the next day.
     next_day = (date.fromisoformat(DAY) + timedelta(days=1)).isoformat()
     for row in r['sheets'][0]['rows']:
