@@ -1,4 +1,5 @@
 """Automatic per-day reporting eligibility, independent of calculation coverage."""
+from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -22,7 +23,10 @@ def remembered_active(presentation, day):
         cell = by_date.get(day, {})
         if cell.get('source_as_of_date') != day:
             continue
-        operands = cell.get('evidence', {}).get('operands', {})
+        evidence = cell.get('evidence', {})
+        operands = evidence.get('operands', {}) if isinstance(evidence, Mapping) else {}
+        if not isinstance(operands, Mapping):
+            operands = {}
         if cell.get('daily_pool_state') == 'active' or any(
                 numeric(operands.get(k)) is not None and numeric(operands[k]) > 0
                 for k in ('order_sum', 'order_count', 'ads_sum')):
