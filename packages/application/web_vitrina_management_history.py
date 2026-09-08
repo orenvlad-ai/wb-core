@@ -480,7 +480,8 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
             cell = revised.get('metadata', {}).get('server_cell_presentation', {}).get(row[1], {}).get(day, {})
             if cell.get('calculation_contract') != 'catalog_economics_v1':
                 continue
-            before = old_rows[row[1]][index]
+            previous_row = old_rows.get(row[1])
+            before = previous_row[index] if previous_row is not None else ''
             previous_cell = plan.get('metadata', {}).get('server_cell_presentation', {}).get(row[1], {}).get(day, {})
             if before != row[index] or previous_cell != cell:
                 changes.append({'date': day, 'row_id': row[1], 'before': before, 'after': row[index], 'provenance': cell})
@@ -493,6 +494,16 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
     index = sheet['header'].index(day)
     rows = {r[1]: r for r in sheet['rows']}
     scopes = sorted(k.split('|')[0] for k in rows if k.startswith('SKU:') and k.endswith('|proxy_profit_3_rub'))
+    # Catalog rows introduced today have no dated evidence in the legacy period.
+    # Merely adding their empty economic rows must not invalidate that period.
+    # A real dated order/cost/advertising gap remains in the legacy calculation.
+    def has_dated_evidence(scope):
+        return any((row := rows.get(scope + '|' + metric)) is not None
+                   and len(row) > index and row[index] not in ('', None)
+                   for metric in ('orderSum', 'orderCount', 'ads_sum', COST,
+                                  'proxy_profit_3_rub', 'proxy_profit_4_rub'))
+    scopes = [scope for scope in scopes if has_dated_evidence(scope)]
+
     if not scopes:
         return {'plan': working, 'changes': [], 'remaining': []}
     cells = working.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
