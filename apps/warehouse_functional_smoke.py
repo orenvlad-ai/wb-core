@@ -5536,7 +5536,7 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             )
         except Exception as exc:
             _assert(
-                "ready snapshot optimistic update conflict" in str(exc),
+            "ready_target_changed:" in str(exc),
                 f"target plan_json conflict is explicit: {exc}",
             )
         else:
