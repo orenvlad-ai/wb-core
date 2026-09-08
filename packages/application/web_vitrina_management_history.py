@@ -402,7 +402,7 @@ def recalculate_current_envelope(plan: Any, *, business_date: str, parameters: t
     revised = recalculate_current(asdict(plan), business_date=business_date, parameters=parameters)
     revised_data = data_sheet(revised)
     return replace(plan, metadata=revised.get('metadata', {}), sheets=[
-        replace(s, rows=revised_data['rows']) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
+        replace(s, rows=revised_data['rows'], row_count=len(revised_data['rows'])) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
 
 
 def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, parameters: tuple[Any, Any] | None,
@@ -410,6 +410,25 @@ def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, paramet
     rows = list(rows)
     if not rows or business_date not in rows[0].values_by_date:
         return rows
+    from packages.application.vitrina_economics import METRICS, EFFECTIVE_DATE
+    specs = {
+        'proxy_profit_3_rub': ('Proxy прибыль 3', 'rub'),
+        'proxy_margin_3_pct': ('Прокси маржинальность 3', 'percent'),
+        'proxy_profit_4_rub': ('Proxy прибыль 4', 'rub'),
+        'proxy_margin_4_pct': ('Прокси маржинальность 4', 'percent'),
+        'proxy_margin_per_unit_rub': ('Средняя маржа на единицу', 'rub_per_unit'),
+    }
+    existing = {r.row_id for r in rows}
+    anchors = {r.scope_key: r for r in rows if business_date >= EFFECTIVE_DATE and r.scope_kind == 'SKU' and r.metric_key in ('orderSum', COST)}
+    for scope, anchor in anchors.items():
+        for metric in METRICS:
+            key = scope + '|' + metric
+            if key not in existing:
+                label, cell_format = specs[metric]
+                rows.append(replace(anchor, row_id=key, row_order=len(rows) + 1,
+                    metric_key=metric, metric_label=label, section='Экономика', format=cell_format,
+                    values_by_date={day: '' for day in anchor.values_by_date}, presentation_by_date={}))
+                existing.add(key)
     dates = sorted({day for r in rows for day in r.values_by_date})
     presentation = {r.row_id:{day:dict(r.presentation_by_date.get(day, {})) for day in dates} for r in rows}
     # Read-time quality overlays may replace an owned proxy marker. Ownership
@@ -461,7 +480,8 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
             cell = revised.get('metadata', {}).get('server_cell_presentation', {}).get(row[1], {}).get(day, {})
             if cell.get('calculation_contract') != 'catalog_economics_v1':
                 continue
-            before = old_rows[row[1]][index]
+            previous_row = old_rows.get(row[1])
+            before = previous_row[index] if previous_row is not None else ''
             previous_cell = plan.get('metadata', {}).get('server_cell_presentation', {}).get(row[1], {}).get(day, {})
             if before != row[index] or previous_cell != cell:
                 changes.append({'date': day, 'row_id': row[1], 'before': before, 'after': row[index], 'provenance': cell})
@@ -474,6 +494,16 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
     index = sheet['header'].index(day)
     rows = {r[1]: r for r in sheet['rows']}
     scopes = sorted(k.split('|')[0] for k in rows if k.startswith('SKU:') and k.endswith('|proxy_profit_3_rub'))
+    # Catalog rows introduced today have no dated evidence in the legacy period.
+    # Merely adding their empty economic rows must not invalidate that period.
+    # A real dated order/cost/advertising gap remains in the legacy calculation.
+    def has_dated_evidence(scope):
+        return any((row := rows.get(scope + '|' + metric)) is not None
+                   and len(row) > index and row[index] not in ('', None)
+                   for metric in ('orderSum', 'orderCount', 'ads_sum', COST,
+                                  'proxy_profit_3_rub', 'proxy_profit_4_rub'))
+    scopes = [scope for scope in scopes if has_dated_evidence(scope)]
+
     if not scopes:
         return {'plan': working, 'changes': [], 'remaining': []}
     cells = working.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
@@ -564,7 +594,7 @@ def recalculate_yesterday_envelope(plan: Any, *, business_date: str,
                                      operation_id='yesterday-proxy:' + day)
     revised = result['plan']
     return replace(plan, metadata=revised.get('metadata', {}), sheets=[
-        replace(s, rows=data_sheet(revised)['rows']) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
+        replace(s, rows=data_sheet(revised)['rows'], row_count=len(data_sheet(revised)['rows'])) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
 
 
 def recalculate_yesterday_rows(rows: Iterable[Any], *, business_date: str,

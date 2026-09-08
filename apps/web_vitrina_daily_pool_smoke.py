@@ -106,6 +106,68 @@ def main():
           (4,7,'bad'), (5,11,'2026-09-07T23:00:00Z')]]}
     assert ads._extract_non_archived_advert_ids(roster, snapshot_date=DAY) == [2,3,4,5]
     assert ads._extract_non_archived_advert_ids(roster, snapshot_date='2026-09-07') == [1,2,3,4,5]
+    # Brand-new SKU has no legacy economic rows or manual configuration.
+    from packages.application.vitrina_economics import METRICS
+    from packages.application.web_vitrina_management_history import recalculate_current_rows
+    from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
+    sparse = fixture()
+    sparse['sheets'][0]['rows'] = [row for row in sparse['sheets'][0]['rows']
+        if not (row[1].startswith('SKU:93|') and row[1].split('|')[1] in METRICS)]
+    filled = project(sparse)
+    assert values(filled)['SKU:93|proxy_profit_4_rub'] == 0
+    view_rows = []
+    for index, row in enumerate(sparse['sheets'][0]['rows']):
+        scope, metric = row[1].split('|')
+        view_rows.append(WebVitrinaContractRow(row[1],index,'SKU' if scope.startswith('SKU:') else 'TOTAL',
+            scope,scope,metric,metric,'','Экономика',None,int(scope.split(':')[1]) if ':' in scope else None,
+            'rub',dict(zip(sparse['date_columns'],row[2:])),{}))
+    read_rows = recalculate_current_rows(view_rows,business_date=DAY,parameters=(P,P),original_presentation={},snapshot_id='new-sku')
+    new_rows = {row.metric_key:row for row in read_rows if row.scope_key=='SKU:93'}
+    assert all(metric in new_rows for metric in METRICS)
+    assert new_rows['proxy_profit_4_rub'].values_by_date[DAY] == 0
+    assert new_rows['proxy_profit_4_rub'].values_by_date['2026-09-07'] == ''
+    # Persisted envelope must round-trip after automatic row creation.
+    import json
+    from dataclasses import asdict
+    from packages.application.web_vitrina_management_history import recalculate_current_envelope
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot
+    fresh = replace(fresh, temporal_slots=[SheetVitrinaV1TemporalSlot('yesterday_closed','Вчера','2026-09-07'), SheetVitrinaV1TemporalSlot('today_current','Сегодня',DAY)])
+    raw_sheet = sparse['sheets'][0]
+    envelope = replace(fresh, sheets=[replace(target, rows=raw_sheet['rows'], row_count=len(raw_sheet['rows'])),
+        replace(target, sheet_name='STATUS', rows=[], row_count=0)])
+    updated = recalculate_current_envelope(envelope, business_date=DAY, parameters=(P,P))
+    assert updated.sheets[0].row_count == len(updated.sheets[0].rows)
+    decoded = _deserialize_sheet_vitrina_plan(json.dumps(asdict(updated)))
+    assert decoded.sheets[0].rows == updated.sheets[0].rows
+    # Read the exact legacy defect without changing values or relaxing other errors.
+    old_count = len(raw_sheet['rows'])
+    legacy = asdict(updated)
+    legacy['sheets'][0]['row_count'] = old_count
+    decoded = _deserialize_sheet_vitrina_plan(json.dumps(legacy))
+    assert decoded.sheets[0].rows == updated.sheets[0].rows
+    legacy['sheets'][0]['rows'][-1][1] = 'SKU:93|orderSum'
+    try:
+        _deserialize_sheet_vitrina_plan(json.dumps(legacy))
+    except ValueError as exc:
+        assert 'row_count must match' in str(exc)
+    else:
+        raise AssertionError('unrelated row corruption was accepted')
+    # New empty catalog rows must not erase a preceding legacy date's totals.
+    from packages.application.web_vitrina_management_history import recalculate_dated_proxy
+    legacy_day = '2026-09-07'
+    legacy_plan = fixture()
+    for row in legacy_plan['sheets'][0]['rows']:
+        row[2] = row[3] if row[1].startswith('SKU:') and int(row[1].split('|')[0].split(':')[1]) <= 33 else ''
+    prior = recalculate_dated_proxy(legacy_plan, day=legacy_day, parameters=(P,P), operation_id='legacy')
+    prior_values = {row[1]:row[2] for row in prior['plan']['sheets'][0]['rows']}
+    assert prior_values['TOTAL|total_proxy_profit_4_rub'] == 1188
+    # A positive dated order with missing cost still blocks the historical total.
+    next(row for row in legacy_plan['sheets'][0]['rows'] if row[1]=='SKU:1|our_wb_unit_cost_rub')[2] = ''
+    invalid = recalculate_dated_proxy(legacy_plan, day=legacy_day, parameters=(P,P), operation_id='legacy-missing')
+    assert next(row[2] for row in invalid['plan']['sheets'][0]['rows'] if row[1]=='TOTAL|total_proxy_profit_4_rub') == ''
+    # Dated refresh may add a never-seen SKU's economic rows too.
+    assert recalculate_dated_proxy(sparse, day=DAY, parameters=(P,P), operation_id='new-dated')['changes']
     print('daily_pool: 92/37/33, zero sales, sellout, day rollover, stock provenance, ad-only and campaign dates: ok')
 
 
