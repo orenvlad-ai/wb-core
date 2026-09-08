@@ -470,6 +470,7 @@ class CalculationParametersBlock:
         try:
             result = self.publish_current_functional_economics(
                 verified_backup=verified_backup,
+                include_history=True,
             )
         except Exception as exc:
             with _connect(self.runtime.db_path) as conn:
@@ -600,8 +601,15 @@ class CalculationParametersBlock:
         self,
         *,
         verified_backup: Mapping[str, Any] | None = None,
+        include_history: bool = False,
     ) -> dict[str, Any]:
         """Publish only WB cost/Proxy target cells from the active functional state."""
+
+        if not include_history:
+            from packages.application.fbs_accounting_runtime import current_publication_receipt
+            current = current_publication_receipt(self.runtime)
+            if current is not None:
+                return current
 
         from packages.application.warehouse_functional_economics_backfill import (
             apply_functional_economics_backfill_plan,

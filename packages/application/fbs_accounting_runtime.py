@@ -201,6 +201,43 @@ def publish_ready(runtime):
     return {"status": result.status}
 
 
+def current_publication_receipt(runtime, *, now=None):
+    """Verify the current owner instead of replaying retired historical costs.
+
+    The hourly runner has already published this book and its ready cells.
+    An absent/stale publication must fail, not silently complete the queue.
+    Explicit historical parameter requests retain their separate legacy path.
+    """
+    book, version = load(runtime.runtime_dir)
+    if not book or not book["active"]:
+        return None
+    snapshot = inventory_from_book(book, now=now)
+    data = snapshot.payload()
+    if data["quality"] == "unavailable":
+        raise ValueError("current_accounting_publication_unavailable")
+    with closing(sqlite3.connect(Path(runtime.db_path).resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        row = conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots ORDER BY refreshed_at DESC LIMIT 1").fetchone()
+    plan = json.loads(row[0]) if row else {}
+    cells = plan.get("metadata", {}).get("server_cell_presentation", {})
+    checked = 0
+    for nm in [None, *data["rows"]]:
+        scope = "TOTAL" if nm is None else "SKU:" + nm
+        for metric, value in snapshot._metrics(data, nm).items():
+            cell = cells.get(scope + "|" + metric, {}).get(data["date"], {})
+            if (cell.get("source") != SOURCE or cell.get("candidate_only") is not False
+                    or cell.get("source_version_id") != data["version_id"]
+                    or cell.get("source_as_of_date") != data["date"]
+                    or cell.get("management_value") != snapshot.presentation(value, data=data)["management_value"]):
+                raise ValueError("current_accounting_ready_publication_mismatch:" + scope + "|" + metric)
+            checked += 1
+    return {"status": "published", "source": SOURCE, "business_date": data["date"],
+            "plan_fingerprint": fingerprint({"book": version, "presentation": data["version_id"]}),
+            "accounting_version": version, "checked_cell_count": checked,
+            "changed_snapshot_count": 0, "database_written": False,
+            "historical_replay": False, "backup_archive": None}
+
+
 def published(value):
     if isinstance(value, dict):
         return {k: False if k == "candidate_only" else published(v) for k, v in value.items()}

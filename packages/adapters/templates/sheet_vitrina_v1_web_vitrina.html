@@ -26509,8 +26509,13 @@
         const payload = await api("/documents/" + encodeURIComponent(id) + "/" + part + suffix);
         const section = make("section", "ff-pool-details"); section.appendChild(make("h4", "", {lines:"Строки",expenses:"Расходы",relations:"Связи",graph:"Граф документов"}[part]));
         const rows = payload.lines || payload.expenses || payload.relations || payload.nodes || [];
-        if (!rows.length) section.appendChild(make("p", "ff-pool-note", "Нет записей."));
-        rows.forEach(function (row) { section.appendChild(make("p", "ff-pool-note", Object.keys(row).filter(function(k){return !k.endsWith("_json");}).map(function(k){return k + ": " + String(row[k] == null ? "—" : row[k]);}).join(" · "))); });
+        if (payload.allocation) section.appendChild(make("p", "ff-pool-note", payload.allocation.allocation_label));
+        if (!rows.length && !payload.allocation) section.appendChild(make("p", "ff-pool-note", "Нет записей."));
+        rows.forEach(function (row) {
+          const text = payload.allocation ? "Товар " + row.nm_id + " · " + row.pool + " · база: " + row.quantity + " шт · распределено: " + money(row.expense_rub)
+            : Object.keys(row).filter(function(k){return !k.endsWith("_json");}).map(function(k){return k + ": " + String(row[k] == null ? "—" : row[k]);}).join(" · ");
+          section.appendChild(make("p", "ff-pool-note", text));
+        });
         nodes.documentDetail.appendChild(section);
       } catch (error) { setAlert(nodes.documentDetail, error.message, "error"); }
     }
@@ -26688,7 +26693,8 @@
       container.appendChild(make("h4", "", "Накладные расходы FBS/FBO"));
       container.appendChild(make("p", "ff-pool-note", (facility ? facility.name : summary.facility_id) + " · " + summary.scope + " · " + (summary.category_label_ru || summary.category)));
       container.appendChild(make("p", "ff-pool-note", "Дата: " + summary.business_date + " · сумма: " + money(summary.amount_rub) + " · основание: " + (summary.source_mode === "payment_order_pdf" ? "PDF" : "ручной ввод")));
-      container.appendChild(make("p", "ff-pool-note", "Положительный физический остаток: " + summary.denominator_quantity + " шт · SKU в denominator: " + summary.denominator_sku_count + " · затронуто SKU: " + summary.affected_sku_count + " · распределено: " + money(summary.allocation_total_rub)));
+      if (summary.allocation_label) container.appendChild(make("p", "ff-pool-note", summary.allocation_label));
+      if (summary.denominator_quantity != null) container.appendChild(make("p", "ff-pool-note", (summary.allocation_source ? "Дневная база распределения: " : "База распределения: ") + summary.denominator_quantity + " шт · товаров: " + summary.denominator_sku_count + " · затронуто: " + summary.affected_sku_count + " · распределено: " + money(summary.allocation_total_rub)));
       if (summary.comment) container.appendChild(make("p", "ff-pool-note", "Комментарий: " + summary.comment));
       if (summary.filename || summary.file_sha256) container.appendChild(make("p", "ff-pool-note", "Файл: " + (summary.filename || "—") + " · SHA-256: " + (summary.file_sha256 || "—") + (summary.payment_evidence && summary.payment_evidence.payment_fingerprint ? " · fingerprint: " + summary.payment_evidence.payment_fingerprint : "")));
       if (summary.source_mode === "payment_order_pdf" && summary.payment_evidence && Object.keys(summary.payment_evidence).length) {

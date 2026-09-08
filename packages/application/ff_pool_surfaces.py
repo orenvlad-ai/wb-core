@@ -750,6 +750,13 @@ class FfPoolSurface:
             }
             for row in rows
         ]
+        if any(item["overhead"] for item in documents):
+            view = self._overhead_accounting_view()
+            from packages.application.fbs_overhead_presentation import apply_summary
+            for item in documents:
+                if item["overhead"]:
+                    item["overhead"] = apply_summary(item["overhead"], view.resolve(
+                        item["overhead"], day=item["business_date"], document_id=item["root_document_id"]))
         payload = {
             "contract_name": CONTRACT_NAME,
             "status": "ready",
@@ -822,6 +829,13 @@ class FfPoolSurface:
             ],
             "lazy": {"lines": True, "expenses": True, "relations": True, "graph": True},
         }
+        if any(item["overhead"] for item in payload["documents"]):
+            view = self._overhead_accounting_view()
+            from packages.application.fbs_overhead_presentation import apply_summary
+            for item in payload["documents"]:
+                if item["overhead"]:
+                    item["overhead"] = apply_summary(item["overhead"], view.resolve(
+                        item["overhead"], day=item["business_date"], document_id=item["document_id"]))
         return _etagged(payload)
 
     def document_lines(self, document_id: str, *, page: int = 1, limit: int = 100) -> dict[str, Any]:
@@ -829,7 +843,8 @@ class FfPoolSurface:
         selected = _identity_token(document_id, field="document_id")
         with self._read() as conn:
             self._require_schema(conn)
-            if not conn.execute(f"SELECT 1 FROM {DOCUMENTS_TABLE} WHERE document_id=?", (selected,)).fetchone():
+            document = conn.execute(f"SELECT business_date,document_kind,posted_manifest_json FROM {DOCUMENTS_TABLE} WHERE document_id=?", (selected,)).fetchone()
+            if document is None:
                 raise FfPoolSurfaceError("document_not_found", "Document was not found", http_status=404)
             total = int(conn.execute(f"SELECT COUNT(*) FROM {DOCUMENT_LINES_TABLE} WHERE document_id=?", (selected,)).fetchone()[0])
             rows = conn.execute(
@@ -839,6 +854,15 @@ class FfPoolSurface:
                     ORDER BY line_no LIMIT ? OFFSET ?""",
                 (selected, limit, offset),
             ).fetchall()
+        if document["document_kind"] == "pool_overhead":
+            domain = _json_object(document["posted_manifest_json"])["domain"]
+            allocation = self._overhead_accounting_view().resolve(domain,
+                day=document["business_date"], document_id=selected)
+            if allocation is not None:
+                items = allocation["lines"]
+                return _etagged({"contract_name": CONTRACT_NAME, "status": allocation["allocation_status"],
+                    "document_id": selected, "allocation": {k: v for k, v in allocation.items() if k != "lines"},
+                    "lines": items[offset:offset + limit], "page": _page_payload(page, limit, len(items))})
         return _etagged(
             {
                 "contract_name": CONTRACT_NAME,
@@ -1027,6 +1051,11 @@ class FfPoolSurface:
                 "payment_evidence": payment_evidence,
             }
         guided_activation = self._guided_acceptance_activation()
+        if str(row["document_kind"]) == "pool_overhead":
+            from packages.application.fbs_overhead_presentation import apply_summary
+            preview_summary = apply_summary(preview_summary, self._overhead_accounting_view().resolve(
+                preview_summary, day=str(row["business_date"]),
+                document_id=str(row["posted_document_id"] or ""), posted=bool(row["posted_document_id"])))
         payload = {
             "contract_name": CONTRACT_NAME,
             "workflow_contract": "ff_document_workflow_v1",
@@ -1039,7 +1068,7 @@ class FfPoolSurface:
             "state": state,
             "state_label_ru": WORKFLOW_LABELS_RU.get(state, state),
             "confirm_allowed": state == "ready" and bool(feature["writer_effective"])
-            and overhead_date_current
+            and overhead_date_current and preview_summary.get("allocation_status") not in {"pending", "unavailable"}
             and (str(row["document_kind"]) != "china_acceptance" or guided_activation["effective"]),
             "feature_blocked": not bool(feature["writer_effective"]),
             "guided_acceptance_activation": guided_activation
@@ -1089,10 +1118,21 @@ class FfPoolSurface:
             if not canonical:
                 raise FfPoolSurfaceError("request_not_found", "Document request was not found", http_status=404)
             row = conn.execute(
-                f"SELECT document_kind,state,preview_manifest_json FROM {REQUESTS_TABLE} WHERE request_id=?",
+                f"SELECT document_kind,state,business_date,posted_document_id,preview_manifest_json FROM {REQUESTS_TABLE} WHERE request_id=?",
                 (canonical,),
             ).fetchone()
         manifest = _json_object(row["preview_manifest_json"])
+        if row["document_kind"] == "pool_overhead":
+            allocation = self._overhead_accounting_view().resolve(manifest,
+                day=str(row["business_date"]), document_id=str(row["posted_document_id"] or ""),
+                posted=bool(row["posted_document_id"]))
+            if allocation is not None:
+                items = allocation["lines"]
+                return _etagged({"contract_name": CONTRACT_NAME, "status": allocation["allocation_status"],
+                    "request_id": canonical, "document_kind": row["document_kind"], "state": row["state"],
+                    "summary": {k: v for k, v in allocation.items() if k != "lines"},
+                    "collection": "allocations", "rows": items[offset:offset + limit],
+                    "page": _page_payload(page, limit, len(items))})
         collections = {key: value for key, value in manifest.items() if isinstance(value, list)}
         selected_collection = str(collection or "").strip()
         if not selected_collection and collections:
@@ -1141,6 +1181,11 @@ class FfPoolSurface:
 
         with warehouse_functional_write_lock(self.runtime_dir):
             return self._create_facility_locked(payload, actor=actor)
+
+    def _overhead_accounting_view(self):
+        from packages.application.fbs_overhead_presentation import OverheadAccountingView
+        return OverheadAccountingView(self.runtime_dir, self.db_path,
+            now=datetime.fromisoformat(self._now().replace("Z", "+00:00")))
 
     def _create_facility_locked(
         self, payload: Mapping[str, Any], *, actor: str

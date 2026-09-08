@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -107,6 +108,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertIsNone(stale.warehouse_detail()["warehouse"]["total_quantity"])
         self.assertIsNone(stale.metrics(1)["stock_fbs_total"] if "stock_fbs_total" in stale.metrics(1) else stale.metrics(1)["own_capital_FF_qty"])
         self.assertIsNone(shared.resolve(nm_id="1", operation_date=date(2026, 9, 8)).get("unit_cost_rub"))
+
+    def test_current_publisher_verifies_ready_without_loading_legacy_history(self):
+        self.opening()
+        snapshot = runtime.load_inventory(self.root, now=self.now)
+        data = snapshot.payload()
+        cells = {}
+        for nm in [None, *data["rows"]]:
+            scope = "TOTAL" if nm is None else "SKU:" + nm
+            for key, value in snapshot._metrics(data, nm).items():
+                cells[scope + "|" + key] = {self.day: snapshot.presentation(value, data=data)}
+        db = self.root / "ready.sqlite3"
+        with sqlite3.connect(db) as conn:
+            conn.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(plan_json TEXT,refreshed_at TEXT)")
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?)",
+                         (json.dumps({"metadata":{"server_cell_presentation":cells}}),self.now.isoformat()))
+        owner = SimpleNamespace(runtime_dir=self.root, db_path=db)
+        from packages.application.calculation_parameters import CalculationParametersBlock
+        block = CalculationParametersBlock.__new__(CalculationParametersBlock)
+        block.runtime = owner
+        from packages.application import warehouse_functional_economics_backfill as legacy
+        with patch.object(legacy, "build_functional_economics_backfill_plan", side_effect=AssertionError("historical scan")), \
+             patch.object(runtime, "current_business_date_iso", return_value=self.day), \
+             patch.object(runtime, "inventory_from_book", return_value=snapshot):
+            result = block.publish_current_functional_economics()
+        self.assertGreater(result["checked_cell_count"], 0)
+        self.assertFalse(result["database_written"])
+        self.assertFalse(result["historical_replay"])
+        cells["SKU:1|our_wb_unit_cost_rub"][self.day]["management_value"] = "999"
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?",
+                         (json.dumps({"metadata":{"server_cell_presentation":cells}}),))
+        with self.assertRaisesRegex(ValueError, "ready_publication_mismatch"):
+            runtime.current_publication_receipt(owner, now=self.now)
+        with self.assertRaisesRegex(ValueError, "publication_unavailable"):
+            runtime.current_publication_receipt(owner, now=datetime(2026,9,8,14,tzinfo=timezone.utc))
+
+    def test_explicit_history_request_keeps_its_separate_path(self):
+        from packages.application.calculation_parameters import CalculationParametersBlock
+        from packages.application import warehouse_functional_economics_backfill as legacy
+        block = CalculationParametersBlock.__new__(CalculationParametersBlock)
+        block.runtime = SimpleNamespace(runtime_dir=self.root)
+        with patch.object(runtime, "current_publication_receipt", side_effect=AssertionError("wrong owner")), \
+             patch.object(legacy, "build_functional_economics_backfill_plan", return_value={"plan_fingerprint":"p"}) as build, \
+             patch.object(legacy, "apply_functional_economics_backfill_plan", return_value={"status":"applied"}):
+            self.assertEqual(block.publish_current_functional_economics(include_history=True)["status"], "applied")
+            build.assert_called_once()
 
     def test_foreign_database_rejected_without_modification(self):
         with sqlite3.connect(runtime.path(self.root)) as conn:
