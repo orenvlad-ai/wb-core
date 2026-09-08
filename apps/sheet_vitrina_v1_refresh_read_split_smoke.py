@@ -35,6 +35,7 @@ from packages.application.sheet_vitrina_v1_live_plan import (
     TEMPORAL_ROLE_ACCEPTED_CURRENT,
 )
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
+from packages.contracts.stocks_block import StocksItem, StocksSuccess
 
 INPUT_BUNDLE_FIXTURE = (
     ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "registry_upload_bundle__fixture.json"
@@ -59,6 +60,15 @@ class CountingBlock:
     def execute(self, request: object) -> SimpleNamespace:
         request_date = _request_date(request)
         self.request_dates.append(request_date)
+        if self.source_key == "stocks":
+            # A successful stock snapshot covers the authoritative catalog,
+            # including zero-activity identities, not only the probe SKU.
+            nm_ids = request.nm_ids
+            return SimpleNamespace(result=StocksSuccess(
+                kind="success", snapshot_date=request_date, count=len(nm_ids),
+                items=[StocksItem(nm_id, 7, 7, 0, 0, 0, 0, 0) for nm_id in nm_ids],
+                warehouse_granularity_complete=False,
+            ))
         payload = SimpleNamespace(
             kind="success",
             items=_build_items(self.source_key),
@@ -131,6 +141,16 @@ def main() -> None:
     with TemporaryDirectory(prefix="sheet-vitrina-refresh-read-split-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        # Stock collection owns the full nomenclature scope, independently of
+        # the reporting bundle. Seed this fixture's catalog rather than bypass
+        # the current unknown/empty-catalog guard in the live source adapter.
+        for item in bundle["config_v2"]:
+            if item["enabled"]:
+                runtime.save_nomenclature_item({
+                    "item_id": f"fixture-{item['nm_id']}", "nm_id": int(item["nm_id"]),
+                    "our_sku": f"fixture-{item['nm_id']}", "is_active": True,
+                    "created_at": ACTIVATED_AT, "updated_at": ACTIVATED_AT,
+                })
         _seed_prior_accepted_current_snapshots(runtime)
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,

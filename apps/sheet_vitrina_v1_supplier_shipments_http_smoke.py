@@ -40,6 +40,7 @@ from packages.application.registry_upload_http_entrypoint import RegistryUploadH
 from packages.application.supplier_shipments import SupplierShipmentsBlock  # noqa: E402
 from packages.application.ff_pool_dense_fbs import DenseFbsService  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
+from apps.supplier_confirmation_flows_smoke import _seed_empty_functional
 
 
 TARGET_FACILITY_ID = "fac_supplier_smoke"
@@ -885,6 +886,7 @@ def main() -> None:
             activated_at_factory=lambda: "2026-05-30T08:00:00Z",
         )
         _seed_target_facilities(runtime)
+        _seed_empty_functional(runtime, "2026-05-30T08:00:00Z")
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -1193,13 +1195,13 @@ def main() -> None:
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-05-31"},
             )
-            if future_acceptance_status != 400 or "business today" not in str(future_acceptance_payload.get("error", "")):
+            if future_acceptance_status != 400 or "Принять на FF" not in str(future_acceptance_payload.get("error", "")):
                 raise AssertionError(f"future FF acceptance must be rejected by API: {future_acceptance_status} {future_acceptance_payload}")
             early_acceptance_status, early_acceptance_payload = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-05-15"},
             )
-            if early_acceptance_status != 400 or "раньше" not in str(early_acceptance_payload.get("error", "")):
+            if early_acceptance_status != 400 or "Принять на FF" not in str(early_acceptance_payload.get("error", "")):
                 raise AssertionError(f"acceptance before shipment must be rejected: {early_acceptance_status} {early_acceptance_payload}")
             unchanged_status, unchanged_detail = _get_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}"
@@ -1273,13 +1275,17 @@ def main() -> None:
             correction_started = threading.Event()
             correction_release = threading.Event()
 
-            def hold_correction(phase: str) -> None:
-                if phase == "before_transaction":
-                    correction_started.set()
-                    if not correction_release.wait(timeout=5):
-                        raise RuntimeError("correction smoke hold timeout")
+            run_correction = entrypoint.supplier_shipment_factual_correction_block.run_job
 
-            entrypoint.supplier_shipment_factual_correction_block.failure_injector = hold_correction
+            def hold_correction(correction_id, emit):
+                # Pause the admitted worker before invoking the real targeted
+                # transaction, not a removed monolithic failure-injection hook.
+                correction_started.set()
+                if not correction_release.wait(timeout=5):
+                    raise RuntimeError("correction smoke hold timeout")
+                return run_correction(correction_id, emit)
+
+            entrypoint.supplier_shipment_factual_correction_block.run_job = hold_correction
             correction_preview_status, correction_preview = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_shipment_date": "2026-05-17"},
@@ -1293,7 +1299,7 @@ def main() -> None:
             if correction_status != 202 or correction_accepted.get("status") != "accepted":
                 raise AssertionError(f"date correction must start one persisted job, got {correction_status} {correction_accepted}")
             if not correction_started.wait(timeout=5):
-                raise AssertionError("correction job did not reach a real running phase")
+                raise AssertionError("admitted correction worker did not reach fixture barrier")
             running_detail_status, running_detail = _get_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}"
             )
@@ -1318,7 +1324,7 @@ def main() -> None:
             ):
                 raise AssertionError(f"parallel duplicate save must reuse one job: {duplicate_status} {duplicate_payload}")
             correction_release.set()
-            entrypoint.supplier_shipment_factual_correction_block.failure_injector = None
+            entrypoint.supplier_shipment_factual_correction_block.run_job = run_correction
             correction = _wait_for_factual_correction(base_url, shipment_id)
             if correction.get("status") != "success":
                 raise AssertionError(f"date correction job did not succeed: {correction}")
@@ -1369,23 +1375,26 @@ def main() -> None:
             )
             if divergent_status != 400 or "вычисляется" not in str(divergent_payload.get("error", "")):
                 raise AssertionError(f"manual divergent status must be rejected, got {divergent_status} {divergent_payload}")
+            before_rejected_acceptance = runtime.load_supplier_shipment(shipment_id)
+            receipts_before_rejection = runtime.list_ff_stock_operations()
             accepted_preview_status, accepted_preview = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-05-30"},
             )
-            if accepted_preview_status != 200:
-                raise AssertionError(f"actual FF acceptance preview failed: {accepted_preview_status} {accepted_preview}")
-            accepted_status, accepted_patched = _post_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/{shipment_id}/factual-dates/confirm",
-                {"confirmation_token": accepted_preview["confirmation_token"]},
+            if accepted_preview_status != 400 or "Принять на FF" not in str(accepted_preview.get("error", "")):
+                raise AssertionError(f"legacy FF acceptance must require unified document: {accepted_preview_status} {accepted_preview}")
+            if runtime.load_supplier_shipment(shipment_id) != before_rejected_acceptance or runtime.list_ff_stock_operations() != receipts_before_rejection:
+                raise AssertionError("rejected legacy FF acceptance must preserve source and receipts")
+
+            # This pre-cutover fixture exercises read-only accepted-history and
+            # frozen invoice guards below, not the retired acceptance writer.
+            # The current receipt date/one-effect/history contract is exercised
+            # by warehouse_ff_acceptance_form_smoke, selected with this check.
+            runtime.save_supplier_shipment(
+                header={**before_rejected_acceptance["header"], "actual_ff_acceptance_date": "2026-05-30"},
+                lines=before_rejected_acceptance["lines"],
             )
-            if accepted_status != 200 or accepted_patched.get("order_status") != "accepted_ff":
-                raise AssertionError(f"actual FF acceptance patch must persist accepted_ff, got {accepted_status} {accepted_patched}")
-            if accepted_patched.get("actual_ff_acceptance_date") != "2026-05-30":
-                raise AssertionError(f"actual FF acceptance patch must keep acceptance date, got {accepted_patched}")
-            ff_stock_keys = [str(item.get("source_key") or "") for item in runtime.list_ff_stock_operations()]
-            if ff_stock_keys.count(f"supplier_shipment_acceptance:{shipment_id}") != 1:
-                raise AssertionError(f"actual FF acceptance must create one idempotent ФФ stock operation, got {ff_stock_keys}")
+            accepted_patched = entrypoint.supplier_shipments_block.get_shipment(shipment_id)
 
             frozen_before_update = runtime.load_supplier_shipment(shipment_id)
             changed_after_receipt = json.loads(json.dumps(accepted_patched))

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -24,6 +25,8 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
     StaticUsdRateProvider,
     SupplierFinancialDocumentsBlock,
 )
+from packages.application.warehouse_functional import FUNCTIONAL_CUTOVER_ID, ensure_warehouse_functional_schema
+from packages.application.warehouse_business_projection import ensure_functional_version_business_time_schema
 
 
 NOW = "2026-07-24T09:00:00Z"
@@ -43,6 +46,7 @@ def main() -> int:
     with TemporaryDirectory(prefix="supplier-confirmation-flows-") as tmp:
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp) / "runtime")
         _seed(runtime)
+        _seed_empty_functional(runtime, NOW)
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime.runtime_dir,
             runtime=runtime,
@@ -91,63 +95,63 @@ def _assert_date_contract(
         ),
         "confirmation token",
     )
-    combined_preview = entrypoint.handle_supplier_factual_dates_preview_request(
-        SHIPMENT_ID,
-        {
+    # Module 34: FF acceptance is owned by the unified receipt document;
+    # ordinary factual-date confirmation now owns shipment dates only.
+    source_before = runtime.load_supplier_shipment(SHIPMENT_ID)
+    receipts_before = runtime.list_ff_stock_operations()
+    _rejects(
+        lambda: entrypoint.handle_supplier_factual_dates_preview_request(SHIPMENT_ID, {
             "actual_shipment_date": "2026-06-26",
             "actual_ff_acceptance_date": "2026-07-21",
-        },
-    )
-    _assert(
-        len(combined_preview["changes"]) == 2,
-        "both factual dates share one server preview",
+        }),
+        "Принять на FF",
     )
     preview = entrypoint.handle_supplier_factual_dates_preview_request(
-        SHIPMENT_ID, direct_payload
+        SHIPMENT_ID, {"actual_shipment_date": "2026-06-26"}
     )
-    _assert(len(preview["changes"]) == 1, "one FF date in preview")
+    _assert(len(preview["changes"]) == 1, "one shipment date in preview")
     _assert(
-        preview["changes"][0]["old_value"] == ""
-        and preview["changes"][0]["new_value"] == "2026-07-21",
+        preview["changes"][0]["old_value"] == "2026-06-25"
+        and preview["changes"][0]["new_value"] == "2026-06-26",
         "preview binds old and new values",
     )
-    counters = {"receipt": 0, "layer": 0, "reconcile": 0, "queue": 0}
-    block._record_ff_stock_receipt = lambda _detail: counters.__setitem__(  # type: ignore[method-assign]
-        "receipt", counters["receipt"] + 1
-    )
-    block._materialize_ff_cost_layer = lambda _shipment_id: counters.__setitem__(  # type: ignore[method-assign]
-        "layer", counters["layer"] + 1
-    )
-    block._reconcile_ff_reservations = lambda: counters.__setitem__(  # type: ignore[method-assign]
-        "reconcile", counters["reconcile"] + 1
-    )
-    block._enqueue_warehouse_recalculation = lambda _detail: (  # type: ignore[method-assign]
-        counters.__setitem__("queue", counters["queue"] + 1)
-        or {"status": "queued"}
-    )
-    _assert(not any(counters.values()), "preview/cancel has no warehouse side effects")
-    result = entrypoint.handle_supplier_factual_dates_confirm_request(
-        SHIPMENT_ID,
-        {"confirmation_token": preview["confirmation_token"]},
-        actor="smoke",
-    )
+    _assert(runtime.load_supplier_shipment(SHIPMENT_ID) == source_before,
+            "rejected FF edit and shipment preview preserve source")
+    _assert(runtime.list_ff_stock_operations() == receipts_before,
+            "preview/cancel has no FF effects")
+
+    def run_inline(*, operation, runner):
+        _assert(operation == "supplier_factual_date_correction", "correct worker")
+        return runner(lambda *_args, **_kwargs: None)
+
+    # Only scheduling is synchronous; the persisted correction and its real
+    # transaction/readback execute against this disposable runtime.
+    with patch.object(entrypoint.operator_jobs, "start", side_effect=run_inline) as start:
+        result = entrypoint.handle_supplier_factual_dates_confirm_request(
+            SHIPMENT_ID, {"confirmation_token": preview["confirmation_token"]}, actor="smoke",
+        )
+        _assert(result["status"] == "accepted", "confirmation admits correction")
+        correction = entrypoint.supplier_shipment_factual_correction_block.get_job(
+            result["correction"]["correction_id"]
+        )
+        _assert(correction["status"] == "success", "real correction completes")
+        saved = runtime.load_supplier_shipment(SHIPMENT_ID)
+        _assert(saved["header"]["actual_shipment_date"] == "2026-06-26",
+                "confirmed shipment date is saved")
+        _assert(saved["lines"] == source_before["lines"], "no composition mutation")
+        repeated = entrypoint.handle_supplier_factual_dates_confirm_request(
+            SHIPMENT_ID, {"confirmation_token": preview["confirmation_token"]}, actor="smoke",
+        )
+        _assert(repeated.get("idempotent"), "repeated date confirmation is idempotent")
+        _assert(start.call_count == 1, "repeat does not admit a second worker")
+        _assert(runtime.load_supplier_shipment(SHIPMENT_ID) == saved, "repeat has no source effect")
+    _assert(runtime.list_ff_stock_operations() == receipts_before, "shipment date never posts FF receipt")
     _assert(
-        result["actual_ff_acceptance_date"] == "2026-07-21",
-        "confirmed FF date is saved",
+        saved["header"]["actual_ff_acceptance_date"] == "",
+        "FF date remains owned by unified receipt",
     )
-    _assert(
-        counters == {"receipt": 1, "layer": 1, "reconcile": 1, "queue": 1},
-        "receipt, layer, reservation reconcile and queue happen once",
-    )
-    repeated = entrypoint.handle_supplier_factual_dates_confirm_request(
-        SHIPMENT_ID,
-        {"confirmation_token": preview["confirmation_token"]},
-        actor="smoke",
-    )
-    _assert(repeated.get("idempotent"), "repeated date confirmation is idempotent")
-    _assert(counters["receipt"] == 1 and counters["layer"] == 1, "no duplicate FF effects")
     stale = entrypoint.handle_supplier_factual_dates_preview_request(
-        SHIPMENT_ID, {"actual_ff_acceptance_date": "2026-07-22"}
+        SHIPMENT_ID, {"actual_shipment_date": "2026-06-27"}
     )
     shipment = runtime.load_supplier_shipment(SHIPMENT_ID) or {}
     runtime.save_supplier_shipment(
@@ -468,6 +472,28 @@ def _assert_batch_financial_contract(
         == before_count + 2,
         "repeat batch confirmation creates no duplicate documents",
     )
+
+
+def _seed_empty_functional(runtime: RegistryUploadDbBackedRuntime, now: str) -> None:
+    """Unpaid temporary orders: active empty warehouse, no invented capital.
+
+    The supported factual correction requires a published functional version.
+    It will retain truthful missing-payment blockers, not call the disabled
+    pre-cutover monolithic writer. The targeted replay smoke covers stock rows.
+    """
+    with sqlite3.connect(runtime.db_path) as conn:
+        ensure_warehouse_functional_schema(conn)
+        ensure_functional_version_business_time_schema(conn)
+        conn.execute("""INSERT INTO sheet_vitrina_v1_warehouse_functional_cutovers
+            VALUES(?,?,'posted','sha256:confirmation-fixture','{}','{}','{}',?,?)""",
+            (FUNCTIONAL_CUTOVER_ID, now, now, now))
+        conn.execute("""INSERT INTO sheet_vitrina_v1_warehouse_functional_versions(
+            version_id,cutover_id,version_kind,effective_at,status,plan_fingerprint,
+            local_source_digest,source_watermarks_json,created_at,business_effective_date,published_at)
+            VALUES('confirmation-base',?,'hourly_wb_sync',?,'good',
+            'sha256:confirmation-base','sha256:empty','{}',?,?,?)""",
+            (FUNCTIONAL_CUTOVER_ID, now, now, now[:10], now))
+        conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_functional_active VALUES(1,'confirmation-base',?)", (now,))
 
 
 def _seed(runtime: RegistryUploadDbBackedRuntime) -> None:
