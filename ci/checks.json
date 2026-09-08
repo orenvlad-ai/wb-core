@@ -1,6 +1,234 @@
 {
   "schema": "wb-core.check-map/v1",
   "groups": {
+    "warehouse_operations": {
+      "patterns": [
+        "apps/warehouse_functional_runner.py",
+        "packages/application/warehouse_update_journal.py",
+        "packages/application/warehouse_functional_lock.py",
+        "packages/application/warehouse_sync_lock.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
+      ],
+      "commands": [
+        ["python3", "apps/warehouse_current_sync_job_smoke.py"],
+        ["python3", "apps/warehouse_update_journal_smoke.py"],
+        ["python3", "ci/fixture_process_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "ready_publication": {
+      "patterns": [
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "packages/application/web_vitrina_historical_ready_snapshot_import.py"
+      ],
+      "commands": [
+        ["python3", "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "warehouse_targeted_operations": {
+      "patterns": [
+        "apps/warehouse_functional_runner.py",
+        "packages/application/warehouse_functional.py",
+        "packages/application/warehouse_functional_lock.py",
+        "packages/application/warehouse_sync_lock.py",
+        "packages/application/calculation_parameters.py",
+        "packages/application/warehouse_functional_economics_backfill.py",
+        "packages/application/warehouse_targeted_replay.py",
+        "packages/application/supplier_shipment_factual_correction.py"
+      ],
+      "commands": [
+        ["python3", "apps/warehouse_functional_smoke.py"],
+        ["python3", "apps/warehouse_targeted_replay_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
+    },
+    "fbs_accounting": {
+      "patterns": [
+        "apps/fbs_accounting_runtime.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "packages/application/fbs_accounting_apply.py",
+        "packages/application/fbs_snapshot_cost.py",
+        "packages/application/calculation_parameters.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [
+        ["python3", "apps/fbs_accounting_runtime_smoke.py"],
+        ["python3", "apps/fbs_accounting_apply_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "fbs_accounting_sources": {
+      "patterns": [
+        "packages/application/fbs_snapshot_cost_sources.py",
+        "packages/application/shared_sku_cost_sources.py",
+        "packages/application/fbs_inventory_presentation.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "packages/application/fbs_accounting_apply.py"
+      ],
+      "commands": [
+        ["python3", "apps/fbs_snapshot_cost_sources_smoke.py"],
+        ["python3", "apps/shared_sku_cost_sources_smoke.py"],
+        ["python3", "apps/fbs_inventory_presentation_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "vitrina_dated_economics": {
+      "patterns": [
+        "packages/application/vitrina_catalog.py",
+        "packages/application/vitrina_economics.py",
+        "packages/application/daily_trading_pool.py",
+        "packages/application/web_vitrina_management_history.py",
+        "packages/application/sheet_vitrina_v1_web_vitrina.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "apps/web_vitrina_management_history.py"
+      ],
+      "commands": [
+        ["python3", "apps/web_vitrina_catalog_economics_smoke.py"],
+        ["python3", "apps/web_vitrina_daily_pool_smoke.py"],
+        ["python3", "apps/web_vitrina_management_history_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "supplier_source_operations": {
+      "patterns": [
+        "packages/application/supplier_shipments.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/registry_upload_http_entrypoint.py"
+      ],
+      "commands": [
+        ["python3", "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"],
+        ["python3", "apps/supplier_confirmation_flows_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "supplier_financial_source_operations": {
+      "patterns": [
+        "packages/application/supplier_financial_documents.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [["python3", "apps/supplier_financial_documents_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
+    },
+    "supplier_invoice_revision": {
+      "patterns": ["packages/application/supplier_shipment_invoice_revision.py"],
+      "commands": [["python3", "apps/supplier_invoice_revision_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "cny_source_operations": {
+      "patterns": [
+        "packages/application/cny_ledger.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [["python3", "apps/cny_ledger_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1"]
+    },
+    "fulfillment_source_operations": {
+      "patterns": [
+        "packages/application/fulfillment_services.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_fulfillment_services_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "pypdf==6.4.1", "reportlab==4.4.5"]
+    },
+    "ff_source_operations": {
+      "patterns": [
+        "packages/application/ff_stock_ledger.py",
+        "packages/application/ff_inventory_reconciliation.py",
+        "packages/application/ff_overhead_allocation.py",
+        "packages/application/ff_document_workflow.py",
+        "packages/application/warehouse_business_projection.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [
+        ["python3", "apps/ff_inventory_reconciliation_smoke.py"],
+        ["python3", "apps/ff_overhead_allocation_smoke.py"],
+        ["python3", "apps/warehouse_business_projection_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "ff_request_operations": {
+      "patterns": [
+        "packages/application/ff_pool_documents.py",
+        "packages/application/ff_pool_dense_fbs.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [
+        ["python3", "apps/ff_pool_documents_smoke.py"],
+        ["python3", "apps/ff_pool_dense_fbs_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "warehouse_ready_recovery": {
+      "patterns": [
+        "packages/application/warehouse_historical_recovery.py",
+        "packages/application/warehouse_fbs_material_rematerialization.py"
+      ],
+      "commands": [
+        ["python3", "apps/warehouse_historical_recovery_smoke.py"],
+        ["python3", "apps/warehouse_fbs_material_rematerialization_smoke.py"],
+        ["python3", "apps/warehouse_recovery_policy_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "finance_ready_recovery": {
+      "patterns": [
+        "packages/application/finance_daily_historical_recovery.py",
+        "packages/application/registry_upload_db_backed_runtime.py"
+      ],
+      "commands": [["python3", "apps/finance_daily_historical_recovery_smoke.py"]],
+      "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
+    },
+    "proxy_v4_ready_recovery": {
+      "patterns": [
+        "apps/sheet_vitrina_v1_proxy_v4_initialize.py",
+        "apps/sheet_vitrina_v1_proxy_v4_reconcile.py",
+        "apps/sheet_vitrina_v1_proxy_v4_transit_repair.py"
+      ],
+      "commands": [
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_initialize_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_proxy_v4_transit_repair_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "canonical_ready_publication": {
+      "patterns": ["apps/canonical_cost_engine_vitrina_publication.py"],
+      "commands": [["python3", "apps/canonical_cost_engine_vitrina_publication_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "historical_cost_ready_publication": {
+      "patterns": ["apps/sheet_vitrina_v1_historical_cost_carry_forward.py"],
+      "commands": [["python3", "apps/sheet_vitrina_v1_historical_cost_carry_forward_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "metric_ready_recompute": {
+      "patterns": ["apps/promo_metric_eligibility_recompute.py", "apps/spp_metric_recompute.py"],
+      "commands": [
+        ["python3", "apps/promo_metric_eligibility_recompute_smoke.py"],
+        ["python3", "apps/spp_metric_recompute_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "disabled_proxy3_apply": {
+      "patterns": ["apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"],
+      "commands": [["python3", "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "supplier_candidate_publication": {
+      "patterns": ["apps/supplier_shipment_publication_chain.py"],
+      "commands": [["python3", "apps/supplier_shipment_publication_chain_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "fbs_observer": {
       "patterns": [
         "packages/application/wb_fbs_observer.py",
