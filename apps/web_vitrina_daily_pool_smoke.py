@@ -153,6 +153,21 @@ def main():
         assert 'row_count must match' in str(exc)
     else:
         raise AssertionError('unrelated row corruption was accepted')
+    # New empty catalog rows must not erase a preceding legacy date's totals.
+    from packages.application.web_vitrina_management_history import recalculate_dated_proxy
+    legacy_day = '2026-09-07'
+    legacy_plan = fixture()
+    for row in legacy_plan['sheets'][0]['rows']:
+        row[2] = row[3] if row[1].startswith('SKU:') and int(row[1].split('|')[0].split(':')[1]) <= 33 else ''
+    prior = recalculate_dated_proxy(legacy_plan, day=legacy_day, parameters=(P,P), operation_id='legacy')
+    prior_values = {row[1]:row[2] for row in prior['plan']['sheets'][0]['rows']}
+    assert prior_values['TOTAL|total_proxy_profit_4_rub'] == 1188
+    # A positive dated order with missing cost still blocks the historical total.
+    next(row for row in legacy_plan['sheets'][0]['rows'] if row[1]=='SKU:1|our_wb_unit_cost_rub')[2] = ''
+    invalid = recalculate_dated_proxy(legacy_plan, day=legacy_day, parameters=(P,P), operation_id='legacy-missing')
+    assert next(row[2] for row in invalid['plan']['sheets'][0]['rows'] if row[1]=='TOTAL|total_proxy_profit_4_rub') == ''
+    # Dated refresh may add a never-seen SKU's economic rows too.
+    assert recalculate_dated_proxy(sparse, day=DAY, parameters=(P,P), operation_id='new-dated')['changes']
     print('daily_pool: 92/37/33, zero sales, sellout, day rollover, stock provenance, ad-only and campaign dates: ok')
 
 
