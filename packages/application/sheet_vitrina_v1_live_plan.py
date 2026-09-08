@@ -172,6 +172,7 @@ from packages.application.spp_proxy_block import SppProxyBlock
 from packages.application.spp_block import SppBlock
 from packages.application.stocks_block import StocksBlock
 from packages.application.stock_catalog_scope import require_stock_catalog_scope
+from packages.application.vitrina_catalog import reporting_config
 from packages.application.wb_incident_policy import (
     VITRINA_PROVISIONAL_QUALITY_MESSAGE_RU,
     build_vitrina_incident_stock_projection,
@@ -1032,7 +1033,7 @@ class SheetVitrinaV1LivePlanBlock:
             HttpBackedOnecStocksSource(),
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
         )
-        self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource())
+        self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource(complete_catalog=True))
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(
             HttpBackedFinReportDailySource(runtime_dir=runtime.runtime_dir)
         )
@@ -1091,10 +1092,17 @@ class SheetVitrinaV1LivePlanBlock:
                 ),
             )
         )
-        enabled_config = sorted(
-            [item for item in current_state.config_v2 if item.enabled],
-            key=lambda item: item.display_order,
-        )
+        from packages.application.vitrina_economics import EFFECTIVE_DATE
+        if current_date >= EFFECTIVE_DATE:
+            enabled_config, catalog_scope = reporting_config(self.runtime.db_path, current_state.config_v2)
+            diagnostics['reporting_catalog'] = {
+                'scope_digest': catalog_scope['scope_digest'],
+                'nm_ids': [item.nm_id for item in enabled_config],
+                'policy': 'automatic_nomenclature_reporting_v1',
+            }
+        else:
+            enabled_config = sorted([item for item in current_state.config_v2 if item.enabled],
+                                    key=lambda item: item.display_order)
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 

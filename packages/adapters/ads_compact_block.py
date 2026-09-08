@@ -1,6 +1,7 @@
 """Адаптерная граница блока ads compact."""
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -40,6 +41,7 @@ class HttpBackedAdsCompactSource:
         timeout_seconds: float = 30.0,
         max_ids_per_request: int = 50,
         batch_sleep_seconds: float = 22.0,
+        complete_catalog: bool = False,
     ) -> None:
         self._default_base_url = base_url.rstrip("/")
         self._token_env_var = token_env_var
@@ -47,6 +49,7 @@ class HttpBackedAdsCompactSource:
         self._default_timeout_seconds = timeout_seconds
         self._max_ids_per_request = max_ids_per_request
         self._batch_sleep_seconds = batch_sleep_seconds
+        self._complete_catalog = complete_catalog
 
     def fetch(self, request: AdsCompactRequest) -> Mapping[str, Any]:
         runtime = load_runtime_config(
@@ -103,6 +106,24 @@ class HttpBackedAdsCompactSource:
                 timeout_seconds=timeout_seconds,
             )
             items = payload if isinstance(payload, list) else []
+            if self._complete_catalog:
+                if not isinstance(payload, list) or len(items) != len(batch) or {x.get('advertId') for x in items if isinstance(x, Mapping)} != set(batch):
+                    raise ValueError('ads_catalog_statistics_incomplete')
+                for advert in items:
+                    if not isinstance(advert, Mapping) or not isinstance(advert.get('days'), list):
+                        raise ValueError('ads_catalog_statistics_invalid')
+                    for day in advert['days']:
+                        if not isinstance(day, Mapping) or _normalize_snapshot_date(day.get('date')) != snapshot_date or not isinstance(day.get('apps'), list):
+                            raise ValueError('ads_catalog_day_invalid')
+                        for app in day['apps']:
+                            if not isinstance(app, Mapping) or not isinstance(app.get('nms'), list):
+                                raise ValueError('ads_catalog_sku_breakdown_missing')
+                            for item in app['nms']:
+                                if not isinstance(item, Mapping) or not isinstance(item.get('nmId'), int) or not isinstance(item.get('sum'), (float, int)) or not math.isfinite(item['sum']) or item['sum'] < 0:
+                                    raise ValueError('ads_catalog_sku_spend_missing')
+                        sku_spend = sum(item['sum'] for app in day['apps'] for item in app['nms'])
+                        if not isinstance(day.get('sum'), (float, int)) or not math.isfinite(day['sum']) or abs(day['sum'] - sku_spend) > .02:
+                            raise ValueError('ads_catalog_unattributed_spend')
             for advert in items:
                 if not isinstance(advert, Mapping):
                     continue
@@ -153,6 +174,15 @@ class HttpBackedAdsCompactSource:
             if index < len(batches) - 1:
                 time.sleep(self._batch_sleep_seconds)
 
+        if self._complete_catalog:
+            # Only after every campaign and every batch was validated. An error
+            # above yields no dense zeros, and cannot replace accepted data.
+            for nm in wanted:
+                agg.setdefault((snapshot_date, nm), {
+                    'fetched_at': fetched_at, 'snapshot_date': snapshot_date, 'nmId': nm,
+                    'ads_views': 0.0, 'ads_clicks': 0.0, 'ads_atbs': 0.0,
+                    'ads_orders': 0.0, 'ads_sum': 0.0, 'ads_sum_price': 0.0,
+                })
         return [agg[key] for key in sorted(agg)]
 
     def _get_json(self, *, url: str, token: str, timeout_seconds: float) -> Any:
@@ -171,9 +201,22 @@ class HttpBackedAdsCompactSource:
             ) from exc
 
     def _extract_non_archived_advert_ids(self, payload: Mapping[str, Any]) -> list[int]:
-        allowed_statuses = {4, 9, 11}
+        allowed_statuses = {7, 9, 11} if self._complete_catalog else {4, 9, 11}
         ids: set[int] = set()
         adverts = payload.get("adverts")
+        if self._complete_catalog and payload.get('all') == 0 and adverts is None:
+            adverts = []
+        if self._complete_catalog:
+            if not isinstance(adverts, list) or not isinstance(payload.get('all'), int):
+                raise ValueError('ads_catalog_campaign_list_invalid')
+            if any(not isinstance(g, Mapping) or not isinstance(g.get('advert_list'), list)
+                   or g.get('count') != len(g['advert_list']) for g in adverts):
+                raise ValueError('ads_catalog_campaign_list_incomplete')
+            if sum(len(g['advert_list']) for g in adverts) != payload['all']:
+                raise ValueError('ads_catalog_campaign_count_mismatch')
+            all_ids = [a.get('advertId', a.get('id')) for g in adverts for a in g['advert_list'] if isinstance(a, Mapping)]
+            if len(set(all_ids)) != payload['all'] or any(not isinstance(i, int) or i <= 0 for i in all_ids):
+                raise ValueError('ads_catalog_campaign_identity_invalid')
         if isinstance(adverts, list):
             for group in adverts:
                 if not isinstance(group, Mapping):
