@@ -1,6 +1,8 @@
 """Адаптерная граница блока ads compact."""
 
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import math
 import time
 from pathlib import Path
@@ -63,7 +65,7 @@ class HttpBackedAdsCompactSource:
             token=runtime.token,
             timeout_seconds=runtime.timeout_seconds,
         )
-        advert_ids = self._extract_non_archived_advert_ids(count_payload)
+        advert_ids = self._extract_non_archived_advert_ids(count_payload, snapshot_date=request.snapshot_date)
         rows = self._fetch_compact_rows(
             base_url=runtime.base_url,
             token=runtime.token,
@@ -200,7 +202,7 @@ class HttpBackedAdsCompactSource:
                 f"official ads compact request transport failed: {exc}"
             ) from exc
 
-    def _extract_non_archived_advert_ids(self, payload: Mapping[str, Any]) -> list[int]:
+    def _extract_non_archived_advert_ids(self, payload: Mapping[str, Any], *, snapshot_date: str | None = None) -> list[int]:
         allowed_statuses = {7, 9, 11} if self._complete_catalog else {4, 9, 11}
         ids: set[int] = set()
         adverts = payload.get("adverts")
@@ -229,6 +231,16 @@ class HttpBackedAdsCompactSource:
                 for advert in advert_list:
                     if not isinstance(advert, Mapping):
                         continue
+                    # A currently stopped campaign last changed before this
+                    # Moscow business day could not serve during the day. Keep
+                    # same-day stops and unknown timestamps in the stats check.
+                    if self._complete_catalog and snapshot_date and group.get("status") in (7, 11):
+                        try:
+                            changed = datetime.fromisoformat(str(advert.get("changeTime", "")).replace("Z", "+00:00"))
+                            if changed.tzinfo is not None and changed.astimezone(ZoneInfo("Europe/Moscow")).date().isoformat() < snapshot_date:
+                                continue
+                        except ValueError:
+                            pass
                     advert_id = advert.get("advertId", advert.get("id"))
                     if isinstance(advert_id, int) and advert_id > 0:
                         ids.add(advert_id)
