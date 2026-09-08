@@ -476,6 +476,7 @@ def _test_heavy_job_lock_does_not_block_interactive_writer() -> None:
 
 
 def _test_http_manual_snapshot_publication_order() -> None:
+    from packages.application.warehouse_update_journal import _require_phase
     for status in ("published", "not_active", "failed"):
         events = []
         def action(name, result):
@@ -485,6 +486,7 @@ def _test_http_manual_snapshot_publication_order() -> None:
         entry.runtime = SimpleNamespace(runtime_dir=Path("/fixture"),
             finalize_completed_wb_transit_cost_recalculations=lambda **kw: {})
         entry.warehouse_update_journal = Mock()
+        entry.warehouse_update_journal.phase_started.side_effect = lambda run_id, key: _require_phase(key)
         entry.calculation_parameters_block = SimpleNamespace(
             prepare_functional_economics_backup=lambda: {},
             process_pending_targeted_recalculations=lambda **kw: action("proxy", {"request_count":0}),

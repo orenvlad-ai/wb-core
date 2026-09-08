@@ -6808,13 +6808,12 @@ class RegistryUploadHttpEntrypoint:
                     accounting = refresh(self.runtime.runtime_dir)
                     if accounting["status"] == "published":
                         publish_ready(self.runtime)
-                    return {**result, "fbs_snapshot_accounting": accounting}
+                    planning = self.inventory_planning.current()
+                    return {**result, "fbs_snapshot_accounting": accounting,
+                            "planning_inventory_readback": planning}
 
                 result = run_phase("functional_publication", publish_functional)
-                planning_inventory_readback = run_phase(
-                    "planning_inventory_readback",
-                    self.inventory_planning.current,
-                )
+                planning_inventory_readback = result["planning_inventory_readback"]
                 def dependent_replay() -> dict[str, Any]:
                     proxy_recalculation = (
                         self.calculation_parameters_block.process_pending_targeted_recalculations(
