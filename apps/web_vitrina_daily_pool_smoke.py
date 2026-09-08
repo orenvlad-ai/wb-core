@@ -126,6 +126,33 @@ def main():
     assert all(metric in new_rows for metric in METRICS)
     assert new_rows['proxy_profit_4_rub'].values_by_date[DAY] == 0
     assert new_rows['proxy_profit_4_rub'].values_by_date['2026-09-07'] == ''
+    # Persisted envelope must round-trip after automatic row creation.
+    import json
+    from dataclasses import asdict
+    from packages.application.web_vitrina_management_history import recalculate_current_envelope
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1TemporalSlot
+    fresh = replace(fresh, temporal_slots=[SheetVitrinaV1TemporalSlot('yesterday_closed','Вчера','2026-09-07'), SheetVitrinaV1TemporalSlot('today_current','Сегодня',DAY)])
+    raw_sheet = sparse['sheets'][0]
+    envelope = replace(fresh, sheets=[replace(target, rows=raw_sheet['rows'], row_count=len(raw_sheet['rows'])),
+        replace(target, sheet_name='STATUS', rows=[], row_count=0)])
+    updated = recalculate_current_envelope(envelope, business_date=DAY, parameters=(P,P))
+    assert updated.sheets[0].row_count == len(updated.sheets[0].rows)
+    decoded = _deserialize_sheet_vitrina_plan(json.dumps(asdict(updated)))
+    assert decoded.sheets[0].rows == updated.sheets[0].rows
+    # Read the exact legacy defect without changing values or relaxing other errors.
+    old_count = len(raw_sheet['rows'])
+    legacy = asdict(updated)
+    legacy['sheets'][0]['row_count'] = old_count
+    decoded = _deserialize_sheet_vitrina_plan(json.dumps(legacy))
+    assert decoded.sheets[0].rows == updated.sheets[0].rows
+    legacy['sheets'][0]['rows'][-1][1] = 'SKU:93|orderSum'
+    try:
+        _deserialize_sheet_vitrina_plan(json.dumps(legacy))
+    except ValueError as exc:
+        assert 'row_count must match' in str(exc)
+    else:
+        raise AssertionError('unrelated row corruption was accepted')
     print('daily_pool: 92/37/33, zero sales, sellout, day rollover, stock provenance, ad-only and campaign dates: ok')
 
 

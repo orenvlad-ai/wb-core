@@ -9912,6 +9912,8 @@ def _deserialize_sheet_vitrina_plan(raw_value: str) -> SheetVitrinaV1Envelope:
         raise ValueError("sheet_vitrina_v1 ready snapshot contains invalid JSON") from exc
     if not isinstance(payload, Mapping):
         raise ValueError("sheet_vitrina_v1 ready snapshot must contain a JSON object")
+    from packages.application.vitrina_economics import reconcile_owned_row_count
+    payload = reconcile_owned_row_count(payload)
     plan = parse_sheet_write_plan_payload(payload)
     effective_policies = effective_source_temporal_policies(plan.source_temporal_policies)
     if effective_policies == plan.source_temporal_policies:

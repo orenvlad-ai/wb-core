@@ -151,3 +151,34 @@ def project_catalog_economics(plan, *, day, parameters):
         coverage[str(version)] = evidence['evidence']
     working['metadata'].setdefault('catalog_economics_coverage', {})[day] = coverage
     return working
+
+
+def reconcile_owned_row_count(payload):
+    """Read compatibility for v1's appended, evidenced rows and stale count only.
+
+    Values and rows are untouched. All other count mismatches remain errors in
+    the strict plan parser. New publications already carry the correct count.
+    """
+    metadata = payload.get('metadata', {})
+    if not isinstance(metadata, dict) or not metadata.get('catalog_economics_coverage'):
+        return payload
+    cells = metadata.get('server_cell_presentation', {})
+    for sheet in payload.get('sheets', []):
+        if sheet.get('sheet_name') != 'DATA_VITRINA':
+            continue
+        rows, count = sheet.get('rows', []), sheet.get('row_count')
+        if not isinstance(count, int) or isinstance(count, bool) or not 0 <= count < len(rows):
+            continue
+        def owned(row):
+            if not isinstance(row, list) or len(row) < 2 or not isinstance(row[1], str):
+                return False
+            scope, _, metric = row[1].partition('|')
+            by_date = cells.get(row[1], {})
+            return (scope.startswith('SKU:') and metric in METRICS and isinstance(by_date, dict)
+                and any(isinstance(cell, dict) and cell.get('source') == SOURCE
+                        and cell.get('calculation_contract') == 'catalog_economics_v1'
+                        and cell.get('source_as_of_date') == day
+                        for day, cell in by_date.items()))
+        if all(owned(row) for row in rows[count:]):
+            sheet['row_count'] = len(rows)
+    return payload

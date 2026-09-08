@@ -402,7 +402,7 @@ def recalculate_current_envelope(plan: Any, *, business_date: str, parameters: t
     revised = recalculate_current(asdict(plan), business_date=business_date, parameters=parameters)
     revised_data = data_sheet(revised)
     return replace(plan, metadata=revised.get('metadata', {}), sheets=[
-        replace(s, rows=revised_data['rows']) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
+        replace(s, rows=revised_data['rows'], row_count=len(revised_data['rows'])) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
 
 
 def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, parameters: tuple[Any, Any] | None,
@@ -583,7 +583,7 @@ def recalculate_yesterday_envelope(plan: Any, *, business_date: str,
                                      operation_id='yesterday-proxy:' + day)
     revised = result['plan']
     return replace(plan, metadata=revised.get('metadata', {}), sheets=[
-        replace(s, rows=data_sheet(revised)['rows']) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
+        replace(s, rows=data_sheet(revised)['rows'], row_count=len(data_sheet(revised)['rows'])) if s.sheet_name == 'DATA_VITRINA' else s for s in plan.sheets])
 
 
 def recalculate_yesterday_rows(rows: Iterable[Any], *, business_date: str,
