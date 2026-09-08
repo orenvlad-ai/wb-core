@@ -2,7 +2,8 @@
 
 Date: 2026-09-08. Approved scope: boundary delta, read-only baseline and selected
 checks only. B2-02 and later are not implemented. No business entrypoint,
-publication behavior, source data, timer, workflow or selector policy changes.
+publication behavior, source data, timer or selector policy changes. The existing
+Gate's dependency-install step now uses an ephemeral venv (details below).
 
 ## Boundary and evidence
 
@@ -13,7 +14,10 @@ Prior source/writer matrices were reused, then compared to main `6e9cc950`
 the dated trading pool and period-reader evidence handling (#1242/#1243).
 Catalog membership, daily pool, structured metadata and historical isolation
 remain unchanged by this PR. Further concurrent main changes require a fresh
-integration check before ready-for-review.
+integration check before ready-for-review. Main `969ccaeb` (#1244–#1246) was then
+integrated: missing economic rows, row counts and dated read compatibility are
+covered by the existing catalog/daily-pool/history/runtime mappings. Nine targeted
+integration checks passed in 12.605 seconds on integrated head `03c189c9`.
 
 Read-only production observation used the active target contract and registry,
 SQLite `mode=ro`, `PRAGMA query_only=ON`, bounded queries and a manifest recheck.
@@ -94,6 +98,18 @@ Exact old-base plan `6e9cc950` → code head `3ee27676`: process + warehouse,
 openpyxl 3.1.5 only, 11 commands including compilation. It passed through the
 unchanged trusted harness in a clean venv in 28.32 seconds. All four repaired
 smokes, importer, unified FF form, process and selector also passed individually.
+The union of 41 new subject commands passed in 85.637 seconds. The exact final
+base `969ccaeb` → `03c189c9` plan passed all 11 commands in 29.67 seconds locally.
+
+The first real draft Gate (run 34233901899) exposed a hosted environment detail:
+pip installed into user-site because the system site-packages directory was not
+writable. Thus even the correct selected dependency was unavailable to `-I`.
+The existing Checks install step now creates an ephemeral venv under RUNNER_TEMP,
+installs only plan.pip with its explicit Python and publishes its bin directory
+to GITHUB_PATH for the next unchanged trusted-harness step. All nested python3
+and sys.executable/-I calls consequently use that same environment. Static wiring
+assertions plus the real existing launcher smoke cover this relationship.
+No checks, isolation, trusted-base ownership or release policy were bypassed.
 
 Because this PR includes `apps/*_smoke.py`, the existing release classification
 is **live_runtime**, not repo_only. Keep the PR DRAFT until task 0066 releases

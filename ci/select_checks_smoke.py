@@ -225,6 +225,15 @@ def exists(_head: str, path: str) -> bool:
 
 
 def main() -> None:
+    # The hosted system Python may install into user-site, which -I correctly
+    # excludes. Dependency install, trusted harness and nested Python must share
+    # the same ephemeral venv; the existing launcher smoke exercises -I for real.
+    workflow = (select_checks.ROOT / ".github/workflows/pr-gate.yml").read_text()
+    assert 'check_venv="$RUNNER_TEMP/wb-core-checks-venv"' in workflow
+    assert 'python3 -m venv "$check_venv"' in workflow
+    assert '"$check_venv/bin/python" -m pip install --disable-pip-version-check $packages' in workflow
+    assert 'echo "$check_venv/bin" >> "$GITHUB_PATH"' in workflow
+    assert workflow.index('>> "$GITHUB_PATH"') < workflow.index('python3 trusted-base/ci/run_checks.py')
     boundary_checks()
     rename_diff_check()
     docs = build_plan_from_paths(
