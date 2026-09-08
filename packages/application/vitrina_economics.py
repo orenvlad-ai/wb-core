@@ -3,6 +3,7 @@ from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from packages.application.calculation_parameters import calculate_proxy_3
 from packages.application.calculation_parameters_v4 import calculate_proxy_4
+from packages.application.daily_trading_pool import classify, remembered_active
 
 EFFECTIVE_DATE = '2026-09-08'
 SOURCE = 'web_vitrina_management_history_v1'
@@ -57,6 +58,12 @@ def project_catalog_economics(plan, *, day, parameters):
     cells = working.setdefault('metadata', {}).setdefault('server_cell_presentation', {})
     p3, p4 = parameters if parameters else (None, None)
     results = {3: {}, 4: {}}
+    remembered = remembered_active(cells, day) | set(
+        working['metadata'].get('daily_trading_pool', {}).get(day, []))
+    pool = {scope: classify(scope=scope, day=day, rows=rows, header=sheet['header'],
+                            cells=cells, remembered=remembered) for scope in scopes}
+    working['metadata'].setdefault('daily_trading_pool', {})[day] = sorted(
+        scope for scope, (state, _) in pool.items() if state == 'active')
 
     def put(key, value, evidence):
         if key not in rows:
@@ -72,6 +79,9 @@ def project_catalog_economics(plan, *, day, parameters):
 
     def value(scope, metric):
         row = rows.get(scope + '|' + metric)
+        cell = cells.get(scope + '|' + metric, {}).get(day, {})
+        if cell.get('state') == 'unavailable' or cell.get('candidate_only') is True or cell.get('source_as_of_date') not in (None, '', day):
+            return None
         return row[index] if row and len(row) > index else None
 
     for scope in scopes:
@@ -82,13 +92,20 @@ def project_catalog_economics(plan, *, day, parameters):
         operands = dict(order_sum=value(scope, 'orderSum'), order_count=value(scope, 'orderCount'),
                         ads_sum=value(scope, 'ads_sum'), cost=cost)
         for version, parameter in ((3, p3), (4, p4)):
-            result = calculate(operands, parameter, version=version, day=day)
+            pool_state, pool_reason = pool[scope]
+            result = (calculate(operands, parameter, version=version, day=day)
+                      if pool_state != 'inactive' else {'available': False, 'reason': pool_reason})
+            # Known zero activity can establish the result without an inventory
+            # signal; otherwise an unknown pool member remains an explicit gap.
+            if pool_state == 'unknown' and not result['available']:
+                result['reason'] = pool_reason + ' ' + result['reason']
             results[version][scope] = result
             profit = result.get('profit')
             revenue, qty = result.get('revenue'), result.get('quantity')
             evidence = {'state': 'unconfirmed' if result['available'] else 'unavailable',
+                        'daily_pool_state': pool_state, 'daily_pool_reason': pool_reason,
                         'quality_state': 'management_estimate' if result['available'] else 'unavailable',
-                        'quality_label': 'Управленческая оценка' if result['available'] else 'Нет данных',
+                        'quality_label': 'Управленческая оценка' if result['available'] else 'Вне пула продаж' if pool_state == 'inactive' else 'Нет данных',
                         'reason': 'Нет заказов и рекламных расходов за дату.' if result.get('state') == 'no_activity'
                                   else 'Расчёт по заказам, рекламе и себестоимости указанной даты.' if result['available'] else result['reason'],
                         'evidence': {'operand_date': day, 'operands': operands,
@@ -101,17 +118,19 @@ def project_catalog_economics(plan, *, day, parameters):
     coverage = {}
     for version in (3, 4):
         eligible = {s: r for s, r in results[version].items() if r['available']}
-        missing = {s: r['reason'] for s, r in results[version].items() if not r['available']}
-        profit = sum((r['profit'] for r in eligible.values()), Decimal(0)) if eligible else None
+        missing = {s: r['reason'] for s, r in results[version].items() if not r['available'] and pool[s][0] != 'inactive'}
+        inactive = [s for s in scopes if pool[s][0] == 'inactive']
+        profit = sum((r['profit'] for r in eligible.values()), Decimal(0)) if eligible or (scopes and not missing) else None
         revenue = sum((r['revenue'] for r in eligible.values()), Decimal(0)) if eligible else None
         qty = sum((r['quantity'] for r in eligible.values()), Decimal(0)) if eligible else None
         reason = ('Неполный итог. Не учтены: ' + '; '.join(s.removeprefix('SKU:') + ' — ' + why for s, why in missing.items())
-                  if missing else 'Учтён весь каталог. Прибыль и знаменатели рассчитаны по одному составу SKU.')
-        evidence = {'state': 'unconfirmed' if eligible else 'unavailable',
+                  if missing else 'Полный итог по дневному пулу продаж. Товары вне продажи полноту не ухудшают.')
+        evidence = {'state': 'unconfirmed' if profit is not None else 'unavailable',
                     'quality_state': 'partial' if missing else 'management_estimate',
                     'quality_label': 'Неполный итог' if missing else 'Управленческая оценка',
                     'reason': reason, 'quality_reason': reason,
-                    'evidence': {'eligible_scope': list(eligible), 'missing_scope': missing,
+                    'evidence': {'eligible_scope': list(eligible), 'missing_scope': missing, 'inactive_scope': inactive,
+                                 'pool_count': len(scopes) - len(inactive),
                                  'catalog_count': len(scopes), 'included_count': len(eligible), 'operand_date': day}}
         put(f'TOTAL|total_proxy_profit_{version}_rub', profit, evidence)
         put(f'TOTAL|proxy_margin_{version}_pct_total', profit / revenue if revenue else None, evidence)

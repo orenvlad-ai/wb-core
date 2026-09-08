@@ -299,6 +299,10 @@ def carry_forward(plan: Any, *, presentation: dict[str, Any], business_date: str
     if not presentation:
         return plan
     metadata = deepcopy(dict(plan.metadata or {}))
+    if business_date:
+        from packages.application.daily_trading_pool import remembered_active
+        prior = metadata.setdefault('daily_trading_pool', {}).get(business_date, [])
+        metadata['daily_trading_pool'][business_date] = sorted(set(prior) | remembered_active(presentation, business_date))
     cells = metadata.setdefault("server_cell_presentation", {})
     sheets = []
     for sheet in plan.sheets:
@@ -406,16 +410,20 @@ def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, paramet
     rows = list(rows)
     if not rows or business_date not in rows[0].values_by_date:
         return rows
-    presentation = {r.row_id:{business_date:dict(r.presentation_by_date.get(business_date, {}))} for r in rows}
+    dates = sorted({day for r in rows for day in r.values_by_date})
+    presentation = {r.row_id:{day:dict(r.presentation_by_date.get(day, {})) for day in dates} for r in rows}
     # Read-time quality overlays may replace an owned proxy marker. Ownership
     # comes from the saved plan; live costs come from the just-applied FBS view.
     for row in rows:
         original = original_presentation.get(row.row_id, {}).get(business_date, {})
         if original.get('source') == SOURCE and presentation[row.row_id][business_date].get('source') != INVENTORY_SOURCE:
             presentation[row.row_id][business_date] = original
-    pseudo = {'date_columns':[business_date], 'snapshot_id':snapshot_id, 'metadata':{'server_cell_presentation':presentation},
-              'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key',business_date],
-                         'rows':[['',r.row_id,r.values_by_date.get(business_date,'')] for r in rows]}]}
+    from packages.application.daily_trading_pool import remembered_active
+    pseudo = {'date_columns':dates, 'snapshot_id':snapshot_id,
+              'metadata':{'server_cell_presentation':presentation,
+                          'daily_trading_pool': {business_date: sorted(remembered_active(original_presentation, business_date))}},
+              'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key',*dates],
+                         'rows':[['',r.row_id,*[r.values_by_date.get(day,'') for day in dates]] for r in rows]}]}
     revised = recalculate_current(pseudo, business_date=business_date, parameters=parameters)
     return restore_rows(rows, presentation=revised['metadata']['server_cell_presentation'])
 
