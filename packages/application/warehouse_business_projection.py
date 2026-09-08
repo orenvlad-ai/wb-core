@@ -3286,6 +3286,7 @@ def reconcile_warehouse_business_projection(
     conn: sqlite3.Connection,
     *,
     target_dates: Iterable[str] | None = None,
+    ready_candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Exhaustively compare all 42 owned keys with exact functional truth."""
 
@@ -3343,10 +3344,15 @@ def reconcile_warehouse_business_projection(
     ready_fallback_bindings: dict[str, str] = {}
     if "sheet_vitrina_v1_ready_snapshots" in tables and normalized_dates:
         selected_dates = set(normalized_dates)
-        ready_rows = conn.execute(
-            "SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
+        ready_rows = [dict(row) for row in conn.execute(
+            "SELECT bundle_version,as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
             "ORDER BY as_of_date DESC,bundle_version DESC"
-        ).fetchall()
+        ).fetchall()]
+        if ready_candidate is not None:
+            key = (ready_candidate["bundle_version"], ready_candidate["as_of_date"])
+            ready_rows = [row for row in ready_rows if (row["bundle_version"], row["as_of_date"]) != key]
+            ready_rows.append(dict(ready_candidate))
+            ready_rows.sort(key=lambda row: (row["as_of_date"], row["bundle_version"]), reverse=True)
         for ready_row in ready_rows:
             ready_date = str(ready_row["as_of_date"])
             metadata = dict(_loads(ready_row["plan_json"], {}).get("metadata") or {})
@@ -3578,10 +3584,11 @@ def materialize_warehouse_business_projection_reconciliation(
     conn: sqlite3.Connection,
     *,
     materialized_at: str | None = None,
+    prepared_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Persist one exhaustive bulk reconciliation in the owning transaction."""
 
-    result = reconcile_warehouse_business_projection(conn)
+    result = dict(prepared_result) if prepared_result is not None else reconcile_warehouse_business_projection(conn)
     projection_state = conn.execute(
         f"SELECT revision_no,revision_id FROM {STATE_TABLE} WHERE slot=1"
     ).fetchone()

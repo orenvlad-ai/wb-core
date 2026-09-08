@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from contextlib import contextmanager
+from contextvars import ContextVar
+import fcntl
 from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
@@ -476,7 +479,43 @@ def audit_promo_campaign_archive(
     }
 
 
+_ARCHIVE_OWNER = ContextVar("promo_archive_owner", default=None)
+
+
+@contextmanager
+def promo_archive_fence(runtime_dir):
+    """One local source owner; acquire before any dependent SQLite writer."""
+    root = Path(runtime_dir).resolve()
+    if _ARCHIVE_OWNER.get() == root:
+        yield
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / ".promo-archive.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        token = _ARCHIVE_OWNER.set(root)
+        try:
+            yield
+        finally:
+            _ARCHIVE_OWNER.reset(token)
+
+
+def promo_archive_manifest(runtime_dir):
+    """Actual bytes and file set, not the diagnostic row-count fingerprint."""
+    archive = promo_campaign_archive_root(Path(runtime_dir))
+    paths = {p.resolve() for p in archive.glob("*/*") if p.is_file()}
+    for record in load_promo_campaign_archive(Path(runtime_dir)):
+        for value in (record.workbook_path, record.workbook_inspection_path):
+            if value:
+                paths.add(Path(value).resolve())
+    return {str(p): _sha256_path(p) if p.is_file() else None for p in sorted(paths)}
+
+
 def sync_promo_campaign_archive(runtime_dir: Path) -> PromoCampaignArchiveSyncSummary:
+    with promo_archive_fence(runtime_dir):
+        return _sync_promo_campaign_archive(runtime_dir)
+
+
+def _sync_promo_campaign_archive(runtime_dir: Path) -> PromoCampaignArchiveSyncSummary:
     runs_root = runtime_dir / "promo_xlsx_collector_runs"
     archive_root = promo_campaign_archive_root(runtime_dir)
     archive_root.mkdir(parents=True, exist_ok=True)
@@ -1783,6 +1822,8 @@ def _load_daily_price_truth(
         snapshot_date=snapshot_date,
         snapshot_role=PRICES_ACCEPTED_CURRENT_ROLE,
     )
+    from packages.application.ready_publication import consume_source
+    consume_source(source_key=PRICES_SOURCE_KEY, snapshot_date=snapshot_date)
     if _is_exact_prices_payload(payload, snapshot_date):
         note = "daily_price_source=prices_snapshot.accepted_current_snapshot"
         if captured_at:

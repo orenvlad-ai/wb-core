@@ -75,7 +75,9 @@ def run_recompute(
     if command == "apply" and not backup:
         return {"status": "blocked", "blocker": "apply requires --backup"}
 
-    db_path = runtime_dir / DB_FILENAME
+    from packages.application.ready_publication import operational_authority, check_authority, pin_queries, check_queries
+    authority = operational_authority(runtime_dir)
+    db_path = authority[0]
     if not db_path.exists():
         return {"status": "blocked", "blocker": f"runtime DB missing: {db_path}"}
 
@@ -92,8 +94,16 @@ def run_recompute(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("BEGIN")
+        source_pins = pin_queries(conn, [
+            ("SELECT * FROM registry_upload_current_state ORDER BY slot", ()),
+            ("SELECT * FROM registry_upload_config_v2 ORDER BY bundle_version,nm_id", ()),
+            ("SELECT captured_at,payload_json FROM temporal_source_slot_snapshots WHERE source_key='spp' AND snapshot_date=? AND snapshot_role=?",
+             (current_date, ACCEPTED_CURRENT_ROLE)),
+        ])
         current_bundle = _current_bundle(conn)
         enabled_nm_ids = _enabled_nm_ids(conn, current_bundle)
+        conn.rollback()  # Do not keep a read transaction across the external fetch.
         goods = _load_fixture_goods(fixture_goods_json) if fixture_goods_json else _fetch_seller_portal_goods(
             enabled_nm_ids,
             storage_state_path=storage_state_path,
@@ -137,11 +147,15 @@ def run_recompute(
             "backup_path": None,
         }
         ready_plan = ready_diff["new_plan"]
+        expected_ready = ready_diff.pop("expected_ready")
         dry_run_summary["ready_snapshot_changes"].pop("new_plan", None)
         if command == "dry-run":
             return dry_run_summary
 
         backup_path = _backup_db(db_path)
+        conn.execute("BEGIN IMMEDIATE")
+        check_authority(runtime_dir, authority)
+        check_queries(conn, source_pins)
         _apply_current_spp(
             conn,
             current_date=current_date,
@@ -149,6 +163,7 @@ def run_recompute(
             ready_plan=ready_plan,
             ready_as_of_date=ready_diff["ready_as_of_date"],
             captured_at=captured_at,
+            expected=expected_ready,
         )
         conn.commit()
         dry_run_summary["backup_path"] = str(backup_path)
@@ -351,6 +366,7 @@ def _build_ready_diff(
         {nm: _round_ready(value) for nm, value in new_by_nm.items()},
     )
     return {
+        "expected_ready": {"bundle_version": current_bundle, "as_of_date": ready_row["as_of_date"], "plan_json": ready_row["plan_json"]},
         "ready_as_of_date": ready_row["as_of_date"],
         "old_refreshed_at": ready_row["refreshed_at"],
         "changed_count": changed_count,
@@ -425,7 +441,13 @@ def _apply_current_spp(
     ready_plan: Mapping[str, Any],
     ready_as_of_date: str,
     captured_at: str,
+    expected: dict[str, Any],
 ) -> None:
+    from packages.application.ready_publication import ExpectedReady, check_expected, replace_ready
+    target = ExpectedReady(**expected)
+    if target.as_of_date != ready_as_of_date:
+        raise ValueError("spp_ready_target_mismatch")
+    check_expected(conn, target)
     payload = {
         "kind": "success",
         "snapshot_date": current_date,
@@ -447,19 +469,8 @@ def _apply_current_spp(
         """,
         (current_date, ACCEPTED_CURRENT_ROLE, captured_at, json.dumps(payload, ensure_ascii=False)),
     )
-    conn.execute(
-        """
-        UPDATE sheet_vitrina_v1_ready_snapshots
-        SET snapshot_id = ?, refreshed_at = ?, plan_json = ?
-        WHERE as_of_date = ?
-        """,
-        (
-            ready_plan["snapshot_id"],
-            captured_at,
-            json.dumps(ready_plan, ensure_ascii=False),
-            ready_as_of_date,
-        ),
-    )
+    replace_ready(conn, expected=target, snapshot_id=ready_plan["snapshot_id"],
+                  refreshed_at=captured_at, plan_json=json.dumps(ready_plan, ensure_ascii=False))
 
 
 def _utc_now() -> str:

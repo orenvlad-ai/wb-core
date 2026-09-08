@@ -142,31 +142,51 @@ def save(runtime_dir, book, *, expected, operation_id):
     Management publication is a separate obligation and never follows latest
     book implicitly. The public save always owns the common lock order.
     """
-    from packages.application.ready_publication import check_material, record_intent, complete_publication
     from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
-    db = StoreRegistry(Path(runtime_dir)).resolve("operational")
     inputs = book.get("publication_inputs", {}) if book["active"] else {}
-    now = datetime.now(timezone.utc).isoformat()
     with warehouse_functional_write_lock(Path(runtime_dir), timeout_seconds=5), writer_lock(runtime_dir):
-        with closing(sqlite3.connect(db, timeout=0)) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if inputs:
-                check_material(conn, inputs)
-            if load(runtime_dir)[1] != expected:
-                raise ValueError("fbs_accounting_compare_and_swap_failed")
-            record_intent(conn, operation_id=operation_id, attempt_id="1", kind="book_only",
-                expected=None, inputs=inputs, expected_book=expected, book_required=True,
-                ready_required=False, created_at=now, book_operation_id=operation_id)
-            conn.commit()  # Deliberately durable before the other database commit.
-            conn.execute("BEGIN IMMEDIATE")
-            if inputs:
-                check_material(conn, inputs)
-            version = _save_book(runtime_dir, book, expected=expected, operation_id=operation_id)
-            _after_book_commit()
-            complete_publication(conn, operation_id=operation_id, attempt_id="1", book_version=version,
-                                 after_digest=None, finished_at=now)
-            conn.commit()
+        return _commit_book_intent(runtime_dir, book, expected=expected, operation_id=operation_id,
+                                   inputs=inputs, kind="book_only")
+
+
+def _commit_book_intent(runtime_dir, book, *, expected, operation_id, inputs, kind):
+    """Private phase under the already held warehouse and book owners."""
+    from packages.application.ready_publication import check_material, record_intent, complete_publication
+    db = StoreRegistry(Path(runtime_dir)).resolve("operational")
+    now = datetime.now(timezone.utc).isoformat()
+    with closing(sqlite3.connect(db, timeout=0)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if inputs:
+            check_material(conn, inputs)
+        if load(runtime_dir)[1] != expected:
+            raise ValueError("fbs_accounting_compare_and_swap_failed")
+        record_intent(conn, operation_id=operation_id, attempt_id="1", kind=kind,
+            expected=None, inputs=inputs, expected_book=expected, book_required=True,
+            ready_required=False, created_at=now, book_operation_id=operation_id)
+        conn.commit()  # Deliberately durable before the other database commit.
+        conn.execute("BEGIN IMMEDIATE")
+        if inputs:
+            check_material(conn, inputs)
+        version = _save_book(runtime_dir, book, expected=expected, operation_id=operation_id)
+        _after_book_commit()
+        complete_publication(conn, operation_id=operation_id, attempt_id="1", book_version=version,
+                             after_digest=None, finished_at=now)
+        conn.commit()
     return version
+
+
+def _record_prepare_failure(runtime_dir, *, expected, error):
+    """Invalidate open operands without replacing ready or replaying old inputs."""
+    from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+    from uuid import uuid4
+    with warehouse_functional_write_lock(Path(runtime_dir), timeout_seconds=5), writer_lock(runtime_dir):
+        prior, version = load(runtime_dir)
+        if version != expected or not prior or not prior["active"]:
+            return  # A newer successful attempt/pause owns its own quality.
+        failed = {**prior, "publication_error": {"reason": str(error)[:500],
+                  "at": datetime.now(timezone.utc).isoformat()}}
+        _commit_book_intent(runtime_dir, failed, expected=expected, operation_id="failure-" + uuid4().hex,
+                            inputs={}, kind="book_quality_failure")
 
 
 def prepare(runtime_dir, *, now=None, opening=False):
@@ -223,7 +243,7 @@ def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expec
 
 
 def refresh(runtime_dir, *, ready_runtime=None):
-    prior, _ = load(runtime_dir)
+    prior, prior_version = load(runtime_dir)
     if prior is None or not prior["active"]:
         return {"status": "not_active"}
     if ready_runtime is not None:
@@ -233,7 +253,11 @@ def refresh(runtime_dir, *, ready_runtime=None):
             bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
         from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
         plan = _deserialize_sheet_vitrina_plan(expected_ready.plan_json)
-    book, expected = prepare(runtime_dir)
+    try:
+        book, expected = prepare(runtime_dir)
+    except Exception as exc:
+        _record_prepare_failure(runtime_dir, expected=prior_version, error=exc)
+        raise
     if book is None:
         return {"status": "not_active"}
     operation_id = "refresh-" + fingerprint(book)[7:]

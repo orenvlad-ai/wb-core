@@ -59,6 +59,10 @@ def main() -> int:
                 """,
                 (json.dumps(plan),),
             )
+            # The same date in another bundle is an independent publication
+            # target with its own original raw bytes and unrelated fields.
+            other = {**plan, "unrelated": "other-bundle-sentinel"}
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots(snapshot_id,bundle_version,activated_at,as_of_date,plan_version,refreshed_at,plan_json) SELECT 'snapshot-2','bundle-2',activated_at,as_of_date,plan_version,refreshed_at,? FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version='bundle-1'", (json.dumps(other, indent=2),))
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_canonical_cost_daily_state(
@@ -82,7 +86,7 @@ def main() -> int:
             runtime.db_path, date_from="2026-07-01", date_to="2026-07-15"
         )
         assert first == second
-        assert first["changed_cells"] == 1
+        assert first["changed_cells"] == 2
         applied = apply_publication(
             runtime.db_path,
             date_from="2026-07-01",
@@ -95,6 +99,12 @@ def main() -> int:
         assert applied["recovery_policy"]["lifecycle"] == "retained"
         assert applied["backup"]["full_database_copy"] is False
         assert applied["backup"]["copy_bytes"] == 0
+        with _connect(runtime.db_path) as conn:
+            rows = conn.execute("SELECT bundle_version,plan_json FROM sheet_vitrina_v1_ready_snapshots ORDER BY bundle_version").fetchall()
+            assert len(rows) == 2
+            assert json.loads(rows[0][1])["sheets"][0]["rows"][0][2] == 10
+            assert json.loads(rows[1][1])["sheets"][0]["rows"][0][2] == 10
+            assert json.loads(rows[1][1])["unrelated"] == "other-bundle-sentinel"
         no_op = build_publication_report(
             runtime.db_path, date_from="2026-07-01", date_to="2026-07-15"
         )

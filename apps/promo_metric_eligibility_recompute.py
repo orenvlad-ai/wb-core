@@ -19,6 +19,7 @@ from packages.application.promo_campaign_archive import (  # noqa: E402
     PromoCampaignArchiveSyncSummary,
     load_promo_campaign_archive,
     materialize_promo_result_from_archive,
+    promo_archive_fence, promo_archive_manifest,
 )
 from packages.application.root_storage_policy import (  # noqa: E402
     admit_root_write,
@@ -41,7 +42,8 @@ TOTAL_ROWS = {
 def main() -> None:
     args = _parse_args()
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
-    db_path = runtime_dir / DB_FILENAME
+    from packages.application.ready_publication import operational_authority
+    db_path = operational_authority(runtime_dir)[0]
     if not db_path.exists():
         raise SystemExit(f"runtime DB missing: {db_path}")
 
@@ -61,7 +63,12 @@ def main() -> None:
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def recompute_promo_eligibility(
+def recompute_promo_eligibility(*, runtime_dir: Path, **kwargs) -> dict[str, Any]:
+    with promo_archive_fence(runtime_dir):
+        return _recompute_promo_eligibility(runtime_dir=runtime_dir, **kwargs)
+
+
+def _recompute_promo_eligibility(
     *,
     runtime_dir: Path,
     date_from: str | None,
@@ -70,8 +77,18 @@ def recompute_promo_eligibility(
     apply: bool,
     backup: bool,
 ) -> dict[str, Any]:
-    db_path = runtime_dir / DB_FILENAME
+    from packages.application.ready_publication import operational_authority, pin_queries
+    authority = operational_authority(runtime_dir)
+    db_path = authority[0]
+    files = promo_archive_manifest(runtime_dir)
     with _connect(db_path) as conn:
+        conn.execute("BEGIN")
+        source_pins = pin_queries(conn, [
+            ("SELECT * FROM registry_upload_current_state ORDER BY slot", ()),
+            ("SELECT * FROM registry_upload_config_v2 ORDER BY bundle_version,nm_id", ()),
+            ("SELECT * FROM temporal_source_slot_snapshots WHERE source_key IN ('promo_by_price','prices_snapshot') ORDER BY source_key,snapshot_date,snapshot_role", ()),
+            ("SELECT * FROM temporal_source_snapshots WHERE source_key='promo_by_price' ORDER BY snapshot_date", ()),
+        ])
         current_state = _current_state(conn)
         enabled_nm_ids = _enabled_nm_ids(conn, current_state["bundle_version"])
         dates = _select_dates(conn, date_from=date_from, date_to=date_to, all_available=all_available)
@@ -134,6 +151,7 @@ def recompute_promo_eligibility(
             captured_at=captured_at,
             recomputed_by_date_role=recomputed_by_date_role,
             ready_updates=ready_updates,
+            source_pins=source_pins, runtime_dir=runtime_dir, authority=authority, files=files,
         )
 
     changed_dates = sorted(
@@ -221,7 +239,7 @@ def _build_ready_updates(
                     "changed_dates": changed_dates,
                     "metric_cells_changed": metric_cells_changed,
                     "plan_json": json.dumps(plan, ensure_ascii=False, separators=(",", ":")),
-                    "old_plan_json": json.dumps(original, ensure_ascii=False, separators=(",", ":")),
+                    "old_plan_json": row["plan_json"],
                 }
             )
         else:
@@ -292,10 +310,16 @@ def _apply_updates(
     captured_at: str,
     recomputed_by_date_role: dict[tuple[str, str], dict[str, Any]],
     ready_updates: list[dict[str, Any]],
+    source_pins, runtime_dir, authority, files,
 ) -> None:
+    from packages.application.ready_publication import ExpectedReady, replace_ready, check_queries, check_authority, ReadyPublicationConflict
+    if promo_archive_manifest(runtime_dir) != files:
+        raise ReadyPublicationConflict("promo_archive_source_changed")
     with _connect(db_path) as conn:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         try:
+            check_authority(runtime_dir, authority)
+            check_queries(conn, source_pins)
             for (snapshot_date, role), payload in sorted(recomputed_by_date_role.items()):
                 payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                 conn.execute(
@@ -318,14 +342,8 @@ def _apply_updates(
             for update in ready_updates:
                 if not update.get("metric_cells_changed"):
                     continue
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_ready_snapshots
-                    SET plan_json = ?
-                    WHERE bundle_version = ? AND as_of_date = ?
-                    """,
-                    (update["plan_json"], current_bundle, update["as_of_date"]),
-                )
+                replace_ready(conn, expected=ExpectedReady(current_bundle, update["as_of_date"], update["old_plan_json"]),
+                              plan_json=update["plan_json"])
             conn.commit()
         except Exception:
             conn.rollback()

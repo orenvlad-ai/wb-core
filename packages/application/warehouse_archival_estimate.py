@@ -83,6 +83,8 @@ def ensure_archival_estimate_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    from packages.application.ready_publication import ensure_material_revisions
+    ensure_material_revisions(conn)
 
 
 def load_archival_estimate_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[str, Any]:

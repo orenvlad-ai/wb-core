@@ -444,6 +444,8 @@ def _current_ui_wb_operand_smoke() -> None:
                 );
                 """
             )
+            from packages.application.ready_publication import ensure_material_revisions
+            ensure_material_revisions(conn)
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
                        snapshot_id,version_id,fetched_at,snapshot_date,requested_nm_ids_json,

@@ -155,7 +155,7 @@ def ensure_inventory_history_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def capture_inventory_history_from_ready_plan(
+def prepare_inventory_history_from_ready_plan(
     conn: sqlite3.Connection,
     *,
     plan: SheetVitrinaV1Envelope,
@@ -163,19 +163,13 @@ def capture_inventory_history_from_ready_plan(
     refreshed_at: str,
     generation_identity: str = "",
 ) -> dict[str, Any]:
-    """Append the current accepted component revision and finalize the closed day."""
+    """Build source-bound current/closed components on the publisher's RO snapshot."""
 
     _ensure_inventory_history_schema_ready(conn)
     current_date = _slot_date(plan, "today_current")
     closed_date = _slot_date(plan, "yesterday_closed")
-    result: dict[str, Any] = {
-        "status": "skipped",
-        "capture_id": "",
-        "capture_inserted": False,
-        "closed_capture_id": "",
-        "closed_capture_inserted": False,
-        "finalization_inserted": False,
-    }
+    result: dict[str, Any] = {"current": None, "closed": None, "closed_date": closed_date,
+        "prior_closed_capture": _latest_capture_id(conn, business_date=closed_date) if closed_date else ""}
     if current_date:
         wb_evidence = _canonical_current_wb_evidence(
             conn,
@@ -209,8 +203,7 @@ def capture_inventory_history_from_ready_plan(
                 "wb": dict(wb_evidence.get("source_manifest") or {}),
                 "fbs": _current_fbs_source(conn, fbs=fbs),
             }
-            capture = append_inventory_history_capture(
-                conn,
+            result["current"] = dict(
                 business_date=current_date,
                 capture_kind="accepted_refresh",
                 formula_version=FORMULA_VERSION,
@@ -223,13 +216,8 @@ def capture_inventory_history_from_ready_plan(
                 components=components,
                 captured_at=refreshed_at,
             )
-            result.update(
-                status="captured",
-                capture_id=capture["capture_id"],
-                capture_inserted=bool(capture["inserted"]),
-            )
     if closed_date:
-        closed_capture = _append_closed_date_ready_capture(
+        result["closed"] = _prepare_closed_date_ready_capture(
             conn,
             plan=plan,
             bundle_version=bundle_version,
@@ -237,13 +225,31 @@ def capture_inventory_history_from_ready_plan(
             refreshed_at=refreshed_at,
             generation_identity=generation_identity,
         )
+    return result
+
+
+def capture_inventory_history_from_ready_plan(
+    conn: sqlite3.Connection, *, plan: SheetVitrinaV1Envelope, bundle_version: str,
+    refreshed_at: str, generation_identity: str = "", prepared: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist prepared components/finalization in the ready owner's transaction."""
+    prepared = prepared if prepared is not None else prepare_inventory_history_from_ready_plan(
+        conn, plan=plan, bundle_version=bundle_version, refreshed_at=refreshed_at,
+        generation_identity=generation_identity)
+    result = {"status": "skipped", "capture_id": "", "capture_inserted": False,
+        "closed_capture_id": "", "closed_capture_inserted": False, "finalization_inserted": False}
+    if prepared["current"]:
+        capture = append_inventory_history_capture(conn, **prepared["current"])
+        result.update(status="captured", capture_id=capture["capture_id"], capture_inserted=bool(capture["inserted"]))
+    closed_date = prepared["closed_date"]
+    if closed_date:
+        closed_capture = append_inventory_history_capture(conn, **prepared["closed"]) if prepared["closed"] else None
         if closed_capture:
-            result["closed_capture_id"] = str(closed_capture["capture_id"])
-            result["closed_capture_inserted"] = bool(closed_capture["inserted"])
+            result.update(closed_capture_id=str(closed_capture["capture_id"]), closed_capture_inserted=bool(closed_capture["inserted"]))
         candidate = (
             str(closed_capture["capture_id"])
             if closed_capture
-            else _latest_capture_id(conn, business_date=closed_date)
+            else prepared["prior_closed_capture"]
         )
         if candidate:
             finalization = append_inventory_history_finalization(
@@ -670,7 +676,7 @@ def _materialize_scope(components: Sequence[Mapping[str, Any]]) -> dict[str, Any
     }
 
 
-def _append_closed_date_ready_capture(
+def _prepare_closed_date_ready_capture(
     conn: sqlite3.Connection,
     *,
     plan: SheetVitrinaV1Envelope,
@@ -805,8 +811,7 @@ def _append_closed_date_ready_capture(
             ],
         }
     )
-    return append_inventory_history_capture(
-        conn,
+    return dict(
         business_date=business_date,
         capture_kind="accepted_refresh",
         formula_version=FORMULA_VERSION,

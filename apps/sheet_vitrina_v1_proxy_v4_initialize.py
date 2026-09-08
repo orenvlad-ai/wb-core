@@ -325,6 +325,10 @@ def _apply_manifest(
         raise ProxyV4InitializationError("reviewed V4 manifest has empty targets")
     _require_v4_schema(runtime.db_path)
 
+    from packages.application.ready_publication import readonly, pin_proxy_repair_sources, check_queries
+    with readonly(runtime.db_path) as source_conn:
+        source_pins = pin_proxy_repair_sources(source_conn)
+
     existing_versions = _load_version_rows(runtime.db_path)
     current_snapshots = _load_exact_snapshots(
         runtime.db_path,
@@ -377,6 +381,7 @@ def _apply_manifest(
     backup_sha256 = _backup_and_verify(runtime.db_path, backup_path)
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        check_queries(conn, source_pins)
         if conn.execute(
             "SELECT 1 FROM sheet_vitrina_v1_proxy_v4_parameter_versions LIMIT 1"
         ).fetchone() is not None:

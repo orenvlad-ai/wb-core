@@ -434,6 +434,7 @@ class RegistryUploadDbBackedRuntime:
         from packages.application.ready_publication import (
             readonly, capture_material, check_material, check_expected, replace_ready, check_build_inputs, capture_history,
             record_intent, complete_publication, digest, ReadyPublicationConflict,
+            MATERIAL_TABLES, INVENTORY_PREPARATION_TABLES,
         )
         from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
         from uuid import uuid4
@@ -441,11 +442,13 @@ class RegistryUploadDbBackedRuntime:
             raise ReadyPublicationConflict("ready_candidate_target_mismatch")
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
         active_inventory = inventory_from_book(book, now=publication_now) if book and book["active"] else None
+        if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
+            raise ReadyPublicationConflict("ready_current_book_operand_unavailable")
         with readonly(self.db_path) as conn:
             check_expected(conn, expected)
             check_build_inputs(conn, build_inputs)
-            material_inputs = capture_material(conn)
-            history_inputs = capture_history(conn, current_state.bundle_version)
+            material_inputs = capture_material(conn, tables=(*MATERIAL_TABLES, *INVENTORY_PREPARATION_TABLES))
+            history_inputs = capture_history(conn)
             registry_row = conn.execute("SELECT bundle_version,activated_at FROM registry_upload_current_state WHERE slot=1").fetchone()
             if tuple(registry_row or ()) != (current_state.bundle_version, current_state.activated_at):
                 raise ReadyPublicationConflict("ready_registry_changed")
@@ -478,6 +481,14 @@ class RegistryUploadDbBackedRuntime:
                 as_of_date=plan.as_of_date,
                 plan=plan,
             )
+            from packages.application.warehouse_business_projection import reconcile_warehouse_business_projection
+            reconciliation = reconcile_warehouse_business_projection(conn, ready_candidate={
+                "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date,
+                "plan_json": _serialize_sheet_vitrina_plan(plan)})
+            from packages.application.sheet_vitrina_v1_inventory_history import prepare_inventory_history_from_ready_plan
+            inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=plan,
+                bundle_version=current_state.bundle_version, refreshed_at=refreshed_at,
+                generation_identity=current_state.bundle_version)
         plan = replace(plan, metadata={**dict(plan.metadata or {}), "ready_publication_target": {
             "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date}})
         serialized_plan = _serialize_sheet_vitrina_plan(plan)
@@ -489,7 +500,7 @@ class RegistryUploadDbBackedRuntime:
             check_expected(conn, expected)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
-            if capture_history(conn, current_state.bundle_version) != history_inputs:
+            if capture_history(conn) != history_inputs:
                 raise ReadyPublicationConflict("ready_history_changed")
             if load(self.runtime_dir)[1] != expected_book:
                 raise ReadyPublicationConflict("ready_book_changed")
@@ -503,7 +514,7 @@ class RegistryUploadDbBackedRuntime:
             check_expected(conn, expected)
             check_material(conn, material_inputs)
             check_build_inputs(conn, build_inputs)
-            if capture_history(conn, current_state.bundle_version) != history_inputs:
+            if capture_history(conn) != history_inputs:
                 raise ReadyPublicationConflict("ready_history_changed")
             if current_business_date_iso() != publication_date:
                 raise ReadyPublicationConflict("ready_business_date_changed")
@@ -521,13 +532,15 @@ class RegistryUploadDbBackedRuntime:
                 bundle_version=current_state.bundle_version,
                 refreshed_at=refreshed_at,
                 generation_identity=current_state.bundle_version,
+                prepared=inventory_history,
             )
             # The ready-snapshot writer owns exact warehouse-history bindings.
-            # Materialize the exhaustive product-capital reconciliation here;
-            # status GETs only read the compact durable result.
+            # Persist the already prepared reconciliation; no exhaustive history
+            # scan or domain rebuild is allowed under this writer.
             materialize_warehouse_business_projection_reconciliation(
                 conn,
                 materialized_at=refreshed_at,
+                prepared_result=reconciliation,
             )
             complete_publication(conn, operation_id=operation_id, attempt_id=attempt_id,
                 book_version=book_version, after_digest=digest(serialized_plan), finished_at=refreshed_at)

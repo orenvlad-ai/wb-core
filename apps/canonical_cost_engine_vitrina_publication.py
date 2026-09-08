@@ -154,16 +154,20 @@ def _semantic_lookups_conn(
     return lookups, semantic
 
 
+def _ready_key(bundle, day):
+    return json.dumps([str(bundle), str(day)], separators=(",", ":"))
+
+
 def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict[str, Any]:
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT as_of_date, plan_json FROM sheet_vitrina_v1_ready_snapshots "
-            "WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date",
+            "SELECT * FROM sheet_vitrina_v1_ready_snapshots "
+            "WHERE as_of_date BETWEEN ? AND ? ORDER BY bundle_version,as_of_date",
             (date_from, date_to),
         ).fetchall()
         if not rows:
             raise ValueError("no ready snapshots exist in the publication range")
-        decoded_plans = {str(row[0]): json.loads(row[1]) for row in rows}
+        decoded_plans = {_ready_key(row["bundle_version"], row["as_of_date"]): json.loads(row["plan_json"]) for row in rows}
         projection_dates = sorted(
             {
                 str(value)
@@ -180,8 +184,9 @@ def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict
     snapshots: list[dict[str, Any]] = []
     plans: dict[str, str] = {}
     for row in rows:
-        day = str(row[0])
-        plan = decoded_plans[day]
+        day = str(row["as_of_date"])
+        target_key = _ready_key(row["bundle_version"], day)
+        plan = decoded_plans[target_key]
         changed = 0
         for sheet in plan.get("sheets", []):
             header = sheet.get("header", [])
@@ -234,16 +239,17 @@ def _publication_payload(db_path: Path, *, date_from: str, date_to: str) -> dict
                 "projection": "paid_capital_for_product_capital_and_recognized_wb_cost",
                 "source_date": day,
             }
-        plans[day] = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
-        snapshots.append({"as_of_date": day, "changed_cells": changed})
+        plans[target_key] = json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
+        snapshots.append({"bundle_version": row["bundle_version"], "as_of_date": day, "changed_cells": changed})
         changed_cells += changed
     snapshot_inputs = {
-        str(row[0]): "sha256:" + hashlib.sha256(str(row[1]).encode()).hexdigest()
+        _ready_key(row["bundle_version"], row["as_of_date"]): "sha256:" + hashlib.sha256(str(row["plan_json"]).encode()).hexdigest()
         for row in rows
     }
     return {
         "snapshots": snapshots,
         "plans": plans,
+        "before_images": [dict(row) for row in rows],
         "changed_cells": changed_cells,
         "snapshot_input_digest": "sha256:" + _hash(snapshot_inputs),
         "canonical_input_digest": "sha256:" + _hash(semantic_lookups),
@@ -272,6 +278,7 @@ def build_publication_report(
         **approval,
         "fingerprint": "sha256:" + _hash(approval),
         "plans": payload["plans"],
+        "before_images": payload["before_images"],
     }
 
 
@@ -313,23 +320,9 @@ def apply_publication(
             },
         }
     registry.ensure_schema()
-    with closing(
-        sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
-    ) as source:
-        source.row_factory = sqlite3.Row
-        source.execute("PRAGMA query_only=ON")
-        before_rows = [
-            dict(row)
-            for row in source.execute(
-                """
-                SELECT * FROM sheet_vitrina_v1_ready_snapshots
-                WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date
-                """,
-                (date_from, date_to),
-            )
-        ]
+    before_rows = before["before_images"]
     after_rows = [
-        {**row, "plan_json": before["plans"][str(row["as_of_date"])]}
+        {**row, "plan_json": before["plans"][_ready_key(row["bundle_version"], row["as_of_date"])]}
         for row in before_rows
     ]
     recovery = registry.prepare_t1(
@@ -340,7 +333,7 @@ def apply_publication(
         before_images=[
             {
                 "table": "sheet_vitrina_v1_ready_snapshots",
-                "key": {"as_of_date": str(old["as_of_date"])},
+                "key": {"bundle_version": str(old["bundle_version"]), "as_of_date": str(old["as_of_date"])},
                 "before": old,
                 "after": new,
             }
@@ -360,14 +353,14 @@ def apply_publication(
             conn.execute("BEGIN IMMEDIATE")
             try:
                 current_rows = conn.execute(
-                    "SELECT as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
-                    "WHERE as_of_date BETWEEN ? AND ? ORDER BY as_of_date",
+                    "SELECT bundle_version,as_of_date,plan_json FROM sheet_vitrina_v1_ready_snapshots "
+                    "WHERE as_of_date BETWEEN ? AND ? ORDER BY bundle_version,as_of_date",
                     (date_from, date_to),
                 ).fetchall()
                 current_input = "sha256:" + _hash(
                     {
-                        str(row[0]): "sha256:"
-                        + hashlib.sha256(str(row[1]).encode()).hexdigest()
+                        _ready_key(row[0], row[1]): "sha256:"
+                        + hashlib.sha256(str(row[2]).encode()).hexdigest()
                         for row in current_rows
                     }
                 )
@@ -377,7 +370,7 @@ def apply_publication(
                     {
                         str(value)
                         for row in current_rows
-                        for sheet in json.loads(row[1]).get("sheets", [])
+                        for sheet in json.loads(row[2]).get("sheets", [])
                         for value in sheet.get("header", [])
                         if _publication_date_column(
                             value, date_from=date_from, date_to=date_to
@@ -388,11 +381,11 @@ def apply_publication(
                 current_canonical_input = "sha256:" + _hash(semantic_lookups)
                 if current_canonical_input != before["canonical_input_digest"]:
                     raise ValueError("publication canonical input drift")
-                for day, plan_json in before["plans"].items():
-                    conn.execute(
-                        "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
-                        (plan_json, day),
-                    )
+                from packages.application.ready_publication import ExpectedReady, replace_ready
+                for row in before_rows:
+                    key = _ready_key(row["bundle_version"], row["as_of_date"])
+                    replace_ready(conn, expected=ExpectedReady(row["bundle_version"], row["as_of_date"], row["plan_json"]),
+                                  plan_json=before["plans"][key])
                 conn.commit()
             except Exception:
                 conn.rollback()

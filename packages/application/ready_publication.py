@@ -1,6 +1,7 @@
 """Exact, connection-owned publication of the existing dated ready row.
 
-This helper never opens a writer, commits, retries or relaxes a domain approval.
+Publication helpers never open a writer, commit, retry or relax a domain approval.
+Additive schema bootstrap alone completes its own setup transaction if needed.
 Recovery callers retain their source guards and receipt in their own transaction.
 """
 from __future__ import annotations
@@ -94,6 +95,18 @@ def replace_ready(conn, *, expected: ExpectedReady, plan_json: str,
     return result
 
 
+def delete_ready(conn, *, expected: ExpectedReady):
+    """Exact undo of a reviewed inserted row, not a historical purge API."""
+    if not conn.in_transaction or not expected.exists:
+        raise ValueError("ready_delete_requires_owner_transaction_and_after_image")
+    check_expected(conn, expected)
+    result = conn.execute(f"DELETE FROM {TABLE} WHERE bundle_version=? AND as_of_date=? AND plan_json=?",
+                         (expected.bundle_version, expected.as_of_date, expected.plan_json))
+    if result.rowcount != 1:
+        raise ReadyPublicationConflict("ready_delete_compare_and_swap_failed")
+    return result
+
+
 # Compact, source-owned revisions of the material tables consumed by FBS and
 # ready transformations. A commit to a job/log/other module is not input drift.
 # Triggers change revisions in the source transaction, including non-HTTP paths.
@@ -107,12 +120,26 @@ MATERIAL_TABLES = (
         "ff_pool_movement_lines", "ff_pool_documents", "ff_pool_document_lines",
         "ff_pool_document_expense_lines", "ff_pool_document_relations", "ff_pool_balances",
         "warehouse_functional_active", "warehouse_functional_versions", "warehouse_functional_balances",
+        "warehouse_functional_cutovers", "warehouse_functional_events", "warehouse_wb_daily_cost",
+        "warehouse_archival_estimate_versions", "warehouse_archival_estimate_rows", "warehouse_archival_estimate_active",
         "warehouse_functional_read_models", "warehouse_wb_snapshots", "warehouse_business_projection_current_rows",
         "calculation_parameter_versions", "proxy_v4_parameter_versions",
+        "sku_action_events",
         "inventory_history_captures", "inventory_history_components", "inventory_history_finalizations",
     )],
 )
 REVISIONS = "sheet_vitrina_v1_ready_input_revisions"
+# The existing immutable inventory capture still consumes legacy FBS quality.
+# Pin these only at its RO preparation, not before unrelated live API collection.
+INVENTORY_PREPARATION_TABLES = tuple("sheet_vitrina_v1_" + name for name in (
+    "ff_pool_cutover_manifests", "ff_pool_feature_epochs", "ff_pool_fbs_lifecycle_current",
+    "ff_pool_fbs_applicability_events", "ff_pool_fbs_identity_pending",
+    "ff_pool_fbs_identity_pending_resolutions", "ff_pool_fbs_drain_state",
+    "ff_pool_fbs_forward_generations", "ff_pool_fbs_forward_state",
+    "ff_pool_fbs_mapping_extensions", "ff_pool_fbs_mapping_extension_allocations",
+    "wb_supplies_fbs_order_observations", "wb_supplies_fbs_status_observations",
+    "wb_supplies_fbs_identity_mappings", "wb_supplies_fbs_identity_evidence",
+))
 PARAMETER_TABLES = tuple(table for table in MATERIAL_TABLES if "parameter_versions" in table)
 _CAPTURE = ContextVar("ready_publication_input_capture", default=None)
 
@@ -121,7 +148,9 @@ _CAPTURE = ContextVar("ready_publication_input_capture", default=None)
 def capture_build_inputs(db_path):
     with readonly(db_path) as conn:
         inputs = {"material": capture_material(conn, tables=tuple(
-            table for table in MATERIAL_TABLES if table not in PARAMETER_TABLES)), "sources": {}, "consumed": {}, "conflicts": []}
+            table for table in MATERIAL_TABLES if table not in PARAMETER_TABLES)),
+            "history": [list(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date")],
+            "sources": {}, "consumed": {}, "conflicts": []}
     token = _CAPTURE.set(inputs)
     try:
         yield inputs
@@ -171,6 +200,8 @@ def check_build_inputs(conn, inputs):
     if inputs.get("conflicts"):
         raise ReadyPublicationConflict("ready_source_changed_during_build")
     check_material(conn, inputs["material"])
+    if [list(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date")] != inputs["history"]:
+        raise ReadyPublicationConflict("ready_history_changed_during_build")
     for item in inputs["consumed"].values():
         role = item["snapshot_role"]
         table = "temporal_source_snapshots" if role is None else "temporal_source_slot_snapshots"
@@ -185,6 +216,18 @@ def check_build_inputs(conn, inputs):
 def ensure_publication_schema(conn) -> None:
     """Additive bootstrap only; never called by a read or inside an apply."""
     ensure_material_revisions(conn)
+    conn.execute("""CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ready_temporal_revisions(
+        source_key TEXT NOT NULL,snapshot_date TEXT NOT NULL,snapshot_role TEXT NOT NULL,
+        revision INTEGER NOT NULL,PRIMARY KEY(source_key,snapshot_date,snapshot_role))""")
+    for table, role in (("temporal_source_snapshots", "''"), ("temporal_source_slot_snapshots", "{row}.snapshot_role")):
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            continue
+        for event in ("INSERT", "UPDATE", "DELETE"):
+            row = "old" if event == "DELETE" else "new"
+            when = " WHEN old.captured_at IS NOT new.captured_at OR old.payload_json IS NOT new.payload_json" if event == "UPDATE" else ""
+            conn.execute(f"CREATE TRIGGER IF NOT EXISTS ready_temporal_{table}_{event.lower()} AFTER {event} ON {table}{when} BEGIN "
+                f"INSERT INTO sheet_vitrina_v1_ready_temporal_revisions VALUES({row}.source_key,{row}.snapshot_date,{role.format(row=row)},1) "
+                "ON CONFLICT(source_key,snapshot_date,snapshot_role) DO UPDATE SET revision=revision+1; END")
     conn.execute("""CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_ready_publications(
         operation_id TEXT NOT NULL,attempt_id TEXT NOT NULL,kind TEXT NOT NULL,
         bundle_version TEXT,as_of_date TEXT,expected_digest TEXT NOT NULL,
@@ -201,7 +244,8 @@ def ensure_publication_schema(conn) -> None:
     conn.execute(f"INSERT OR IGNORE INTO sheet_vitrina_v1_ready_revisions SELECT bundle_version,as_of_date,0 FROM {TABLE}")
     for event in ("INSERT", "UPDATE", "DELETE"):
         row = "old" if event == "DELETE" else "new"
-        when = " WHEN old.plan_json IS NOT new.plan_json" if event == "UPDATE" else ""
+        when = " WHEN " + " OR ".join(f"old.{column} IS NOT new.{column}" for column in (
+            "bundle_version", "as_of_date", "plan_json", "snapshot_id", "plan_version", "refreshed_at", "activated_at")) if event == "UPDATE" else ""
         conn.execute(f"CREATE TRIGGER IF NOT EXISTS ready_history_{event.lower()} AFTER {event} ON {TABLE}{when} BEGIN "
             f"INSERT INTO sheet_vitrina_v1_ready_revisions VALUES({row}.bundle_version,{row}.as_of_date,1) "
             "ON CONFLICT(bundle_version,as_of_date) DO UPDATE SET revision=revision+1; END")
@@ -209,9 +253,10 @@ def ensure_publication_schema(conn) -> None:
 
 def ensure_material_revisions(conn) -> None:
     """Also called by the three lazy source-schema owners before their first write."""
+    was_in_transaction = conn.in_transaction
     conn.execute(f"CREATE TABLE IF NOT EXISTS {REVISIONS}(source_table TEXT PRIMARY KEY,revision INTEGER NOT NULL)")
     existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    for table in MATERIAL_TABLES:
+    for table in (*MATERIAL_TABLES, *INVENTORY_PREPARATION_TABLES):
         if table not in existing:
             continue
         conn.execute(f"INSERT OR IGNORE INTO {REVISIONS} VALUES(?,0)", (table,))
@@ -222,9 +267,13 @@ def ensure_material_revisions(conn) -> None:
             when = " WHEN " + different if event == "UPDATE" else ""
             conn.execute(f'CREATE TRIGGER IF NOT EXISTS "{trigger}" AFTER {event} ON "{table}"{when} '
                 f"BEGIN UPDATE {REVISIONS} SET revision=revision+1 WHERE source_table='{table}'; END")
+    if not was_in_transaction:
+        conn.commit()  # Complete only this bootstrap; never commit its owner's write.
 
 
-def capture_history(conn, bundle_version):
+def capture_history(conn, bundle_version=None):
+    if bundle_version is None:
+        return [list(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date")]
     return dict(conn.execute("SELECT as_of_date,revision FROM sheet_vitrina_v1_ready_revisions WHERE bundle_version=?",
                              (bundle_version,)))
 
@@ -245,6 +294,57 @@ def check_material(conn, expected) -> None:
     changed = [name for name in expected if current[name] != expected[name]]
     if changed:
         raise ReadyPublicationConflict("ready_material_input_changed:" + ",".join(changed))
+
+
+def pin_queries(conn, queries):
+    """Bounded source reads for reviewed repair adapters without epoch owners.
+
+    SQL and scope are constants supplied by the source adapter. Capture before
+    dependent preparation; recheck on its existing writer connection. No writes,
+    arbitrary table-wide data_version gate or independent transaction is added.
+    """
+    result = []
+    for sql, params in queries:
+        hashed = hashlib.sha256()
+        for row in conn.execute(sql, params):
+            hashed.update(canonical(list(row)).encode())
+            hashed.update(b"\n")
+        result.append((sql, tuple(params), "sha256:" + hashed.hexdigest()))
+    return result
+
+
+def check_queries(conn, expected):
+    if pin_queries(conn, [(sql, params) for sql, params, _ in expected]) != expected:
+        raise ReadyPublicationConflict("ready_repair_source_changed")
+
+
+def operational_authority(runtime_dir):
+    from packages.application.storage_registry import StoreRegistry
+    registry = StoreRegistry(Path(runtime_dir))
+    manifest = registry.load()
+    return registry.resolve("operational", manifest=manifest), manifest.manifest_sha256
+
+
+def check_authority(runtime_dir, expected):
+    if operational_authority(runtime_dir) != expected:
+        raise ReadyPublicationConflict("ready_storage_authority_changed")
+
+
+def pin_proxy_repair_sources(conn):
+    """Exact compact source boundary before the existing bounded V4 rebuild."""
+    tables = ("registry_upload_current_state", "registry_upload_config_v2",
+        "sheet_vitrina_v1_calculation_parameter_versions", "sheet_vitrina_v1_proxy_v4_parameter_versions",
+        "wb_finance_weekly_aggregates", "wb_finance_weekly_sync")
+    placeholders = ",".join("?" for _ in tables)
+    queries = [(f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({placeholders}) ORDER BY name", tables),
+        ("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date", ()),
+        ("SELECT * FROM sheet_vitrina_v1_ready_temporal_revisions WHERE source_key='sales_funnel_history' ORDER BY snapshot_date,snapshot_role", ())]
+    existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in tables:
+        if table in existing:
+            columns = [r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')]
+            queries.append((f'SELECT * FROM "{table}" ORDER BY ' + ",".join('"' + c + '"' for c in columns), ()))
+    return pin_queries(conn, queries)
 
 
 def record_intent(conn, *, operation_id, attempt_id, kind, expected, inputs,

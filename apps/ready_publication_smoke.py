@@ -108,6 +108,12 @@ def cas_child(channel, db_path, expected):
             raise AssertionError("stale candidate was accepted")
 
 
+def committed_child(channel, root):
+    runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(root))
+    save(runtime, make_plan(), prepared=make_book(Path(root), quantity="1900"))
+    checkpoint(channel, "ready_committed_before_ack")
+
+
 class PublicationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -178,6 +184,74 @@ class PublicationTests(unittest.TestCase):
                 publication.check_material(conn, before)
             publication.capture_material(conn)
 
+    def test_actual_nested_prices_sku_events_and_cross_bundle_donor_drift(self):
+        from packages.application.promo_campaign_archive import _load_daily_price_truth
+        with publication.capture_build_inputs(self.runtime.db_path) as inputs:
+            # Even absence is an operand: no exact price produces a missing cell.
+            _load_daily_price_truth(runtime_dir=self.root, snapshot_date=DAY, requested_nm_ids=[1])
+        self.assertTrue(inputs["consumed"])
+        self.runtime.save_temporal_source_slot_snapshot(source_key="prices_snapshot", snapshot_date=DAY,
+            snapshot_role="accepted_current_snapshot", captured_at=STAMP, payload={"items": []})
+        with publication.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, "ready_source_changed"):
+                publication.check_build_inputs(conn, inputs)
+        with publication.capture_build_inputs(self.runtime.db_path) as inputs:
+            self.runtime.load_sku_action_daily_metric_lookup(as_of_date=DAY)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute("INSERT INTO sheet_vitrina_v1_sku_action_events(event_id,nm_id,parameter,requested_at,confirmed_at,commit_status,readback_status) VALUES('confirmed',1,'price',?,?, 'confirmed','matched')", (STAMP, STAMP))
+        with publication.readonly(self.runtime.db_path) as conn:
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, "sku_action_events"):
+                publication.check_build_inputs(conn, inputs)
+        save(self.runtime, make_plan())
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET bundle_version='donor'")
+        absent = self.expected()
+        self.assertFalse(absent.exists)
+        with publication.capture_build_inputs(self.runtime.db_path) as inputs:
+            self.runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=OUTER)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=json_set(plan_json,'$.donor_changed',1)")
+        with publication.readonly(self.runtime.db_path) as conn:
+            publication.check_expected(conn, absent)
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, "ready_history"):
+                publication.check_build_inputs(conn, inputs)
+
+    def test_prepared_reconciliation_outside_writer_matches_committed_candidate(self):
+        from packages.application import warehouse_business_projection as projection
+        from packages.application import sheet_vitrina_v1_inventory_history as history
+        original, original_history = projection.reconcile_warehouse_business_projection, history.prepare_inventory_history_from_ready_plan
+        observed = []
+        def prepare(conn, **kwargs):
+            self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
+            value = original(conn, **kwargs)
+            observed.append(value)
+            return value
+        def inventory(conn, **kwargs):
+            self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
+            return original_history(conn, **kwargs)
+        with patch.object(projection, "reconcile_warehouse_business_projection", side_effect=prepare), \
+             patch.object(history, "prepare_inventory_history_from_ready_plan", side_effect=inventory):
+            save(self.runtime, make_plan())
+        self.assertEqual(len(observed), 1)
+        with publication.readonly(self.runtime.db_path) as conn:
+            self.assertEqual(original(conn), observed[0])
+
+    def test_crash_after_ready_commit_reads_same_exact_complete_receipt(self):
+        initial, expected = make_book(self.root, opening=True)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        with fixture_process(committed_child, str(self.root)) as child:
+            child.wait("ready_committed_before_ack")
+            accepted = self.expected()
+            child.crash()
+        with publication.readonly(self.runtime.db_path) as conn:
+            operation = conn.execute("SELECT operation_id FROM sheet_vitrina_v1_ready_publications WHERE kind='book_ready'").fetchone()[0]
+        status = book.publication_status(self.root, operation_id=operation)
+        self.assertEqual(status["state"], "complete")
+        self.assertEqual(status["after_digest"], publication.digest(accepted.plan_json))
+        self.assertEqual(book.publication_status(self.root, operation_id=operation), status)
+        self.assertEqual(self.expected(), accepted)
+
     def test_book_ahead_crash_and_restart_keep_accepted_pair_and_strict_consumer(self):
         initial, expected = make_book(self.root, opening=True)
         first_version = book.save(self.root, initial, expected=expected, operation_id="opening")
@@ -221,6 +295,34 @@ class PublicationTests(unittest.TestCase):
         paused = {**initial, "active": False}
         book.save(self.root, paused, expected=book.load(self.root)[1], operation_id="pause")
         self.assertIsNone(book.load_management_inventory(self.root, plan, now=NOW))
+
+    def test_prepare_failure_preserves_display_but_rejects_open_operands(self):
+        initial, expected = make_book(self.root, opening=True)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        save(self.runtime, make_plan())
+        before = self.expected()
+        with patch.object(book, "prepare", side_effect=ValueError("source_corrupt")):
+            with self.assertRaisesRegex(ValueError, "source_corrupt"):
+                book.refresh(self.root)
+        self.assertEqual(before, self.expected())
+        self.assertIsNone(book.load_management_inventory(self.root, self.runtime.load_sheet_vitrina_ready_snapshot(), now=NOW))
+        self.assertEqual(book.load_inventory(self.root, now=NOW).payload()["quality"], "unavailable")
+        self.assertIsNone(book.load_shared(self.root).resolve(nm_id="1", operation_date=NOW.date()).get("unit_cost_rub"))
+        with self.assertRaisesRegex(publication.ReadyPublicationConflict, "book_operand_unavailable"):
+            save(self.runtime, make_plan())
+        self.assertEqual(before, self.expected())
+
+    def test_old_failed_prepare_does_not_mark_newer_book_or_paused_book(self):
+        initial, expected = make_book(self.root, opening=True)
+        old = book.save(self.root, initial, expected=expected, operation_id="opening")
+        newer, expected = make_book(self.root, quantity="1900")
+        version = book.save(self.root, newer, expected=expected, operation_id="newer")
+        book._record_prepare_failure(self.root, expected=old, error="old_failure")
+        self.assertEqual(book.load(self.root)[1], version)
+        self.assertFalse(book.load(self.root)[0].get("publication_error"))
+        paused = book.save(self.root, {**newer, "active": False}, expected=version, operation_id="pause")
+        book._record_prepare_failure(self.root, expected=paused, error="paused_failure")
+        self.assertEqual(book.load(self.root)[1], paused)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,11 @@
     "ready_publication": {
       "patterns": [
         "packages/application/ready_publication.py",
+        "packages/application/promo_campaign_archive.py",
+        "packages/application/sheet_vitrina_v1_inventory_history.py",
+        "packages/application/warehouse_business_projection.py",
+        "packages/application/warehouse_archival_estimate.py",
+        "packages/application/warehouse_recovery_policy.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/adapters/registry_upload_http_entrypoint.py",
@@ -34,6 +39,13 @@
       ],
       "commands": [
         ["python3", "apps/ready_publication_smoke.py"],
+        ["python3", "apps/ready_writer_closure_smoke.py"],
+        ["python3", "apps/fbs_accounting_runtime_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_inventory_history_smoke.py"],
+        ["python3", "apps/canonical_cost_engine_vitrina_publication_smoke.py"],
+        ["python3", "apps/promo_metric_eligibility_recompute_smoke.py"],
+        ["python3", "apps/spp_metric_recompute_smoke.py"],
+        ["python3", "apps/warehouse_recovery_policy_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py"]
