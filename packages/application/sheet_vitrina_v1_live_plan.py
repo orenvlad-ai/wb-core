@@ -1045,7 +1045,13 @@ class SheetVitrinaV1LivePlanBlock:
     def _diagnostic_timestamp(self) -> str:
         return _format_runtime_timestamp(self.now_factory())
 
-    def build_plan(
+    def build_plan(self, *args, **kwargs) -> SheetVitrinaV1Envelope:
+        from packages.application.ready_publication import capture_build_inputs
+        with capture_build_inputs(self.runtime.db_path) as inputs:
+            plan = self._build_plan(*args, **kwargs)
+            return replace(plan, metadata={**dict(plan.metadata or {}), "publication_inputs": inputs})
+
+    def _build_plan(
         self,
         as_of_date: str | None = None,
         log: LivePlanLogEmitter | None = None,
@@ -1173,6 +1179,8 @@ class SheetVitrinaV1LivePlanBlock:
             }
         )
         diagnostics["proxy_v4_rollover"] = proxy_v4_rollover
+        from packages.application.ready_publication import pin_parameters
+        pin_parameters(self.runtime.db_path)
         emit(
             _format_log_event(
                 "proxy_v4_rollover",
@@ -2037,7 +2045,13 @@ class SheetVitrinaV1LivePlanBlock:
             "preserved_display_nm_ids": [item.nm_id for item in payload.items],
         }), payload
 
-    def _capture_slot_source(
+    def _capture_slot_source(self, **kwargs):
+        from packages.application.ready_publication import consume_source
+        result = self._capture_slot_source_unpinned(**kwargs)
+        consume_source(source_key=kwargs["source_key"], snapshot_date=kwargs["column_date"])
+        return result
+
+    def _capture_slot_source_unpinned(
         self,
         *,
         source_key: str,

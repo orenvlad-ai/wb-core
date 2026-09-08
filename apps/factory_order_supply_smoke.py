@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.factory_order_supply import FactoryOrderSupplyBlock
 from packages.application.factory_order_sales_history import persist_sales_history_result_exact_dates
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -1290,7 +1291,7 @@ def _seed_onec_ff_stock_ready_snapshot(
             ),
         ],
     )
-    runtime.save_sheet_vitrina_ready_snapshot(
+    save_ready_fixture(runtime,
         current_state=current_state,
         refreshed_at=ACTIVATED_AT,
         plan=plan,

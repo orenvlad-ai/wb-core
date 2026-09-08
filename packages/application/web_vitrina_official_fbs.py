@@ -40,6 +40,7 @@ def _number(value: Any) -> Decimal:
 
 def build_current_official_fbs_estimate(
     db_path: Path, *, nm_ids: Iterable[int], now: datetime,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Read one SQLite snapshot; all totals use the exact displayed SKU set."""
     universe = sorted(set(int(nm) for nm in nm_ids))
@@ -48,6 +49,10 @@ def build_current_official_fbs_estimate(
     if not universe or not Path(db_path).exists():
         return empty
     try:
+        if connection is not None:
+            with localcontext() as context:
+                context.prec = 50
+                return _build(connection, universe=universe, day=day, now=now)
         with _connect_readonly(Path(db_path)) as conn, localcontext() as context:
             context.prec = 50
             conn.execute("BEGIN")

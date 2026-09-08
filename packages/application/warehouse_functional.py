@@ -7743,6 +7743,8 @@ def ensure_warehouse_functional_schema(conn: sqlite3.Connection) -> None:
     )
 
     ensure_warehouse_projection_source_outbox(conn)
+    from packages.application.ready_publication import ensure_material_revisions
+    ensure_material_revisions(conn)
 
 
 def _source_rows(

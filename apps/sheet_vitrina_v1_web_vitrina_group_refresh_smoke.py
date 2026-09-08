@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.sheet_vitrina_v1_own_product_capital import (  # noqa: E402
@@ -74,7 +75,7 @@ def main() -> None:
             raise AssertionError(f"fixture bundle must be accepted, got {accepted}")
         current_state = runtime.load_current_state()
         nm_id = next(item.nm_id for item in current_state.config_v2 if item.enabled)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=OLD_REFRESHED_AT,
             plan=_build_previous_plan(nm_id=nm_id),
@@ -303,7 +304,7 @@ def _assert_product_capital_cross_bundle_refresh() -> None:
             raise AssertionError(f"historical fixture bundle must be accepted, got {accepted}")
         old_state = runtime.load_current_state()
         nm_id = next(item.nm_id for item in old_state.config_v2 if item.enabled)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=old_state,
             refreshed_at=OLD_REFRESHED_AT,
             plan=_build_previous_plan(nm_id=nm_id),

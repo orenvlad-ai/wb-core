@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.calculation_parameters import DEFAULT_PROXY_PARAMETERS
 from packages.application.calculation_parameters_v4 import _parameters_from_values, PROXY_V4_FORMULA_VERSION
 from packages.application.web_vitrina_management_history import project, carry_forward, restore_rows, SOURCE
@@ -167,7 +168,7 @@ def _writer_rollover(base_rows,p3,p4):
         status=SheetVitrinaWriteTarget('STATUS','A1','A1:A1','A:A','replace',False,['status'],[],0,1)
         plan=SheetVitrinaV1Envelope('v1','save5-first','2026-09-04',['2026-09-05'],[SheetVitrinaV1TemporalSlot('today_current','today','2026-09-05')],{},[sheet,status])
         with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_management_history.dated_parameters',return_value=(p3,p4)), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value=model):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-05T10:10:00Z',plan=plan)
+            save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-05T10:10:00Z',plan=plan)
         first=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-04')
         firstprofit=next(r[2] for r in first.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')
         revised=deepcopy(first.sheets[0].rows)
@@ -175,7 +176,7 @@ def _writer_rollover(base_rows,p3,p4):
         model=deepcopy(model);model['skus'][1]['cost']+=Decimal('1')
         plan=replace(first,snapshot_id='save5-second',sheets=[replace(first.sheets[0],rows=revised),status])
         with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_management_history.dated_parameters',return_value=(p3,p4)), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value=model):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-05T10:20:00Z',plan=plan)
+            save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-05T10:20:00Z',plan=plan)
         latest=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-04')
         lastprofit=next(r[2] for r in latest.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')
         lastcost=next(r[2] for r in latest.sheets[0].rows if r[1]=='SKU:1|our_wb_unit_cost_rub')
@@ -194,7 +195,7 @@ def _writer_rollover(base_rows,p3,p4):
             temporal_slots=[SheetVitrinaV1TemporalSlot('yesterday_closed','closed','2026-09-05'),SheetVitrinaV1TemporalSlot('today_current','current','2026-09-06')],
             sheets=[replace(latest.sheets[0],header=['label','key','2026-09-05','2026-09-06'],rows=cleared,column_count=4),status])
         with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-06T10:10:00Z',plan=tomorrow)
+            save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-06T10:10:00Z',plan=tomorrow)
         closed=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
         assert next(r[2] for r in closed.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==''
         assert next(r[2] for r in closed.sheets[0].rows if r[1]=='SKU:1|our_wb_unit_cost_rub')==lastcost
@@ -211,7 +212,7 @@ def _writer_rollover(base_rows,p3,p4):
         current_model=deepcopy(model);current_model['date']='2026-09-06';current_model['skus'][1]['cost']+=Decimal('500')
         def choose_dated(conn,day):return (p3,p4 if day=='2026-09-05' else current_p4)
         with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_management_history.dated_parameters',side_effect=choose_dated) as selected, patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value=current_model):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-06T10:20:00Z',plan=tomorrow)
+            save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-06T10:20:00Z',plan=tomorrow)
             complete=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
             values={r[1]:r[2] for r in complete.sheets[0].rows}
             exact_cost=Decimal(complete.metadata['server_cell_presentation']['SKU:1|our_wb_unit_cost_rub']['2026-09-05']['management_value'])
@@ -220,13 +221,13 @@ def _writer_rollover(base_rows,p3,p4):
             assert {call.args[1] for call in selected.call_args_list}=={'2026-09-05','2026-09-06'}
             assert complete.metadata['server_cell_presentation']['SKU:1|proxy_profit_4_rub']['2026-09-05']['evidence']['proxy4_version']==p4.version_id
             # Repeated ordinary publication must not put back the old profit.
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-06T10:30:00Z',plan=tomorrow)
+            save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-06T10:30:00Z',plan=tomorrow)
             repeated=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
             assert repeated.sheets[0].rows==complete.sheets[0].rows
         # Once it becomes older history, the accepted correction survives.
         Clock.current=datetime(2026,9,7,10,10,tzinfo=timezone.utc)
         with patch('packages.application.registry_upload_db_backed_runtime.datetime',Clock), patch('packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate',return_value={'available':False}):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state,refreshed_at='2026-09-07T10:10:00Z',plan=tomorrow)
+            save_ready_fixture(runtime,current_state=state,refreshed_at='2026-09-07T10:10:00Z',plan=tomorrow)
         older=runtime.load_sheet_vitrina_ready_snapshot(as_of_date='2026-09-05')
         assert next(r[2] for r in older.sheets[0].rows if r[1]=='SKU:1|proxy_profit_4_rub')==values['SKU:1|proxy_profit_4_rub']
 

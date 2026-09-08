@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -168,7 +169,7 @@ class LocalWebVitrinaFixtureServer:
             start_date = datetime(2026, 4, 14, tzinfo=timezone.utc).date()
             for offset in range(7):
                 snapshot_date = (start_date + timedelta(days=offset)).isoformat()
-                runtime.save_sheet_vitrina_ready_snapshot(
+                save_ready_fixture(runtime,
                     current_state=current_state,
                     refreshed_at=f"{snapshot_date}T15:05:00Z",
                     plan=_build_plan(
@@ -5044,7 +5045,7 @@ def _stub_sheet_refresh_request(entrypoint, runtime, *, as_of_date=None, log=Non
     emit('event=source_step_finish source=seller_funnel_snapshot temporal_slot=today_current endpoint="GET /v1/sales-funnel/daily?date=<YYYY-MM-DD>" kind=success')
     emit('event=source_step_finish source=web_source_snapshot temporal_slot=today_current endpoint="GET /v1/search-analytics/snapshot?date_from=<YYYY-MM-DD>&date_to=<YYYY-MM-DD>" kind=success note="resolution_rule=accepted_prior_current_runtime_cache"')
     emit('event=source_step_finish source=prices_snapshot temporal_slot=today_current endpoint="POST /api/v2/list/goods/filter" kind=error note="no payload returned"')
-    refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
+    refresh_result = save_ready_fixture(runtime,
         current_state=current_state,
         refreshed_at=refreshed_at,
         plan=plan,

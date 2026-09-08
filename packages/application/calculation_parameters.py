@@ -1193,6 +1193,8 @@ def ensure_calculation_parameters_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    from packages.application.ready_publication import ensure_material_revisions
+    ensure_material_revisions(conn)
 
 
 def _parameters_from_payload(payload: Mapping[str, Any]) -> ProxyParameters:

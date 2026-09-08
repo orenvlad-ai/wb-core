@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 from packages.business_time import business_date_from_timestamp
 
 from packages.application.change_registry import ensure_change_registry_schema
+from packages.application.ready_publication import record_source, ExpectedReady, replace_ready
 from packages.application.cost_price_upload import CostPriceUploadBlock, parse_cost_price_upload_payload
 from packages.application.root_storage_policy import admit_root_write
 from packages.application.ff_pool_documents import ensure_ff_pool_document_schema
@@ -397,12 +398,20 @@ class RegistryUploadDbBackedRuntime:
             ).fetchall()
             return [row["dataset_version"] for row in rows]
 
+    def prepare_sheet_vitrina_ready_publication(self, *, bundle_version: str, as_of_date: str):
+        from packages.application.ready_publication import readonly, capture_expected
+        with readonly(self.db_path) as conn:
+            return capture_expected(conn, bundle_version=bundle_version, as_of_date=as_of_date)
+
     def save_sheet_vitrina_ready_snapshot(
         self,
         *,
         current_state: RegistryUploadDbBackedCurrentState,
         refreshed_at: str,
         plan: SheetVitrinaV1Envelope,
+        expected,
+        build_inputs=None,
+        _prepared_book=None,
     ) -> SheetVitrinaV1RefreshResult:
         _validate_timestamp(refreshed_at, field_name="refreshed_at")
         from packages.application.web_vitrina_official_fbs import (
@@ -418,22 +427,34 @@ class RegistryUploadDbBackedRuntime:
 
         publication_now = datetime.now(timezone.utc)
         publication_date = current_business_date_iso(publication_now)
-        from packages.application.fbs_accounting_runtime import load_inventory, materialize
-        active_inventory = load_inventory(self.runtime_dir, now=publication_now)
-        estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
-            self.db_path,
-            nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
-            now=publication_now,
+        from packages.application.fbs_accounting_runtime import (
+            load, inventory_from_book, materialize, writer_lock, _save_book, _after_book_commit,
         )
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with _connect(self.db_path) as conn:
-            _ensure_schema(conn)
-            from packages.application.warehouse_business_projection import (
-                ensure_warehouse_business_projection_schema,
-                materialize_warehouse_business_projection_reconciliation,
+        from packages.application.fbs_snapshot_cost import fingerprint
+        from packages.application.ready_publication import (
+            readonly, capture_material, check_material, check_expected, replace_ready, check_build_inputs, capture_history,
+            record_intent, complete_publication, digest, ReadyPublicationConflict,
+        )
+        from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+        from uuid import uuid4
+        if (expected.bundle_version, expected.as_of_date) != (current_state.bundle_version, plan.as_of_date):
+            raise ReadyPublicationConflict("ready_candidate_target_mismatch")
+        book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
+        active_inventory = inventory_from_book(book, now=publication_now) if book and book["active"] else None
+        with readonly(self.db_path) as conn:
+            check_expected(conn, expected)
+            check_build_inputs(conn, build_inputs)
+            material_inputs = capture_material(conn)
+            history_inputs = capture_history(conn, current_state.bundle_version)
+            registry_row = conn.execute("SELECT bundle_version,activated_at FROM registry_upload_current_state WHERE slot=1").fetchone()
+            if tuple(registry_row or ()) != (current_state.bundle_version, current_state.activated_at):
+                raise ReadyPublicationConflict("ready_registry_changed")
+            if _prepared_book is not None:
+                check_material(conn, book["publication_inputs"])
+            estimate = {"available": False} if active_inventory is not None else build_current_official_fbs_estimate(
+                self.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled],
+                now=publication_now, connection=conn,
             )
-
-            ensure_warehouse_business_projection_schema(conn)
             plan = materialize_current_official_fbs_estimate(
                 plan,
                 estimate=estimate,
@@ -444,7 +465,9 @@ class RegistryUploadDbBackedRuntime:
             plan = carry_forward(plan, presentation=load_presentations(
                 conn, bundle_version=current_state.bundle_version, dates=plan.date_columns,
             ), business_date=publication_date)
-            plan = materialize(plan, runtime_dir=self.runtime_dir, now=publication_now)
+            plan = materialize(plan, runtime_dir=self.runtime_dir, now=publication_now,
+                               book=book, book_version=(fingerprint(book) if _prepared_book else expected_book),
+                               ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
             plan = recalculate_current_envelope(plan, business_date=publication_date,
                 parameters=dated_parameters(conn, publication_date) if estimate.get('available') or active_inventory is not None else None)
             plan = recalculate_yesterday_envelope(plan, business_date=publication_date,
@@ -455,35 +478,43 @@ class RegistryUploadDbBackedRuntime:
                 as_of_date=plan.as_of_date,
                 plan=plan,
             )
-            conn.execute(
-                """
-                INSERT INTO sheet_vitrina_v1_ready_snapshots(
-                    bundle_version,
-                    activated_at,
-                    as_of_date,
-                    snapshot_id,
-                    plan_version,
-                    refreshed_at,
-                    plan_json
-                )
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(bundle_version, as_of_date) DO UPDATE SET
-                    activated_at = excluded.activated_at,
-                    snapshot_id = excluded.snapshot_id,
-                    plan_version = excluded.plan_version,
-                    refreshed_at = excluded.refreshed_at,
-                    plan_json = excluded.plan_json
-                """,
-                (
-                    current_state.bundle_version,
-                    current_state.activated_at,
-                    plan.as_of_date,
-                    plan.snapshot_id,
-                    plan.plan_version,
-                    refreshed_at,
-                    _serialize_sheet_vitrina_plan(plan),
-                ),
-            )
+        plan = replace(plan, metadata={**dict(plan.metadata or {}), "ready_publication_target": {
+            "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date}})
+        serialized_plan = _serialize_sheet_vitrina_plan(plan)
+        operation_id, attempt_id = "ready-" + uuid4().hex, "1"
+        from packages.application.warehouse_business_projection import materialize_warehouse_business_projection_reconciliation
+        with warehouse_functional_write_lock(self.runtime_dir, timeout_seconds=5), writer_lock(self.runtime_dir), _connect(self.db_path) as conn:
+            conn.execute("PRAGMA busy_timeout=0")
+            conn.execute("BEGIN IMMEDIATE")
+            check_expected(conn, expected)
+            check_material(conn, material_inputs)
+            check_build_inputs(conn, build_inputs)
+            if capture_history(conn, current_state.bundle_version) != history_inputs:
+                raise ReadyPublicationConflict("ready_history_changed")
+            if load(self.runtime_dir)[1] != expected_book:
+                raise ReadyPublicationConflict("ready_book_changed")
+            record_intent(conn, operation_id=operation_id, attempt_id=attempt_id, kind="book_ready" if _prepared_book else "ready",
+                expected=expected, inputs={"material": material_inputs, "history": history_inputs,
+                    "build": build_inputs, "business_date": publication_date,
+                    "prepared_book": book.get("publication_inputs") if _prepared_book else None}, expected_book=expected_book,
+                book_required=_prepared_book is not None, ready_required=True, created_at=refreshed_at)
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            check_expected(conn, expected)
+            check_material(conn, material_inputs)
+            check_build_inputs(conn, build_inputs)
+            if capture_history(conn, current_state.bundle_version) != history_inputs:
+                raise ReadyPublicationConflict("ready_history_changed")
+            if current_business_date_iso() != publication_date:
+                raise ReadyPublicationConflict("ready_business_date_changed")
+            book_version = expected_book
+            if _prepared_book is not None:
+                book_version = _save_book(self.runtime_dir, book, expected=expected_book,
+                                         operation_id=operation_id + ":" + attempt_id)
+                _after_book_commit()
+            replace_ready(conn, expected=expected, activated_at=current_state.activated_at,
+                snapshot_id=plan.snapshot_id, plan_version=plan.plan_version, refreshed_at=refreshed_at,
+                plan_json=serialized_plan)
             capture_inventory_history_from_ready_plan(
                 conn,
                 plan=plan,
@@ -498,6 +529,8 @@ class RegistryUploadDbBackedRuntime:
                 conn,
                 materialized_at=refreshed_at,
             )
+            complete_publication(conn, operation_id=operation_id, attempt_id=attempt_id,
+                book_version=book_version, after_digest=digest(serialized_plan), finished_at=refreshed_at)
             conn.commit()
 
         semantic_summary = _derive_sheet_vitrina_refresh_semantic_summary(plan)
@@ -520,7 +553,20 @@ class RegistryUploadDbBackedRuntime:
             semantic_reason=semantic_summary["reason"],
             source_outcome_counts=dict(semantic_summary["counts"]),
             source_outcomes=list(semantic_summary["sources"]),
+            publication_operation_id=operation_id,
+            publication_attempt_id=attempt_id,
+            publication_digest=digest(serialized_plan),
         )
+
+    def finalize_sheet_vitrina_publication(self, *, operation_id, attempt_id, diagnostics):
+        """Persist only this operation's diagnostics; business bytes are never loaded."""
+        with _connect(self.db_path) as conn:
+            count = conn.execute("""UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?
+                WHERE operation_id=? AND attempt_id=? AND state='complete'""",
+                (json.dumps(diagnostics, ensure_ascii=False, default=str), operation_id, attempt_id)).rowcount
+            if count != 1:
+                raise ValueError("exact_publication_receipt_required_for_finalize")
+            conn.commit()
 
     def apply_sheet_vitrina_incident_rematerialization(
         self,
@@ -609,14 +655,8 @@ class RegistryUploadDbBackedRuntime:
                         )
                     if current_digest == before_digest:
                         serialized_after = _serialize_sheet_vitrina_plan(after_plan)
-                        conn.execute(
-                            """
-                            UPDATE sheet_vitrina_v1_ready_snapshots
-                            SET plan_json = ?
-                            WHERE bundle_version = ? AND as_of_date = ?
-                            """,
-                            (serialized_after, bundle_version, as_of_date),
-                        )
+                        replace_ready(conn, expected=ExpectedReady(bundle_version, as_of_date, row["plan_json"]),
+                                      plan_json=serialized_after)
                         changed_snapshots += 1
                         changed_cells += int(item.get("changed_cells") or 0)
                     conn.execute(
@@ -934,14 +974,8 @@ class RegistryUploadDbBackedRuntime:
                 ):
                     raise ValueError("Finance daily recovery temporal state changed after review")
                 if current_digest == before_plan_digest:
-                    conn.execute(
-                        """
-                        UPDATE sheet_vitrina_v1_ready_snapshots
-                        SET plan_json = ?
-                        WHERE bundle_version = ? AND as_of_date = ?
-                        """,
-                        (_serialize_sheet_vitrina_plan(after_plan), bundle_version, as_of_date),
-                    )
+                    replace_ready(conn, expected=ExpectedReady(bundle_version, as_of_date, row["plan_json"]),
+                                  plan_json=_serialize_sheet_vitrina_plan(after_plan))
                     changed = True
                 if existing is None:
                     payload_json = _serialize_temporal_source_payload(source_payload)
@@ -2628,6 +2662,8 @@ class RegistryUploadDbBackedRuntime:
                     _serialize_temporal_source_payload(payload),
                 ),
             )
+            record_source(source_key=source_key, snapshot_date=snapshot_date,
+                row=(captured_at, _serialize_temporal_source_payload(payload)), own_write=True)
             conn.commit()
 
     def replace_temporal_source_snapshot_window(
@@ -2716,6 +2752,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (source_key, snapshot_date),
             ).fetchone()
+            record_source(source_key=source_key, snapshot_date=snapshot_date, row=row)
             if row is None:
                 return None, None
             return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
@@ -2823,6 +2860,8 @@ class RegistryUploadDbBackedRuntime:
                     _serialize_temporal_source_payload(payload),
                 ),
             )
+            record_source(source_key=source_key, snapshot_date=snapshot_date, snapshot_role=snapshot_role,
+                row=(captured_at, _serialize_temporal_source_payload(payload)), own_write=True)
             conn.commit()
 
     def load_temporal_source_slot_snapshot(
@@ -2842,6 +2881,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (source_key, snapshot_date, snapshot_role),
             ).fetchone()
+            record_source(source_key=source_key, snapshot_date=snapshot_date, snapshot_role=snapshot_role, row=row)
             if row is None:
                 return None, None
             return _deserialize_temporal_source_payload(row["payload_json"]), row["captured_at"]
@@ -13708,6 +13748,10 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
         """
     )
     ensure_change_registry_schema(conn)
+    from packages.application.warehouse_business_projection import ensure_warehouse_business_projection_schema
+    ensure_warehouse_business_projection_schema(conn)
+    from packages.application.ready_publication import ensure_publication_schema
+    ensure_publication_schema(conn)
 
 
 def _ensure_column(

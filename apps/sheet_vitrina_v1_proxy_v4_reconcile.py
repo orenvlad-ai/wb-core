@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from apps.sheet_vitrina_v1_buyout_mature_backfill import (  # noqa: E402
     _backup_and_verify,
     _digest,
@@ -410,11 +411,7 @@ def _apply_manifest(
         for item in repairs:
             key = (str(item["bundle_version"]), str(item["as_of_date"]))
             before = str(current_by_key[key]["plan_json"])
-            cursor = conn.execute(
-                """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
-                   WHERE bundle_version=? AND as_of_date=? AND plan_json=?""",
-                (str(item["after_plan_json"]), key[0], key[1], before),
-            )
+            cursor = replace_ready(conn, expected=ExpectedReady(key[0],key[1],before), plan_json=str(item["after_plan_json"]))
             if cursor.rowcount != 1:
                 raise ProxyV4ReconciliationError(
                     f"target snapshot compare-and-swap failed: {key[1]}"

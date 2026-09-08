@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.contracts.sheet_vitrina_v1 import (
@@ -230,7 +231,7 @@ def main() -> None:
         }
 
         metric_labels = {item.metric_key: item.label_ru for item in current_state.metrics_v2 if item.enabled}
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-19T09:05:00Z",
             plan=_build_plan(
@@ -242,7 +243,7 @@ def main() -> None:
                 sku_values=new_sku,
             ),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-18T09:05:00Z",
             plan=_build_plan(

@@ -18,6 +18,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
@@ -2420,16 +2421,7 @@ def _apply_ready_updates(
             raise WarehouseHistoricalRecoveryError(
                 "ready snapshot changed after exact dry-run"
             )
-        changed = conn.execute(
-            "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
-            "WHERE bundle_version=? AND as_of_date=? AND plan_json=?",
-            (
-                item["after_plan_json"],
-                item["bundle_version"],
-                item["as_of_date"],
-                str(row["plan_json"]),
-            ),
-        )
+        changed = replace_ready(conn, expected=ExpectedReady(item["bundle_version"],item["as_of_date"],str(row["plan_json"])), plan_json=item["after_plan_json"])
         if int(changed.rowcount or 0) != 1:
             raise WarehouseHistoricalRecoveryError(
                 "ready snapshot optimistic update conflict"

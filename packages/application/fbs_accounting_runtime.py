@@ -73,15 +73,20 @@ def admit(conn):
         raise ValueError("not_an_isolated_fbs_accounting_book")
 
 
-def load(runtime_dir):
+def load(runtime_dir, *, version=None):
     file = path(runtime_dir)
     if not file.exists():
+        if version is not None:
+            raise ValueError("fbs_accounting_bound_revision_missing")
         return None, None
     with closing(sqlite3.connect(file.as_uri() + "?mode=ro", uri=True)) as conn:
         conn.execute("PRAGMA query_only=ON")
         admit(conn)
-        row = conn.execute("SELECT r.version,r.payload FROM accounting_current c JOIN accounting_revisions r USING(version)").fetchone()
+        row = (conn.execute("SELECT version,payload FROM accounting_revisions WHERE version=?", (version,)).fetchone()
+               if version is not None else conn.execute("SELECT r.version,r.payload FROM accounting_current c JOIN accounting_revisions r USING(version)").fetchone())
         if row is None:
+            if version is not None:
+                raise ValueError("fbs_accounting_bound_revision_missing")
             return None, None
         book = unpack(conn, row[1])
         if book.get("schema") != SCHEMA or fingerprint(book) != row[0]:
@@ -97,12 +102,12 @@ def writer_lock(runtime_dir):
         yield
 
 
-def save(runtime_dir, book, *, expected, operation_id):
+def _save_book(runtime_dir, book, *, expected, operation_id):
     if book.get("schema") != SCHEMA:
         raise ValueError("invalid_accounting_book")
     load(runtime_dir)  # Admit an existing file before any writing connection.
     version = fingerprint(book)
-    with closing(sqlite3.connect(path(runtime_dir), timeout=5)) as conn, conn:
+    with closing(sqlite3.connect(path(runtime_dir), timeout=0)) as conn, conn:
         conn.execute("BEGIN IMMEDIATE")
         admit(conn)
         conn.execute("CREATE TABLE IF NOT EXISTS accounting_revisions(version TEXT PRIMARY KEY,operation_id TEXT UNIQUE NOT NULL,payload TEXT NOT NULL,previous_version TEXT)")
@@ -127,6 +132,43 @@ def save(runtime_dir, book, *, expected, operation_id):
     return version
 
 
+def _after_book_commit():
+    """Deterministic fixture boundary; production performs no additional work."""
+
+
+def save(runtime_dir, book, *, expected, operation_id):
+    """Book-only commit with a durable intent before the separate book commit.
+
+    Management publication is a separate obligation and never follows latest
+    book implicitly. The public save always owns the common lock order.
+    """
+    from packages.application.ready_publication import check_material, record_intent, complete_publication
+    from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+    db = StoreRegistry(Path(runtime_dir)).resolve("operational")
+    inputs = book.get("publication_inputs", {}) if book["active"] else {}
+    now = datetime.now(timezone.utc).isoformat()
+    with warehouse_functional_write_lock(Path(runtime_dir), timeout_seconds=5), writer_lock(runtime_dir):
+        with closing(sqlite3.connect(db, timeout=0)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if inputs:
+                check_material(conn, inputs)
+            if load(runtime_dir)[1] != expected:
+                raise ValueError("fbs_accounting_compare_and_swap_failed")
+            record_intent(conn, operation_id=operation_id, attempt_id="1", kind="book_only",
+                expected=None, inputs=inputs, expected_book=expected, book_required=True,
+                ready_required=False, created_at=now, book_operation_id=operation_id)
+            conn.commit()  # Deliberately durable before the other database commit.
+            conn.execute("BEGIN IMMEDIATE")
+            if inputs:
+                check_material(conn, inputs)
+            version = _save_book(runtime_dir, book, expected=expected, operation_id=operation_id)
+            _after_book_commit()
+            complete_publication(conn, operation_id=operation_id, attempt_id="1", book_version=version,
+                                 after_digest=None, finished_at=now)
+            conn.commit()
+    return version
+
+
 def prepare(runtime_dir, *, now=None, opening=False):
     now = now or datetime.now(timezone.utc)
     before, expected = load(runtime_dir)
@@ -135,7 +177,15 @@ def prepare(runtime_dir, *, now=None, opening=False):
     if not opening and (before is None or not before["active"]):
         return None, expected
     db = StoreRegistry(Path(runtime_dir)).resolve("operational")
-    capture = capture_current(db, now=now, include_baseline=opening)
+    from packages.application.ready_publication import readonly, capture_material
+    with readonly(db) as conn:
+        inputs = capture_material(conn)
+        return _prepare_from_snapshot(runtime_dir, db=db, conn=conn, now=now, opening=opening,
+                                      before=before, expected=expected, inputs=inputs)
+
+
+def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expected, inputs):
+    capture = capture_current(db, now=now, include_baseline=opening, connection=conn)
     day = capture["business_date"]
     state = initialize_candidate(capture, open_initial_day=True) if opening else before["state"]
     book = {"schema": SCHEMA, "active": True, "effective_date": day,
@@ -154,8 +204,8 @@ def prepare(runtime_dir, *, now=None, opening=False):
     if not view["available"]:
         raise ValueError("current_fbs_period_missing:" + str(state["last_attempt"]))
     ids = sorted({int(r["nm_id"]) for r in view["rows"].values()})
-    wb = capture_wb_component(db, day=day, nm_ids=ids)
-    retained = capture_retained_stages(db, day=day, wb_version_id=wb["version_id"], nm_ids=ids)
+    wb = capture_wb_component(db, day=day, nm_ids=ids, connection=conn)
+    retained = capture_retained_stages(db, day=day, wb_version_id=wb["version_id"], nm_ids=ids, connection=conn)
     presentation = FbsInventorySnapshot(fbs_state=state, wb_capture=wb, retained=retained, day=day)
     shared = build_shared_cost_day(state, wb, day)
     if opening and (view["quality"] == "incomplete" or view["pending_documents"]
@@ -168,24 +218,35 @@ def prepare(runtime_dir, *, now=None, opening=False):
     book["retained_days"][day] = retained
     book["shared_days"][day] = shared
     book["presentations"][day] = presentation.payload()
+    book["publication_inputs"] = inputs
     return book, expected
 
 
-def refresh(runtime_dir):
-    with writer_lock(runtime_dir):
-        try:
-            book, expected = prepare(runtime_dir)
-        except Exception as exc:
-            prior, expected = load(runtime_dir)
-            if prior and prior["active"]:
-                failed = {**prior, "publication_error": {"reason": str(exc)[:500],
-                          "at": datetime.now(timezone.utc).isoformat()}}
-                save(runtime_dir, failed, expected=expected, operation_id="failed-" + fingerprint(failed)[7:])
-            raise
-        if book is None:
-            return {"status": "not_active"}
-        version = save(runtime_dir, book, expected=expected, operation_id="refresh-" + fingerprint(book)[7:])
+def refresh(runtime_dir, *, ready_runtime=None):
+    prior, _ = load(runtime_dir)
+    if prior is None or not prior["active"]:
+        return {"status": "not_active"}
+    if ready_runtime is not None:
+        current = ready_runtime.load_current_state()
+        plan = ready_runtime.load_sheet_vitrina_ready_snapshot()
+        expected_ready = ready_runtime.prepare_sheet_vitrina_ready_publication(
+            bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
+        from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+        plan = _deserialize_sheet_vitrina_plan(expected_ready.plan_json)
+    book, expected = prepare(runtime_dir)
+    if book is None:
+        return {"status": "not_active"}
+    operation_id = "refresh-" + fingerprint(book)[7:]
+    if ready_runtime is None:
+        version = save(runtime_dir, book, expected=expected, operation_id=operation_id)
+    else:
+        ready_result = ready_runtime.save_sheet_vitrina_ready_snapshot(current_state=current, plan=plan,
+            refreshed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            expected=expected_ready, _prepared_book=(book, expected))
+        version = fingerprint(book)
+        operation_id = ready_result.publication_operation_id
     return {"status": "published", "version": version, "date": max(book["shared_days"]),
+            "operation_id": operation_id, "attempt_id": "1", "ready_obligation": "complete" if ready_runtime else "not_applicable",
             "fbs": book["presentations"][max(book["presentations"])]["totals"]["fbs"]}
 
 
@@ -196,8 +257,14 @@ def publish_ready(runtime):
         return {"status": "not_active"}
     current = runtime.load_current_state()
     plan = runtime.load_sheet_vitrina_ready_snapshot()
+    expected = runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version,
+                                                            as_of_date=plan.as_of_date)
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    if expected.plan_json is None:
+        raise ValueError("fbs_ready_target_missing")
+    plan = _deserialize_sheet_vitrina_plan(expected.plan_json)
     result = runtime.save_sheet_vitrina_ready_snapshot(current_state=current,
-        refreshed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), plan=plan)
+        refreshed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), plan=plan, expected=expected)
     return {"status": result.status}
 
 
@@ -217,7 +284,17 @@ def current_publication_receipt(runtime, *, now=None):
         raise ValueError("current_accounting_publication_unavailable")
     with closing(sqlite3.connect(Path(runtime.db_path).resolve().as_uri() + "?mode=ro", uri=True)) as conn:
         conn.execute("PRAGMA query_only=ON")
-        row = conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots ORDER BY refreshed_at DESC LIMIT 1").fetchone()
+        row = conn.execute("""SELECT ready.plan_json,p.after_digest,p.operation_id,p.attempt_id
+            FROM sheet_vitrina_v1_ready_publications p
+            JOIN sheet_vitrina_v1_ready_snapshots ready
+              ON ready.bundle_version=p.bundle_version AND ready.as_of_date=p.as_of_date
+            JOIN registry_upload_current_state current ON current.bundle_version=ready.bundle_version AND current.slot=1
+            WHERE p.state='complete' AND p.book_version=? AND p.ready_required=1
+              AND json_extract(ready.plan_json,'$.metadata.fbs_accounting_bindings.' || ? || '.book_version')=?
+            ORDER BY p.finished_at DESC,p.operation_id LIMIT 1""", (version, '"' + data["date"] + '"', version)).fetchone()
+    from packages.application.ready_publication import digest
+    if row is None or digest(row[0]) != row[1]:
+        raise ValueError("current_accounting_ready_publication_mismatch:receipt")
     plan = json.loads(row[0]) if row else {}
     cells = plan.get("metadata", {}).get("server_cell_presentation", {})
     checked = 0
@@ -232,6 +309,7 @@ def current_publication_receipt(runtime, *, now=None):
                 raise ValueError("current_accounting_ready_publication_mismatch:" + scope + "|" + metric)
             checked += 1
     return {"status": "published", "source": SOURCE, "business_date": data["date"],
+            "operation_id": row[2], "attempt_id": row[3], "ready_digest": row[1],
             "plan_fingerprint": fingerprint({"book": version, "presentation": data["version_id"]}),
             "accounting_version": version, "checked_cell_count": checked,
             "changed_snapshot_count": 0, "database_written": False,
@@ -338,9 +416,13 @@ def load_inventory(runtime_dir, *, now=None):
     return inventory_from_book(book, now=now) if book and book["active"] else None
 
 
-def materialize(plan, *, runtime_dir, now=None):
+_UNSET = object()
+
+
+def materialize(plan, *, runtime_dir, now=None, book=_UNSET, book_version=None, ready_target=None):
     """Publish dated cells via the existing ready-plan writer, preserving history."""
-    book, _ = load(runtime_dir)
+    if book is _UNSET:
+        book, book_version = load(runtime_dir)
     if not book or not book["active"]:
         return plan
     current = inventory_from_book(book, now=now)
@@ -386,4 +468,69 @@ def materialize(plan, *, runtime_dir, now=None):
             raise ValueError("unsupported_data_sheet_start_cell")
         sheets.append(replace(sheet, rows=rows, row_count=len(rows), write_rect=re.sub(r"\d+$", str(len(rows) + int(start[1])), sheet.write_rect)))
     metadata["fbs_accounting"] = {"effective_date": book["effective_date"], "source": SOURCE, "candidate_only": False}
+    metadata["fbs_accounting_bindings"] = {
+        day: {"book_version": book_version, "presentation_version": payload["version_id"],
+              "effective_date": book["effective_date"], "date": day,
+              "quality": payload["quality"], "source": SOURCE,
+              "ready_target": ready_target}
+        for day, payload in book["presentations"].items() if day in plan.date_columns
+    }
     return replace(plan, sheets=sheets, metadata=metadata)
+
+
+def load_management_inventory(runtime_dir, plan, *, now):
+    """Resolve only the book revision accepted by this management column.
+
+    Legacy ready keeps its dated materialized cells; it cannot select latest.
+    Standalone FF/Finance/planning continue to use their own book contracts.
+    """
+    current, _ = load(runtime_dir)
+    if not current or not current["active"]:
+        return None
+    day = current_business_date_iso(now)
+    binding = dict(plan.metadata or {}).get("fbs_accounting_bindings", {}).get(day)
+    if not binding:
+        return None
+    target = dict(plan.metadata or {}).get("fbs_accounting_targets", {}).get(day)
+    if target is None:
+        target = dict(plan.metadata or {}).get("ready_publication_target")
+    if not target or binding.get("ready_target") != target:
+        raise ValueError("fbs_accounting_ready_binding_target_mismatch")
+    book, version = load(runtime_dir, version=binding["book_version"])
+    payload = book["presentations"].get(day)
+    if (not payload or binding.get("date") != day or binding.get("source") != SOURCE
+            or payload["version_id"] != binding.get("presentation_version")
+            or payload["quality"] != binding.get("quality")
+            or book["effective_date"] != binding.get("effective_date")):
+        raise ValueError("fbs_accounting_ready_binding_mismatch")
+    # Failure/pause belongs to the current activation, not to the old immutable
+    # revision. Preserve dated display, but never re-enable a forbidden operand.
+    if current.get("publication_error"):
+        return None
+    inventory = inventory_from_book(book, now=now)
+    return inventory if inventory.payload().get("quality") != "unavailable" else None
+
+
+def publication_status(runtime_dir, *, operation_id, attempt_id="1"):
+    """Exact RO reconciliation, including a process death between the two commits."""
+    from packages.application.ready_publication import publication_status as read_intent
+    db = StoreRegistry(Path(runtime_dir)).resolve("operational")
+    intent = read_intent(db, operation_id=operation_id, attempt_id=attempt_id)
+    if intent is None:
+        return None
+    result = {key: intent[key] for key in (
+        "operation_id", "attempt_id", "kind", "bundle_version", "as_of_date", "state",
+        "expected_digest", "book_required", "ready_required", "book_version", "after_digest")}
+    if intent["book_required"] and path(runtime_dir).exists():
+        with closing(sqlite3.connect(path(runtime_dir).as_uri() + "?mode=ro", uri=True)) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            admit(conn)
+            row = conn.execute("SELECT version,payload FROM accounting_revisions WHERE operation_id=?",
+                               (intent["book_operation_id"],)).fetchone()
+            if row:
+                if fingerprint(unpack(conn, row[1])) != row[0]:
+                    raise ValueError("fbs_accounting_book_corrupt")
+                result["book_version"] = row[0]
+                if intent["state"] != "complete":
+                    result["state"] = "book_committed_ready_pending" if intent["ready_required"] else "book_committed_ack_pending"
+    return result

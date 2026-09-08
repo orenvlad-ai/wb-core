@@ -1106,6 +1106,8 @@ def ensure_proxy_v4_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    from packages.application.ready_publication import ensure_material_revisions
+    ensure_material_revisions(conn)
 
 
 def _build_finance_window(

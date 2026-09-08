@@ -49,7 +49,8 @@ def _rows(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> list[dict]:
     return [dict(row) for row in conn.execute(sql, args)]
 
 
-def capture_current(db_path: Path, *, now: datetime, include_baseline: bool = True) -> dict[str, Any]:
+def capture_current(db_path: Path, *, now: datetime, include_baseline: bool = True,
+                    connection: sqlite3.Connection | None = None) -> dict[str, Any]:
     """Capture full-catalog stock, documents and optional baseline in one RO txn.
 
 The exact document manifest is captured with a digest-matched published pool
@@ -70,12 +71,13 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
             "sources_unavailable" if include_baseline else "not_requested_after_initialization"),
                            "rows": [], "fbo_rows": [], "document_manifest": {}},
     }
-    conn = None
+    conn = connection
     try:
-        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
-        conn.execute("BEGIN")
+        if conn is None:
+            conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
         with localcontext() as context:
             context.prec = 50  # matches the published official FBS estimate
             try:
@@ -108,7 +110,7 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
     except ERRORS as exc:
         result["reason"] = str(exc)
     finally:
-        if conn is not None:
+        if conn is not None and connection is None:
             conn.close()
     # Re-reading identical facts changes capture time, not source identity.
     result["source_digest"] = _digest({

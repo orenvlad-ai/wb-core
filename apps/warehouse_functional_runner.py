@@ -974,11 +974,9 @@ def _collect_autonomous_transit_costs(
 
 
 def _publish_fbs_snapshot_accounting(runtime: RegistryUploadDbBackedRuntime) -> dict[str, Any]:
-    from packages.application.fbs_accounting_runtime import refresh, publish_ready
+    from packages.application.fbs_accounting_runtime import refresh
 
-    result = refresh(runtime.runtime_dir)
-    if result["status"] == "published":
-        publish_ready(runtime)
+    result = refresh(runtime.runtime_dir, ready_runtime=runtime)
     return result
 
 

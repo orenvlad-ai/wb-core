@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_daily_report import SheetVitrinaV1DailyReportBlock
 from packages.application.sheet_vitrina_v1_stock_report import SheetVitrinaV1StockReportBlock
@@ -109,7 +110,7 @@ def _save_snapshot(
     as_of_date: str,
     refreshed_at: str,
 ) -> None:
-    runtime.save_sheet_vitrina_ready_snapshot(
+    save_ready_fixture(runtime,
         current_state=current_state,
         refreshed_at=refreshed_at,
         plan=_build_plan(as_of_date=as_of_date, current_state=current_state),

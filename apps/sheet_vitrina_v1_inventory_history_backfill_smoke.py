@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_inventory_history_backfill import (  # noqa: E402
     InventoryHistoryBackfillError,
     _ready_wb_history,
@@ -103,7 +104,7 @@ def main() -> int:
         enabled = [item for item in state.config_v2 if item.enabled]
         first_nm_id, second_nm_id = int(enabled[0].nm_id), int(enabled[1].nm_id)
         for business_date in _dates("2026-08-09", "2026-08-21"):
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=state,
                 refreshed_at=business_date + "T20:00:00Z",
                 plan=_ready_plan(

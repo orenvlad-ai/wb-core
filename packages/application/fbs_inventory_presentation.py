@@ -59,17 +59,19 @@ def operands(rows, *, blocked=False):
             "wac_rub": text(c / q) if c is not None and q else None}
 
 
-def capture_retained_stages(db_path: Path, *, day: str, wb_version_id: str, nm_ids: list[int]) -> dict:
+def capture_retained_stages(db_path: Path, *, day: str, wb_version_id: str, nm_ids: list[int],
+                            connection: sqlite3.Connection | None = None) -> dict:
     """Read exact published stage cells once, without schema initializers.
 
     Missing rows stay missing. A published explicit zero is kept, including
     zero SKU rows absent from the sparse functional balance table.
     """
-    conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    conn = connection or sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
     try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
-        conn.execute("BEGIN")
+        if connection is None:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
         versions = {(r[0], r[1]) for r in conn.execute(
             "SELECT v.version_id,v.business_effective_date FROM sheet_vitrina_v1_warehouse_functional_versions v "
             "JOIN sheet_vitrina_v1_warehouse_wb_snapshots s ON s.version_id=v.version_id "
@@ -125,8 +127,9 @@ def capture_retained_stages(db_path: Path, *, day: str, wb_version_id: str, nm_i
         result["source_digest"] = fingerprint(result)
         return result
     finally:
-        conn.rollback()
-        conn.close()
+        if connection is None:
+            conn.rollback()
+            conn.close()
 
 
 class FbsInventorySnapshot:

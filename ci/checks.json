@@ -25,6 +25,7 @@
     },
     "ready_publication": {
       "patterns": [
+        "packages/application/ready_publication.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/adapters/registry_upload_http_entrypoint.py",
@@ -32,6 +33,7 @@
         "packages/application/web_vitrina_historical_ready_snapshot_import.py"
       ],
       "commands": [
+        ["python3", "apps/ready_publication_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_ready_snapshot_runtime_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_refresh_read_split_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_web_vitrina_group_refresh_smoke.py"]

@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
     DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
@@ -1144,7 +1145,7 @@ def _seed_onec_ff_stock_ready_snapshot(
             ),
         ],
     )
-    runtime.save_sheet_vitrina_ready_snapshot(
+    save_ready_fixture(runtime,
         current_state=current_state,
         refreshed_at=ACTIVATED_AT,
         plan=plan,

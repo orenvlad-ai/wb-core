@@ -6800,14 +6800,12 @@ class RegistryUploadHttpEntrypoint:
                     self.warehouse_functional_block.build_sync_plan,
                 )
                 def publish_functional() -> dict[str, Any]:
-                    from packages.application.fbs_accounting_runtime import refresh, publish_ready
+                    from packages.application.fbs_accounting_runtime import refresh
                     result = self.warehouse_functional_block.apply_plan(
                         plan,
                         confirm_fingerprint=str(plan["plan_fingerprint"]),
                     )
-                    accounting = refresh(self.runtime.runtime_dir)
-                    if accounting["status"] == "published":
-                        publish_ready(self.runtime)
+                    accounting = refresh(self.runtime.runtime_dir, ready_runtime=self.runtime)
                     planning = self.inventory_planning.current()
                     return {**result, "fbs_snapshot_accounting": accounting,
                             "planning_inventory_readback": planning}
@@ -7547,6 +7545,8 @@ class RegistryUploadHttpEntrypoint:
                     "build_plan_total",
                     started_at=self.activated_at_factory(),
                 )
+                expected_ready = self.runtime.prepare_sheet_vitrina_ready_publication(
+                    bundle_version=current_state.bundle_version, as_of_date=effective_as_of_date)
                 plan = self.sheet_plan_block.build_plan(
                     as_of_date=effective_as_of_date,
                     log=emit,
@@ -7603,6 +7603,8 @@ class RegistryUploadHttpEntrypoint:
                     current_state=current_state,
                     refreshed_at=refreshed_at,
                     plan=plan,
+                    expected=expected_ready,
+                    build_inputs=dict(plan.metadata or {}).get("publication_inputs"),
                 )
                 active_refresh = active_refresh_summary(refresh_result)
                 _finish_operator_phase(
@@ -7702,12 +7704,10 @@ class RegistryUploadHttpEntrypoint:
                     semantic_status=active_refresh["status"],
                     technical_status=refresh_result.status,
                 )
-                plan = _with_refresh_diagnostics_metadata(plan, refresh_diagnostics)
-                refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
-                    current_state=current_state,
-                    refreshed_at=refreshed_at,
-                    plan=plan,
-                )
+                # Finalization owns diagnostics, never the earlier business plan.
+                self.runtime.finalize_sheet_vitrina_publication(
+                    operation_id=refresh_result.publication_operation_id,
+                    attempt_id=refresh_result.publication_attempt_id, diagnostics=refresh_diagnostics)
                 payload.update(asdict(refresh_result))
                 _apply_active_refresh_semantics(payload, refresh_result)
                 payload["updated_cells"] = updated_cells
@@ -7978,6 +7978,8 @@ class RegistryUploadHttpEntrypoint:
                         metric_keys=",".join(metric_keys),
                     )
                 )
+                expected_ready = self.runtime.prepare_sheet_vitrina_ready_publication(
+                    bundle_version=current_state.bundle_version, as_of_date=target_snapshot_as_of_date)
                 partial_plan = self.sheet_plan_block.build_plan(
                     as_of_date=target_snapshot_as_of_date,
                     log=emit,
@@ -8072,6 +8074,8 @@ class RegistryUploadHttpEntrypoint:
                     current_state=current_state,
                     refreshed_at=refreshed_at,
                     plan=merged_plan,
+                    expected=expected_ready,
+                    build_inputs=dict(partial_plan.metadata or {}).get("publication_inputs"),
                 )
                 refresh_outcome = _build_refresh_result_payload(refresh_result)
                 self.runtime.save_sheet_vitrina_manual_refresh_result(
@@ -11743,6 +11747,7 @@ def _merge_source_group_ready_snapshot(
     )
     metadata = {
         **previous_metadata,
+        "publication_inputs": dict(partial_plan.metadata or {}).get("publication_inputs", {}),
         "row_last_updated_at_by_row_id": row_updated_at,
         "source_group_last_updated_at": group_updated_at,
         "last_partial_group_refresh": {

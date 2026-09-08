@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.calculation_parameters import PROXY_BLOCK_KEY, _parameters_from_row as parameters3
 from packages.application.calculation_parameters_v4 import PROXY_V4_BLOCK_KEY, _parameters_from_row as parameters4
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
@@ -194,8 +195,7 @@ class WebVitrinaManagementHistoryAdapter:
                     raise ValueError("backup-verification-failed")
                 for update in candidate["updates"]:
                     before_row = next(r for r in candidate["before_images"] if r["bundle_version"] == update["bundle_version"] and r["as_of_date"] == update["as_of_date"])
-                    count = conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE bundle_version=? AND as_of_date=? AND plan_json=?",
-                        (update["after_plan_json"], update["bundle_version"], update["as_of_date"], before_row["plan_json"])).rowcount
+                    count = replace_ready(conn, expected=ExpectedReady(update["bundle_version"],update["as_of_date"],before_row["plan_json"]), plan_json=update["after_plan_json"]).rowcount
                     if count != 1:
                         raise ValueError("snapshot-cas-failed")
                 conn.commit()
@@ -241,8 +241,7 @@ class WebVitrinaManagementHistoryAdapter:
                 conn.execute('BEGIN IMMEDIATE')
                 self.target(request)
                 for update, before in zip(candidate['updates'], candidate['before_images']):
-                    count = conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE bundle_version=? AND as_of_date=? AND plan_json=?',
-                        (before['plan_json'], update['bundle_version'], update['as_of_date'], update['after_plan_json'])).rowcount
+                    count = replace_ready(conn, expected=ExpectedReady(update['bundle_version'],update['as_of_date'],update['after_plan_json']), plan_json=before['plan_json']).rowcount
                     if count != 1: raise ValueError('rollback-cas-drift')
                 conn.commit()
         return {'operation_id':operation_id, 'restored_snapshots':len(candidate['updates'])}

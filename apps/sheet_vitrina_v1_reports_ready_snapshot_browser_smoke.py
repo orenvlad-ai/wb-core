@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -63,12 +64,12 @@ def main() -> None:
                 raise AssertionError(f"bundle upload must be accepted, got {upload_status} {upload_payload}")
 
             current_state = runtime.load_current_state()
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at="2026-05-09T06:00:00Z",
                 plan=_build_plan(as_of_date="2026-05-08", current_state=current_state),
             )
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at="2026-05-10T06:00:00Z",
                 plan=_build_plan(as_of_date="2026-05-09", current_state=current_state),

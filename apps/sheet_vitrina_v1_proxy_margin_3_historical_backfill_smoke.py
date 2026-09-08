@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_proxy_margin_3_historical_backfill import (  # noqa: E402
     BackfillExecutionError,
     run_backfill,
@@ -76,7 +77,7 @@ def main() -> None:
         second_nm = int(enabled_one[1].nm_id)
         third_nm = int(enabled_one[2].nm_id)
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state_one,
             refreshed_at="2026-06-28T09:00:00Z",
             plan=_plan_without_operands(
@@ -85,7 +86,7 @@ def main() -> None:
                 nm_ids=[first_nm, second_nm],
             ),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state_one,
             refreshed_at="2026-06-29T09:00:00Z",
             plan=_pre_boundary_fallback_plan(
@@ -93,7 +94,7 @@ def main() -> None:
                 nm_ids=[first_nm, second_nm],
             ),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state_one,
             refreshed_at="2026-06-30T09:00:00Z",
             plan=_ratio_plan(
@@ -128,7 +129,7 @@ def main() -> None:
         accepted = runtime.ingest_bundle(generation_two, activated_at="2026-07-01T08:00:00Z")
         _assert(accepted.status == "accepted", "second bundle generation must be accepted")
         state_two = runtime.load_current_state()
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state_two,
             refreshed_at="2026-07-01T09:00:00Z",
             plan=_ratio_plan(
@@ -146,7 +147,7 @@ def main() -> None:
                 existing_targets={},
             ),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state_two,
             refreshed_at="2026-07-02T09:00:00Z",
             plan=_ratio_plan(

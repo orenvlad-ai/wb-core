@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.onec_stocks_block import OnecStocksBlock, normalize_onec_stocks_payload
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
@@ -56,7 +57,7 @@ def main() -> None:
         _assert_plan_ff_stock_filled(first_plan, FILLED_DATE)
         _assert_plan_ff_stock_zero(first_plan, MISSING_DATE)
         _assert_ff_stock_status_has_zero_stock(first_plan, MISSING_DATE)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=runtime.load_current_state(),
             refreshed_at="2026-05-19T08:05:00Z",
             plan=first_plan,
@@ -74,7 +75,7 @@ def main() -> None:
         _assert_plan_ff_stock_zero(second_plan, CURRENT_DATE)
         _assert_ff_stock_status_has_zero_stock(second_plan, MISSING_DATE)
         _assert_ff_stock_status_has_zero_stock(second_plan, CURRENT_DATE)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=runtime.load_current_state(),
             refreshed_at="2026-05-20T08:05:00Z",
             plan=second_plan,
@@ -93,7 +94,7 @@ def main() -> None:
         _assert_archived_onec_rows_hidden(period_rows)
 
         stale_plan = _with_stale_ff_stock_cells_and_unrelated_row(second_plan)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=runtime.load_current_state(),
             refreshed_at="2026-05-20T08:20:00Z",
             plan=stale_plan,

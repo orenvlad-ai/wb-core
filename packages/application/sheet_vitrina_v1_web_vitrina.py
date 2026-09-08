@@ -432,7 +432,11 @@ class SheetVitrinaV1WebVitrinaBlock:
                     rows,
                     reason_ru=fbs_lifecycle_fallback.reason_ru,
                 )
-        inventory_snapshot = self.fbs_inventory_snapshot
+        from packages.application.fbs_accounting_runtime import load as load_accounting, load_management_inventory
+        accounting_book, _ = load_accounting(self.runtime.runtime_dir)
+        management_book_mode = accounting_book is not None and self._fbs_inventory_snapshot is None
+        inventory_snapshot = (load_management_inventory(self.runtime.runtime_dir, snapshot, now=now)
+                              if management_book_mode else self.fbs_inventory_snapshot)
         rows = restore_materialized_official_fbs_estimates(
             rows,
             presentation=dict(snapshot.metadata or {}).get("server_cell_presentation", {}),
@@ -445,20 +449,23 @@ class SheetVitrinaV1WebVitrinaBlock:
             if inventory_snapshot is not None:
                 rows = inventory_snapshot.apply_rows(rows, business_date=current_business_date_iso(now))
                 current_estimate = {"available": True}
-            else:
+            elif not management_book_mode:
                 current_estimate = build_current_official_fbs_estimate(
                     self.runtime.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled], now=now,
                 )
                 rows = apply_current_official_fbs_estimate(rows, estimate=current_estimate)
+            else:
+                current_estimate = {"available": False}
             import sqlite3
             with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
                 conn.row_factory = sqlite3.Row
                 conn.execute('PRAGMA query_only=ON')
                 parameters = dated_parameters(conn, current_business_date_iso(now)) if current_estimate.get('available') else None
-            rows = recalculate_current_rows(rows, business_date=current_business_date_iso(now), parameters=parameters,
-                original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}), snapshot_id=snapshot.snapshot_id)
+            if not management_book_mode:
+                rows = recalculate_current_rows(rows, business_date=current_business_date_iso(now), parameters=parameters,
+                    original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}), snapshot_id=snapshot.snapshot_id)
         yesterday = yesterday_date(current_business_date_iso(now))
-        if yesterday in snapshot.date_columns:
+        if yesterday in snapshot.date_columns and not management_book_mode:
             import sqlite3
             with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
                 conn.row_factory = sqlite3.Row
@@ -854,6 +861,18 @@ def _build_period_snapshot(
         ],
         metadata={
             "server_cell_presentation": combined_presentation,
+            "fbs_accounting_bindings": {
+                binding.requested_date: dict(snapshots_by_as_of_date[binding.storage_key].metadata or {})
+                    .get("fbs_accounting_bindings", {})[binding.requested_date]
+                for binding in period_date_bindings
+                if not binding.missing and binding.requested_date in
+                    dict(snapshots_by_as_of_date[binding.storage_key].metadata or {}).get("fbs_accounting_bindings", {})
+            },
+            "fbs_accounting_targets": {
+                binding.requested_date: dict(snapshots_by_as_of_date[binding.storage_key].metadata or {})
+                    .get("ready_publication_target")
+                for binding in period_date_bindings if not binding.missing
+            },
             "incident_projection_quality_by_date": _merge_period_incident_projection_quality(
                 period_date_bindings=period_date_bindings,
                 snapshots_by_as_of_date=snapshots_by_as_of_date,
