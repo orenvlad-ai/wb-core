@@ -127,9 +127,20 @@ def build_plan_from_paths(
         if file_exists(head, sibling):
             commands.append(["python3", sibling])
 
+    # Close dependencies over the final selection, including changed/sibling
+    # smokes that did not come from a matched group. Only the trusted map owns
+    # these prerequisites; candidate source is never imported or inspected.
+    expanded_commands: list[list[str]] = []
+    for command in commands:
+        for dependency in mapping.get("command_dependencies", {}).values():
+            if len(command) > 1 and command[0] == "python3" and command[1] in dependency["scripts"]:
+                expanded_commands.extend(dependency.get("commands") or [])
+                pip.extend(dependency.get("pip") or [])
+        expanded_commands.append(command)
+
     unique_commands: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
-    for command in commands:
+    for command in expanded_commands:
         normalized = tuple(str(part) for part in command)
         if not normalized or normalized in seen:
             continue

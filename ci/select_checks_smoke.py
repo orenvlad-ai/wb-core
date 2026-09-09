@@ -211,6 +211,69 @@ def rename_diff_check():
         assert paths == sorted([original, renamed]), paths
 
 
+def command_dependency_checks():
+    # Independent entrypoint expectations: browser dependencies follow commands,
+    # not a filename heuristic or an unrelated changed-path group.
+    scripts = (
+        "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
+        "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
+        "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
+        "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
+        "apps/sku_inventory_balance_browser_smoke.py",
+    )
+    install = ["python3", "-m", "playwright", "install", "--with-deps", "chromium"]
+
+    def check(plan, selected):
+        verify_plan(plan)
+        assert plan["commands"].count(install) == 1, plan
+        assert plan["pip"].count("playwright==1.58.0") == 1, plan
+        assert "openpyxl==3.1.5" in plan["pip"], plan
+        for script in selected:
+            command = ["python3", script]
+            assert plan["commands"].count(command) == 1, plan
+            assert plan["commands"].index(install) < plan["commands"].index(command), plan
+
+    for script in scripts:
+        assert (select_checks.ROOT / script).is_file(), script
+        direct = build_plan_from_paths(pull_request=30, base=BASE, head=HEAD,
+            paths=[script], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+        check(direct, [script])
+        sibling_source = script.removesuffix("_smoke.py") + ".py"
+        sibling = build_plan_from_paths(pull_request=31, base=BASE, head=HEAD,
+            paths=[sibling_source], file_exists=lambda _, p: p in {sibling_source, script})
+        check(sibling, [script])
+
+    combined = build_plan_from_paths(pull_request=32, base=BASE, head=HEAD,
+        paths=[*scripts, "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
+        file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+    check(combined, scripts)
+    assert combined["commands"][0][:3] == ["python3", "-m", "py_compile"]
+
+    # A group can select a browser command even when no browser file changed.
+    mapping, mapping_sha = select_checks.load_map()
+    mapping["groups"]["fixture_browser_boundary"] = {
+        "patterns": ["packages/application/fixture_boundary.py"],
+        "commands": [["python3", scripts[0]]],
+    }
+    with patch.object(select_checks, "load_map", return_value=(mapping, mapping_sha)):
+        grouped = build_plan_from_paths(pull_request=33, base=BASE, head=HEAD,
+            paths=["packages/application/fixture_boundary.py"], file_exists=lambda *_: True)
+    check(grouped, [scripts[0]])
+
+    for paths, file_exists in (
+        (["packages/application/sku_inventory_balance.py"], lambda *_: True),
+        (["apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py"], lambda *_: True),
+        (["ci/checks.json", "ci/select_checks.py", "ci/select_checks_smoke.py"], lambda *_: True),
+        ([scripts[1]], lambda *_: False),
+    ):
+        non_browser = build_plan_from_paths(pull_request=34, base=BASE, head=HEAD,
+            paths=paths, file_exists=file_exists)
+        verify_plan(non_browser)
+        assert install not in non_browser["commands"], non_browser
+        assert "playwright==1.58.0" not in non_browser["pip"], non_browser
+    print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
+
+
 def exists(_head: str, path: str) -> bool:
     return path in {
         "docs/example.md",
@@ -236,6 +299,7 @@ def main() -> None:
     assert workflow.index('>> "$GITHUB_PATH"') < workflow.index('python3 trusted-base/ci/run_checks.py')
     boundary_checks()
     rename_diff_check()
+    command_dependency_checks()
     docs = build_plan_from_paths(
         pull_request=1, base=BASE, head=HEAD, paths=["docs/example.md"], file_exists=exists
     )
