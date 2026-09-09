@@ -1,5 +1,18 @@
 {
   "schema": "wb-core.check-map/v1",
+  "command_dependencies": {
+    "playwright_chromium": {
+      "scripts": [
+        "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
+        "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
+        "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
+        "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
+        "apps/sku_inventory_balance_browser_smoke.py"
+      ],
+      "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
+    }
+  },
   "groups": {
     "warehouse_operations": {
       "patterns": [
@@ -384,20 +397,11 @@
       "commands": [
         [
           "python3",
-          "-m",
-          "playwright",
-          "install",
-          "--with-deps",
-          "chromium"
-        ],
-        [
-          "python3",
           "apps/sku_inventory_balance_browser_smoke.py"
         ]
       ],
       "pip": [
-        "openpyxl==3.1.5",
-        "playwright==1.58.0"
+        "openpyxl==3.1.5"
       ]
     },
     "change_registry_writer": {
