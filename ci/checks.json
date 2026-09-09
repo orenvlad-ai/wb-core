@@ -1,6 +1,11 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "recovery_http_imports": {
+      "scripts": ["apps/warehouse_recovery_policy_http_smoke.py"],
+      "commands": [],
+      "pip": ["playwright==1.58.0"]
+    },
     "playwright_chromium": {
       "scripts": [
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
