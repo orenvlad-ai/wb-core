@@ -61,6 +61,12 @@ STATUS_HEADER = [
 ]
 UNAVAILABLE_STALE_VALUE_METRIC_KEY = "promo_participation"
 WB_CONTOUR_METRIC_LABEL = "Склад WB: весь контур, шт"
+CURRENT_WB_STOCK_METRIC_KEY = "inventory_wb_total_qty_v1"
+LEGACY_STOCK_METRIC_KEYS = tuple(
+    f"{scope}wb_stock_{variant}_qty"
+    for scope in ("", "total_")
+    for variant in ("fact", "incident", "effective")
+)
 
 
 def main() -> None:
@@ -437,43 +443,45 @@ def run_browser_checks(
                     if collapsed_toggle.count() == 0:
                         break
                     collapsed_toggle.first.click()
-                if page.locator('[data-metric-key="wb_stock_fact_qty"]').count():
-                    raise AssertionError(
-                        "retired WB fact duplicate must not render in the public table"
-                    )
-                provisional_cell = page.locator(
-                    'td[data-quality-state="provisional_received_rows"]'
-                    '[data-metric-key="wb_stock_incident_qty"]'
+                for metric_key in LEGACY_STOCK_METRIC_KEYS:
+                    if page.locator(f'[data-metric-key="{metric_key}"]').count():
+                        raise AssertionError(
+                            f"persisted legacy WB stock row must not render: {metric_key}"
+                        )
+                wb_stock_cell = page.locator(
+                    'td[data-quality-state="inventory_history_legacy_wb_exact"]'
+                    f'[data-metric-key="{CURRENT_WB_STOCK_METRIC_KEY}"]'
                     '[data-cell-date="2026-04-20"]'
                 )
-                if provisional_cell.count() != 1:
+                if wb_stock_cell.count() != 1 or wb_stock_cell.inner_text().strip() != "15":
                     raise AssertionError(
-                        "provisional incident fixture cell must render once"
+                        "the explicit WB row must retain the historical WB-only value 15 once, "
+                        f"got {wb_stock_cell.all_text_contents()}"
                     )
                 quality_phrase = (
-                    "Рассчитано по полученному снимку, полнота WB не подтверждена"
+                    "Историческое значение сохранено по прежней формуле; "
+                    "inventory_planning_v1 не применён задним числом."
                 )
                 if (
                     quality_phrase not in (
-                        provisional_cell.get_attribute("title") or ""
+                        wb_stock_cell.get_attribute("title") or ""
                     )
                     or quality_phrase
-                    not in (provisional_cell.get_attribute("aria-label") or "")
+                    not in (wb_stock_cell.get_attribute("aria-label") or "")
                 ):
                     raise AssertionError(
-                        "provisional incident cell must expose one accessible quality explanation"
+                        "current WB stock must expose its historical evidence limit accessibly"
                     )
-                incident_cell = page.locator(
-                    'td[data-presentation-state="incident_adjusted"]'
-                    '[data-quality-state="provisional_received_rows"]'
-                    '[data-metric-key="wb_stock_incident_qty"]'
-                    '[data-cell-date="2026-04-20"]'
+                combined_cells = page.locator(
+                    'td[data-metric-key="stock_total"][data-cell-date="2026-04-20"]'
                 )
-                if incident_cell.count() != 1:
-                    raise AssertionError(
-                        "positive provisional incident cell must retain its server metadata"
-                    )
-                incident_style = incident_cell.evaluate(
+                if combined_cells.count() == 0 or any(
+                    cell.inner_text().strip() != "—"
+                    or cell.get_attribute("data-quality-state") != "inventory_planning_history_unavailable"
+                    for cell in combined_cells.all()
+                ):
+                    raise AssertionError("WB-only history must not become a combined WB+FBS total or zero")
+                wb_stock_style = wb_stock_cell.evaluate(
                     """node => {
                       const style = getComputedStyle(node);
                       return {
@@ -487,28 +495,21 @@ def run_browser_checks(
                     }"""
                 )
                 if (
-                    incident_style["legacyAdjustedClass"]
-                    or incident_style["legacyProvisionalClass"]
-                    or incident_style["shadow"] != "none"
-                    or incident_style["textDecorationLine"] != "none"
-                    or incident_style["color"] != "rgb(244, 244, 245)"
+                    wb_stock_style["legacyAdjustedClass"]
+                    or wb_stock_style["legacyProvisionalClass"]
+                    or wb_stock_style["shadow"] != "none"
+                    or wb_stock_style["textDecorationLine"] != "none"
+                    or wb_stock_style["color"] != "rgb(244, 244, 245)"
                 ):
                     raise AssertionError(
-                        "incident/provisional cells must use neutral table styling without dotted or "
-                        f"blue-violet markers: {incident_style}"
+                        "current WB history must keep neutral styling and accessible metadata: "
+                        f"{wb_stock_style}"
                     )
-                quality_badge = page.locator(
-                    "[data-vitrina-incident-quality-badge]:not([hidden])"
-                )
-                if (
-                    quality_badge.count() != 1
-                    or quality_phrase
-                    not in (quality_badge.get_attribute("title") or "")
-                    or quality_phrase
-                    not in (quality_badge.get_attribute("aria-label") or "")
-                ):
+                if page.locator(
+                    "[data-vitrina-incident-quality-badge], [data-vitrina-incident-policy-badge]"
+                ).count():
                     raise AssertionError(
-                        "Vitrina must expose an accessible neutral provisional-quality badge"
+                        "persisted legacy incident metadata must not restore retired header badges"
                     )
                 for _index in range(100):
                     expanded_toggle = page.locator(
@@ -1042,34 +1043,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         raise AssertionError(
             f"operator compatibility route must reuse uniform metric rows without cost help UI, got {shared_metric_rows}"
         )
-    shared_time_pills = page.evaluate(
-        """() => {
-          const wrapper = document.querySelector('[data-table-snapshot-summary]');
-          const snapshot = document.querySelector('[data-vitrina-incident-quality-badge]');
-          const updated = document.querySelector('[data-table-summary-line]');
-          const wrapperStyle = wrapper ? getComputedStyle(wrapper) : null;
-          const snapshotStyle = snapshot ? getComputedStyle(snapshot) : null;
-          const updatedStyle = updated ? getComputedStyle(updated) : null;
-          return {
-            visible: !!wrapper && !wrapper.hidden && !!snapshot && !snapshot.hidden && !!updated && !updated.hidden,
-            wrapperHasVisual: !!wrapperStyle && (parseFloat(wrapperStyle.borderTopWidth || '0') > 0 || wrapperStyle.backgroundColor !== 'rgba(0, 0, 0, 0)'),
-            independent: !!snapshotStyle && !!updatedStyle && parseFloat(snapshotStyle.borderTopWidth || '0') >= 1 && parseFloat(updatedStyle.borderTopWidth || '0') >= 1,
-            sameTone: !!snapshotStyle && !!updatedStyle && snapshotStyle.backgroundColor === updatedStyle.backgroundColor,
-            weights: [snapshotStyle ? snapshotStyle.fontWeight : '', updatedStyle ? updatedStyle.fontWeight : ''],
-            snapshotHasStatusSubstrate: !!snapshot && snapshot.classList.contains('status-pill')
-          };
-        }"""
-    )
-    if (
-        not shared_time_pills["visible"]
-        or shared_time_pills["wrapperHasVisual"]
-        or not shared_time_pills["independent"]
-        or not shared_time_pills["sameTone"]
-        or int(shared_time_pills["weights"][0]) < 700
-        or int(shared_time_pills["weights"][1]) > 500
-        or shared_time_pills["snapshotHasStatusSubstrate"]
-    ):
-        raise AssertionError(f"operator compatibility route must use the shared two-pill renderer, got {shared_time_pills}")
+    shared_updated_timestamp = _check_updated_timestamp(page)
     page.locator("[data-filters-toggle]").click()
     operator_columns = page.evaluate(
         """() => {
@@ -1096,7 +1070,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "actions": ", ".join(shell_actions),
         "default_active": active_tabs[0],
         "metric_rows": json.dumps(shared_metric_rows, ensure_ascii=False),
-        "time_pills": json.dumps(shared_time_pills, ensure_ascii=False),
+        "updated_timestamp": json.dumps(shared_updated_timestamp, ensure_ascii=False),
         "columns": json.dumps(operator_columns, ensure_ascii=False),
     }
 
@@ -1623,6 +1597,12 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
         }"""
     )
     rows = initial["rows"]
+    if any(
+        row[scope_key] in LEGACY_STOCK_METRIC_KEYS
+        for row in rows
+        for scope_key in ("totalKey", "skuKey")
+    ):
+        raise AssertionError("legacy stock metrics must remain absent from active metric settings")
     if (
         initial["dialogRole"] != "dialog"
         or initial["ariaModal"] != "true"
@@ -1756,7 +1736,18 @@ def _check_metric_presentation_controls(page: object) -> dict[str, object]:
             f"got {pairing_safety}"
         )
 
-    first_common, second_common = common_rows[:2]
+    # The catalog can add metrics with no values in this ready fixture. Exercise
+    # both projections of known populated rows, independently of catalog growth.
+    fixture_common_rows = [
+        row for row in common_rows if row["skuKey"] in {"view_count", "orderCount"}
+    ]
+    if len(fixture_common_rows) != 2:
+        raise AssertionError(f"selection needs both populated TOTAL/SKU fixture pairs, got {fixture_common_rows}")
+    initial_counts = _visible_metric_key_counts(page)
+    for row in fixture_common_rows:
+        if any(initial_counts.get(str(row[key]), 0) <= 0 for key in ("totalKey", "skuKey")):
+            raise AssertionError(f"selection fixture pairs must initially render in both scopes: {row}")
+    first_common, second_common = fixture_common_rows
     first_id = str(first_common["logicalId"])
     second_id = str(second_common["logicalId"])
     page.locator("[data-metric-selection-toggle]").click()
@@ -2499,7 +2490,45 @@ def _check_table_snapshot_cache(page: object) -> dict[str, object]:
         cache_page.close()
 
 
+def _check_updated_timestamp(page: object) -> dict[str, object]:
+    """Both routes share one update token; incident badges are retired (#983)."""
+    payload = page.evaluate(
+        """() => {
+          const wrapper = document.querySelector('[data-table-snapshot-summary]');
+          const summary = document.querySelector('[data-table-summary-line]');
+          const updated = document.querySelector('[data-table-summary-updated]');
+          const wrapperStyle = wrapper ? getComputedStyle(wrapper) : null;
+          const summaryStyle = summary ? getComputedStyle(summary) : null;
+          return {
+            visible: !!wrapper && !wrapper.hidden && !!summary && !summary.hidden &&
+              summary.getBoundingClientRect().width > 0 && !!updated && !updated.hidden,
+            grouped: !!wrapper && !!summary && !!updated &&
+              wrapper.children.length === 1 && wrapper.contains(summary) && summary.contains(updated),
+            transparentWrapper: !!wrapperStyle && parseFloat(wrapperStyle.borderTopWidth) === 0 &&
+              wrapperStyle.backgroundColor === 'rgba(0, 0, 0, 0)',
+            singlePill: !!summaryStyle && parseFloat(summaryStyle.borderTopWidth) >= 1 &&
+              parseFloat(summaryStyle.borderTopLeftRadius) >= 10 && parseInt(summaryStyle.fontWeight, 10) <= 500,
+            updatedCount: document.querySelectorAll('[data-table-summary-updated]').length,
+            legacyBadgeCount: document.querySelectorAll('[data-vitrina-incident-quality-badge], [data-vitrina-incident-policy-badge]').length,
+            text: updated ? updated.textContent.trim() : ''
+          };
+        }"""
+    )
+    if (
+        not payload["visible"]
+        or not payload["grouped"]
+        or not payload["transparentWrapper"]
+        or not payload["singlePill"]
+        or payload["updatedCount"] != 1
+        or payload["legacyBadgeCount"] != 0
+        or not payload["text"].startswith("обн:")
+    ):
+        raise AssertionError(f"shared header must show one updated timestamp without legacy badges, got {payload}")
+    return payload
+
+
 def _check_table_header_layout(page: object) -> dict[str, object]:
+    _check_updated_timestamp(page)
     payload = page.evaluate(
         """() => {
           const header = document.querySelector('[data-table-header]');
@@ -2508,7 +2537,6 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const snapshotSummary = header ? header.querySelector('[data-table-snapshot-summary]') : null;
           const summary = header ? header.querySelector('[data-table-summary-line]') : null;
           const updated = summary ? summary.querySelector('[data-table-summary-updated]') : null;
-          const quality = header ? header.querySelector('[data-vitrina-incident-quality-badge]') : null;
           const loadStatus = header ? header.querySelector('[data-table-load-status]') : null;
           const objectLabel = header ? header.querySelector('[data-table-object-label]') : null;
           const progress = header ? header.querySelector('[data-global-progress]') : null;
@@ -2524,12 +2552,7 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
           const headerRect = header ? header.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const rightRect = rightZone ? rightZone.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const snapshotRect = snapshotSummary ? snapshotSummary.getBoundingClientRect() : {left: 0, right: 0, width: 0};
-          const qualityRect = quality ? quality.getBoundingClientRect() : {left: 0, right: 0, width: 0};
-          const updatedRect = updated ? updated.getBoundingClientRect() : {left: 0, right: 0, width: 0};
-          const summaryRect = summary ? summary.getBoundingClientRect() : {left: 0, right: 0, width: 0};
           const snapshotStyles = snapshotSummary ? getComputedStyle(snapshotSummary) : null;
-          const qualityStyles = quality ? getComputedStyle(quality) : null;
-          const summaryStyles = summary ? getComputedStyle(summary) : null;
           const historyButton = header ? header.querySelector('[data-history-toggle]') : null;
           const historyLabel = header ? header.querySelector('[data-history-label]') : null;
           const historyIcon = header ? header.querySelector('.history-control-icon') : null;
@@ -2597,13 +2620,8 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
             right_zone_near_button: !!rightZone && !!loadButton && Math.abs(rightRect.right - buttonRect.right) <= 4,
             snapshot_summary_exists: !!snapshotSummary,
             snapshot_summary_visible: !!snapshotSummary && snapshotRect.width > 2,
-            snapshot_updated_grouped: !!snapshotSummary && !!quality && !!updated && snapshotSummary.contains(quality) && snapshotSummary.contains(updated),
-            snapshot_updated_adjacent: !!quality && !!summary && !quality.hidden && summaryRect.left >= qualityRect.right && summaryRect.left - qualityRect.right <= 12,
+            snapshot_updated_grouped: !!snapshotSummary && !!summary && !!updated && snapshotSummary.contains(summary) && summary.contains(updated),
             snapshot_group_visual: !!snapshotStyles && ['flex', 'inline-flex'].includes(snapshotStyles.display) && parseFloat(snapshotStyles.borderTopWidth || '0') === 0 && snapshotStyles.backgroundColor === 'rgba(0, 0, 0, 0)',
-            independent_time_pills: !!qualityStyles && !!summaryStyles && parseFloat(qualityStyles.borderTopWidth || '0') >= 1 && parseFloat(summaryStyles.borderTopWidth || '0') >= 1 && parseFloat(qualityStyles.borderTopLeftRadius || '0') >= 10 && parseFloat(summaryStyles.borderTopLeftRadius || '0') >= 10,
-            time_pills_same_tone: !!qualityStyles && !!summaryStyles && qualityStyles.backgroundColor === summaryStyles.backgroundColor && qualityStyles.borderTopColor === summaryStyles.borderTopColor,
-            snapshot_bold_updated_regular: !!qualityStyles && !!summaryStyles && parseInt(qualityStyles.fontWeight || '0', 10) >= 700 && parseInt(summaryStyles.fontWeight || '0', 10) <= 500,
-            snapshot_has_no_inner_substrate: !!quality && !quality.classList.contains('status-pill') && quality.children.length === 0,
             snapshot_badge_count: header ? header.querySelectorAll('[data-vitrina-incident-quality-badge]').length : 0,
             updated_token_count: header ? header.querySelectorAll('[data-table-summary-updated]').length : 0,
             summary_separator_count: snapshotSummary ? snapshotSummary.querySelectorAll('.table-summary-separator').length : 0,
@@ -2669,13 +2687,8 @@ def _check_table_header_layout(page: object) -> dict[str, object]:
         or not payload["snapshot_summary_exists"]
         or not payload["snapshot_summary_visible"]
         or not payload["snapshot_updated_grouped"]
-        or not payload["snapshot_updated_adjacent"]
         or not payload["snapshot_group_visual"]
-        or not payload["independent_time_pills"]
-        or not payload["time_pills_same_tone"]
-        or not payload["snapshot_bold_updated_regular"]
-        or not payload["snapshot_has_no_inner_substrate"]
-        or int(payload["snapshot_badge_count"]) != 1
+        or int(payload["snapshot_badge_count"]) != 0
         or int(payload["updated_token_count"]) != 1
         or int(payload["summary_separator_count"]) != 0
         or int(payload["visible_freshness_count"]) != 0
@@ -2756,7 +2769,6 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                   const load = header && header.querySelector('[data-load-refresh-button]');
                   const metrics = header && header.querySelector('[data-metrics-settings-open]');
                   const snapshotSummary = header && header.querySelector('[data-table-snapshot-summary]');
-                  const quality = header && header.querySelector('[data-vitrina-incident-quality-badge]');
                   const updated = header && header.querySelector('[data-table-summary-updated]');
                   const summaryLine = header && header.querySelector('[data-table-summary-line]');
                   const rect = node => node ? node.getBoundingClientRect() : {left: 0, right: 0, top: 0, bottom: 0};
@@ -2764,7 +2776,6 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                   const leftRect = rect(left);
                   const rightRect = rect(right);
                   const snapshotRect = rect(snapshotSummary);
-                  const qualityRect = rect(quality);
                   const updatedRect = rect(summaryLine);
                   return {
                     documentWidth: document.documentElement.scrollWidth,
@@ -2773,9 +2784,8 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                     rightInside: rightRect.left >= headerRect.left - 1 && rightRect.right <= headerRect.right + 1,
                     wrapped: rightRect.top >= leftRect.bottom - 2,
                     snapshotInside: snapshotRect.left >= headerRect.left - 1 && snapshotRect.right <= headerRect.right + 1,
-                    snapshotUpdatedGrouped: !!snapshotSummary && !!quality && !!updated && snapshotSummary.contains(quality) && snapshotSummary.contains(updated),
-                    snapshotUpdatedAdjacent: !!quality && !!updated && !quality.hidden && updatedRect.left >= qualityRect.right && updatedRect.left - qualityRect.right <= 12,
-                    timePillsInside: qualityRect.left >= snapshotRect.left - 1 && qualityRect.right <= snapshotRect.right + 1 && updatedRect.left >= snapshotRect.left - 1 && updatedRect.right <= snapshotRect.right + 1,
+                    snapshotUpdatedGrouped: !!snapshotSummary && !!summaryLine && !!updated && snapshotSummary.contains(summaryLine) && summaryLine.contains(updated),
+                    updatedPillInside: updatedRect.left >= snapshotRect.left - 1 && updatedRect.right <= snapshotRect.right + 1,
                     freshnessVisible: /(?:Свежесть|свеж:)/i.test(header ? (header.innerText || '') : ''),
                     separatorCount: snapshotSummary ? snapshotSummary.querySelectorAll('.table-summary-separator').length : -1,
                     sellerBadgeCount: header ? header.querySelectorAll('[data-seller-top-session]').length : -1,
@@ -2793,8 +2803,9 @@ def _check_narrow_table_header_layout(page: object) -> dict[str, object]:
                 or not layout["wrapped"]
                 or not layout["snapshotInside"]
                 or not layout["snapshotUpdatedGrouped"]
-                or not layout["snapshotUpdatedAdjacent"]
-                or not layout["timePillsInside"]
+                or not layout["updatedPillInside"]
+                or layout["incidentText"]
+                or layout["qualityText"]
                 or layout["freshnessVisible"]
                 or int(layout["separatorCount"]) != 0
                 or int(layout["sellerBadgeCount"]) != 0
@@ -3726,6 +3737,7 @@ def _check_load_refresh_action(
 
 
 def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
+    _check_updated_timestamp(page)
     legacy_card_count = page.locator(
         "[data-summary-card='page_refresh'], [data-summary-card='status']"
     ).count()
@@ -3737,7 +3749,6 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
           const loadStatusNode = document.querySelector('[data-table-load-status]');
           const updatedNode = node ? node.querySelector('[data-table-summary-updated]') : null;
           const snapshotSummaryNode = document.querySelector('[data-table-snapshot-summary]');
-          const qualityNode = document.querySelector('[data-vitrina-incident-quality-badge]');
           const trimPrefix = (value, prefix) => {
             const text = String(value || '').trim();
             return text.startsWith(prefix) ? text.slice(prefix.length).trim() : text;
@@ -3752,7 +3763,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
             load_status_dot_count: loadStatusNode ? loadStatusNode.querySelectorAll('.table-load-status-dot').length : 0,
             updated: trimPrefix(updatedNode ? updatedNode.textContent : '', 'обн:'),
             updated_at: updatedNode ? String(updatedNode.getAttribute('data-table-summary-updated-at') || '').trim() : '',
-            snapshot_updated_grouped: !!snapshotSummaryNode && !!qualityNode && !!updatedNode && snapshotSummaryNode.contains(qualityNode) && snapshotSummaryNode.contains(updatedNode),
+            snapshot_updated_grouped: !!snapshotSummaryNode && !!node && !!updatedNode && snapshotSummaryNode.contains(node) && node.contains(updatedNode),
             freshness_node_count: document.querySelectorAll('[data-table-summary-freshness], .table-summary-freshness').length,
             separator_count: snapshotSummaryNode ? snapshotSummaryNode.querySelectorAll('.table-summary-separator').length : 0,
             status: String((loadStatusNode && loadStatusNode.getAttribute('data-load-status-text')) || '').trim(),
@@ -3776,7 +3787,7 @@ def _read_summary_cards(page: object) -> dict[str, dict[str, str]]:
         or int(payload.get("freshness_node_count") or 0) != 0
         or int(payload.get("separator_count") or 0) != 0
     ):
-        raise AssertionError(f"table header summary must contain one grouped snapshot/updated block without freshness, got {payload}")
+        raise AssertionError(f"table header summary must contain one grouped update timestamp without freshness, got {payload}")
     if payload.get("load_status_visible_text") or int(payload.get("load_status_dot_count") or 0) != 1:
         raise AssertionError(f"load status must be an icon-only lamp, got {payload}")
     if not str(payload.get("load_status_title") or "").startswith("Загрузка: "):
@@ -4684,7 +4695,7 @@ def _build_plan(
             SheetVitrinaWriteTarget(
                 sheet_name="DATA_VITRINA",
                 write_start_cell="A1",
-                write_rect="A1:C35",
+                write_rect="A1:C37",
                 clear_range="A:Z",
                 write_mode="overwrite",
                 partial_update_allowed=False,
@@ -4722,6 +4733,9 @@ def _build_plan(
                     [f"SKU B: Средневзвешенная себестоимость", f"SKU:{second_nm_id}|own_avg_product_cost_rub", 110],
                     ["Итого: WB contour", "TOTAL|total_own_capital_WB_qty", 42],
                     [f"SKU A: WB contour", f"SKU:{first_nm_id}|own_capital_WB_qty", 42],
+                    ["Итого: Остаток WB", "TOTAL|total_stock_total", 15],
+                    ["SKU A: Остаток WB", f"SKU:{first_nm_id}|stock_total", 15],
+                    # Retained history proves legacy rows/metadata stay out of active UI.
                     ["Итого: Остаток WB факт", "TOTAL|total_wb_stock_fact_qty", 15],
                     ["Итого: Остаток WB инцидент", "TOTAL|total_wb_stock_incident_qty", 10],
                     ["Итого: Остаток WB effective", "TOTAL|total_wb_stock_effective_qty", 5],
@@ -4729,7 +4743,7 @@ def _build_plan(
                     [f"SKU A: Остаток WB инцидент", f"SKU:{first_nm_id}|wb_stock_incident_qty", 10],
                     [f"SKU A: Остаток WB effective", f"SKU:{first_nm_id}|wb_stock_effective_qty", 5],
                 ],
-                row_count=34,
+                row_count=36,
                 column_count=3,
             ),
             SheetVitrinaWriteTarget(
