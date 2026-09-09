@@ -16,6 +16,42 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    'warehouse_recovery_retention_smoke': (
+        'apps/warehouse_recovery_retention.py',
+        'packages/application/warehouse_recovery_policy.py',
+        'packages/application/storage_registry.py',
+    ),
+    'warehouse_recovery_policy_smoke': (
+        'apps/warehouse_recovery_retention.py',
+        'packages/application/warehouse_recovery_policy.py',
+        'packages/application/storage_registry.py',
+    ),
+    'warehouse_recovery_policy_static_smoke': (
+        'apps/warehouse_recovery_retention.py',
+        'packages/application/warehouse_recovery_policy.py',
+        'packages/application/storage_registry.py',
+    ),
+    'warehouse_recovery_policy_http_smoke': (
+        'apps/warehouse_recovery_retention.py',
+        'packages/application/warehouse_recovery_policy.py',
+        'packages/application/storage_registry.py',
+    ),
+    'finance_storage_split_smoke': (
+        'packages/application/storage_registry.py',
+        'packages/application/finance_storage_backup_rotation.py',
+        'apps/finance_storage_backup_rotation.py',
+    ),
+    'finance_storage_backup_rotation_smoke': (
+        'packages/application/storage_registry.py',
+        'packages/application/finance_storage_backup_rotation.py',
+        'apps/finance_storage_backup_rotation.py',
+    ),
+    'root_storage_policy_smoke': (
+        'packages/application/root_storage_policy.py',
+        'apps/root_storage_policy.py',
+        'artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json',
+    ),
+
     "ready_writer_closure_smoke": (
         "packages/application/ready_publication.py",
         "packages/application/registry_upload_db_backed_runtime.py",
@@ -155,6 +191,10 @@ def boundary_checks():
     for name in DIRECT_WRITERS:
         smoke = "sheet_vitrina_v1_proxy_v4_initialize" if name == "sheet_vitrina_v1_proxy_v4_reconcile" else name
         expected.setdefault(f"apps/{name}.py", set()).add(("python3", f"apps/{smoke}_smoke.py"))
+    for path in ("apps/wb_autoanswers_activation.py", "apps/wb_autoanswers_activation_test.py"):
+        plan = build_plan_from_paths(pull_request=21, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: (root / p).is_file())
+        assert ["python3", "-m", "unittest", "apps.wb_autoanswers_activation_test"] in plan["commands"]
     for path, required in expected.items():
         assert (root / path).is_file(), path
         for command in required:
