@@ -14,6 +14,83 @@
     }
   },
   "groups": {
+    "warehouse_recovery_retention": {
+      "patterns": [
+        "apps/warehouse_recovery_retention.py",
+        "packages/application/warehouse_recovery_policy.py",
+        "packages/application/storage_registry.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/warehouse_recovery_retention_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_recovery_policy_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_recovery_policy_static_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_recovery_policy_http_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
+    "storage_generation_backup": {
+      "patterns": [
+        "packages/application/storage_registry.py",
+        "packages/application/finance_storage_backup_rotation.py",
+        "apps/finance_storage_backup_rotation.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/finance_storage_split_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/finance_storage_backup_rotation_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
+    "root_storage_admission": {
+      "patterns": [
+        "packages/application/root_storage_policy.py",
+        "apps/root_storage_policy.py",
+        "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/root_storage_policy_smoke.py"
+        ]
+      ],
+      "pip": []
+    },
+    "deployment_quiesce": {
+      "patterns": [
+        "apps/wb_autoanswers_activation.py",
+        "apps/wb_autoanswers_activation_test.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "unittest",
+          "apps.wb_autoanswers_activation_test"
+        ]
+      ],
+      "pip": []
+    },
     "warehouse_operations": {
       "patterns": [
         "apps/warehouse_functional_runner.py",
