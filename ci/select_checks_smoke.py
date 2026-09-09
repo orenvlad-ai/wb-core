@@ -293,6 +293,12 @@ def command_dependency_checks():
             paths=[sibling_source], file_exists=lambda _, p: p in {sibling_source, script})
         check(sibling, [script])
 
+    for path in ("apps/warehouse_recovery_policy_http_smoke.py", "packages/application/warehouse_recovery_policy.py"):
+        plan = build_plan_from_paths(pull_request=35, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+        assert "playwright==1.58.0" in plan["pip"], plan
+        assert install not in plan["commands"], plan
+
     combined = build_plan_from_paths(pull_request=32, base=BASE, head=HEAD,
         paths=[*scripts, "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
         file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
