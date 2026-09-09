@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock  # noqa: E402
@@ -79,7 +80,7 @@ def main() -> None:
         old_result = runtime.ingest_bundle(old_bundle, activated_at="2026-04-20T10:00:00Z")
         if old_result.status != "accepted":
             raise AssertionError(f"old fixture bundle must be accepted, got {old_result}")
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=runtime.load_current_state(),
             refreshed_at="2026-04-20T10:05:00Z",
             plan=_build_old_snapshot(nm_id=nm_id),
@@ -91,7 +92,7 @@ def main() -> None:
         new_result = runtime.ingest_bundle(new_bundle, activated_at="2026-04-21T10:00:00Z")
         if new_result.status != "accepted":
             raise AssertionError(f"new fixture bundle must be accepted, got {new_result}")
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=runtime.load_current_state(),
             refreshed_at="2026-04-21T10:05:00Z",
             plan=_build_new_snapshot(nm_id=nm_id),

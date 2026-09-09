@@ -14473,9 +14473,18 @@
         return true;
       }
       const scrollLeft = Number(node.scrollLeft || 0);
-      const atLeftEdge = scrollLeft <= 1;
-      const atRightEdge = scrollLeft >= maxScrollLeft - 1;
-      return (deltaX < 0 && atLeftEdge) || (deltaX > 0 && atRightEdge);
+      if (deltaX < 0) {
+        return scrollLeft <= 1;
+      }
+      // Layout overflow can overstate the reachable right edge. Ask the native
+      // scroller whether it can advance, then restore before paint/default wheel.
+      // Do not use a scrollbar-width tolerance: near-edge movement must work.
+      try {
+        node.scrollTo({left: scrollLeft + 1, behavior: "instant"});
+        return node.scrollLeft <= scrollLeft;
+      } finally {
+        node.scrollTo({left: scrollLeft, behavior: "instant"});
+      }
     }
 
     function renderSummaryCards(cards) {

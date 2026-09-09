@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.our_wb_costs import (  # noqa: E402
     TRANSIT_DIRECT_ZERO_CONFIRMED,
     TRANSIT_NOT_FOUND,
@@ -687,7 +688,7 @@ def _assert_physical_inbound_gate_and_idempotency() -> None:
             unknown_cost_nm: 100,
         }
         for as_of_date in ("2026-07-01", "2026-07-02"):
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{as_of_date}T06:00:00Z",
                 plan=_daily_stock_plan_many(as_of_date=as_of_date, stock_by_nm=opening_stocks),
@@ -744,7 +745,7 @@ def _assert_physical_inbound_gate_and_idempotency() -> None:
             _assert_close(float(july2[nm_id]["confirmed_qty"]), 100.0, "planned/open confirmed bucket")
             _assert_close(float(july2[nm_id]["estimated_qty"]), 0.0, "planned/open estimated bucket")
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-07-03T06:00:00Z",
             plan=_daily_stock_plan_many(
@@ -845,7 +846,7 @@ def _assert_daily_state_rolls_iso_timestamp_inbound(
         ("2026-07-03", 0),
         ("2026-07-04", 20),
     ):
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=f"{as_of_date}T06:00:00Z",
             plan=_daily_stock_plan(as_of_date=as_of_date, nm_id=nm_id, stock_qty=stock_qty),
@@ -971,7 +972,7 @@ def _assert_confirmed_share_partial_bucket_math() -> None:
             },
         }
         for as_of_date, stocks in stock_by_date.items():
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{as_of_date}T06:00:00Z",
                 plan=_daily_stock_plan_many(as_of_date=as_of_date, stock_by_nm=stocks),

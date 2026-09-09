@@ -250,6 +250,8 @@ def materialize_historical_ready_snapshots(
     skipped_count = 0
     saved_dates: list[str] = []
     for snapshot_date in selected_dates:
+        expected = runtime.prepare_sheet_vitrina_ready_publication(
+            bundle_version=current_state.bundle_version, as_of_date=snapshot_date)
         exists = _ready_snapshot_exists(runtime, as_of_date=snapshot_date)
         if exists and not replace_existing:
             skipped_count += 1
@@ -314,6 +316,7 @@ def materialize_historical_ready_snapshots(
             current_state=current_state,
             refreshed_at=captured_at,
             plan=plan,
+            expected=expected,
         )
         saved_count += 1
         saved_dates.append(snapshot_date)

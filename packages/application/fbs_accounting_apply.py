@@ -53,11 +53,10 @@ class FbsAccountingAdapter:
 
     def apply(self, request, operation_id, preview):
         root = target(request)
-        with writer_lock(root):
-            fresh = self.preview(request, operation_id)
-            if any(fresh[k] != preview[k] for k in ("prestate_sha256", "candidate_sha256")):
-                raise ValueError("fbs_activation_compare_failed")
-            save(root, preview["prepared"], expected=preview["expected_version"], operation_id=operation_id)
+        fresh = self.preview(request, operation_id)
+        if any(fresh[k] != preview[k] for k in ("prestate_sha256", "candidate_sha256")):
+            raise ValueError("fbs_activation_compare_failed")
+        save(root, preview["prepared"], expected=preview["expected_version"], operation_id=operation_id)
         return {"operation_id": operation_id, "disposition": "submitted"}
 
     def readback(self, request, operation_id):

@@ -500,15 +500,16 @@ def _test_http_manual_snapshot_publication_order() -> None:
         entry.inventory_planning = SimpleNamespace(current=lambda: action("planning", {}))
         entry.wb_finance_weekly_block = SimpleNamespace(recalculate_stale_cost_weeks=lambda: action("finance", {}))
         entry.activated_at_factory = lambda: "2026-09-08T08:00:00Z"
-        def refresh(root):
+        def refresh(root, *, ready_runtime):
             _assert(root == Path("/fixture"), "manual accounting root")
+            _assert(ready_runtime is entry.runtime, "manual ready/book owner")
             events.append("fbs")
             if status == "failed":
                 raise ValueError("fbs publication failed")
             return {"status":status}
         with patch("packages.application.registry_upload_http_entrypoint.warehouse_sync_lock", return_value=nullcontext()), \
              patch("packages.application.fbs_accounting_runtime.refresh", side_effect=refresh), \
-             patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=lambda owner: action("ready", {})):
+             patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=AssertionError("duplicate independent publication")):
             if status == "failed":
                 try:
                     entry.handle_warehouse_manual_sync_request()
@@ -520,7 +521,7 @@ def _test_http_manual_snapshot_publication_order() -> None:
             else:
                 result = entry.handle_warehouse_manual_sync_request()
                 _assert(result["fbs_snapshot_accounting"] == {"status":status}, "manual accounting evidence")
-                expected = ["wb","fbs"] + (["ready"] if status == "published" else [])
+                expected = ["wb","fbs"]
                 _assert(events == expected + ["planning","proxy","economics","finance"], "manual accounting order")
 
 
@@ -637,7 +638,7 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                     ),
                     patch(
                         "packages.application.fbs_accounting_runtime.refresh",
-                        side_effect=lambda *_: record("fbs_refreshed", fbs_result),
+                        side_effect=lambda *_, **kwargs: record("fbs_refreshed", fbs_result),
                     ) as fbs_refresh,
                     patch(
                         "packages.application.fbs_accounting_runtime.publish_ready",
@@ -665,15 +666,13 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                         ),
                         sqlite_busy_timeout_ms=120_000,
                     )
-                fbs_refresh.assert_called_once_with(runtime_dir)
+                fbs_refresh.assert_called_once_with(runtime_dir, ready_runtime=runtime)
                 _assert(result["fbs_snapshot_accounting"] == fbs_result,
                         f"{command} returns accounting publication evidence")
                 expected = ["wb_published", "fbs_refreshed"]
-                if changed_rows:
-                    publish_ready.assert_called_once_with(runtime)
-                    expected.append("ready_published")
-                else:
-                    publish_ready.assert_not_called()
+                # The combined publisher owns its book/ready receipt; the
+                # runner must not issue a second independent publication.
+                publish_ready.assert_not_called()
                 _assert(events == expected + ["proxy", "finance"],
                         f"{command} must publish active FBS before dependent costs: {events}")
                 if trigger_source is None:
@@ -5537,7 +5536,7 @@ def _test_functional_economics_backfill(*, runtime: RegistryUploadDbBackedRuntim
             )
         except Exception as exc:
             _assert(
-                "ready snapshot optimistic update conflict" in str(exc),
+            "ready_target_changed:" in str(exc),
                 f"target plan_json conflict is explicit: {exc}",
             )
         else:

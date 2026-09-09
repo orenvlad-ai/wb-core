@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_stock_report_smoke import (  # noqa: E402
     BUNDLE_FIXTURE,
     CAPTURED_AT,
@@ -54,7 +55,7 @@ def main() -> None:
 
 
 def run_browser_checks(base_url: str) -> dict[str, object]:
-    page_url = f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports"
+    page_url = f"{base_url}{DEFAULT_SHEET_OPERATOR_UI_PATH}?embedded_tab=reports&stock_report_embed=1"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 980, "height": 850})
@@ -68,7 +69,8 @@ def run_browser_checks(base_url: str) -> dict[str, object]:
         )
         try:
             page.goto(page_url, wait_until="domcontentloaded")
-            page.locator('[data-report-section-button="stock"]').click()
+            # The embedded report selects stock itself; the legacy tab is retired.
+            page.locator("body.stock-report-only").wait_for(timeout=10000)
             page.wait_for_timeout(500)
             if stock_report_requests:
                 raise AssertionError(f"stock report must not auto-fetch before Рассчитать, got {stock_report_requests}")
@@ -294,7 +296,7 @@ class _StockReportFixtureServer:
         _seed_wb_supplies(runtime, nm_ids)
         _seed_ff_stock_balances(runtime, nm_ids)
         for snapshot_date in ["2026-04-15", "2026-04-16", "2026-04-17", "2026-04-18"]:
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{snapshot_date}T09:05:00Z",
                 plan=_build_plan(

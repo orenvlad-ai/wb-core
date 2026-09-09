@@ -16,6 +16,16 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "ready_writer_closure_smoke": (
+        "packages/application/ready_publication.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/fbs_accounting_runtime.py",
+    ),
+    "ready_publication_smoke": (
+        "packages/application/ready_publication.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/fbs_accounting_runtime.py",
+    ),
     "warehouse_ff_acceptance_form_smoke": (
         "packages/application/supplier_shipments.py",
         "packages/application/registry_upload_db_backed_runtime.py",

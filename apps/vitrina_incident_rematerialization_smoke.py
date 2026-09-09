@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     incident_stock_metric_key,
@@ -116,7 +117,7 @@ def main() -> None:
         current = runtime.load_current_state()
         nm_ids = [int(item.nm_id) for item in current.config_v2 if item.enabled][:2]
         assert len(nm_ids) == 2
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current,
             refreshed_at="2026-07-25T08:05:00Z",
             plan=_plan(nm_ids),

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -82,7 +83,7 @@ class LocalCurrentTailFixtureServer:
 
         current_state = runtime.load_current_state()
         enabled = [item for item in current_state.config_v2 if item.enabled]
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-18T15:01:00Z",
             plan=_build_one_day_plan(
@@ -91,7 +92,7 @@ class LocalCurrentTailFixtureServer:
                 second_nm_id=enabled[1].nm_id,
             ),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-19T15:02:00Z",
             plan=_build_one_day_plan(
@@ -100,7 +101,7 @@ class LocalCurrentTailFixtureServer:
                 second_nm_id=enabled[1].nm_id,
             ),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-20T15:03:00Z",
             plan=_build_default_daily_plan(

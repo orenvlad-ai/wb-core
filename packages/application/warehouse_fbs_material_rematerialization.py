@@ -18,6 +18,7 @@ import json
 import sqlite3
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
     FACILITIES_TABLE,
@@ -2336,24 +2337,13 @@ def _persist_candidate_and_switch(
         version_id=target_version_id,
     )
     for update in ready_updates:
-        changed = conn.execute(
-            """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?,refreshed_at=?
-               WHERE bundle_version=? AND as_of_date=?
-                 AND plan_json=?""",
-            (
-                str(update["after_plan_json"]),
-                str(candidate["published_at"]),
-                str(update["bundle_version"]),
-                str(update["as_of_date"]),
-                str(
+        changed = replace_ready(conn, expected=ExpectedReady(str(update["bundle_version"]),str(update["as_of_date"]),str(
                     conn.execute(
                         """SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots
                            WHERE bundle_version=? AND as_of_date=?""",
                         (str(update["bundle_version"]), str(update["as_of_date"])),
                     ).fetchone()[0]
-                ),
-            ),
-        )
+                )), plan_json=str(update["after_plan_json"]), refreshed_at=str(candidate["published_at"]))
         if changed.rowcount != 1:
             raise WarehouseFbsMaterialError(
                 "fbs_material_ready_snapshot_cas_drift",

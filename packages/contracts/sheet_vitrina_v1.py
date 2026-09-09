@@ -62,6 +62,9 @@ class SheetVitrinaV1RefreshResult:
     semantic_reason: str = ""
     source_outcome_counts: dict[str, int] = field(default_factory=dict)
     source_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    publication_operation_id: str | None = None
+    publication_attempt_id: str | None = None
+    publication_digest: str | None = None
 
 
 @dataclass(frozen=True)

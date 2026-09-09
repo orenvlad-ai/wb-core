@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import DB_FILENAME, RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
 
@@ -61,7 +62,7 @@ def main() -> None:
         ):
             if expected_label not in labels:
                 raise AssertionError(f"new our WB cost metric label missing from DATA_VITRINA: {expected_label}")
-        refresh_result = runtime.save_sheet_vitrina_ready_snapshot(
+        refresh_result = save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=REFRESHED_AT,
             plan=plan,

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.sheet_vitrina_v1_our_wb_costs import (
@@ -88,7 +89,7 @@ def main() -> None:
         if len(enabled) < 2:
             raise AssertionError("fixture must expose at least two enabled SKU rows")
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-20T09:05:00Z",
             plan=_build_plan(
@@ -431,7 +432,7 @@ def _test_read_time_warehouse_certification_revalidation(bundle: dict[str, objec
                 },
             },
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-07-20T08:05:00Z",
             plan=plan,

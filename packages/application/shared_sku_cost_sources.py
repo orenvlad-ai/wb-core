@@ -71,6 +71,7 @@ def _missing(nm_id: int, reason: str, source: dict | None = None) -> dict:
 
 def capture_wb_component(
     db_path: Path, *, day: str, nm_ids: list[int], version_id: str | None = None,
+    connection: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Read a single saved authority in one SQLite read-only transaction.
 
@@ -92,12 +93,13 @@ def capture_wb_component(
         "quantity_basis": "wb_stock_plus_to_customer_plus_from_customer",
     }
     evidence: dict[str, Any] = {}
-    conn = None
+    conn = connection
     try:
-        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
-        conn.execute("BEGIN")
+        if conn is None:
+            conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
         versions = [dict(row) for row in conn.execute(
             f"SELECT version_id,cutover_id,status,business_effective_date,published_at,"
             f"created_at,effective_at,plan_fingerprint,source_watermarks_json FROM {P}warehouse_functional_versions "
@@ -188,7 +190,7 @@ def capture_wb_component(
         result.update(complete=False, authority_complete=False, reason=str(exc),
                       rows=[_missing(nm_id, str(exc)) for nm_id in requested])
     finally:
-        if conn is not None:
+        if conn is not None and connection is None:
             conn.rollback()
             conn.close()
     result["source_digest"] = _digest({"capture": result, "evidence": evidence})

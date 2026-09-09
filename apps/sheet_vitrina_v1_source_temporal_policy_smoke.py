@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.contracts.sheet_vitrina_v1 import (
@@ -55,7 +56,7 @@ def main() -> None:
         if not enabled:
             raise AssertionError("fixture must expose at least one enabled SKU")
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=REFRESHED_AT,
             plan=_build_plan(first_nm_id=enabled[0].nm_id),

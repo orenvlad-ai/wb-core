@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from apps.sheet_vitrina_v1_buyout_mature_backfill import (  # noqa: E402
     _digest,
     _file_digest,
@@ -351,6 +352,9 @@ def _apply_manifest(
     if not desired_correction or not desired_snapshots:
         raise ProxyV4TransitRepairError("reviewed manifest has empty targets")
 
+    from packages.application.ready_publication import readonly, pin_proxy_repair_sources, check_queries
+    with readonly(runtime.db_path) as source_conn:
+        source_pins = pin_proxy_repair_sources(source_conn)
     current_versions = _load_version_rows(runtime.db_path)
     current_snapshots = _load_target_snapshots(
         runtime.db_path,
@@ -418,6 +422,7 @@ def _apply_manifest(
     }
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        check_queries(conn, source_pins)
         if conn.execute(
             "SELECT 1 FROM sheet_vitrina_v1_proxy_v4_parameter_versions WHERE version_id=? OR revision=?",
             (desired_correction["version_id"], desired_correction["revision"]),
@@ -451,11 +456,7 @@ def _apply_manifest(
             key = (str(item["bundle_version"]), str(item["as_of_date"]))
             if str(item["before_plan_sha256"]) == str(item["after_plan_sha256"]):
                 continue
-            cursor = conn.execute(
-                """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
-                   WHERE bundle_version=? AND as_of_date=? AND plan_json=?""",
-                (str(item["after_plan_json"]), key[0], key[1], current_by_key[key]),
-            )
+            cursor = replace_ready(conn, expected=ExpectedReady(key[0],key[1],current_by_key[key]), plan_json=str(item["after_plan_json"]))
             if cursor.rowcount != 1:
                 raise ProxyV4TransitRepairError(
                     f"target snapshot compare-and-swap failed: {key[1]}"

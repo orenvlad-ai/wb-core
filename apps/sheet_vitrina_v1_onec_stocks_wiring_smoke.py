@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.onec_stocks_block import ArtifactBackedOnecStocksSource
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -220,12 +221,12 @@ def main() -> None:
             raise AssertionError(f"partial 1C plan must request each slot date separately, got {partial_source.request_dates}")
 
         current_state = runtime.load_current_state()
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-05-13T12:05:00Z",
             plan=_build_legacy_period_snapshot(),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=REFRESHED_AT,
             plan=_with_unrelated_source_error(plan),
@@ -483,7 +484,7 @@ def _assert_onec_date_specific_snapshot_lineage() -> None:
             metric_keys=metric_keys,
         )
         current_state = runtime.load_current_state()
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-05-16T12:05:00Z",
             plan=first_plan,
@@ -504,7 +505,7 @@ def _assert_onec_date_specific_snapshot_lineage() -> None:
             _include_archived_metrics_for_audit=True,
             metric_keys=metric_keys,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-05-17T12:05:00Z",
             plan=second_plan,
@@ -595,7 +596,7 @@ def _assert_onec_date_specific_period_snapshots() -> None:
                 raise AssertionError(f"1C closed lineage must match {closed_day.isoformat()}, got {status_rows}")
             if status_rows[f"{ONEC_STOCKS_SOURCE_KEY}[today_current]"][3] != current_day.isoformat():
                 raise AssertionError(f"1C current lineage must match {current_day.isoformat()}, got {status_rows}")
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{current_day.isoformat()}T12:05:00Z",
                 plan=plan,

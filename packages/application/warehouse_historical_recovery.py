@@ -18,6 +18,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.registry_upload_db_backed_runtime import (
     RegistryUploadDbBackedRuntime,
 )
@@ -2299,6 +2300,9 @@ def _before_images(
                 raise WarehouseHistoricalRecoveryError(
                     "target ready snapshot disappeared before T1 capture"
                 )
+            if "sha256:" + _sha(str(row["plan_json"])) != update["before_plan_sha256"]:
+                raise WarehouseHistoricalRecoveryError("ready snapshot changed before T1 capture")
+            update["before_row"] = dict(row)
             images.append(
                 _before_image(
                     "sheet_vitrina_v1_ready_snapshots",
@@ -2307,6 +2311,7 @@ def _before_images(
                         "as_of_date": str(update["as_of_date"]),
                     },
                     dict(row),
+                    after={**dict(row), "plan_json": update["after_plan_json"]},
                 )
             )
     return images
@@ -2408,28 +2413,20 @@ def _apply_ready_updates(
 ) -> None:
     for item in updates:
         row = conn.execute(
-            "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots "
+            "SELECT * FROM sheet_vitrina_v1_ready_snapshots "
             "WHERE bundle_version=? AND as_of_date=?",
             (item["bundle_version"], item["as_of_date"]),
         ).fetchone()
         if (
             row is None
+            or (item.get("before_row") is not None and dict(row) != item["before_row"])
             or "sha256:" + _sha(str(row["plan_json"]))
             != str(item["before_plan_sha256"])
         ):
             raise WarehouseHistoricalRecoveryError(
                 "ready snapshot changed after exact dry-run"
             )
-        changed = conn.execute(
-            "UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? "
-            "WHERE bundle_version=? AND as_of_date=? AND plan_json=?",
-            (
-                item["after_plan_json"],
-                item["bundle_version"],
-                item["as_of_date"],
-                str(row["plan_json"]),
-            ),
-        )
+        changed = replace_ready(conn, expected=ExpectedReady(item["bundle_version"],item["as_of_date"],str(row["plan_json"])), plan_json=item["after_plan_json"])
         if int(changed.rowcount or 0) != 1:
             raise WarehouseHistoricalRecoveryError(
                 "ready snapshot optimistic update conflict"
@@ -2699,12 +2696,13 @@ def _before_image(
     table: str,
     key: Mapping[str, Any],
     before: Mapping[str, Any] | None,
+    *, after: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "table": str(table),
         "key": dict(key),
         "before": dict(before) if before is not None else None,
-        "after": None,
+        "after": dict(after) if after is not None else None,
     }
 
 

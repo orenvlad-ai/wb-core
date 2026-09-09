@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_DAILY_REPORT_PATH,
     DEFAULT_SHEET_OPERATOR_UI_PATH,
@@ -90,7 +91,7 @@ def main() -> None:
             nm_ids = [item.nm_id for item in enabled]
             metric_labels = {item.metric_key: item.label_ru for item in current_state.metrics_v2 if item.enabled}
             old_sku, new_sku = _seed_sku_values(nm_ids)
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at="2026-04-19T09:05:00Z",
                 plan=_build_plan(
@@ -103,7 +104,7 @@ def main() -> None:
                     today_sku_values=new_sku,
                 ),
             )
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at="2026-04-18T09:05:00Z",
                 plan=_build_plan(

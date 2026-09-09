@@ -28,6 +28,11 @@ class RuntimeTests(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        from packages.application.storage_registry import StoreRegistry
+        from packages.application.ready_publication import ensure_publication_schema
+        self.operational = StoreRegistry(self.root).resolve("operational")
+        with sqlite3.connect(self.operational) as conn:
+            ensure_publication_schema(conn)
         self.day = "2026-09-07"
         self.image = capture()
         self.wb = wb()
@@ -119,10 +124,22 @@ class RuntimeTests(unittest.TestCase):
             for key, value in snapshot._metrics(data, nm).items():
                 cells[scope + "|" + key] = {self.day: snapshot.presentation(value, data=data)}
         db = self.root / "ready.sqlite3"
+        from packages.application.ready_publication import ensure_publication_schema, record_intent, complete_publication, ExpectedReady, digest
+        version = runtime.load(self.root)[1]
+        plan_json = json.dumps({"metadata": {"server_cell_presentation": cells,
+            "fbs_accounting_bindings": {self.day: {"book_version": version}}}})
         with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(plan_json TEXT,refreshed_at TEXT)")
-            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?)",
-                         (json.dumps({"metadata":{"server_cell_presentation":cells}}),self.now.isoformat()))
+            conn.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version TEXT,as_of_date TEXT,plan_json TEXT,refreshed_at TEXT,snapshot_id TEXT DEFAULT 'fixture',plan_version TEXT DEFAULT 'v1',activated_at TEXT DEFAULT '',PRIMARY KEY(bundle_version,as_of_date))")
+            conn.execute("CREATE TABLE registry_upload_current_state(slot INTEGER,bundle_version TEXT)")
+            conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'b1')")
+            ensure_publication_schema(conn)
+            record_intent(conn, operation_id="ready-test", attempt_id="1", kind="ready",
+                expected=ExpectedReady("b1", self.day, None), inputs={}, expected_book=version,
+                book_required=False, ready_required=True, created_at=self.now.isoformat())
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,plan_json,refreshed_at) VALUES(?,?,?,?)",
+                         ("b1", self.day, plan_json, self.now.isoformat()))
+            complete_publication(conn, operation_id="ready-test", attempt_id="1", book_version=version,
+                after_digest=digest(plan_json), finished_at=self.now.isoformat())
         owner = SimpleNamespace(runtime_dir=self.root, db_path=db)
         from packages.application.calculation_parameters import CalculationParametersBlock
         block = CalculationParametersBlock.__new__(CalculationParametersBlock)

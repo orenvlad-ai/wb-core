@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
     ARCHIVED_PUBLIC_METRIC_KEYS,
@@ -216,7 +217,7 @@ def _assert_other_sources_skips_archived_legacy_metrics() -> None:
             raise AssertionError(f"fixture bundle must be accepted, got {accepted}")
         current_state = runtime.load_current_state()
         nm_id = next(item.nm_id for item in current_state.config_v2 if item.enabled)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=OLD_REFRESHED_AT,
             plan=_build_previous_plan(nm_id=nm_id),
@@ -312,7 +313,7 @@ def _assert_onec_sources_recomputes_derived_metrics() -> None:
             raise AssertionError(f"fixture bundle must be accepted, got {accepted}")
         current_state = runtime.load_current_state()
         nm_id = next(item.nm_id for item in current_state.config_v2 if item.enabled)
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at=OLD_REFRESHED_AT,
             plan=_build_previous_onec_plan(nm_id=nm_id),

@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_web_vitrina_group_refresh_smoke import (  # noqa: E402
     BUNDLE_FIXTURE,
     NEW_REFRESHED_AT,
@@ -216,7 +217,7 @@ def _build_entrypoint(
         raise AssertionError(f"fixture bundle must be accepted, got {accepted}")
     current_state = runtime.load_current_state()
     nm_id = next(item.nm_id for item in current_state.config_v2 if item.enabled)
-    runtime.save_sheet_vitrina_ready_snapshot(
+    save_ready_fixture(runtime,
         current_state=current_state,
         refreshed_at=OLD_REFRESHED_AT,
         plan=_build_previous_plan(nm_id=nm_id),

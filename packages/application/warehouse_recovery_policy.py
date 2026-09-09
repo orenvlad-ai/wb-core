@@ -4252,6 +4252,20 @@ def _apply_undo_row(conn: sqlite3.Connection, item: Mapping[str, Any]) -> None:
         raise RecoveryPolicyError(
             f"T1 rollback current row differs from expected after-image: {table}/{key}"
         )
+    if table == "sheet_vitrina_v1_ready_snapshots":
+        from packages.application.ready_publication import ExpectedReady, replace_ready, delete_ready
+        if set(key) != {"bundle_version", "as_of_date"}:
+            raise RecoveryPolicyError("ready rollback requires exact bundle/date key")
+        if current != expected_after:
+            raise RecoveryPolicyError("ready rollback after-image drift")
+        expected = ExpectedReady(key["bundle_version"], key["as_of_date"],
+                                 current["plan_json"] if current else None)
+        if before is None:
+            delete_ready(conn, expected=expected)
+        else:
+            replace_ready(conn, expected=expected, **{name: before[name] for name in
+                ("plan_json", "activated_at", "snapshot_id", "plan_version", "refreshed_at")})
+        return
     if before is None:
         conn.execute(
             f"DELETE FROM {_quoted(table)} WHERE {where}",

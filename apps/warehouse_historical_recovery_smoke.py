@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
@@ -255,6 +256,7 @@ def _check_early_exact_rollback() -> None:
                     "bundle_version": "bundle-fixture",
                     "as_of_date": "2026-07-18",
                     "after_plan_json": '{"state":"after"}',
+                    "before_plan_sha256": "sha256:" + sha256(b'{"state":"before"}').hexdigest(),
                 }
             ],
         }
@@ -264,10 +266,11 @@ def _check_early_exact_rollback() -> None:
             conn.execute(
                 "CREATE TABLE sheet_vitrina_v1_ready_snapshots("
                 "bundle_version TEXT NOT NULL,as_of_date TEXT NOT NULL,"
-                "plan_json TEXT NOT NULL,PRIMARY KEY(bundle_version,as_of_date))"
+                "plan_json TEXT NOT NULL,activated_at TEXT DEFAULT '',snapshot_id TEXT DEFAULT 'fixture',"
+                "plan_version TEXT DEFAULT 'v1',refreshed_at TEXT DEFAULT '',PRIMARY KEY(bundle_version,as_of_date))"
             )
             conn.execute(
-                "INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?)",
+                "INSERT INTO sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,plan_json) VALUES(?,?,?)",
                 ("bundle-fixture", "2026-07-18", '{"state":"before"}'),
             )
             conn.commit()

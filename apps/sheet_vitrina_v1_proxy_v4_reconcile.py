@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from apps.sheet_vitrina_v1_buyout_mature_backfill import (  # noqa: E402
     _backup_and_verify,
     _digest,
@@ -360,6 +361,9 @@ def _apply_manifest(
     repairs = list((manifest.get("desired") or {}).get("repairs") or [])
     if not target_keys or not repairs:
         raise ProxyV4ReconciliationError("reviewed V4 reconciliation manifest has empty targets")
+    from packages.application.ready_publication import readonly, pin_proxy_repair_sources, check_queries
+    with readonly(runtime.db_path) as source_conn:
+        source_pins = pin_proxy_repair_sources(source_conn)
     current_versions = _load_version_rows(runtime.db_path)
     current_snapshots = _load_required_snapshots(runtime.db_path, keys=target_keys)
     current_by_key = {
@@ -407,14 +411,11 @@ def _apply_manifest(
     backup_sha256 = _backup_and_verify(runtime.db_path, backup_path)
     with sqlite3.connect(runtime.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        check_queries(conn, source_pins)
         for item in repairs:
             key = (str(item["bundle_version"]), str(item["as_of_date"]))
             before = str(current_by_key[key]["plan_json"])
-            cursor = conn.execute(
-                """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
-                   WHERE bundle_version=? AND as_of_date=? AND plan_json=?""",
-                (str(item["after_plan_json"]), key[0], key[1], before),
-            )
+            cursor = replace_ready(conn, expected=ExpectedReady(key[0],key[1],before), plan_json=str(item["after_plan_json"]))
             if cursor.rowcount != 1:
                 raise ProxyV4ReconciliationError(
                     f"target snapshot compare-and-swap failed: {key[1]}"

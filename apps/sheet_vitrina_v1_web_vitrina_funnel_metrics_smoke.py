@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import build_web_vitrina_gravity_table_adapter
@@ -56,7 +57,7 @@ def main() -> None:
         if len(enabled) < 2:
             raise AssertionError("fixture must expose at least two enabled SKU rows")
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-04-21T08:05:00Z",
             plan=_build_plan(

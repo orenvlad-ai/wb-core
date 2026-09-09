@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.finance_daily_historical_recovery import (  # noqa: E402
     EXPECTED_TARGET_CELLS,
     SKU_METRICS,
@@ -194,7 +195,7 @@ def main() -> None:
         current = runtime.load_current_state()
         nm_ids = sorted(int(item.nm_id) for item in current.config_v2 if item.enabled)
         assert len(nm_ids) == 33
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current,
             refreshed_at="2026-08-27T08:10:00Z",
             plan=_ready_plan(nm_ids),
@@ -230,7 +231,7 @@ def main() -> None:
             row_id = str(row[1] or "")
             if row_id in expected:
                 row[date_index] = float(expected[row_id]["expected"])
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current,
             refreshed_at="2026-08-27T08:11:00Z",
             plan=parity_ready,
@@ -245,7 +246,7 @@ def main() -> None:
         assert parity_plan["changed_cells"] == 0
         assert parity_plan["parity_status"] == "exact"
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current,
             refreshed_at="2026-08-27T08:12:00Z",
             plan=_ready_plan(nm_ids),
@@ -312,7 +313,7 @@ def main() -> None:
         assert chained_first["successor_operations"] == [second_plan["operation_id"]]
         assert all(chained_first["checks"].values())
         try:
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current,
                 refreshed_at="2026-08-28T09:05:00Z",
                 plan=_ready_plan(nm_ids),

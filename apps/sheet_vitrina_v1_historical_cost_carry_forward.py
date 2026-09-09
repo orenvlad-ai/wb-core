@@ -1368,17 +1368,9 @@ def _submit_once(
                 str(plan["created_at"]),
             ),
         )
-        changed = conn.execute(
-            """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
-                WHERE bundle_version=? AND as_of_date=? AND snapshot_id=? AND plan_json=?""",
-            (
-                after_json,
-                str(target["bundle_version"]),
-                str(target["as_of_date"]),
-                str(target["snapshot_id"]),
-                str(current["plan_json"]),
-            ),
-        )
+        from packages.application.ready_publication import ExpectedReady, replace_ready
+        changed = replace_ready(conn, expected=ExpectedReady(str(target["bundle_version"]),
+            str(target["as_of_date"]), str(current["plan_json"])), plan_json=after_json)
         if changed.rowcount != 1:
             raise HistoricalCostCarryForwardError(
                 "immediate_target_cas_failed", "ready snapshot CAS changed no exact row"

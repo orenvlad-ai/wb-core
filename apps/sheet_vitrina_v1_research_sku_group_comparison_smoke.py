@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SHEET_OPERATOR_UI_PATH,
     DEFAULT_SHEET_PLAN_PATH,
@@ -195,7 +196,7 @@ class LocalResearchFixtureServer:
             snapshot_date = (start_date + timedelta(days=offset)).isoformat()
             if not self.include_latest_closed_snapshot and snapshot_date == "2026-04-20":
                 continue
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{snapshot_date}T15:05:00Z",
                 plan=_build_plan(

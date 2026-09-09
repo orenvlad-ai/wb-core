@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_FACTORY_ORDER_CALCULATE_PATH,
     DEFAULT_FACTORY_ORDER_DELETE_INBOUND_FACTORY_PATH,
@@ -756,24 +757,36 @@ def main() -> None:
             if effective_supplier_rows != [("26GN390", "2026-05-20", "2026-05-22", 33.0)]:
                 raise AssertionError(f"supplier registry source must expose effective rows used, got {effective_supplier_rows}")
 
+            before_acceptance = runtime.load_supplier_shipment("sup_factory_inbound_inside_window")
+            assert before_acceptance is not None
             preview_status, preview_payload = _post_json(
                 f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window/factual-dates/preview",
                 {"actual_ff_acceptance_date": "2026-04-18"},
             )
-            if preview_status != 200 or not preview_payload.get("confirmation_token"):
+            if (
+                preview_status != 400
+                or preview_payload.get("confirmation_token")
+                or "Принять на FF" not in json.dumps(preview_payload, ensure_ascii=False)
+            ):
                 raise AssertionError(
-                    "actual_ff_acceptance_date preview must issue a confirmation token"
+                    f"legacy FF factual-date preview must require the unified receipt document, got {preview_status} {preview_payload}"
                 )
-            patch_status, patch_payload = _post_json(
-                f"{base_url}{DEFAULT_SUPPLIER_SHIPMENTS_PATH}/sup_factory_inbound_inside_window/factual-dates/confirm",
-                {"confirmation_token": preview_payload["confirmation_token"]},
+            if runtime.load_supplier_shipment("sup_factory_inbound_inside_window") != before_acceptance:
+                raise AssertionError("rejected legacy FF preview must leave shipment unchanged")
+            # This fixture tests the factory-order reader of already accepted shipments.
+            # Real unified receipt posting/replay is covered by warehouse_ff_acceptance_form_smoke.
+            runtime.save_supplier_shipment(
+                header={
+                    **before_acceptance["header"],
+                    "actual_ff_acceptance_date": "2026-04-18",
+                    "order_status": ORDER_STATUS_ACCEPTED_FF,
+                },
+                lines=before_acceptance["lines"],
             )
-            if patch_status != 200 or patch_payload.get("order_status") != ORDER_STATUS_ACCEPTED_FF:
-                raise AssertionError(f"actual_ff_acceptance_date PATCH must trigger accepted_ff, got {patch_status} {patch_payload}")
 
             patched_status_code, patched_status_payload = _get_json(f"{base_url}{DEFAULT_FACTORY_ORDER_STATUS_PATH}")
             if patched_status_code != 200:
-                raise AssertionError(f"factory status after actual_ff_acceptance_date PATCH must return 200, got {patched_status_code}")
+                raise AssertionError(f"factory status with accepted FF receipt state must return 200, got {patched_status_code}")
             patched_supplier_summary = patched_status_payload.get("supplier_registry_inbound_summary", {})
             patched_supplier_shipments = patched_supplier_summary.get("shipment_summary", [])
             if any(item.get("shipment_id") == "sup_factory_inbound_inside_window" for item in patched_supplier_shipments):
@@ -784,7 +797,7 @@ def main() -> None:
                 or patched_diagnostics.get("excluded_accepted_ff_line_count") != 2
                 or patched_diagnostics.get("excluded_accepted_ff_quantity") != 77.0
             ):
-                raise AssertionError(f"status after actual_ff_acceptance_date PATCH must expose excluded counters, got {patched_diagnostics}")
+                raise AssertionError(f"status with accepted FF receipt state must expose excluded counters, got {patched_diagnostics}")
 
             patched_supplier_status, patched_supplier_payload = _post_json(
                 f"{base_url}{DEFAULT_FACTORY_ORDER_CALCULATE_PATH}",
@@ -802,7 +815,7 @@ def main() -> None:
                 },
             )
             if patched_supplier_status != 200:
-                raise AssertionError(f"supplier registry calc after actual_ff_acceptance_date PATCH must succeed, got {patched_supplier_status} {patched_supplier_payload}")
+                raise AssertionError(f"supplier registry calc with accepted FF receipt state must succeed, got {patched_supplier_status} {patched_supplier_payload}")
             patched_supplier_sku = next(item for item in patched_supplier_payload.get("rows", []) if item.get("nm_id") == 210183919)
             if patched_supplier_sku.get("inbound_factory_to_ff") != 0.0:
                 raise AssertionError(f"accepted_ff shipment must not count in supplier registry inbound after PATCH, got {patched_supplier_sku}")
@@ -1144,7 +1157,7 @@ def _seed_onec_ff_stock_ready_snapshot(
             ),
         ],
     )
-    runtime.save_sheet_vitrina_ready_snapshot(
+    save_ready_fixture(runtime,
         current_state=current_state,
         refreshed_at=ACTIVATED_AT,
         plan=plan,

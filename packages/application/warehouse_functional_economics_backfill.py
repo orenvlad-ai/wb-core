@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.business_time import business_date_from_timestamp, current_business_date_iso
 from packages.application.calculation_parameters import (
     CalculationParametersBlock,
@@ -934,16 +935,7 @@ def apply_functional_economics_backfill_plan(
                     connection=conn,
                     item=item,
                 )
-                cursor = conn.execute(
-                    """UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?
-                       WHERE bundle_version=? AND as_of_date=? AND plan_json=?""",
-                    (
-                        item["after_plan_json"],
-                        item["bundle_version"],
-                        item["as_of_date"],
-                        before["plan_json"],
-                    ),
-                )
+                cursor = replace_ready(conn, expected=ExpectedReady(item["bundle_version"],item["as_of_date"],before["plan_json"]), plan_json=item["after_plan_json"])
                 if cursor.rowcount != 1:
                     raise FunctionalEconomicsBackfillError("ready snapshot optimistic update conflict")
             for item in normalized["updates"]:
@@ -1352,14 +1344,7 @@ def rollback_target_scoped_functional_economics(
                     raise FunctionalEconomicsBackfillError(
                         "functional economics rollback rejected: snapshot changed"
                     )
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_ready_snapshots
-                    SET plan_json=?
-                    WHERE bundle_version=? AND as_of_date=?
-                    """,
-                    (str(item["plan_json"]), *key),
-                )
+                replace_ready(conn, expected=ExpectedReady(*key, after_by_key[key]), plan_json=str(item["plan_json"]))
             conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_functional_economics_undo_manifests

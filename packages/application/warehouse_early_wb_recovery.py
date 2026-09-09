@@ -924,6 +924,9 @@ def _before_images(
                 "WHERE bundle_version=? AND as_of_date=?",
                 (update["bundle_version"], update["as_of_date"]),
             ).fetchone()
+            if row is None or "sha256:" + _sha(str(row["plan_json"])) != update["before_plan_sha256"]:
+                raise WarehouseEarlyWbRecoveryError("ready snapshot changed before T1 capture")
+            update["before_row"] = dict(row)
             images.append(
                 _before_image(
                     "sheet_vitrina_v1_ready_snapshots",
@@ -931,7 +934,8 @@ def _before_images(
                         "bundle_version": update["bundle_version"],
                         "as_of_date": update["as_of_date"],
                     },
-                    dict(row) if row is not None else None,
+                    dict(row),
+                    after={**dict(row), "plan_json": update["after_plan_json"]},
                 )
             )
     return images

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.calculation_parameters import (  # noqa: E402
     CalculationParametersBlock,
     DEFAULT_PROXY_PARAMETERS,
@@ -177,7 +178,7 @@ def main() -> None:
             ],
             captured_at="2026-08-09T08:00:00Z",
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-08-09T08:05:00Z",
             plan=_old_ready_snapshot_with_immature_buyout(

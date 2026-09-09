@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_proxy_v4_initialize import (  # noqa: E402
     run_initialization,
 )
@@ -92,7 +93,7 @@ def main() -> None:
         target_dates = tuple(f"2026-08-{day:02d}" for day in range(1, 10))
         for as_of_date in target_dates:
             plan = _ready_plan(as_of_date, enabled_nm_ids[:2])
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{as_of_date}T12:00:00Z",
                 plan=plan,
@@ -222,7 +223,7 @@ def main() -> None:
         drifted = _drift_v4_total(
             runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-08-09")
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-08-10T06:00:00Z",
             plan=drifted,

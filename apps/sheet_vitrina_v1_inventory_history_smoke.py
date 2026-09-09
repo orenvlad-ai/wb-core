@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
@@ -85,12 +86,12 @@ def _capture_and_supersession_smoke() -> None:
             archived_nm_id=archived_nm_id,
             missing_nm_id=missing_nm_id,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state,
             refreshed_at="2026-08-21T18:00:00Z",
             plan=first,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state,
             refreshed_at="2026-08-21T18:00:00Z",
             plan=first,
@@ -106,7 +107,7 @@ def _capture_and_supersession_smoke() -> None:
             archived_nm_id=archived_nm_id,
             missing_nm_id=missing_nm_id,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state,
             refreshed_at="2026-08-21T19:00:00Z",
             plan=correction,
@@ -125,7 +126,7 @@ def _capture_and_supersession_smoke() -> None:
             previous_first=11,
             previous_second=20,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state,
             refreshed_at="2026-08-22T18:00:00Z",
             plan=close_once,
@@ -142,7 +143,7 @@ def _capture_and_supersession_smoke() -> None:
             archived_nm_id=archived_nm_id,
             missing_nm_id=missing_nm_id,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state,
             refreshed_at="2026-08-22T19:00:00Z",
             plan=late,
@@ -161,7 +162,7 @@ def _capture_and_supersession_smoke() -> None:
             previous_first=12,
             previous_second=20,
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=state,
             refreshed_at="2026-08-22T20:00:00Z",
             plan=close_twice,
@@ -443,6 +444,8 @@ def _current_ui_wb_operand_smoke() -> None:
                 );
                 """
             )
+            from packages.application.ready_publication import ensure_material_revisions
+            ensure_material_revisions(conn)
             conn.execute(
                 """INSERT INTO sheet_vitrina_v1_warehouse_wb_snapshots(
                        snapshot_id,version_id,fetched_at,snapshot_date,requested_nm_ids_json,
@@ -492,7 +495,7 @@ def _current_ui_wb_operand_smoke() -> None:
             "updated_at": "",
         }
         with patch.object(inventory_history, "_fbs_facilities", return_value=empty_fbs):
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=state,
                 refreshed_at="2026-08-24T09:01:00Z",
                 plan=ready,

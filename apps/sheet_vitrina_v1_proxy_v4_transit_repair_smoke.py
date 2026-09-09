@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_proxy_v4_initialize import run_initialization  # noqa: E402
 from apps.sheet_vitrina_v1_proxy_v4_initialize_smoke import _ready_plan  # noqa: E402
 from apps.sheet_vitrina_v1_proxy_v4_smoke import (  # noqa: E402
@@ -79,7 +80,7 @@ def main() -> None:
         current_state = runtime.load_current_state()
         for day in range(1, 10):
             as_of_date = f"2026-08-{day:02d}"
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{as_of_date}T12:00:00Z",
                 plan=_ready_plan(as_of_date, enabled_nm_ids[:2]),
@@ -119,7 +120,7 @@ def main() -> None:
         _insert_legacy_aug_16_revision(runtime)
         for day in range(14, 18):
             as_of_date = f"2026-08-{day:02d}"
-            runtime.save_sheet_vitrina_ready_snapshot(
+            save_ready_fixture(runtime,
                 current_state=current_state,
                 refreshed_at=f"{as_of_date}T12:00:00Z",
                 plan=_ready_plan(as_of_date, enabled_nm_ids[:2]),

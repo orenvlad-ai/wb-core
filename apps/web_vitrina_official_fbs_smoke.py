@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.web_vitrina_official_fbs import (
     SOURCE, _estimate_cost, build_current_official_fbs_estimate,
     materialize_current_official_fbs_estimate, restore_materialized_official_fbs_estimates,
@@ -263,7 +264,7 @@ def main():
         assert shifted_saved.sheets[1] is shifted.sheets[1]
         assert shifted_saved.sheets[0].write_rect == "B5:E" + str(5 + len(shifted_saved.sheets[0].rows))
         with patch("packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate", return_value=model):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at="2026-09-05T10:10:00Z", plan=plan)
+            save_ready_fixture(runtime,current_state=state, refreshed_at="2026-09-05T10:10:00Z", plan=plan)
         from packages.application.sheet_vitrina_v1_inventory_history import append_inventory_history_capture, CAPTURES_TABLE, COMPONENTS_TABLE
         from apps.sheet_vitrina_v1_inventory_history_smoke import _component
         with sqlite3.connect(runtime.db_path) as history:
@@ -283,7 +284,7 @@ def main():
                                replace(plan.sheets[0], header=["label", "key", "2026-09-05", "2026-09-06"]),
                                plan.sheets[1]])
         with patch("packages.application.web_vitrina_official_fbs.build_current_official_fbs_estimate", return_value={"available": False}):
-            runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at="2026-09-06T10:10:00Z", plan=tomorrow)
+            save_ready_fixture(runtime,current_state=state, refreshed_at="2026-09-06T10:10:00Z", plan=tomorrow)
         loaded = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-09-05")
         cost_row = next(r for r in loaded.sheets[0].rows if r[1] == row.row_id)
         assert cost_row[2] == restored.values_by_date["2026-09-05"]

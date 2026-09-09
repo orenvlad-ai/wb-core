@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.ready_publication_fixture import save_ready_fixture
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_plan_report import SheetVitrinaV1PlanReportBlock
 from packages.application.web_vitrina_ready_fact_reconcile import (
@@ -45,17 +46,17 @@ def main() -> None:
         current_state = runtime.load_current_state()
         active_nm_ids = [int(item.nm_id) for item in current_state.config_v2 if item.enabled][:2]
 
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-03-04T09:05:00Z",
             plan=_ready_plan("2026-03-01", active_nm_ids, buyout_values=[100.0, 200.0], ads_values=[10.0, 20.0]),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-03-04T09:06:00Z",
             plan=_ready_plan("2026-03-02", active_nm_ids, buyout_values=["", ""], ads_values=[30.0, 40.0]),
         )
-        runtime.save_sheet_vitrina_ready_snapshot(
+        save_ready_fixture(runtime,
             current_state=current_state,
             refreshed_at="2026-03-04T09:07:00Z",
             plan=_ready_plan("2026-03-03", active_nm_ids, buyout_values=[300.0, 400.0], ads_values=[50.0, 60.0]),
