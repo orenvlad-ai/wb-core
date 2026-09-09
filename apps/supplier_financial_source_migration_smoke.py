@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps.supplier_financial_source_migration import run  # noqa: E402
+from apps.supplier_financial_source_migration import run, build_plan, _run_orphan_lifecycle, _orphan_reference_readback, MANIFEST_FILENAME  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     RegistryUploadDbBackedRuntime,
 )
@@ -29,7 +30,109 @@ from packages.application.supplier_financial_documents import (  # noqa: E402
 STAMP = "2026-07-26T09:00:00Z"
 
 
+def _reference_safety() -> None:
+    from packages.application.storage_registry import StoreRegistry, atomic_write_manifest, build_manifest
+    with TemporaryDirectory(prefix="source-unavailable-") as directory:
+        root = Path(directory).resolve()
+        result = run(action="apply", runtime_dir=root)
+        assert result["status"] == "held_source_store_unavailable"
+        assert result["orphan_lifecycle"]["status"] == "held_unknown_reference_coverage"
+        assert not (root / "registry_upload_runtime.sqlite3").exists()
+    with TemporaryDirectory(prefix="source-reference-safety-") as directory:
+        root = Path(directory).resolve()
+        selected = root / "operational.sqlite3"
+        legacy = root / "registry_upload_runtime.sqlite3"
+        def seed(path):
+            with sqlite3.connect(path) as conn:
+                conn.executescript("""
+                    CREATE TABLE sheet_vitrina_v1_supplier_financial_documents
+                        (document_id TEXT, document_type TEXT, stored_file_path TEXT, file_sha256 TEXT);
+                    CREATE TABLE sheet_vitrina_v1_cny_documents (stored_file_path TEXT, file_sha256 TEXT);
+                    CREATE TABLE sheet_vitrina_v1_supplier_financial_sources (stored_file_path TEXT, source_sha256 TEXT);
+                    CREATE TABLE extra_document_owner (source_file_path TEXT, source_file_sha256 TEXT);
+                """)
+        seed(selected)
+        seed(legacy)
+        manifest = build_manifest(state="cutover", canonical_source="split", generation_epoch="epoch-1",
+            raw_generation_id="raw-1", raw_relative_path="raw.sqlite3", raw_watermark="",
+            operational_generation_id="op-1", operational_relative_path=selected.name,
+            operational_watermark="", rollback_generation_id="legacy", source_fingerprint="source-1")
+        atomic_write_manifest(StoreRegistry(root).manifest_path, manifest)
+        with sqlite3.connect(selected) as conn:
+            conn.execute("CREATE TABLE finance_operational_schema_meta (singleton INTEGER, schema_revision TEXT, logical_store TEXT, generation_id TEXT, generation_epoch TEXT, source_fingerprint TEXT)")
+            conn.execute("INSERT INTO finance_operational_schema_meta VALUES (1,?,?,?,?,?)",
+                ("operational_v1", "operational", "op-1", "epoch-1", "source-1"))
+        candidates = {}
+        for name in ("financial", "cny", "path_only", "sources", "extra", "manifest", "unknown"):
+            path = root / "supplier_financial_orphan_quarantine" / name / "source.pdf"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("fixture-" + name).encode())
+            old = time.time() - 31 * 86400
+            os.utime(path, (old, old))
+            candidates[name] = (path, hashlib.sha256(path.read_bytes()).hexdigest())
+        with sqlite3.connect(selected) as conn:
+            conn.execute("INSERT INTO sheet_vitrina_v1_supplier_financial_documents VALUES (?,?,?,?)",
+                ("financial", "invoice", "missing/new-name.pdf", candidates["financial"][1]))
+            conn.execute("INSERT INTO sheet_vitrina_v1_cny_documents VALUES (?,?)", ("missing/cny.pdf", candidates["cny"][1]))
+            conn.execute("INSERT INTO sheet_vitrina_v1_cny_documents VALUES (?,?)",
+                ("supplier_financial_documents/files/path_only/source.pdf", None))
+            conn.execute("INSERT INTO sheet_vitrina_v1_cny_documents VALUES (?,?)", (None, None))
+            conn.execute("INSERT INTO sheet_vitrina_v1_supplier_financial_sources VALUES (?,?)", ("missing/source.pdf", candidates["sources"][1]))
+            conn.execute("INSERT INTO extra_document_owner VALUES (?,?)", ("missing/extra.pdf", candidates["extra"][1]))
+        (root / MANIFEST_FILENAME).write_text(json.dumps({"plan": {"groups": [{"source_sha256": candidates["manifest"][1]}]}}))
+        # Empty legacy is deliberately different from the selected operational DB.
+        before = {p: p.read_bytes() for p in [selected, legacy] + [v[0] for v in candidates.values()]}
+        result = _run_orphan_lifecycle(root)
+        assert result["status"] == "held_unknown_reference_coverage"
+        assert not result["expired_deleted"] and not result["quarantined"]
+        assert result["reference_database"] == str(selected)
+        for name, (path, _digest) in candidates.items():
+            item = next(row for row in result["held"] if row["path"] == str(path.relative_to(root)))
+            assert item["reason"] == ("unknown_reference_coverage" if name in {"unknown", "extra"} else "referenced_source")
+        assert "extra_document_owner" not in result["reference_tables"]
+        assert len(result["reference_tables"]) == 3
+        assert "other table readers" in result["coverage_gap"]
+        with patch("apps.supplier_financial_source_migration.ORPHAN_HASH_READ_LIMIT_BYTES", 20):
+            bounded = _run_orphan_lifecycle(root)
+        assert 0 < bounded["hash_read_bytes"] <= 20
+        assert bounded["skipped_hash_count"] > 0
+        for item in bounded["held"]:
+            if item["sha256"] is None:
+                assert item["reason"] == "unknown_reference_coverage"
+                assert item["hash_status"] == "skipped_budget_or_drift"
+        with patch("apps.supplier_financial_source_migration.ORPHAN_HASH_READ_LIMIT_BYTES", 0):
+            zero_budget = _run_orphan_lifecycle(root)
+        assert zero_budget["hash_read_bytes"] == 0
+        assert all(item["sha256"] is None and item["reason"] == "unknown_reference_coverage"
+                   for item in zero_budget["held"])
+        assert all(p.read_bytes() == data for p, data in before.items())
+        assert _run_orphan_lifecycle(root)["expired_deleted"] == []
+        # Canonical planning must see the selected store, not the empty legacy DB.
+        bank = root / "statement.pdf"
+        bank.write_bytes(b"bank statement")
+        with sqlite3.connect(selected) as conn:
+            conn.execute("INSERT INTO sheet_vitrina_v1_supplier_financial_documents VALUES (?,?,?,?)",
+                ("bank", "bank_fee_statement", bank.name, hashlib.sha256(bank.read_bytes()).hexdigest()))
+        assert build_plan(root)["groups"][0]["documents"][0]["document_id"] == "bank"
+        # Drift and incomplete legacy schema cannot turn missing knowledge into orphanhood.
+        with sqlite3.connect(selected) as conn:
+            conn.execute("UPDATE finance_operational_schema_meta SET generation_id='wrong'")
+        assert _run_orphan_lifecycle(root)["reference_error"]
+        assert all(path.is_file() for path, _digest in candidates.values())
+        with sqlite3.connect(selected) as conn:
+            conn.execute("UPDATE finance_operational_schema_meta SET generation_id='op-1'")
+            conn.execute("DROP TABLE sheet_vitrina_v1_cny_documents")
+        incomplete = _run_orphan_lifecycle(root)
+        assert "missing" in incomplete["reference_error"]
+        assert not incomplete["expired_deleted"]
+        selected.unlink()
+        missing = _run_orphan_lifecycle(root)
+        assert missing["reference_error"] and not selected.exists()
+        assert all(path.is_file() for path, _digest in candidates.values())
+
+
 def main() -> None:
+    _reference_safety()
     with TemporaryDirectory(prefix="supplier-source-migration-") as directory:
         runtime_dir = Path(directory) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -130,15 +233,11 @@ def main() -> None:
         ):
             raise AssertionError(f"migration apply failed: {applied}")
         lifecycle = dict(applied.get("orphan_lifecycle") or {})
-        if orphan.exists() or len(lifecycle.get("quarantined") or []) != 1:
-            raise AssertionError(
-                f"unreferenced old staging source was not quarantined: {lifecycle}"
-            )
-        quarantined_path = runtime_dir / str(
-            lifecycle["quarantined"][0]["quarantine_path"]
-        )
-        if not quarantined_path.is_file():
-            raise AssertionError("orphan quarantine readback is missing")
+        if (not orphan.is_file() or lifecycle.get("status") != "held_unknown_reference_coverage"
+                or lifecycle["quarantined"] or lifecycle["expired_deleted"]):
+            raise AssertionError(f"unknown orphan coverage must hold files: {lifecycle}")
+        if not any(item["reason"] == "referenced_source" for item in lifecycle["held"]):
+            raise AssertionError("same-SHA staging source was not classified as referenced")
         target = (
             runtime_dir
             / "supplier_financial_sources"

@@ -61,6 +61,7 @@ class ActivationTest(unittest.TestCase):
         result: str = "success",
         main_pid: str = "0",
         exec_main_status: str = "0",
+        exec_main_code: str | None = "0",
         invocation_id: str = "",
         include_process_fields: bool = True,
     ) -> subprocess.CompletedProcess[str]:
@@ -78,6 +79,8 @@ class ActivationTest(unittest.TestCase):
                     f"ExecMainStatus={exec_main_status}",
                 )
             )
+        if include_process_fields and exec_main_code is not None:
+            fields.append(f"ExecMainCode={exec_main_code}")
         stdout = "\n".join(fields)
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
@@ -315,6 +318,67 @@ class ActivationTest(unittest.TestCase):
 
         self.assertFalse(any(command[:2] == ["systemctl", "stop"] for command in commands))
 
+    def test_deploy_quiesce_terminal_http_matrix(self) -> None:
+        cases = [
+            ({"exec_main_code": "2", "exec_main_status": "15"}, True),
+            ({"exec_main_code": "1", "exec_main_status": "0"}, True),
+            ({"exec_main_code": "0", "exec_main_status": "0"}, True),
+            ({"exec_main_code": "1", "exec_main_status": "15"}, False),
+            ({"exec_main_code": "2", "exec_main_status": "9"}, False),
+            ({"exec_main_code": "3", "exec_main_status": "11"}, False),
+            ({"exec_main_code": "2", "exec_main_status": "15", "result": "signal"}, False),
+            ({"exec_main_code": "2", "exec_main_status": "15", "result": ""}, False),
+            ({"exec_main_code": "2", "exec_main_status": "15", "main_pid": "12"}, False),
+            ({"exec_main_code": "2", "exec_main_status": "15", "active_state": "failed"}, False),
+            ({"exec_main_code": "2", "exec_main_status": "15", "sub_state": "stop"}, False),
+            ({"exec_main_code": "99"}, False),
+            ({"exec_main_code": "unknown"}, False),
+            ({"exec_main_code": None}, False),
+        ]
+        for overrides, accepted in cases:
+            with self.subTest(overrides=overrides):
+                commands = []
+
+                def fake_run(command, **_kwargs):
+                    commands.append(command)
+                    state = {"active_state": "inactive", "sub_state": "dead"}
+                    if command[2] == "wb-core-registry-http.service":
+                        state.update(overrides)
+                    return self._systemd_show_result(command, **state)
+
+                with (
+                    patch.dict(os.environ, {"WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE": "true"}),
+                    patch("apps.wb_autoanswers_activation.subprocess.run", side_effect=fake_run),
+                ):
+                    if accepted:
+                        with _deployment_quiesce() as evidence:
+                            self.assertFalse(evidence["registry_was_active"])
+                            self.assertEqual(evidence["registry_state_before"]["exec_main_code"], overrides["exec_main_code"])
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            with _deployment_quiesce():
+                                self.fail("invalid process must not reach schema mutation")
+                self.assertTrue(all(c[:2] == ["systemctl", "show"] for c in commands))
+
+    def test_deploy_quiesce_rejects_sigterm_provider_job(self) -> None:
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            return self._systemd_show_result(
+                command, active_state="inactive", sub_state="dead",
+                exec_main_code="2", exec_main_status="15",
+            )
+
+        with (
+            patch.dict(os.environ, {"WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE": "true"}),
+            patch("apps.wb_autoanswers_activation.subprocess.run", side_effect=fake_run),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "service state is invalid"):
+                with _deployment_quiesce():
+                    self.fail("a terminated provider job is not a successful drain")
+        self.assertTrue(all(c[:2] == ["systemctl", "show"] for c in commands))
+
     def test_capacity_heartbeat_keeps_long_remote_verification_observable(self) -> None:
         output = StringIO()
         with patch("apps.wb_autoanswers_activation.CAPACITY_HEARTBEAT_SECONDS", 0.01):
@@ -352,6 +416,28 @@ class ActivationTest(unittest.TestCase):
         )
         with sqlite3.connect(db_path) as conn:
             self.assertEqual(conn.execute("SELECT value FROM legacy_marker").fetchone()[0], "preserved")
+
+    @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
+    def test_prepare_deploy_runs_schema_after_terminal_http_sigterm(self, _dependency: object) -> None:
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            http = command[2] == "wb-core-registry-http.service"
+            return self._systemd_show_result(
+                command, active_state="inactive", sub_state="dead",
+                exec_main_code="2" if http else "0",
+                exec_main_status="15" if http else "0",
+            )
+
+        with (
+            patch.dict(os.environ, {"WB_AUTOANSWERS_FORCE_OFF": "true", "WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE": "true"}),
+            patch("apps.wb_autoanswers_activation.subprocess.run", side_effect=fake_run),
+        ):
+            result = run(action="prepare-deploy", runtime_dir=self.runtime_dir)
+        self.assertEqual(result["status"], "ready")
+        self.assertIn(SCHEMA_VERSION, {int(row["version"]) for row in result["runtime"]["schema_migrations"]})
+        self.assertTrue(all(c[:2] == ["systemctl", "show"] for c in commands))
 
     @patch("apps.wb_autoanswers_activation._dependency_status", return_value=GOOD_DEPENDENCIES)
     def test_prepare_deploy_preserves_active_manual_mode_after_additive_schema(self, _dependency: object) -> None:
