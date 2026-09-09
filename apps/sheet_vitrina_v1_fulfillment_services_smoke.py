@@ -38,6 +38,7 @@ NOW = "2026-07-06T08:00:00Z"
 
 
 def main() -> None:
+    _check_pdf_text_matching()
     with TemporaryDirectory(prefix="fulfillment-services-app-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
@@ -103,9 +104,12 @@ def main() -> None:
             "Хранение",
             "1001",
             "1002",
+            "Total Итого 3 500,00",
+            "Total НДС 5% 175,00",
+            "Хранение 525,00",
+            "К оплате = Итого + НДС 5% 3 675,00",
         ):
-            if expected not in pdf_text:
-                raise AssertionError(f"PDF must contain {expected!r}, text={pdf_text!r}")
+            _assert_pdf_contains(pdf_text, expected)
 
         unmatched = block.upload_xlsx(_build_workbook([_valid_row("9999")]), uploaded_filename="unmatched.xlsx")
         if unmatched.get("validation_status") != "failed" or unmatched["upload"].get("pdf_available"):
@@ -371,6 +375,39 @@ def _read_headers(workbook_bytes: bytes) -> list[str]:
 def _pdf_text(pdf_bytes: bytes) -> str:
     reader = PdfReader(BytesIO(pdf_bytes))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def _assert_pdf_contains(text: str, expected: str) -> None:
+    # Font metrics may wrap PDF labels differently across operating systems.
+    # Collapse whitespace only: words, order, numbers and symbols remain exact.
+    normalized_expected = " ".join(expected.split())
+    normalized_text = " ".join(text.split())
+    if f" {normalized_expected} " not in f" {normalized_text} ":
+        raise AssertionError(f"PDF must contain {expected!r}, text={text!r}")
+
+
+def _check_pdf_text_matching() -> None:
+    expected = "К оплате = Итого + НДС 5% 3 675,00 ₽"
+    for text in (
+        expected,
+        "К оплате = Итого + НДС\n5%\n3 675,00 ₽",
+        "К\tоплате = Итого  + НДС\r\n5%\n3\u00a0675,00 ₽",
+    ):
+        _assert_pdf_contains(text, expected)
+    for text in (
+        expected.replace("5%", "6%"),
+        expected.replace("+", "−"),
+        expected.replace("Итого ", ""),
+        expected.replace("3 675,00", "3 765,00"),
+        expected.replace("675,00", "675,001"),
+        expected.replace("675", "67 5"),
+        expected.replace("₽", "$"),
+    ):
+        try:
+            _assert_pdf_contains(text, expected)
+        except AssertionError:
+            continue
+        raise AssertionError(f"PDF comparison must reject changed content: {text!r}")
 
 
 def _reserve_free_port() -> int:
