@@ -753,30 +753,7 @@ def run_browser_checks(
                 raise AssertionError(f"reset must restore canonical default order, got {reset_order[:8]}, expected {initial_order[:8]}")
 
             column_visibility = _check_column_visibility_controls(page)
-            horizontal_overscroll_guard = page.evaluate(
-                """() => {
-                  const node = document.querySelector('[data-table-scroll]');
-                  if (!node) {
-                    return {overscrollBehaviorX: '', leftPrevented: false, rightPrevented: false, maxScrollLeft: 0};
-                  }
-                  node.scrollLeft = 0;
-                  const leftEvent = new WheelEvent('wheel', {deltaX: -120, deltaY: 0, cancelable: true});
-                  const leftPrevented = !node.dispatchEvent(leftEvent);
-                  node.scrollLeft = Math.max(0, node.scrollWidth - node.clientWidth);
-                  const rightEvent = new WheelEvent('wheel', {deltaX: 120, deltaY: 0, cancelable: true});
-                  const rightPrevented = !node.dispatchEvent(rightEvent);
-                  return {
-                    overscrollBehaviorX: getComputedStyle(node).overscrollBehaviorX || '',
-                    leftPrevented: leftPrevented,
-                    rightPrevented: rightPrevented,
-                    maxScrollLeft: Math.max(0, node.scrollWidth - node.clientWidth)
-                  };
-                }"""
-            )
-            if horizontal_overscroll_guard["overscrollBehaviorX"] not in {"contain", "none"}:
-                raise AssertionError(f"table scroll must keep horizontal overscroll contained, got {horizontal_overscroll_guard}")
-            if not horizontal_overscroll_guard["leftPrevented"] or not horizontal_overscroll_guard["rightPrevented"]:
-                raise AssertionError(f"table scroll must block browser-back overscroll at both edges, got {horizontal_overscroll_guard}")
+            horizontal_overscroll_guard = _check_horizontal_overscroll_guard(page)
 
             initial_query = page.evaluate("() => window.location.search")
             historical_selector_works = False
@@ -2039,6 +2016,89 @@ def _assert_details_open(locator: object, expected: bool, label: str) -> None:
     actual = locator.evaluate("node => !!node.open")
     if actual is not expected:
         raise AssertionError(f"{label}, expected open={expected}, got {actual}")
+
+
+def _assert_horizontal_overscroll_guard(evidence: dict[str, object]) -> None:
+    if evidence["overscrollBehaviorX"] not in {"contain", "none"}:
+        raise AssertionError(f"table scroll must keep horizontal overscroll contained, got {evidence}")
+    left, right, middle = (evidence[key] for key in ("leftEdge", "rightEdge", "middle"))
+    if (
+        left["maxScrollLeft"] <= 2 or right["maxScrollLeft"] <= 2
+        or abs(left["scrollLeft"]) > 1
+        or abs(right["scrollLeft"] - right["maxScrollLeft"]) > 1
+        or not 1 < middle["scrollLeft"] < middle["maxScrollLeft"] - 1
+    ):
+        raise AssertionError(f"overscroll probe must reach both actual edges and a real interior, got {evidence}")
+    if evidence["verticalPrevented"] or evidence["middleLeftPrevented"] or evidence["middleRightPrevented"]:
+        raise AssertionError(f"overscroll guard must allow vertical and interior horizontal scrolling, got {evidence}")
+    if not evidence["leftPrevented"] or not evidence["rightPrevented"]:
+        raise AssertionError(f"table scroll must block browser-back overscroll at both edges, got {evidence}")
+
+
+def _check_horizontal_overscroll_guard(page: object) -> dict[str, object]:
+    probe = """async (suppressGuard) => {
+      const node = document.querySelector('[data-table-scroll]');
+      if (!node) throw new Error('overscroll probe: table scroll node missing');
+      const geometry = () => ({scrollLeft: node.scrollLeft, scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth, maxScrollLeft: node.scrollWidth - node.clientWidth});
+      const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+      const move = async (position) => {
+        let previous = null;
+        let actual = geometry();
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          node.scrollTo({left: position === 'left' ? 0 : position === 'right' ? node.scrollWidth
+            : (node.scrollWidth - node.clientWidth) / 2, behavior: 'instant'});
+          await frame();
+          actual = geometry();
+          const reached = actual.clientWidth > 0 && actual.maxScrollLeft > 2 && (
+            position === 'left' ? Math.abs(actual.scrollLeft) <= 1 : position === 'right'
+              ? Math.abs(actual.scrollLeft - actual.maxScrollLeft) <= 1
+              : actual.scrollLeft > 1 && actual.scrollLeft < actual.maxScrollLeft - 1);
+          if (reached && previous && Object.keys(actual).every(key => actual[key] === previous[key])) {
+            return {...actual, settledFrames: attempt + 1};
+          }
+          previous = actual;
+        }
+        throw new Error('overscroll probe did not reach stable ' + position + ': ' + JSON.stringify(actual));
+      };
+      const wheel = (deltaX, deltaY = 0) => !node.dispatchEvent(
+        new WheelEvent('wheel', {deltaX, deltaY, cancelable: true}));
+      // Negative control suppresses only the fixture's wheel listeners; CSS and
+      // actual scroll geometry stay intact. Always restore the real listener.
+      const suppress = event => event.stopImmediatePropagation();
+      if (suppressGuard) node.addEventListener('wheel', suppress, {capture: true});
+      try {
+        const leftEdge = await move('left');
+        const leftPrevented = wheel(-120);
+        const rightEdge = await move('right');
+        const rightPrevented = wheel(120);
+        const verticalPrevented = wheel(0, 120);
+        const middle = await move('middle');
+        const middleLeftPrevented = wheel(-120);
+        const middleRightPrevented = wheel(120);
+        await move('right');
+        return {overscrollBehaviorX: getComputedStyle(node).overscrollBehaviorX || '',
+          leftEdge, rightEdge, middle, leftPrevented, rightPrevented, verticalPrevented,
+          middleLeftPrevented, middleRightPrevented, maxScrollLeft: rightEdge.maxScrollLeft};
+      } finally {
+        if (suppressGuard) node.removeEventListener('wheel', suppress, {capture: true});
+      }
+    }"""
+    evidence = page.evaluate(probe, arg=False)
+    _assert_horizontal_overscroll_guard(evidence)
+    unguarded = page.evaluate(probe, arg=True)
+    if unguarded["leftPrevented"] or unguarded["rightPrevented"]:
+        raise AssertionError(f"overscroll negative control must disable both edge handlers, got {unguarded}")
+    try:
+        _assert_horizontal_overscroll_guard(unguarded)
+    except AssertionError as exc:
+        if not str(exc).startswith("table scroll must block browser-back overscroll at both edges"):
+            raise
+    else:
+        raise AssertionError("overscroll probe accepted a missing wheel guard")
+    restored = page.evaluate(probe, arg=False)
+    _assert_horizontal_overscroll_guard(restored)
+    return {**restored, "missing_guard_rejected": True}
 
 
 def _check_column_visibility_controls(page: object) -> dict[str, object]:
