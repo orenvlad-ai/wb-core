@@ -11,6 +11,11 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 
+from packages.application.warehouse_functional_lock import (
+    require_warehouse_job_owner, WarehouseJobOwnershipError,
+)
+
+
 PHASES = (
     "wb_supply_registry",
     "transit_enrichment",
@@ -33,8 +38,9 @@ PHASE_LABELS_RU = {
 
 
 class WarehouseUpdateJournal:
-    def __init__(self, *, db_path: Path, timestamp_factory: Any | None = None) -> None:
+    def __init__(self, *, db_path: Path, runtime_dir: Path | None = None, timestamp_factory: Any | None = None) -> None:
         self.db_path = Path(db_path)
+        self.runtime_dir = Path(runtime_dir) if runtime_dir is not None else self.db_path.parent
         self.timestamp_factory = timestamp_factory or _now
         # Schema ownership belongs to service/runner construction.  Read-side
         # status requests below remain strict query-only operations.
@@ -42,17 +48,23 @@ class WarehouseUpdateJournal:
             ensure_warehouse_update_journal_schema(conn)
             conn.commit()
 
-    def start(self, *, trigger_source: str, scheduled_for: str = "") -> str:
+    def start(self, *, trigger_source: str, scheduled_for: str = "", owner_token: str | None = None) -> str:
+        owner = require_warehouse_job_owner(self.runtime_dir, owner_token)
         started_at = self.timestamp_factory()
         run_id = "whur_" + hashlib.sha256(
             f"{trigger_source}:{started_at}:{uuid4().hex}".encode("utf-8")
         ).hexdigest()[:24]
         with _connect(self.db_path) as conn:
-            ensure_warehouse_update_journal_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
             interrupted = conn.execute(
-                "SELECT run_id,started_at FROM sheet_vitrina_v1_warehouse_update_runs "
+                "SELECT run_id,started_at,owner_token,owner_scope FROM sheet_vitrina_v1_warehouse_update_runs "
                 "WHERE status='running'"
             ).fetchall()
+            scope = str(self.runtime_dir.resolve())
+            if any(row["owner_scope"] and row["owner_scope"] != scope for row in interrupted):
+                raise WarehouseJobOwnershipError("running warehouse run belongs to a different admission scope")
+            if any(row["owner_token"] == owner for row in interrupted):
+                raise WarehouseJobOwnershipError("this admission already has a running warehouse run")
             for row in interrupted:
                 prior_run_id = str(row["run_id"])
                 conn.execute(
@@ -83,10 +95,10 @@ class WarehouseUpdateJournal:
                 INSERT INTO sheet_vitrina_v1_warehouse_update_runs(
                     run_id,trigger_source,status,scheduled_for,started_at,
                     finished_at,duration_ms,active_phase,last_error,result_json,
-                    functional_version_id,business_date,created_at,updated_at
-                ) VALUES(?,?,'running',?,?,NULL,NULL,'','', '{}','','',?,?)
+                    functional_version_id,business_date,created_at,updated_at,owner_token,owner_scope
+                ) VALUES(?,?,'running',?,?,NULL,NULL,'','', '{}','','',?,?,?,?)
                 """,
-                (run_id, trigger_source, scheduled_for, started_at, started_at, started_at),
+                (run_id, trigger_source, scheduled_for, started_at, started_at, started_at, owner, scope),
             )
             for phase in PHASES:
                 conn.execute(
@@ -101,11 +113,12 @@ class WarehouseUpdateJournal:
             conn.commit()
         return run_id
 
-    def phase_started(self, run_id: str, phase_key: str) -> None:
+    def phase_started(self, run_id: str, phase_key: str, *, owner_token: str | None = None) -> None:
         _require_phase(phase_key)
+        owner = require_warehouse_job_owner(self.runtime_dir, owner_token)
         now = self.timestamp_factory()
         with _connect(self.db_path) as conn:
-            ensure_warehouse_update_journal_schema(conn)
+            self._fence(conn, run_id, owner)
             conn.execute(
                 "UPDATE sheet_vitrina_v1_warehouse_update_runs SET active_phase=?,updated_at=? WHERE run_id=?",
                 (phase_key, now, run_id),
@@ -129,11 +142,13 @@ class WarehouseUpdateJournal:
         item_count: int = 0,
         details: Mapping[str, Any] | None = None,
         error: str = "",
+        owner_token: str | None = None,
     ) -> None:
         _require_phase(phase_key)
+        owner = require_warehouse_job_owner(self.runtime_dir, owner_token)
         now = self.timestamp_factory()
         with _connect(self.db_path) as conn:
-            ensure_warehouse_update_journal_schema(conn)
+            self._fence(conn, run_id, owner)
             row = conn.execute(
                 "SELECT started_at FROM sheet_vitrina_v1_warehouse_update_phases WHERE run_id=? AND phase_key=?",
                 (run_id, phase_key),
@@ -173,12 +188,14 @@ class WarehouseUpdateJournal:
         status: str,
         result: Mapping[str, Any] | None = None,
         error: str = "",
+        owner_token: str | None = None,
     ) -> None:
+        owner = require_warehouse_job_owner(self.runtime_dir, owner_token)
         now = self.timestamp_factory()
         payload = dict(result or {})
         active_version = dict(payload.get("active_version") or {})
         with _connect(self.db_path) as conn:
-            ensure_warehouse_update_journal_schema(conn)
+            self._fence(conn, run_id, owner)
             row = conn.execute(
                 "SELECT started_at FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?",
                 (run_id,),
@@ -204,6 +221,15 @@ class WarehouseUpdateJournal:
                 ),
             )
             conn.commit()
+
+    def _fence(self, conn: sqlite3.Connection, run_id: str, owner: str) -> None:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT owner_token,status FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if row is None or row["owner_token"] != owner or row["status"] != "running":
+            raise WarehouseJobOwnershipError("warehouse run is not running under this admission owner")
 
     def public_status(self) -> dict[str, Any]:
         with _connect(self.db_path, query_only=True) as conn:
@@ -333,6 +359,12 @@ def ensure_warehouse_update_journal_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    columns = {str(row[1]) for row in conn.execute(
+        "PRAGMA table_info(sheet_vitrina_v1_warehouse_update_runs)"
+    )}
+    for name in ("owner_token", "owner_scope"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE sheet_vitrina_v1_warehouse_update_runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
 
 
 def _run_public(
