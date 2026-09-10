@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
+import hashlib
 from pathlib import Path
 import sqlite3
 import sys
@@ -14,7 +15,15 @@ from packages.application.change_registry import ensure_change_registry_schema,C
 from packages.application.change_registry_search_cluster import prepare_in_transaction,confirm_in_transaction
 from packages.contracts.search_cluster_cleaner import Account,Target
 
-LEGACY=Path(__file__).parent/'fixtures/search_cluster_cleaner_legacy_registry.sql'
+LEGACY=Path(__file__).parent/'fixtures/search_cluster_cleaner_legacy_registry.json'
+def legacy_sql():
+    fixture=json.loads(LEGACY.read_text(encoding='utf-8'))
+    assert fixture['schema']=='wb-core.synthetic-legacy-registry/v1'
+    sql=fixture['sql']
+    assert isinstance(sql,str) and hashlib.sha256(sql.encode('utf-8')).hexdigest()==fixture['sql_sha256']
+    return sql
+
+
 NOW='2026-09-11T00:00:00+00:00';AFTER='2026-09-11T00:01:00+00:00'
 
 
@@ -35,7 +44,7 @@ class FailingConnection(sqlite3.Connection):
 
 class RegistryTests(unittest.TestCase):
     def test_populated_legacy_migration_reinitialize(self):
-        conn=sqlite3.connect(':memory:');conn.row_factory=sqlite3.Row;conn.executescript(LEGACY.read_text());conn.execute('PRAGMA foreign_keys=ON')
+        conn=sqlite3.connect(':memory:');conn.row_factory=sqlite3.Row;conn.executescript(legacy_sql());conn.execute('PRAGMA foreign_keys=ON')
         before=snapshot(conn);self.assertEqual(len(before['change_registry_facts'][1]),3)
         ensure_change_registry_schema(conn);conn.commit()
         for table,(columns,rows) in before.items():
@@ -47,7 +56,7 @@ class RegistryTests(unittest.TestCase):
         conn.close()
 
     def test_failed_migration_rolls_back_complete_old_schema(self):
-        conn=sqlite3.connect(':memory:',factory=FailingConnection);conn.row_factory=sqlite3.Row;conn.executescript(LEGACY.read_text());conn.execute('PRAGMA foreign_keys=ON')
+        conn=sqlite3.connect(':memory:',factory=FailingConnection);conn.row_factory=sqlite3.Row;conn.executescript(legacy_sql());conn.execute('PRAGMA foreign_keys=ON')
         old=conn.serialize();conn.fail=True
         with self.assertRaises(sqlite3.OperationalError):ensure_change_registry_schema(conn)
         self.assertEqual(conn.serialize(),old);self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[])

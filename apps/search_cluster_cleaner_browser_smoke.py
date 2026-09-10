@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import tempfile
 import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from playwright.sync_api import sync_playwright, expect
@@ -150,4 +151,4 @@ def run(output:Path):
     return dict(passed=len(checks),checks=checks,screenshots=[str(output/name) for name in screens],wb_writes=0,synthetic_wb_posts=2)
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);args=parser.parse_args();result=run(args.output);(args.output/'browser-receipt.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n');print(json.dumps(result,ensure_ascii=False,indent=2))
+    parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path);args=parser.parse_args();args.output=args.output or Path(tempfile.mkdtemp(prefix='wbc-cleaner-browser-'));result=run(args.output);(args.output/'browser-receipt.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n');print(json.dumps(result,ensure_ascii=False,indent=2))

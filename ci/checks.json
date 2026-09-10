@@ -27,7 +27,7 @@
         "packages/application/search_cluster_cleaner*.py",
         "apps/search_cluster_cleaner*.py",
         "apps/fixtures/search_cluster_cleaner_holdout.json",
-        "apps/fixtures/search_cluster_cleaner_legacy_registry.sql",
+        "apps/fixtures/search_cluster_cleaner_legacy_registry.json",
         "packages/adapters/search_cluster_cleaner*.py",
         "packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.*",
         "packages/application/change_registry_search_cluster.py"
