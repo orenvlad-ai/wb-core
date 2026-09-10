@@ -2,15 +2,20 @@
 
 import json
 import os
+import math
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
 from packages.adapters.wb_finance_api import (
+    FinanceApiError,
     FinanceFetchResult,
     WbFinanceApiClient,
 )
 from packages.contracts.fin_report_daily_block import FinReportDailyRequest
+from packages.contracts.source_attempt_diagnostics import (
+    SourceAttemptError, new_attempt, unknown_diagnostics,
+)
 
 
 FINANCE_BASE_URL = "https://finance-api.wildberries.ru"
@@ -71,42 +76,46 @@ class HttpBackedFinReportDailySource:
                     or Path(os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR", ".runtime/registry_upload"))
                 ),
             )
-        fetched = client.fetch_report(
-            date_from=request.snapshot_date,
-            date_to=request.snapshot_date,
-            period="daily",
-        )
-        rows, exact_row_count, target_row_count = self._map_finance_rows(
-            fetched=fetched,
-            snapshot_date=request.snapshot_date,
-            nm_ids=request.nm_ids,
-        )
-        covered_nm_ids = sorted(
-            int(row["nmId"])
-            for row in rows
-            if isinstance(row.get("nmId"), int) and int(row["nmId"]) > 0
-        )
+        diagnostics = {**unknown_diagnostics("fin_report_daily"),
+                       **new_attempt("fin_report_daily", request.snapshot_date),
+                       "endpoint": "POST /api/finance/v1/sales-reports/detailed",
+                       "mode": "official_finance_daily", "period": "daily",
+                       "requested_count": len(set(request.nm_ids))}
+        try:
+            fetched = client.fetch_report(
+                date_from=request.snapshot_date, date_to=request.snapshot_date, period="daily",
+            )
+        except FinanceApiError as exc:
+            observed_rows = getattr(exc, "_observed_rows", None)
+            if observed_rows is not None:
+                diagnostics.update(_finance_row_evidence(observed_rows, request.snapshot_date, request.nm_ids))
+            diagnostics.update(
+                attempt_status="rejected", error_code=exc.code,
+                source_digest=getattr(exc, "source_digest", None),
+                source_observed_at=getattr(exc, "source_observed_at", None),
+                pagination={"pages": exc.pages, "rrdid_start": 0, "rrdid_end": exc.cursor,
+                            "terminal_status": exc.http_status, "complete": False},
+            )
+            exc.diagnostics = diagnostics
+            raise
+        diagnostics.update(_finance_row_evidence(fetched.rows, request.snapshot_date, request.nm_ids))
+        diagnostics.update(source_observed_at=fetched.source_observed_at, source_digest=fetched.source_digest,
+                           pagination={"pages": fetched.pages, "rrdid_start": 0,
+                                       "rrdid_end": fetched.rrd_id_end,
+                                       "terminal_status": fetched.terminal_status,
+                                       "complete": fetched.terminal_status == 204})
+        try:
+            rows, _exact_count, _target_count = self._map_finance_rows(
+                fetched=fetched, snapshot_date=request.snapshot_date, nm_ids=request.nm_ids,
+            )
+        except Exception as exc:
+            # Field names are allowlisted by the observer; provider text is not.
+            raise SourceAttemptError("finance_daily_mapping_failed", diagnostics) from exc
+        diagnostics["attempt_status"] = "returned"
         return {
             "snapshot_date": request.snapshot_date,
             "requested_nm_ids": request.nm_ids,
-            "source": {
-                "endpoint": "POST /api/finance/v1/sales-reports/detailed",
-                "mode": "official_finance_daily",
-                "period": "daily",
-                "pagination": {
-                    "pages": fetched.pages,
-                    "rrdid_start": 0,
-                    "rrdid_end": fetched.rrd_id_end,
-                    "terminal_status": fetched.terminal_status,
-                    "complete": fetched.terminal_status == 204,
-                },
-                "source_digest": fetched.source_digest,
-                "source_row_count": len(fetched.rows),
-                "exact_date_row_count": exact_row_count,
-                "target_row_count": target_row_count,
-                "requested_count": len(set(request.nm_ids)),
-                "covered_count": len(set(covered_nm_ids)),
-            },
+            "source": diagnostics,
             "data": {"rows": rows},
         }
 
@@ -243,3 +252,77 @@ def _finance_detailed_url(base_url: str) -> str:
     if normalized.endswith("/api/finance/v1/sales-reports/detailed"):
         return normalized
     return normalized + "/api/finance/v1/sales-reports/detailed"
+
+
+_FINANCE_REQUIRED_FIELDS = (
+    "retailPriceWithDisc", "commissionPercent", "deliveryService", "paidStorage",
+    "deduction", "ppvzSalesCommission", "penalty", "additionalPayment",
+    "acquiringFee", "cashbackAmount",
+)
+
+
+def _finance_row_evidence(rows: list[dict[str, Any]], snapshot_date: str, nm_ids: list[int]) -> dict[str, Any]:
+    """Observed row scope, before mapping can reject; never contains money or PII."""
+    wanted = set(nm_ids)
+    covered: set[int] = set()
+    evidence: dict[str, Any] = {
+        "counter_basis": "observed_source_rows",
+        "source_row_count": len(rows), "exact_date_row_count": 0,
+        "target_row_count": 0, "non_target_row_count": 0,
+        "invalid_identity_row_count": 0, "invalid_row_count": 0, "date_fallback_count": 0,
+        "date_discard_count": 0, "missing_date_row_count": 0,
+        "date_basis_counts": {"rrDate": 0, "saleDt": 0, "dateFrom": 0, "missing": 0},
+        "missing_required_fields": {}, "invalid_required_fields": {},
+        "anomaly_codes": [],
+    }
+    for row in rows:
+        if not isinstance(row, Mapping):
+            evidence["invalid_row_count"] += 1
+            continue
+        basis = next((key for key in ("rrDate", "saleDt", "dateFrom") if _extract_ymd(row.get(key))), "missing")
+        evidence["date_basis_counts"][basis] += 1
+        if basis in ("saleDt", "dateFrom"):
+            evidence["date_fallback_count"] += 1
+        if basis == "missing":
+            evidence["missing_date_row_count"] += 1
+        if _extract_snapshot_date(row) != snapshot_date:
+            evidence["date_discard_count"] += 1
+            continue
+        evidence["exact_date_row_count"] += 1
+        nm_id = _positive_int(row.get("nmId"))
+        if nm_id is None:
+            evidence["invalid_identity_row_count"] += 1
+        elif nm_id not in wanted:
+            evidence["non_target_row_count"] += 1
+        else:
+            evidence["target_row_count"] += 1
+            covered.add(nm_id)
+        fields = _FINANCE_REQUIRED_FIELDS if nm_id in wanted else ("paidStorage",)
+        for key in fields:
+            value = row.get(key)
+            category = None
+            if value is None or value == "":
+                category = "missing_required_fields"
+            else:
+                try:
+                    if isinstance(value, bool) or not math.isfinite(float(value)):
+                        category = "invalid_required_fields"
+                except (ValueError, TypeError, OverflowError):
+                    category = "invalid_required_fields"
+            if category:
+                evidence[category][key] = evidence[category].get(key, 0) + 1
+    evidence.update(covered_count=len(covered), covered_nm_ids=sorted(covered),
+                    missing_nm_ids=sorted(wanted - covered))
+    for code, present in (
+        ("empty_unconfirmed", not rows),
+        ("date_basis_mismatch_or_unavailable", rows and not evidence["exact_date_row_count"]),
+        ("date_fallback_used", evidence["date_fallback_count"]),
+        ("date_rows_discarded", evidence["date_discard_count"]),
+        ("invalid_identity", evidence["invalid_identity_row_count"]),
+        ("invalid_row", evidence["invalid_row_count"]),
+        ("missing_required_fields", evidence["missing_required_fields"]),
+        ("invalid_required_fields", evidence["invalid_required_fields"]),
+    ):
+        if present:
+            evidence["anomaly_codes"].append(code)
+    return evidence

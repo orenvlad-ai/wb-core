@@ -1,7 +1,7 @@
 """Контракты блока ads compact."""
 
-from dataclasses import dataclass
-from typing import Literal, Union
+from dataclasses import dataclass, field
+from typing import Any, Literal, Union
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,7 @@ class AdsCompactSuccess:
     snapshot_date: str
     count: int
     items: list[AdsCompactItem]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class AdsCompactEmpty:
     count: int
     items: list[AdsCompactItem]
     detail: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 AdsCompactResult = Union[AdsCompactSuccess, AdsCompactEmpty]

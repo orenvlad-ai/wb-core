@@ -11,6 +11,7 @@ from packages.contracts.fin_report_daily_block import (
     FinReportDailyStorageTotal,
     FinReportDailySuccess,
 )
+from packages.contracts.source_attempt_diagnostics import SourceAttemptError, unknown_diagnostics
 
 
 FIN_FIELDS = (
@@ -38,7 +39,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> FinReportDailyEnvelo
         raise ValueError("legacy payload must contain data.rows list")
 
     source = payload.get("source")
-    source_diagnostics = dict(source) if isinstance(source, Mapping) else {}
+    source_diagnostics = {**unknown_diagnostics("fin_report_daily"), **(dict(source) if isinstance(source, Mapping) else {})}
 
     grouped: dict[int, dict[str, float]] = defaultdict(lambda: {field: 0.0 for field in FIN_FIELDS})
     storage_total = 0.0
@@ -117,4 +118,10 @@ class FinReportDailyBlock:
 
     def execute(self, request: FinReportDailyRequest) -> FinReportDailyEnvelope:
         payload = self._source.fetch(request)
-        return transform_legacy_payload(payload)
+        try:
+            return transform_legacy_payload(payload)
+        except Exception as exc:
+            diagnostics = payload.get("source")
+            if not isinstance(diagnostics, Mapping):
+                diagnostics = unknown_diagnostics("fin_report_daily")
+            raise SourceAttemptError("fin_report_daily_transform_failed", diagnostics) from exc
