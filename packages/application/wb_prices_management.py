@@ -16,6 +16,7 @@ from packages.adapters.wb_prices_management import HttpBackedWbPricesManagementS
 from packages.application.change_registry_writer import (
     InternalWriterRegistry,
     InternalWriterRegistryError,
+    PreparedWriterOperation,
     price_tuple_from_wb,
 )
 from packages.contracts.wb_price_quarantine import (
@@ -243,7 +244,10 @@ class WbPricesManagementBlock:
             },
         }
 
-    def upload_task(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
+    def upload_task(
+        self, payload: Mapping[str, Any], *, actor: str = "",
+        current_payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.safety.write_enabled:
             raise WbPricesManagementError(
                 "WB price writes are disabled; set WB_PRICES_WRITE_ENABLED=true for controlled live commit",
@@ -261,13 +265,34 @@ class WbPricesManagementBlock:
         changes = preview.get("changes") if isinstance(preview.get("changes"), list) else []
         if not changes:
             raise WbPricesManagementError("preview has no valid changes to upload", http_status=422)
+        rows_by_nm = {
+            int(row["nmID"]): row for row in preview.get("rows", [])
+            if isinstance(row, Mapping) and row.get("valid") is True
+        }
+        expected = {}
+        for change in changes:
+            nm_id = int(change["nmID"])
+            row = rows_by_nm.get(nm_id)
+            if row is None:
+                raise WbPricesManagementError("price preview lost exact tuple evidence", http_status=409)
+            expected[nm_id] = price_tuple_from_wb(
+                price=row["current"]["price"], discount=row["current"]["discount"],
+                seller_price=row["current"]["discountedPrice"],
+            )
+        try:
+            observed = self._read_price_tuples(sorted(expected), current_payload=current_payload)
+        except Exception as exc:
+            raise WbPricesManagementError(
+                "Не удалось перепроверить текущие цены. Отправка не выполнена.",
+                http_status=503, payload={"reason": "price_prestate_unavailable"},
+            ) from exc
+        if observed != expected:
+            raise WbPricesManagementError(
+                "Цены или скидки изменились либо недоступны. Обновите предварительную проверку.",
+                http_status=409, payload={"reason": "price_prestate_drift"},
+            )
         prepared = None
         if self.writer_registry is not None:
-            rows_by_nm = {
-                int(row["nmID"]): row
-                for row in preview.get("rows", [])
-                if isinstance(row, Mapping) and row.get("valid") is True
-            }
             registry_changes = []
             for change in changes:
                 nm_id = int(change["nmID"])
@@ -434,70 +459,133 @@ class WbPricesManagementBlock:
             "wb_response": payload,
             "goods_errors": [],
         }
+        detail_rows = None
         if status_code in {5, 6}:
             try:
                 details = self.get_upload_task_goods(upload_id, limit=MAX_PRICE_CHANGES_PER_UPLOAD, offset=0)
-                result["goods_errors"] = [row for row in details["rows"] if row.get("errorText")]
+                detail_rows = details["rows"]
+                result["goods_errors"] = [row for row in detail_rows if row.get("errorText")]
             except Exception as exc:
                 result["goods_errors_error"] = str(exc)
-        if self.writer_registry is not None and status_code in PRICE_UPLOAD_FINAL_STATUSES:
-            receipt_reference = registry_receipt_reference
-            stored = self.writer_registry.read_by_receipt(receipt_reference)
-            prepared = self.writer_registry.find_by_receipt(receipt_reference)
-            if stored is not None and prepared is not None:
-                if status_code == 3:
-                    by_nm: dict[int, dict[str, int]] = {}
-                    for item in stored["items"]:
-                        by_nm.setdefault(int(item["nm_id"]), {})[
-                            str(item["parameter_field"])
-                        ] = int(item["requested_value_integer"])
-                    current = normalize_goods_payload(
-                        self.source.fetch_goods_by_nm_ids(sorted(by_nm))
-                    )
-                    observed = {
-                        good.nm_id: price_tuple_from_wb(
-                            price=good.price,
-                            discount=good.discount,
-                            seller_price=good.discounted_price,
-                        )
-                        for good in current
-                    }
-                    if set(observed) == set(by_nm) and all(
-                        observed[nm_id] == requested
-                        for nm_id, requested in by_nm.items()
-                    ):
-                        self.writer_registry.confirm_prices(
-                            prepared,
-                            confirmed_by_nm=observed,
-                            readback_basis={
-                                "upload_id": upload_id,
-                                "status_code": status_code,
-                                "confirmed_by_nm": observed,
-                            },
-                            receipt_reference=receipt_reference,
-                            native_audit_references=(
-                                "sheet_vitrina_v1_prices/upload_audit.jsonl"
-                                f"#operation={prepared.native_operation_id}",
-                            ),
-                        )
-                        result["registry_readback_status"] = "confirmed"
-                    else:
-                        self.writer_registry.ambiguous(
-                            prepared,
-                            error_code="wb_readback_mismatch",
-                            error_message="final upload succeeded but exact price tuple did not match",
-                            receipt_reference=receipt_reference,
-                        )
-                        result["registry_readback_status"] = "ambiguous"
-                else:
-                    self.writer_registry.failed_after_submit(
-                        prepared,
-                        error_code=f"wb_upload_{status_label}",
-                        error_message="WB upload reached a non-success final status",
-                        receipt_reference=receipt_reference,
-                    )
-                    result["registry_readback_status"] = "failed"
+        if registry_prepared is not None and status_code in PRICE_UPLOAD_FINAL_STATUSES:
+            self._reconcile_price_upload(result, registry_prepared, registry_receipt_reference, detail_rows)
         return result
+
+    def _read_price_tuples(
+        self, nm_ids: Sequence[int], *, current_payload: Mapping[str, Any] | None = None,
+    ) -> dict[int, dict[str, int]]:
+        # Only an in-process caller may reuse its just-read payload; HTTP accepts no such argument.
+        goods = normalize_goods_payload(
+            current_payload if current_payload is not None else self.source.fetch_goods_by_nm_ids(nm_ids)
+        )
+        observed: dict[int, dict[str, int]] = {}
+        invalid = set()
+        for good in goods:
+            if good.nm_id in observed or good.nm_id in invalid:
+                invalid.add(good.nm_id)
+                continue
+            try:
+                observed[good.nm_id] = price_tuple_from_wb(
+                    price=good.price, discount=good.discount, seller_price=good.discounted_price,
+                )
+            except (ValueError, TypeError, InvalidOperation):
+                invalid.add(good.nm_id)
+        return {nm_id: value for nm_id, value in observed.items() if nm_id not in invalid}
+
+    def _reconcile_price_upload(
+        self, result: dict[str, Any], prepared: PreparedWriterOperation,
+        receipt_reference: str, detail_rows: Sequence[Mapping[str, Any]] | None,
+    ) -> None:
+        """Resolve each SKU of the original submission; never submit from a status read."""
+        writer = self.writer_registry
+        if writer is None:
+            raise InternalWriterRegistryError("price registry is unavailable")
+        stored = writer.read_by_receipt(receipt_reference)
+        if stored is None:
+            raise InternalWriterRegistryError("price operation receipt is unavailable")
+        latest = {row["change_item_id"]: row for row in stored["latest_attempts"]}
+        by_nm: dict[int, list[Mapping[str, Any]]] = {}
+        for item in stored["items"]:
+            by_nm.setdefault(int(item["nm_id"]), []).append(item)
+        item_results = {}
+        pending = {}
+        for nm_id, items in by_nm.items():
+            states = {latest[item["change_item_id"]]["resolution_state"] or
+                      latest[item["change_item_id"]]["state"] for item in items}
+            if states == {"confirmed"}:
+                item_results[nm_id] = {"nmID": nm_id, "status": "confirmed", "errorText": ""}
+            elif states <= {"failed", "rejected", "cancelled"}:
+                item_results[nm_id] = {"nmID": nm_id, "status": "failed",
+                                      "errorText": next((latest[item["change_item_id"]]["error_message"]
+                                                         for item in items if latest[item["change_item_id"]]["error_message"]), "WB не применил изменение.")}
+            else:
+                pending[nm_id] = items
+        observed = {}
+        if pending:
+            try:
+                observed = self._read_price_tuples(sorted(pending))
+            except Exception:
+                pass  # Missing readback remains ambiguous, never a success or a zero price.
+        details_by_nm = {}
+        for row in detail_rows or []:
+            details_by_nm.setdefault(row["nmID"], []).append(row)
+        confirmed = {}
+        ambiguous = []
+        failed = {False: [], True: []}
+        for nm_id, items in pending.items():
+            requested = {item["parameter_field"]: item["requested_value_integer"] for item in items}
+            before = {item["parameter_field"]: item["before_value_integer"] for item in items}
+            rows = details_by_nm.get(nm_id, [])
+            exact_detail = rows[0] if len(rows) == 1 else None
+            wb_success = result["status_code"] == 3 or (
+                result["status_code"] == 5 and exact_detail is not None and not exact_detail["errorText"]
+            )
+            wb_failed = result["status_code"] in {4, 6} or (
+                result["status_code"] == 5 and exact_detail is not None and bool(exact_detail["errorText"])
+            )
+            error = ""
+            if wb_success and observed.get(nm_id) == requested:
+                status = "confirmed"
+                confirmed[nm_id] = requested
+            elif wb_failed and observed.get(nm_id) == before:
+                status = "failed"
+                was_ambiguous = any(latest[item["change_item_id"]]["state"] == "ambiguous" for item in items)
+                failed[was_ambiguous].append(nm_id)
+                error = "WB не применил изменение цены."
+            else:
+                status = "ambiguous"
+                ambiguous.append(nm_id)
+                error = "Изменение цены не подтверждено. Повторная отправка не выполнялась."
+            item_results[nm_id] = {"nmID": nm_id, "status": status, "errorText": error}
+        if confirmed:
+            writer.confirm_prices(
+                writer.price_items(prepared, sorted(confirmed)), confirmed_by_nm=confirmed,
+                readback_basis={"upload_id": result["uploadID"], "status_code": result["status_code"],
+                                "confirmed_by_nm": confirmed, "details": details_by_nm},
+                receipt_reference=receipt_reference,
+                native_audit_references=("sheet_vitrina_v1_prices/upload_audit.jsonl"
+                                         f"#operation={prepared.native_operation_id}",),
+            )
+        for resolved, nm_ids in failed.items():
+            if nm_ids:
+                writer.failed_after_submit(
+                    writer.price_items(prepared, nm_ids), resolved=resolved,
+                    error_code="wb_price_not_applied", error_message="WB не применил изменение цены.",
+                    receipt_reference=receipt_reference,
+                )
+        if ambiguous:
+            writer.ambiguous(
+                writer.price_items(prepared, ambiguous), error_code="wb_price_readback_unconfirmed",
+                error_message="WB price result is not proven by per-item status and exact readback",
+                receipt_reference=receipt_reference,
+            )
+        result["item_results"] = [item_results[nm_id] for nm_id in sorted(item_results)]
+        states = {item["status"] for item in item_results.values()}
+        result["registry_readback_status"] = (
+            "ambiguous" if "ambiguous" in states else "confirmed" if states == {"confirmed"}
+            else "failed" if states == {"failed"} else "partial"
+        )
+        result["readback_pending"] = "ambiguous" in states
 
     def get_upload_task_goods(self, upload_id: int, *, limit: int, offset: int) -> dict[str, Any]:
         upload_id = _as_positive_int(upload_id, "upload_id")

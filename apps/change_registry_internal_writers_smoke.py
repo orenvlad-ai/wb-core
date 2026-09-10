@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal
 import sqlite3
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
@@ -38,6 +39,7 @@ from packages.application.sku_inventory_balance import (  # noqa: E402
 from packages.application.wb_prices_management import (  # noqa: E402
     WbPricesManagementBlock,
     WbPricesSafetyConfig,
+    WbPricesManagementError,
 )
 from packages.application.wb_spp_tester import (  # noqa: E402
     WbSppTesterBlock,
@@ -220,6 +222,8 @@ def main() -> None:
         _assert_concrete_writer_blocks(runtime_dir, writer, clock)
         _assert_checkpoint_writer_race_both_orderings(Path(tmp))
 
+    _assert_price_batch_results()
+    _assert_price_status_ui()
     print("change_registry_internal_writers_smoke: OK")
 
 
@@ -656,6 +660,202 @@ def _counts(db_path: Path) -> tuple[int, int, int, int, int]:
                 FACT_LINKS_TABLE,
             )
         )  # type: ignore[return-value]
+
+
+
+def _assert_price_batch_results() -> None:
+    class Runtime:
+        def list_nomenclature_items(self, **_kwargs):
+            return []
+
+    class Source:
+        def __init__(self, count=2):
+            self.values = {nm: {"price": 100, "discount": 10} for nm in range(1, count + 1)}
+            self.status = 3
+            self.failed = set()
+            self.omit = set()
+            self.duplicate = False
+            self.read_error = False
+            self.details_error = False
+            self.no_apply = False
+            self.upload_calls = 0
+            self.read_calls = 0
+            self.last_changes = []
+
+        def fetch_goods_by_nm_ids(self, ids):
+            self.read_calls += 1
+            if self.read_error:
+                raise RuntimeError("fixture read unavailable")
+            rows = [{"nmID": nm, "discount": self.values[nm]["discount"], "sizes": [{
+                "sizeID": nm, "price": self.values[nm]["price"],
+                "discountedPrice": self.values[nm]["price"] * (100 - self.values[nm]["discount"]) / 100,
+            }]} for nm in ids if nm not in self.omit]
+            if self.duplicate and rows:
+                rows.append(rows[0])
+            return {"data": {"listGoods": rows}}
+
+        def upload_task(self, changes):
+            self.upload_calls += 1
+            self.last_changes = changes
+            for change in changes:
+                if change["nmID"] not in self.failed and not self.no_apply:
+                    self.values[change["nmID"]].update({k: v for k, v in change.items() if k != "nmID"})
+            return {"data": {"id": 741}}
+
+        def fetch_upload_status(self, _upload_id):
+            return {"data": {"status": self.status}}
+
+        def fetch_upload_goods(self, **_kwargs):
+            if self.details_error:
+                raise RuntimeError("fixture details unavailable")
+            return {"data": {"historyGoods": [dict(change, errorText=("fixture rejected" if change["nmID"] in self.failed else ""))
+                                              for change in self.last_changes]}}
+
+    def setup(root, source):
+        repository = ChangeRegistryRepository(root)
+        repository.initialize_schema()
+        writer = InternalWriterRegistry(runtime_dir=root, seller_id=SELLER, account_scope=ACCOUNT)
+        block = WbPricesManagementBlock(runtime=Runtime(), runtime_dir=root, source=source,
+                                       safety_config=WbPricesSafetyConfig(True, 300), writer_registry=writer)
+        preview = block.preview_changes({"changes": [{"nmID": nm, "price": 120} for nm in source.values]})
+        return block, preview["confirmation_payload"], writer
+
+    def facts(root):
+        with sqlite3.connect(root / "registry_upload_runtime.sqlite3") as conn:
+            return conn.execute(f"SELECT nm_id, parameter_field, before_value_integer, after_value_integer FROM {FACTS_TABLE} ORDER BY nm_id,parameter_field").fetchall()
+
+    with TemporaryDirectory(prefix="price-batch-proof-") as tmp:
+        root = Path(tmp)
+        # A changed, missing, duplicated or unreadable prestate must never reach WB or registry prepare.
+        for scenario in ("price", "discount", "missing", "duplicate", "unavailable"):
+            source = Source()
+            block, payload, writer = setup(root / scenario, source)
+            if scenario in {"price", "discount"}:
+                source.values[1][scenario] += 1
+            source.omit = {1} if scenario == "missing" else set()
+            source.duplicate = scenario == "duplicate"
+            source.read_error = scenario == "unavailable"
+            try:
+                block.upload_task(payload, actor="test")
+            except WbPricesManagementError as exc:
+                assert exc.payload["reason"] in {"price_prestate_drift", "price_prestate_unavailable"}
+            else:
+                raise AssertionError(f"{scenario} prestate reached submit")
+            assert source.upload_calls == 0 and _counts(root / scenario / "registry_upload_runtime.sqlite3") == (0, 0, 0, 0, 0)
+
+        source = Source(29)
+        block, payload, writer = setup(root / "batch", source)
+        upload = block.upload_task(payload, actor="test")
+        status = block.get_upload_task(upload["uploadID"])
+        assert status["registry_readback_status"] == "confirmed" and len(status["item_results"]) == 29
+        assert len(facts(root / "batch")) == 58 and source.upload_calls == 1
+        before_counts = _counts(root / "batch" / "registry_upload_runtime.sqlite3")
+        source.values[1]["price"] = 150  # A later external change cannot rewrite a completed operation.
+        reads = source.read_calls
+        assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "confirmed"
+        assert source.read_calls == reads and _counts(root / "batch" / "registry_upload_runtime.sqlite3") == before_counts
+        try:
+            block.upload_task(payload, actor="test")
+        except WbPricesManagementError:
+            pass
+        else:
+            raise AssertionError("same preview was submitted twice")
+        assert source.upload_calls == 1
+
+        # Missing details stay ambiguous, then the same upload resolves per item without resubmission.
+        source = Source(); source.status = 5; source.failed = {2}
+        block, payload, writer = setup(root / "partial", source)
+        upload = block.upload_task(payload, actor="test")
+        source.details_error = True
+        assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "ambiguous"
+        assert facts(root / "partial") == []
+        source.details_error = False
+        status = block.get_upload_task(upload["uploadID"])
+        assert status["registry_readback_status"] == "partial" and not status["readback_pending"]
+        assert {row["nmID"]: row["status"] for row in status["item_results"]} == {1: "confirmed", 2: "failed"}
+        assert facts(root / "partial") == [(1, "original_price_minor", 10000, 12000), (1, "seller_price_minor", 9000, 10800)]
+        counts = _counts(root / "partial" / "registry_upload_runtime.sqlite3")
+        assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "partial"
+        assert _counts(root / "partial" / "registry_upload_runtime.sqlite3") == counts and source.upload_calls == 1
+
+        # A successful status alone is not proof; a later read may resolve only the pending SKU.
+        source = Source(); source.no_apply = True
+        block, payload, writer = setup(root / "mismatch", source)
+        upload = block.upload_task(payload, actor="test")
+        source.values[1]["price"] = 120
+        status = block.get_upload_task(upload["uploadID"])
+        assert status["registry_readback_status"] == "ambiguous" and status["readback_pending"]
+        assert {row["nmID"]: row["status"] for row in status["item_results"]} == {1: "confirmed", 2: "ambiguous"}
+        assert len(facts(root / "mismatch")) == 2
+        source.read_error = True
+        assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "ambiguous"
+        source.read_error = False; source.values[2]["price"] = 120
+        assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "confirmed"
+        assert len(facts(root / "mismatch")) == 4 and source.upload_calls == 1
+
+        # WB errors contradicting changed values remain unproven; unchanged failures are terminal.
+        for code in (4, 6):
+            source = Source(); source.status = code; source.no_apply = True
+            path = root / f"failure-{code}"
+            block, payload, writer = setup(path, source)
+            upload = block.upload_task(payload, actor="test")
+            source.values[1]["price"] = 120
+            status = block.get_upload_task(upload["uploadID"])
+            assert {row["nmID"]: row["status"] for row in status["item_results"]} == {1: "ambiguous", 2: "failed"}
+            assert facts(path) == [] and source.upload_calls == 1
+
+        # A subset cannot address a foreign operation or silently confirm only one field of a tuple.
+        prepared = writer.find_by_receipt("wb-prices-upload:741")
+        try:
+            writer.price_items(prepared, [999])
+        except InternalWriterRegistryError:
+            pass
+        else:
+            raise AssertionError("foreign SKU selection admitted")
+        from packages.application.change_registry import ChangeRegistryError
+        try:
+            writer.repository.append_writer_operation_state(operation_id=prepared.operation_id, state="failed",
+                occurred_at=datetime.now(timezone.utc).isoformat(), change_item_ids=["foreign-item"])
+        except ChangeRegistryError:
+            pass
+        else:
+            raise AssertionError("foreign item selection admitted")
+
+
+def _assert_price_status_ui() -> None:
+    # Execute the production JS functions, including polling after the preview modal is closed.
+    script = r"""
+const fs = require('fs'); const vm = require('vm'); const assert = require('assert');
+const html = fs.readFileSync('packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html', 'utf8');
+const names = ['pollPriceUploadStatus', 'applyPriceUploadStatus', 'markPriceUploadRows', 'priceStatusLabel', 'priceStatusTone'];
+const functions = names.map(name => {
+  const match = html.match(new RegExp('    (?:async )?function ' + name + '\\('));
+  const start = match.index; const end = html.slice(start + 1).search(/\n    (?:async )?function /);
+  return html.slice(start, start + 1 + end);
+}).join('\n');
+const state = {prices: {rowUpload: {}, statusPollSequence: 0, preview: null}};
+let payloads = []; let reads = 0;
+const context = {state, Set, WEB_VITRINA_CONFIG: {prices_upload_task_path: '/prices/upload-task'},
+  delay: async () => {}, renderPricesTable: () => {}, loadPricesGoods: async () => {},
+  fetch: async () => { reads++; return {ok: true}; }, readJsonResponse: async () => payloads.shift()};
+vm.createContext(context); vm.runInContext(functions, context);
+const rows = [{nmID: 1, valid: true}, {nmID: 2, valid: true}, {nmID: 3, valid: false}];
+context.applyPriceUploadStatus(741, rows, {status: 'success', registry_readback_status: 'ambiguous'});
+assert.equal(state.prices.rowUpload[1].status, 'unconfirmed');
+assert.equal(state.prices.rowUpload[3], undefined);
+assert.equal(context.priceStatusLabel('unconfirmed'), 'не подтверждено');
+assert.equal(context.priceStatusTone('unconfirmed'), 'warning');
+context.applyPriceUploadStatus(741, rows, {status: 'partial_error', registry_readback_status: 'partial', item_results: [
+  {nmID: 1, status: 'confirmed'}, {nmID: 2, status: 'failed', errorText: 'WB не применил изменение.'}]});
+assert.equal(state.prices.rowUpload[1].status, 'success'); assert.equal(state.prices.rowUpload[2].status, 'all_error');
+payloads = [{status: 'success', is_final: true, readback_pending: true, registry_readback_status: 'ambiguous'},
+            {status: 'success', is_final: true, readback_pending: false, registry_readback_status: 'confirmed'}];
+context.pollPriceUploadStatus(741, rows).then(() => {
+  assert.equal(reads, 2); assert.equal(state.prices.rowUpload[1].status, 'success');
+  assert.equal(state.prices.rowUpload[3], undefined);
+}).catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    subprocess.run(["node", "-"], input=script, text=True, cwd=ROOT, check=True, timeout=30)
 
 
 if __name__ == "__main__":

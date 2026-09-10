@@ -2833,6 +2833,14 @@ class ChangeRegistryRepository:
                 "operation": dict(operation),
                 "items": [dict(row) for row in items],
                 "annotations": [dict(row) for row in annotations],
+                "latest_attempts": [dict(row) for row in conn.execute(
+                    f"""SELECT event.* FROM {ATTEMPT_EVENTS_TABLE} event
+                        JOIN {ITEMS_TABLE} item ON item.change_item_id=event.change_item_id
+                        WHERE item.operation_id=? AND event.sequence_no=(
+                            SELECT MAX(latest.sequence_no) FROM {ATTEMPT_EVENTS_TABLE} latest
+                            WHERE latest.change_item_id=event.change_item_id)""",
+                    (exact_id,),
+                ).fetchall()],
             }
 
     def find_operation_by_receipt_reference(
@@ -2874,8 +2882,9 @@ class ChangeRegistryRepository:
         readback_proof_kind: str = "",
         readback_digest: str = "",
         resolution_state: str = "",
+        change_item_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        """Append the same lifecycle transition to all atomic writer attempts."""
+        """Append a transition to all items, or an explicit operation-owned subset."""
 
         exact_operation_id = _identifier(operation_id, "operation_id")
         exact_state = _required_token(state, "state", ATTEMPT_STATES)
@@ -2923,6 +2932,7 @@ class ChangeRegistryRepository:
                 raise ChangeRegistryConflict(
                     "writer operation has no atomic items"
                 )
+            items = _select_writer_items(items, change_item_ids)
             stored: list[dict[str, Any]] = []
             for item in items:
                 previous = conn.execute(
@@ -3010,6 +3020,7 @@ class ChangeRegistryRepository:
         readback_digest: str,
         receipt_reference: str = "",
         native_audit_references: Sequence[str] = (),
+        change_item_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Atomically confirm exact items, create/reuse facts and late-link proof."""
 
@@ -3039,6 +3050,9 @@ class ChangeRegistryRepository:
                 raise ChangeRegistryConflict(
                     "writer operation has no atomic items"
                 )
+            items = _select_writer_items(items, change_item_ids)
+            if set(confirmed_values) != {str(item["change_item_id"]) for item in items}:
+                raise ChangeRegistryError("confirmed readback must match selected atomic items")
             facts: list[dict[str, Any]] = []
             events: list[dict[str, Any]] = []
             for item in items:
@@ -3576,6 +3590,16 @@ def _require_annotation_subject(
     ).fetchone()
     if row is None:
         raise ChangeRegistryNotFound("annotation subject is missing")
+
+
+def _select_writer_items(items: Sequence[Any], change_item_ids: Sequence[str] | None) -> list[Any]:
+    if change_item_ids is None:
+        return list(items)
+    selected = set(change_item_ids)
+    available = {str(item["change_item_id"]) for item in items}
+    if not selected or len(selected) != len(change_item_ids) or not selected <= available:
+        raise ChangeRegistryError("writer item selection must be a nonempty operation-owned subset")
+    return [item for item in items if str(item["change_item_id"]) in selected]
 
 
 def _validate_attempt_transition(previous: str, current: str) -> None:

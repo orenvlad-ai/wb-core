@@ -159,9 +159,12 @@ Commit route:
 - requires `WB_PRICES_WRITE_ENABLED=true`;
 - requires `confirm=true`, preview id and confirmation token from the preview response;
 - rejects expired/tampered previews;
+- re-reads all accepted rows immediately before registry preparation; missing, duplicate or changed original price/discount/seller-price evidence blocks the entire submit. The SKU wrapper may reuse its just-read in-process payload; the HTTP caller cannot supply this evidence;
 - uploads only valid rows through `POST /api/v2/upload/task`;
 - returns `uploadID` and `alreadyExists` when WB returns them;
 - treats upload response as task creation only, not final price application.
+
+Final status reconciliation preserves one operation but resolves complete price tuples per SKU. Successful WB rows require exact requested-tuple readback before facts appear. Rejected/cancelled rows require unchanged-before readback; contradictory, missing or unavailable evidence remains ambiguous. Status `5` requires per-product upload details. Already terminal items are retained on subsequent reads, while unresolved items can be confirmed or failed later without another upload. The UI uses these per-item results, displays `не подтверждено` for unproven success, and offers `Проверить результат` to read the same upload again, including after closing the preview modal.
 
 SPP tester route:
 - accepts only one `nmID` per job;

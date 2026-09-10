@@ -1837,6 +1837,7 @@ class SkuManagementBlock:
                 lambda: self.prices_block.upload_task(
                     preview["delegated_confirmation"],
                     actor=actor,
+                    current_payload=current_goods_payload,
                 ),
             )
             upload_id = _positive_int(upload.get("uploadID"), "uploadID")

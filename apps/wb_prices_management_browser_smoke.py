@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import sqlite3
 from tempfile import TemporaryDirectory
 import threading
 
@@ -40,7 +41,8 @@ def main() -> None:
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 1440, "height": 920})
             page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
-            page.locator('[data-unified-tab-button="prices"]').click()
+            page.locator('[data-unified-tab-button="sku-management"]').click()
+            page.locator('[data-sku-management-subtab="prices"]').click()
             page.locator(f'[data-prices-row="{PRIMARY_NM}"]').wait_for(timeout=7000)
             for removed_selector in (
                 "[data-prices-filter-errors]",
@@ -86,7 +88,8 @@ def main() -> None:
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 1440, "height": 920})
             page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
-            page.locator('[data-unified-tab-button="prices"]').click()
+            page.locator('[data-unified-tab-button="sku-management"]').click()
+            page.locator('[data-sku-management-subtab="prices"]').click()
             page.locator(f'[data-prices-row="{PRIMARY_NM}"]').wait_for(timeout=7000)
             page.locator(f'[data-prices-edit-nm="{SIZE_PRICE_NM}"][data-prices-edit-field="discount"]').fill("25")
             page.locator("[data-prices-preview]").click()
@@ -102,12 +105,37 @@ def main() -> None:
                 raise AssertionError(f"row-level upload error must be visible, got: {table_text}")
             browser.close()
 
+    local = _LocalPricesServer(write_enabled=True, with_registry=True)
+    with local as base_url:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 920})
+            page.goto(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}", wait_until="domcontentloaded")
+            page.locator('[data-unified-tab-button="sku-management"]').click()
+            page.locator('[data-sku-management-subtab="prices"]').click()
+            page.locator(f'[data-prices-edit-nm="{PRIMARY_NM}"][data-prices-edit-field="price"]').fill("1100")
+            page.locator("[data-prices-preview]").click()
+            page.locator("[data-prices-modal]").wait_for(state="visible")
+            page.locator("[data-prices-commit]").click()
+            page.wait_for_function("() => document.querySelector('[data-prices-modal]').innerText.includes('987654321')")
+            page.locator("[data-prices-modal-close]").first.click()
+            row = page.locator(f'[data-prices-row="{PRIMARY_NM}"]')
+            row.get_by_text("не подтверждено", exact=True).wait_for(timeout=10000)
+            if row.locator('.prices-badge.success').count():
+                raise AssertionError("unconfirmed exact readback must not be green")
+            row.get_by_role("button", name="Проверить результат").click()
+            with sqlite3.connect(local.db_path) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM change_registry_facts").fetchone()[0] == 0
+            assert len(local.source.upload_payloads) == 1
+            browser.close()
+
     print("wb_prices_management_browser_smoke: OK")
 
 
 class _LocalPricesServer:
-    def __init__(self, *, write_enabled: bool) -> None:
+    def __init__(self, *, write_enabled: bool, with_registry: bool = False) -> None:
         self.write_enabled = write_enabled
+        self.with_registry = with_registry
         self.tmp: TemporaryDirectory[str] | None = None
         self.server = None
         self.thread: threading.Thread | None = None
@@ -118,12 +146,21 @@ class _LocalPricesServer:
         runtime_dir = Path(self.tmp.name) / "runtime"
         runtime = _seed_runtime(runtime_dir)
         source = FakePricesSource()
+        self.source = source
+        self.db_path = runtime_dir / "registry_upload_runtime.sqlite3"
+        block = _build_block(runtime, runtime_dir, source, write_enabled=self.write_enabled)
+        if self.with_registry:
+            from packages.application.change_registry import ChangeRegistryRepository
+            from packages.application.change_registry_writer import InternalWriterRegistry
+            ChangeRegistryRepository(runtime_dir).initialize_schema()
+            block.writer_registry = InternalWriterRegistry(runtime_dir=runtime_dir, seller_id="fixture", account_scope="seller-portal-primary")
+            source.status_code = 3  # Upload accepted but fake WB deliberately keeps the old prices.
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=runtime_dir,
             runtime=runtime,
             now_factory=lambda: NOW,
             activated_at_factory=lambda: "2026-07-07T07:00:00Z",
-            prices_block=_build_block(runtime, runtime_dir, source, write_enabled=self.write_enabled),
+            prices_block=block,
         )
         config = RegistryUploadHttpEntrypointConfig(
             host="127.0.0.1",
