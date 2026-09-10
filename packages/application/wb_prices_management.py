@@ -537,8 +537,14 @@ class WbPricesManagementBlock:
             before = {item["parameter_field"]: item["before_value_integer"] for item in items}
             rows = details_by_nm.get(nm_id, [])
             exact_detail = rows[0] if len(rows) == 1 else None
+            detail_matches = (
+                exact_detail is not None
+                and exact_detail["price"] is not None and exact_detail["discount"] is not None
+                and Decimal(str(exact_detail["price"])) * 100 == requested["original_price_minor"]
+                and Decimal(str(exact_detail["discount"])) * 100 == requested["discount_bps"]
+            )
             wb_success = result["status_code"] == 3 or (
-                result["status_code"] == 5 and exact_detail is not None and not exact_detail["errorText"]
+                result["status_code"] == 5 and detail_matches and not exact_detail["errorText"]
             )
             wb_failed = result["status_code"] in {4, 6} or (
                 result["status_code"] == 5 and exact_detail is not None and bool(exact_detail["errorText"])

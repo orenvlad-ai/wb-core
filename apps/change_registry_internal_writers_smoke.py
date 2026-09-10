@@ -677,6 +677,7 @@ def _assert_price_batch_results() -> None:
             self.duplicate = False
             self.read_error = False
             self.details_error = False
+            self.details_missing = False
             self.no_apply = False
             self.upload_calls = 0
             self.read_calls = 0
@@ -708,7 +709,10 @@ def _assert_price_batch_results() -> None:
         def fetch_upload_goods(self, **_kwargs):
             if self.details_error:
                 raise RuntimeError("fixture details unavailable")
-            return {"data": {"historyGoods": [dict(change, errorText=("fixture rejected" if change["nmID"] in self.failed else ""))
+            if self.details_missing:
+                return {"data": {"historyGoods": [{"nmID": change["nmID"]} for change in self.last_changes]}}
+            return {"data": {"historyGoods": [dict(change, discount=self.values[change["nmID"]]["discount"],
+                                                   errorText=("fixture rejected" if change["nmID"] in self.failed else ""))
                                               for change in self.last_changes]}}
 
     def setup(root, source):
@@ -770,6 +774,10 @@ def _assert_price_batch_results() -> None:
         assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "ambiguous"
         assert facts(root / "partial") == []
         source.details_error = False
+        source.details_missing = True
+        assert block.get_upload_task(upload["uploadID"])["registry_readback_status"] == "ambiguous"
+        assert facts(root / "partial") == []
+        source.details_missing = False
         status = block.get_upload_task(upload["uploadID"])
         assert status["registry_readback_status"] == "partial" and not status["readback_pending"]
         assert {row["nmID"]: row["status"] for row in status["item_results"]} == {1: "confirmed", 2: "failed"}
