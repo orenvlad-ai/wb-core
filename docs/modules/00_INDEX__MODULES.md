@@ -41,6 +41,7 @@
 - [SPP proxy](35_MODULE__SPP_PROXY_BLOCK.md)
 - [Поставки WB](36_MODULE__WB_SUPPLIES_BLOCK.md)
 - [Оператор рекламы](37_MODULE__SHEET_VITRINA_V1_ADS_OPERATOR_BLOCK.md)
+- [Политика поисковых кластеров WB](../policies/wb-search-cluster-policy.md) — только для задач аудита и управления кластерами CPM.
 
 ## Склады, финансы и операции
 
