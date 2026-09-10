@@ -19,6 +19,25 @@
     }
   },
   "groups": {
+    "search_cluster_cleaner": {
+      "patterns": [
+        "packages/contracts/search_cluster_cleaner.py",
+        "packages/domain/search_cluster_*.py",
+        "packages/application/search_cluster_cleaner*.py",
+        "apps/search_cluster_cleaner*.py",
+        "apps/fixtures/search_cluster_cleaner_holdout.json"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/search_cluster_cleaner_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/search_cluster_cleaner_holdout_smoke.py"
+        ]
+      ]
+    },
     "warehouse_recovery_retention": {
       "patterns": [
         "apps/warehouse_recovery_retention.py",
