@@ -219,7 +219,8 @@ from packages.application.warehouse_functional_economics_backfill import (
     carry_forward_closed_functional_economics_metadata,
 )
 from packages.application.warehouse_functional_lock import (
-    warehouse_functional_job_lock, require_warehouse_job_owner, WarehouseFunctionalBusyError,
+    warehouse_functional_job_lock, warehouse_functional_job_is_busy,
+    require_warehouse_job_owner, WarehouseFunctionalBusyError,
 )
 from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
@@ -6931,6 +6932,13 @@ class RegistryUploadHttpEntrypoint:
                 self.operator_jobs.get(requested)
             )
         job = self.operator_jobs.active_job(operations=(operation,))
+        if job is None and warehouse_functional_job_is_busy(self.runtime.runtime_dir):
+            # A busy POST without a process-local ID is polled through this
+            # same empty-ID route. Never replace a live CLI owner with an old
+            # manual success/never; no durable alias is invented here.
+            return {"contract_name": "warehouse_current_source_sync_status",
+                    "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
         if job is None:
             job = self.operator_jobs.latest_relevant_job(operations=(operation,))
         if job is None:

@@ -39,6 +39,39 @@ def require_warehouse_job_owner(runtime_dir: Path, token: str | None = None) -> 
     return str(state["token"])
 
 
+def warehouse_functional_job_is_busy(runtime_dir: Path) -> bool:
+    """Read-only, momentary admission probe; never create a lock file or owner.
+
+    flock on an existing read-only descriptor observes the actual process lock.
+    The in-process mutex covers threads, including the small acquire/release
+    boundaries. No PID, timestamp or stale journal row is treated as ownership.
+    """
+    path = (Path(runtime_dir) / WAREHOUSE_FUNCTIONAL_JOB_LOCK_FILENAME).resolve()
+    current = getattr(_LOCAL, "warehouse_job_owner", None)
+    if current is not None and current["pid"] == os.getpid() and current["path"] == path:
+        return True
+    with _LOCKS_GUARD:
+        process_lock = _PROCESS_LOCKS.get(path)
+    if process_lock is not None and not process_lock.acquire(blocking=False):
+        return True
+    try:
+        try:
+            handle = path.open("r", encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        with handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                return False
+    finally:
+        if process_lock is not None:
+            process_lock.release()
+
+
 def _record_writer_metrics(evidence: dict[str, Any]) -> None:
     state = getattr(_LOCAL, "warehouse_job_owner", None)
     if state is not None and state["pid"] == os.getpid():
