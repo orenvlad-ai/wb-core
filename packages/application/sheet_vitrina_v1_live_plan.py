@@ -185,6 +185,7 @@ from packages.business_time import (
     current_business_date_iso,
     default_business_as_of_date,
 )
+from packages.contracts.source_attempt_diagnostics import SourceAttemptError, unknown_diagnostics
 from packages.contracts.cost_price_upload import CostPriceCurrentState, CostPriceRow
 from packages.contracts.ads_bids_block import AdsBidsRequest
 from packages.contracts.ads_compact_block import AdsCompactRequest
@@ -622,6 +623,15 @@ def _append_source_slot_diagnostic(
         "counter_basis": "live_source_status; adapter-internal long-tail counters are not available without adapter refactor",
         **_known_payload_diagnostic_counters(status.source_key, payload),
     }
+    if status.source_key in {"ads_compact", "fin_report_daily"}:
+        source_diagnostics = dict(status.diagnostics or unknown_diagnostics(status.source_key))
+        latest = source_diagnostics.get("latest_attempt")
+        attempt = latest.get("diagnostics", {}) if isinstance(latest, Mapping) else source_diagnostics
+        item["source_diagnostics"] = source_diagnostics
+        pagination = attempt.get("pagination") or {}
+        item.update(page_count=pagination.get("pages"), batch_count=attempt.get("batch_count"),
+                    rows_fetched=attempt.get("source_row_count"),
+                    counter_basis=attempt.get("counter_basis", "adapter_attempt_evidence"))
     promo_diagnostics = _promo_slot_diagnostics(
         status=status,
         payload=payload,
@@ -935,7 +945,12 @@ def _build_refresh_source_summary(raw_source_slots: Any) -> list[dict[str, Any]]
             counts = summary[counts_key]
             counts[value] = counts.get(value, 0) + 1
         for key in ("rows_fetched", "rows_accepted", "rows_reused", "rows_skipped"):
-            summary[key] += int(item.get(key) or 0)
+            if source_key in {"ads_compact", "fin_report_daily"} and (
+                item.get(key) is None or summary[key] is None
+            ):
+                summary[key] = None
+            else:
+                summary[key] += int(item.get(key) or 0)
     return [by_source[key] for key in sorted(by_source)]
 
 
@@ -2619,6 +2634,7 @@ class SheetVitrinaV1LivePlanBlock:
                 temporal_policy=temporal_policy,
                 column_date=column_date,
                 requested_nm_ids=requested_nm_ids,
+                latest_status=status,
                 closure_state=TemporalSourceClosureState(
                     source_key=source_key,
                     target_date=column_date,
@@ -4191,6 +4207,29 @@ def _build_metric_rows(
     raise ValueError(f"unsupported metric scope: {metric.scope}")
 
 
+def _source_attempt_status_note(status: LiveSourceStatus) -> str:
+    if status.source_key not in {"ads_compact", "fin_report_daily"}:
+        return status.note
+    diagnostics = status.diagnostics or unknown_diagnostics(status.source_key)
+    latest = diagnostics.get("latest_attempt")
+    attempt = latest.get("diagnostics", {}) if isinstance(latest, Mapping) else diagnostics
+    fields = {"diagnostic_attempt": attempt.get("attempt_status", "unknown"),
+              "attempt_source_observed_at": attempt.get("source_observed_at")}
+    anomalies = attempt.get("anomaly_codes")
+    if anomalies:
+        fields["diagnostic_anomalies"] = ",".join(anomalies)
+    if status.source_key == "fin_report_daily":
+        fields.update({key: attempt.get(key) for key in (
+            "source_row_count", "exact_date_row_count", "target_row_count", "covered_count")})
+        fields["pages"] = (attempt.get("pagination") or {}).get("pages")
+    else:
+        for key in ("expected_campaign_ids", "returned_campaign_ids", "missing_campaign_ids", "duplicate_campaign_ids"):
+            value = attempt.get(key)
+            fields[key.replace("_ids", "_count")] = len(value) if isinstance(value, list) else None
+    detail = "; ".join(f"{key}={value if value is not None else 'unknown'}" for key, value in fields.items())
+    return "; ".join(part for part in (status.note, detail) if part)
+
+
 def _build_status_rows(
     *,
     current_state: Any,
@@ -4249,7 +4288,7 @@ def _build_status_rows(
                 status.requested_count,
                 status.covered_count,
                 _format_missing_nm_ids(status.missing_nm_ids),
-                status.note,
+                _source_attempt_status_note(status),
             ]
             for status in live_sources.statuses
         ]
@@ -4366,6 +4405,7 @@ def _capture_live_source(
         payload = loader()
     except FinanceApiError as exc:
         diagnostics = {
+            **dict(getattr(exc, "diagnostics", {}) or {}),
             "error_code": exc.code,
             "endpoint": "POST /api/finance/v1/sales-reports/detailed",
             "source_date": exc.date_from,
@@ -4403,6 +4443,9 @@ def _capture_live_source(
             None,
         )
     except Exception as exc:  # pragma: no cover - live transport fallback
+        diagnostics = dict(exc.diagnostics) if isinstance(exc, SourceAttemptError) else {}
+        if source_key in {"ads_compact", "fin_report_daily"} and not diagnostics:
+            diagnostics = unknown_diagnostics(source_key)
         return (
             LiveSourceStatus(
                 source_key=source_key,
@@ -4418,7 +4461,8 @@ def _capture_live_source(
                 requested_count=len(requested_nm_ids),
                 covered_count=0,
                 missing_nm_ids=[],
-                note=str(exc),
+                note=str(exc) if isinstance(exc, SourceAttemptError) or source_key not in {"ads_compact", "fin_report_daily"} else f"{source_key}_source_failed",
+                diagnostics=diagnostics,
             ),
             None,
         )
@@ -4757,6 +4801,7 @@ def _build_closure_retry_status(
     column_date: str,
     requested_nm_ids: list[int],
     closure_state: TemporalSourceClosureState | None,
+    latest_status: LiveSourceStatus | None = None,
 ) -> LiveSourceStatus:
     state = closure_state.state if closure_state is not None else CLOSURE_STATE_PENDING
     note_parts = [
@@ -4788,6 +4833,8 @@ def _build_closure_retry_status(
         covered_count=0,
         missing_nm_ids=sorted(set(requested_nm_ids)),
         note="; ".join(note_parts),
+        diagnostics=(dict(latest_status.diagnostics or {}) if latest_status is not None
+                     else unknown_diagnostics(source_key) if source_key in {"ads_compact", "fin_report_daily"} else {}),
     )
 
 
@@ -5025,6 +5072,20 @@ def _preserved_status_diagnostics(
     accepted_at: str | None,
     temporal_slot: str,
 ) -> dict[str, Any]:
+    if accepted_status.source_key in {"ads_compact", "fin_report_daily"}:
+        diagnostics = dict(accepted_status.diagnostics or unknown_diagnostics(accepted_status.source_key))
+        diagnostics["preserved_snapshot"] = {
+            "kind": accepted_status.kind,
+            "snapshot_date": accepted_status.snapshot_date,
+            "accepted_at": accepted_at,
+            "source_observed_at": diagnostics.get("source_observed_at"),
+        }
+        diagnostics["latest_attempt"] = {
+            "kind": latest_status.kind,
+            "note": latest_status.note,
+            "diagnostics": dict(latest_status.diagnostics or unknown_diagnostics(latest_status.source_key)),
+        }
+        return diagnostics
     if accepted_status.source_key != "promo_by_price":
         return dict(accepted_status.diagnostics or {})
     accepted_diagnostics = _plain_jsonable(accepted_status.diagnostics)

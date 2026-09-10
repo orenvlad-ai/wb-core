@@ -38,6 +38,7 @@ class FinanceFetchResult:
     rrd_id_end: int
     terminal_status: int
     source_digest: str
+    source_observed_at: str | None = None
 
 
 class FinanceApiError(RuntimeError):
@@ -349,7 +350,8 @@ class WbFinanceApiClient:
         pages = 0
         seen_cursors: set[int] = set()
         started = self._monotonic()
-        with self.rate_gate.session() as gate:
+        progress: dict[str, Any] = {"source_observed_at": None}
+        with _capture_finance_progress(all_rows, progress), self.rate_gate.session() as gate:
             while True:
                 if self._monotonic() - started > self.deadline_seconds:
                     raise FinanceApiError(
@@ -402,6 +404,7 @@ class WbFinanceApiClient:
                         pages=pages,
                         detail=type(exc).__name__,
                     ) from exc
+                progress["source_observed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 retry_after, next_retry_at = gate.after_response(response)
                 if response.status == 429:
                     raise FinanceRateLimited(
@@ -423,6 +426,7 @@ class WbFinanceApiClient:
                         rrd_id_end=rrd_id,
                         terminal_status=204,
                         source_digest=_rows_digest(all_rows),
+                        source_observed_at=progress["source_observed_at"],
                     )
                 if response.status != 200:
                     raise FinanceApiError(
@@ -530,3 +534,19 @@ def _iso_from_epoch(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace(
         "+00:00", "Z"
     )
+
+
+@contextmanager
+def _capture_finance_progress(rows: list[dict[str, Any]], progress: dict[str, Any]) -> Iterator[None]:
+    try:
+        yield
+    except FinanceApiError as exc:
+        # Transient reference only: the daily adapter derives safe counters.
+        # No raw rows enter diagnostics, exception text or receipts; no copy.
+        exc._observed_rows = rows
+        try:
+            exc.source_digest = _rows_digest(rows)
+        except (TypeError, ValueError, OverflowError):
+            exc.source_digest = None
+        exc.source_observed_at = progress["source_observed_at"]
+        raise

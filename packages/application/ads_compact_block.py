@@ -11,10 +11,13 @@ from packages.contracts.ads_compact_block import (
     AdsCompactRequest,
     AdsCompactSuccess,
 )
+from packages.contracts.source_attempt_diagnostics import SourceAttemptError, unknown_diagnostics
 
 
 def transform_legacy_payload(payload: Mapping[str, Any]) -> AdsCompactEnvelope:
     snapshot_date = _require_str(payload, "snapshot_date")
+    source = payload.get("source")
+    diagnostics = {**unknown_diagnostics("ads_compact"), **(dict(source) if isinstance(source, Mapping) else {})}
     data = payload.get("data")
     if not isinstance(data, Mapping):
         raise ValueError("legacy payload must contain data object")
@@ -57,6 +60,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> AdsCompactEnvelope:
                 count=0,
                 items=[],
                 detail="no compact ads rows returned for requested nmIds",
+                diagnostics=diagnostics,
             )
         )
 
@@ -86,6 +90,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> AdsCompactEnvelope:
             snapshot_date=snapshot_date,
             count=len(items),
             items=items,
+            diagnostics=diagnostics,
         )
     )
 
@@ -117,4 +122,10 @@ class AdsCompactBlock:
 
     def execute(self, request: AdsCompactRequest) -> AdsCompactEnvelope:
         payload = self._source.fetch(request)
-        return transform_legacy_payload(payload)
+        try:
+            return transform_legacy_payload(payload)
+        except Exception as exc:
+            diagnostics = payload.get("source")
+            if not isinstance(diagnostics, Mapping):
+                diagnostics = unknown_diagnostics("ads_compact")
+            raise SourceAttemptError("ads_compact_transform_failed", diagnostics) from exc
