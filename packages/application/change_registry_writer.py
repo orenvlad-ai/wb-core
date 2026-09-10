@@ -297,13 +297,33 @@ class InternalWriterRegistry:
         error_code: str,
         error_message: str,
         receipt_reference: str = "",
+        resolved: bool = False,
     ) -> None:
         self._state(
             prepared,
-            state="failed",
+            state="resolved" if resolved else "failed",
+            resolution_state="failed" if resolved else "",
             error_code=error_code,
             error_message=error_message,
             receipt_reference=receipt_reference,
+        )
+
+    def price_items(
+        self, prepared: PreparedWriterOperation, nm_ids: Sequence[int]
+    ) -> PreparedWriterOperation:
+        """Select complete price tuples while retaining the single WB operation."""
+        wanted = {_positive_int(nm_id, "nm_id") for nm_id in nm_ids}
+        selected = {
+            key: item_id for key, item_id in prepared.change_item_ids.items()
+            if key.startswith("price:") and int(key.split(":", 5)[1]) in wanted
+        }
+        if not wanted or len(selected) != len(wanted) * len(PRICE_FIELDS):
+            raise InternalWriterRegistryError("price selection requires complete operation-owned tuples")
+        return PreparedWriterOperation(
+            operation_id=prepared.operation_id,
+            change_item_ids=selected,
+            source_surface=prepared.source_surface,
+            native_operation_id=prepared.native_operation_id,
         )
 
     def confirm_price(
@@ -567,11 +587,14 @@ class InternalWriterRegistry:
         receipt_digest: str = "",
         error_code: str = "",
         error_message: str = "",
+        resolution_state: str = "",
     ) -> None:
         try:
             self.repository.append_writer_operation_state(
                 operation_id=prepared.operation_id,
                 state=state,
+                change_item_ids=tuple(prepared.change_item_ids.values()),
+                resolution_state=resolution_state,
                 occurred_at=_utc_timestamp(self.timestamp_factory()),
                 receipt_reference=_sanitized(
                     receipt_reference, "receipt_reference", 320
@@ -601,6 +624,7 @@ class InternalWriterRegistry:
         try:
             self.repository.confirm_writer_operation(
                 operation_id=prepared.operation_id,
+                change_item_ids=tuple(prepared.change_item_ids.values()),
                 confirmed_values=confirmed_values,
                 confirmed_at=_utc_timestamp(self.timestamp_factory()),
                 readback_digest=canonical_digest(readback_basis),

@@ -4918,6 +4918,16 @@
       background: rgba(15, 23, 42, 0.64);
     }
 
+    .prices-status-recheck {
+      display: block;
+      max-width: 100%;
+      margin-top: 4px;
+      padding: 4px 6px;
+      white-space: normal;
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
     .prices-modal-backdrop[hidden] {
       display: none;
     }
@@ -23478,6 +23488,11 @@
     }
 
     function handlePricesPanelClick(event) {
+      const recheck = event.target.closest("[data-prices-recheck-upload]");
+      if (recheck) {
+        pollPriceUploadStatus(Number(recheck.getAttribute("data-prices-recheck-upload")));
+        return;
+      }
       const subtab = event.target.closest("[data-prices-subtab]");
       if (subtab) {
         activatePricesSubtab(subtab.getAttribute("data-prices-subtab") || "current");
@@ -24252,6 +24267,9 @@
       const uploadStatus = uploadStatusValue
         ? '<span class="prices-badge ' + priceStatusTone(uploadStatusValue) + '">' + escapeHtml(priceStatusLabel(uploadStatusValue)) + '</span>'
         : "—";
+      const recheckButton = uploadStatusValue === "unconfirmed" && upload.uploadID
+        ? ' <button class="button ghost prices-status-recheck" type="button" data-prices-recheck-upload="' + escapeHtml(upload.uploadID) + '">Проверить результат</button>'
+        : "";
       const errorText = upload.errorText || row.wbErrorText || "";
       const context = {
         nmId: nmId,
@@ -24262,7 +24280,7 @@
         photo: photo,
         typeBadge: typeBadge,
         quarantineBadge: quarantineBadge,
-        uploadStatus: uploadStatus,
+        uploadStatus: uploadStatus + recheckButton,
         errorText: errorText
       };
       return '<tr data-prices-row="' + escapeHtml(nmId) + '">' +
@@ -24540,7 +24558,7 @@
         markPriceUploadRows(preview.rows || [], payload.uploadID, "processing", "");
         renderPricesTable();
         if (payload.uploadID) {
-          pollPriceUploadStatus(payload.uploadID);
+          pollPriceUploadStatus(payload.uploadID, preview.rows || []);
         }
       } catch (error) {
         state.prices.error = String(error && error.message ? error.message : error);
@@ -24551,7 +24569,7 @@
       }
     }
 
-    async function pollPriceUploadStatus(uploadId) {
+    async function pollPriceUploadStatus(uploadId, submittedRows) {
       const pollId = ++state.prices.statusPollSequence;
       const statusPath = String(WEB_VITRINA_CONFIG.prices_upload_task_path || "") + "/" + encodeURIComponent(uploadId);
       for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -24565,28 +24583,16 @@
           if (!response.ok) {
             throw new Error(payload && payload.error ? payload.error : "prices upload status route returned " + response.status);
           }
-          const rows = state.prices.preview && Array.isArray(state.prices.preview.rows) ? state.prices.preview.rows : [];
-          markPriceUploadRows(rows, uploadId, payload.status || "unknown", "");
-          if (Array.isArray(payload.goods_errors)) {
-            payload.goods_errors.forEach(function(row) {
-              const nmId = String(row.nmID || "");
-              if (!nmId) {
-                return;
-              }
-              state.prices.rowUpload[nmId] = {
-                uploadID: uploadId,
-                status: payload.status || "unknown",
-                errorText: row.errorText || ""
-              };
-            });
+          if (pollId !== state.prices.statusPollSequence) {
+            return;
           }
+          const rows = submittedRows || Object.keys(state.prices.rowUpload || {}).filter(function(nmId) {
+            return (state.prices.rowUpload[nmId] || {}).uploadID === uploadId;
+          }).map(function(nmId) { return {nmID: nmId}; });
+          applyPriceUploadStatus(uploadId, rows, payload);
           renderPricesTable();
-          if (payload.is_final) {
-            if (payload.status === "success") {
-              await loadPricesGoods({force: true});
-            } else {
-              await loadPriceUploadGoods(uploadId, payload.status || "unknown");
-            }
+          if (payload.is_final && !payload.readback_pending) {
+            await loadPricesGoods({force: true});
             return;
           }
         } catch (error) {
@@ -24595,6 +24601,29 @@
           return;
         }
       }
+    }
+
+    function applyPriceUploadStatus(uploadId, rows, payload) {
+      const proven = payload.registry_readback_status === "confirmed";
+      const fallback = payload.status === "success" ? (proven ? "success" : "unconfirmed") : (payload.status || "unknown");
+      markPriceUploadRows(rows, uploadId, fallback,
+        fallback === "unconfirmed" ? "Фактическая цена не подтверждена." : "");
+      const allowed = new Set((rows || []).filter(function(row) { return row.valid !== false; }).map(function(row) { return String(row.nmID); }));
+      (payload.goods_errors || []).forEach(function(row) {
+        const nmId = String(row.nmID || "");
+        if (allowed.has(nmId)) {
+          state.prices.rowUpload[nmId].errorText = row.errorText || "";
+        }
+      });
+      (payload.item_results || []).forEach(function(row) {
+        const nmId = String(row.nmID || "");
+        if (!allowed.has(nmId)) { return; }
+        state.prices.rowUpload[nmId] = {
+          uploadID: uploadId,
+          status: row.status === "confirmed" ? "success" : (row.status === "failed" ? "all_error" : "unconfirmed"),
+          errorText: row.errorText || ""
+        };
+      });
     }
 
     async function loadPriceUploadGoods(uploadId, status) {
@@ -24626,7 +24655,7 @@
     function markPriceUploadRows(rows, uploadId, status, errorText) {
       (rows || []).forEach(function(row) {
         const nmId = String(row.nmID || "");
-        if (!nmId) {
+        if (!nmId || row.valid === false) {
           return;
         }
         state.prices.rowUpload[nmId] = {
@@ -24664,6 +24693,9 @@
       if (normalized === "success") {
         return "успешно";
       }
+      if (normalized === "unconfirmed") {
+        return "не подтверждено";
+      }
       if (normalized === "partial_error") {
         return "часть с ошибкой";
       }
@@ -24681,7 +24713,7 @@
       if (normalized === "success") {
         return "success";
       }
-      if (normalized === "partial_error" || normalized === "processing") {
+      if (normalized === "partial_error" || normalized === "processing" || normalized === "unconfirmed") {
         return "warning";
       }
       if (normalized === "all_error" || normalized === "canceled") {
