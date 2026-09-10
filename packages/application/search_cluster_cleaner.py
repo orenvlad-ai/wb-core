@@ -349,6 +349,11 @@ class KeywordCleaner:
                 c.execute("UPDATE cleaner_runs SET state='queued',phase='recovered',worker_token=NULL,lease_expires_at=NULL WHERE run_id=?",(active["run_id"],))
                 for op in c.execute("SELECT operation_id FROM cleaner_write_operations WHERE run_id=? AND state IN('dispatching','submitted','unresolved')",(active["run_id"],)):
                     c.execute("INSERT OR IGNORE INTO cleaner_readback_jobs(operation_id,account) VALUES(?,?)",(op[0],self.key))
+                c.execute("""UPDATE cleaner_run_targets SET state='resume_required' WHERE run_id=? AND EXISTS(
+                    SELECT 1 FROM cleaner_observations o WHERE o.account=? AND o.target=cleaner_run_targets.target
+                    AND o.last_run_id=? AND o.state='pending_exclude') AND NOT EXISTS(
+                    SELECT 1 FROM cleaner_write_operations w WHERE w.account=? AND w.target=cleaner_run_targets.target
+                    AND w.state IN('dispatching','submitted','unresolved'))""",(active['run_id'],self.key,active['run_id'],self.key))
                 self._event(c,"worker_recovered",dict(previous_worker=active["worker_token"]),run_id=active["run_id"])
             run=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND state='queued' ORDER BY created_at,run_id LIMIT 1",(self.key,)).fetchone()
             if not run: return None
@@ -394,9 +399,9 @@ class KeywordCleaner:
             due=c.execute("SELECT max(due_at) FROM cleaner_schedule_dates WHERE run_id=?",(run_id,)).fetchone()[0]
             rows=c.execute("SELECT * FROM cleaner_scan_queue WHERE account=? AND available=1 ORDER BY CASE WHEN scan_order>? THEN 0 ELSE 1 END,scan_order",(self.key,s["cursor"])).fetchall()
             for r in rows:
-                done=c.execute("SELECT observed_at FROM cleaner_run_targets WHERE run_id=? AND target=?",(run_id,r["target"])).fetchone()
+                done=c.execute("SELECT observed_at,state FROM cleaner_run_targets WHERE run_id=? AND target=?",(run_id,r["target"])).fetchone()
                 # An early manual read cannot satisfy an obligation acquired later.
-                if done and (not due or (done[0] and timestamp(done[0])>=timestamp(due))): continue
+                if done and done["state"]!="resume_required" and (not due or (done[0] and timestamp(done[0])>=timestamp(due))): continue
                 if r["retry_not_before"] and timestamp(r["retry_not_before"])>timestamp(now): continue
                 return Target(**json.loads(r["metadata"]))
             return None
@@ -500,10 +505,15 @@ class KeywordCleaner:
             run=self._lease(c,run_id,token,generation)
             s=self._settings(c);state="complete"
             targets=c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=?",(run_id,)).fetchall()
-            summary=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,confirmed_automatic=0,pairs=len(targets),campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=True)
+            summary=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,confirmed_automatic=0,confirmed_manual=0,pairs=len(targets),campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=not bool(run["transport_enabled"]))
             for t in targets:
                 for k,v in json.loads(t["counters"]).items():
                     if k in summary: summary[k]+=v
+            for event in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='readback_result'",(run_id,)):
+                counts=json.loads(event[0])
+                for field in ('confirmed_automatic','confirmed_manual'): summary[field]+=counts.get(field,0)
+            summary['unresolved_operations']=c.execute("SELECT count(*) FROM cleaner_write_operations WHERE run_id=? AND state IN('dispatching','submitted','unresolved')",(run_id,)).fetchone()[0]
+            if summary['unresolved_operations']: state='partial'
             if any(t["state"]!="done" for t in targets) or reason or run["reason"]: state="partial"
             if not s["enabled"]: state="stopped"
             if run["kind"]=="scan":
@@ -557,6 +567,10 @@ class KeywordCleaner:
             row=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
             if row is None: raise CleanerError("not_found","Запуск не найден",404)
             result=self._run_payload(row)
+            result["settlement"]=dict(confirmed_automatic=0,confirmed_manual=0)
+            for event in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='late_confirmation'",(run_id,)):
+                facts=json.loads(event[0])
+                for field in result['settlement']:result['settlement'][field]+=facts.get(field,0)
             result["targets"]=[dict(r) for r in c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=? ORDER BY target",(run_id,))]
             return result
 
@@ -586,6 +600,15 @@ class KeywordCleaner:
             items=[dict(r,facts=json.loads(r["facts"])) for r in rows[:limit]]
             return dict(items=items,next_cursor=items[-1]["sequence"] if len(rows)>limit else None)
 
+    def _confirmation_totals(self,c):
+        result=dict(automatic=0,manual=0,late_automatic=0,late_manual=0)
+        for row in c.execute("SELECT kind,facts FROM cleaner_events WHERE account=? AND kind IN('readback_result','late_confirmation')",(self.key,)):
+            facts=json.loads(row['facts'])
+            for field in ('automatic','manual'):
+                result[field]+=facts.get('confirmed_'+field,0)
+                if row['kind']=='late_confirmation':result['late_'+field]+=facts.get('confirmed_'+field,0)
+        return result
+
     def summary(self,principal:Principal) -> dict:
         principal.require_read();now=self.clock()
         with self.store.read() as c:
@@ -603,4 +626,4 @@ class KeywordCleaner:
                 local=timestamp(now).astimezone(ZoneInfo(s["timezone"]));h,m=map(int,s["schedule_time"].split(":"));due=local.replace(hour=h,minute=m,second=0,microsecond=0)
                 if local>due+timedelta(minutes=5) and not c.execute("SELECT 1 FROM cleaner_schedule_dates WHERE account=? AND local_date=?",(self.key,local.date().isoformat())).fetchone(): errors.append("scheduled_run_overdue")
             if last and last["state"] in {"partial","failed"}: errors.append("last_scan_partial")
-            return dict(settings=dict(enabled=bool(s["enabled"]),revision=s["revision"],schedule_time=s["schedule_time"],timezone=s["timezone"],baseline_ready=bool(s["baseline_ready"]),restore_hold=bool(s["restore_hold"])),last_scan=self._run_payload(last),current_work=self._run_payload(active),queued=[self._run_payload(r) for r in queued],pending_count=pending,unresolved_count=unresolved,profile_required_count=profile_required,target_holds=holds,errors=errors,indicator=bool(pending or unresolved or profile_required or holds or errors),coverage=COVERAGE_NOTICE,transport_enabled=False)
+            return dict(settings=dict(enabled=bool(s["enabled"]),revision=s["revision"],schedule_time=s["schedule_time"],timezone=s["timezone"],baseline_ready=bool(s["baseline_ready"]),restore_hold=bool(s["restore_hold"])),last_scan=self._run_payload(last),current_work=self._run_payload(active),queued=[self._run_payload(r) for r in queued],pending_count=pending,unresolved_count=unresolved,profile_required_count=profile_required,target_holds=holds,errors=errors,indicator=bool(pending or unresolved or profile_required or holds or errors),coverage=COVERAGE_NOTICE,transport_enabled=bool(s["transport_enabled"]),dry_run=not bool(s["transport_enabled"]),confirmed=self._confirmation_totals(c))

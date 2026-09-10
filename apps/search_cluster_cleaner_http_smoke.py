@@ -26,6 +26,12 @@ def run():
     def check(name, condition):
         assert condition, name
         checks.append(name)
+    with running_fixture('confirmed') as f:
+        summary=f.request('/summary')[1]
+        check('D_connected_transport_and_counts',summary['transport_enabled'] and summary['confirmed']==dict(automatic=2,manual=1,late_automatic=0,late_manual=1))
+        check('D_original_scan_unchanged',summary['last_scan']['summary']['confirmed_automatic']==2 and summary['last_scan']['summary']['confirmed_manual']==0)
+        history=f.request('/history')[1]['items']
+        check('D_late_manual_history',any(e['kind']=='late_confirmation' and e['facts']['confirmed_manual']==1 for e in history))
     with running_fixture() as f:
         s=f.request('/summary')[1]
         check('ordinary_saved_summary',s['pending_count']==3 and s['last_scan']['state']=='complete')
@@ -104,7 +110,7 @@ def run():
         f.entrypoint.cleaner_web=CleanerWeb()
         count=f.count('cleaner_requests')
         check('no_configuration_safe_get',f.request('/summary')[1]['configuration']['configured'] is False and f.count('cleaner_requests')==count)
-    return dict(passed=len(checks),checks=checks,http_get_count=100,source_wait_seconds=30,http_roundtrip_p95_ms=round(p95,3),http_roundtrip_max_ms=round(max(durations),3),wb_writes=0)
+    return dict(passed=len(checks),checks=checks,http_get_count=100,source_wait_seconds=30,http_roundtrip_p95_ms=round(p95,3),http_roundtrip_max_ms=round(max(durations),3),wb_writes=0,synthetic_wb_posts=2)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path);args=parser.parse_args();result=run();print(json.dumps(result,ensure_ascii=False,indent=2))

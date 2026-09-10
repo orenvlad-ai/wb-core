@@ -138,6 +138,9 @@ IMMUTABLE_TABLES = ("cleaner_profiles", "cleaner_auto_decisions", "cleaner_basel
 
 def install_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table in ('cleaner_settings','cleaner_runs'):
+        if 'transport_enabled' not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN transport_enabled INTEGER NOT NULL DEFAULT 0 CHECK(transport_enabled IN(0,1))')
     if conn.execute("SELECT version FROM cleaner_schema WHERE singleton=1").fetchone()[0] != SCHEMA_VERSION:
         raise RuntimeError("unsupported cleaner schema version")
     for table in IMMUTABLE_TABLES:

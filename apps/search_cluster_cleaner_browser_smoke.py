@@ -28,6 +28,16 @@ def run(output:Path):
         checks.append(name)
     with sync_playwright() as p:
         browser=p.chromium.launch()
+        with running_fixture('confirmed') as f:
+            page=browser.new_page(viewport={'width':1440,'height':1080});browser_login(page,f)
+            expect(page.locator('[data-kc-excluded]')).to_have_text('2')
+            text=page.locator('[data-keyword-cleaner]').inner_text()
+            check('D_connected_confirmed_manual_and_late_visible','По решениям владельца подтверждено исключений: 1' in text and 'по решениям владельца 1' in text)
+            check('D_confirmed_candidates_not_pending','Это не подтверждённые исключения' not in text)
+            page.locator('[data-kc-history-open]').click()
+            expect(page.locator('[data-kc-history]')).to_contain_text('Позднее подтверждение WB')
+            check('D_history_real_late_event')
+            page.screenshot(path=str(output/'confirmed.png'),full_page=True);screens.append('confirmed.png');page.close()
         with running_fixture() as f:
             page=browser.new_page(viewport={'width':1440,'height':1080});errors=[]
             page.on('pageerror',lambda e:errors.append(str(e)))
@@ -122,14 +132,22 @@ def run(output:Path):
         # An unresponsive POST connection is aborted after the bounded deadline.
         with running_fixture('empty') as f:
             page=browser.new_page();browser_login(page,f);posts=[]
+            hanging_routes=[]
             def hanging_post(route):
+                hanging_routes.append(route)
                 posts.append(route.request.post_data_json);assert route.fetch().status==202
                 # Keep browser response pending; its own deadline initiates recovery.
             page.route('**/keyword-cleaner/settings',hanging_post)
             start=time.monotonic();page.locator('[data-kc-enabled]').click();expect(page.locator('[data-kc-message]')).to_contain_text('Изменения сохранены',timeout=16000)
-            check('hanging_post_deadline_recovers_one_request',len(posts)==1 and 9<=time.monotonic()-start<16);page.close()
+            check('hanging_post_deadline_recovers_one_request',len(posts)==1 and 9<=time.monotonic()-start<16)
+            # Resolve the deliberately retained route before closing Playwright;
+            # the browser already recovered the original durable request.
+            for route in hanging_routes:
+                try:route.abort('failed')
+                except Exception:pass
+            page.unroute_all(behavior='ignoreErrors');page.close()
         browser.close()
-    return dict(passed=len(checks),checks=checks,screenshots=[str(output/name) for name in screens],wb_writes=0)
+    return dict(passed=len(checks),checks=checks,screenshots=[str(output/name) for name in screens],wb_writes=0,synthetic_wb_posts=2)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);args=parser.parse_args();result=run(args.output);(args.output/'browser-receipt.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n');print(json.dumps(result,ensure_ascii=False,indent=2))

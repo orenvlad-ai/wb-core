@@ -261,6 +261,18 @@ def rename_diff_check():
         assert paths == sorted([original, renamed]), paths
 
 
+def cleaner_command_checks():
+    script='apps/search_cluster_cleaner_browser_smoke.py'
+    exists=lambda _,path:(select_checks.ROOT/path).is_file()
+    for path in (script,'packages/adapters/search_cluster_cleaner_wb.py','packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.js'):
+        plan=build_plan_from_paths(pull_request=72,base=BASE,head=HEAD,paths=[path],file_exists=exists)
+        verify_plan(plan)
+        browser=[c for c in plan['commands'] if len(c)>1 and c[1]==script]
+        assert browser==[['python3',script,'--output','/tmp/wbc-cleaner-browser-ci']],plan
+        assert 'playwright==1.58.0' in plan['pip']
+        assert not any(len(c)>1 and c[1].endswith('_browser_smoke.py') and c[1]!=script for c in plan['commands']),plan
+
+
 def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
@@ -344,6 +356,7 @@ def exists(_head: str, path: str) -> bool:
 
 
 def main() -> None:
+    cleaner_command_checks()
     # The hosted system Python may install into user-site, which -I correctly
     # excludes. Dependency install, trusted harness and nested Python must share
     # the same ephemeral venv; the existing launcher smoke exercises -I for real.

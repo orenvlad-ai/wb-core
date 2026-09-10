@@ -60,7 +60,7 @@ IMMUTABLE_TABLES = (
     OBSERVER_HEALTH_EVENTS_TABLE,
 )
 
-TARGET_KINDS = frozenset({"price", "bid", "campaign"})
+TARGET_KINDS = frozenset({"price", "bid", "campaign", "search_cluster"})
 PRICE_FIELDS = frozenset(
     {"original_price_minor", "discount_bps", "seller_price_minor"}
 )
@@ -136,6 +136,18 @@ class TargetIdentity:
     placement: str = ""
 
 
+@dataclass(frozen=True)
+class SearchClusterIdentity(TargetIdentity):
+    query_hash: str = ""
+
+
+def _registry_payload(row) -> dict:
+    result = dict(row)
+    if result.get("query_hash") is None:
+        result.pop("query_hash", None)
+    return result
+
+
 def canonical_json(value: Any) -> str:
     """Return deterministic JSON without accepting non-finite numbers."""
 
@@ -184,8 +196,16 @@ def target_identity(
     nm_id: int,
     advert_id: int = 0,
     placement: str = "",
+    query_hash: str | None = None,
 ) -> TargetIdentity:
     kind = _required_token(target_kind, "target_kind", TARGET_KINDS)
+    if kind == "search_cluster":
+        if (not isinstance(query_hash, str) or re.fullmatch(r"[0-9a-f]{64}", query_hash) is None
+                or placement or _positive_integer(advert_id, "advert_id") <= 0):
+            raise ChangeRegistryError("search_cluster requires exact query hash and advert/nm identity")
+        return SearchClusterIdentity(kind, _positive_integer(nm_id, "nm_id"), advert_id, "", query_hash)
+    if query_hash is not None:
+        raise ChangeRegistryError("legacy target must not have query identity")
     exact_nm_id = _positive_integer(nm_id, "nm_id")
     exact_advert_id = _non_negative_integer(advert_id, "advert_id")
     exact_placement = str(placement or "").strip().lower()
@@ -228,8 +248,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
         not in str(attempt_trigger[0] or "")
     ):
         conn.execute("DROP TRIGGER change_registry_attempt_lifecycle")
-    conn.executescript(
-        f"""
+    schema_sql = f"""
         CREATE TABLE IF NOT EXISTS {OPERATIONS_TABLE}(
             operation_id TEXT PRIMARY KEY,
             seller_id TEXT NOT NULL,
@@ -267,13 +286,14 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             operation_id TEXT NOT NULL,
             seller_id TEXT NOT NULL,
             account_scope TEXT NOT NULL,
-            target_kind TEXT NOT NULL CHECK(target_kind IN ('price','bid','campaign')),
+            target_kind TEXT NOT NULL CHECK(target_kind IN ('price','bid','campaign','search_cluster')),
             nm_id INTEGER NOT NULL,
             advert_id INTEGER NOT NULL DEFAULT 0,
             placement TEXT NOT NULL DEFAULT '',
+            query_hash TEXT,
             parameter_field TEXT NOT NULL CHECK(parameter_field IN (
                 'original_price_minor','discount_bps','seller_price_minor',
-                'bid_minor','campaign_state','payment_model','payment_unit'
+                'bid_minor','campaign_state','payment_model','payment_unit','excluded'
             )),
             before_value_kind TEXT NOT NULL,
             before_value_integer INTEGER,
@@ -288,13 +308,16 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(operation_id,seller_id,account_scope)
                 REFERENCES {OPERATIONS_TABLE}(operation_id,seller_id,account_scope),
             CHECK({_identity_text_check('change_item_id', 120)}),
-            CHECK({target_check}),
+            CHECK(({target_check} AND query_hash IS NULL) OR (target_kind='search_cluster' AND typeof(nm_id)='integer' AND nm_id>0 AND typeof(advert_id)='integer' AND advert_id>0 AND placement='' AND parameter_field='excluded' AND typeof(query_hash)='text' AND length(query_hash)=64 AND query_hash NOT GLOB '*[^0-9a-f]*')),
             CHECK({value_check_before}),
             CHECK({value_check_requested}),
             CHECK({_field_value_check('before_value', requested=False)}),
             CHECK({_field_value_check('requested_value', requested=True)}),
-            UNIQUE(operation_id,target_kind,nm_id,advert_id,placement,parameter_field)
+            UNIQUE(operation_id,target_kind,nm_id,advert_id,placement,parameter_field,query_hash)
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS change_registry_items_legacy_identity
+        ON {ITEMS_TABLE}(operation_id,target_kind,nm_id,advert_id,placement,parameter_field)
+        WHERE target_kind<>'search_cluster';
         CREATE INDEX IF NOT EXISTS change_registry_items_by_target
         ON {ITEMS_TABLE}(
             seller_id,account_scope,target_kind,nm_id,advert_id,placement,
@@ -382,13 +405,14 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             fact_id TEXT PRIMARY KEY,
             seller_id TEXT NOT NULL,
             account_scope TEXT NOT NULL,
-            target_kind TEXT NOT NULL CHECK(target_kind IN ('price','bid','campaign')),
+            target_kind TEXT NOT NULL CHECK(target_kind IN ('price','bid','campaign','search_cluster')),
             nm_id INTEGER NOT NULL,
             advert_id INTEGER NOT NULL DEFAULT 0,
             placement TEXT NOT NULL DEFAULT '',
+            query_hash TEXT,
             parameter_field TEXT NOT NULL CHECK(parameter_field IN (
                 'original_price_minor','discount_bps','seller_price_minor',
-                'bid_minor','campaign_state','payment_model','payment_unit'
+                'bid_minor','campaign_state','payment_model','payment_unit','excluded'
             )),
             before_value_kind TEXT NOT NULL,
             before_value_integer INTEGER,
@@ -410,7 +434,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             CHECK({_identity_text_check('fact_id', 120)}),
             CHECK({_identity_text_check('seller_id', 120)}),
             CHECK({_identity_text_check('account_scope', 120)}),
-            CHECK({target_check}),
+            CHECK(({target_check} AND query_hash IS NULL) OR (target_kind='search_cluster' AND typeof(nm_id)='integer' AND nm_id>0 AND typeof(advert_id)='integer' AND advert_id>0 AND placement='' AND parameter_field='excluded' AND typeof(query_hash)='text' AND length(query_hash)=64 AND query_hash NOT GLOB '*[^0-9a-f]*')),
             CHECK({value_check_before}),
             CHECK({value_check_after}),
             CHECK({_field_value_check('before_value', requested=False)}),
@@ -422,9 +446,13 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             CHECK(julianday(observed_to)<=julianday(proven_at)),
             UNIQUE(
                 seller_id,account_scope,target_kind,nm_id,advert_id,placement,
-                parameter_field,observed_from,observed_to,proof_kind,evidence_digest
+                parameter_field,observed_from,observed_to,proof_kind,evidence_digest,query_hash
             )
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS change_registry_facts_legacy_identity
+        ON {FACTS_TABLE}(seller_id,account_scope,target_kind,nm_id,advert_id,placement,
+                        parameter_field,observed_from,observed_to,proof_kind,evidence_digest)
+        WHERE target_kind<>'search_cluster';
         CREATE INDEX IF NOT EXISTS change_registry_facts_by_target_interval
         ON {FACTS_TABLE}(
             seller_id,account_scope,target_kind,nm_id,advert_id,placement,
@@ -587,6 +615,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
                   AND fact.advert_id=item.advert_id
                   AND fact.placement=item.placement
                   AND fact.parameter_field=item.parameter_field
+                  AND fact.query_hash IS item.query_hash
             ) THEN RAISE(ABORT,'fact link target identity mismatch') END;
             SELECT CASE WHEN NEW.link_kind='checkpoint' AND NOT EXISTS(
                 SELECT 1
@@ -953,6 +982,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
                   AND fact.advert_id=item.advert_id
                   AND fact.placement=item.placement
                   AND fact.parameter_field=item.parameter_field
+                  AND fact.query_hash IS item.query_hash
             ) THEN RAISE(ABORT,'manual pending fact target identity mismatch') END;
         END;
 
@@ -1047,7 +1077,25 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             SELECT RAISE(ABORT,'change registry observer lease rows are retained');
         END;
         """
-    )
+    from packages.application.change_registry_search_cluster import migrate_search_cluster_schema
+    migrate_search_cluster_schema(conn, schema_sql)
+    for trigger in ('change_registry_fact_link_exact_scope','change_registry_manual_pending_lifecycle'):
+        row=conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(trigger,)).fetchone()
+        if row and 'query_hash' not in row[0]: conn.execute(f'DROP TRIGGER {trigger}')
+    conn.executescript(schema_sql)
+    for table in (ITEMS_TABLE, FACTS_TABLE):
+        conn.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_search_identity
+          BEFORE INSERT ON {table} WHEN NEW.target_kind='search_cluster' AND NOT EXISTS(
+            SELECT 1 FROM change_registry_search_cluster_queries q WHERE q.seller_id=NEW.seller_id
+            AND q.account_scope=NEW.account_scope AND q.advert_id=NEW.advert_id AND q.nm_id=NEW.nm_id AND q.query_hash=NEW.query_hash)
+          BEGIN SELECT RAISE(ABORT,'search cluster query evidence missing'); END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS change_registry_search_confirmed_proof
+      BEFORE INSERT ON change_registry_attempt_events WHEN NEW.state='confirmed'
+      AND EXISTS(SELECT 1 FROM change_registry_items i WHERE i.change_item_id=NEW.change_item_id AND i.target_kind='search_cluster')
+      AND NOT EXISTS(SELECT 1 FROM change_registry_fact_links l JOIN change_registry_facts f ON f.fact_id=l.fact_id
+        JOIN change_registry_items i ON i.change_item_id=l.change_item_id
+        WHERE i.change_item_id=NEW.change_item_id AND f.query_hash=i.query_hash AND f.evidence_digest=NEW.readback_digest)
+      BEGIN SELECT RAISE(ABORT,'search cluster confirmation proof missing'); END""")
     _ensure_observer_job_event_evidence_columns(conn)
     for table in IMMUTABLE_TABLES:
         trigger_stem = table.removeprefix("change_registry_")
@@ -1166,6 +1214,15 @@ class ChangeRegistryRepository:
         ) as conn:
             ensure_change_registry_schema(conn)
             conn.commit()
+
+    def prepare_search_cluster_operation_in_transaction(self, conn, **kwargs):
+        """No connection, BEGIN, commit or network; caller owns atomic dispatch."""
+        from packages.application.change_registry_search_cluster import prepare_in_transaction
+        return prepare_in_transaction(conn, **kwargs)
+
+    def confirm_search_cluster_items_in_transaction(self, conn, **kwargs):
+        from packages.application.change_registry_search_cluster import confirm_in_transaction
+        return confirm_in_transaction(conn, **kwargs)
 
     def prepare_writer_operation(
         self,
@@ -1552,7 +1609,7 @@ class ChangeRegistryRepository:
             ).fetchone()
             if existing is not None:
                 if _row_matches(existing, row):
-                    return dict(existing)
+                    return _registry_payload(existing)
                 raise ChangeRegistryConflict(
                     "attempt event identity owns different immutable bytes"
                 )
@@ -1999,7 +2056,7 @@ class ChangeRegistryRepository:
                     "created_at": _timestamp(created_at, "created_at"),
                 }
                 if all(existing[key] == value for key, value in expected.items()):
-                    return dict(existing)
+                    return _registry_payload(existing)
                 raise ChangeRegistryConflict(
                     "annotation revision identity owns different immutable bytes"
                 )
@@ -2105,7 +2162,7 @@ class ChangeRegistryRepository:
             ).fetchone()
             if existing is not None:
                 if _row_matches(existing, row):
-                    return dict(existing)
+                    return _registry_payload(existing)
                 raise ChangeRegistryConflict(
                     "manual pending event identity owns different immutable bytes"
                 )
@@ -2830,10 +2887,10 @@ class ChangeRegistryRepository:
                 (exact_id,),
             ).fetchall()
             return {
-                "operation": dict(operation),
-                "items": [dict(row) for row in items],
-                "annotations": [dict(row) for row in annotations],
-                "latest_attempts": [dict(row) for row in conn.execute(
+                "operation": _registry_payload(operation),
+                "items": [_registry_payload(row) for row in items],
+                "annotations": [_registry_payload(row) for row in annotations],
+                "latest_attempts": [_registry_payload(row) for row in conn.execute(
                     f"""SELECT event.* FROM {ATTEMPT_EVENTS_TABLE} event
                         JOIN {ITEMS_TABLE} item ON item.change_item_id=event.change_item_id
                         WHERE item.operation_id=? AND event.sequence_no=(
@@ -3174,7 +3231,7 @@ class ChangeRegistryRepository:
                                 "readback_digest": exact_readback_digest,
                             },
                         )
-                    facts.append(dict(fact))
+                    facts.append(_registry_payload(fact))
 
                 previous = conn.execute(
                     f"""SELECT * FROM {ATTEMPT_EVENTS_TABLE}
@@ -3253,7 +3310,7 @@ class ChangeRegistryRepository:
                     ORDER BY linked_at,fact_link_id""",
                 (exact_id,),
             ).fetchall()
-            return {"fact": dict(fact), "links": [dict(row) for row in links]}
+            return {"fact": _registry_payload(fact), "links": [_registry_payload(row) for row in links]}
 
     def list_operations(
         self,
@@ -3335,7 +3392,7 @@ class ChangeRegistryRepository:
             next_cursor = _encode_cursor(
                 entity, str(last[time_column]), str(last[id_column])
             )
-        return {"items": [dict(row) for row in page], "next_cursor": next_cursor}
+        return {"items": [_registry_payload(row) for row in page], "next_cursor": next_cursor}
 
     def _insert_idempotent(
         self,
@@ -3365,7 +3422,7 @@ class ChangeRegistryRepository:
                 (row[identity_column],),
             ).fetchone()
             if existing is not None and _row_matches(existing, row):
-                return dict(existing)
+                return _registry_payload(existing)
             raise ChangeRegistryConflict(
                 f"{table} immutable identity or idempotency conflict"
             ) from exc
@@ -3375,7 +3432,7 @@ class ChangeRegistryRepository:
         ).fetchone()
         if stored is None:
             raise ChangeRegistryConflict(f"{table} insert readback is missing")
-        return dict(stored)
+        return _registry_payload(stored)
 
     @contextmanager
     def _transaction(self, operation: str) -> Iterator[sqlite3.Connection]:
@@ -3703,9 +3760,11 @@ def _target_storage_check() -> str:
 
 
 def _field_value_check(prefix: str, *, requested: bool) -> str:
+    boolean_value = 1 if requested else 0
     numeric_kinds = "('integer')" if requested else "('missing','null','integer')"
     text_kinds = "('text')" if requested else "('missing','null','text')"
-    return f"""(
+    return f"""(parameter_field='excluded' AND {prefix}_kind='boolean'
+                 AND {prefix}_integer={boolean_value} AND {prefix}_text IS NULL) OR (
             parameter_field IN
                 ('original_price_minor','discount_bps','seller_price_minor','bid_minor')
             AND {prefix}_kind IN {numeric_kinds}

@@ -77,6 +77,33 @@ def seed_cleaner(runtime_dir: Path, mode='normal'):
     return cleaner
 
 
+def seed_confirmed(cleaner):
+    """Real D composition against loopback WB, including a late manual result."""
+    from apps.search_cluster_cleaner_write_fixture import FakeWB,Clock,Q1,Q2
+    from packages.application.change_registry import ChangeRegistryRepository
+    from packages.application.search_cluster_cleaner_admission import AdmissionGuard
+    from packages.application.search_cluster_cleaner_worker import product_tick
+    from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource,AccountLimiter
+    from packages.adapters.official_api_runtime import OfficialApiRuntimeConfig
+    clock=Clock();clock.base=datetime.fromisoformat(FIXTURE_NOW.replace('Z','+00:00'));clock.advance(1);cleaner.clock=clock
+    ChangeRegistryRepository(cleaner.store.registry.runtime_dir).initialize_schema()
+    fake=FakeWB();fake.targets[11]['stats']=[Q1,Q2,QUERIES[0]]
+    guard=AdmissionGuard(cleaner.store.registry.runtime_dir.parent/'cleaner-server-state',cleaner.store)
+    guard.activate(account=cleaner.account,generation=GENERATION,evidence='synthetic confirmed UI fixture')
+    with fake.server() as url:
+        source=CleanerWbSource(account=cleaner.account,runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
+            clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
+        cleaner.start_run(dict(request_id='fixture-D-scan'),OWNER)
+        product_tick(cleaner,source,guard,generation=GENERATION,monotonic=clock.monotonic)
+        review=cleaner.reviews(OWNER)['items'][0]
+        cleaner.decide(review['review_id'],dict(request_id='fixture-D-manual',expected_revision=review['revision'],decision='exclude'),OWNER)
+        fake.mode='noop'
+        product_tick(cleaner,source,guard,generation=GENERATION,monotonic=clock.monotonic)
+        fake.targets[11]['minus']=fake.writes[-1]['norm_queries'];clock.advance(25)
+        product_tick(cleaner,source,guard,generation=GENERATION,monotonic=clock.monotonic)
+        assert len(fake.writes)==2 and cleaner.summary(OWNER)['confirmed']['late_manual']==1
+
+
 class Fixture:
     def request(self, path, payload=None, *, opener=None, headers=None, method=None):
         request_headers = {'Accept': 'application/json'}
@@ -124,6 +151,7 @@ def running_fixture(mode='normal', port=0):
         fixture = Fixture();fixture.runtime_dir = Path(tmp)/'runtime'
         runtime = _seed_runtime(fixture.runtime_dir)
         fixture.cleaner = seed_cleaner(fixture.runtime_dir, mode)
+        if mode=='confirmed':seed_confirmed(fixture.cleaner)
         fixture.web = CleanerWeb(fixture.cleaner, generation=GENERATION)
         fixture.entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=fixture.runtime_dir, runtime=runtime, now_factory=lambda: NOW, cleaner_web=fixture.web, ads_block=_build_ads_block(runtime, fixture.runtime_dir, FakePromotionSource(), write_enabled=False))
         password_hash = _password_hash(PASSWORD)
@@ -143,7 +171,7 @@ def running_fixture(mode='normal', port=0):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--serve',action='store_true',required=True);parser.add_argument('--mode',choices=['normal','empty','partial','failed','unresolved','unready','profile-required'],default='normal');parser.add_argument('--port',type=int,default=0);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--serve',action='store_true',required=True);parser.add_argument('--mode',choices=['normal','empty','partial','failed','unresolved','unready','profile-required','confirmed'],default='normal');parser.add_argument('--port',type=int,default=0);args=parser.parse_args()
     with running_fixture(args.mode,args.port) as fixture:
         print(json.dumps(dict(url=fixture.url,username='owner',password=PASSWORD,synthetic=True),ensure_ascii=False),flush=True)
         try:

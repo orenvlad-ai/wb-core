@@ -1,8 +1,8 @@
-# Чистка ключей: этапы B и C
+# Чистка ключей: этапы B, C и D
 
 Реализация данных и локального механизма проекта WBC 0072K2. Никакие службы,
-таймеры и WB-вызовы этим кодом не включаются. Web-интеграция C реализована;
-D (транспорт и реестр подтверждённых изменений) подключается отдельно.
+таймеры и WB-вызовы этим кодом не включаются. Web-интеграция C и связная цепь записи D реализованы. Внешний допуск закрыт
+по умолчанию; production-включение относится к отдельному этапу E.
 
 ## Границы
 
@@ -21,7 +21,8 @@ D (транспорт и реестр подтверждённых измене�
   профиль, baseline, вопросы, неизменяемые решения, очередь, расписание и leases.
 - `packages/application/search_cluster_cleaner_worker.py`: один явный `tick()`;
   read source вызывается за пределами DB-транзакций. Нет фонового потока при
-  открытии страницы или принятии команды и нет WB write transport.
+  открытии страницы или принятии команды. Порт записи подключается только явной
+  композицией `product_tick` с внешним допуском.
 
 Исходные файлы аудита и приватный эталон в Git не входят. Фикстура
 `apps/fixtures/search_cluster_cleaner_holdout.json` содержит только отдельные
@@ -90,8 +91,8 @@ query_hash и decision_id; новые невиденные вхождения н
 Изменившаяся ревизия вопроса даёт 409. Override действует только на тот же SKU и
 точную фразу с подходящим fingerprint; старые окончательные решения закреплены.
 
-D владеет реализацией prepare/preflight/atomic dispatch admission, сетевым
-one-submit и readback в операциях/items, узким расширением change_registry и
+D реализует prepare/preflight/atomic dispatch admission, сетевой
+one-submit и readback в операциях/items, узкое расширение change_registry и
 server-owned admission вне business backup. Настройки и профиль используют ту
 же БД, поэтому D вызывает `_lease` и проверяет текущие версии в своей **единой**
 транзакции с реестром. Простое наличие pending candidate или lease не даёт
@@ -217,3 +218,110 @@ Playwright с Chromium; для HTTP smoke достаточно зависимо�
 23 regression-проверки B, прежний browser preview ставок и narrow 390 px layout.
 Приватные screenshots/receipts не входят в Git. Эти результаты подтверждают
 локальный этап C, не WB write transport, production admission или выпуск.
+
+
+## Подтверждаемая запись D
+
+Продуктовая цепь: `CleanerWbSource` → `CleanerWorker` → `CleanerWriter` →
+`prepare_search_cluster_operation_in_transaction` → один set-minus →
+`CleanerReadback` → сохранённые summary/history. `product_tick` собирает эти
+части явно; `apps/search_cluster_cleaner_worker.py` — одиночный entrypoint.
+Он не создаёт supervisor/systemd/timer и не содержит переключателя активации.
+`python3 apps/search_cluster_cleaner_worker.py --fixture` выполняет один полный
+синтетический тик с временными путями и loopback WB, без чтения реального токена.
+
+`CleanerWbSource.from_env(account)` использует существующий
+`official_api_runtime.load_runtime_config`, канонический `WB_API_TOKEN`,
+`SELLER_PORTAL_CANONICAL_SUPPLIER_ID` и server-owned account scope. `sid` токена
+проверяется локально на совпадение продавца; это проверка привязки, а не замена
+авторизации WB. Производственный origin строго `https://advert-api.wildberries.ru`.
+Отдельный fixture-конструктор допускает только loopback HTTP. Браузер не передаёт
+источник, аккаунт или токен. Сеть в этапе D была только синтетической локальной.
+
+Каталог проверяет `count.all`, группы/count/advert_list, дубли и точные adverts.
+Отсутствующий в adverts ID даёт явную ошибку каталога, сохраняя корректные
+вернувшиеся цели той же пачки. Предварительная проверка конкретной цели строга:
+кампания, SKU, состав всех nm, payment/bid/status и полный minus перечитываются.
+Поддержан только проверенный manual CPM; null и отсутствующие пары не становятся
+пустыми ответами. `stats` запрашивается за вчера/сегодня; этот период не доказывает
+активность либо полный охват всех запросов WB. Stats-only кандидат допустим;
+перед записью точная фраза должна снова присутствовать в статистике, а явные
+excluded/archived имеют приоритет.
+
+На аккаунт общий интервал normquery не меньше 0.5 секунды, для stats отдельный
+интервал не меньше 6.1 секунды. Чтение одной snapshot — три вызова list/stats/minus.
+Общий бюджет обработки цели 120 секунд охватывает начальное чтение, fresh
+preflight, ожидание лимита и CAS; отдельный HTTP-вызов ограничен 20 секундами или
+меньшим runtime timeout. Абсолютный receive deadline проверяется при каждом recv,
+включая медленные headers/body. 429 откладывает последующее чтение с Retry-After.
+Запись не повторяется при 429/5xx, разрыве или redirect; HTTP redirects не следуют.
+
+Writer сохраняет буквальный before и before∪additions. Предел 1000 проверяется
+до сети; 1001 не разбивается и не обрезается, пустое добавление не вызывает POST.
+После ожидания лимита CAS повторяет enabled/settings/rules/profile/fingerprint,
+точную override revision (либо её отсутствие), lease/token/generation,
+restore_hold, общий business write barrier, внешний допуск, digest кандидата и
+свежесть всех preflight наблюдений (не старше 30 секунд). Операция, отдельные
+items общего реестра и dispatch_count=1 появляются в одном BEGIN IMMEDIATE,
+одном operational connection и одном commit. Сеть начинается после commit.
+
+Внешний `AdmissionGuard` хранится в отдельном каталоге **вне runtime/business
+backup**. Отсутствующее/повреждённое состояние означает hold. На всё время
+продуктового тика берётся process flock; владелец проверяется по PID и времени
+старта процесса. `activate` — отдельная server-owned процедура release/recovery,
+которой нужны подтверждённая baseline, поколение и ссылка на основание; она не
+вызывается web/tick/флагом окружения. Живой старый процесс блокирует замену.
+
+Перед operational commit fsync сохраняет внешний seal операции/digest/цели.
+Если БД затем отказала, seal может закрыть дальнейшую запись до разбора; это
+сознательный отказ от повторной отправки при неопределённости. Восстановленный
+queued backup не проходит сверку с внешними seals, даже когда более новый
+operational-журнал полностью утрачен. Загрузка старой env-конфигурации не снимает
+этот запрет. В v1 нет команды удаления seals, автоматической смены поколения,
+снятия target hold или компенсационного возврата исключений.
+
+Реестр расширен только в items/facts: `search_cluster/excluded`, boolean
+false→true, query_hash и неизменяемая domain-строка с буквальным query. Прежние
+price/bid/campaign dataclass identities, значения, ключи и сериализация не
+получают пустого query-поля. Миграция двух таблиц копирует прежние столбцы
+буквально и сохраняет FK/индексы/триггеры. Отдельные unique-индексы сохраняют
+старую уникальность. Общий observer не включает search_cluster в свой interval
+state. Связь item(query A)→fact(query B) запрещена также SQL-триггером.
+
+Readback использует независимые durable jobs и lease, работает после выключения
+и не занимает FIFO-слот scan/manual_apply. В одном окне до трёх чтений с шагом
+20 секунд, затем отсрочка 300 секунд; Retry-After может увеличить её. Каждая
+появившаяся новая фраза получает один fact; следующие чтения добавляют evidence
+к тому же fact. Совпадение полного списка закрывает исходную операцию. Missing
+old/extra ставит target hold; корректирующей записи нет. Неопределённая цель A
+не мешает следующей цели B. Ошибка авторизации раннего readback прекращает новые
+записи аккаунта в этом тике.
+
+Manual_apply запускается из очереди после сохранённого решения. Бюджет,
+выключение и общая ошибка аккаунта сохраняют недопущенный хвост в одном
+продолжении; отправленная цель туда не входит. Поздняя сверка связана с исходным
+run, не изменяет его завершённый summary/run_finished и видна отдельным событием.
+Summary разделяет automatic/manual/late counts. UI показывает подтверждённые
+исключения и не подписывает их прежним предупреждением о кандидатах dry-run.
+
+### Проверки D и граница E
+
+- `apps/search_cluster_cleaner_write_smoke.py`: связный fake WB, stats-only,
+  1000/1001/0, freshness/CAS/storage faults, crash, настоящий SQLite backup/restore,
+  lost journal, disable/readback, fairness, manual continuation, bounded slow body.
+- `apps/search_cluster_cleaner_registry_smoke.py`: populated legacy fixture
+  старой схемы, сохранение старых строк, rollback миграции, повторная инициализация,
+  точные items/facts и повторное evidence без дублирования перехода.
+- HTTP/browser smokes включают `running_fixture('confirmed')`: настоящая
+  продуктовая цепь с fake WB, 2 automatic и 1 late manual; исходный scan неизменен.
+- Сохранены B smoke/holdout и регрессии общего registry, внутренних writers,
+  observer, ставок. В CI зарегистрирована только нужная cleaner browser suite;
+  её output указан во временном каталоге, Playwright/Chromium — явная dependency.
+
+Все перечисленные подтверждения относятся к локальной синтетике. Полнота
+актуального WB-охвата, baseline_ready, два исторических allow/still-excluded и
+production admission остаются открытыми. Классификатор не менялся:
+`f8c3bccd2d843949a4416bf9f44ed0d507bb1a7414ce775311208e6a48627863`.
+Этап E требует отдельного задания на внедрение, штатной резервной копии
+operational, проверки серверного процесса/поколения и исходной базы. Этот этап D
+не даёт разрешения на live WB, merge/deploy или включение таймера.
