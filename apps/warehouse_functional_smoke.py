@@ -501,15 +501,16 @@ def _test_http_manual_snapshot_publication_order() -> None:
         entry.wb_finance_weekly_block = SimpleNamespace(recalculate_stale_cost_weeks=lambda: action("finance", {}))
         entry.activated_at_factory = lambda: "2026-09-08T08:00:00Z"
         def refresh(root, *, ready_runtime):
-            _assert(root == Path("/fixture"), "manual accounting root")
+            _assert(root == entry.runtime.runtime_dir, "manual accounting root")
             _assert(ready_runtime is entry.runtime, "manual ready/book owner")
             events.append("fbs")
             if status == "failed":
                 raise ValueError("fbs publication failed")
             return {"status":status}
-        with patch("packages.application.registry_upload_http_entrypoint.warehouse_sync_lock", return_value=nullcontext()), \
+        with tempfile.TemporaryDirectory(prefix="manual-publication-order-") as temporary, \
              patch("packages.application.fbs_accounting_runtime.refresh", side_effect=refresh), \
              patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=AssertionError("duplicate independent publication")):
+            entry.runtime.runtime_dir = Path(temporary)
             if status == "failed":
                 try:
                     entry.handle_warehouse_manual_sync_request()
@@ -711,7 +712,8 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
 
 
 def _test_finance_recalculation_is_the_last_cost_writer() -> None:
-    tree = ast.parse(inspect.getsource(_run))
+    from apps.warehouse_functional_runner import _run_admitted
+    tree = ast.parse(inspect.getsource(_run_admitted))
     calls = [
         node
         for node in ast.walk(tree)
@@ -749,7 +751,7 @@ def _test_finance_recalculation_is_the_last_cost_writer() -> None:
             "Finance recalculation must finish before final retention and completion",
         )
     manual_source = inspect.getsource(
-        RegistryUploadHttpEntrypoint.handle_warehouse_manual_sync_request
+        RegistryUploadHttpEntrypoint._handle_owned_warehouse_manual_sync_request
     )
     _assert(
         manual_source.index("publish_current_functional_economics")

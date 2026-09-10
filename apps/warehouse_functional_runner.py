@@ -41,6 +41,7 @@ from packages.application.warehouse_functional_economics_backfill import (  # no
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_job_lock,
+    require_warehouse_job_owner,
     warehouse_functional_write_lock,
 )
 from packages.application.warehouse_recovery_policy import (  # noqa: E402
@@ -231,6 +232,25 @@ def _run(
     *,
     sqlite_busy_timeout_ms: int | None,
 ) -> dict[str, Any]:
+    if args.command in {"hourly-sync", "manual-sync", "sync-apply"}:
+        # Admission precedes constructors/schema work, not only domain apply.
+        with warehouse_functional_job_lock(Path(str(args.runtime_dir)).resolve()) as metrics:
+            payload = _run_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
+                                    lock_evidence=metrics)
+        payload["lock_metrics"] = metrics
+        return payload
+    return _run_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
+
+
+def _run_admitted(
+    args: argparse.Namespace,
+    *,
+    sqlite_busy_timeout_ms: int | None,
+    lock_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if args.command in {"hourly-sync", "manual-sync", "sync-apply"}:
+        require_warehouse_job_owner(Path(str(args.runtime_dir)).resolve(),
+                                    str((lock_evidence or {}).get("owner_token") or ""))
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(str(args.runtime_dir)).resolve())
     block = WarehouseFunctionalBlock(runtime=runtime, stocks_block=_fresh_stocks_block())
 
@@ -296,362 +316,360 @@ def _run(
             args.fingerprint,
             expected_kind="hourly_wb_sync",
         )
-        with warehouse_functional_job_lock(runtime.runtime_dir):
-            try:
-                retention_before = _run_bounded_recovery_retention(runtime)
-                economics_backup = (
-                    block.calculation_parameters.prepare_functional_economics_backup()
+        try:
+            retention_before = _run_bounded_recovery_retention(runtime)
+            economics_backup = (
+                block.calculation_parameters.prepare_functional_economics_backup()
+            )
+            supply_refresh = _refresh_official_supply_state(
+                runtime,
+                record_ff_movements=False,
+            )
+            downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
+            ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
+            fresh_plan = block.build_sync_plan()
+            recheck = _verify_sync_external_recheck(reviewed_plan, fresh_plan)
+            result = block.apply_plan(
+                reviewed_plan,
+                confirm_fingerprint=str(args.fingerprint),
+            )
+            fbs_accounting = _publish_fbs_snapshot_accounting(runtime)
+            proxy_recalculation = (
+                block.calculation_parameters.process_pending_targeted_recalculations(
+                    verified_backup=economics_backup,
                 )
-                supply_refresh = _refresh_official_supply_state(
+            )
+            if str(proxy_recalculation.get("status") or "") == "failed":
+                raise RuntimeError(
+                    "targeted Proxy recalculation failed: "
+                    + str(proxy_recalculation.get("error") or "unknown error")
+                )
+            economics_publication = (
+                proxy_recalculation
+                if int(proxy_recalculation.get("request_count") or 0) > 0
+                else block.calculation_parameters.publish_current_functional_economics(
+                    verified_backup=economics_backup,
+                )
+            )
+            finance_cost_recalculation = (
+                _recalculate_downstream_finance_cost(runtime)
+            )
+            transit_cost_replays = (
+                runtime.finalize_completed_wb_transit_cost_recalculations(
+                    completed_at=block.timestamp_factory(),
+                )
+            )
+            retention_after = _run_bounded_recovery_retention(runtime)
+            _mark_plan_ff_replays(
+                runtime,
+                reviewed_plan,
+                status="complete",
+                occurred_at=block.timestamp_factory(),
+            )
+            _mark_plan_ff_finance(
+                runtime,
+                reviewed_plan,
+                status="complete",
+                occurred_at=block.timestamp_factory(),
+                source_fingerprint=str(
+                    finance_cost_recalculation.get("fingerprint") or ""
+                ),
+            )
+            backup_result = result.get("recovery_policy")
+            return {
+                "status": "success",
+                "mode": "reviewed_sync_apply",
+                "reviewed_plan_fingerprint": args.fingerprint,
+                "backup": backup_result,
+                "recovery_retention_before": retention_before,
+                "recovery_retention_after": retention_after,
+                "supply_refresh": supply_refresh,
+                "downstream_cost_layers_materialized": downstream_cost_layers,
+                "fbs_snapshot_accounting": fbs_accounting,
+                "wb_finance_cost_recalculation": finance_cost_recalculation,
+                "wb_transit_cost_replays": transit_cost_replays,
+                "ff_state": ff_state,
+                "external_optimistic_recheck": recheck,
+                "diff": reviewed_plan.get("diff"),
+                "active_version": result.get("active_version"),
+                "sync": result.get("sync"),
+                "reconciliation": result.get("reconciliation"),
+                "proxy_targeted_recalculation": proxy_recalculation,
+                "functional_economics_publication": {
+                    "plan_fingerprint": economics_publication.get("plan_fingerprint"),
+                    "changed_snapshot_count": economics_publication.get(
+                        "changed_snapshot_count"
+                    ),
+                    "database_written": economics_publication.get("database_written"),
+                    "backup_archive": economics_publication.get("backup_archive"),
+                },
+            }
+        except Exception as exc:
+            try:
+                _mark_plan_ff_replays(
+                    runtime,
+                    reviewed_plan,
+                    status="error",
+                    occurred_at=block.timestamp_factory(),
+                    error=str(exc),
+                )
+                _mark_plan_ff_finance(
+                    runtime,
+                    reviewed_plan,
+                    status="error",
+                    occurred_at=block.timestamp_factory(),
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+            block.record_failed_sync(exc)
+            raise
+    if args.command in {"hourly-sync", "manual-sync"}:
+        phase_timings_ms: dict[str, float] = {}
+        journal = WarehouseUpdateJournal(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir)
+        durable_run_id = ""
+        durable_phase = ""
+        durable_run_id = journal.start(
+            trigger_source="hourly" if args.command == "hourly-sync" else "manual"
+        )
+        phase_timings_ms["warehouse_job_lock_wait"] = float(
+            lock_evidence.get("wait_ms") or 0
+        )
+        try:
+            retention_before = _run_sync_phase(
+                "recovery_retention_before",
+                phase_timings_ms,
+                lambda: _run_bounded_recovery_retention(runtime),
+            )
+            economics_backup = _run_sync_phase(
+                "prepare_economics_restore_point",
+                phase_timings_ms,
+                block.calculation_parameters.prepare_functional_economics_backup,
+            )
+            durable_phase = "wb_supply_registry"
+            journal.phase_started(durable_run_id, durable_phase)
+            supply_refresh = _run_sync_phase(
+                "refresh_official_supply_state",
+                phase_timings_ms,
+                lambda: _refresh_official_supply_state(
                     runtime,
                     record_ff_movements=False,
-                )
-                downstream_cost_layers = _materialize_downstream_cost_layers(runtime)
-                ff_state = WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state()
-                fresh_plan = block.build_sync_plan()
-                recheck = _verify_sync_external_recheck(reviewed_plan, fresh_plan)
-                result = block.apply_plan(
-                    reviewed_plan,
-                    confirm_fingerprint=str(args.fingerprint),
-                )
-                fbs_accounting = _publish_fbs_snapshot_accounting(runtime)
-                proxy_recalculation = (
+                ),
+            )
+            journal.phase_finished(durable_run_id, durable_phase, details=supply_refresh)
+            durable_phase = "transit_enrichment"
+            journal.phase_started(durable_run_id, durable_phase)
+            transit_cost_collection = _run_sync_phase(
+                "collect_autonomous_transit_costs",
+                phase_timings_ms,
+                lambda: _collect_autonomous_transit_costs(runtime),
+            )
+            journal.phase_finished(durable_run_id, durable_phase, details=transit_cost_collection)
+            durable_phase = "cost_materialization"
+            journal.phase_started(durable_run_id, durable_phase)
+            downstream_cost_layers = _run_sync_phase(
+                "materialize_downstream_cost_layers",
+                phase_timings_ms,
+                lambda: _materialize_downstream_cost_layers(runtime),
+            )
+            journal.phase_finished(
+                durable_run_id,
+                durable_phase,
+                item_count=int(downstream_cost_layers),
+                details={"changed_rows": int(downstream_cost_layers)},
+            )
+            durable_phase = "ff_ledger_reservations"
+            journal.phase_started(durable_run_id, durable_phase)
+            ff_state = _run_sync_phase(
+                "reconcile_functional_ff_state",
+                phase_timings_ms,
+                lambda: WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state(),
+            )
+            journal.phase_finished(durable_run_id, durable_phase, details=ff_state)
+            durable_phase = "official_complete_wb_stocks"
+            journal.phase_started(durable_run_id, durable_phase)
+            plan = _run_sync_phase(
+                "build_sync_plan",
+                phase_timings_ms,
+                block.build_sync_plan,
+            )
+            journal.phase_finished(
+                durable_run_id,
+                durable_phase,
+                item_count=int(dict(plan.get("diff") or {}).get("changed_line_count") or 0),
+                details={"plan_fingerprint": plan.get("plan_fingerprint")},
+            )
+            durable_phase = "functional_publication"
+            journal.phase_started(durable_run_id, durable_phase)
+            result = _run_sync_phase(
+                "publish_functional_version",
+                phase_timings_ms,
+                lambda: block.apply_plan(
+                    plan,
+                    confirm_fingerprint=str(plan["plan_fingerprint"]),
+                ),
+            )
+            fbs_accounting = _run_sync_phase(
+                "publish_fbs_snapshot_accounting",
+                phase_timings_ms,
+                lambda: _publish_fbs_snapshot_accounting(runtime),
+            )
+            journal.phase_finished(
+                durable_run_id,
+                durable_phase,
+                details={**dict(result.get("active_version") or {}),
+                         "fbs_snapshot_accounting": fbs_accounting},
+            )
+            backup_result = result.get("recovery_policy")
+            durable_phase = "dependent_replay_economics"
+            journal.phase_started(durable_run_id, durable_phase)
+            proxy_recalculation = _run_sync_phase(
+                "process_targeted_recalculations",
+                phase_timings_ms,
+                lambda: (
                     block.calculation_parameters.process_pending_targeted_recalculations(
                         verified_backup=economics_backup,
                     )
+                ),
+            )
+            if str(proxy_recalculation.get("status") or "") == "failed":
+                raise RuntimeError(
+                    "targeted Proxy recalculation failed: "
+                    + str(proxy_recalculation.get("error") or "unknown error")
                 )
-                if str(proxy_recalculation.get("status") or "") == "failed":
-                    raise RuntimeError(
-                        "targeted Proxy recalculation failed: "
-                        + str(proxy_recalculation.get("error") or "unknown error")
-                    )
-                economics_publication = (
+            economics_publication = _run_sync_phase(
+                "publish_functional_economics",
+                phase_timings_ms,
+                lambda: (
                     proxy_recalculation
                     if int(proxy_recalculation.get("request_count") or 0) > 0
                     else block.calculation_parameters.publish_current_functional_economics(
                         verified_backup=economics_backup,
                     )
-                )
-                finance_cost_recalculation = (
-                    _recalculate_downstream_finance_cost(runtime)
-                )
-                transit_cost_replays = (
-                    runtime.finalize_completed_wb_transit_cost_recalculations(
-                        completed_at=block.timestamp_factory(),
-                    )
-                )
-                retention_after = _run_bounded_recovery_retention(runtime)
-                _mark_plan_ff_replays(
-                    runtime,
-                    reviewed_plan,
-                    status="complete",
-                    occurred_at=block.timestamp_factory(),
-                )
-                _mark_plan_ff_finance(
-                    runtime,
-                    reviewed_plan,
-                    status="complete",
-                    occurred_at=block.timestamp_factory(),
-                    source_fingerprint=str(
-                        finance_cost_recalculation.get("fingerprint") or ""
-                    ),
-                )
-                backup_result = result.get("recovery_policy")
-                return {
-                    "status": "success",
-                    "mode": "reviewed_sync_apply",
-                    "reviewed_plan_fingerprint": args.fingerprint,
-                    "backup": backup_result,
-                    "recovery_retention_before": retention_before,
-                    "recovery_retention_after": retention_after,
-                    "supply_refresh": supply_refresh,
-                    "downstream_cost_layers_materialized": downstream_cost_layers,
-                    "fbs_snapshot_accounting": fbs_accounting,
-                    "wb_finance_cost_recalculation": finance_cost_recalculation,
-                    "wb_transit_cost_replays": transit_cost_replays,
-                    "ff_state": ff_state,
-                    "external_optimistic_recheck": recheck,
-                    "diff": reviewed_plan.get("diff"),
-                    "active_version": result.get("active_version"),
-                    "sync": result.get("sync"),
-                    "reconciliation": result.get("reconciliation"),
+                ),
+            )
+            finance_cost_recalculation = _run_sync_phase(
+                "recalculate_downstream_finance_cost",
+                phase_timings_ms,
+                lambda: _recalculate_downstream_finance_cost(runtime),
+            )
+            transit_cost_replays = _run_sync_phase(
+                "finalize_transit_cost_replays",
+                phase_timings_ms,
+                lambda: runtime.finalize_completed_wb_transit_cost_recalculations(
+                    completed_at=block.timestamp_factory(),
+                ),
+            )
+            retention_after = _run_sync_phase(
+                "recovery_retention_after",
+                phase_timings_ms,
+                lambda: _run_bounded_recovery_retention(runtime),
+            )
+            _mark_plan_ff_replays(
+                runtime,
+                plan,
+                status="complete",
+                occurred_at=block.timestamp_factory(),
+            )
+            _mark_plan_ff_finance(
+                runtime,
+                plan,
+                status="complete",
+                occurred_at=block.timestamp_factory(),
+                source_fingerprint=str(
+                    finance_cost_recalculation.get("fingerprint") or ""
+                ),
+            )
+            completed_backup = backup_result
+            journal.phase_finished(
+                durable_run_id,
+                durable_phase,
+                item_count=int(proxy_recalculation.get("request_count") or 0),
+                details={
                     "proxy_targeted_recalculation": proxy_recalculation,
-                    "functional_economics_publication": {
-                        "plan_fingerprint": economics_publication.get("plan_fingerprint"),
-                        "changed_snapshot_count": economics_publication.get(
-                            "changed_snapshot_count"
-                        ),
-                        "database_written": economics_publication.get("database_written"),
-                        "backup_archive": economics_publication.get("backup_archive"),
-                    },
-                }
-            except Exception as exc:
+                    "finance_cost_recalculation": finance_cost_recalculation,
+                    "transit_cost_replays": transit_cost_replays,
+                },
+            )
+            payload = {
+                "status": "success",
+                "mode": args.command,
+                "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
+                "phase_timings_ms": phase_timings_ms,
+                "backup": completed_backup,
+                "raw_backup": None,
+                "recovery_retention_before": retention_before,
+                "recovery_retention_after": retention_after,
+                "supply_refresh": supply_refresh,
+                "wb_transit_cost_collection": transit_cost_collection,
+                "downstream_cost_layers_materialized": downstream_cost_layers,
+                "fbs_snapshot_accounting": fbs_accounting,
+                "wb_finance_cost_recalculation": finance_cost_recalculation,
+                "wb_transit_cost_replays": transit_cost_replays,
+                "ff_state": ff_state,
+                "plan_fingerprint": plan["plan_fingerprint"],
+                "diff": plan["diff"],
+                "active_version": result.get("active_version"),
+                "sync": result.get("sync"),
+                "reconciliation": result.get("reconciliation"),
+                "proxy_targeted_recalculation": proxy_recalculation,
+                "functional_economics_publication": {
+                    "plan_fingerprint": economics_publication.get("plan_fingerprint"),
+                    "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
+                    "database_written": economics_publication.get("database_written"),
+                    "backup_archive": economics_publication.get("backup_archive"),
+                },
+            }
+            journal.finish(durable_run_id, status="success", result=payload)
+            return payload
+        except Exception as exc:
+            if durable_phase == "dependent_replay_economics" and "plan" in locals():
                 try:
                     _mark_plan_ff_replays(
                         runtime,
-                        reviewed_plan,
+                        plan,
                         status="error",
                         occurred_at=block.timestamp_factory(),
                         error=str(exc),
                     )
                     _mark_plan_ff_finance(
                         runtime,
-                        reviewed_plan,
+                        plan,
                         status="error",
                         occurred_at=block.timestamp_factory(),
                         error=str(exc),
                     )
                 except Exception:
                     pass
-                block.record_failed_sync(exc)
-                raise
-    if args.command in {"hourly-sync", "manual-sync"}:
-        phase_timings_ms: dict[str, float] = {}
-        journal = WarehouseUpdateJournal(db_path=runtime.db_path)
-        durable_run_id = ""
-        durable_phase = ""
-        with warehouse_functional_job_lock(runtime.runtime_dir) as lock_evidence:
-            durable_run_id = journal.start(
-                trigger_source="hourly" if args.command == "hourly-sync" else "manual"
-            )
-            phase_timings_ms["warehouse_job_lock_wait"] = float(
-                lock_evidence.get("wait_ms") or 0
-            )
-            try:
-                retention_before = _run_sync_phase(
-                    "recovery_retention_before",
-                    phase_timings_ms,
-                    lambda: _run_bounded_recovery_retention(runtime),
-                )
-                economics_backup = _run_sync_phase(
-                    "prepare_economics_restore_point",
-                    phase_timings_ms,
-                    block.calculation_parameters.prepare_functional_economics_backup,
-                )
-                durable_phase = "wb_supply_registry"
-                journal.phase_started(durable_run_id, durable_phase)
-                supply_refresh = _run_sync_phase(
-                    "refresh_official_supply_state",
-                    phase_timings_ms,
-                    lambda: _refresh_official_supply_state(
-                        runtime,
-                        record_ff_movements=False,
-                    ),
-                )
-                journal.phase_finished(durable_run_id, durable_phase, details=supply_refresh)
-                durable_phase = "transit_enrichment"
-                journal.phase_started(durable_run_id, durable_phase)
-                transit_cost_collection = _run_sync_phase(
-                    "collect_autonomous_transit_costs",
-                    phase_timings_ms,
-                    lambda: _collect_autonomous_transit_costs(runtime),
-                )
-                journal.phase_finished(durable_run_id, durable_phase, details=transit_cost_collection)
-                durable_phase = "cost_materialization"
-                journal.phase_started(durable_run_id, durable_phase)
-                downstream_cost_layers = _run_sync_phase(
-                    "materialize_downstream_cost_layers",
-                    phase_timings_ms,
-                    lambda: _materialize_downstream_cost_layers(runtime),
-                )
-                journal.phase_finished(
-                    durable_run_id,
-                    durable_phase,
-                    item_count=int(downstream_cost_layers),
-                    details={"changed_rows": int(downstream_cost_layers)},
-                )
-                durable_phase = "ff_ledger_reservations"
-                journal.phase_started(durable_run_id, durable_phase)
-                ff_state = _run_sync_phase(
-                    "reconcile_functional_ff_state",
-                    phase_timings_ms,
-                    lambda: WbSuppliesBlock(runtime=runtime).reconcile_functional_ff_state(),
-                )
-                journal.phase_finished(durable_run_id, durable_phase, details=ff_state)
-                durable_phase = "official_complete_wb_stocks"
-                journal.phase_started(durable_run_id, durable_phase)
-                plan = _run_sync_phase(
-                    "build_sync_plan",
-                    phase_timings_ms,
-                    block.build_sync_plan,
-                )
-                journal.phase_finished(
-                    durable_run_id,
-                    durable_phase,
-                    item_count=int(dict(plan.get("diff") or {}).get("changed_line_count") or 0),
-                    details={"plan_fingerprint": plan.get("plan_fingerprint")},
-                )
-                durable_phase = "functional_publication"
-                journal.phase_started(durable_run_id, durable_phase)
-                result = _run_sync_phase(
-                    "publish_functional_version",
-                    phase_timings_ms,
-                    lambda: block.apply_plan(
-                        plan,
-                        confirm_fingerprint=str(plan["plan_fingerprint"]),
-                    ),
-                )
-                fbs_accounting = _run_sync_phase(
-                    "publish_fbs_snapshot_accounting",
-                    phase_timings_ms,
-                    lambda: _publish_fbs_snapshot_accounting(runtime),
-                )
-                journal.phase_finished(
-                    durable_run_id,
-                    durable_phase,
-                    details={**dict(result.get("active_version") or {}),
-                             "fbs_snapshot_accounting": fbs_accounting},
-                )
-                backup_result = result.get("recovery_policy")
-                durable_phase = "dependent_replay_economics"
-                journal.phase_started(durable_run_id, durable_phase)
-                proxy_recalculation = _run_sync_phase(
-                    "process_targeted_recalculations",
-                    phase_timings_ms,
-                    lambda: (
-                        block.calculation_parameters.process_pending_targeted_recalculations(
-                            verified_backup=economics_backup,
-                        )
-                    ),
-                )
-                if str(proxy_recalculation.get("status") or "") == "failed":
-                    raise RuntimeError(
-                        "targeted Proxy recalculation failed: "
-                        + str(proxy_recalculation.get("error") or "unknown error")
-                    )
-                economics_publication = _run_sync_phase(
-                    "publish_functional_economics",
-                    phase_timings_ms,
-                    lambda: (
-                        proxy_recalculation
-                        if int(proxy_recalculation.get("request_count") or 0) > 0
-                        else block.calculation_parameters.publish_current_functional_economics(
-                            verified_backup=economics_backup,
-                        )
-                    ),
-                )
-                finance_cost_recalculation = _run_sync_phase(
-                    "recalculate_downstream_finance_cost",
-                    phase_timings_ms,
-                    lambda: _recalculate_downstream_finance_cost(runtime),
-                )
-                transit_cost_replays = _run_sync_phase(
-                    "finalize_transit_cost_replays",
-                    phase_timings_ms,
-                    lambda: runtime.finalize_completed_wb_transit_cost_recalculations(
-                        completed_at=block.timestamp_factory(),
-                    ),
-                )
-                retention_after = _run_sync_phase(
-                    "recovery_retention_after",
-                    phase_timings_ms,
-                    lambda: _run_bounded_recovery_retention(runtime),
-                )
-                _mark_plan_ff_replays(
-                    runtime,
-                    plan,
-                    status="complete",
-                    occurred_at=block.timestamp_factory(),
-                )
-                _mark_plan_ff_finance(
-                    runtime,
-                    plan,
-                    status="complete",
-                    occurred_at=block.timestamp_factory(),
-                    source_fingerprint=str(
-                        finance_cost_recalculation.get("fingerprint") or ""
-                    ),
-                )
-                completed_backup = backup_result
-                journal.phase_finished(
-                    durable_run_id,
-                    durable_phase,
-                    item_count=int(proxy_recalculation.get("request_count") or 0),
-                    details={
-                        "proxy_targeted_recalculation": proxy_recalculation,
-                        "finance_cost_recalculation": finance_cost_recalculation,
-                        "transit_cost_replays": transit_cost_replays,
-                    },
-                )
-                payload = {
-                    "status": "success",
-                    "mode": args.command,
-                    "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
-                    "phase_timings_ms": phase_timings_ms,
-                    "backup": completed_backup,
-                    "raw_backup": None,
-                    "recovery_retention_before": retention_before,
-                    "recovery_retention_after": retention_after,
-                    "supply_refresh": supply_refresh,
-                    "wb_transit_cost_collection": transit_cost_collection,
-                    "downstream_cost_layers_materialized": downstream_cost_layers,
-                    "fbs_snapshot_accounting": fbs_accounting,
-                    "wb_finance_cost_recalculation": finance_cost_recalculation,
-                    "wb_transit_cost_replays": transit_cost_replays,
-                    "ff_state": ff_state,
-                    "plan_fingerprint": plan["plan_fingerprint"],
-                    "diff": plan["diff"],
-                    "active_version": result.get("active_version"),
-                    "sync": result.get("sync"),
-                    "reconciliation": result.get("reconciliation"),
-                    "proxy_targeted_recalculation": proxy_recalculation,
-                    "functional_economics_publication": {
-                        "plan_fingerprint": economics_publication.get("plan_fingerprint"),
-                        "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
-                        "database_written": economics_publication.get("database_written"),
-                        "backup_archive": economics_publication.get("backup_archive"),
-                    },
-                }
-                journal.finish(durable_run_id, status="success", result=payload)
-                return payload
-            except Exception as exc:
-                if durable_phase == "dependent_replay_economics" and "plan" in locals():
-                    try:
-                        _mark_plan_ff_replays(
-                            runtime,
-                            plan,
-                            status="error",
-                            occurred_at=block.timestamp_factory(),
-                            error=str(exc),
-                        )
-                        _mark_plan_ff_finance(
-                            runtime,
-                            plan,
-                            status="error",
-                            occurred_at=block.timestamp_factory(),
-                            error=str(exc),
-                        )
-                    except Exception:
-                        pass
-                if durable_phase:
-                    try:
-                        journal.phase_finished(
-                            durable_run_id,
-                            durable_phase,
-                            status="failed",
-                            error=str(exc),
-                        )
-                    except Exception:
-                        pass
+            if durable_phase:
                 try:
-                    journal.finish(
+                    journal.phase_finished(
                         durable_run_id,
+                        durable_phase,
                         status="failed",
-                        error=f"{durable_phase}: {exc}" if durable_phase else str(exc),
+                        error=str(exc),
                     )
                 except Exception:
                     pass
-                failure = _sync_failure_record(
-                    exc,
-                    sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
-                    phase_timings_ms=phase_timings_ms,
+            try:
+                journal.finish(
+                    durable_run_id,
+                    status="failed",
+                    error=f"{durable_phase}: {exc}" if durable_phase else str(exc),
                 )
-                try:
-                    block.record_failed_sync(failure)
-                except sqlite3.OperationalError as record_exc:
-                    if not _is_sqlite_locked_error(record_exc):
-                        raise
-                raise
+            except Exception:
+                pass
+            failure = _sync_failure_record(
+                exc,
+                sqlite_busy_timeout_ms=sqlite_busy_timeout_ms,
+                phase_timings_ms=phase_timings_ms,
+            )
+            try:
+                block.record_failed_sync(failure)
+            except sqlite3.OperationalError as record_exc:
+                if not _is_sqlite_locked_error(record_exc):
+                    raise
+            raise
     if args.command == "emergency-dry-run":
         plan = block.build_emergency_rebuild_plan()
         return _write_optional_plan(plan, str(args.output or ""))

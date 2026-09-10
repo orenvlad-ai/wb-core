@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
+import logging
+import json
+import os
 from pathlib import Path
 import threading
 import time
 from typing import Any, Iterator
+from uuid import uuid4
 
 
 WAREHOUSE_FUNCTIONAL_LOCK_FILENAME = ".warehouse-functional-sync.lock"
@@ -19,6 +23,66 @@ _LOCAL = threading.local()
 
 class WarehouseFunctionalBusyError(RuntimeError):
     """Raised when a non-blocking functional writer cannot acquire the lock."""
+
+
+class WarehouseJobOwnershipError(RuntimeError):
+    """No live admission belonging to this process, thread and scope."""
+
+
+def require_warehouse_job_owner(runtime_dir: Path, token: str | None = None) -> str:
+    path = (Path(runtime_dir) / WAREHOUSE_FUNCTIONAL_JOB_LOCK_FILENAME).resolve()
+    state = getattr(_LOCAL, "warehouse_job_owner", None)
+    if (state is None or state["path"] != path or state["pid"] != os.getpid()
+            or state["thread"] != threading.get_ident() or state["handle"].closed
+            or (token is not None and token != state["token"])):
+        raise WarehouseJobOwnershipError("warehouse journal requires its live admission owner")
+    return str(state["token"])
+
+
+def warehouse_functional_job_is_busy(runtime_dir: Path) -> bool:
+    """Read-only, momentary admission probe; never create a lock file or owner.
+
+    flock on an existing read-only descriptor observes the actual process lock.
+    The in-process mutex covers threads, including the small acquire/release
+    boundaries. No PID, timestamp or stale journal row is treated as ownership.
+    """
+    path = (Path(runtime_dir) / WAREHOUSE_FUNCTIONAL_JOB_LOCK_FILENAME).resolve()
+    current = getattr(_LOCAL, "warehouse_job_owner", None)
+    if current is not None and current["pid"] == os.getpid() and current["path"] == path:
+        return True
+    with _LOCKS_GUARD:
+        process_lock = _PROCESS_LOCKS.get(path)
+    if process_lock is not None and not process_lock.acquire(blocking=False):
+        return True
+    try:
+        try:
+            handle = path.open("r", encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        with handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                return False
+    finally:
+        if process_lock is not None:
+            process_lock.release()
+
+
+def _record_writer_metrics(evidence: dict[str, Any]) -> None:
+    state = getattr(_LOCAL, "warehouse_job_owner", None)
+    if state is not None and state["pid"] == os.getpid():
+        metrics = state["metrics"]
+        metrics["writer_count"] += int(evidence.get("outcome") != "busy")
+        if evidence.get("outcome") == "busy":
+            metrics["writer_busy_count"] += 1
+        elif evidence.get("outcome") == "error":
+            metrics["writer_error_count"] += 1
+        for key in ("wait_ms", "hold_ms"):
+            metrics["writer_" + key] = round(metrics["writer_" + key] + evidence[key], 3)
 
 
 def _process_lock(lock_path: Path) -> threading.RLock:
@@ -49,6 +113,7 @@ def warehouse_functional_write_lock(
             timeout=max(float(timeout_seconds), 0.0)
         )
     if not process_lock_acquired:
+        _record_writer_metrics({"outcome": "busy", "wait_ms": round((time.monotonic() - started) * 1000, 3), "hold_ms": 0.0})
         raise WarehouseFunctionalBusyError(
             "functional warehouse writer is already running"
         )
@@ -84,22 +149,32 @@ def warehouse_functional_write_lock(
                     deadline is not None and time.monotonic() >= deadline
                 ):
                     handle.close()
+                    _record_writer_metrics({"outcome": "busy", "wait_ms": round((time.monotonic() - started) * 1000, 3), "hold_ms": 0.0})
                     raise WarehouseFunctionalBusyError(
                         "functional warehouse writer is already running"
                     ) from exc
                 time.sleep(max(min(float(poll_interval_seconds), 1.0), 0.01))
         held[lock_path] = {"depth": 1, "handle": handle}
+        acquired_at = time.monotonic()
+        evidence = {"wait_ms": round((acquired_at - started) * 1000, 3),
+                    "hold_ms": None, "reentrant": 0.0, "outcome": "running"}
         try:
-            yield {
-                "wait_ms": round((time.monotonic() - started) * 1000, 3),
-                "reentrant": 0.0,
-            }
+            yield evidence
+            evidence["outcome"] = "success"
+        except BaseException:
+            evidence["outcome"] = "error"
+            raise
         finally:
             held.pop(lock_path, None)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
+            process_lock.release()
+            process_lock_acquired = False
+            evidence["hold_ms"] = round((time.monotonic() - acquired_at) * 1000, 3)
+            _record_writer_metrics(evidence)
     finally:
-        process_lock.release()
+        if process_lock_acquired:
+            process_lock.release()
 
 
 @contextmanager
@@ -117,6 +192,10 @@ def warehouse_functional_job_lock(
     continues through its own short canonical writer/CAS boundary.
     """
 
+    # Nested top-level admission is a caller error, never a second descriptor.
+    current = getattr(_LOCAL, "warehouse_job_owner", None)
+    if current is not None and current["pid"] == os.getpid():
+        raise WarehouseJobOwnershipError("nested warehouse job admission is forbidden")
     with _named_functional_lock(
         runtime_dir,
         filename=WAREHOUSE_FUNCTIONAL_JOB_LOCK_FILENAME,
@@ -148,8 +227,10 @@ def _named_functional_lock(
             timeout=max(float(timeout_seconds), 0.0)
         )
     if not process_lock_acquired:
+        _job_diagnostic({"outcome": "busy", "wait_ms": round((time.monotonic() - started) * 1000, 3), "hold_ms": 0.0})
         raise WarehouseFunctionalBusyError("functional warehouse job is already running")
     handle = None
+    evidence = None
     try:
         handle = lock_path.open("a+", encoding="utf-8")
         deadline = (
@@ -172,15 +253,40 @@ def _named_functional_lock(
         acquired_at = time.monotonic()
         evidence = {
             "wait_ms": round((acquired_at - started) * 1000, 3),
-            "hold_ms": 0.0,
+            "hold_ms": None,
             "lock_identity": filename,
+            "owner_token": uuid4().hex,
+            "writer_count": 0, "writer_wait_ms": 0.0, "writer_hold_ms": 0.0,
+            "writer_busy_count": 0, "writer_error_count": 0,
+            "outcome": "running",
+        }
+        _LOCAL.warehouse_job_owner = {
+            "path": lock_path, "pid": os.getpid(), "thread": threading.get_ident(),
+            "handle": handle, "token": evidence["owner_token"], "metrics": evidence,
         }
         try:
             yield evidence
+            evidence["outcome"] = "success"
+        except BaseException:
+            evidence["outcome"] = "error"
+            raise
         finally:
-            evidence["hold_ms"] = round((time.monotonic() - acquired_at) * 1000, 3)
+            _LOCAL.warehouse_job_owner = None
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except WarehouseFunctionalBusyError:
+        if evidence is None:
+            _job_diagnostic({"outcome": "busy", "wait_ms": round((time.monotonic() - started) * 1000, 3), "hold_ms": 0.0})
+        raise
     finally:
         if handle is not None:
             handle.close()
         process_lock.release()
+        if evidence is not None:
+            evidence["hold_ms"] = round((time.monotonic() - acquired_at) * 1000, 3)
+            _job_diagnostic(evidence)
+
+
+def _job_diagnostic(evidence: dict[str, Any]) -> None:
+    # Warning is captured by both the existing CLI stderr and HTTP service
+    # journal without depending on an application-wide INFO configuration.
+    logging.getLogger(__name__).warning("warehouse_job_lock_diagnostic %s", json.dumps(evidence, sort_keys=True))

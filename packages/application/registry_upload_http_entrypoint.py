@@ -218,7 +218,10 @@ from packages.application.warehouse_functional import (
 from packages.application.warehouse_functional_economics_backfill import (
     carry_forward_closed_functional_economics_metadata,
 )
-from packages.application.warehouse_sync_lock import warehouse_sync_lock
+from packages.application.warehouse_functional_lock import (
+    warehouse_functional_job_lock, warehouse_functional_job_is_busy,
+    require_warehouse_job_owner, WarehouseFunctionalBusyError,
+)
 from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
 )
@@ -1163,6 +1166,7 @@ class RegistryUploadHttpEntrypoint:
         self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
         self.warehouse_update_journal = WarehouseUpdateJournal(
             db_path=self.runtime.db_path,
+            runtime_dir=self.runtime.runtime_dir,
             timestamp_factory=self.activated_at_factory,
         )
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
@@ -6733,6 +6737,15 @@ class RegistryUploadHttpEntrypoint:
         ).public_status()
 
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
+        with warehouse_functional_job_lock(self.runtime.runtime_dir) as metrics:
+            payload = self._handle_owned_warehouse_manual_sync_request(
+                owner_token=str(metrics["owner_token"]),
+            )
+        payload["lock_metrics"] = metrics
+        return payload
+
+    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str) -> dict[str, Any]:
+        require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
         durable_run_id = ""
         active_phase = ""
 
@@ -6768,148 +6781,145 @@ class RegistryUploadHttpEntrypoint:
             return value
 
         try:
-            with warehouse_sync_lock(self.runtime.runtime_dir, blocking=False):
-                durable_run_id = self.warehouse_update_journal.start(
-                    trigger_source="manual"
+            durable_run_id = self.warehouse_update_journal.start(
+                trigger_source="manual"
+            )
+            economics_backup = (
+                self.calculation_parameters_block.prepare_functional_economics_backup()
+            )
+            supply_payload = run_phase(
+                "wb_supply_registry",
+                lambda: self.wb_supplies_block.sync_functional_sources(
+                    record_ff_movements=False
+                ),
+            )
+            transit_cost_collection = run_phase(
+                "transit_enrichment",
+                self.wb_supplies_block.collect_all_due_transit_costs,
+            )
+            downstream_cost_layers = run_phase(
+                "cost_materialization",
+                lambda: self.our_wb_cost_block.materialize_wb_supply_cost_layers(
+                    opening_date="2026-07-01"
+                ),
+            )
+            ff_state = run_phase(
+                "ff_ledger_reservations",
+                self.wb_supplies_block.reconcile_functional_ff_state,
+            )
+            plan = run_phase(
+                "official_complete_wb_stocks",
+                self.warehouse_functional_block.build_sync_plan,
+            )
+            def publish_functional() -> dict[str, Any]:
+                from packages.application.fbs_accounting_runtime import refresh
+                result = self.warehouse_functional_block.apply_plan(
+                    plan,
+                    confirm_fingerprint=str(plan["plan_fingerprint"]),
                 )
-                economics_backup = (
-                    self.calculation_parameters_block.prepare_functional_economics_backup()
-                )
-                supply_payload = run_phase(
-                    "wb_supply_registry",
-                    lambda: self.wb_supplies_block.sync_functional_sources(
-                        record_ff_movements=False
-                    ),
-                )
-                transit_cost_collection = run_phase(
-                    "transit_enrichment",
-                    self.wb_supplies_block.collect_all_due_transit_costs,
-                )
-                downstream_cost_layers = run_phase(
-                    "cost_materialization",
-                    lambda: self.our_wb_cost_block.materialize_wb_supply_cost_layers(
-                        opening_date="2026-07-01"
-                    ),
-                )
-                ff_state = run_phase(
-                    "ff_ledger_reservations",
-                    self.wb_supplies_block.reconcile_functional_ff_state,
-                )
-                plan = run_phase(
-                    "official_complete_wb_stocks",
-                    self.warehouse_functional_block.build_sync_plan,
-                )
-                def publish_functional() -> dict[str, Any]:
-                    from packages.application.fbs_accounting_runtime import refresh
-                    result = self.warehouse_functional_block.apply_plan(
-                        plan,
-                        confirm_fingerprint=str(plan["plan_fingerprint"]),
-                    )
-                    accounting = refresh(self.runtime.runtime_dir, ready_runtime=self.runtime)
-                    planning = self.inventory_planning.current()
-                    return {**result, "fbs_snapshot_accounting": accounting,
-                            "planning_inventory_readback": planning}
+                accounting = refresh(self.runtime.runtime_dir, ready_runtime=self.runtime)
+                planning = self.inventory_planning.current()
+                return {**result, "fbs_snapshot_accounting": accounting,
+                        "planning_inventory_readback": planning}
 
-                result = run_phase("functional_publication", publish_functional)
-                planning_inventory_readback = result["planning_inventory_readback"]
-                def dependent_replay() -> dict[str, Any]:
-                    proxy_recalculation = (
-                        self.calculation_parameters_block.process_pending_targeted_recalculations(
-                            verified_backup=economics_backup,
-                        )
+            result = run_phase("functional_publication", publish_functional)
+            planning_inventory_readback = result["planning_inventory_readback"]
+            def dependent_replay() -> dict[str, Any]:
+                proxy_recalculation = (
+                    self.calculation_parameters_block.process_pending_targeted_recalculations(
+                        verified_backup=economics_backup,
                     )
-                    if str(proxy_recalculation.get("status") or "") == "failed":
-                        raise RuntimeError(
-                            "targeted Proxy recalculation failed: "
-                            + str(proxy_recalculation.get("error") or "unknown error")
-                        )
-                    economics_publication = (
-                        proxy_recalculation
-                        if int(proxy_recalculation.get("request_count") or 0) > 0
-                        else self.calculation_parameters_block.publish_current_functional_economics(
-                            verified_backup=economics_backup,
-                        )
+                )
+                if str(proxy_recalculation.get("status") or "") == "failed":
+                    raise RuntimeError(
+                        "targeted Proxy recalculation failed: "
+                        + str(proxy_recalculation.get("error") or "unknown error")
                     )
-                    finance_cost_recalculation = (
-                        self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+                economics_publication = (
+                    proxy_recalculation
+                    if int(proxy_recalculation.get("request_count") or 0) > 0
+                    else self.calculation_parameters_block.publish_current_functional_economics(
+                        verified_backup=economics_backup,
                     )
-                    transit_cost_replays = (
-                        self.runtime.finalize_completed_wb_transit_cost_recalculations(
-                            completed_at=self.activated_at_factory(),
-                        )
+                )
+                finance_cost_recalculation = (
+                    self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+                )
+                transit_cost_replays = (
+                    self.runtime.finalize_completed_wb_transit_cost_recalculations(
+                        completed_at=self.activated_at_factory(),
                     )
-                    return {
-                        "proxy_recalculation": proxy_recalculation,
-                        "economics_publication": economics_publication,
-                        "finance_cost_recalculation": finance_cost_recalculation,
-                        "transit_cost_replays": transit_cost_replays,
-                    }
+                )
+                return {
+                    "proxy_recalculation": proxy_recalculation,
+                    "economics_publication": economics_publication,
+                    "finance_cost_recalculation": finance_cost_recalculation,
+                    "transit_cost_replays": transit_cost_replays,
+                }
 
-                dependent = run_phase("dependent_replay_economics", dependent_replay)
+            dependent = run_phase("dependent_replay_economics", dependent_replay)
+            sync = dict(supply_payload.get("sync") or {})
+            proxy_recalculation = dict(dependent.get("proxy_recalculation") or {})
+            economics_publication = dict(dependent.get("economics_publication") or {})
+            finance_cost_recalculation = dict(
+                dependent.get("finance_cost_recalculation") or {}
+            )
+            transit_cost_replays = dict(dependent.get("transit_cost_replays") or {})
+            payload = {
+                "status": "success",
+                "mode": "manual_sync",
+                "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
+                "durable_run_id": durable_run_id,
+                "official_supply_sync": {
+                    "run_id": str(sync.get("run_id") or ""),
+                    "changed_rows": int(sync.get("changed_rows") or 0),
+                    "accepted_qty_changed_rows": int(sync.get("accepted_qty_changed_rows") or 0),
+                },
+                "downstream_cost_layers_materialized": downstream_cost_layers,
+                "wb_transit_cost_collection": transit_cost_collection,
+                "ff_state": ff_state,
+                "plan_fingerprint": plan["plan_fingerprint"],
+                "diff": plan["diff"],
+                "active_version": result.get("active_version"),
+                "sync": result.get("sync"),
+                "planning_inventory_readback": planning_inventory_readback,
+                "proxy_targeted_recalculation": proxy_recalculation,
+                "wb_finance_cost_recalculation": finance_cost_recalculation,
+                "wb_transit_cost_replays": transit_cost_replays,
+                "functional_economics_publication": {
+                    "plan_fingerprint": economics_publication.get("plan_fingerprint"),
+                    "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
+                    "database_written": economics_publication.get("database_written"),
+                    "backup_archive": economics_publication.get("backup_archive"),
+                },
+            }
+            self.warehouse_update_journal.finish(
+                durable_run_id,
+                status="success",
+                result=payload,
+            )
+            return payload
+
         except Exception as exc:
-            self.warehouse_functional_block.record_failed_sync(exc)
             if durable_run_id:
                 self.warehouse_update_journal.finish(
-                    durable_run_id,
-                    status="failed",
+                    durable_run_id, status="failed",
                     error=f"{active_phase}: {exc}" if active_phase else str(exc),
                 )
+                self.warehouse_functional_block.record_failed_sync(exc)
             raise
-        sync = dict(supply_payload.get("sync") or {})
-        proxy_recalculation = dict(dependent.get("proxy_recalculation") or {})
-        economics_publication = dict(dependent.get("economics_publication") or {})
-        finance_cost_recalculation = dict(
-            dependent.get("finance_cost_recalculation") or {}
-        )
-        transit_cost_replays = dict(dependent.get("transit_cost_replays") or {})
-        payload = {
-            "status": "success",
-            "mode": "manual_sync",
-            "fbs_snapshot_accounting": result.get("fbs_snapshot_accounting"),
-            "durable_run_id": durable_run_id,
-            "official_supply_sync": {
-                "run_id": str(sync.get("run_id") or ""),
-                "changed_rows": int(sync.get("changed_rows") or 0),
-                "accepted_qty_changed_rows": int(sync.get("accepted_qty_changed_rows") or 0),
-            },
-            "downstream_cost_layers_materialized": downstream_cost_layers,
-            "wb_transit_cost_collection": transit_cost_collection,
-            "ff_state": ff_state,
-            "plan_fingerprint": plan["plan_fingerprint"],
-            "diff": plan["diff"],
-            "active_version": result.get("active_version"),
-            "sync": result.get("sync"),
-            "planning_inventory_readback": planning_inventory_readback,
-            "proxy_targeted_recalculation": proxy_recalculation,
-            "wb_finance_cost_recalculation": finance_cost_recalculation,
-            "wb_transit_cost_replays": transit_cost_replays,
-            "functional_economics_publication": {
-                "plan_fingerprint": economics_publication.get("plan_fingerprint"),
-                "changed_snapshot_count": economics_publication.get("changed_snapshot_count"),
-                "database_written": economics_publication.get("database_written"),
-                "backup_archive": economics_publication.get("backup_archive"),
-            },
-        }
-        self.warehouse_update_journal.finish(
-            durable_run_id,
-            status="success",
-            result=payload,
-        )
-        return payload
 
     def handle_warehouse_manual_sync_start_request(self) -> dict[str, Any]:
-        operation = "warehouse_current_source_sync"
-        active = self.operator_jobs.active_job(operations=(operation,))
-        if active:
-            return self._warehouse_manual_sync_status_payload(
-                active,
-                busy=True,
-            )
-        job = self.operator_jobs.start(
-            operation=operation,
+        job, busy = self.operator_jobs.start_warehouse_if_idle(
+            runtime_dir=self.runtime.runtime_dir,
             runner=self._run_warehouse_manual_sync_job,
         )
-        return self._warehouse_manual_sync_status_payload(job)
+        # An external CLI owner has no process-local operator status ID.
+        if job is None:
+            return {"contract_name": "warehouse_current_source_sync_status",
+                    "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
+        return self._warehouse_manual_sync_status_payload(job, busy=busy)
 
     def handle_warehouse_manual_sync_status_request(
         self,
@@ -6922,6 +6932,13 @@ class RegistryUploadHttpEntrypoint:
                 self.operator_jobs.get(requested)
             )
         job = self.operator_jobs.active_job(operations=(operation,))
+        if job is None and warehouse_functional_job_is_busy(self.runtime.runtime_dir):
+            # A busy POST without a process-local ID is polled through this
+            # same empty-ID route. Never replace a live CLI owner with an old
+            # manual success/never; no durable alias is invented here.
+            return {"contract_name": "warehouse_current_source_sync_status",
+                    "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
         if job is None:
             job = self.operator_jobs.latest_relevant_job(operations=(operation,))
         if job is None:
@@ -6969,7 +6986,9 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         emit("Проверяем общий warehouse lock и предусмотренный restore point.")
         emit("Получаем текущие WB supplies, official stock snapshot и canonical cost layers.")
-        result = self.handle_warehouse_manual_sync_request()
+        result = self._handle_owned_warehouse_manual_sync_request(
+            owner_token=require_warehouse_job_owner(self.runtime.runtime_dir),
+        )
         diff = dict(result.get("diff") or {})
         lines = [
             dict(item)
@@ -10078,6 +10097,104 @@ class SheetVitrinaV1OperatorJobStore:
         self._jobs: dict[str, SheetVitrinaV1OperatorJob] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._warehouse_start_lock = threading.Lock()
+        self._warehouse_admitted_job: str | None = None
+
+    def start_warehouse_if_idle(
+        self, *, runtime_dir: Path,
+        runner: Callable[[OperatorLogEmitter], dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """One worker owns both admission and execution; request waits only for admission.
+
+        The serial handshake prevents two simultaneous POSTs creating hidden
+        workers. No RLock or open file descriptor crosses a thread boundary.
+        A rejected external admission creates no operator job or domain record.
+        """
+        deadline = time.monotonic() + 5.0
+        if not self._warehouse_start_lock.acquire(timeout=5.0):
+            return None, True
+        try:
+            with self._lock:
+                active = self._jobs.get(self._warehouse_admitted_job or "")
+                if active is not None and active.status == "running":
+                    return active.snapshot(), True
+            ready = threading.Event()
+            proceed = threading.Event()
+            admission: dict[str, Any] = {}
+            job_id = uuid4().hex
+
+            def worker() -> None:
+                metrics: dict[str, Any] = {}
+                result: dict[str, Any] = {}
+                error: BaseException | None = None
+                try:
+                    with warehouse_functional_job_lock(runtime_dir) as metrics:
+                        with self._lock:
+                            if admission.get("cancelled"):
+                                return
+                            self._jobs[job_id] = SheetVitrinaV1OperatorJob(
+                                job_id=job_id, operation="warehouse_current_source_sync",
+                                status="running", started_at=self.timestamp_factory(),
+                            )
+                            self._threads[job_id] = threading.current_thread()
+                            self._warehouse_admitted_job = job_id
+                            admission["job"] = self._jobs[job_id].snapshot()
+                        ready.set()
+                        permitted = proceed.wait(timeout=5.0)
+                        with self._lock:
+                            if not permitted or admission.get("cancelled"):
+                                admission["cancelled"] = True
+                                return
+                        context_token = SHEET_OPERATOR_JOB_ID.set(job_id)
+                        try:
+                            result = runner(lambda message: self._append_log(job_id, message))
+                        finally:
+                            SHEET_OPERATOR_JOB_ID.reset(context_token)
+                            with self._lock:
+                                if self._warehouse_admitted_job == job_id:
+                                    self._warehouse_admitted_job = None
+                except BaseException as exc:
+                    error = exc
+                    if "job" not in admission:
+                        if isinstance(exc, WarehouseFunctionalBusyError):
+                            admission["busy"] = True
+                        else:
+                            admission["error"] = exc
+                finally:
+                    # Domain journal terminal happened under admission. Publish
+                    # operator terminal with complete diagnostics after release.
+                    with self._lock:
+                        if admission.get("cancelled"):
+                            self._jobs.pop(job_id, None)
+                            self._threads.pop(job_id, None)
+                        elif "job" in admission:
+                            job = self._jobs[job_id]
+                            job.result = {**result, "lock_metrics": metrics}
+                            job.finished_at = self.timestamp_factory()
+                            job.status = "error" if error is not None else "success"
+                            if error is not None:
+                                job.error = str(error)
+                                job.log_lines.append(f"{job.finished_at} Ошибка: {error}")
+                        if self._warehouse_admitted_job == job_id:
+                            self._warehouse_admitted_job = None
+                    ready.set()
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            observed = ready.wait(timeout=max(0.0, deadline - time.monotonic()))
+            with self._lock:
+                if not observed or admission.get("cancelled"):
+                    admission["cancelled"] = True
+                    proceed.set()
+                    return None, True
+                if "error" in admission:
+                    raise admission["error"]
+                if admission.get("busy"):
+                    return None, True
+                proceed.set()
+                return admission["job"], False
+        finally:
+            self._warehouse_start_lock.release()
 
     def start(
         self,

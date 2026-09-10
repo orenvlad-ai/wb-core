@@ -383,16 +383,19 @@ def main() -> None:
                 conn.commit()
             legacy_journal = WarehouseUpdateJournal(
                 db_path=runtime.db_path,
+                runtime_dir=runtime.runtime_dir,
                 timestamp_factory=lambda: "2026-04-18T09:01:00Z",
             )
-            legacy_run_id = legacy_journal.start(trigger_source="hourly")
-            legacy_journal.phase_started(legacy_run_id, "dependent_replay_economics")
-            legacy_journal.phase_finished(
-                legacy_run_id,
-                "dependent_replay_economics",
-                status="success",
-            )
-            legacy_journal.finish(legacy_run_id, status="success")
+            from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+            with warehouse_functional_job_lock(runtime.runtime_dir):
+                legacy_run_id = legacy_journal.start(trigger_source="hourly")
+                legacy_journal.phase_started(legacy_run_id, "dependent_replay_economics")
+                legacy_journal.phase_finished(
+                    legacy_run_id,
+                    "dependent_replay_economics",
+                    status="success",
+                )
+                legacy_journal.finish(legacy_run_id, status="success")
             _, legacy_replayed_status = _get_json(
                 f"{base_url}{DEFAULT_FF_OVERHEAD_STATUS_PATH}?preview_id={overhead_preview['preview_id']}"
             )
