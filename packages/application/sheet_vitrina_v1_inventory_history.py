@@ -8,6 +8,7 @@ finalization; a later accepted revision appends a superseding finalization.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 from pathlib import Path
@@ -21,6 +22,10 @@ from packages.application.inventory_planning_read_model import (
 from packages.application.ff_pool_fbs_lifecycle import (
     fbs_lifecycle_group_blocked,
     fbs_lifecycle_quality_coverage,
+)
+from packages.application.inventory_quantity import (
+    CONTRACT as QUANTITY_CONTRACT, EFFECTIVE_DATE, KNOWN_BAD_CAPTURES, POLICY_VERSION,
+    REPAIR_REASON, resolve_plan_quantities,
 )
 from packages.application.wb_incident_policy import canonical_seller_id
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope
@@ -162,6 +167,9 @@ def prepare_inventory_history_from_ready_plan(
     bundle_version: str,
     refreshed_at: str,
     generation_identity: str = "",
+    runtime_dir: Path | None = None,
+    prepared_book: Mapping[str, Any] | None = None,
+    ready_target: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build source-bound current/closed components on the publisher's RO snapshot."""
 
@@ -170,7 +178,19 @@ def prepare_inventory_history_from_ready_plan(
     closed_date = _slot_date(plan, "yesterday_closed")
     result: dict[str, Any] = {"current": None, "closed": None, "closed_date": closed_date,
         "prior_closed_capture": _latest_capture_id(conn, business_date=closed_date) if closed_date else ""}
+    def typed_capture(day):
+        operands = resolve_plan_quantities(plan, day=day, runtime_dir=runtime_dir,
+            prepared_book=prepared_book, ready_target=ready_target, require_closed=day == closed_date)
+        if operands is None:
+            return None
+        return dict(business_date=day, capture_kind="accepted_refresh", formula_version=QUANTITY_CONTRACT,
+            bundle_version=bundle_version, ready_snapshot_id=plan.snapshot_id,
+            ready_plan_version=plan.plan_version, generation_identity=generation_identity,
+            facility_roster=operands["facility_roster"], source_manifest=operands["source_manifest"],
+            components=operands["components"], captured_at=refreshed_at)
     if current_date:
+        result["current"] = typed_capture(current_date)
+    if current_date and result["current"] is None:
         wb_evidence = _canonical_current_wb_evidence(
             conn,
             plan=plan,
@@ -216,7 +236,15 @@ def prepare_inventory_history_from_ready_plan(
                 components=components,
                 captured_at=refreshed_at,
             )
+    if closed_date and closed_date >= EFFECTIVE_DATE and conn.execute(
+        f"SELECT 1 FROM {FINALIZATIONS_TABLE} WHERE business_date=? LIMIT 1", (closed_date,)
+    ).fetchone():
+        # A release/ordinary refresh is never an implicit historical correction.
+        result["closed_date"] = ""
+        return result
     if closed_date:
+        result["closed"] = typed_capture(closed_date)
+    if closed_date and result["closed"] is None:
         result["closed"] = _prepare_closed_date_ready_capture(
             conn,
             plan=plan,
@@ -425,6 +453,7 @@ def append_inventory_history_finalization(
     finalization_identity: str,
     finalized_at: str,
     provenance: Mapping[str, Any],
+    expected_predecessor: str | None = None,
 ) -> dict[str, Any]:
     """Append the accepted closed-day pointer, preserving prior revisions."""
 
@@ -441,6 +470,16 @@ def append_inventory_history_finalization(
         (business_date,),
     ).fetchone()
     previous_digest = str(previous[0]) if previous is not None else ""
+    existing = conn.execute(
+        f"SELECT finalization_id,finalization_digest,supersedes_finalization_digest FROM {FINALIZATIONS_TABLE} "
+        "WHERE business_date=? AND capture_id=? AND finalization_identity=?",
+        (business_date, capture_id, finalization_identity),
+    ).fetchone()
+    if existing:
+        return {"finalization_id": str(existing[0]), "finalization_digest": str(existing[1]),
+                "supersedes_finalization_digest": str(existing[2]), "inserted": False}
+    if expected_predecessor is not None and previous_digest != expected_predecessor:
+        raise ValueError("inventory_history_predecessor_changed")
     payload = {
         "business_date": business_date,
         "capture_id": capture_id,
@@ -493,6 +532,7 @@ def read_inventory_history_window(
     *,
     dates: Iterable[str],
     current_date: str,
+    connection: sqlite3.Connection | None = None,
     lifecycle_quality_resolver: Callable[
         [str, Iterable[int] | None], Mapping[str, Any]
     ]
@@ -503,13 +543,16 @@ def read_inventory_history_window(
     requested_dates = sorted({str(value) for value in dates if str(value)})
     if not requested_dates or not Path(db_path).is_file():
         return {"contract": CONTRACT_NAME, "dates": {}, "facilities": []}
-    conn = sqlite3.connect(
-        f"file:{Path(db_path).resolve().as_posix()}?mode=ro",
-        uri=True,
-        timeout=30.0,
+    owns_connection = connection is None
+    conn = connection or sqlite3.connect(
+        f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True, timeout=30.0,
     )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
+    if owns_connection:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+    elif not conn.in_transaction or conn.execute("PRAGMA query_only").fetchone()[0] != 1:
+        raise ValueError("inventory_history_existing_ro_transaction_required")
     try:
         tables = {
             str(row[0])
@@ -560,7 +603,10 @@ def read_inventory_history_window(
                 for row in rows
                 if row["nm_id"] is not None and int(row["nm_id"]) > 0
             }
-            lifecycle_quality = (
+            source_manifest = _loads(capture["source_manifest_json"], {})
+            typed = source_manifest.get("contract") == QUANTITY_CONTRACT
+            known_bad = (business_date, str(capture["capture_id"]), str(capture["source_digest"])) in KNOWN_BAD_CAPTURES
+            lifecycle_quality = {} if typed else (
                 dict(lifecycle_quality_resolver(business_date, requested_nm_ids))
                 if lifecycle_quality_resolver is not None
                 else fbs_lifecycle_quality_coverage(
@@ -572,7 +618,11 @@ def read_inventory_history_window(
             scopes: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
                 component = dict(row)
+                component["provenance"] = _loads(component.get("provenance_json"), {})
+                if known_bad and component["component_kind"] == "WB":
+                    component.update(state="missing", quantity=None, diagnostic=REPAIR_REASON)
                 if (
+                    not typed and
                     str(component["component_kind"]) == "FBS_FACILITY"
                     and fbs_lifecycle_group_blocked(
                         lifecycle_quality,
@@ -604,8 +654,13 @@ def read_inventory_history_window(
                 "finalization_id": str(capture["finalization_id"]),
                 "finalization_digest": str(capture["finalization_digest"]),
                 "finalized_at": str(capture["finalized_at"]),
+                "facility_roster": roster,
+                "diagnostic_policy_version": POLICY_VERSION,
                 "scopes": {
-                    scope_key: _materialize_scope(components)
+                    scope_key: {**_materialize_scope(components),
+                        "finalization_id": str(capture["finalization_id"]),
+                        "finalization_digest": str(capture["finalization_digest"]),
+                        "typed_quantity": typed, "diagnostic": REPAIR_REASON if known_bad else ""}
                     for scope_key, components in scopes.items()
                 },
             }
@@ -623,7 +678,8 @@ def read_inventory_history_window(
             ),
         }
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
 
 def _materialize_scope(components: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -640,6 +696,7 @@ def _materialize_scope(components: Sequence[Mapping[str, Any]]) -> dict[str, Any
             "source_revision": str(item["source_revision"]),
             "source_digest": str(item["source_digest"]),
             "source_watermark": str(item["source_watermark"]),
+            **({"provenance": dict(item["provenance"])} if item.get("provenance", {}).get("contract") == QUANTITY_CONTRACT else {}),
         }
         for item in components
         if str(item["component_kind"]) == "FBS_FACILITY"
@@ -667,6 +724,7 @@ def _materialize_scope(components: Sequence[Mapping[str, Any]]) -> dict[str, Any
             "source_revision": str(wb["source_revision"]) if wb else "",
             "source_digest": str(wb["source_digest"]) if wb else "",
             "source_watermark": str(wb["source_watermark"]) if wb else "",
+            **({"provenance": dict(wb["provenance"])} if wb and wb.get("provenance", {}).get("contract") == QUANTITY_CONTRACT else {}),
         },
         "facilities": facilities,
         "fbs_total": sum(fbs_known),
@@ -1170,11 +1228,15 @@ def _ready_wb_components(
         row_key = str(row[1] or "")
         value = row[column_index]
         presentation = dict(plan.metadata or {}).get("server_cell_presentation", {}).get(row_key, {}).get(business_date, {})
-        if presentation.get("source") == "official_fbs_management_inventory_v1":
+        source = presentation.get("source")
+        if source == "official_fbs_management_inventory_v1":
             # This public row is WB + official FBS. Only its frozen WB operand
             # belongs in the canonical WB history component, including closure.
             # A missing operand must never fall back to the combined number.
             value = presentation.get("wb_component_value")
+        elif (source and source not in {"stocks", "inventory_planning_v1"}) or (not source and business_date >= EFFECTIVE_DATE):
+            # Unknown/new sources must not promote a public combined row to WB.
+            value = None
         if row_key == "TOTAL|total_stock_total":
             result["TOTAL"] = _optional_integer(value)
         elif row_key.startswith("SKU:") and row_key.endswith("|stock_total"):
@@ -1320,10 +1382,10 @@ def _optional_integer(value: Any) -> int | None:
     if value is None or value == "" or isinstance(value, bool):
         return None
     try:
-        number = float(value)
-    except (TypeError, ValueError):
+        number = Decimal(str(value))
+    except (TypeError, ValueError, InvalidOperation):
         return None
-    if not number.is_integer():
+    if not number.is_finite() or number != number.to_integral_value():
         return None
     return int(number)
 

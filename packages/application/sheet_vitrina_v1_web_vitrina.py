@@ -14,6 +14,8 @@ from packages.application.inventory_cost_blend import (
     INVENTORY_COST_BLEND_EFFECTIVE_DATE,
 )
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
+from packages.application.fbs_snapshot_cost import fingerprint as inventory_fingerprint
+from packages.application.inventory_quantity import POLICY_VERSION as INVENTORY_POLICY_VERSION
 from packages.application.web_vitrina_official_fbs import (
     apply_current_official_fbs_estimate,
     build_current_official_fbs_estimate,
@@ -402,15 +404,14 @@ class SheetVitrinaV1WebVitrinaBlock:
             history_arguments["lifecycle_quality_resolver"] = (
                 lifecycle_quality_resolver
             )
+        inventory_history = read_inventory_history_window(
+            self.runtime.db_path, dates=snapshot.date_columns,
+            current_date=inventory_current_date, **history_arguments,
+        )
         rows = extend_rows_with_inventory_planning(
             rows,
             planning=inventory_planning,
-            history=read_inventory_history_window(
-                self.runtime.db_path,
-                dates=snapshot.date_columns,
-                current_date=inventory_current_date,
-                **history_arguments,
-            ),
+            history=inventory_history,
             date_columns=list(snapshot.date_columns),
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
         )
@@ -482,6 +483,9 @@ class SheetVitrinaV1WebVitrinaBlock:
                 conn.execute('PRAGMA query_only=ON')
                 corrected_parameters = {day: dated_parameters(conn, day) for day in corrected_dates}
             rows = recalculate_corrected_unit_margin_rows(rows, parameters=corrected_parameters)
+        from packages.application.sheet_vitrina_v1_inventory_planning import restore_finalized_inventory_history
+        rows = restore_finalized_inventory_history(rows, history=inventory_history,
+                                                  current_date=current_business_date_iso(now))
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(
@@ -517,6 +521,11 @@ class SheetVitrinaV1WebVitrinaBlock:
                     refreshed_at=refreshed_at,
                 ),
                 warehouse_business_projection=projection_metadata,
+                inventory_history_version=inventory_fingerprint({
+                    "policy": INVENTORY_POLICY_VERSION,
+                    "dates": {day: {"finalization": value.get("finalization_digest", ""),
+                                    "capture": value.get("source_digest", "")}
+                              for day, value in inventory_history.get("dates", {}).items()}}),
             ),
             status_summary=WebVitrinaContractStatusSummary(
                 refresh_status=str(period_refresh_summary["status"]),

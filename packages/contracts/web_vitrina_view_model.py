@@ -65,6 +65,9 @@ class WebVitrinaViewModelCell:
     quality_state: str = ""
     quality_label: str = ""
     quality_reason: str = ""
+    quantity_semantic_kind: str = ""
+    quantity_source_observed_at: str = ""
+    inventory_finalization_digest: str = ""
 
 
 @dataclass(frozen=True)

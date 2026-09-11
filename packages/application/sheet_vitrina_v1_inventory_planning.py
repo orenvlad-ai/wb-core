@@ -100,6 +100,8 @@ def apply_fbs_last_good_presentation(
             if value in {None, ""}:
                 continue
             current = dict(presentation.get(business_date) or {})
+            if current.get("inventory_quantity_contract") or current.get("quality_state") == "historical_repair_required":
+                continue
             existing_reason = str(
                 current.get("quality_reason") or current.get("reason") or ""
             ).strip()
@@ -147,6 +149,9 @@ def apply_fbs_unavailable_presentation(
         values = dict(row.values_by_date)
         presentation = dict(row.presentation_by_date)
         for business_date in values:
+            current = presentation.get(business_date, {})
+            if current.get("inventory_quantity_contract") or current.get("quality_state") == "historical_repair_required":
+                continue
             values[business_date] = ""
             presentation[business_date] = {
                 "state": "unavailable",
@@ -211,6 +216,9 @@ def extend_rows_with_inventory_planning(
     config_by_nm_id = {
         int(item.nm_id): item for item in enabled_config if bool(item.enabled)
     }
+    history_scope_keys = {key for dated in history_payload.get("dates", {}).values()
+                          for key, scope in dated.get("scopes", {}).items()
+                          if scope.get("typed_quantity") or scope.get("diagnostic")}
 
     scope_order: list[str] = []
     rows_by_scope: dict[str, list[WebVitrinaContractRow]] = {}
@@ -232,6 +240,10 @@ def extend_rows_with_inventory_planning(
             scope_order.append(scope_id)
             rows_by_scope[scope_id] = []
 
+    for scope_id in sorted(history_scope_keys):
+        if scope_id not in rows_by_scope:
+            scope_order.append(scope_id)
+            rows_by_scope[scope_id] = []
     result: list[WebVitrinaContractRow] = []
     for scope_id in scope_order:
         cluster = rows_by_scope[scope_id]
@@ -264,7 +276,10 @@ def extend_rows_with_inventory_planning(
                 result.extend(cluster)
                 continue
             config = config_by_nm_id.get(nm_id)
-            if config is None:
+            dated_identity = next((scope.get("wb", {}).get("provenance", {}).get("identity", {})
+                for dated in reversed(list(history_payload.get("dates", {}).values()))
+                if (scope := dated.get("scopes", {}).get(scope_id)) is not None), {})
+            if config is None and scope_id not in history_scope_keys:
                 result.extend(cluster)
                 continue
             result.extend(
@@ -276,8 +291,8 @@ def extend_rows_with_inventory_planning(
                     date_columns=date_columns,
                     scope_kind="SKU",
                     scope_key=scope_id,
-                    scope_label=str(config.display_name),
-                    group=str(config.group or "") or None,
+                    scope_label=str(config.display_name) if config else (dated_identity.get("name") or (cluster[0].scope_label if cluster else str(nm_id))),
+                    group=(str(config.group or "") or None) if config else (cluster[0].group if cluster else None),
                     nm_id=nm_id,
                     value_source=_sku_value_source(
                         planning_by_nm_id.get(nm_id),
@@ -779,7 +794,62 @@ def _history_scopes(
     return result
 
 
-def _historical_metric_value(
+def _historical_metric_value(spec: _MetricSpec, scope: Mapping[str, Any]) -> tuple[int | None, dict[str, Any]]:
+    from packages.application.inventory_quantity import CONTRACT, WB_KIND, FBS_KIND, POLICY_VERSION, REPAIR_REASON
+    component = (scope.get("wb") or {}) if spec.sku_key == INVENTORY_WB_TOTAL_KEY else (
+        dict(scope.get("facilities") or {}).get(spec.facility_id) or {})
+    if scope.get("diagnostic") and spec.sku_key in {INVENTORY_WB_TOTAL_KEY, COMBINED_TOTAL_ALIAS_KEY}:
+        return None, {"state": "unavailable", "tone": "warning", "source": CONTRACT,
+            "quality_state": "historical_repair_required", "quality_label": REPAIR_REASON,
+            "quality_reason": REPAIR_REASON, "reason": REPAIR_REASON,
+            "finalization_id": scope.get("finalization_id", ""),
+            "finalization_digest": scope.get("finalization_digest", ""), "diagnostic_policy_version": POLICY_VERSION}
+    value, presentation = _legacy_historical_metric_value(spec, scope)
+    if not scope.get("typed_quantity"):
+        return value, presentation
+    if spec.sku_key == COMBINED_TOTAL_ALIAS_KEY:
+        operands = [scope.get("wb", {}), *scope.get("facilities", {}).values()]
+        semantic = "wb_physical_plus_fbs_available_qty"
+        label = "WB на складе + доступный FBS"
+    else:
+        operands = [component]
+        semantic = component.get("provenance", {}).get("semantic_kind", "")
+        label = ("Доступно FBS по официальному снимку · " + str(component.get("label") or spec.label_ru)) if semantic == FBS_KIND else "WB на складе"
+    observation = {str(index): item.get("source_watermark", "") for index, item in enumerate(operands)}
+    presentation.update({"source": CONTRACT, "inventory_quantity_contract": CONTRACT,
+        "semantic_kind": semantic, "unit": "pcs", "source_observed_at": min(observation.values(), default=""),
+        "quantity_sources": operands, "quality_label": label if value is not None else presentation["quality_label"],
+        "quality_reason": label if value is not None else presentation["quality_reason"],
+        "finalization_id": scope.get("finalization_id", ""),
+        "finalization_digest": scope.get("finalization_digest", ""), "diagnostic_policy_version": POLICY_VERSION})
+    return value, presentation
+
+
+def restore_finalized_inventory_history(rows, *, history, current_date):
+    """Last quantity-only overlay; dated finalizations win over materialized ready cells."""
+    specs = _public_metric_specs({}, history=history, include_facilities=True)
+    specs_by_key = {key: spec for spec in specs for key in (spec.sku_key, spec.total_key)}
+    result = []
+    for row in rows:
+        spec = specs_by_key.get(row.metric_key)
+        if spec is None:
+            result.append(row)
+            continue
+        values, presentations = dict(row.values_by_date), dict(row.presentation_by_date)
+        for day, dated in history.get("dates", {}).items():
+            if day == current_date or day not in values or not dated.get("finalization_id"):
+                continue
+            scope = dated.get("scopes", {}).get(row.scope_key)
+            if scope is None or not (scope.get("typed_quantity") or scope.get("diagnostic")):
+                continue
+            value, presentation = _historical_metric_value(spec, scope)
+            values[day] = "" if value is None else value
+            presentations[day] = presentation
+        result.append(replace(row, values_by_date=values, presentation_by_date=presentations))
+    return result
+
+
+def _legacy_historical_metric_value(
     spec: _MetricSpec,
     scope: Mapping[str, Any],
 ) -> tuple[int | None, dict[str, Any]]:
