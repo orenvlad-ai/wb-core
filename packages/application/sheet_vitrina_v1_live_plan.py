@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 import json
 import math
@@ -1002,6 +1003,41 @@ class _SyntheticNoPromoLiveSourceBlock:
         )
 
 
+@dataclass
+class _CollectedBuildSources:
+    """One invocation's accepted source outcomes; never a publishable plan."""
+
+    scope: Any = None
+    effects: dict[str, Any] = field(default_factory=dict)
+    slots: dict[tuple, Any] = field(default_factory=dict)
+    inputs: dict[str, Any] = field(default_factory=dict)
+
+
+def _registry_state_fingerprint(current_state):
+    from packages.application.ready_publication import canonical, digest
+    return digest(canonical(asdict(current_state)))
+
+
+def bind_local_derive_publication(runtime, plan, current_state, expected):
+    """Resolve the exact predecessor the local derive actually observed.
+
+    A new publication after derive is a conflict, never permission to overwrite
+    it. Legacy/prebuilt builders keep their original exact CAS.
+    """
+    pinned = dict(plan.metadata or {}).get("local_derive_expected_ready_fingerprint")
+    if not pinned:
+        return current_state, expected
+    from packages.application.ready_publication import ReadyPublicationConflict
+    current = runtime.load_current_state()
+    if _registry_state_fingerprint(current) != plan.metadata.get("local_derive_registry_fingerprint"):
+        raise ReadyPublicationConflict("ready_registry_changed_after_local_derive")
+    latest = runtime.prepare_sheet_vitrina_ready_publication(
+        bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
+    if latest.fingerprint != pinned:
+        raise ReadyPublicationConflict("ready_target_changed_after_local_derive")
+    return current, latest
+
+
 class SheetVitrinaV1LivePlanBlock:
     def __init__(
         self,
@@ -1061,10 +1097,51 @@ class SheetVitrinaV1LivePlanBlock:
         return _format_runtime_timestamp(self.now_factory())
 
     def build_plan(self, *args, **kwargs) -> SheetVitrinaV1Envelope:
-        from packages.application.ready_publication import capture_build_inputs
-        with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as inputs:
-            plan = self._build_plan(*args, **kwargs)
-            return replace(plan, metadata={**dict(plan.metadata or {}), "publication_inputs": inputs})
+        from packages.application.ready_publication import (
+            ReadyPublicationConflict, capture_build_inputs, capture_expected,
+            check_build_inputs, check_expected, readonly,
+        )
+        args = list(args)
+        for index in (3, 4):
+            if len(args) > index and args[index] is not None:
+                args[index] = tuple(args[index])
+        for key in ("source_keys", "metric_keys"):
+            if kwargs.get(key) is not None:
+                kwargs[key] = tuple(kwargs[key])
+        collected = _CollectedBuildSources()
+        with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as source_inputs:
+            self._build_plan(*args, **kwargs, _collection=collected, _collect_only=True)
+        # Material pins from before external collection are deliberately not
+        # reused. Every local operand is read again below with fresh pins.
+        collected.inputs = deepcopy({key: source_inputs[key] for key in (
+            "sources", "consumed", "conflicts", "authority")})
+        for attempt in range(1, 4):
+            with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as inputs:
+                if inputs["authority"] != collected.inputs["authority"]:
+                    raise ReadyPublicationConflict("ready_collection_authority_changed")
+                inputs.update(deepcopy({key: collected.inputs[key] for key in (
+                    "sources", "consumed", "conflicts")}))
+                try:
+                    # Fail before doing local work if a consumed source already
+                    # changed. Reusing older source values is not a rebase.
+                    with readonly(self.runtime.db_path) as conn:
+                        check_build_inputs(conn, inputs)
+                        expected = capture_expected(conn, bundle_version=collected.scope[0],
+                            as_of_date=collected.scope[1], authority=inputs["authority"])
+                    plan = self._build_plan(*args, **kwargs, _collection=collected)
+                    with readonly(self.runtime.db_path) as conn:
+                        check_build_inputs(conn, inputs)
+                        check_expected(conn, expected)
+                except ReadyPublicationConflict as exc:
+                    if attempt == 3 or not str(exc).startswith((
+                        "ready_material_input_changed:", "ready_history_changed_during_build", "ready_target_changed:",
+                    )):
+                        raise
+                    continue
+                return replace(plan, metadata={**dict(plan.metadata or {}),
+                    "publication_inputs": inputs, "local_derive_attempt": attempt,
+                    "local_derive_expected_ready_fingerprint": expected.fingerprint})
+        raise AssertionError("bounded local derive did not terminate")
 
     def _build_plan(
         self,
@@ -1074,6 +1151,8 @@ class SheetVitrinaV1LivePlanBlock:
         source_keys: Iterable[str] | None = None,
         metric_keys: Iterable[str] | None = None,
         _include_archived_metrics_for_audit: bool = False,
+        _collection: _CollectedBuildSources | None = None,
+        _collect_only: bool = False,
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
         selected_source_keys = {str(item).strip() for item in (source_keys or []) if str(item).strip()}
@@ -1127,12 +1206,27 @@ class SheetVitrinaV1LivePlanBlock:
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
 
+        if _collection is not None:
+            from packages.application.ready_publication import ReadyPublicationConflict
+            scope = (current_state.bundle_version, effective_date, current_date,
+                     [asdict(item) for item in enabled_config],
+                     sorted(selected_source_keys), sorted(selected_metric_keys))
+            if _collect_only:
+                _collection.scope = scope
+            elif _collection.scope != scope:
+                raise ReadyPublicationConflict("ready_collection_scope_or_date_changed")
+
         mature_buyout_started = _start_refresh_phase(
             diagnostics,
             "mature_buyout_capture",
             started_at=self._diagnostic_timestamp(),
         )
-        if not selected_source_keys or "sales_funnel_history" in selected_source_keys:
+        if _collection is not None and not _collect_only:
+            diagnostics["mature_buyout_capture"] = deepcopy(_collection.effects["mature_buyout_capture"])
+            _finish_refresh_phase(diagnostics, mature_buyout_started,
+                finished_at=self._diagnostic_timestamp(), status="skipped",
+                note_kind="retained_source_collection")
+        elif not selected_source_keys or "sales_funnel_history" in selected_source_keys:
             try:
                 mature_buyout_capture = capture_mature_buyout_percent_snapshots(
                     runtime=self.runtime,
@@ -1181,7 +1275,10 @@ class SheetVitrinaV1LivePlanBlock:
                 note_kind="source_scope_excluded",
             )
 
-        proxy_v4_rollover = (
+        if _collection is not None and _collect_only:
+            _collection.effects["mature_buyout_capture"] = deepcopy(diagnostics["mature_buyout_capture"])
+        proxy_v4_rollover = (deepcopy(_collection.effects["proxy_v4_rollover"])
+            if _collection is not None and not _collect_only else (
             self.proxy_v4_parameters_block.materialize_latest_confirmed_window(
                 business_date=current_date,
             )
@@ -1192,7 +1289,9 @@ class SheetVitrinaV1LivePlanBlock:
                 "effective_date": current_date,
                 "detail": "Proxy V4 rollover is owned by the complete Vitrina refresh.",
             }
-        )
+        ))
+        if _collection is not None and _collect_only:
+            _collection.effects["proxy_v4_rollover"] = deepcopy(proxy_v4_rollover)
         diagnostics["proxy_v4_rollover"] = proxy_v4_rollover
         from packages.application.ready_publication import pin_parameters
         pin_parameters(self.runtime.db_path)
@@ -1255,7 +1354,12 @@ class SheetVitrinaV1LivePlanBlock:
             "current_web_source_sync",
             started_at=self._diagnostic_timestamp(),
         )
-        if not selected_source_keys or "web_source_snapshot" in selected_source_keys:
+        if _collection is not None and not _collect_only:
+            current_web_source_sync_note = _collection.effects["current_web_source_sync_note"]
+            _finish_refresh_phase(diagnostics, current_sync_started,
+                finished_at=self._diagnostic_timestamp(), status="skipped",
+                note_kind="retained_source_collection")
+        elif not selected_source_keys or "web_source_snapshot" in selected_source_keys:
             emit(
                 _format_log_event(
                     "current_web_source_sync_start",
@@ -1297,6 +1401,8 @@ class SheetVitrinaV1LivePlanBlock:
                     reason="source group does not include web_source_snapshot",
                 )
             )
+        if _collection is not None and _collect_only:
+            _collection.effects["current_web_source_sync_note"] = current_web_source_sync_note
         live_sources = self._load_live_sources(
             enabled_config,
             temporal_slots,
@@ -1306,7 +1412,13 @@ class SheetVitrinaV1LivePlanBlock:
             log=emit,
             source_keys=selected_source_keys or None,
             diagnostics=diagnostics,
+            _collection=_collection,
+            _collect_only=_collect_only,
         )
+        if _collect_only:
+            diagnostics["finished_at"] = self._diagnostic_timestamp()
+            _collection.effects["collection_diagnostics"] = deepcopy(diagnostics)
+            return None
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
             metrics_by_key=metrics_by_key,
@@ -1412,6 +1524,14 @@ class SheetVitrinaV1LivePlanBlock:
             status_layout=_load_json(STATUS_LAYOUT_PATH),
         )
         diagnostics["finished_at"] = self._diagnostic_timestamp()
+        if _collection is not None:
+            collection_diagnostics = _collection.effects["collection_diagnostics"]
+            diagnostics["started_at"] = collection_diagnostics["started_at"]
+            diagnostics["source_slots"] = deepcopy(collection_diagnostics["source_slots"])
+            diagnostics["local_derive_phase_summary"] = deepcopy(diagnostics["phase_summary"])
+            diagnostics["phase_summary"] = (deepcopy(collection_diagnostics["phase_summary"])
+                + [phase for phase in diagnostics["phase_summary"] if phase["phase_key"]
+                   not in {"mature_buyout_capture", "current_web_source_sync", "load_live_sources_total"}])
         diagnostics["duration_ms"] = _duration_ms_from_phase_summary(diagnostics.get("phase_summary"))
         diagnostics["source_summary"] = _build_refresh_source_summary(
             diagnostics.get("source_slots"),
@@ -1420,6 +1540,7 @@ class SheetVitrinaV1LivePlanBlock:
             plan,
             metadata={
                 **dict(getattr(plan, "metadata", {}) or {}),
+                "local_derive_registry_fingerprint": _registry_state_fingerprint(current_state),
                 "refresh_diagnostics": diagnostics,
                 "incident_projection_quality_by_date": {
                     slot.column_date: dict(
@@ -1500,6 +1621,8 @@ class SheetVitrinaV1LivePlanBlock:
         log: LivePlanLogEmitter | None = None,
         source_keys: set[str] | None = None,
         diagnostics: dict[str, Any] | None = None,
+        _collection: _CollectedBuildSources | None = None,
+        _collect_only: bool = False,
     ) -> TemporalLiveSources:
         emit = log or _noop_live_plan_log
         selected_source_keys = _expand_selected_source_keys_for_dependencies(
@@ -1736,6 +1859,8 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_date=slot.column_date,
                     started_at=self._diagnostic_timestamp(),
                 )
+                slot_identity = (source_key, slot.slot_key, slot.column_date,
+                                 tuple(source_nm_ids), stock_scope_error is not None)
                 if stock_scope_error is not None:
                     # An unavailable catalog must not revive a smaller cache or
                     # block unrelated sources in this refresh.
@@ -1750,7 +1875,12 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_nm_ids=source_nm_ids,
                     loader=loader,
                 )
-                if stock_scope_error is not None:
+                if _collection is not None and not _collect_only:
+                    from packages.application.ready_publication import ReadyPublicationConflict
+                    if slot_identity not in _collection.slots:
+                        raise ReadyPublicationConflict("ready_collection_source_scope_changed:" + source_key)
+                    status, payload = deepcopy(_collection.slots[slot_identity])
+                elif stock_scope_error is not None:
                     status, payload = _capture_live_source(**capture_kwargs)
                     status, payload = self._preserve_closed_stocks_without_catalog(status)
                 else:
@@ -1763,6 +1893,8 @@ class SheetVitrinaV1LivePlanBlock:
                             else None
                         ),
                     )
+                if _collection is not None and _collect_only:
+                    _collection.slots[slot_identity] = deepcopy((status, payload))
                 if stock_scope is not None:
                     status = replace(status, diagnostics={
                         **dict(status.diagnostics or {}),
@@ -1813,9 +1945,10 @@ class SheetVitrinaV1LivePlanBlock:
                         ),
                     )
                     stock_items = list(getattr(payload, "items", []) or [])
-                    if all(hasattr(item, "stock_total") for item in stock_items):
+                    if not _collect_only and all(hasattr(item, "stock_total") for item in stock_items):
                         projection = build_vitrina_incident_stock_projection(
                             self.runtime,
+                            cache_enabled=False,
                             items=stock_items,
                             warehouse_rows=list(getattr(payload, "warehouse_rows", []) or []),
                             snapshot_date=str(getattr(payload, "snapshot_date", "") or slot.column_date),
@@ -1851,6 +1984,8 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "promo_by_price":
                     current_lookups.promo_lookup = _index_promo_items(payload)
 
+            if _collect_only:
+                continue
             try:
                 current_lookups.our_wb_cost_lookup = self.runtime.load_our_wb_cost_daily_state(
                     as_of_date=slot.column_date
