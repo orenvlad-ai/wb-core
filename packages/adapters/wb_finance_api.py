@@ -27,7 +27,7 @@ DEFAULT_MAX_PAGES = 200
 @dataclass(frozen=True)
 class FinanceHttpResult:
     status: int
-    rows: list[dict[str, Any]]
+    rows: list[Any]
     headers: Mapping[str, str]
 
 
@@ -438,6 +438,20 @@ class WbFinanceApiClient:
                         pages=pages,
                         http_status=response.status,
                     )
+                if period == "daily" and not isinstance(response.rows, list):
+                    raise FinanceApiError(
+                        "invalid_rows", date_from=date_from, date_to=date_to,
+                        period=period, cursor=rrd_id, pages=pages, http_status=200,
+                    )
+                if period == "daily" and any(not isinstance(row, Mapping) for row in response.rows):
+                    # Preserve the rejected page for safe I1 counters. A daily
+                    # report cannot prove absent SKU operations after row loss.
+                    pages += 1
+                    all_rows.extend(response.rows)
+                    raise FinanceApiError(
+                        "invalid_row", date_from=date_from, date_to=date_to,
+                        period=period, cursor=rrd_id, pages=pages, http_status=200,
+                    )
                 if not response.rows:
                     raise FinanceApiError(
                         "partial_report",
@@ -496,11 +510,15 @@ class WbFinanceApiClient:
             with urllib.request.urlopen(request, timeout=180) as response:
                 raw = response.read()
                 parsed = json.loads(raw) if raw else []
+                if payload["period"] == "daily" and not isinstance(parsed, list):
+                    raise ValueError("Finance daily API expected an array payload")
                 if parsed and not isinstance(parsed, list):
                     raise ValueError("Finance API expected an array payload")
                 return FinanceHttpResult(
                     int(response.status),
-                    [dict(row) for row in parsed if isinstance(row, Mapping)],
+                    ([dict(row) if isinstance(row, Mapping) else row for row in parsed]
+                     if payload["period"] == "daily"
+                     else [dict(row) for row in parsed if isinstance(row, Mapping)]),
                     dict(response.headers.items()),
                 )
         except urllib.error.HTTPError as exc:

@@ -12,19 +12,8 @@ from packages.contracts.fin_report_daily_block import (
     FinReportDailySuccess,
 )
 from packages.contracts.source_attempt_diagnostics import SourceAttemptError, unknown_diagnostics
-
-
-FIN_FIELDS = (
-    "fin_delivery_rub",
-    "fin_storage_fee",
-    "fin_deduction",
-    "fin_commission",
-    "fin_penalty",
-    "fin_additional_payment",
-    "fin_buyout_rub",
-    "fin_commission_wb_portal",
-    "fin_acquiring_fee",
-    "fin_loyalty_rub",
+from packages.domain.finance_daily_report import (
+    FIN_FIELDS, finite_money, validate_finance_daily_projection,
 )
 
 
@@ -59,6 +48,11 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> FinReportDailyEnvelo
         for field in FIN_FIELDS:
             acc[field] += _require_float(row, field)
 
+    finite_money(storage_total)
+    for values in grouped.values():
+        for value in values.values():
+            finite_money(value)
+
     items = [
         FinReportDailyItem(
             nm_id=nm_id,
@@ -76,7 +70,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> FinReportDailyEnvelo
         for nm_id in sorted(grouped)
     ]
 
-    return FinReportDailyEnvelope(
+    envelope = FinReportDailyEnvelope(
         result=FinReportDailySuccess(
             kind="success",
             snapshot_date=snapshot_date,
@@ -89,6 +83,12 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> FinReportDailyEnvelo
             diagnostics=source_diagnostics,
         )
     )
+    if "finance_report" in source_diagnostics:
+        validate_finance_daily_projection(
+            envelope, expected_date=snapshot_date,
+            expected_nm_ids=payload.get("requested_nm_ids", []),
+        )
+    return envelope
 
 
 def _require_str(payload: Mapping[str, Any], key: str) -> str:
@@ -100,16 +100,16 @@ def _require_str(payload: Mapping[str, Any], key: str) -> str:
 
 def _require_int(payload: Mapping[str, Any], key: str) -> int:
     value = payload.get(key)
-    if not isinstance(value, int):
+    if type(value) is not int or value < 0:
         raise ValueError(f"{key} must be int")
     return value
 
 
 def _require_float(payload: Mapping[str, Any], key: str) -> float:
     value = payload.get(key)
-    if not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise ValueError(f"{key} must be numeric")
-    return float(value)
+    return finite_money(value)
 
 
 class FinReportDailyBlock:
