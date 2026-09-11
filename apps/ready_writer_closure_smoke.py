@@ -19,7 +19,9 @@ from apps.spp_metric_recompute_smoke import _init_db
 from ci.fixture_process import fixture_process, checkpoint
 
 WRITERS = {
+    "apps/ads_partial_publication.py",
     "apps/canonical_cost_engine_vitrina_publication.py",
+    "apps/finance_daily_publication.py",
     "apps/supplier_shipment_publication_chain.py",  # disposable proof, apply remains disabled
     "apps/promo_metric_eligibility_recompute.py",
     "apps/spp_metric_recompute.py",
