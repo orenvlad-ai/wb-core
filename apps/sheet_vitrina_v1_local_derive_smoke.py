@@ -1,9 +1,11 @@
 """Retained source collection and optimistic local derive regression tests."""
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import ExitStack, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import sqlite3
 import sys
 import unittest
@@ -18,6 +20,8 @@ from apps.sheet_vitrina_v1_onec_zero_stock_empty_bucket_smoke import (
 )
 from apps.ready_publication_fixture import save_ready_fixture
 from apps.sheet_vitrina_v1_refresh_read_split_smoke import CountingBlock
+from apps import ready_publication_smoke as active_fixture
+from apps import sheet_vitrina_v1_refresh_read_split_smoke as source_fixture
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.onec_stocks_block import OnecStocksBlock
 from packages.application.sheet_vitrina_v1_onec_stocks import DEFAULT_ONEC_STAGE_MAPPING
@@ -220,6 +224,116 @@ class LocalDeriveTests(unittest.TestCase):
             refreshed_at="2026-05-20T08:00:00Z")
         with self.assertRaisesRegex(publication.ReadyPublicationConflict, "ready_target_changed_after_local_derive"):
             bind_local_derive_publication(self.runtime, plan, current, expected)
+
+    def test_september_active_book_reporting_and_retry_keep_collection_single(self):
+        day, outer = "2026-09-11", "2026-09-10"
+        now = datetime(2026, 9, 11, 14, tzinfo=timezone.utc)
+        stamp = "2026-09-11T14:00:00Z"
+        with TemporaryDirectory() as directory, ExitStack() as stack:
+            for key, value in [("DAY", day), ("OUTER", outer), ("NOW", now), ("STAMP", stamp)]:
+                stack.enter_context(patch.object(active_fixture, key, value))
+            stack.enter_context(patch.object(source_fixture, "PROBE_NM_ID", 1))
+            # Enrich the existing accounting fixture with typed current-source
+            # evidence needed by the September inventory-history consumer.
+            capture, wb = active_fixture.capture, active_fixture.wb
+            def typed_capture(*args, **kwargs):
+                value = capture(*args, **kwargs)
+                snapshot = value["quantity_snapshot"]
+                snapshot["source"] = "official_fbs_stock_snapshot_v1"
+                snapshot["facility_evidence"] = {"ff-1": {"facility_id": "ff-1",
+                    "facility_name": "Fixture FF", "mapping_id": "fixture-map",
+                    "stock_run_id": "fixture-current", "stock_digest": "fixture-stock",
+                    "captured_at": stamp}}
+                return value
+            def typed_wb(*args, **kwargs):
+                value = wb(*args, **kwargs)
+                value.update(authority_complete=True, requested_nm_ids=[1],
+                    source={"snapshot_date": day, "fetched_at": stamp, "snapshot_id": "fixture-wb"})
+                value["rows"][0]["components"] = {"physical": 500, "to_customer": 0}
+                return value
+            stack.enter_context(patch.object(active_fixture, "capture", side_effect=typed_capture))
+            stack.enter_context(patch.object(active_fixture, "wb", side_effect=typed_wb))
+            root = Path(directory)
+            runtime = active_fixture.seed(root)
+            runtime.save_nomenclature_item({"item_id": "september-1", "nm_id": 1,
+                "our_sku": "september-1", "is_active": True, "created_at": stamp, "updated_at": stamp})
+            active_fixture.save(runtime, active_fixture.make_plan(),
+                prepared=active_fixture.make_book(root, opening=True))
+            counters = source_fixture._build_counting_blocks()
+            sync = SimpleNamespace(ensure_snapshot=lambda *_: None,
+                ensure_closed_day_snapshot=lambda **_: None)
+            block = SheetVitrinaV1LivePlanBlock(runtime, now_factory=lambda: now,
+                current_web_source_sync=sync, closed_day_web_source_sync=sync,
+                spp_proxy_block=CountingBlock("spp_proxy"), **counters)
+            phase = ["collect"]
+            connect = sqlite3.connect
+            local_writes = []
+            def tracked_connection(*args, **kwargs):
+                conn = connect(*args, **kwargs)
+                def authorize(action, table, column, database, trigger):
+                    if phase[0] == "local" and table != "sqlite_master" and action in {
+                        sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                    }:
+                        local_writes.append((action, table))
+                        return sqlite3.SQLITE_DENY
+                    return sqlite3.SQLITE_OK
+                conn.set_authorizer(authorize)
+                return conn
+            stack.enter_context(patch.object(sqlite3, "connect", side_effect=tracked_connection))
+            local_attempts = []
+            acceptance = []
+            for method in ["save_temporal_source_snapshot", "save_temporal_source_slot_snapshot",
+                           "save_temporal_source_closure_state", "save_wb_incident_projection_cache"]:
+                original_write = getattr(runtime, method)
+                def guarded(*args, _name=method, _write=original_write, **kwargs):
+                    self.assertNotEqual(phase[0], "local", "local derive wrote " + _name)
+                    acceptance.append((_name, phase[0]))
+                    return _write(*args, **kwargs)
+                stack.enter_context(patch.object(runtime, method, side_effect=guarded))
+            original_load = block._load_live_sources
+            def database_image():
+                with closing(connect(Path(runtime.db_path).as_uri() + "?mode=ro", uri=True)) as conn:
+                    conn.execute("PRAGMA query_only=ON")
+                    return list(conn.iterdump())
+            def phases(*args, **kwargs):
+                phase[0] = "collect" if kwargs.get("_collect_only") else "local"
+                before = database_image() if phase[0] == "local" else None
+                result = original_load(*args, **kwargs)
+                if phase[0] == "local":
+                    self.assertEqual(database_image(), before, "local derive changed rows or schema")
+                    local_attempts.append(1)
+                    if len(local_attempts) == 1:
+                        with closing(connect(runtime.db_path)) as conn, conn:
+                            conn.execute(f"INSERT INTO {FBS_TABLE}(run_id,seller_warehouse_id,chrt_id,nm_id,amount,evidence_digest) VALUES('september-next',1,1,1,1100,'changed-real-quantity')")
+                return result
+            stack.enter_context(patch.object(block, "_load_live_sources", side_effect=phases))
+            rollover = stack.enter_context(patch.object(block.proxy_v4_parameters_block,
+                "materialize_latest_confirmed_window", wraps=block.proxy_v4_parameters_block.materialize_latest_confirmed_window))
+            sync_call = stack.enter_context(patch.object(sync, "ensure_snapshot", wraps=sync.ensure_snapshot))
+            plan = block.build_plan(as_of_date=outer)
+            self.assertEqual(plan.metadata["local_derive_attempt"], 2)
+            self.assertIn(1, plan.metadata["refresh_diagnostics"]["reporting_catalog"]["nm_ids"])
+            self.assertEqual(plan.metadata["refresh_diagnostics"]["reporting_catalog"]["policy"],
+                             "automatic_nomenclature_reporting_v1")
+            self.assertEqual(rollover.call_count, 1)
+            self.assertEqual(sync_call.call_count, 1)
+            self.assertTrue(acceptance)
+            self.assertTrue(all(stage == "collect" for _, stage in acceptance))
+            self.assertEqual(local_writes, [])
+            for name, source in counters.items():
+                if source.source_key != "sales_funnel_history":
+                    self.assertLessEqual(len(source.request_dates), 2, name)
+                else:
+                    self.assertEqual(len(source.request_dates), len(set(source.request_dates)))
+            phase[0] = "publish"
+            current = runtime.load_current_state()
+            expected = runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version, as_of_date=outer)
+            with active_fixture.clock():
+                runtime.save_sheet_vitrina_ready_snapshot(current_state=current, plan=plan,
+                    expected=expected, refreshed_at="2026-09-11T14:01:00Z")
+            receipt = active_fixture.book.current_publication_receipt(runtime, now=now)
+            self.assertEqual(receipt["business_date"], day)
+            self.assertEqual(receipt["status"], "published")
 
 
 if __name__ == "__main__":

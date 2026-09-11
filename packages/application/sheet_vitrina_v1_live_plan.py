@@ -1011,6 +1011,7 @@ class _CollectedBuildSources:
     effects: dict[str, Any] = field(default_factory=dict)
     slots: dict[tuple, Any] = field(default_factory=dict)
     inputs: dict[str, Any] = field(default_factory=dict)
+    capital_reader: OwnProductCapitalBlock | None = None
 
 
 def _registry_state_fingerprint(current_state):
@@ -1630,7 +1631,14 @@ class SheetVitrinaV1LivePlanBlock:
         )
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
-        own_product_capital_block = OwnProductCapitalBlock(runtime=self.runtime)
+        if _collection is None or _collect_only:
+            own_product_capital_block = OwnProductCapitalBlock(runtime=self.runtime)
+            if _collection is not None:
+                _collection.capital_reader = own_product_capital_block
+        else:
+            # The constructor bootstraps schema; its read methods hold no
+            # operand cache and reopen the database on each local attempt.
+            own_product_capital_block = _collection.capital_reader
         try:
             own_product_capital_cutover_date = (
                 own_product_capital_block.functional_warehouse_cutover_date()
