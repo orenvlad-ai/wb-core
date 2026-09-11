@@ -4192,7 +4192,9 @@ class WbFinanceWeeklyBlock:
                     payload = {}
                 result, envelope_origin = resolve_ads_snapshot_payload(payload)
                 source_kind = str((result or {}).get("kind") or "invalid")
-                items = (result or {}).get("items") or []
+                # This legacy consumer requires full Ads coverage. Observed
+                # partial rows must not silently qualify its finance manifest.
+                items = ((result or {}).get("items") or []) if source_kind == "success" else []
                 for item in items if isinstance(items, list) else []:
                     if isinstance(item, dict):
                         value = str(item.get("nm_id", item.get("nmId", "")) or "")

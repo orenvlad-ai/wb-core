@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from apps.fin_report_daily_finance_transport_smoke import Clock, _client, _row
+from apps.ads_daily_report_contract_smoke import campaign as complete_campaign, roster as dated_roster
 from apps.sheet_vitrina_v1_business_time_smoke import _build_live_plan
 from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
 from packages.adapters.fin_report_daily_block import HttpBackedFinReportDailySource
@@ -33,7 +34,7 @@ DAY = "2026-08-27"
 
 
 def ads_result(pages, ids=(5, 6), nm_ids=(101, 102), batch_size=50):
-    source = HttpBackedAdsCompactSource(complete_catalog=True, max_ids_per_request=batch_size, batch_sleep_seconds=0)
+    source = HttpBackedAdsCompactSource(complete_catalog=True, max_ids_per_request=batch_size, batch_sleep_seconds=0, dated_roster=dated_roster(ids, DAY))
     responses = [{"all": len(ids), "adverts": [{"status": 9, "count": len(ids),
                  "advert_list": [{"advertId": i} for i in ids]}]}] + deepcopy(pages)
     def fake_json(**_kwargs):
@@ -48,9 +49,7 @@ def ads_result(pages, ids=(5, 6), nm_ids=(101, 102), batch_size=50):
 
 
 def campaign(nm_id=101, advert_id=5):
-    return {"advertId": advert_id, "sum": 7, "days": [{"date": DAY, "sum": 7,
-            "apps": [{"nms": [{"nmId": nm_id, "sum": 7, "views": 50,
-                                "clicks": 3, "atbs": 1, "orders": 1, "sum_price": 100}]}]}]}
+    return complete_campaign(nm_id, advert_id, day=DAY)
 
 
 def capture(source, loader):
@@ -75,20 +74,43 @@ def check_ads():
     assert d["error_code"] == "ads_catalog_statistics_incomplete" and d["source_observed_at"]
     assert d["counter_basis"] == "observed_campaign_responses"
     assert d["batches"][0]["source_date"] == DAY and d["batches"][0]["digest"].startswith("sha256:")
+    assert d["attempted_campaign_ids"] == [5, 6] and d["not_attempted_campaign_ids"] == []
+    assert d["missing_from_received_batches_campaign_ids"] == [6]
+    assert d["batches"][0]["response_kind"] == "array"
+    # One omitted response in the first batch must not classify the untouched
+    # second batch as provider omissions. Preserve the whole expected roster.
+    many_ids = tuple(range(1, 60))
+    first_page = [complete_campaign(advert_id=i, day=DAY) for i in range(1, 50)]
+    interrupted, interrupted_payload = capture("ads_compact", lambda: ads_result([first_page], ids=many_ids))
+    evidence = interrupted.diagnostics
+    assert interrupted_payload is None and evidence["batch_count"] == 2
+    assert len(evidence["batches"]) == 1 and len(evidence["expected_campaign_ids"]) == 59
+    assert evidence["missing_campaign_ids"] == list(range(50, 60))
+    assert evidence["missing_from_received_batches_campaign_ids"] == [50]
+    assert evidence["not_attempted_campaign_ids"] == list(range(51, 60))
+    null_status, null_payload = capture("ads_compact", lambda: ads_result([None], ids=(5,)))
+    assert null_payload is None and null_status.kind == "error"
+    assert null_status.diagnostics["batches"][0]["response_kind"] == "null"
+    assert null_status.diagnostics["missing_from_received_batches_campaign_ids"] == [5]
     duplicate, _ = capture("ads_compact", lambda: ads_result([[campaign(), campaign()]]))
     assert duplicate.diagnostics["duplicate_campaign_ids"] == [5]
     assert duplicate.diagnostics["missing_campaign_ids"] == [6]
     partial, _ = capture("ads_compact", lambda: ads_result([[campaign()], OSError("private provider detail")], batch_size=1))
     assert partial.diagnostics["batches"][0]["returned_campaign_ids"] == [5]
     assert partial.diagnostics["batches"][1]["status"] == "error"
+    assert partial.diagnostics["attempted_campaign_ids"] == [5, 6]
+    assert partial.diagnostics["not_attempted_campaign_ids"] == []
+    assert partial.diagnostics["missing_from_received_batches_campaign_ids"] == []
+    assert partial.diagnostics["response_error_campaign_ids"] == [6]
+    assert partial.diagnostics["batches"][1]["response_kind"] is None
     assert "private provider detail" not in json.dumps(asdict(partial))
-    empty_days = ads_result([[{"advertId": 5, "sum": 20, "days": []}]], ids=(5,))
-    assert empty_days.kind == "success" and [i.ads_sum for i in empty_days.items] == [0, 0]
-    assert "campaign_positive_sum_without_days" in empty_days.diagnostics["anomaly_codes"]
+    empty_status, _ = capture("ads_compact", lambda: ads_result([[{"advertId": 5, "sum": 20, "days": []}]], ids=(5,)))
+    assert empty_status.diagnostics["error_code"] == "ads_catalog_campaign_positive_sum_without_days"
+    assert "campaign_positive_sum_without_days" in empty_status.diagnostics["anomaly_codes"]
     missing = campaign()
     del missing["days"][0]["apps"][0]["nms"][0]["views"]
-    lossy = ads_result([[missing]], ids=(5,))
-    assert lossy.items[0].ads_views == 0  # Existing behavior, explicitly deferred to И7.
+    lossy, _ = capture("ads_compact", lambda: ads_result([[missing]], ids=(5,)))
+    assert lossy.kind == "error"
     assert lossy.diagnostics["batches"][0]["missing_metric_fields"] == {"views": 1}
     missing_spend = campaign()
     del missing_spend["days"][0]["apps"][0]["nms"][0]["sum"]
@@ -97,9 +119,8 @@ def check_ads():
     assert rejected.diagnostics["batches"][0]["missing_metric_fields"] == {"sum": 1}
     huge_integer = campaign(nm_id=999)
     huge_integer["days"][0]["apps"][0]["nms"][0]["views"] = 10 ** 400
-    outside_scope = ads_result([[huge_integer]], ids=(5,))
-    assert outside_scope.kind == "success"
-    assert [item.ads_sum for item in outside_scope.items] == [0, 0]
+    outside_scope, _ = capture("ads_compact", lambda: ads_result([[huge_integer]], ids=(5,)))
+    assert outside_scope.kind == "error"
     assert outside_scope.diagnostics["batches"][0]["invalid_metric_fields"] == {"views": 1}
     wrong_date = deepcopy(huge_integer)
     wrong_date["days"][0]["date"] = "2026-08-26"
@@ -108,20 +129,20 @@ def check_ads():
     assert wrong_date_status.diagnostics["error_code"] == "ads_catalog_day_invalid"
     assert wrong_date_status.diagnostics["batches"][0]["invalid_metric_fields"] == {"views": 1}
     for raw_id, expected_id in ((5.0, 5), (True, 1)):
-        noncanonical = ads_result([[campaign(advert_id=raw_id)]], ids=(expected_id,))
-        assert noncanonical.kind == "success" and noncanonical.items[0].ads_sum == 7
+        noncanonical, _ = capture("ads_compact", lambda: ads_result([[campaign(advert_id=raw_id)]], ids=(expected_id,)))
+        assert noncanonical.kind == "error"
         evidence = noncanonical.diagnostics
         assert evidence["counter_basis"] == "observed_campaign_responses"
         assert evidence["returned_campaign_ids"] == [expected_id] and evidence["missing_campaign_ids"] == []
         assert evidence["batches"][0]["noncanonical_campaign_ids"] == [expected_id]
         assert "noncanonical_campaign_identity" in evidence["anomaly_codes"]
-        note = _source_attempt_status_note(capture("ads_compact", lambda: noncanonical)[0])
+        note = _source_attempt_status_note(noncanonical)
         assert "returned_campaign_count=1" in note and "missing_campaign_count=0" in note
-    summary = _source_attempt_status_note(capture("ads_compact", lambda: empty_days)[0])
+    summary = _source_attempt_status_note(empty_status)
     assert "campaign_positive_sum_without_days" in summary
     # Evidence scales with campaign IDs and batches, never with raw per-SKU rows.
     ids = tuple(range(1, 1001))
-    pages = [[{"advertId": i, "days": []} for i in ids[start:start + 50]] for start in range(0, len(ids), 50)]
+    pages = [[complete_campaign(advert_id=i, day=DAY, zero=True) for i in ids[start:start + 50]] for start in range(0, len(ids), 50)]
     scaled = ads_result(pages, ids=ids)
     size = len(json.dumps(scaled.diagnostics).encode())
     assert size < 100_000, size

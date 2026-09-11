@@ -12,6 +12,10 @@ from urllib import error, parse, request as urllib_request
 
 from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, load_runtime_config
 from packages.contracts.ads_compact_block import AdsCompactRequest
+from packages.contracts.ads_daily_report import (
+    AdsDatedRoster, AdsReportError, validate_ads_campaign_batch, validate_dated_roster,
+    validate_ads_request, checked_ads_count, COUNTS,
+)
 from packages.contracts.source_attempt_diagnostics import (
     SourceAttemptError, new_attempt, observed_now, source_digest,
 )
@@ -48,6 +52,8 @@ class HttpBackedAdsCompactSource:
         max_ids_per_request: int = 50,
         batch_sleep_seconds: float = 22.0,
         complete_catalog: bool = False,
+        dated_roster: AdsDatedRoster | None = None,
+        partial_from_date: str | None = None,
     ) -> None:
         self._default_base_url = base_url.rstrip("/")
         self._token_env_var = token_env_var
@@ -56,6 +62,10 @@ class HttpBackedAdsCompactSource:
         self._max_ids_per_request = max_ids_per_request
         self._batch_sleep_seconds = batch_sleep_seconds
         self._complete_catalog = complete_catalog
+        self._dated_roster = dated_roster
+        self._partial_from_date = partial_from_date
+        if type(max_ids_per_request) is not int or not 1 <= max_ids_per_request <= 50:
+            raise ValueError("ads_campaign_batch_limit_invalid")
 
     def fetch(self, request: AdsCompactRequest) -> Mapping[str, Any]:
         runtime = load_runtime_config(
@@ -67,6 +77,9 @@ class HttpBackedAdsCompactSource:
         diagnostics = new_attempt("ads_compact", request.snapshot_date)
         diagnostics.update(expected_campaign_ids=None, returned_campaign_ids=None,
                            missing_campaign_ids=None, duplicate_campaign_ids=None,
+                           attempted_campaign_ids=None, not_attempted_campaign_ids=None,
+                           missing_from_received_batches_campaign_ids=None,
+                           response_error_campaign_ids=None,
                            batch_count=None, batches=[], source_digest=None,
                            counter_basis="adapter_attempt_evidence")
         try:
@@ -77,6 +90,14 @@ class HttpBackedAdsCompactSource:
             )
             diagnostics["source_observed_at"] = observed_now()
             diagnostics["campaign_list_digest"] = source_digest(count_payload)
+            if self._partial_enabled(request.snapshot_date):
+                diagnostics["catalog_observation"] = {
+                    "target_date": request.snapshot_date,
+                    "observed_at": diagnostics["source_observed_at"],
+                    "digest": diagnostics["campaign_list_digest"],
+                    "campaign_count": count_payload.get("all"),
+                    "state": "current_catalog_does_not_prove_full_dated_roster",
+                }
             advert_ids = self._extract_non_archived_advert_ids(count_payload, snapshot_date=request.snapshot_date)
             rows = self._fetch_compact_rows(
                 base_url=runtime.base_url, token=runtime.token, advert_ids=advert_ids,
@@ -103,6 +124,10 @@ class HttpBackedAdsCompactSource:
             "data": {"rows": rows},
         }
 
+    def _partial_enabled(self, snapshot_date: str) -> bool:
+        return bool(self._complete_catalog and self._partial_from_date
+                    and snapshot_date >= self._partial_from_date)
+
     def _fetch_compact_rows(
         self,
         *,
@@ -114,7 +139,13 @@ class HttpBackedAdsCompactSource:
         timeout_seconds: float,
         diagnostics: dict[str, Any] | None = None,
     ) -> list[Mapping[str, Any]]:
+        if self._complete_catalog:
+            try:
+                validate_ads_request(snapshot_date=snapshot_date, nm_ids=nm_ids, campaign_ids=advert_ids)
+            except AdsReportError as exc:
+                raise SourceAttemptError(str(exc), diagnostics or new_attempt("ads_compact", snapshot_date)) from exc
         wanted = set(nm_ids)
+        partial = self._partial_enabled(snapshot_date)
         fetched_at = f"{snapshot_date} 21:30:00"
         agg: dict[tuple[str, int], dict[str, Any]] = {}
         batches = [
@@ -126,12 +157,22 @@ class HttpBackedAdsCompactSource:
             diagnostics = new_attempt("ads_compact", snapshot_date)
         diagnostics.update(expected_campaign_ids=list(advert_ids), returned_campaign_ids=[],
                            missing_campaign_ids=list(advert_ids), duplicate_campaign_ids=[],
+                           attempted_campaign_ids=[], not_attempted_campaign_ids=list(advert_ids),
+                           missing_from_received_batches_campaign_ids=[], response_error_campaign_ids=[],
                            batch_count=len(batches), batches=[], source_digest=None,
                            counter_basis="observed_campaign_responses")
         returned_ids: list[int] = []
+        attempted_ids: list[int] = []
+        observed_campaign_ids: list[int] = []
+        no_statistics_campaign_ids: list[int] = []
+        unclassified_platform_campaign_ids: list[int] = []
         for index, batch in enumerate(batches):
+            attempted_ids.extend(batch)
+            diagnostics.update(attempted_campaign_ids=list(attempted_ids),
+                               not_attempted_campaign_ids=sorted(set(advert_ids) - set(attempted_ids)))
             batch_evidence = {"batch_index": index + 1, "source_date": snapshot_date,
                               "expected_campaign_ids": list(batch), "status": "started",
+                              "attempt_started_at": observed_now(), "response_kind": None,
                               "returned_campaign_ids": None, "missing_campaign_ids": None,
                               "duplicate_campaign_ids": None, "digest": None}
             diagnostics["batches"].append(batch_evidence)
@@ -146,11 +187,18 @@ class HttpBackedAdsCompactSource:
                 )
             except Exception as exc:
                 batch_evidence["status"] = "error"
+                diagnostics["response_error_campaign_ids"].extend(batch)
                 code = exc.code if isinstance(exc, SourceAttemptError) else "ads_transport_error"
                 if isinstance(exc, SourceAttemptError):
                     batch_evidence.update(exc.diagnostics)
                 raise SourceAttemptError(code, diagnostics) from exc
             diagnostics["source_observed_at"] = observed_now()
+            batch_evidence["response_kind"] = (
+                "null" if payload is None else "array" if isinstance(payload, list)
+                else "object" if isinstance(payload, Mapping) else "boolean" if isinstance(payload, bool)
+                else "number" if isinstance(payload, (int, float)) else "string" if isinstance(payload, str)
+                else "invalid"
+            )
             items = payload if isinstance(payload, list) else []
             ids, noncanonical_ids, invalid_id_count = _campaign_id_evidence(items)
             returned_ids.extend(ids)
@@ -160,6 +208,7 @@ class HttpBackedAdsCompactSource:
                                   unexpected_campaign_ids=sorted(set(ids) - set(batch)), digest=source_digest(payload))
             batch_evidence.update(noncanonical_campaign_ids=noncanonical_ids,
                                   invalid_campaign_identity_count=invalid_id_count)
+            diagnostics["missing_from_received_batches_campaign_ids"].extend(batch_evidence["missing_campaign_ids"])
             for code, present in (("noncanonical_campaign_identity", noncanonical_ids),
                                   ("invalid_campaign_identity", invalid_id_count)):
                 if present and code not in diagnostics["anomaly_codes"]:
@@ -170,23 +219,33 @@ class HttpBackedAdsCompactSource:
                                source_digest=source_digest([b["digest"] for b in diagnostics["batches"]]))
             _record_ads_anomalies(items, batch_evidence, diagnostics)
             if self._complete_catalog:
-                if not isinstance(payload, list) or len(items) != len(batch) or {x.get('advertId') for x in items if isinstance(x, Mapping)} != set(batch):
-                    raise SourceAttemptError('ads_catalog_statistics_incomplete', diagnostics)
-                for advert in items:
-                    if not isinstance(advert, Mapping) or not isinstance(advert.get('days'), list):
-                        raise SourceAttemptError('ads_catalog_statistics_invalid', diagnostics)
-                    for day in advert['days']:
-                        if not isinstance(day, Mapping) or _normalize_snapshot_date(day.get('date')) != snapshot_date or not isinstance(day.get('apps'), list):
-                            raise SourceAttemptError('ads_catalog_day_invalid', diagnostics)
-                        for app in day['apps']:
-                            if not isinstance(app, Mapping) or not isinstance(app.get('nms'), list):
-                                raise SourceAttemptError('ads_catalog_sku_breakdown_missing', diagnostics)
-                            for item in app['nms']:
-                                if not isinstance(item, Mapping) or not isinstance(item.get('nmId'), int) or not isinstance(item.get('sum'), (float, int)) or not math.isfinite(item['sum']) or item['sum'] < 0:
-                                    raise SourceAttemptError('ads_catalog_sku_spend_missing', diagnostics)
-                        sku_spend = sum(item['sum'] for app in day['apps'] for item in app['nms'])
-                        if not isinstance(day.get('sum'), (float, int)) or not math.isfinite(day['sum']) or abs(day['sum'] - sku_spend) > .02:
-                            raise SourceAttemptError('ads_catalog_unattributed_spend', diagnostics)
+                try:
+                    if partial:
+                        if payload is not None and not isinstance(payload, list):
+                            raise AdsReportError("ads_catalog_statistics_invalid")
+                        if invalid_id_count or noncanonical_ids or batch_evidence["duplicate_campaign_ids"] or batch_evidence["unexpected_campaign_ids"]:
+                            raise AdsReportError("ads_catalog_campaign_identity_invalid")
+                        # Empty days are explicitly unknown; positive declared
+                        # metrics without a breakdown remain a contradiction.
+                        validated_items = []
+                        for item in items:
+                            if item.get("days") == []:
+                                from packages.contracts.ads_daily_report import validate_ads_empty_statistics
+                                validate_ads_empty_statistics(item)
+                                no_statistics_campaign_ids.append(item["advertId"])
+                            else:
+                                validated_items.append(item)
+                        items = validated_items
+                    validation = validate_ads_campaign_batch(
+                        items if partial else payload,
+                        campaign_ids=[i["advertId"] for i in items] if partial else batch,
+                        snapshot_date=snapshot_date, allow_unclassified_platform=partial)
+                except AdsReportError as exc:
+                    raise SourceAttemptError(str(exc), diagnostics) from exc
+                batch_evidence["validation_contract"] = validation["contract"]
+                observed_campaign_ids.extend(i["advertId"] for i in items)
+                unclassified_platform_campaign_ids.extend(i["advertId"] for i in items
+                    if any(a["appType"] == 0 for d in i["days"] for a in d["apps"]))
             for advert in items:
                 if not isinstance(advert, Mapping):
                     continue
@@ -217,7 +276,7 @@ class HttpBackedAdsCompactSource:
                             key = (snapshot_date, nm_id)
                             if key not in agg:
                                 agg[key] = {
-                                    "fetched_at": fetched_at,
+                                    "fetched_at": diagnostics["source_observed_at"] if partial else fetched_at,
                                     "snapshot_date": snapshot_date,
                                     "nmId": nm_id,
                                     "ads_views": 0.0,
@@ -228,24 +287,66 @@ class HttpBackedAdsCompactSource:
                                     "ads_sum_price": 0.0,
                                 }
                             row = agg[key]
-                            row["ads_views"] += _to_float(item.get("views"))
-                            row["ads_clicks"] += _to_float(item.get("clicks"))
-                            row["ads_atbs"] += _to_float(item.get("atbs"))
-                            row["ads_orders"] += _to_float(item.get("orders"))
+                            for field in COUNTS:
+                                metric_key = f"ads_{field}"
+                                if self._complete_catalog:
+                                    # The batch validator already checked each input.
+                                    # Sum as int before projecting to binary64.
+                                    try:
+                                        row[metric_key] = checked_ads_count(int(row[metric_key]) + int(item[field]))
+                                    except AdsReportError as exc:
+                                        raise SourceAttemptError(str(exc), diagnostics) from exc
+                                else:
+                                    row[metric_key] += _to_float(item.get(field))
                             row["ads_sum"] += _to_float(item.get("sum"))
                             row["ads_sum_price"] += _to_float(item.get("sum_price"))
             if index < len(batches) - 1:
                 time.sleep(self._batch_sleep_seconds)
 
-        if self._complete_catalog:
-            # Only after every campaign and every batch was validated. An error
-            # above yields no dense zeros, and cannot replace accepted data.
-            for nm in wanted:
-                agg.setdefault((snapshot_date, nm), {
+        if partial:
+            if not agg:
+                raise SourceAttemptError("ads_partial_no_observed_rows", diagnostics)
+            diagnostics.update(
+                partial_observation_contract="ads_partial_observed_v1",
+                completeness_state="partial", dated_roster_state="unqualified",
+                observed_campaign_ids=sorted(observed_campaign_ids),
+                no_statistics_campaign_ids=sorted(no_statistics_campaign_ids),
+                unresolved_campaign_ids=sorted(set(advert_ids) - set(observed_campaign_ids)),
+                unclassified_platform_campaign_ids=sorted(unclassified_platform_campaign_ids),
+                missing_nm_ids=sorted(wanted - {nm for _, nm in agg}),
+                affected_nm_ids=None, missing_sku_count=None,
+                impact_scope_state="unknown_campaign_attribution_and_dated_roster",
+                zero_fill_applied=False,
+            )
+            if any(not math.isfinite(row[key]) for row in agg.values()
+                   for key in row if key.startswith("ads_")):
+                raise SourceAttemptError("ads_catalog_aggregate_nonfinite", diagnostics)
+        elif self._complete_catalog:
+            missing_nms = sorted(wanted - {nm for _, nm in agg})
+            diagnostics["unobserved_nm_ids"] = missing_nms
+            diagnostics["dated_roster_state"] = "unknown"
+            # A current campaign catalog cannot establish the historical universe.
+            # Only an explicitly qualified dated roster admits inferred zero rows.
+            if self._dated_roster is not None or missing_nms:
+                try:
+                    binding = validate_dated_roster(self._dated_roster,
+                        campaign_ids=advert_ids, snapshot_date=snapshot_date)
+                except AdsReportError as exc:
+                    raise SourceAttemptError(str(exc), diagnostics) from exc
+                diagnostics["dated_roster_state"] = binding["state"]
+                diagnostics["dated_roster"] = binding
+            for nm in missing_nms:
+                agg[(snapshot_date, nm)] = {
                     'fetched_at': fetched_at, 'snapshot_date': snapshot_date, 'nmId': nm,
                     'ads_views': 0.0, 'ads_clicks': 0.0, 'ads_atbs': 0.0,
                     'ads_orders': 0.0, 'ads_sum': 0.0, 'ads_sum_price': 0.0,
-                })
+                }
+            if any(not math.isfinite(row[key]) for row in agg.values()
+                   for key in row if key.startswith("ads_")):
+                raise SourceAttemptError("ads_catalog_aggregate_nonfinite", diagnostics)
+            for row in agg.values():
+                for field in COUNTS:
+                    row[f"ads_{field}"] = float(row[f"ads_{field}"])
         return [agg[key] for key in sorted(agg)]
 
     def _get_json(self, *, url: str, token: str, timeout_seconds: float) -> Any:
@@ -266,15 +367,16 @@ class HttpBackedAdsCompactSource:
         if self._complete_catalog and payload.get('all') == 0 and adverts is None:
             adverts = []
         if self._complete_catalog:
-            if not isinstance(adverts, list) or not isinstance(payload.get('all'), int):
+            if not isinstance(adverts, list) or type(payload.get('all')) is not int:
                 raise ValueError('ads_catalog_campaign_list_invalid')
             if any(not isinstance(g, Mapping) or not isinstance(g.get('advert_list'), list)
+                   or type(g.get('count')) is not int or g['count'] < 0
                    or g.get('count') != len(g['advert_list']) for g in adverts):
                 raise ValueError('ads_catalog_campaign_list_incomplete')
             if sum(len(g['advert_list']) for g in adverts) != payload['all']:
                 raise ValueError('ads_catalog_campaign_count_mismatch')
             all_ids = [a.get('advertId', a.get('id')) for g in adverts for a in g['advert_list'] if isinstance(a, Mapping)]
-            if len(set(all_ids)) != payload['all'] or any(not isinstance(i, int) or i <= 0 for i in all_ids):
+            if any(type(i) is not int or i <= 0 for i in all_ids) or len(set(all_ids)) != payload['all']:
                 raise ValueError('ads_catalog_campaign_identity_invalid')
         if isinstance(adverts, list):
             for group in adverts:

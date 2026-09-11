@@ -487,6 +487,8 @@ class SheetVitrinaV1WebVitrinaBlock:
         rows = restore_finalized_inventory_history(rows, history=inventory_history,
                                                   current_date=current_business_date_iso(now))
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
+        from packages.application.metric_completeness import aggregate_counters
+        rows = aggregate_counters(rows, dates=snapshot.date_columns)
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(
             self.runtime,
@@ -1464,6 +1466,31 @@ def _include_proxy_v4_unit_margin_rows(
         PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
         PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
     }
+    canonical_dates = {day for row in rows if row.metric_key in target_keys
+        for day, cell in row.presentation_by_date.items()
+        if cell.get("calculation_contract") == "catalog_economics_v1"
+        and cell.get("source_as_of_date") == day}
+    if canonical_dates:
+        legacy_dates = [day for day in date_columns if day not in canonical_dates]
+        if not legacy_dates:
+            return rows
+        projected = _include_proxy_v4_unit_margin_rows(
+            [replace(row, presentation_by_date={d: c for d, c in row.presentation_by_date.items()
+                     if d not in canonical_dates}) for row in rows],
+            runtime=runtime, date_columns=legacy_dates, enabled_config=enabled_config,
+            sku_metric=sku_metric, total_metric=total_metric, parameters_for_date=parameters_for_date)
+        originals = {row.row_id: row for row in rows if row.metric_key in target_keys}
+        restored = []
+        for row in projected:
+            original = originals.pop(row.row_id, None)
+            if original is not None:
+                row = replace(row, values_by_date={**row.values_by_date, **{
+                    d: original.values_by_date.get(d) for d in canonical_dates}},
+                    presentation_by_date={**row.presentation_by_date, **{
+                    d: c for d, c in original.presentation_by_date.items() if d in canonical_dates}})
+            restored.append(row)
+        restored.extend(originals.values())
+        return restored
     original_by_id = {row.row_id: row for row in rows}
     result = [row for row in rows if row.metric_key not in target_keys]
     source_by_scope_metric = {
