@@ -7571,6 +7571,9 @@ class RegistryUploadHttpEntrypoint:
                     log=emit,
                     execution_mode=execution_mode,
                 )
+                from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+                current_state, expected_ready = bind_local_derive_publication(
+                    self.runtime, plan, current_state, expected_ready)
                 _finish_operator_phase(
                     refresh_diagnostics,
                     build_plan_phase,
@@ -8006,6 +8009,9 @@ class RegistryUploadHttpEntrypoint:
                     source_keys=source_keys,
                     metric_keys=metric_keys,
                 )
+                from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+                current_state, expected_ready = bind_local_derive_publication(
+                    self.runtime, partial_plan, current_state, expected_ready)
                 emit(
                     _format_log_event(
                         "group_refresh_stage_finish",
