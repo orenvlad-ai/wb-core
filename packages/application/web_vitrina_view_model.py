@@ -463,6 +463,8 @@ def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> We
         quality_state=str(presentation.get("quality_state") or ""),
         quality_label=str(presentation.get("quality_label") or ""),
         quality_reason=str(presentation.get("quality_reason") or ""),
+        completeness_state=str(presentation.get("completeness_state") or ""),
+        missing_sku_count=(presentation.get("missing_sku_count") if type(presentation.get("missing_sku_count")) is int and presentation["missing_sku_count"] >= 0 else None),
         quantity_semantic_kind=str(presentation.get("semantic_kind") or ""),
         quantity_source_observed_at=str(presentation.get("source_observed_at") or ""),
         inventory_finalization_digest=str(presentation.get("finalization_digest") or ""),

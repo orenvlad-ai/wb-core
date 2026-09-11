@@ -103,6 +103,13 @@ def _metrics(row: Mapping[str, Any], level: str) -> dict[str, int | Decimal]:
     return result
 
 
+def validate_ads_empty_statistics(row: Mapping[str, Any]) -> None:
+    """A typed zero summary with no days is unknown, never an observed zero."""
+    values = _metrics(row, "campaign")
+    if any(values.values()):
+        _fail("ads_catalog_campaign_positive_sum_without_days")
+
+
 def _sum(rows: Sequence[Mapping[str, int | Decimal]]) -> dict[str, int | Decimal]:
     return {field: sum((row[field] for row in rows), 0 if field in COUNTS else Decimal(0)) for field in FIELDS}
 
@@ -121,7 +128,8 @@ def _reconcile(parent: Mapping[str, int | Decimal], children: Sequence[Mapping[s
             _fail("ads_catalog_unattributed_spend" if field == "sum" else "ads_catalog_metric_totals_mismatch")
 
 
-def validate_ads_campaign_batch(payload: Any, *, campaign_ids: Sequence[int], snapshot_date: str) -> dict[str, Any]:
+def validate_ads_campaign_batch(payload: Any, *, campaign_ids: Sequence[int], snapshot_date: str,
+                                allow_unclassified_platform: bool = False) -> dict[str, Any]:
     """Validate every campaign/day/platform/SKU, including non-target products.
 
     Duplicate platform IDs within a day and duplicate SKU IDs within a platform
@@ -165,7 +173,11 @@ def validate_ads_campaign_batch(payload: Any, *, campaign_ids: Sequence[int], sn
                 if not isinstance(app, Mapping) or not isinstance(app.get("nms"), list):
                     _fail("ads_catalog_sku_breakdown_missing")
                 app_id = app.get("appType")
-                if type(app_id) is not int or app_id not in (1, 32, 64):
+                # The partial observation contract retains WB's explicit
+                # unclassified bucket 0 without assigning it a named platform
+                # or dropping any of its metrics. Full qualification is stricter.
+                allowed_platforms = (0, 1, 32, 64) if allow_unclassified_platform else (1, 32, 64)
+                if type(app_id) is not int or app_id not in allowed_platforms:
                     _fail("ads_catalog_platform_identity_invalid")
                 if app_id in platforms:
                     _fail("ads_catalog_duplicate_platform")

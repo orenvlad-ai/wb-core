@@ -214,6 +214,8 @@ def _build_rows(
                 quality_state=str(cell.get("quality_state") or ""),
                 quality_label=str(cell.get("quality_label") or ""),
                 quality_reason=str(cell.get("quality_reason") or ""),
+                completeness_state=str(cell.get("completeness_state") or ""),
+                missing_sku_count=(cell.get("missing_sku_count") if type(cell.get("missing_sku_count")) is int and cell["missing_sku_count"] >= 0 else None),
                 quantity_semantic_kind=str(cell.get("quantity_semantic_kind") or ""),
                 quantity_source_observed_at=str(cell.get("quantity_source_observed_at") or ""),
                 inventory_finalization_digest=str(cell.get("inventory_finalization_digest") or ""),

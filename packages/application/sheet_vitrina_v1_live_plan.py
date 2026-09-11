@@ -31,6 +31,7 @@ from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurren
 from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnapshotSource
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
+from packages.application.metric_completeness import ads_partial_presentation, evaluator_scope_presentation, ads_dependencies
 from packages.application.calculation_parameters import (
     CalculationParametersBlock,
     DEFAULT_PROXY_PARAMETERS,
@@ -1085,7 +1086,8 @@ class SheetVitrinaV1LivePlanBlock:
             HttpBackedOnecStocksSource(),
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
         )
-        self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource(complete_catalog=True))
+        self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource(
+            complete_catalog=True, partial_from_date="2026-09-11"))
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(
             HttpBackedFinReportDailySource(runtime_dir=runtime.runtime_dir)
         )
@@ -1556,6 +1558,11 @@ class SheetVitrinaV1LivePlanBlock:
                     ].incident_projection_quality
                 },
                 "server_cell_presentation": _merge_cell_presentations(
+                    evaluator_scope_presentation(rows=data_rows, slots=temporal_slots,
+                        evaluator=evaluator, current_date=current_date),
+                    ads_partial_presentation(
+                        rows=data_rows, slots=temporal_slots, statuses=live_sources.statuses,
+                        metrics=metrics_by_key, formulas=formulas_by_id),
                     _inventory_cost_cell_presentation(
                         enabled_config=enabled_config,
                         displayed_metrics=displayed_metrics,
@@ -2585,6 +2592,14 @@ class SheetVitrinaV1LivePlanBlock:
             column_date=column_date,
             temporal_slot=temporal_slot,
         )
+        if (source_key == "ads_compact" and status.kind == "incomplete"
+                and accepted_snapshot is not None and accepted_snapshot[0].kind in {"success", "empty"}):
+            # A validated partial contribution cannot downgrade this date's
+            # established complete result. Keep its clocks and explain the attempt.
+            old_status, old_payload, old_at = accepted_snapshot
+            return (_build_preserved_accepted_status(
+                accepted_status=old_status, accepted_at=old_at or now_iso,
+                latest_status=status, temporal_slot=temporal_slot), old_payload)
         if (
             payload is not None
             and _is_exact_snapshot_payload(payload, column_date)
@@ -2606,16 +2621,19 @@ class SheetVitrinaV1LivePlanBlock:
                 payload=payload,
             )
             if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                ads_partial = source_key == "ads_compact" and status.kind == "incomplete"
+                retry_at, retry_state = (_next_closure_retry(now, next_attempt_count, "ads_partial_observed")
+                                         if ads_partial else (None, CLOSURE_STATE_SUCCESS))
                 self.runtime.save_temporal_source_closure_state(
                     source_key=source_key,
                     target_date=column_date,
                     slot_kind=temporal_slot,
-                    state=CLOSURE_STATE_SUCCESS,
+                    state=retry_state,
                     attempt_count=next_attempt_count,
-                    next_retry_at=None,
-                    last_reason=_accepted_resolution_note(temporal_slot),
+                    next_retry_at=retry_at,
+                    last_reason="ads_partial_observed_not_complete" if ads_partial else _accepted_resolution_note(temporal_slot),
                     last_attempt_at=now_iso,
-                    last_success_at=now_iso,
+                    last_success_at=(closure_state.last_success_at if closure_state is not None else None) if ads_partial else now_iso,
                     accepted_at=now_iso,
                 )
             return (
@@ -2710,16 +2728,19 @@ class SheetVitrinaV1LivePlanBlock:
                 payload=accepted_payload,
             )
             if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                ads_partial = source_key == "ads_compact" and accepted_status.kind == "incomplete"
+                retry_at, retry_state = (_next_closure_retry(now, next_attempt_count, "ads_partial_preserved")
+                                         if ads_partial else (None, CLOSURE_STATE_SUCCESS))
                 self.runtime.save_temporal_source_closure_state(
                     source_key=source_key,
                     target_date=column_date,
                     slot_kind=temporal_slot,
-                    state=CLOSURE_STATE_SUCCESS,
-                    attempt_count=closure_state.attempt_count if closure_state is not None else 0,
-                    next_retry_at=None,
+                    state=retry_state,
+                    attempt_count=next_attempt_count if ads_partial else closure_state.attempt_count if closure_state is not None else 0,
+                    next_retry_at=retry_at,
                     last_reason="accepted_snapshot_preserved_after_invalid_attempt",
                     last_attempt_at=now_iso,
-                    last_success_at=preserved_at,
+                    last_success_at=(closure_state.last_success_at if closure_state is not None else None) if ads_partial else preserved_at,
                     accepted_at=preserved_at,
                 )
             return (
@@ -2814,10 +2835,17 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_date=column_date,
             snapshot_role=snapshot_role,
         )
-        if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+        confirmed_ads_empty = (source_key == "ads_compact" and cached_payload is not None
+            and getattr(cached_payload, "kind", "") == "empty"
+            and _resolve_freshness(cached_payload) == column_date
+            and _payload_diagnostics(cached_payload).get("completeness_state") == "complete"
+            and _payload_diagnostics(cached_payload).get("no_activity_proven") is True
+            and _payload_diagnostics(cached_payload).get("dated_roster_state") == "caller_qualified_dated_roster")
+        if cached_payload is None or not (_is_exact_snapshot_payload(cached_payload, column_date) or confirmed_ads_empty):
             return None
         preserve_closed_stock = source_key == "stocks" and snapshot_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
-        if require_closed_day_fresh and not preserve_closed_stock and not _closed_day_capture_is_fresh(
+        partial_ads = source_key == "ads_compact" and getattr(cached_payload, "kind", None) == "incomplete"
+        if require_closed_day_fresh and not preserve_closed_stock and not partial_ads and not _closed_day_capture_is_fresh(
             captured_at=cached_at,
             snapshot_date=column_date,
         ):
@@ -3250,6 +3278,7 @@ class _MetricEvaluator:
         self.sku_cache: dict[tuple[str, int, str], float | None] = {}
         self.total_cache: dict[tuple[str, str], float | None] = {}
         self.group_cache: dict[tuple[str, str, str], float | None] = {}
+        self.ads_dependent_metrics = ads_dependencies(metrics_by_key, formulas_by_id)
 
     def resolve_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
         cache_key = (temporal_slot, nm_id, metric_key)
@@ -3486,17 +3515,19 @@ class _MetricEvaluator:
                 value = self._resolve_total_direct(metric.metric_key, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self.resolve_total(numerator_key, temporal_slot)
-            denominator = self.resolve_total(denominator_key, temporal_slot)
-            value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
+            if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot):
+                value = self._aligned_ratio(numerator_key, denominator_key, self.enabled_config, temporal_slot)
+            else:
+                numerator = self.resolve_total(numerator_key, temporal_slot)
+                denominator = self.resolve_total(denominator_key, temporal_slot)
+                value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
             if formula is None:
                 raise ValueError(f"formula missing for metric {metric_key}")
-            value = _evaluate_formula(
-                formula.expression,
-                lambda dependency: self.resolve_total(dependency, temporal_slot),
-            )
+            value = (self._aligned_formula(formula.expression, self.enabled_config, temporal_slot)
+                if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot)
+                else _evaluate_formula(formula.expression, lambda dependency: self.resolve_total(dependency, temporal_slot)))
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
 
@@ -3577,22 +3608,43 @@ class _MetricEvaluator:
                 value = self._aggregate_sum(metric.calc_ref, group_items, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self._aggregate_sum(numerator_key, group_items, temporal_slot)
-            denominator = self._aggregate_sum(denominator_key, group_items, temporal_slot)
-            value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
+            if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot):
+                value = self._aligned_ratio(numerator_key, denominator_key, group_items, temporal_slot)
+            else:
+                numerator = self._aggregate_sum(numerator_key, group_items, temporal_slot)
+                denominator = self._aggregate_sum(denominator_key, group_items, temporal_slot)
+                value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
             if formula is None:
                 raise ValueError(f"formula missing for metric {metric_key}")
-            value = _evaluate_formula(
-                formula.expression,
-                lambda dependency: self._aggregate_sum(dependency, group_items, temporal_slot),
-            )
+            value = (self._aligned_formula(formula.expression, group_items, temporal_slot)
+                if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot)
+                else _evaluate_formula(formula.expression, lambda dependency: self._aggregate_sum(dependency, group_items, temporal_slot)))
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
 
         self.group_cache[cache_key] = value
         return value
+
+    def _partial_ads_slot(self, temporal_slot):
+        return any(s.source_key == 'ads_compact' and s.temporal_slot == temporal_slot
+                   and s.kind == 'incomplete' for s in self.live_sources.statuses)
+
+    def _aligned_formula(self, expression, members, temporal_slot):
+        keys = sorted(set(FORMULA_TOKEN_RE.findall(expression)))
+        inputs = [{k: self.resolve_sku(k, item.nm_id, temporal_slot) for k in keys} for item in members]
+        eligible = [values for values in inputs if all(v is not None for v in values.values())]
+        if not eligible:
+            return None
+        totals = {k: sum(values[k] for values in eligible) for k in keys}
+        return _evaluate_formula(expression, totals.get)
+
+    def _aligned_ratio(self, numerator, denominator, members, temporal_slot):
+        pairs = [(self.resolve_sku(numerator, item.nm_id, temporal_slot),
+                  self.resolve_sku(denominator, item.nm_id, temporal_slot)) for item in members]
+        pairs = [(n, d) for n, d in pairs if n is not None and d is not None]
+        return _divide_or_none(sum(n for n, d in pairs), sum(d for n, d in pairs)) if pairs else None
 
     def _resolve_total_direct(self, metric_key: str, temporal_slot: str) -> float | None:
         if metric_key == "fin_storage_fee_total":
@@ -5111,6 +5163,15 @@ def _is_valid_temporal_candidate(
 ) -> bool:
     if payload is None or not _is_exact_snapshot_payload(payload, column_date):
         return False
+    if source_key == "ads_compact" and status.kind == "incomplete":
+        d = _payload_diagnostics(payload)
+        return bool(column_date >= "2026-09-11" and status.covered_count > 0
+            and d.get("partial_observation_contract") == "ads_partial_observed_v1"
+            and d.get("completeness_state") == "partial"
+            and d.get("zero_fill_applied") is False
+            and d.get("source_date") == column_date
+            and d.get("source_observed_at") and d.get("observed_campaign_ids")
+            and d.get("dated_roster_state") == "unqualified")
     if status.kind != "success":
         if not (
             source_key == ONEC_STOCKS_SOURCE_KEY
@@ -6091,7 +6152,19 @@ def _merge_cell_presentations(
         for row_id, by_date in presentation.items():
             target = result.setdefault(str(row_id), {})
             for column_date, value in by_date.items():
-                target[str(column_date)] = dict(value)
+                previous = target.get(str(column_date), {})
+                merged = dict(value)
+                # Domain presentation keeps its own evidence. Coverage belongs
+                # to the same cell and must survive later domain overlays.
+                for key in ("metric_scope_evidence", "completeness_state", "missing_sku_count"):
+                    if key in previous and key not in merged:
+                        merged[key] = previous[key]
+                if previous.get("completeness_state") == "unknown_scope":
+                    merged.update(completeness_state="unknown_scope", missing_sku_count=None,
+                                  quality_state="partial")
+                    merged["quality_reason"] = " ".join(filter(None, [previous.get("quality_reason"), merged.get("quality_reason")]))
+                    merged["source_observed_at"] = previous.get("source_observed_at", merged.get("source_observed_at", ""))
+                target[str(column_date)] = merged
     return result
 
 

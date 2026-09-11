@@ -65,6 +65,8 @@ class WebVitrinaViewModelCell:
     quality_state: str = ""
     quality_label: str = ""
     quality_reason: str = ""
+    completeness_state: str = ""
+    missing_sku_count: int | None = None
     quantity_semantic_kind: str = ""
     quantity_source_observed_at: str = ""
     inventory_finalization_digest: str = ""

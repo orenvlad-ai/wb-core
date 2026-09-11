@@ -103,6 +103,10 @@ def project_catalog_economics(plan, *, day, parameters):
             cost = cell.get('management_value')
         operands = dict(order_sum=value(scope, 'orderSum'), order_count=value(scope, 'orderCount'),
                         ads_sum=value(scope, 'ads_sum'), cost=cost)
+        partial_inputs = {metric: cells.get(scope + '|' + metric, {}).get(day, {})
+                          for metric in ('orderSum', 'orderCount', 'ads_sum', COST)
+                          if cells.get(scope + '|' + metric, {}).get(day, {}).get('quality_state') == 'partial'}
+        unknown_scope = any(c.get('completeness_state') == 'unknown_scope' for c in partial_inputs.values())
         for version, parameter in ((3, p3), (4, p4)):
             pool_state, pool_reason = pool[scope]
             result = (calculate(operands, parameter, version=version, day=day)
@@ -112,6 +116,8 @@ def project_catalog_economics(plan, *, day, parameters):
             if pool_state == 'unknown' and not result['available']:
                 result['reason'] = pool_reason + ' ' + result['reason']
             results[version][scope] = result
+            result['partial'] = bool(partial_inputs)
+            result['unknown_scope'] = unknown_scope
             profit = result.get('profit')
             revenue, qty = result.get('revenue'), result.get('quantity')
             evidence = {'state': 'unconfirmed' if result['available'] else 'unavailable',
@@ -122,6 +128,12 @@ def project_catalog_economics(plan, *, day, parameters):
                                   else 'Расчёт по заказам, рекламе и себестоимости указанной даты.' if result['available'] else result['reason'],
                         'evidence': {'operand_date': day, 'operands': operands,
                                      'parameter_version': parameter.version_id if parameter else None}}
+            if partial_inputs:
+                reason = 'Расчёт по наблюдаемым входам; неизвестный вклад не равен нулю. ' + ' '.join(
+                    str(c.get('quality_reason') or c.get('reason') or '') for c in partial_inputs.values())
+                evidence.update(quality_state='partial', quality_label='', quality_reason=reason,
+                                reason=reason, completeness_state='unknown_scope' if unknown_scope else 'partial')
+                evidence['evidence']['partial_operands'] = sorted(partial_inputs)
             put(scope + f'|proxy_profit_{version}_rub', profit, evidence)
             put(scope + f'|proxy_margin_{version}_pct', profit / revenue if revenue else None, evidence)
             if version == 4:
@@ -131,6 +143,8 @@ def project_catalog_economics(plan, *, day, parameters):
     for version in (3, 4):
         eligible = {s: r for s, r in results[version].items() if r['available']}
         missing = {s: r['reason'] for s, r in results[version].items() if not r['available'] and pool[s][0] != 'inactive'}
+        partial = {s for s, r in results[version].items() if r.get('partial') and pool[s][0] != 'inactive'}
+        unknown_scope = any(r.get('unknown_scope') for r in results[version].values())
         inactive = [s for s in scopes if pool[s][0] == 'inactive']
         profit = sum((r['profit'] for r in eligible.values()), Decimal(0)) if eligible or (scopes and not missing) else None
         revenue = sum((r['revenue'] for r in eligible.values()), Decimal(0)) if eligible else None
@@ -138,12 +152,19 @@ def project_catalog_economics(plan, *, day, parameters):
         reason = ('Неполный итог. Не учтены: ' + '; '.join(s.removeprefix('SKU:') + ' — ' + why for s, why in missing.items())
                   if missing else 'Полный итог по дневному пулу продаж. Товары вне продажи полноту не ухудшают.')
         evidence = {'state': 'unconfirmed' if profit is not None else 'unavailable',
-                    'quality_state': 'partial' if missing else 'management_estimate',
-                    'quality_label': 'Неполный итог' if missing else 'Управленческая оценка',
+                    'quality_state': 'partial' if missing or partial else 'management_estimate',
+                    'quality_label': '' if missing or partial else 'Управленческая оценка',
+                    'completeness_state': 'unknown_scope' if unknown_scope else 'partial' if missing or partial else 'complete',
+                    'missing_sku_count': None if unknown_scope else len(set(missing) | partial),
                     'reason': reason, 'quality_reason': reason,
                     'evidence': {'eligible_scope': list(eligible), 'missing_scope': missing, 'inactive_scope': inactive,
+                                 'partial_scope': sorted(partial), 'applicable_scope': [s for s in scopes if s not in inactive],
                                  'pool_count': len(scopes) - len(inactive),
                                  'catalog_count': len(scopes), 'included_count': len(eligible), 'operand_date': day}}
+        if partial:
+            evidence['reason'] = evidence['quality_reason'] = ('Итог по согласованным наблюдаемым входам. '
+                'Неполные SKU: ' + ', '.join(sorted(partial)) + '. ' +
+                ('Полный состав затронутых SKU неизвестен. ' if unknown_scope else '') + reason)
         put(f'TOTAL|total_proxy_profit_{version}_rub', profit, evidence)
         put(f'TOTAL|proxy_margin_{version}_pct_total', profit / revenue if revenue else None, evidence)
         if version == 4:

@@ -54,7 +54,7 @@ def main():
     set_value(original, 'SKU:93|orderCount', 2)
     plan = project_catalog_economics(original, day=DAY, parameters=(P, P))
     total = plan['metadata']['server_cell_presentation']['TOTAL|total_proxy_profit_4_rub'][DAY]
-    assert total['quality_label'] == 'Неполный итог' and '93 — Нет данных: себестоимость' in total['reason']
+    assert total['quality_label'] == '' and total['missing_sku_count'] == 1 and '93 — Нет данных: себестоимость' in total['reason']
     assert values(plan)['TOTAL|total_proxy_profit_4_rub'] == 1188
     set_value(original, 'SKU:93|our_wb_unit_cost_rub', 10)
     plan = project_catalog_economics(original, day=DAY, parameters=(P, P))
