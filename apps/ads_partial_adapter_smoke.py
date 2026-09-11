@@ -45,7 +45,7 @@ class Tests(unittest.TestCase):
   for n in (101,102):
    data={'orderSum':100,'orderCount':2,'our_wb_unit_cost_rub':10,'ads_sum':''}
    rows.extend([[str(n),f'SKU:{n}|'+k,123,data.get(k,'')] for k in keys])
-  plan={'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key','2026-09-10',DAY],'rows':rows}],'metadata':{},'date_columns':['2026-09-10',DAY]}
+  plan={'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key','2026-09-10',DAY],'rows':rows},{'sheet_name':'STATUS','header':['source_key','kind','snapshot_date','note'],'rows':[['ads_compact[yesterday_closed]','error','','old10'],['ads_compact[today_current]','error','','old11'],['fin_report_daily[today_current]','error','','finance']]}],'metadata':{},'date_columns':['2026-09-10',DAY],'temporal_slots':[{'slot_key':'yesterday_closed','column_date':'2026-09-10'},{'slot_key':'today_current','column_date':DAY}]}
   with closing(sqlite3.connect(db)) as c, c:
    c.executescript('CREATE TABLE registry_upload_current_state(slot,bundle_version,activated_at);CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version,as_of_date,plan_json,refreshed_at,activated_at,snapshot_id,plan_version,PRIMARY KEY(bundle_version,as_of_date));CREATE TABLE temporal_source_slot_snapshots(source_key,snapshot_date,snapshot_role,captured_at,payload_json,PRIMARY KEY(source_key,snapshot_date,snapshot_role));CREATE TABLE temporal_source_closure_state(source_key,target_date,slot_kind,state,attempt_count,next_retry_at,last_reason,last_attempt_at,last_success_at,accepted_at,PRIMARY KEY(source_key,target_date,slot_kind));')
    c.execute('INSERT INTO registry_upload_current_state VALUES(1,?,?)',('fixture',OBS));c.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?,?,?,?)',('fixture','2026-09-10',json.dumps(plan),OBS,OBS,'snapshot','v1'))
@@ -58,6 +58,7 @@ class Tests(unittest.TestCase):
   self.adapter.apply(self.request,'fixture-applied',p);r=self.adapter.readback(self.request,'fixture-applied');self.assertEqual(r['state'],'applied')
   after=self.snapshot();payload=json.loads(after[1][0][4]);self.assertEqual(payload['kind'],'incomplete');self.assertEqual(payload['diagnostics']['source_observed_at'],OBS)
   self.assertEqual(after[2][0][3],'closure_retrying');self.assertIsNone(after[2][0][8])
+  status=json.loads(after[0][0][2])['sheets'][1]['rows'];self.assertEqual(status[0],['ads_compact[yesterday_closed]','error','','old10']);self.assertEqual(status[1][1],'incomplete');self.assertEqual(status[2],['fin_report_daily[today_current]','error','','finance'])
   with self.assertRaises(ValueError):self.adapter.apply(self.request,'fixture-applied',p)
   self.assertEqual(after,self.snapshot())
  def test_source_drift_and_ready_cas(self):

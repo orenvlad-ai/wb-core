@@ -116,6 +116,24 @@ def project(plan, *, result, config, metrics, formulas, parameters, operation_id
     for key, by_date in ads_partial_presentation(rows=sheet['rows'], slots=[slot], statuses=[status], metrics=metrics, formulas=formulas).items():
         cells.setdefault(key, {}).update(by_date)
     working = project_catalog_economics(working, day=day, parameters=parameters)
+    slots_by_key = {s['slot_key']:s['column_date'] for s in working.get('temporal_slots', [])}
+    for status_sheet in working['sheets']:
+        if status_sheet['sheet_name'] != 'STATUS': continue
+        for row in status_sheet['rows']:
+            old = dict(zip(status_sheet['header'], row))
+            source_key = str(old.get('source_key', ''))
+            temporal_key = source_key.partition('[')[2].removesuffix(']')
+            if not source_key.startswith('ads_compact[') or slots_by_key.get(temporal_key) != day: continue
+            latest = dict(old, kind='incomplete', freshness=day, snapshot_date=day,
+                requested_count=result.requested_count, covered_count=result.covered_count,
+                missing_nm_ids=','.join(map(str,result.missing_nm_ids)),
+                note=json.dumps({'resolution_rule':'accepted_partial_retained_observation',
+                    'source_observed_at':result.diagnostics['source_observed_at'],
+                    'observed_campaign_count':len(result.diagnostics['observed_campaign_ids']),
+                    'unknown_campaign_ids':result.diagnostics['unresolved_campaign_ids'],
+                    'dated_roster_state':'unqualified','missing_sku_count':None,
+                    'source_digest':result.diagnostics['source_digest']},ensure_ascii=False,sort_keys=True))
+            row[:] = [latest.get(k,'') for k in status_sheet['header']]
     working['metadata'].setdefault('ads_partial_publications', {})[day] = {
         'operation_id': operation_id, 'source_digest': result.diagnostics['source_digest'],
         'source_observed_at': result.diagnostics['source_observed_at'], 'kind': 'incomplete'}
