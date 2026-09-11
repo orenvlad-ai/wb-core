@@ -16,7 +16,8 @@ from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
 from packages.application.ads_compact_block import AdsCompactBlock
 from packages.contracts.ads_compact_block import AdsCompactRequest
 from packages.contracts.ads_daily_report import (
-    AdsDatedRoster, AdsReportError, FIELDS, project_ads_daily_report, validate_ads_campaign_batch,
+    AdsDatedRoster, AdsReportError, FIELDS, MAX_EXACT_ADS_COUNT,
+    project_ads_daily_report, validate_ads_campaign_batch,
 )
 from packages.contracts.source_attempt_diagnostics import SourceAttemptError, source_digest
 
@@ -215,6 +216,40 @@ class AdsContractTests(unittest.TestCase):
             project_ads_daily_report(items, snapshot_date=DAY, nm_ids=[101], roster=roster((5, 6)))
         with self.assertRaises(SourceAttemptError):
             run_source([items], ids=(5, 6))
+
+    def test_count_domain_exact_reconciliation_and_projection(self):
+        def counted(value, field="views", advert_id=5):
+            item = campaign(advert_id=advert_id)
+            day = item["days"][0]; app = day["apps"][0]
+            for row in (item, day, app, app["nms"][0]): row[field] = value
+            return item
+        for field in FIELDS[:4]:
+            cases = (
+                [counted(2**53 + 1, field)],
+                [counted(MAX_EXACT_ADS_COUNT, field), counted(2, field, 6)],
+            )
+            for items in cases:
+                ids = tuple(item["advertId"] for item in items)
+                with self.subTest(field=field, campaigns=len(ids)):
+                    with self.assertRaisesRegex(AdsReportError, "ads_catalog_count_out_of_range"):
+                        project_ads_daily_report(items, snapshot_date=DAY, nm_ids=[101], roster=roster(ids))
+                    with self.assertRaisesRegex(SourceAttemptError, "ads_catalog_count_out_of_range"):
+                        run_source([items], ids=ids, nms=(101,))
+            # Both a direct boundary and a cross-campaign sum at it are exact.
+            for items in ([counted(MAX_EXACT_ADS_COUNT, field)],
+                          [counted(MAX_EXACT_ADS_COUNT - 2, field), counted(2, field, 6)]):
+                ids = tuple(item["advertId"] for item in items)
+                pure = project_ads_daily_report(items, snapshot_date=DAY, nm_ids=[101], roster=roster(ids))
+                adapter, _ = run_source([items], ids=ids, nms=(101,))
+                self.assertEqual(pure["data"]["rows"][0][f"ads_{field}"], MAX_EXACT_ADS_COUNT)
+                self.assertEqual(getattr(adapter.items[0], f"ads_{field}"), MAX_EXACT_ADS_COUNT)
+        malformed = counted(10**28)
+        malformed["days"][0]["apps"][0]["nms"][0]["views"] += 1
+        self.reject([malformed], "ads_catalog_count_out_of_range")
+        # A one-unit difference inside the admitted domain also fails exactly.
+        mismatch = counted(MAX_EXACT_ADS_COUNT - 1)
+        mismatch["days"][0]["apps"][0]["nms"][0]["views"] += 1
+        self.reject([mismatch], "ads_catalog_metric_totals_mismatch")
 
 
 if __name__ == "__main__":

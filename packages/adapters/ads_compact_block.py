@@ -14,7 +14,7 @@ from packages.adapters.official_api_runtime import DEFAULT_WB_API_TOKEN_ENV, loa
 from packages.contracts.ads_compact_block import AdsCompactRequest
 from packages.contracts.ads_daily_report import (
     AdsDatedRoster, AdsReportError, validate_ads_campaign_batch, validate_dated_roster,
-    validate_ads_request,
+    validate_ads_request, checked_ads_count, COUNTS,
 )
 from packages.contracts.source_attempt_diagnostics import (
     SourceAttemptError, new_attempt, observed_now, source_digest,
@@ -230,10 +230,17 @@ class HttpBackedAdsCompactSource:
                                     "ads_sum_price": 0.0,
                                 }
                             row = agg[key]
-                            row["ads_views"] += _to_float(item.get("views"))
-                            row["ads_clicks"] += _to_float(item.get("clicks"))
-                            row["ads_atbs"] += _to_float(item.get("atbs"))
-                            row["ads_orders"] += _to_float(item.get("orders"))
+                            for field in COUNTS:
+                                metric_key = f"ads_{field}"
+                                if self._complete_catalog:
+                                    # The batch validator already checked each input.
+                                    # Sum as int before projecting to binary64.
+                                    try:
+                                        row[metric_key] = checked_ads_count(int(row[metric_key]) + int(item[field]))
+                                    except AdsReportError as exc:
+                                        raise SourceAttemptError(str(exc), diagnostics) from exc
+                                else:
+                                    row[metric_key] += _to_float(item.get(field))
                             row["ads_sum"] += _to_float(item.get("sum"))
                             row["ads_sum_price"] += _to_float(item.get("sum_price"))
             if index < len(batches) - 1:
@@ -262,6 +269,9 @@ class HttpBackedAdsCompactSource:
             if any(not math.isfinite(row[key]) for row in agg.values()
                    for key in row if key.startswith("ads_")):
                 raise SourceAttemptError("ads_catalog_aggregate_nonfinite", diagnostics)
+            for row in agg.values():
+                for field in COUNTS:
+                    row[f"ads_{field}"] = float(row[f"ads_{field}"])
         return [agg[key] for key in sorted(agg)]
 
     def _get_json(self, *, url: str, token: str, timeout_seconds: float) -> Any:

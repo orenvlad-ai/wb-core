@@ -15,6 +15,9 @@ from packages.contracts.source_attempt_diagnostics import source_digest
 
 FIELDS = ("views", "clicks", "atbs", "orders", "sum", "sum_price")
 COUNTS = frozenset(FIELDS[:4])
+# All integers in this domain survive the existing binary64/JSON consumers.
+# Keep counts as int until that projection, including sums across campaigns.
+MAX_EXACT_ADS_COUNT = 2**53 - 1
 CONTRACT = "ads_daily_report_v1"
 
 
@@ -78,7 +81,14 @@ def validate_ads_request(*, snapshot_date: str, nm_ids: Sequence[int], campaign_
     _ids(campaign_ids, "ads_catalog_campaign_identity_invalid")
 
 
-def _metrics(row: Mapping[str, Any], level: str) -> dict[str, Decimal]:
+def checked_ads_count(value: int | float) -> int:
+    """Bound an already validated nonnegative integer or an exact integer sum."""
+    if value > MAX_EXACT_ADS_COUNT:
+        _fail("ads_catalog_count_out_of_range")
+    return int(value)
+
+
+def _metrics(row: Mapping[str, Any], level: str) -> dict[str, int | Decimal]:
     result = {}
     for field in FIELDS:
         value = row.get(field)
@@ -89,20 +99,24 @@ def _metrics(row: Mapping[str, Any], level: str) -> dict[str, Decimal]:
             valid = False
         if not valid or (field in COUNTS and value != int(value)):
             _fail(code)
-        result[field] = Decimal(str(value))
+        result[field] = checked_ads_count(value) if field in COUNTS else Decimal(str(value))
     return result
 
 
-def _sum(rows: Sequence[Mapping[str, Decimal]]) -> dict[str, Decimal]:
-    return {field: sum((row[field] for row in rows), Decimal(0)) for field in FIELDS}
+def _sum(rows: Sequence[Mapping[str, int | Decimal]]) -> dict[str, int | Decimal]:
+    return {field: sum((row[field] for row in rows), 0 if field in COUNTS else Decimal(0)) for field in FIELDS}
 
 
-def _reconcile(parent: Mapping[str, Decimal], children: Sequence[Mapping[str, Decimal]]) -> None:
+def _reconcile(parent: Mapping[str, int | Decimal], children: Sequence[Mapping[str, int | Decimal]]) -> None:
     totals = _sum(children)
     for field in FIELDS:
         # Retain the existing two-kopeck spend tolerance; counts reconcile
         # exactly. A zero/nonzero contradiction never fits a rounding tolerance.
-        tolerance = Decimal(0) if field in COUNTS else Decimal("0.02")
+        if field in COUNTS:
+            if parent[field] != totals[field]:
+                _fail("ads_catalog_metric_totals_mismatch")
+            continue
+        tolerance = Decimal("0.02")
         if (parent[field] == 0) != (totals[field] == 0) or abs(parent[field] - totals[field]) > tolerance:
             _fail("ads_catalog_unattributed_spend" if field == "sum" else "ads_catalog_metric_totals_mismatch")
 
@@ -167,7 +181,7 @@ def validate_ads_campaign_batch(payload: Any, *, campaign_ids: Sequence[int], sn
                     metrics = _metrics(item, "sku")
                     nm_metrics.append(metrics)
                     rows.append({"advertId": advert["advertId"], "appType": app_id, "nmId": item["nmId"],
-                                 **{f"ads_{k}": float(v) for k, v in metrics.items()}})
+                                 **{f"ads_{k}": v if k in COUNTS else float(v) for k, v in metrics.items()}})
                 metrics = _metrics(app, "app")
                 _reconcile(metrics, nm_metrics)
                 app_metrics.append(metrics)
@@ -206,11 +220,15 @@ def project_ads_daily_report(payload: Any, *, snapshot_date: str, nm_ids: Sequen
     wanted = _ids(nm_ids, "ads_catalog_scope_invalid")
     binding = validate_dated_roster(roster, campaign_ids=roster.campaign_ids if isinstance(roster, AdsDatedRoster) else (), snapshot_date=snapshot_date)
     validated = validate_ads_campaign_batch(payload, campaign_ids=binding["campaign_ids"], snapshot_date=snapshot_date)
-    agg = {nm: {f"ads_{field}": Decimal(0) for field in FIELDS} for nm in wanted}
+    agg = {nm: {f"ads_{field}": 0 if field in COUNTS else Decimal(0) for field in FIELDS} for nm in wanted}
     for row in validated["rows"]:
         if row["nmId"] in wanted:
             for field in FIELDS:
-                agg[row["nmId"]][f"ads_{field}"] += Decimal(str(row[f"ads_{field}"]))
+                key = f"ads_{field}"
+                if field in COUNTS:
+                    agg[row["nmId"]][key] = checked_ads_count(agg[row["nmId"]][key] + row[key])
+                else:
+                    agg[row["nmId"]][key] += Decimal(str(row[key]))
     rows = [{"snapshot_date": snapshot_date, "nmId": nm, **{k: float(v) for k, v in values.items()}}
             for nm, values in sorted(agg.items())]
     if any(not math.isfinite(v) for row in rows for k, v in row.items() if k.startswith("ads_")):
