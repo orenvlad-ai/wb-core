@@ -74,12 +74,35 @@ def check_ads():
     assert d["error_code"] == "ads_catalog_statistics_incomplete" and d["source_observed_at"]
     assert d["counter_basis"] == "observed_campaign_responses"
     assert d["batches"][0]["source_date"] == DAY and d["batches"][0]["digest"].startswith("sha256:")
+    assert d["attempted_campaign_ids"] == [5, 6] and d["not_attempted_campaign_ids"] == []
+    assert d["missing_from_received_batches_campaign_ids"] == [6]
+    assert d["batches"][0]["response_kind"] == "array"
+    # One omitted response in the first batch must not classify the untouched
+    # second batch as provider omissions. Preserve the whole expected roster.
+    many_ids = tuple(range(1, 60))
+    first_page = [complete_campaign(advert_id=i, day=DAY) for i in range(1, 50)]
+    interrupted, interrupted_payload = capture("ads_compact", lambda: ads_result([first_page], ids=many_ids))
+    evidence = interrupted.diagnostics
+    assert interrupted_payload is None and evidence["batch_count"] == 2
+    assert len(evidence["batches"]) == 1 and len(evidence["expected_campaign_ids"]) == 59
+    assert evidence["missing_campaign_ids"] == list(range(50, 60))
+    assert evidence["missing_from_received_batches_campaign_ids"] == [50]
+    assert evidence["not_attempted_campaign_ids"] == list(range(51, 60))
+    null_status, null_payload = capture("ads_compact", lambda: ads_result([None], ids=(5,)))
+    assert null_payload is None and null_status.kind == "error"
+    assert null_status.diagnostics["batches"][0]["response_kind"] == "null"
+    assert null_status.diagnostics["missing_from_received_batches_campaign_ids"] == [5]
     duplicate, _ = capture("ads_compact", lambda: ads_result([[campaign(), campaign()]]))
     assert duplicate.diagnostics["duplicate_campaign_ids"] == [5]
     assert duplicate.diagnostics["missing_campaign_ids"] == [6]
     partial, _ = capture("ads_compact", lambda: ads_result([[campaign()], OSError("private provider detail")], batch_size=1))
     assert partial.diagnostics["batches"][0]["returned_campaign_ids"] == [5]
     assert partial.diagnostics["batches"][1]["status"] == "error"
+    assert partial.diagnostics["attempted_campaign_ids"] == [5, 6]
+    assert partial.diagnostics["not_attempted_campaign_ids"] == []
+    assert partial.diagnostics["missing_from_received_batches_campaign_ids"] == []
+    assert partial.diagnostics["response_error_campaign_ids"] == [6]
+    assert partial.diagnostics["batches"][1]["response_kind"] is None
     assert "private provider detail" not in json.dumps(asdict(partial))
     empty_status, _ = capture("ads_compact", lambda: ads_result([[{"advertId": 5, "sum": 20, "days": []}]], ids=(5,)))
     assert empty_status.diagnostics["error_code"] == "ads_catalog_campaign_positive_sum_without_days"

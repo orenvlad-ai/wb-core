@@ -75,6 +75,9 @@ class HttpBackedAdsCompactSource:
         diagnostics = new_attempt("ads_compact", request.snapshot_date)
         diagnostics.update(expected_campaign_ids=None, returned_campaign_ids=None,
                            missing_campaign_ids=None, duplicate_campaign_ids=None,
+                           attempted_campaign_ids=None, not_attempted_campaign_ids=None,
+                           missing_from_received_batches_campaign_ids=None,
+                           response_error_campaign_ids=None,
                            batch_count=None, batches=[], source_digest=None,
                            counter_basis="adapter_attempt_evidence")
         try:
@@ -139,12 +142,19 @@ class HttpBackedAdsCompactSource:
             diagnostics = new_attempt("ads_compact", snapshot_date)
         diagnostics.update(expected_campaign_ids=list(advert_ids), returned_campaign_ids=[],
                            missing_campaign_ids=list(advert_ids), duplicate_campaign_ids=[],
+                           attempted_campaign_ids=[], not_attempted_campaign_ids=list(advert_ids),
+                           missing_from_received_batches_campaign_ids=[], response_error_campaign_ids=[],
                            batch_count=len(batches), batches=[], source_digest=None,
                            counter_basis="observed_campaign_responses")
         returned_ids: list[int] = []
+        attempted_ids: list[int] = []
         for index, batch in enumerate(batches):
+            attempted_ids.extend(batch)
+            diagnostics.update(attempted_campaign_ids=list(attempted_ids),
+                               not_attempted_campaign_ids=sorted(set(advert_ids) - set(attempted_ids)))
             batch_evidence = {"batch_index": index + 1, "source_date": snapshot_date,
                               "expected_campaign_ids": list(batch), "status": "started",
+                              "attempt_started_at": observed_now(), "response_kind": None,
                               "returned_campaign_ids": None, "missing_campaign_ids": None,
                               "duplicate_campaign_ids": None, "digest": None}
             diagnostics["batches"].append(batch_evidence)
@@ -159,11 +169,18 @@ class HttpBackedAdsCompactSource:
                 )
             except Exception as exc:
                 batch_evidence["status"] = "error"
+                diagnostics["response_error_campaign_ids"].extend(batch)
                 code = exc.code if isinstance(exc, SourceAttemptError) else "ads_transport_error"
                 if isinstance(exc, SourceAttemptError):
                     batch_evidence.update(exc.diagnostics)
                 raise SourceAttemptError(code, diagnostics) from exc
             diagnostics["source_observed_at"] = observed_now()
+            batch_evidence["response_kind"] = (
+                "null" if payload is None else "array" if isinstance(payload, list)
+                else "object" if isinstance(payload, Mapping) else "boolean" if isinstance(payload, bool)
+                else "number" if isinstance(payload, (int, float)) else "string" if isinstance(payload, str)
+                else "invalid"
+            )
             items = payload if isinstance(payload, list) else []
             ids, noncanonical_ids, invalid_id_count = _campaign_id_evidence(items)
             returned_ids.extend(ids)
@@ -173,6 +190,7 @@ class HttpBackedAdsCompactSource:
                                   unexpected_campaign_ids=sorted(set(ids) - set(batch)), digest=source_digest(payload))
             batch_evidence.update(noncanonical_campaign_ids=noncanonical_ids,
                                   invalid_campaign_identity_count=invalid_id_count)
+            diagnostics["missing_from_received_batches_campaign_ids"].extend(batch_evidence["missing_campaign_ids"])
             for code, present in (("noncanonical_campaign_identity", noncanonical_ids),
                                   ("invalid_campaign_identity", invalid_id_count)):
                 if present and code not in diagnostics["anomaly_codes"]:
