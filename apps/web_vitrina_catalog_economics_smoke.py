@@ -102,7 +102,12 @@ def main():
     assert ads._extract_non_archived_advert_ids({'all': 1, 'adverts': [{'status': 7, 'count': 1, 'advert_list': [{'advertId': 5}]}]}) == [5]
     ads._get_json = lambda **kw: [{'advertId': 5, 'days': []}]
     kwargs = dict(base_url='unused', token='unused', advert_ids=[5], snapshot_date=DAY, nm_ids=[101, 202], timeout_seconds=1)
-    assert [r['ads_sum'] for r in ads._fetch_compact_rows(**kwargs)] == [0, 0]
+    try:
+        ads._fetch_compact_rows(**kwargs)
+    except ValueError as exc:
+        assert str(exc) == 'ads_catalog_no_statistics_unconfirmed'
+    else:
+        raise AssertionError('no statistics became zero')
     ads._get_json = lambda **kw: []
     try:
         ads._fetch_compact_rows(**kwargs)
