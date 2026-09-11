@@ -18,6 +18,7 @@ from packages.application.supplier_shipment_invoice_revision import SupplierInvo
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter
 from apps.web_vitrina_wb_history_recovery import WebVitrinaWbHistoryRecoveryAdapter
 from apps.ads_partial_publication import AdsPartialPublicationAdapter
+from apps.finance_daily_publication import FinanceDailyPublicationAdapter
 
 
 class Adapter(Protocol):
@@ -27,6 +28,7 @@ class Adapter(Protocol):
 
 
 ADAPTERS: dict[str, Adapter] = {
+    "finance_daily_publication_v1": FinanceDailyPublicationAdapter(),
     "ads_partial_publication_v1": AdsPartialPublicationAdapter(),
     "fbs_snapshot_accounting_v1": FbsAccountingAdapter(),
     "finance_payout_reconcile_v1": FinancePayoutAdapter(),

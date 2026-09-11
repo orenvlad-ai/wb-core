@@ -1566,6 +1566,19 @@ def _sum_snapshot_metric(
             f"accepted closed-day snapshot for {field_name} points to {snapshot_date}, expected {expected_snapshot_date}"
         )
     items = _get_attr(result, "items", []) or []
+    if field_name == "fin_buyout_rub":
+        diagnostics = _get_attr(result, "diagnostics", {})
+        report = _get_attr(diagnostics, "finance_report")
+        has_report = ("finance_report" in diagnostics if isinstance(diagnostics, Mapping)
+                      else hasattr(diagnostics, "finance_report"))
+        if has_report:
+            from packages.domain.finance_daily_report import validate_finance_daily_projection
+            roster = _get_attr(report, "roster_nm_ids", [])
+            validate_finance_daily_projection(
+                result, expected_date=expected_snapshot_date, expected_nm_ids=roster,
+            )
+            if not allowed_nm_ids.issubset(set(roster)):
+                raise ValueError("finance plan-report scope is outside validated projection")
     total = 0.0
     for item in items:
         nm_id = _get_int_attr(item, "nm_id")

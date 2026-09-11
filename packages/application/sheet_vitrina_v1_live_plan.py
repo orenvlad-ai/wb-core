@@ -1592,7 +1592,17 @@ class SheetVitrinaV1LivePlanBlock:
             slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
             states=sorted(CLOSURE_PENDING_STATES),
         )
-        return [state for state in states if _closure_attempt_is_due(state, now)]
+        # Older exhausted Finance dates are a separately reviewed historical
+        # repair. Reopen only post-contract dates; the caller refreshes a whole
+        # date, so enrolling legacy gaps here would mutate unrelated history.
+        states += self.runtime.list_temporal_source_closure_states(
+            source_keys=["fin_report_daily"],
+            slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            states=[CLOSURE_STATE_EXHAUSTED],
+        )
+        return [state for state in states
+                if (state.state != CLOSURE_STATE_EXHAUSTED or state.target_date >= "2026-09-12")
+                and _closure_attempt_is_due(state, now)]
 
     def list_due_current_capture_retries(
         self,
@@ -2850,7 +2860,7 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_date=column_date,
         ):
             return None
-        cached_status, _ = _capture_live_source(
+        cached_status, admitted_payload = _capture_live_source(
             source_key=source_key,
             temporal_slot=temporal_slot,
             temporal_policy=temporal_policy,
@@ -2858,7 +2868,9 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=lambda: cached_payload,
         )
-        return cached_status, cached_payload, cached_at
+        if admitted_payload is None:
+            return None
+        return cached_status, admitted_payload, cached_at
 
     def _preserve_onec_missing_stage_buckets(
         self,
@@ -3011,7 +3023,7 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_date=column_date,
         ):
             return None
-        cached_status, _ = _capture_live_source(
+        cached_status, admitted_payload = _capture_live_source(
             source_key=source_key,
             temporal_slot=temporal_slot,
             temporal_policy=temporal_policy,
@@ -3024,7 +3036,9 @@ class SheetVitrinaV1LivePlanBlock:
         cache_note = runtime_cache_note
         if cached_at:
             cache_note = f"{cache_note}; cache_captured_at={cached_at}"
-        return _append_status_note(cached_status, cache_note), cached_payload
+        if admitted_payload is None:
+            return None
+        return _append_status_note(cached_status, cache_note), admitted_payload
 
     def _capture_provisional_current_web_source(
         self,
@@ -4690,6 +4704,21 @@ def _capture_live_source(
 
     kind = str(getattr(payload, "kind", "missing"))
     payload_diagnostics = _payload_diagnostics(payload)
+    if source_key == "fin_report_daily" and "finance_report" in payload_diagnostics:
+        from packages.domain.finance_daily_report import validate_finance_daily_projection
+        try:
+            validate_finance_daily_projection(
+                payload, expected_date=column_date, expected_nm_ids=requested_nm_ids,
+            )
+        except ValueError as exc:
+            return LiveSourceStatus(
+                source_key=source_key, temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy, column_date=column_date,
+                kind="error", freshness="", snapshot_date="", date="", date_from="", date_to="",
+                requested_count=len(requested_nm_ids), covered_count=0,
+                missing_nm_ids=sorted(set(requested_nm_ids)), note=str(exc),
+                diagnostics=payload_diagnostics,
+            ), None
     if kind == "incomplete":
         missing_nm_ids = list(getattr(payload, "missing_nm_ids", []))
         requested_count = int(getattr(payload, "requested_count", len(requested_nm_ids)))
@@ -5148,7 +5177,7 @@ def _invalid_temporal_candidate_note(source_key: str, temporal_slot: str) -> str
     if source_key == "promo_by_price":
         return "invalid_exact_snapshot=promo_live_source_incomplete"
     if source_key == "fin_report_daily":
-        return "invalid_exact_snapshot=finance_requires_terminal_204_and_full_sku_coverage"
+        return "invalid_exact_snapshot=finance_requires_usable_complete_report_and_projection"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "prices_snapshot":
         return "invalid_exact_snapshot=zero_filled_prices_snapshot"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "ads_bids":
