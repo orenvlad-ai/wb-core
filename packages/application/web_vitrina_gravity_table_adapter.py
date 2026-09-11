@@ -214,6 +214,9 @@ def _build_rows(
                 quality_state=str(cell.get("quality_state") or ""),
                 quality_label=str(cell.get("quality_label") or ""),
                 quality_reason=str(cell.get("quality_reason") or ""),
+                quantity_semantic_kind=str(cell.get("quantity_semantic_kind") or ""),
+                quantity_source_observed_at=str(cell.get("quantity_source_observed_at") or ""),
+                inventory_finalization_digest=str(cell.get("inventory_finalization_digest") or ""),
             )
             for cell in row["cells"]
         }

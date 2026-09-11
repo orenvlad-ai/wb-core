@@ -493,7 +493,8 @@ class RegistryUploadDbBackedRuntime:
             from packages.application.sheet_vitrina_v1_inventory_history import prepare_inventory_history_from_ready_plan
             inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=plan,
                 bundle_version=current_state.bundle_version, refreshed_at=refreshed_at,
-                generation_identity=current_state.bundle_version)
+                generation_identity=current_state.bundle_version, runtime_dir=self.runtime_dir, prepared_book=book,
+                ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
         plan = replace(plan, metadata={**dict(plan.metadata or {}), "ready_publication_target": {
             "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date}})
         serialized_plan = _serialize_sheet_vitrina_plan(plan)

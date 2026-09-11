@@ -9218,7 +9218,7 @@
 
     function markFreshTableDisplayed(payload) {
       state.tableSnapshot.displayedRequestKey = tableSnapshotRequestKey();
-      state.tableSnapshot.displayedSnapshotId = String((payload && payload.meta && payload.meta.snapshot_id) || "");
+      state.tableSnapshot.displayedSnapshotId = String((payload && payload.meta && payload.meta.snapshot_id) || "") + ":" + String((payload && payload.meta && payload.meta.inventory_history_version) || "");
       state.tableSnapshot.displayedSavedAt = "";
       state.tableSnapshot.showingCached = false;
       state.tableSnapshot.freshLoading = false;
@@ -17024,7 +17024,8 @@
       const value = formatCellValue(cell);
       const reasons = [
         String(cell.presentation_reason || "").trim(),
-        String(cell.quality_reason || "").trim()
+        String(cell.quality_reason || "").trim(),
+        cell.quantity_source_observed_at ? "Снимок: " + String(cell.quantity_source_observed_at) : ""
       ].filter(function(item, index, items) {
         return item && items.indexOf(item) === index;
       });

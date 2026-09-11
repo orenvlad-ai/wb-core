@@ -5,7 +5,7 @@ closed daily costs and the presentation consumed by all current readers.
 """
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -73,14 +73,20 @@ def admit(conn):
         raise ValueError("not_an_isolated_fbs_accounting_book")
 
 
-def load(runtime_dir, *, version=None):
+def load(runtime_dir, *, version=None, connection=None):
     file = path(runtime_dir)
     if not file.exists():
         if version is not None:
             raise ValueError("fbs_accounting_bound_revision_missing")
         return None, None
-    with closing(sqlite3.connect(file.as_uri() + "?mode=ro", uri=True)) as conn:
-        conn.execute("PRAGMA query_only=ON")
+    if connection is not None:
+        if (not connection.in_transaction or connection.execute("PRAGMA query_only").fetchone()[0] != 1
+                or Path(connection.execute("PRAGMA database_list").fetchone()[2]).resolve() != file):
+            raise ValueError("fbs_accounting_existing_bound_ro_transaction_required")
+    with (nullcontext(connection) if connection is not None else
+          closing(sqlite3.connect(file.as_uri() + "?mode=ro", uri=True))) as conn:
+        if connection is None:
+            conn.execute("PRAGMA query_only=ON")
         admit(conn)
         row = (conn.execute("SELECT version,payload FROM accounting_revisions WHERE version=?", (version,)).fetchone()
                if version is not None else conn.execute("SELECT r.version,r.payload FROM accounting_current c JOIN accounting_revisions r USING(version)").fetchone())

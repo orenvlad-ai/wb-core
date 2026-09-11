@@ -463,6 +463,9 @@ def _build_cell(column: WebVitrinaViewModelColumn, row: Mapping[str, Any]) -> We
         quality_state=str(presentation.get("quality_state") or ""),
         quality_label=str(presentation.get("quality_label") or ""),
         quality_reason=str(presentation.get("quality_reason") or ""),
+        quantity_semantic_kind=str(presentation.get("semantic_kind") or ""),
+        quantity_source_observed_at=str(presentation.get("source_observed_at") or ""),
+        inventory_finalization_digest=str(presentation.get("finalization_digest") or ""),
     )
 
 
