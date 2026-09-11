@@ -444,6 +444,10 @@ class RegistryUploadDbBackedRuntime:
             raise ReadyPublicationConflict("ready_candidate_target_mismatch")
         if expected.authority is None:
             raise ReadyPublicationConflict("ready_preparation_authority_required")
+        # A current book commit must publish its current-day binding. Historical
+        # ready-only writes remain valid, but cannot carry a new current book.
+        if _prepared_book is not None and publication_date not in plan.date_columns:
+            raise ReadyPublicationConflict("ready_current_book_target_missing_date")
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
         active_inventory = inventory_from_book(book, now=publication_now) if book and book["active"] else None
         if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
@@ -771,7 +775,7 @@ class RegistryUploadDbBackedRuntime:
                     SELECT plan_json
                     FROM sheet_vitrina_v1_ready_snapshots
                     WHERE bundle_version = ?
-                    ORDER BY refreshed_at DESC, as_of_date DESC
+                    ORDER BY as_of_date DESC, refreshed_at DESC
                     LIMIT 1
                     """,
                     (current_state.bundle_version,),
@@ -1422,7 +1426,7 @@ class RegistryUploadDbBackedRuntime:
                     SELECT activated_at, as_of_date, snapshot_id, plan_version, refreshed_at, plan_json
                     FROM sheet_vitrina_v1_ready_snapshots
                     WHERE bundle_version = ?
-                    ORDER BY refreshed_at DESC, as_of_date DESC
+                    ORDER BY as_of_date DESC, refreshed_at DESC
                     LIMIT 1
                     """,
                     (current_state.bundle_version,),

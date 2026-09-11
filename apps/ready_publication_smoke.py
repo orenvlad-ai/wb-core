@@ -27,6 +27,7 @@ from packages.application import registry_upload_db_backed_runtime as dbmod
 from packages.application import ready_publication as publication
 from packages.application.fbs_snapshot_cost import fingerprint
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
+from packages.business_time import current_business_date_iso
 from packages.contracts.sheet_vitrina_v1 import SheetVitrinaV1Envelope, SheetVitrinaV1TemporalSlot, SheetVitrinaWriteTarget
 
 DAY = "2026-09-08"
@@ -35,37 +36,41 @@ NOW = datetime(2026, 9, 8, 14, tzinfo=timezone.utc)
 STAMP = NOW.isoformat().replace("+00:00", "Z")
 
 
-class FixedDateTime(datetime):
-    @classmethod
-    def now(cls, tz=None):
-        return NOW if tz else NOW.replace(tzinfo=None)
-
-
 @contextmanager
-def clock():
+def clock(now=NOW):
+    business_date = current_business_date_iso(now)
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz else now.replace(tzinfo=None)
+
     with patch.object(dbmod, "datetime", FixedDateTime), patch.object(book, "datetime", FixedDateTime), \
-         patch("packages.business_time.current_business_date_iso", return_value=DAY):
+         patch("packages.business_time.current_business_date_iso", return_value=business_date):
         yield
 
 
-def make_book(root, *, quantity="1000", opening=False):
-    image = capture(DAY, quantity=quantity, docs=[] if opening else [document(day=DAY)])
-    component = wb(DAY)
+def make_book(root, *, quantity="1000", opening=False, now=NOW):
+    day = current_business_date_iso(now)
+    stamp = now.isoformat().replace("+00:00", "Z")
+    image = capture(day, quantity=quantity, docs=[] if opening else [document(day=day)], timestamp=stamp)
+    image["captured_at"] = stamp
+    image["source_digest"] = fingerprint({key: value for key, value in image.items() if key != "source_digest"})
+    component = wb(day)
     with patch.object(book, "capture_current", return_value=image), \
          patch.object(book, "capture_wb_component", return_value=component), \
          patch.object(book, "capture_retained_stages", return_value=retained(component)):
-        return book.prepare(root, now=NOW, opening=opening)
+        return book.prepare(root, now=now, opening=opening)
 
 
-def make_plan():
+def make_plan(as_of_date=OUTER, day=DAY):
     rows = [["cost", "SKU:1|our_wb_unit_cost_rub", 91, 92],
             ["capital", "SKU:1|own_capital_FF_capital_rub", 888, 999],
             ["orders", "SKU:1|ordersCount", 11, 12],
             ["unrelated", "SKU:1|foreign_metric", 314, 159]]
-    return SheetVitrinaV1Envelope("test-v1", "same-snapshot-id", OUTER, [OUTER, DAY],
-        [SheetVitrinaV1TemporalSlot("previous", "previous", OUTER), SheetVitrinaV1TemporalSlot("current", "current", DAY)],
+    return SheetVitrinaV1Envelope("test-v1", "same-snapshot-id", as_of_date, [as_of_date, day],
+        [SheetVitrinaV1TemporalSlot("previous", "previous", as_of_date), SheetVitrinaV1TemporalSlot("current", "current", day)],
         {}, [SheetVitrinaWriteTarget("DATA_VITRINA", "A1", "A1:D5", "A:D", "replace", False,
-            ["label", "key", OUTER, DAY], rows, len(rows), 4),
+            ["label", "key", as_of_date, day], rows, len(rows), 4),
             SheetVitrinaWriteTarget("STATUS", "A1", "A1:B1", "A:B", "replace", False,
                 ["key", "value"], [], 0, 2)])
 
@@ -78,13 +83,13 @@ def seed(root):
     return runtime
 
 
-def save(runtime, plan, *, expected=None, prepared=None):
+def save(runtime, plan, *, expected=None, prepared=None, now=NOW):
     current = runtime.load_current_state()
     if expected is None:
         expected = runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
-    with clock():
+    with clock(now):
         return runtime.save_sheet_vitrina_ready_snapshot(current_state=current, plan=plan,
-            refreshed_at=STAMP, expected=expected, _prepared_book=prepared)
+            refreshed_at=now.isoformat().replace("+00:00", "Z"), expected=expected, _prepared_book=prepared)
 
 
 def book_ready_child(channel, root):
@@ -124,6 +129,72 @@ class PublicationTests(unittest.TestCase):
 
     def expected(self):
         return self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=self.current.bundle_version, as_of_date=OUTER)
+
+    def test_historical_touch_keeps_latest_date_and_current_book_publication(self):
+        self._check_historical_touch(datetime(2026, 9, 12, 14, tzinfo=timezone.utc))
+
+    def test_historical_touch_at_utc_previous_day_keeps_current_business_day(self):
+        self._check_historical_touch(datetime(2026, 9, 11, 23, 37, tzinfo=timezone.utc))
+
+    def _check_historical_touch(self, now):
+        earlier = now.replace(hour=now.hour - 1)
+        save(self.runtime, make_plan("2026-09-11", "2026-09-12"), now=earlier)
+        for day in ("2026-09-08", "2026-09-09"):
+            next_day = "2026-09-09" if day.endswith("08") else "2026-09-10"
+            save(self.runtime, make_plan(day, next_day), now=now)
+        historical = {day: self.runtime.load_sheet_vitrina_ready_snapshot(day)
+                      for day in ("2026-09-08", "2026-09-09")}
+        self.assertEqual(self.runtime.load_sheet_vitrina_ready_snapshot().as_of_date, "2026-09-11")
+        status = self.runtime.load_sheet_vitrina_refresh_status()
+        self.assertEqual((status.as_of_date, status.refreshed_at),
+                         ("2026-09-11", earlier.isoformat().replace("+00:00", "Z")))
+        for day, plan in historical.items():
+            self.assertEqual(plan.as_of_date, day)
+            self.assertEqual(self.runtime.load_sheet_vitrina_refresh_status(day).as_of_date, day)
+
+        initial, expected = make_book(self.root, opening=True, now=now)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        prepared = make_book(self.root, quantity="1900", now=now)
+        with clock(now), patch.object(book, "prepare", return_value=prepared):
+            result = book.refresh(self.root, ready_runtime=self.runtime)
+        receipt = book.current_publication_receipt(self.runtime, now=now)
+        self.assertEqual(receipt["operation_id"], result["operation_id"])
+        self.assertEqual(receipt["business_date"], "2026-09-12")
+        self.assertGreater(receipt["checked_cell_count"], 0)
+        current = self.runtime.load_sheet_vitrina_ready_snapshot()
+        binding = current.metadata["fbs_accounting_bindings"]["2026-09-12"]
+        self.assertEqual(binding["book_version"], book.load(self.root)[1])
+        self.assertEqual(binding["ready_target"]["as_of_date"], "2026-09-11")
+        for day, plan in historical.items():
+            self.assertEqual(self.runtime.load_sheet_vitrina_ready_snapshot(day), plan)
+
+    def test_current_book_rejects_incompatible_target_before_any_write(self):
+        self._check_incompatible_target(datetime(2026, 9, 12, 14, tzinfo=timezone.utc))
+
+    def test_current_book_rejects_incompatible_target_at_utc_previous_day(self):
+        self._check_incompatible_target(datetime(2026, 9, 11, 23, 37, tzinfo=timezone.utc))
+
+    def _check_incompatible_target(self, now):
+        historical = make_plan("2026-09-09", "2026-09-10")
+        save(self.runtime, historical, now=now)
+        initial, expected = make_book(self.root, opening=True, now=now)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        prepared = make_book(self.root, quantity="1900", now=now)
+
+        def state():
+            with publication.readonly(self.runtime.db_path) as conn, publication.readonly(book.path(self.root)) as books:
+                return list(conn.iterdump()), list(books.iterdump())
+
+        before = state()
+        # Exercise both the ordinary current caller and the writer admission.
+        for direct in (False, True):
+            with clock(now), patch.object(book, "prepare", return_value=prepared):
+                with self.assertRaisesRegex(publication.ReadyPublicationConflict, "current_book_target_missing_date"):
+                    if direct:
+                        save(self.runtime, historical, prepared=prepared, now=now)
+                    else:
+                        book.refresh(self.root, ready_runtime=self.runtime)
+            self.assertEqual(state(), before)
 
     def test_exact_raw_cas_and_first_insert_real_processes(self):
         for first in (True, False):
