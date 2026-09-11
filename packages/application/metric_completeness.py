@@ -8,8 +8,7 @@ ADS_ECONOMICS = {'proxy_profit_3_rub', 'proxy_margin_3_pct', 'proxy_profit_4_rub
                  'proxy_margin_4_pct', 'proxy_margin_per_unit_rub',
                  'total_proxy_profit_3_rub', 'proxy_margin_3_pct_total',
                  'total_proxy_profit_4_rub', 'proxy_margin_4_pct_total',
-                 'proxy_margin_per_unit_rub_total', 'own_capital_return_pct',
-                 'own_capital_return_pct_total'}
+                 'proxy_margin_per_unit_rub_total'}
 
 
 def ads_dependencies(metrics, formulas):

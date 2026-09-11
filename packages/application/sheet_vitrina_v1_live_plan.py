@@ -3408,6 +3408,9 @@ class _MetricEvaluator:
             elif metric.metric_key == OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY:
                 value = self._aggregate_own_product_capital_confirmed_share(temporal_slot)
             elif metric.metric_key == OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY:
+                if self._partial_ads_slot(temporal_slot):
+                    self.total_cache[cache_key] = None
+                    return None
                 value = _divide_or_none(
                     self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
                     self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
@@ -4231,6 +4234,8 @@ class _MetricEvaluator:
                 self.resolve_sku(ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY, nm_id, temporal_slot),
             )
         if metric_key == OWN_CAPITAL_RETURN_PCT_METRIC_KEY:
+            if self._partial_ads_slot(temporal_slot):
+                return None
             return _divide_or_none(
                 self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
                 self.resolve_sku(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY, nm_id, temporal_slot),
