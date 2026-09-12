@@ -17,6 +17,7 @@ from apps.ads_partial_publication_smoke import DAY,OBS
 from apps.ads_daily_report_contract_smoke import campaign
 from packages.contracts.source_attempt_diagnostics import source_digest
 from packages.application.web_vitrina_management_history import digest
+from packages.application.ads_partial_publication import HISTORICAL_ADS10
 from packages.application.vitrina_economics import METRICS,TOTALS
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item,ConfigV2Item
 @dataclass
@@ -108,6 +109,61 @@ class Tests(unittest.TestCase):
   (self.runtime/CONTROL_FILES[0]).write_text(json.dumps({'active':False,'revision':72}))
   with closing(sqlite3.connect(self.db)) as c, c:c.execute('INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)',('ads_compact',DAY,'accepted_closed_day_snapshot',OBS,json.dumps({'result':{'kind':'success','items':[]}})))
   with self.assertRaisesRegex(ValueError,'complete-snapshot-preserved'):self.adapter.preview(self.request,'fixture-full')
+ def historical_fixture(self):
+  self.request['publication_mode']=HISTORICAL_ADS10
+  src=json.loads(json.dumps(source()).replace(DAY,'2026-09-10'))
+  for item in src['observations']:item['payload_digest']=source_digest(item['payload'])
+  self.request.update(source=src,source_sha256=digest(src))
+  with closing(sqlite3.connect(self.db)) as c, c:
+   plan=json.loads(c.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots').fetchone()[0])
+   plan['sheets'][0]['rows'].append(['Finance','TOTAL|finance_fixture',818161.44,1000865.05])
+   plan['metadata']['server_cell_presentation']={'TOTAL|finance_fixture':{'2026-09-10':{'state':'confirmed'},DAY:{'state':'confirmed'}}}
+   c.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?',(json.dumps(plan),))
+   c.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots SELECT bundle_version,?,plan_json,refreshed_at,activated_at,snapshot_id,plan_version FROM sheet_vitrina_v1_ready_snapshots',(DAY,))
+   c.execute('INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)',('fin_report_daily','2026-09-10','accepted_closed_day_snapshot',OBS,'{"kind":"success","finance":"preserve"}'))
+   c.execute('INSERT INTO temporal_source_closure_state VALUES(?,?,?,?,?,?,?,?,?,?)',('ads_compact','2026-09-10','yesterday_closed','closure_retrying',3,OBS,'old partial',OBS,None,None))
+ def test_historical10_exact_target_preserves_finance_and_does_not_enqueue_whole_date(self):
+  self.historical_fixture();before=self.snapshot()
+  p=self.adapter.preview(self.request,'fixture-history10');self.adapter.apply(self.request,'fixture-history10',p)
+  self.assertEqual(self.adapter.readback(self.request,'fixture-history10')['state'],'applied')
+  after=self.snapshot();old=json.loads(before[0][0][2]);new=json.loads(after[0][0][2])
+  self.assertEqual(before[0][1],after[0][1])
+  self.assertEqual(old['sheets'][0]['rows'][-1],new['sheets'][0]['rows'][-1])
+  self.assertEqual(old['metadata']['server_cell_presentation']['TOTAL|finance_fixture'],new['metadata']['server_cell_presentation']['TOTAL|finance_fixture'])
+  self.assertIn(before[1][0],after[1])
+  self.assertTrue(p['candidate']['changes']);self.assertTrue(all(x['date']=='2026-09-10' for x in p['candidate']['changes']))
+  self.assertEqual(new['sheets'][1]['rows'][0][1],'incomplete')
+  self.assertEqual(old['sheets'][1]['rows'][1:],new['sheets'][1]['rows'][1:])
+  closure=p['candidate']['closure_after']
+  self.assertEqual(closure['state'],'closure_exhausted');self.assertIsNone(closure['next_retry_at'])
+  self.assertEqual(closure['attempt_count'],3);self.assertEqual(closure['last_attempt_at'],OBS);self.assertIsNone(closure['last_success_at'])
+  payload=json.loads(p['candidate']['slot_after']['payload_json'])
+  self.assertEqual(payload['kind'],'incomplete');self.assertIsNone(payload['diagnostics']['missing_sku_count'])
+  self.assertFalse(payload['diagnostics']['zero_fill_applied'])
+  from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+  from types import SimpleNamespace as NS
+  def states(**kwargs):
+   with closing(sqlite3.connect(self.db)) as c:
+    c.row_factory=sqlite3.Row;return [NS(**dict(r)) for r in c.execute('SELECT * FROM temporal_source_closure_state') if r['state'] in kwargs['states']]
+  harness=NS(now_factory=lambda:datetime(2026,9,12,20,tzinfo=timezone.utc),runtime=NS(list_temporal_source_closure_states=states))
+  self.assertEqual(SheetVitrinaV1LivePlanBlock.list_due_closed_day_retries(harness),[])
+ def test_historical10_rejects_other_target_before_effects(self):
+  self.historical_fixture();self.request['ready_as_of_date']=DAY;before=self.snapshot()
+  with self.assertRaisesRegex(ValueError,'historical-ready-target-mismatch'):self.adapter.preview(self.request,'fixture-history-target')
+  self.assertEqual(before,self.snapshot());self.assertFalse((self.runtime/'evidence').exists())
+ def test_historical10_source_binding_and_default_cutover_stay_strict(self):
+  from packages.application.ads_partial_publication import assemble
+  self.historical_fixture();src=self.request['source']
+  with self.assertRaisesRegex(ValueError,'date-outside-contract'):assemble(src,[101,102])
+  for other in ('2026-09-09',DAY,'2026-09-12'):
+   changed=json.loads(json.dumps(src).replace('2026-09-10',other))
+   with self.subTest(date=other),self.assertRaisesRegex(ValueError,'date-outside-contract'):
+    assemble(changed,[101,102],publication_mode=HISTORICAL_ADS10)
+  changed=json.loads(json.dumps(src));changed['observations'][0]['path']=changed['observations'][0]['path'].replace('2026-09-10',DAY)
+  with self.assertRaisesRegex(ValueError,'request-binding-invalid'):assemble(changed,[101,102],publication_mode=HISTORICAL_ADS10)
+  changed=json.loads(json.dumps(src));changed['observations'][1]['payload'][0]['days'][0]['date']=DAY+'T00:00:00Z'
+  changed['observations'][1]['payload_digest']=source_digest(changed['observations'][1]['payload'])
+  with self.assertRaises(ValueError):assemble(changed,[101,102],publication_mode=HISTORICAL_ADS10)
 if __name__=='__main__':
  socket.create_connection=lambda *a,**k:(_ for _ in ()).throw(AssertionError('network forbidden'))
  unittest.main(verbosity=2)

@@ -9,7 +9,7 @@ import sqlite3
 
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter, readonly, private_json
 from packages.application.web_vitrina_management_history import digest, dated_parameters
-from packages.application.ads_partial_publication import assemble, project
+from packages.application.ads_partial_publication import assemble, project, RETAINED_CLOSED_DAY, HISTORICAL_ADS10
 from packages.application.registry_upload_db_backed_runtime import _load_metric_items, _load_formula_items, _load_config_items
 from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
@@ -38,6 +38,9 @@ class AdsPartialPublicationAdapter:
 
     def build(self, request, operation_id, conn):
         source = request['source']; day = source['date']
+        publication_mode = request.get('publication_mode', RETAINED_CLOSED_DAY)
+        if publication_mode == HISTORICAL_ADS10 and request['ready_as_of_date'] != day:
+            raise ValueError('ads-historical-ready-target-mismatch')
         if digest(source) != request['source_sha256']:
             raise ValueError('ads-source-drift')
         prepared = datetime.fromisoformat(request['prepared_at'].replace('Z', '+00:00'))
@@ -69,7 +72,7 @@ class AdsPartialPublicationAdapter:
             existing, _ = resolve_ads_snapshot_payload(json.loads(item['payload_json']));kind = (existing or {}).get('kind')
             if kind in ('success', 'empty'):
                 raise ValueError('ads-complete-snapshot-preserved')
-        result = assemble(source, nms)
+        result = assemble(source, nms, publication_mode=publication_mode)
         observed = datetime.fromisoformat(result.diagnostics['source_observed_at'].replace('Z','+00:00'))
         if observed > prepared: raise ValueError('ads-source-clock-after-preparation')
         params = dated_parameters(conn, day)
@@ -96,6 +99,14 @@ class AdsPartialPublicationAdapter:
             'state':retry_state,'attempt_count':0,'next_retry_at':retry_at,
             'last_reason':'retained_partial_observation_not_complete', 'last_attempt_at':None,
             'last_success_at':None, 'accepted_at':request['prepared_at']}
+        if publication_mode == HISTORICAL_ADS10:
+            # The ordinary retry worker rebuilds a whole date, including Finance.
+            # A retained historical partial must not enqueue that broader work.
+            prior_closure = next((c for c in closures if c['slot_kind'] == 'yesterday_closed'), {})
+            closure.update(state='closure_exhausted', next_retry_at=None,
+                attempt_count=prior_closure.get('attempt_count', 0),
+                last_attempt_at=prior_closure.get('last_attempt_at'),
+                last_reason='retained_historical_partial_requires_qualified_repair')
         prestate = {'ready':before,'slots':slots,'closures':closures,'registry':registry,
                     'metrics':[asdict(x) for x in metrics.values()], 'formulas':[asdict(x) for x in formulas.values()],
                     'config':[asdict(x) for x in manual.values()], 'parameters':[asdict(x) for x in params]}

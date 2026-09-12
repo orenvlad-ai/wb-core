@@ -117,8 +117,30 @@ Every Finance/Partner manifest, coverage and calculation consumer uses the share
 
 # 10. Historical missing-slot recovery
 
-`apps/ads_historical_recovery.py` is the only repo-owned production-data path for a reviewed exact set of absent accepted closed-day `ads_compact` slots. Dry-run is default. It reads the official campaign manifest and `/adv/v3/fullstats` only for campaign statuses `7`, `9`, `11`, with at most 31 inclusive days, 50 campaign IDs and 3 requests/minute. A batch omission requires exact singleton confirmation. Besides complete list responses and the exact structured WB no-statistics envelope, schema `ads_historical_recovery_v4` accepts only the production-observed exact `HTTP 200 + application/json + JSON null` singleton sentinel; generic `None`, empty lists and other response shapes remain blockers. Invalid/incomplete upstream data, a non-empty global response without the requested `nmId`, or an invalid existing target snapshot fails closed; a valid existing snapshot is skipped and never overwritten.
+`apps/ads_historical_recovery.py` is the repo-owned full-coverage production-data path for a reviewed exact set of absent accepted closed-day `ads_compact` slots. Dry-run is default. It reads the official campaign manifest and `/adv/v3/fullstats` only for campaign statuses `7`, `9`, `11`, with at most 31 inclusive days, 50 campaign IDs and 3 requests/minute. A batch omission requires exact singleton confirmation. Besides complete list responses and the exact structured WB no-statistics envelope, schema `ads_historical_recovery_v4` accepts only the production-observed exact `HTTP 200 + application/json + JSON null` singleton sentinel; generic `None`, empty lists and other response shapes remain blockers. Invalid/incomplete upstream data, a non-empty global response without the requested `nmId`, or an invalid existing target snapshot fails closed; a valid existing snapshot is skipped and never overwritten.
 
 The 3 requests/minute pacing is the current Personal/Service fullstats contract. A Base-plan token is limited by WB to 1 request/hour and therefore cannot use this bounded production recovery as configured; `429` is an upstream/token-plan blocker and is never retried as empty data.
 
 Apply requires the exact fresh plan fingerprint, exact `nmId`/date scope, fresh human approval reference, canonical warehouse-functional write lock and a coherent mode-`0600` SQLite backup with `integrity_check=ok` and SHA-256. One `BEGIN IMMEDIATE` transaction inserts only planned missing snapshots, updates their closure state, records audit evidence and proves exact readback plus the non-target digest. An unchanged retry is an audited no-op. `kind=empty` is written only when the complete official response for every eligible campaign contains no row for any `nmId` on that date; the runner never manufactures a selected-SKU zero.
+
+
+# 11. Retained partial Ads publication
+
+`apps/ads_partial_publication.py` replays retained official observations with exact
+source dates/digests, dated parameters, target CAS, before-images and one-submit
+readback. Default `retained_closed_day` retains the cutover at 2026-09-11 and its
+ordinary closure retry behavior. The explicit `historical_ads10` request mode
+admits only 2026-09-10, only its own `ready_as_of_date=2026-09-10`, and only that
+column's Ads metrics and directly dependent economics. It does not broaden the
+ordinary source adapter's partial-data cutover.
+
+Historical partial publication writes `closure_exhausted` with no `next_retry_at`
+and reason `retained_historical_partial_requires_qualified_repair`. This means
+automatic whole-date retries are closed; it does not claim complete source data
+or invented retry attempts. Existing attempt count/time are preserved. The
+ordinary retry selector must not enqueue the historical date (which would also
+recollect Finance). The accepted Ads payload, affected STATUS and dependent
+presentations remain incomplete with unknown SKU impact where unproven. Current
+catalog observations are not proof of a complete historical campaign roster;
+missing contributions remain unknown and are never zero-filled. Adjacent dated
+readies and Finance source/closure/values are outside this write-set.
