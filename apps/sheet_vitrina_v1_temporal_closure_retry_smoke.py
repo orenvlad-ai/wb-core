@@ -69,7 +69,7 @@ def main() -> None:
         second_plan = plan_block.build_plan(as_of_date=SECOND_AS_OF_DATE)
         second_status_rows = _status_rows(second_plan)
         for key in ("web_source_snapshot[yesterday_closed]", "seller_funnel_snapshot[yesterday_closed]"):
-            if second_status_rows[key][1] != "success":
+            if second_status_rows[key][1] != "incomplete":
                 raise AssertionError(f"{key} must use accepted current as latest-confirmed closed-day fallback")
             if "accepted_current_from_prior_closed_day_latest_confirmed" not in str(second_status_rows[key][10]):
                 raise AssertionError(f"{key} must explain accepted-current latest-confirmed fallback")
@@ -126,7 +126,7 @@ def main() -> None:
                 raise AssertionError(f"{key} must preserve the accepted closed-day snapshot after a later invalid attempt")
             expected_note = (
                 "accepted_closed_stock_snapshot_preserved" if key.startswith("stocks[")
-                else "accepted_closed_preserved_after_invalid_attempt"
+                else "accepted_closed_snapshot_preserved"
             )
             if expected_note not in str(preserved_status_rows[key][10]):
                 raise AssertionError(f"{key} must explain that the accepted closed-day snapshot was preserved")

@@ -2,12 +2,13 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import traceback
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from packages.adapters.seller_portal_web_source_collector import replay_headers, _response_json
+from packages.adapters.seller_portal_web_source_collector import replay_headers, _response_json, _post_report
 from packages.adapters.web_source_current_sync import ClosedDaySourceState
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_live_plan import (
@@ -48,6 +49,26 @@ def main():
         try: _response_json(response)
         except RuntimeError: assert not accepted
         else: assert accepted
+    class BrokenTransport:
+        def post(self, *args, **kwargs):
+            raise RuntimeError('Call log authorizev3=FAKE_AUTH_MARKER seller-lk=FAKE_SUPPLIER_MARKER')
+    try:
+        _post_report(BrokenTransport(), 'http://localhost:1')
+    except RuntimeError:
+        rendered=traceback.format_exc()
+        assert 'FAKE_AUTH_MARKER' not in rendered and 'FAKE_SUPPLIER_MARKER' not in rendered
+    else:raise AssertionError('transport failure expected')
+    from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync, WebSourceCurrentSyncConfig
+    from datetime import timedelta
+    current=[ClosedDaySourceState('web_source_snapshot',DAY,1,datetime.now(timezone.utc).isoformat())]
+    sync=ShellBackedWebSourceCurrentSync(config=WebSourceCurrentSyncConfig('off',Path('/absent'),Path('/absent'),'http://localhost',1,'',''),
+        closed_day_source_state_loader=lambda *_:current[0])
+    assert sync._current_source_is_fresh('web_source_snapshot',DAY)
+    current[0]=ClosedDaySourceState('web_source_snapshot',DAY,1,(datetime.now(timezone.utc)-timedelta(hours=2)).isoformat())
+    assert not sync._current_source_is_fresh('web_source_snapshot',DAY) and not sync.observed_states
+    sync.observed_states[('web_source_snapshot',DAY)]=current[0]
+    sync.ensure_snapshot(DAY)
+    assert not sync.observed_states
     cases={
         'seller_funnel_snapshot':SellerFunnelSnapshotSuccess('success',DAY,1,[SellerFunnelSnapshotItem(1,'item','code',100,10,10)]),
         'web_source_snapshot':WebSourceSnapshotSuccess('success',DAY,DAY,1,[WebSourceSnapshotItem(1,100,10,1,1)]),

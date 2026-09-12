@@ -103,6 +103,7 @@ class ShellBackedWebSourceCurrentSync:
         )
 
     def ensure_snapshot(self, snapshot_date: str) -> None:
+        self.observed_states.clear()
         if not self._is_enabled():
             return
 
@@ -214,6 +215,7 @@ class ShellBackedWebSourceCurrentSync:
         return _is_usable_sales_funnel_payload(payload, snapshot_date) and self._current_source_is_fresh("seller_funnel_snapshot", snapshot_date)
 
     def _current_source_is_fresh(self, source_key: str, snapshot_date: str) -> bool:
+        self.observed_states.pop((source_key, snapshot_date), None)
         if snapshot_date < "2026-09-11":
             return True
         state = self._closed_day_source_state_loader(source_key, snapshot_date)
@@ -309,7 +311,7 @@ class ShellBackedWebSourceCurrentSync:
 
     def _ensure_closed_day_source_freshness(self, *, source_key: str, snapshot_date: str) -> ClosedDaySourceState:
         state = self._closed_day_source_state_loader(source_key, snapshot_date)
-        if state is None or state.row_count <= 0:
+        if state is None or state.row_count <= 0 or state.source_key != source_key or state.snapshot_date != snapshot_date:
             raise RuntimeError(
                 "closed_day_source_freshness_not_accepted: "
                 f"source_key={source_key}; snapshot_date={snapshot_date}; reason=source_rows_missing_after_sync"
@@ -321,7 +323,7 @@ class ShellBackedWebSourceCurrentSync:
             )
         fetched_at = _parse_timestamp(state.fetched_at)
         required_after = _closed_day_required_fetched_after(snapshot_date)
-        if fetched_at < required_after:
+        if fetched_at < required_after or fetched_at > datetime.now(timezone.utc) + timedelta(minutes=5):
             raise RuntimeError(
                 "closed_day_source_freshness_not_accepted: "
                 f"source_key={source_key}; snapshot_date={snapshot_date}; "
@@ -588,7 +590,7 @@ if source_key == "web_source_snapshot":
         connect_timeout=5,
     )
     sql = (
-        "select count(*), min(fetched_at) "
+        "select count(*), min(fetched_at), count(fetched_at) "
         "from public.search_analytics_raw "
         "where date_from = %s::date and date_to = %s::date"
     )
@@ -602,7 +604,7 @@ elif source_key == "seller_funnel_snapshot":
         connect_timeout=5,
     )
     sql = (
-        "select count(*), min(source_fetched_at) "
+        "select count(*), min(source_fetched_at), count(source_fetched_at) "
         "from public.web_source_sales_funnel_daily "
         "where snapshot_date = %s::date"
     )
@@ -616,7 +618,7 @@ with conn:
         row = cur.fetchone()
 
 row_count = int(row[0] or 0) if row else 0
-fetched_at = row[1].isoformat() if row and row[1] is not None else ""
+fetched_at = row[1].isoformat() if row and row[1] is not None and row[2] == row_count else ""
 print(json.dumps({"row_count": row_count, "fetched_at": fetched_at}))
 """
 

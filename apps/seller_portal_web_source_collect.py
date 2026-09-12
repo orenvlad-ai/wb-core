@@ -11,7 +11,7 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apps.seller_portal_automation_guard import seller_portal_automation_lock
-from packages.adapters.seller_portal_web_source_collector import collect_web_source
+from packages.adapters.seller_portal_web_source_collector import CollectorError, collect_web_source
 from packages.adapters.web_source_current_sync import _load_env_file
 
 
@@ -61,8 +61,13 @@ def main():
         if args.output:
             with os.fdopen(os.open(args.output, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600),'w') as f:
                 json.dump(candidate,f,ensure_ascii=False,sort_keys=True)
-        print(json.dumps({k:v for k,v in candidate.items() if k not in {'items','raw_report'}} | {'row_count':len(candidate['items']), 'source_written':args.write_source}))
+        print(json.dumps({k:v for k,v in candidate.items() if k not in {'items','raw_report','detail_pages'}} | {'row_count':len(candidate['items']), 'source_written':args.write_source}))
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, CollectorError) else type(exc).__name__
+        print('seller_source_collector_failed:' + reason, file=sys.stderr)
+        raise SystemExit(1) from None
