@@ -16,7 +16,7 @@ import sqlite3
 import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from packages.business_time import business_date_from_timestamp
 
@@ -8034,7 +8034,9 @@ class RegistryUploadDbBackedRuntime:
                 ORDER BY is_hidden ASC, is_active DESC, created_at ASC, product_type ASC, match_key ASC, nomenclature_name ASC
                 """
             ).fetchall()
-            return [_nomenclature_item_to_dict(row) for row in rows]
+            from packages.application.nomenclature_activation_intents import source_statuses
+            statuses = source_statuses(conn)
+            return [{**_nomenclature_item_to_dict(row), **statuses.get(row["item_id"], {})} for row in rows]
 
     def load_nomenclature_item(self, item_id: str) -> dict[str, Any] | None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -8048,7 +8050,9 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (item_id,),
             ).fetchone()
-            return _nomenclature_item_to_dict(row) if row is not None else None
+            from packages.application.nomenclature_activation_intents import source_statuses
+            return ({**_nomenclature_item_to_dict(row), **source_statuses(conn, [item_id]).get(item_id, {})}
+                    if row is not None else None)
 
     def active_nomenclature_match_key_exists(self, *, match_key: str, exclude_item_id: str = "") -> bool:
         normalized = str(match_key or "").strip()
@@ -8070,13 +8074,17 @@ class RegistryUploadDbBackedRuntime:
             ).fetchone()
             return row is not None
 
-    def save_nomenclature_item(self, item: Mapping[str, Any]) -> dict[str, Any]:
-        saved_items = self.save_nomenclature_items_atomic([item])
+    def save_nomenclature_item(self, item: Mapping[str, Any], *, preserve_staged_activation: bool = False) -> dict[str, Any]:
+        saved_items = self.save_nomenclature_items_atomic(
+            [item], preserve_staged_item_ids=[str(item["item_id"])] if preserve_staged_activation else [],
+        )
         if not saved_items:
             raise ValueError("nomenclature item was not saved")
         return saved_items[0]
 
-    def save_nomenclature_items_atomic(self, items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def save_nomenclature_items_atomic(
+        self, items: list[Mapping[str, Any]], *, preserve_staged_item_ids: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
         prepared_items: list[dict[str, Any]] = []
         for item in items:
             item_id = str(item.get("item_id") or "").strip()
@@ -8170,7 +8178,11 @@ class RegistryUploadDbBackedRuntime:
                 }
             )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        from packages.application.ff_pool_dense_fbs import DenseFbsService
+        from packages.application.nomenclature_activation_intents import (
+            drain_nomenclature_activation_intents,
+            record_source_write,
+            source_statuses,
+        )
         from packages.application.warehouse_functional_lock import (
             warehouse_functional_write_lock,
         )
@@ -8189,15 +8201,21 @@ class RegistryUploadDbBackedRuntime:
                         [str(item["item_id"]) for item in prepared_items],
                     ).fetchall()
                 } if prepared_items else {}
+                activation_statuses = source_statuses(conn, preserve_staged_item_ids) if preserve_staged_item_ids else {}
                 staged_rows: list[dict[str, Any]] = []
                 for prepared in prepared_items:
+                    prior = existing.get(str(prepared["item_id"]))
+                    if prepared["item_id"] in preserve_staged_item_ids and prior is not None:
+                        # Metadata writers preserve the current decision under the
+                        # shared lock, not the false flag from an older staged read.
+                        prepared["is_active"] = int(bool(prior["is_active"]) or
+                            activation_statuses.get(prepared["item_id"], {}).get("activation_status") == "pending")
                     desired_nm_id = int(prepared["nm_id"] or 0)
                     desired_stock_managed = bool(
                         prepared["is_active"]
                         and not prepared["is_hidden"]
                         and desired_nm_id > 0
                     )
-                    prior = existing.get(str(prepared["item_id"]))
                     prior_nm_id = int(prior["nm_id"] or 0) if prior is not None else 0
                     prior_stock_managed = bool(
                         prior is not None
@@ -8225,28 +8243,15 @@ class RegistryUploadDbBackedRuntime:
                     else:
                         staged_rows.append(prepared)
                 _upsert_nomenclature_rows(conn, staged_rows)
+                record_source_write(
+                    conn, desired_items=prepared_items,
+                    staged_item_ids={item["item_id"] for item in activation_items},
+                )
                 conn.commit()
             if activation_items:
-                activation_material = sorted(
-                    activation_items,
-                    key=lambda item: (item["nm_id"], item["item_id"]),
-                )
-                request_identity = "sha256:" + hashlib.sha256(
-                    json.dumps(
-                        activation_material,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
-                DenseFbsService(
-                    db_path=self.db_path,
-                    runtime_dir=self.runtime_dir,
-                ).activate_staged_skus(
-                    staged_items=activation_material,
-                    orchestration_key="sku-activation:" + request_identity,
-                    request_identity=request_identity,
-                    actor="registry_nomenclature_write",
+                drain_nomenclature_activation_intents(
+                    self, item_ids=[item["item_id"] for item in activation_items],
+                    raise_errors=True,
                 )
         loaded_items: list[dict[str, Any]] = []
         for prepared in prepared_items:
@@ -8276,6 +8281,7 @@ class RegistryUploadDbBackedRuntime:
                     raise ValueError(f"nomenclature item not found: {item_id}")
                 if bool(row[0]) and not bool(row[1]) and int(row[2] or 0) > 0:
                     require_fbs_sku_retirable(conn, nm_id=int(row[2]))
+                from packages.application.nomenclature_activation_intents import cancel_source_activation
                 cursor = conn.execute(
                     """
                     UPDATE sheet_vitrina_v1_nomenclature_items
@@ -8285,6 +8291,7 @@ class RegistryUploadDbBackedRuntime:
                     """,
                     (updated_at, item_id),
                 )
+                cancel_source_activation(conn, item_id)
                 conn.commit()
                 if cursor.rowcount != 1:
                     raise ValueError(f"nomenclature item not found: {item_id}")

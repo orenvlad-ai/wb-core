@@ -2054,7 +2054,11 @@ class SupplierShipmentsBlock:
                 items=[],
             )
 
-        saved_items = self.runtime.save_nomenclature_items_atomic([operation["item"] for operation in operations])
+        saved_items = self.runtime.save_nomenclature_items_atomic(
+            [operation["item"] for operation in operations],
+            preserve_staged_item_ids=[str(operation["item"]["item_id"]) for operation in operations
+                                     if operation.get("preserve_staged_activation")],
+        )
         return _nomenclature_import_result(
             status="ok",
             dry_run=False,
@@ -2158,7 +2162,7 @@ class SupplierShipmentsBlock:
                 prepared_payload["hidden_at"] = ""
                 prepared_payload["hidden_reason"] = ""
         item = _normalize_nomenclature_payload(
-            {**existing, **prepared_payload},
+            {**existing, "is_active": _nomenclature_requested_active(existing), **prepared_payload},
             item_id=item_id,
             created_at=str(existing.get("created_at") or now),
             updated_at=now,
@@ -2173,7 +2177,7 @@ class SupplierShipmentsBlock:
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature",
             "status": "ok",
-            "item": self.runtime.save_nomenclature_item(item),
+            "item": self.runtime.save_nomenclature_item(item, preserve_staged_activation="is_active" not in payload),
             "barcode_sync": barcode_sync,
         }
 
@@ -2194,7 +2198,7 @@ class SupplierShipmentsBlock:
             reason="manual_row_sync",
             allow_existing_non_manual=True,
         )
-        saved = self.runtime.save_nomenclature_item(item) if barcode_sync.get("save_item", False) else existing
+        saved = self.runtime.save_nomenclature_item(item, preserve_staged_activation=True) if barcode_sync.get("save_item", False) else existing
         return {
             "contract_name": "sheet_vitrina_v1_nomenclature_barcode_sync",
             "status": "ok",
@@ -2271,7 +2275,7 @@ class SupplierShipmentsBlock:
                 if updated.get("_manual_barcode_preserved"):
                     counts["manual_barcode_preserved"] += 1
                 updated.pop("_manual_barcode_preserved", None)
-                saved = self.runtime.save_nomenclature_item(updated)
+                saved = self.runtime.save_nomenclature_item(updated, preserve_staged_activation=True)
                 matcher.replace(saved)
                 results.append(saved)
                 counts["updated"] += 1
@@ -2844,7 +2848,7 @@ class SupplierShipmentsBlock:
             updated["compatible_models_text"] = text
             updated["compatible_model_keys"] = keys
             updated["updated_at"] = now
-            self.runtime.save_nomenclature_item(updated)
+            self.runtime.save_nomenclature_item(updated, preserve_staged_activation=True)
 
 
 def _sanitize_supplier_write_payload(
@@ -4874,6 +4878,10 @@ def _nomenclature_import_row_empty(row_values: Mapping[str, Any]) -> bool:
     return True
 
 
+def _nomenclature_requested_active(item: Mapping[str, Any]) -> bool:
+    return bool(item.get("is_active")) or item.get("activation_status") == "pending"
+
+
 def _normalize_nomenclature_import_row(
     row_values: Mapping[str, Any],
     *,
@@ -4898,6 +4906,8 @@ def _normalize_nomenclature_import_row(
             raise ValueError(f"Строка {row_number}: match key неоднозначен: {raw_match_key}")
 
     base = dict(existing) if existing is not None else {}
+    if existing is not None:
+        base["is_active"] = _nomenclature_requested_active(existing)
     is_active = (
         _parse_nomenclature_bool(row_values.get("is_active"), default=bool(base.get("is_active", True)))
         if "is_active" in row_values
@@ -5013,7 +5023,9 @@ def _normalize_nomenclature_import_row(
     action = "created"
     if existing is not None:
         action = "deactivated" if bool(existing.get("is_active")) and not bool(item.get("is_active")) else "updated"
-    return {"row": row_number, "action": action, "item": item}
+    return {"row": row_number, "action": action, "item": item,
+            "preserve_staged_activation": existing is not None and
+                ("is_active" not in row_values or not _cell_text(row_values.get("is_active")))}
 
 
 def _parse_nomenclature_bool(value: Any, *, default: bool) -> bool:
