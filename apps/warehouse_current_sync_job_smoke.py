@@ -71,7 +71,7 @@ def wait_terminal(entry, run_id):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         value = entry.handle_warehouse_manual_sync_status_request(run_id)
-        if value["status"] not in {"running", "busy"}:
+        if value["status"] not in {"running", "busy", "accepted", "queued"}:
             return value
         time.sleep(0.01)
     raise AssertionError("HTTP worker failed to terminate")
@@ -138,7 +138,7 @@ def http_races(root):
             gate.wait(5)
             results = [f.result(5) for f in futures]
         assert reached.wait(5)
-        assert sorted(r["status"] for r in results) == ["busy", "running"]
+        assert sorted(r["status"] for r in results) == ["accepted", "busy"]
         assert results[0]["run_id"] == results[1]["run_id"]
         assert len(entry.operator_jobs._threads) == 1
         assert effects.count("backup") == 1
@@ -175,7 +175,7 @@ def http_races(root):
     entry.wb_supplies_block.sync_functional_sources = failure
     failed = entry.handle_warehouse_manual_sync_start_request()
     result = wait_terminal(entry, failed["run_id"])
-    assert result["status"] == "error" and effects.count("failed") == 1
+    assert result["status"] == "failed" and effects.count("failed") == 1
     assert result["technical_details"]["lock_metrics"]["outcome"] == "error"
     assert entry.warehouse_update_journal.public_status()["manual_updates"]["status"] == "failed"
     with warehouse_functional_job_lock(root):
@@ -187,7 +187,7 @@ def http_races(root):
     with patch("packages.application.fbs_accounting_runtime.refresh", return_value={}):
         failed_terminal = entry.handle_warehouse_manual_sync_start_request()
         terminal_result = wait_terminal(entry, failed_terminal["run_id"])
-    assert terminal_result["status"] == "error" and "terminal unavailable" in terminal_result["user_status"]
+    assert terminal_result["status"] == "interrupted" and not terminal_result["can_start_new"]
     assert entry.warehouse_update_journal.public_status()["active_run"]["status"] == "running"
     entry.warehouse_update_journal.finish = original_finish
     with warehouse_functional_job_lock(root):

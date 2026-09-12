@@ -26,6 +26,8 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 import zlib
 
+from packages.application.warehouse_update_journal import WarehouseRequestConflict
+
 from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint,
     SheetVitrinaHealthRecoveryConflict,
@@ -1062,11 +1064,16 @@ def _build_handler(
                 try:
                     body = _load_optional_request_payload(self)
                     if parsed.path == DEFAULT_WAREHOUSES_SYNC_PATH:
-                        payload = entrypoint.handle_warehouse_manual_sync_start_request()
+                        payload = entrypoint.handle_warehouse_manual_sync_start_request(
+                            body, request_scope=_current_web_user_config_key(self),
+                        )
                     elif parsed.path == DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH:
                         payload = entrypoint.handle_warehouse_emergency_preview_request()
                     else:
                         payload = entrypoint.handle_warehouse_emergency_apply_request(body)
+                except WarehouseRequestConflict as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": "request_key_conflict"})
+                    return
                 except WarehouseSyncBusyError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
@@ -3104,6 +3111,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        user_config_key=_current_web_user_config_key(self),
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
                     ),
@@ -3157,6 +3165,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        user_config_key=_current_web_user_config_key(self),
                         active_tab="settings",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
@@ -3196,6 +3205,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        user_config_key=_current_web_user_config_key(self),
                         active_tab="instructions",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
@@ -3300,6 +3310,7 @@ def _build_handler(
                             operator_path=sheet_operator_ui_path,
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
+                            user_config_key=_current_web_user_config_key(self),
                             role=_current_web_user_role(self),
                             allowed_sections=_current_web_user_allowed_sections(self),
                         ),
@@ -4607,7 +4618,9 @@ def _build_handler(
                 try:
                     run_id = _resolve_single_query_param(parsed.query, "run_id")
                     payload = entrypoint.handle_warehouse_manual_sync_status_request(
-                        run_id or None
+                        run_id or None,
+                        request_key=_resolve_single_query_param(parsed.query, "request_key") or "",
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -10326,6 +10339,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     role: str = WEB_AUTH_ROLE_ADMIN,
     allowed_sections: Sequence[str] | None = None,
     active_tab: str = "",
+    user_config_key: str = "local_operator",
 ) -> str:
     normalized_role = _normalize_runtime_role(role) or WEB_AUTH_ROLE_ADMIN
     normalized_sections = (
@@ -10338,6 +10352,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     config_payload = {
         "page_title": "Web-витрина",
         "current_role": normalized_role,
+        "user_config_key": user_config_key,
         "allowed_sections": normalized_sections,
         "allowed_tabs": allowed_tabs,
         "initial_tab": initial_tab,
