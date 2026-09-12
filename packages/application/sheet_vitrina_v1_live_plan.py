@@ -163,6 +163,13 @@ from packages.application.sheet_vitrina_v1_weighted_seller_price import (
     SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
     WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
     extend_metrics_with_weighted_seller_price,
+    index_daily_order_price,
+    observed_order_price,
+    uses_order_price,
+    weighted_price_presentation,
+    ORDER_PRICE_EFFECTIVE_FROM,
+    ORDER_PRICE_AGGREGATION_RULE,
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_AGGREGATION_RULE,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
@@ -448,6 +455,7 @@ class SlotLookups:
     sku_action_lookup: dict[int, dict[str, float]] = field(default_factory=dict)
     sku_action_error: str = ""
     column_date: str = ""
+    order_price_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1544,6 +1552,11 @@ class SheetVitrinaV1LivePlanBlock:
             metadata={
                 **dict(getattr(plan, "metadata", {}) or {}),
                 "local_derive_registry_fingerprint": _registry_state_fingerprint(current_state),
+                "weighted_seller_price_formula": {
+                    "effective_from": ORDER_PRICE_EFFECTIVE_FROM,
+                    "before": WEIGHTED_SELLER_PRICE_DISCOUNTED_AGGREGATION_RULE,
+                    "from": ORDER_PRICE_AGGREGATION_RULE,
+                },
                 "refresh_diagnostics": diagnostics,
                 "incident_projection_quality_by_date": {
                     slot.column_date: dict(
@@ -1559,6 +1572,8 @@ class SheetVitrinaV1LivePlanBlock:
                 },
                 "server_cell_presentation": _merge_cell_presentations(
                     evaluator_scope_presentation(rows=data_rows, slots=temporal_slots,
+                        evaluator=evaluator, current_date=current_date),
+                    weighted_price_presentation(slots=temporal_slots,
                         evaluator=evaluator, current_date=current_date),
                     ads_partial_presentation(
                         rows=data_rows, slots=temporal_slots, statuses=live_sources.statuses,
@@ -1947,6 +1962,7 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "sales_funnel_history":
                     current_lookups.history_lookup = _index_history_items(payload)
+                    current_lookups.order_price_lookup = index_daily_order_price(payload, slot.column_date)
                 elif source_key == "web_source_snapshot":
                     current_lookups.web_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "prices_snapshot":
@@ -3516,12 +3532,18 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key == WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY:
-                value = self._aggregate_positive_weight_fail_closed(
-                    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
-                    SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
-                    self.enabled_config,
-                    temporal_slot,
-                )
+                lookups = self._slot_lookups(temporal_slot)
+                if uses_order_price(lookups.column_date):
+                    value, _, _ = observed_order_price(
+                        lookups.order_price_lookup, (item.nm_id for item in self.enabled_config),
+                    )
+                else:
+                    value = self._aggregate_positive_weight_fail_closed(
+                        SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+                        SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
+                        self.enabled_config,
+                        temporal_slot,
+                    )
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
                 value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
