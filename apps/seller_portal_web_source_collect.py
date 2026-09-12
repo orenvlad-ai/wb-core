@@ -51,14 +51,17 @@ def main():
     parser.add_argument('--source-key', choices=['seller_funnel_snapshot','web_source_snapshot'], required=True)
     parser.add_argument('--date', required=True)
     parser.add_argument('--bot-dir', default='/opt/wb-web-bot')
+    parser.add_argument('--canonical-env', default='/opt/wb-ai/.env')
     parser.add_argument('--write-source', action='store_true')
     parser.add_argument('--output')
     args = parser.parse_args()
     bot = Path(args.bot_dir)
     env = {**os.environ, **_load_env_file(bot/'.env')}
+    canonical_supplier=_load_env_file(Path(args.canonical_env)).get('SELLER_PORTAL_CANONICAL_SUPPLIER_ID','')
+    if not canonical_supplier:raise ValueError('canonical_supplier_not_configured')
     with seller_portal_automation_lock(owner='web_source_collector', purpose='dated_report', run_id=str(uuid4()), expected_max_seconds=600):
         candidate = collect_web_source(source_key=args.source_key, snapshot_date=args.date,
-            storage_state_path=str(bot/'storage_state.json'), canonical_supplier_id=env.get('SELLER_PORTAL_CANONICAL_SUPPLIER_ID',''))
+            storage_state_path=str(bot/'storage_state.json'), canonical_supplier_id=canonical_supplier)
         if args.write_source:
             write_source(candidate, env=env)
         if args.output:

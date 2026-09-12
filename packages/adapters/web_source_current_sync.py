@@ -232,6 +232,7 @@ class ShellBackedWebSourceCurrentSync:
         return [str(self.config.wb_web_bot_dir / "venv" / "bin" / "python"),
                 str(Path(__file__).resolve().parents[2] / "apps" / "seller_portal_web_source_collect.py"),
                 "--source-key", source_key, "--date", snapshot_date,
+                "--canonical-env", str(self.config.wb_ai_dir / ".env"),
                 "--bot-dir", str(self.config.wb_web_bot_dir), "--write-source"]
 
     def _is_enabled(self) -> bool:

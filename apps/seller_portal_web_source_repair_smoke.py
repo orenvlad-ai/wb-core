@@ -123,6 +123,8 @@ def main():
     current=[ClosedDaySourceState('web_source_snapshot',DAY,1,datetime.now(timezone.utc).isoformat())]
     sync=ShellBackedWebSourceCurrentSync(config=WebSourceCurrentSyncConfig('off',Path('/absent'),Path('/absent'),'http://localhost',1,'',''),
         closed_day_source_state_loader=lambda *_:current[0])
+    command=sync._collector_command('web_source_snapshot',DAY)
+    assert command[command.index('--canonical-env')+1]=='/absent/.env'
     assert sync._current_source_is_fresh('web_source_snapshot',DAY)
     current[0]=ClosedDaySourceState('web_source_snapshot',DAY,1,(datetime.now(timezone.utc)-timedelta(hours=2)).isoformat())
     assert not sync._current_source_is_fresh('web_source_snapshot',DAY) and not sync.observed_states
