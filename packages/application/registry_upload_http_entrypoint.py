@@ -6073,16 +6073,11 @@ class RegistryUploadHttpEntrypoint:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
     ) -> dict[str, Any]:
-        result = self.fulfillment_services_block.upload_xlsx(
+        return self.fulfillment_services_block.upload_xlsx(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
         )
-        result["warehouse_targeted_recalculation"] = self._enqueue_fulfillment_recalculation(
-            result,
-            revision=str((result.get("upload") or {}).get("file_sha256") or ""),
-        )
-        return result
 
     def handle_fulfillment_services_uploads_request(self) -> dict[str, Any]:
         return self.fulfillment_services_block.list_uploads()
@@ -6091,61 +6086,7 @@ class RegistryUploadHttpEntrypoint:
         return self.fulfillment_services_block.get_upload(upload_id)
 
     def handle_fulfillment_services_upload_delete_request(self, upload_id: str) -> dict[str, Any]:
-        before = self.fulfillment_services_block.get_upload(upload_id)
-        result = self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
-        result["warehouse_targeted_recalculation"] = self._enqueue_fulfillment_recalculation(
-            before,
-            revision=f"deleted:{result.get('deleted_at') or ''}",
-        )
-        return result
-
-    def _enqueue_fulfillment_recalculation(
-        self,
-        detail: Mapping[str, Any],
-        *,
-        revision: str,
-    ) -> dict[str, Any]:
-        upload = dict(detail.get("upload") or {})
-        if str(upload.get("validation_status") or detail.get("validation_status") or "") != "ok":
-            return {"status": "not_eligible", "reason": "fulfillment_document_not_confirmed"}
-        supply_records: dict[str, Mapping[str, Any]] = {}
-        for line in detail.get("lines") or []:
-            if str(line.get("match_status") or "") != "ok" or bool(line.get("is_storage_line")):
-                continue
-            candidates = (
-                line.get("matched_wb_supply_id"),
-                str(line.get("matched_wb_cache_key") or "").removeprefix("supply:"),
-                line.get("supply_id_input"),
-            )
-            for candidate in candidates:
-                supply_id = str(candidate or "").strip()
-                if not supply_id or supply_id in supply_records:
-                    continue
-                record = self.runtime.load_wb_supply_record(supply_id)
-                if record is not None:
-                    supply_records[supply_id] = record
-                    break
-        nm_ids: set[int] = set()
-        effective_dates: list[str] = []
-        for record in supply_records.values():
-            normalized = _normalized_wb_record(record)
-            nm_ids.update(int(item["nm_id"]) for item in _validated_wb_goods(normalized))
-            for field in ("fact_date", "supply_date", "updated_date", "created_date"):
-                value = str(normalized.get(field) or record.get(field) or "")[:10]
-                if value:
-                    effective_dates.append(value)
-                    break
-        if not nm_ids:
-            return {"status": "not_eligible", "reason": "no_matched_supply_skus"}
-        upload_id = str(upload.get("upload_id") or detail.get("upload_id") or "").strip()
-        return enqueue_warehouse_targeted_recalculation(
-            runtime=self.runtime,
-            stable_source_id=f"fulfillment_upload:{upload_id}",
-            source_revision=str(revision or upload.get("updated_at") or upload_id),
-            effective_date=min(effective_dates) if effective_dates else str(upload.get("uploaded_at") or "")[:10],
-            affected_nm_ids=nm_ids,
-            requested_at=self.activated_at_factory(),
-        )
+        return self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
 
     def handle_fulfillment_services_payment_validation_pdf_request(
         self,

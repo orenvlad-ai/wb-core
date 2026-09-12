@@ -5936,6 +5936,8 @@ class WarehouseFunctionalBlock:
                 recovery_end_date=snapshot_business_date,
                 include_historical_correction=include_historical_correction,
             )
+            from packages.application.fulfillment_recalc_intents import require_current_cost_layers
+            require_current_cost_layers(conn)
             conn.commit()
         # The version timestamp describes the completed coherent local capture,
         # not the instant before the (potentially slow) WB fetch or DB read.  A

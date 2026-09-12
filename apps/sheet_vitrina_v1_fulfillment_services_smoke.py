@@ -38,6 +38,8 @@ NOW = "2026-07-06T08:00:00Z"
 
 
 def main() -> None:
+    from apps.fulfillment_recalc_intents_smoke import main as check_durable_recalculation
+    check_durable_recalculation()
     _check_pdf_text_matching()
     with TemporaryDirectory(prefix="fulfillment-services-app-") as tmp:
         runtime_dir = Path(tmp) / "runtime"
