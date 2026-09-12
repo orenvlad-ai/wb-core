@@ -27,7 +27,7 @@ from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
 from packages.adapters.spp_proxy_block import HttpBackedPublicWbCardBuyerPriceSource
 from packages.adapters.spp_block import HttpBackedSppSource
 from packages.adapters.stocks_block import HistoricalCsvBackedStocksSource
-from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync
+from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync, serving_payload_matches
 from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnapshotSource
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
@@ -2588,6 +2588,8 @@ class SheetVitrinaV1LivePlanBlock:
         )
         if current_web_source_sync_note:
             status = _append_current_web_source_sync_note(status, current_web_source_sync_note)
+        if source_state is not None and not serving_payload_matches(source_state,payload,requested_nm_ids if source_key=="seller_funnel_snapshot" else None):
+            sync_error="serving_source_generation_mismatch"
         if sync_error:
             status = _append_status_note(status, f"closed_day_sync_error={sync_error}")
         elif source_state is not None and payload is not None and hasattr(payload, "source_fetched_at"):

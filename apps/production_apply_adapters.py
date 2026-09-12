@@ -19,7 +19,7 @@ from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapt
 from apps.web_vitrina_wb_history_recovery import WebVitrinaWbHistoryRecoveryAdapter
 from apps.ads_partial_publication import AdsPartialPublicationAdapter
 from apps.finance_daily_publication import FinanceDailyPublicationAdapter
-from apps.web_source_publication import WebSourcePublicationAdapter
+from apps.web_vitrina_web_source_publication import WebSourcePublicationAdapter
 
 
 class Adapter(Protocol):

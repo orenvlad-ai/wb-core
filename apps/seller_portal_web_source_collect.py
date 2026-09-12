@@ -17,15 +17,18 @@ from packages.adapters.web_source_current_sync import _load_env_file
 
 def write_source(candidate: dict, *, env: dict) -> None:
     """Replace one dated source in one transaction, preserving observation time."""
+    day = candidate['snapshot_date']
+    items = candidate['items']
+    if not items or candidate.get('completeness') != 'complete' or candidate['request_period'] != {'start':day,'end':day}:
+        raise ValueError('unqualified_source_candidate')
+    signals=('view_count','open_card_count') if candidate['source_key']=='seller_funnel_snapshot' else ('views_current','ctr_current','orders_current')
+    if not any((r.get(k) or 0)>0 for r in items for k in signals):
+        raise ValueError('source_zero_signal_not_accepted')
     import psycopg2
     from psycopg2.extras import Json, execute_batch
     conn = psycopg2.connect(host=env.get('WEB_DB_HOST','127.0.0.1'), port=env.get('WEB_DB_PORT','5432'),
         dbname=env.get('WEB_DB_NAME','wb_web_analytics'), user=env.get('WEB_DB_USER','wb_ai'),
         password=env.get('WEB_DB_PASSWORD'), connect_timeout=5)
-    day = candidate['snapshot_date']
-    items = candidate['items']
-    if not items or candidate.get('completeness') != 'complete' or candidate['request_period'] != {'start':day,'end':day}:
-        raise ValueError('unqualified_source_candidate')
     try:
         with conn:
             with conn.cursor() as cur:

@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from apps.web_source_publication import WebSourcePublicationAdapter, canonical, digest, project, validate_observations, non_target_digest
+from apps.web_vitrina_web_source_publication import WebSourcePublicationAdapter, canonical, digest, project, validate_observations, non_target_digest
 from apps.production_apply_launcher import execute
 
 
@@ -37,9 +37,94 @@ def plan():
         {'sheet_name':'STATUS','rows':[[s+'[yesterday_closed]','success','','','','','',3,0,'','stale'] for s in ['seller_funnel_snapshot','web_source_snapshot']]}]}
 
 
+def source_recovery_checks(request):
+    """Exercise the real launcher/adapter with transactional stores and injected IO failures."""
+    from contextlib import contextmanager
+    from datetime import datetime,timezone
+    from apps.web_vitrina_web_source_publication import PG_TABLES
+    from apps.production_apply_launcher import ApplyError
+    request={**request,'phase':'source'}
+    for failure in ('raw-after-commit','handoff-before-commit','none'):
+        with TemporaryDirectory() as tmp:
+            runtime=Path(tmp);db=runtime/'operational.sqlite3'
+            sqlite3.connect(db).close()
+            class Cursor:
+                def __enter__(self):return self
+                def __exit__(self,*args):pass
+                def execute(self,sql):assert sql=='SELECT transaction_timestamp()'
+                def fetchone(self):return (datetime.now(timezone.utc),)
+            class Connection:
+                def __init__(self,owner,target):
+                    self.owner,self.target=owner,target;self.staged=deepcopy(owner.images[target])
+                def cursor(self):return Cursor()
+                def commit(self):
+                    self.owner.commits.append(self.target)
+                    if self.target and self.owner.failure=='handoff-before-commit':
+                        self.owner.failure='none';raise OSError('connection lost before commit')
+                    self.owner.images[self.target]=deepcopy(self.staged)
+                    if not self.target and self.owner.failure=='raw-after-commit':
+                        self.owner.failure='none';raise OSError('connection lost after commit')
+                def rollback(self):pass
+                def close(self):pass
+            class Adapter(WebSourcePublicationAdapter):
+                def __init__(self):
+                    self.images={t:{name:[] for name,_ in tables} for t,tables in PG_TABLES.items()}
+                    self.failure=failure;self.commits=[];self.locked=False
+                def target(self,r):return runtime,db
+                @contextmanager
+                def _pg_connections(self,*,locked=False):
+                    self.locked=locked
+                    try:yield {t:Connection(self,t) for t in PG_TABLES}
+                    finally:self.locked=False
+                def _pg_read(self,conn,tables,r):return deepcopy(conn.staged)
+                def _pg_capture(self,r,connections=None):
+                    states={}
+                    for t in PG_TABLES:states.update(deepcopy(connections[t].staged if connections else self.images[t]))
+                    return states,{'False':['fixture-raw'],'True':['fixture-serving']}
+                def _pg_replace(self,conn,r,tables,images):
+                    assert self.locked,'PG CAS must hold both stores locked'
+                    conn.staged=deepcopy(images)
+                def _materialized(self,r):pass
+            adapter=Adapter();adapters={'fixture':adapter};request['runtime_dir']=str(runtime)
+            operation='operation-source-'+failure
+            preview=execute(action='preview',adapter_name='fixture',operation_id=operation,request=request,adapters=adapters)
+            receipt=execute(action='apply',adapter_name='fixture',operation_id=operation,request=request,
+                expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
+            if failure!='none':
+                assert receipt['state']=='ambiguous' and receipt['readback']['parts']=={'raw':'after','handoff':'before'},receipt
+                commits=list(adapter.commits)
+                try:execute(action='apply',adapter_name='fixture',operation_id=operation,request=request,
+                    expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
+                except ApplyError as exc:assert str(exc)=='operation-not-ready'
+                else:raise AssertionError('partial submit repeated')
+                assert adapter.commits==commits
+            else:
+                assert receipt['state']=='applied'
+                # The API is still candidate, but any raw-only update is drift.
+                saved=deepcopy(adapter.images[False]);adapter.images[False]['sales_funnel_daily_raw'][0]['view_count']='999'
+                assert adapter.readback(request,operation)['parts']['raw']=='drift'
+                before=deepcopy(adapter.images)
+                try:adapter.rollback(request,operation)
+                except ValueError as exc:assert str(exc)=='rollback-after-state-drift'
+                else:raise AssertionError('raw drift overwritten')
+                assert adapter.images==before
+                adapter.images[False]=deepcopy(saved)
+                # A new raw SKU or a changed JSON report is equally observable.
+                added=deepcopy(saved['sales_funnel_daily_raw'][0]);added['nm_id']=999
+                adapter.images[False]['sales_funnel_daily_raw'].append(added)
+                assert adapter.readback(request,operation)['parts']['raw']=='drift'
+                adapter.images[False]=deepcopy(saved)
+                adapter.images[False]['search_analytics_raw'][0]['raw_json']={'new':'report'}
+                assert adapter.readback(request,operation)['parts']['raw']=='drift'
+                adapter.images[False]=deepcopy(saved)
+            assert adapter.rollback(request,operation)['state']=='restored'
+            assert all(not rows for store in adapter.images.values() for rows in store.values())
+
+
 def main():
     obs=observations();request={'dates':['2026-09-11'],'nm_ids':[1,2,3],'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture','phase':'publication'}
     validate_observations(request)
+    source_recovery_checks(request)
     old=plan();new,changes=project(old,obs,[1,2,3],'op-fixture')
     assert non_target_digest(old,obs)==non_target_digest(new,obs)
     rows={r[1]:r for r in new['sheets'][0]['rows']}
@@ -72,6 +157,19 @@ def main():
         repeated=execute(action='apply',adapter_name='fixture',operation_id='operation-fixture-1',request=request,
             expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
         assert repeated['state']=='applied' and repeated.get('submit') is None
+        # Full slot/closure images, not only payload bytes, belong to CAS.
+        for table,column,drift in [('temporal_source_closure_state','last_reason','independent-new-attempt'),
+            ('temporal_source_closure_state','state','closure_retrying'),('temporal_source_slot_snapshots','captured_at','2099-01-01T00:00:00Z')]:
+            with sqlite3.connect(db) as conn:
+                original=conn.execute(f'SELECT {column} FROM {table} ORDER BY rowid LIMIT 1').fetchone()[0]
+                conn.execute(f'UPDATE {table} SET {column}=? WHERE rowid=(SELECT min(rowid) FROM {table})',(drift,))
+            assert adapter.readback(request,'operation-fixture-1')['parts']['publication']=='drift'
+            try:adapter.rollback(request,'operation-fixture-1')
+            except ValueError as exc:assert str(exc)=='rollback-after-state-drift'
+            else:raise AssertionError('independent closure/slot change overwritten')
+            with sqlite3.connect(db) as conn:
+                assert conn.execute(f'SELECT {column} FROM {table} ORDER BY rowid LIMIT 1').fetchone()[0]==drift
+                conn.execute(f'UPDATE {table} SET {column}=? WHERE rowid=(SELECT min(rowid) FROM {table})',(original,))
         assert adapter.rollback(request,'operation-fixture-1')['state']=='restored'
         with sqlite3.connect(db) as conn:
             assert json.loads(conn.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots').fetchone()[0])==old
