@@ -226,6 +226,7 @@ from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
 )
 from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
+from packages.application.warehouse_functional_maintenance import warehouse_start_is_held
 from packages.application.warehouse_update_journal import (
     WarehouseUpdateJournal, WarehouseRequestConflict, validate_warehouse_request,
 )
@@ -10178,6 +10179,10 @@ class SheetVitrinaV1OperatorJobStore:
                 error: BaseException | None = None
                 try:
                     with warehouse_functional_job_lock(runtime_dir) as metrics:
+                        # Startup pickup must respect the same maintenance
+                        # boundary as a new HTTP request, including invalid state.
+                        if warehouse_start_is_held(runtime_dir):
+                            raise WarehouseFunctionalBusyError("warehouse updates are paused for maintenance")
                         with self._lock:
                             if admission.get("cancelled"):
                                 return
@@ -10204,6 +10209,8 @@ class SheetVitrinaV1OperatorJobStore:
                         permitted = proceed.wait(timeout=5.0)
                         if not permitted or admission.get("cancelled"):
                             return  # Durable pending is retained, never deleted.
+                        if warehouse_start_is_held(runtime_dir):
+                            return  # A hold acquired during acceptance also keeps this ID pending.
                         claimed = journal.claim(accepted["durable_run_id"])
                         if not claimed:
                             return

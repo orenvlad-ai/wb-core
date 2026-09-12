@@ -95,6 +95,60 @@ def crash_cases(root):
         print("durable restart:", boundary, result["status"], "same ID; no duplicate effect")
 
 
+def maintenance_pickup_case(root):
+    from packages.application.business_data_write_barrier import acquire_barrier, abort_barrier_acquire
+    from packages.application.warehouse_functional_maintenance import (
+        WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME, warehouse_start_is_held,
+    )
+    for mode in ("business_barrier", "holding", "held", "invalid", "during_accept"):
+        case = root / mode
+        entry, effects, _ = entry_fixture(case)
+        marker = case / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME
+        plan = "sha256:" + "1" * 64
+        if mode == "business_barrier":
+            acquire_barrier(case, window_id="fixture-maintenance", window_kind="snapshot", plan_fingerprint=plan,
+                            approval_reference="fixture-approved", actor="fixture", reason="test startup pause")
+        elif mode != "during_accept":
+            marker.write_text("{" if mode == "invalid" else json.dumps({"phase": mode}), encoding="utf-8")
+        with patch("packages.application.fbs_accounting_runtime.refresh", return_value={}):
+            if mode == "during_accept":
+                original_accept = entry.warehouse_update_journal.accept
+                def accept_then_hold(**request):
+                    result = original_accept(**request)
+                    marker.write_text(json.dumps({"phase": "held"}), encoding="utf-8")
+                    return result
+                with patch.object(entry.warehouse_update_journal, "accept", side_effect=accept_then_hold):
+                    response = entry.handle_warehouse_manual_sync_start_request({"request_key": KEY})
+                pending = entry.warehouse_update_journal.lookup(public_id=response["run_id"], request_scope=SCOPE)
+                picker = None
+            else:
+                pending, _ = accept(entry.warehouse_update_journal)
+                picker = entry.operator_jobs.resume_warehouse_pending(runtime_dir=case, journal=entry.warehouse_update_journal,
+                    runner=entry._run_warehouse_manual_sync_job)
+            time.sleep(.2)
+            job = entry.warehouse_update_journal.lookup(public_id=pending["job_id"], request_scope=SCOPE)
+            assert warehouse_start_is_held(case)
+            assert job["status"] == "accepted" and not job["attempt_id"] and not effects, (mode, job, effects)
+            if mode == "business_barrier":
+                # acquire changed only the disposable barrier; no controls were changed.
+                abort_barrier_acquire(case, window_id="fixture-maintenance", plan_fingerprint=plan, actor="fixture",
+                    reason="test exact unchanged controls", restore_readback={"status":"restored", "exact_prior_state_restored":True})
+            else:
+                marker.write_text(json.dumps({"phase": "restored"}), encoding="utf-8")
+            assert not warehouse_start_is_held(case)
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                result = entry.handle_warehouse_manual_sync_status_request(pending["job_id"])
+                if result["status"] == "success":
+                    break
+                time.sleep(.05)
+            if picker:
+                picker.join(6)
+                assert not picker.is_alive()
+            assert result["status"] == "success" and effects.count("network") == 1, (mode, result, effects)
+        print("startup maintenance:", mode, "accepted/no claim/no effects; release same ID/effect1")
+
+
 def delayed_acceptance_case(root):
     entry, effects, _ = entry_fixture(root)
     assert entry.operator_jobs.resume_warehouse_pending(runtime_dir=root, journal=entry.warehouse_update_journal,
@@ -269,6 +323,7 @@ def main():
         identity_cases(root / "identity")
         crash_cases(root / "crash")
         delayed_acceptance_case(root / "delayed")
+        maintenance_pickup_case(root / "maintenance")
         http_cases(root / "http")
     print("warehouse_durable_identity_smoke: OK")
 

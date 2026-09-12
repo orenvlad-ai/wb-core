@@ -26,7 +26,11 @@ scoped route.
 При построении application сначала подготавливается additive schema; после
 построения всех зависимостей startup picker проверяет сохранённые операции.
 Он повторяет только admission к занятому owner. Если accepted успел сохраниться
-после истечения HTTP handshake, локальный picker запускается также без рестарта. `accepted` получает claim под
+после истечения HTTP handshake, локальный picker запускается также без рестарта.
+Активный или повреждённый write barrier, а также существующий warehouse maintenance
+marker (holding/held или нечитаемый) откладывают pickup до восстановления допуска.
+Проверка только читает существующие состояния, до pickup и повторно перед claim;
+в окне обслуживания accepted не получает claim. `accepted` получает claim под
 прежним ID. Запуск прежнего owner, который уже получил claim, переходит в
 `interrupted` без replay с первой фазы; подтверждённые этапы и точные receipts
 сохраняются. Если терминальный journal commit не состоялся, GET наблюдает

@@ -272,6 +272,17 @@ def _load_state(runtime_dir: Path) -> dict[str, Any] | None:
     return payload
 
 
+def warehouse_start_is_held(runtime_dir: Path) -> bool:
+    """Read existing maintenance gates without systemd calls or state changes."""
+    if barrier_status(runtime_dir).get("active"):
+        return True
+    try:
+        state = _load_state(runtime_dir)
+    except (OSError, ValueError, RuntimeError):
+        return True
+    return state is not None and state.get("phase") != "restored"
+
+
 def _load_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
