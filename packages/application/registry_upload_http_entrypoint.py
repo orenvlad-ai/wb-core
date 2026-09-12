@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import hashlib
 import importlib
 from io import BytesIO
@@ -179,7 +181,11 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
 )
 from packages.application.sheet_vitrina_v1_weighted_seller_price import (
     WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    WEIGHTED_PRICE_ROW_ID,
+    ORDER_PRICE_EFFECTIVE_FROM,
     extend_metrics_with_weighted_seller_price,
+    weighted_price_source,
+    preserve_seller_price_history,
 )
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
@@ -7583,6 +7589,7 @@ class RegistryUploadHttpEntrypoint:
                     previous_plan=previous_plan,
                     previous_refreshed_at=previous_refreshed_at,
                     business_date=current_business_date_iso(self.now_factory()),
+                    runtime=self.runtime,
                 )
                 save_snapshot_phase = _start_operator_phase(
                     "save_ready_snapshot",
@@ -7952,6 +7959,7 @@ class RegistryUploadHttpEntrypoint:
                         )
                     ),
                     source_keys=source_keys,
+                    column_date=selected_as_of_date,
                 )
                 if not metric_keys:
                     raise ValueError(f"source group {source_group_id!r} has no enabled web-vitrina metrics")
@@ -8036,6 +8044,7 @@ class RegistryUploadHttpEntrypoint:
                     refreshed_at=refreshed_at,
                     previous_refreshed_at=previous_status.refreshed_at,
                     selected_as_of_date=selected_as_of_date,
+                    business_date=current_business_date_iso(self.now_factory()),
                 )
                 emit(
                     _format_log_event(
@@ -11639,11 +11648,16 @@ def _web_vitrina_source_status_snapshot_id(
         return contract_snapshot_id
 
 
-def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterable[str]) -> list[str]:
+def _metric_keys_for_source_keys(
+    metrics: Iterable[Any], *, source_keys: Iterable[str], column_date: str = "",
+) -> list[str]:
     source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
     allowed_metric_keys: set[str] = set()
     for source_key in source_key_set:
         allowed_metric_keys.update(WEB_VITRINA_SOURCE_METRIC_KEYS.get(source_key, ()))
+    allowed_metric_keys.discard(WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY)
+    if weighted_price_source(column_date) in source_key_set:
+        allowed_metric_keys.add(WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY)
     ordered: list[str] = []
     for metric in sorted(metrics, key=lambda item: int(getattr(item, "display_order", 0) or 0)):
         metric_key = str(getattr(metric, "metric_key", "") or "").strip()
@@ -11658,8 +11672,10 @@ def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterabl
     return ordered
 
 
-def _source_key_for_metric_key(metric_key: str) -> str:
+def _source_key_for_metric_key(metric_key: str, column_date: str = "") -> str:
     normalized_metric_key = str(metric_key or "").strip()
+    if normalized_metric_key == WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY:
+        return weighted_price_source(column_date)
     for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items():
         if normalized_metric_key in set(metric_keys):
             return source_key
@@ -11681,6 +11697,7 @@ def _merge_source_group_ready_snapshot(
     refreshed_at: str,
     previous_refreshed_at: str,
     selected_as_of_date: str | None = None,
+    business_date: str = "",
 ) -> tuple[SheetVitrinaV1Envelope, dict[str, Any]]:
     metric_key_set = {str(item).strip() for item in metric_keys if str(item).strip()}
     source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
@@ -11717,6 +11734,9 @@ def _merge_source_group_ready_snapshot(
         for row_id in partial_rows_by_id
         if _metric_key_from_row_id(row_id) in metric_key_set
     }
+    business_date = business_date or current_business_date_iso()
+    if selected_date and selected_date < min(ORDER_PRICE_EFFECTIVE_FROM, business_date):
+        updated_row_ids.discard(WEIGHTED_PRICE_ROW_ID)
     partial_cell_statuses = _updated_cell_statuses_by_source_and_date(partial_plan)
     onec_missing_bucket_metric_keys: set[str] = set()
     if source_group_id == ONEC_STOCKS_SOURCE_GROUP_ID and selected_date:
@@ -11739,7 +11759,7 @@ def _merge_source_group_ready_snapshot(
         row_id = _row_id(row)
         if row_id in updated_row_ids:
             metric_key = _metric_key_from_row_id(row_id)
-            source_key = _source_key_for_metric_key(metric_key)
+            source_key = _source_key_for_metric_key(metric_key, selected_date)
             if selected_date and not _source_date_allows_cell_merge(
                 partial_cell_statuses,
                 source_key=source_key,
@@ -11772,7 +11792,7 @@ def _merge_source_group_ready_snapshot(
     existing_row_ids = {_row_id(row) for row in previous_data.rows if _row_id(row)}
     for row_id in sorted(updated_row_ids - existing_row_ids):
         metric_key = _metric_key_from_row_id(row_id)
-        source_key = _source_key_for_metric_key(metric_key)
+        source_key = _source_key_for_metric_key(metric_key, selected_date)
         if selected_date and not _source_date_allows_cell_merge(
             partial_cell_statuses,
             source_key=source_key,
@@ -11846,6 +11866,26 @@ def _merge_source_group_ready_snapshot(
             merged_sheets.append(sheet)
 
     previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {})
+    # The changed cell and its dated coverage travel together in a group refresh.
+    previous_metadata.pop("weighted_seller_price_history_preserved_dates", None)
+    if WEIGHTED_PRICE_ROW_ID in merged_row_ids:
+        presentation = deepcopy(previous_metadata.get("server_cell_presentation", {}))
+        cells = presentation.setdefault(WEIGHTED_PRICE_ROW_ID, {})
+        partial_cells = partial_plan.metadata.get("server_cell_presentation", {}).get(WEIGHTED_PRICE_ROW_ID, {})
+        for day in ([selected_date] if selected_date else previous_plan.date_columns):
+            if day in partial_cells:
+                cells[day] = deepcopy(partial_cells[day])
+            else:
+                cells.pop(day, None)
+        previous_metadata["server_cell_presentation"] = presentation
+    if "weighted_seller_price_formula" in partial_plan.metadata:
+        previous_metadata["weighted_seller_price_formula"] = deepcopy(partial_plan.metadata["weighted_seller_price_formula"])
+    merged_base = preserve_seller_price_history(
+        replace(previous_plan, sheets=merged_sheets, metadata=previous_metadata),
+        previous_plan=previous_plan, business_date=business_date,
+    )
+    merged_sheets = merged_base.sheets
+    previous_metadata = merged_base.metadata
     row_updated_at = _row_updated_at_metadata(
         previous_plan,
         metadata=previous_metadata,
@@ -11861,10 +11901,7 @@ def _merge_source_group_ready_snapshot(
         group_updated_at[source_group_id] = refreshed_at
     updated_cells = (
         _updated_cells_for_plan(
-            replace(
-                previous_plan,
-                sheets=merged_sheets,
-            ),
+            merged_base,
             row_ids=merged_row_ids,
             date_columns=[selected_date] if selected_date else list(previous_plan.date_columns),
         )
@@ -11981,9 +12018,13 @@ def _with_full_refresh_metadata(
     previous_plan: SheetVitrinaV1Envelope | None = None,
     previous_refreshed_at: str = "",
     business_date: str = "",
+    runtime: Any = None,
 ) -> SheetVitrinaV1Envelope:
     preservation_summary: dict[str, Any] | None = None
     proxy_v4_preservation: dict[str, Any] | None = None
+    metadata = dict(plan.metadata)
+    metadata.pop("weighted_seller_price_history_preserved_dates", None)
+    plan = replace(plan, metadata=metadata)
     if previous_plan is not None:
         plan, preservation_summary = _preserve_unconfirmed_source_cells_from_previous_plan(
             plan=plan,
@@ -11999,6 +12040,25 @@ def _with_full_refresh_metadata(
             previous_plan=previous_plan,
             business_date=business_date,
         )
+    # A closed column may have been published in yesterday's snapshot or an older
+    # bundle. Read it by column date, without changing other metrics' preservation.
+    statuses = _updated_cell_statuses_by_source_and_date(plan)
+    for day in plan.date_columns:
+        unconfirmed = not _source_date_allows_cell_merge(
+            statuses, source_key=weighted_price_source(day), as_of_date=day)
+        if day >= business_date and not unconfirmed:
+            continue
+        prior = previous_plan
+        if runtime is not None:
+            try:
+                prior = runtime.load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(column_date=day)
+            except ValueError:
+                pass
+        if prior is not None:
+            plan = preserve_seller_price_history(
+                plan, previous_plan=prior, business_date=business_date,
+                column_dates=[day], unconfirmed_dates=[day] if unconfirmed else [],
+            )
     data_sheet = _find_sheet(plan, "DATA_VITRINA")
     previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {}) if previous_plan is not None else {}
     if previous_plan is None:
@@ -12108,6 +12168,7 @@ def _preserve_unconfirmed_source_cells_from_previous_plan(
 
         merged_row = list(row)
         for as_of_date, current_indexes in plan_indexes_by_date.items():
+            source_key = _source_key_for_metric_key(_metric_key_from_row_id(row_id), as_of_date)
             if _source_date_allows_cell_merge(
                 status_by_source_date,
                 source_key=source_key,
@@ -12460,6 +12521,11 @@ def _updated_cells_for_plan(
         if not source_key or not source_group_id:
             continue
         for as_of_date in plan.date_columns:
+            source_key = _source_key_for_metric_key(metric_key, as_of_date)
+            source_group_id = _source_group_id_for_source_key(source_key)
+            if (row_id == WEIGHTED_PRICE_ROW_ID and as_of_date in
+                    plan.metadata.get("weighted_seller_price_history_preserved_dates", [])):
+                continue
             if date_filter and as_of_date not in date_filter:
                 continue
             status = status_by_source_date.get((source_key, as_of_date), "updated")
