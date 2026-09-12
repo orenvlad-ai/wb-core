@@ -97,6 +97,7 @@ class ShellBackedWebSourceCurrentSync:
         closed_day_source_state_loader: Callable[[str, str], ClosedDaySourceState | None] | None = None,
     ) -> None:
         self.config = config or load_web_source_current_sync_config()
+        self.observed_states: dict[tuple[str, str], ClosedDaySourceState] = {}
         self._closed_day_source_state_loader = (
             closed_day_source_state_loader or self._load_closed_day_source_state
         )
@@ -118,7 +119,7 @@ class ShellBackedWebSourceCurrentSync:
 
         if not search_ready:
             self._run(
-                [str(bot_python), "-m", "bot.runner_day", snapshot_date],
+                self._collector_command("web_source_snapshot", snapshot_date),
                 cwd=self.config.wb_web_bot_dir,
                 env=bot_env,
                 label=f"search_analytics current-day sync {snapshot_date}",
@@ -139,7 +140,7 @@ class ShellBackedWebSourceCurrentSync:
 
         if not seller_ready:
             self._run(
-                [str(bot_python), "-m", "bot.runner_sales_funnel_day", snapshot_date],
+                self._collector_command("seller_funnel_snapshot", snapshot_date),
                 cwd=self.config.wb_web_bot_dir,
                 env=bot_env,
                 label=f"sales_funnel current-day sync {snapshot_date}",
@@ -169,19 +170,23 @@ class ShellBackedWebSourceCurrentSync:
                 f"{','.join(missing)} on {snapshot_date}"
             )
 
-    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> ClosedDaySourceState:
         if not self._is_enabled():
             raise RuntimeError("closed-day web-source sync is disabled in current runtime")
         self._ensure_seller_portal_session_ready()
         if source_key == "web_source_snapshot":
             self._materialize_search_analytics(snapshot_date)
-            self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
-            return
+            return self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
         if source_key == "seller_funnel_snapshot":
             self._materialize_sales_funnel(snapshot_date)
-            self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
-            return
+            return self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
         raise ValueError(f"unsupported closed-day web-source source_key: {source_key}")
+
+    def _collector_command(self, source_key: str, snapshot_date: str) -> list[str]:
+        return [str(self.config.wb_web_bot_dir / "venv" / "bin" / "python"),
+                str(Path(__file__).resolve().parents[2] / "apps" / "seller_portal_web_source_collect.py"),
+                "--source-key", source_key, "--date", snapshot_date,
+                "--bot-dir", str(self.config.wb_web_bot_dir), "--write-source"]
 
     def _is_enabled(self) -> bool:
         if self.config.mode == "off":
@@ -199,14 +204,27 @@ class ShellBackedWebSourceCurrentSync:
             f"{self.config.api_base_url.rstrip('/')}/v1/search-analytics/snapshot"
             f"?{parse.urlencode({'date_to': snapshot_date})}"
         )
-        return _is_usable_search_analytics_payload(payload, snapshot_date)
+        return _is_usable_search_analytics_payload(payload, snapshot_date) and self._current_source_is_fresh("web_source_snapshot", snapshot_date)
 
     def _has_sales_funnel_snapshot(self, snapshot_date: str) -> bool:
         payload = _fetch_json(
             f"{self.config.api_base_url.rstrip('/')}/v1/sales-funnel/daily"
             f"?{parse.urlencode({'date': snapshot_date})}"
         )
-        return _is_usable_sales_funnel_payload(payload, snapshot_date)
+        return _is_usable_sales_funnel_payload(payload, snapshot_date) and self._current_source_is_fresh("seller_funnel_snapshot", snapshot_date)
+
+    def _current_source_is_fresh(self, source_key: str, snapshot_date: str) -> bool:
+        if snapshot_date < "2026-09-11":
+            return True
+        state = self._closed_day_source_state_loader(source_key, snapshot_date)
+        if state is None or state.row_count <= 0 or not state.fetched_at:
+            return False
+        observed = _parse_timestamp(state.fetched_at)
+        now = datetime.now(timezone.utc)
+        if observed > now + timedelta(minutes=5) or observed < now - timedelta(hours=1):
+            return False
+        self.observed_states[(source_key, snapshot_date)] = state
+        return True
 
     def _run(
         self,
@@ -245,7 +263,7 @@ class ShellBackedWebSourceCurrentSync:
         bot_env = _build_env(self.config.wb_web_bot_dir / ".env")
         ai_env = _build_env(self.config.wb_ai_dir / ".env")
         self._run(
-            [str(bot_python), "-m", "bot.runner_day", snapshot_date],
+            self._collector_command("web_source_snapshot", snapshot_date),
             cwd=self.config.wb_web_bot_dir,
             env=bot_env,
             label=f"search_analytics sync {snapshot_date}",
@@ -270,7 +288,7 @@ class ShellBackedWebSourceCurrentSync:
         bot_env = _build_env(self.config.wb_web_bot_dir / ".env")
         ai_env = _build_env(self.config.wb_ai_dir / ".env")
         self._run(
-            [str(bot_python), "-m", "bot.runner_sales_funnel_day", snapshot_date],
+            self._collector_command("seller_funnel_snapshot", snapshot_date),
             cwd=self.config.wb_web_bot_dir,
             env=bot_env,
             label=f"sales_funnel sync {snapshot_date}",
@@ -289,7 +307,7 @@ class ShellBackedWebSourceCurrentSync:
             label=f"sales_funnel handoff {snapshot_date}",
         )
 
-    def _ensure_closed_day_source_freshness(self, *, source_key: str, snapshot_date: str) -> None:
+    def _ensure_closed_day_source_freshness(self, *, source_key: str, snapshot_date: str) -> ClosedDaySourceState:
         state = self._closed_day_source_state_loader(source_key, snapshot_date)
         if state is None or state.row_count <= 0:
             raise RuntimeError(
@@ -309,6 +327,8 @@ class ShellBackedWebSourceCurrentSync:
                 f"source_key={source_key}; snapshot_date={snapshot_date}; "
                 f"source_fetched_at={fetched_at.isoformat()}; required_after={required_after.isoformat()}"
             )
+
+        return state
 
     def _load_closed_day_source_state(self, source_key: str, snapshot_date: str) -> ClosedDaySourceState | None:
         ai_python = self.config.wb_ai_dir / "venv" / "bin" / "python"
@@ -568,9 +588,9 @@ if source_key == "web_source_snapshot":
         connect_timeout=5,
     )
     sql = (
-        "select count(*), max(fetched_at) "
+        "select count(*), min(fetched_at) "
         "from public.search_analytics_raw "
-        "where date_to = %s::date"
+        "where date_from = %s::date and date_to = %s::date"
     )
 elif source_key == "seller_funnel_snapshot":
     conn = psycopg2.connect(
@@ -582,16 +602,17 @@ elif source_key == "seller_funnel_snapshot":
         connect_timeout=5,
     )
     sql = (
-        "select count(*), max(source_fetched_at) "
+        "select count(*), min(source_fetched_at) "
         "from public.web_source_sales_funnel_daily "
         "where snapshot_date = %s::date"
     )
 else:
     raise SystemExit(f"unsupported source_key: {source_key}")
 
+conn.set_session(readonly=True)
 with conn:
     with conn.cursor() as cur:
-        cur.execute(sql, (snapshot_date,))
+        cur.execute(sql, (snapshot_date, snapshot_date) if source_key == "web_source_snapshot" else (snapshot_date,))
         row = cur.fetchone()
 
 row_count = int(row[0] or 0) if row else 0

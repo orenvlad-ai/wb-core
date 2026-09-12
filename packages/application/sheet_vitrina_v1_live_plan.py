@@ -2550,10 +2550,28 @@ class SheetVitrinaV1LivePlanBlock:
                     cached_payload,
                 )
 
+        strict_closed = source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+        if strict_closed and accepted_snapshot is not None:
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            return _append_status_note(accepted_status, f"resolution_rule=accepted_closed_snapshot_preserved; accepted_at={accepted_at}"), accepted_payload
+        if strict_closed and closure_state is not None and closure_state.state == CLOSURE_STATE_SUCCESS:
+            # A legacy success with no source-qualified accepted payload is an
+            # outstanding obligation, even when its old retry counter was high.
+            next_attempt_count = 1
+        elif strict_closed and allow_persisted_retry and not _closure_attempt_is_due(closure_state, now):
+            prior = self._load_slot_snapshot_status(source_key=source_key, temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy, column_date=column_date, requested_nm_ids=requested_nm_ids,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT)
+            retry_status = _build_closure_retry_status(source_key=source_key, temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy, column_date=column_date, requested_nm_ids=requested_nm_ids,
+                closure_state=closure_state)
+            return retry_status, prior[1] if prior else None
+
         sync_error: str | None = None
+        source_state = getattr(self.current_web_source_sync, "observed_states", {}).get((source_key, column_date)) if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT else None
         if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
             try:
-                self.closed_day_web_source_sync.ensure_closed_day_snapshot(
+                source_state = self.closed_day_web_source_sync.ensure_closed_day_snapshot(
                     source_key=source_key,
                     snapshot_date=column_date,
                 )
@@ -2572,6 +2590,9 @@ class SheetVitrinaV1LivePlanBlock:
             status = _append_current_web_source_sync_note(status, current_web_source_sync_note)
         if sync_error:
             status = _append_status_note(status, f"closed_day_sync_error={sync_error}")
+        elif source_state is not None and payload is not None and hasattr(payload, "source_fetched_at"):
+            payload = replace(payload, source_fetched_at=source_state.fetched_at)
+            status = _append_status_note(status, f"source_fetched_at={source_state.fetched_at}")
 
         if payload is not None and _is_exact_snapshot_payload(payload, column_date):
             if source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS and (
@@ -2611,7 +2632,7 @@ class SheetVitrinaV1LivePlanBlock:
                     accepted_role=accepted_role,
                 )
 
-        candidate_valid = _is_valid_temporal_candidate(
+        candidate_valid = not sync_error and not (source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and current_web_source_sync_note and source_state is None) and _is_valid_temporal_candidate(
             source_key=source_key,
             status=status,
             payload=payload,
@@ -2635,7 +2656,7 @@ class SheetVitrinaV1LivePlanBlock:
             status = _coerce_invalid_temporal_candidate_status(
                 status=status,
                 requested_nm_ids=requested_nm_ids,
-                note_suffix=_invalid_temporal_candidate_note(source_key, temporal_slot),
+                note_suffix=("closed_day_source_observation_not_accepted" if strict_closed and (sync_error or not _web_source_observation_is_closed(source_key, payload, column_date)) else _invalid_temporal_candidate_note(source_key, temporal_slot)),
             )
 
         if candidate_valid:
@@ -2711,7 +2732,7 @@ class SheetVitrinaV1LivePlanBlock:
                         accepted_at=None,
                     )
                     note_parts.append(f"closure_state={retry_state}")
-                return _append_status_note(prior_status, "; ".join(note_parts)), prior_payload
+                return _append_status_note(replace(prior_status, kind="incomplete"), "; ".join(note_parts)), prior_payload
 
         cached_snapshot = self._load_cached_temporal_source(
             source_key=source_key,
@@ -2868,6 +2889,8 @@ class SheetVitrinaV1LivePlanBlock:
             and _payload_diagnostics(cached_payload).get("no_activity_proven") is True
             and _payload_diagnostics(cached_payload).get("dated_roster_state") == "caller_qualified_dated_roster")
         if cached_payload is None or not (_is_exact_snapshot_payload(cached_payload, column_date) or confirmed_ads_empty):
+            return None
+        if require_closed_day_fresh and not _web_source_observation_is_closed(source_key, cached_payload, column_date):
             return None
         preserve_closed_stock = source_key == "stocks" and snapshot_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
         partial_ads = source_key == "ads_compact" and getattr(cached_payload, "kind", None) == "incomplete"
@@ -3033,6 +3056,8 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_date=column_date,
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+            return None
+        if require_closed_day_fresh and not _web_source_observation_is_closed(source_key, cached_payload, column_date):
             return None
         if require_closed_day_fresh and not _closed_day_capture_is_fresh(
             captured_at=cached_at,
@@ -5228,6 +5253,8 @@ def _is_valid_temporal_candidate(
             and d.get("source_date") == column_date
             and d.get("source_observed_at") and d.get("observed_campaign_ids")
             and d.get("dated_roster_state") == "unqualified")
+    if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and not _web_source_observation_is_closed(source_key, payload, column_date):
+        return False
     if status.kind != "success":
         if not (
             source_key == ONEC_STOCKS_SOURCE_KEY
@@ -5607,7 +5634,7 @@ def _append_current_web_source_sync_note(
     status: LiveSourceStatus,
     note: str | None,
 ) -> LiveSourceStatus:
-    if not note or status.kind == "success":
+    if not note:
         return status
     return _append_status_note(status, note)
 
@@ -5621,6 +5648,15 @@ def _parse_runtime_timestamp(value: str) -> datetime:
     if normalized.endswith("Z"):
         normalized = normalized[:-1] + "+00:00"
     return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+
+
+def _web_source_observation_is_closed(source_key: str, payload: Any, snapshot_date: str) -> bool:
+    # Earlier accepted history predates this provenance contract. The affected
+    # incident dates and all new dates require the actual source clock.
+    if source_key not in STRICT_CLOSED_DAY_SOURCE_KEYS or snapshot_date < "2026-09-11":
+        return True
+    return _closed_day_capture_is_fresh(
+        captured_at=getattr(payload, "source_fetched_at", None), snapshot_date=snapshot_date)
 
 
 def _closed_day_capture_is_fresh(*, captured_at: str | None, snapshot_date: str) -> bool:
