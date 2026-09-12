@@ -397,6 +397,105 @@ def test_post_save_invoice_actions():
         assert len(rt.list_supplier_shipments()) == 0
 
 
+def _standalone_link_fixture(raw):
+    from packages.application.supplier_shipments import SupplierShipmentsBlock
+    rt = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw))
+    source(rt, {**HEADER, 'invoice_document_id': 'invoice'})
+    for document_id, kind in (('invoice', 'invoice'), ('A', 'contract'), ('B', 'contract')):
+        rt.save_trade_document(dict(document_id=document_id, document_type=kind, number=document_id, status='active', created_at=NOW, updated_at=NOW))
+    block = SupplierShipmentsBlock(runtime=rt, timestamp_factory=lambda: NOW)
+    block.update_shipment('source', {})
+    return rt, block
+
+
+def test_explicit_document_coverage():
+    from packages.application.supplier_financial_documents import SupplierFinancialDocumentsBlock
+    with TemporaryDirectory() as raw:
+        rt, block = _standalone_link_fixture(raw)
+        doc = dict(document_id='legacy', supplier_order_id='source', document_type='bank_fee_statement', file_sha256='a'*64, uploaded_at=NOW, updated_at=NOW, document_date='2026-08-05', parse_status='confirmed', total_amount_rub=200)
+        expense = dict(line_id='legacy-line', amount=200, amount_rub=200, currency='RUB', category='bank_fee', status='confirmed')
+        rt.save_supplier_financial_document(document=doc, expense_lines=[expense])
+        with _connect(rt.db_path) as conn:
+            conn.execute(f'DELETE FROM {intents.TABLE}'); conn.execute(f'DELETE FROM {QUEUE}'); conn.commit()
+        block.update_shipment('source', {'contract_document_id': 'A'})
+        unrelated = request(rt)
+        assert unrelated['status'] == 'delivered' and unrelated['costs_required'] == 0 and json.loads(unrelated['document_ids_json']) == []
+        financial = SupplierFinancialDocumentsBlock(runtime=rt)
+        result = financial.finalize_bank_fee_statement_import('source', 'legacy')
+        assert result['warehouse_targeted_recalculation']['status'] == 'queued', result
+        assert len(queue(rt)) == 1
+        first_queue = queue(rt)[0]['queue_id']
+        with _connect(rt.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_own_capital_events WHERE shipment_id='source'").fetchone()[0] == 1
+        block.update_shipment('source', {'contract_document_id': 'B'})
+        assert request(rt)['costs_required'] == 0
+        with patch.object(intents, '_prepare', side_effect=AssertionError('covered document repeated')):
+            again = financial.finalize_bank_fee_statement_import('source', 'legacy')
+        assert again['warehouse_targeted_recalculation']['queue_id'] == first_queue
+        assert len(queue(rt)) == 1
+        rt.save_supplier_financial_document(document={**doc, 'total_amount_rub': 300}, expense_lines=[{**expense, 'amount': 300, 'amount_rub': 300}])
+        newer = financial.finalize_bank_fee_statement_import('source', 'legacy')
+        assert newer['warehouse_targeted_recalculation']['queue_id'] != first_queue
+        assert len(queue(rt)) == 2
+        coverage = json.loads(request(rt)['document_coverage_json'])['legacy']
+        with _connect(rt.db_path) as conn:
+            assert coverage['fingerprint'] == intents._document_fingerprint(intents.capture_source(conn, 'source'), 'legacy')
+            conn.execute(f"UPDATE {QUEUE} SET source_revision='unrelated-revision' WHERE queue_id=?", (coverage['queue_id'],)); conn.commit()
+        corrected = financial.finalize_bank_fee_statement_import('source', 'legacy')
+        assert corrected['warehouse_targeted_recalculation']['queue_id'] != coverage['queue_id']
+        assert corrected['warehouse_targeted_recalculation']['source_revision'] != 'unrelated-revision'
+
+
+def test_standalone_link_supersession():
+    for decision in ('shipment_link', 'invoice_link', 'shipment_unlink', 'invoice_unlink', 'before_consumer_write', 'rollback'):
+        with TemporaryDirectory() as raw:
+            rt, block = _standalone_link_fixture(raw)
+            with patch.object(rt, 'save_invoice_contract_link', side_effect=OSError('pending-A')):
+                pending = block.update_shipment('source', {'shipment_date': '2026-09-25', 'contract_document_id': 'A'})
+            assert pending['warehouse_targeted_recalculation']['status'] == 'pending'
+            captured = request(rt)
+            assert captured['costs_required'] == 1
+            if decision == 'rollback':
+                with _connect(rt.db_path) as conn:
+                    conn.execute("CREATE TRIGGER reject_link BEFORE INSERT ON sheet_vitrina_v1_invoice_contract_links BEGIN SELECT RAISE(ABORT,'standalone-write-stop'); END"); conn.commit()
+                try:
+                    block.link_shipment_contract('source', contract_document_id='B')
+                except sqlite3.IntegrityError:
+                    pass
+                else:
+                    raise AssertionError('standalone failure expected')
+                assert request(rt) == captured and rt.load_invoice_contract_link('invoice') is None
+                with _connect(rt.db_path) as conn:
+                    conn.execute('DROP TRIGGER reject_link'); conn.commit()
+            elif decision == 'before_consumer_write':
+                original = rt.save_invoice_contract_link
+                def newer_before_guard(**kwargs):
+                    original(invoice_document_id='invoice', contract_document_id='B', created_at=NOW, updated_at=NOW, linked_by='operator', source='operator')
+                    return original(**kwargs)
+                with patch.object(rt, 'save_invoice_contract_link', side_effect=newer_before_guard):
+                    assert intents.drain_supplier_preparation_intents(rt)['status'] == 'pending'
+            elif decision == 'shipment_link':
+                block.link_shipment_contract('source', contract_document_id='B')
+            elif decision == 'invoice_link':
+                block.link_invoice_to_contract('invoice', contract_document_id='B')
+            elif decision == 'shipment_unlink':
+                block.unlink_shipment_contract('source')
+            else:
+                block.unlink_invoice_contract('invoice')
+            if decision != 'rollback':
+                newer = request(rt)
+                assert newer['revision'] > captured['revision'] and newer['costs_required'] == 1
+                assert not json.loads(newer['post_actions_json'])
+            fresh = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw))
+            assert intents.drain_supplier_preparation_intents(fresh)['status'] == 'queued'
+            link = rt.load_invoice_contract_link('invoice')
+            if decision in {'shipment_unlink', 'invoice_unlink'}:
+                assert link is None
+            else:
+                assert link['contract_document_id'] == ('A' if decision == 'rollback' else 'B'), link
+            assert len(queue(rt)) == 2 and request(rt)['status'] == 'delivered'
+
+
 def test_invoice_audit_recovery():
     with TemporaryDirectory() as raw:
         req, rt, _, _ = invoice_fixture(Path(raw))
@@ -644,7 +743,7 @@ def test_two_consumers_one_preparation():
 
 
 def main():
-    for test in (test_source_boundaries,test_retry_and_new_revision,test_financial_scope_and_archive,test_financial_rebind_and_revision,test_trigger_upgrade_atomicity,test_existing_worker_and_broken_scope,test_explicit_legacy_finalize,test_post_save_invoice_actions,test_invoice_audit_recovery,test_statement_composite_restart,test_invoice_late_audit_receipt,test_uncaught_process_exit,test_consumer_to_functional_result,test_two_consumers_one_preparation):
+    for test in (test_source_boundaries,test_retry_and_new_revision,test_financial_scope_and_archive,test_financial_rebind_and_revision,test_trigger_upgrade_atomicity,test_existing_worker_and_broken_scope,test_explicit_legacy_finalize,test_post_save_invoice_actions,test_explicit_document_coverage,test_standalone_link_supersession,test_invoice_audit_recovery,test_statement_composite_restart,test_invoice_late_audit_receipt,test_uncaught_process_exit,test_consumer_to_functional_result,test_two_consumers_one_preparation):
         test(); print(test.__name__ + ': OK')
     print('supplier_preparation_intents_smoke: OK')
 

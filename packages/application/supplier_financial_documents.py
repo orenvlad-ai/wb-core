@@ -2176,13 +2176,13 @@ class SupplierFinancialDocumentsBlock:
             raise ValueError(f"financial document not found: {document_id}")
         from packages.application.supplier_preparation_intents import ensure_explicit_document_continuation
 
-        ensure_explicit_document_continuation(self.runtime, supplier_order_id, document_id)
-        return self._resume_saved_preparation(supplier_order_id)
+        covered = ensure_explicit_document_continuation(self.runtime, supplier_order_id, document_id)
+        return self._resume_saved_preparation(supplier_order_id, prepared_result=covered)
 
-    def _resume_saved_preparation(self, supplier_order_id: str) -> dict[str, Any]:
+    def _resume_saved_preparation(self, supplier_order_id: str, *, prepared_result: dict[str, Any] | None = None) -> dict[str, Any]:
         from packages.application.supplier_preparation_intents import resume_supplier_preparation
 
-        result = resume_supplier_preparation(self.runtime, supplier_order_id)
+        result = prepared_result if prepared_result is not None else resume_supplier_preparation(self.runtime, supplier_order_id)
         outcome = {
             "operation_applied": True,
             "cny_ledger_replay": result.get("cny_ledger_replay", {}),

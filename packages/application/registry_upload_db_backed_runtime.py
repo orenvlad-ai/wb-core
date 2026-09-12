@@ -7864,12 +7864,16 @@ class RegistryUploadDbBackedRuntime:
         updated_at: str,
         linked_by: str,
         source: str,
+        preparation_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         _validate_timestamp(str(created_at or ""), field_name="created_at")
         _validate_timestamp(str(updated_at or ""), field_name="updated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import guard_invoice_link_write
+
+            guard_invoice_link_write(conn, invoice_document_id, contract_document_id, preparation_request)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_invoice_contract_links(
@@ -7925,10 +7929,13 @@ class RegistryUploadDbBackedRuntime:
                 "source": row["source"] or "",
             }
 
-    def delete_invoice_contract_link(self, invoice_document_id: str) -> bool:
+    def delete_invoice_contract_link(self, invoice_document_id: str, *, preparation_request: dict[str, Any] | None = None) -> bool:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import guard_invoice_link_write
+
+            guard_invoice_link_write(conn, invoice_document_id, "", preparation_request)
             cursor = conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_invoice_contract_links

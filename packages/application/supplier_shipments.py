@@ -1546,6 +1546,7 @@ class SupplierShipmentsBlock:
         contract_document_id: str,
         linked_by: str = "",
         source: str = TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+        preparation_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         invoice, contract = self._validated_invoice_contract_pair(invoice_document_id, contract_document_id)
         now = self.timestamp_factory()
@@ -1557,6 +1558,7 @@ class SupplierShipmentsBlock:
             updated_at=now,
             linked_by=linked_by,
             source=source,
+            preparation_request=preparation_request,
         )
         return {
             "contract_name": "sheet_vitrina_v1_invoice_contract_links",
@@ -1579,11 +1581,11 @@ class SupplierShipmentsBlock:
             raise ValueError(f"contract document is not active: {contract_document_id}")
         return invoice, contract
 
-    def unlink_invoice_contract(self, invoice_document_id: str) -> dict[str, Any]:
+    def unlink_invoice_contract(self, invoice_document_id: str, *, preparation_request: dict[str, Any] | None = None) -> dict[str, Any]:
         invoice = self.runtime.load_trade_document(invoice_document_id)
         if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
             raise ValueError(f"invoice document not found: {invoice_document_id}")
-        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id)
+        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id, preparation_request=preparation_request)
         return {
             "contract_name": "sheet_vitrina_v1_invoice_contract_links",
             "status": "ok",
