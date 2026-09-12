@@ -13,9 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
-    DB_FILENAME,
-)
+from packages.application.storage_registry import StoreRegistry  # noqa: E402
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     warehouse_functional_write_lock,
 )
@@ -49,9 +47,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "retention deployed SHA mismatch: "
             f"expected={deployed_sha}, actual={actual_sha or '<missing>'}"
         )
+    stores = StoreRegistry(runtime_dir)
+    manifest = stores.load()
+    with stores.session(
+        "operational", mode="ro", operation="retention_target_preflight",
+        manifest=manifest,
+    ):
+        pass
     registry = WarehouseRecoveryRegistry(
         runtime_dir=runtime_dir,
-        db_path=runtime_dir / DB_FILENAME,
+        db_path=stores.resolve("operational", manifest=manifest),
     )
     if args.mode == "status":
         return {
