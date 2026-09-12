@@ -330,6 +330,25 @@ def command_dependency_checks():
     print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
 
 
+def ads_dependency_checks():
+    scripts = ["apps/ads_partial_adapter_smoke.py", "apps/ads_partial_publication_smoke.py"]
+    for paths, expected in (
+        ([scripts[0]], [scripts[0]]),
+        ([scripts[1]], [scripts[1]]),
+        (["apps/ads_partial_publication.py"], [scripts[1]]),
+        (["apps/ads_partial_publication.py", scripts[0]], scripts),
+    ):
+        plan = build_plan_from_paths(pull_request=36, base=BASE, head=HEAD,
+            paths=paths, file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+        verify_plan(plan)
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        for script in expected:
+            assert plan["commands"].count(["python3", script]) == 1, plan
+        assert plan["commands"][0][:3] == ["python3", "-m", "py_compile"], plan
+        assert len(plan["commands"]) == 1 + len(expected), plan
+    print("Ads dependencies: direct/sibling/mixed smokes keep exact openpyxl prerequisite OK")
+
+
 def exists(_head: str, path: str) -> bool:
     return path in {
         "docs/example.md",
@@ -356,6 +375,7 @@ def main() -> None:
     boundary_checks()
     rename_diff_check()
     command_dependency_checks()
+    ads_dependency_checks()
     docs = build_plan_from_paths(
         pull_request=1, base=BASE, head=HEAD, paths=["docs/example.md"], file_exists=exists
     )
