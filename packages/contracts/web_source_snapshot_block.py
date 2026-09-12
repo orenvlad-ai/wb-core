@@ -34,6 +34,7 @@ class WebSourceSnapshotSuccess:
     date_to: str
     count: int
     items: list[WebSourceSnapshotItem]
+    source_fetched_at: str | None = None
 
 
 @dataclass(frozen=True)

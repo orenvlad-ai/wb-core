@@ -34,6 +34,7 @@ class SellerFunnelSnapshotSuccess:
     date: str
     count: int
     items: list[SellerFunnelSnapshotItem]
+    source_fetched_at: str | None = None
 
 
 @dataclass(frozen=True)
