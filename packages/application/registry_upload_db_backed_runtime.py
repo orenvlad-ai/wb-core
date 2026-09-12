@@ -7866,6 +7866,8 @@ class RegistryUploadDbBackedRuntime:
         source: str,
         preparation_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        invoice_document_id = str(invoice_document_id or "").strip()
+        contract_document_id = str(contract_document_id or "").strip()
         _validate_timestamp(str(created_at or ""), field_name="created_at")
         _validate_timestamp(str(updated_at or ""), field_name="updated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -7892,8 +7894,8 @@ class RegistryUploadDbBackedRuntime:
                     source = excluded.source
                 """,
                 (
-                    str(invoice_document_id or "").strip(),
-                    str(contract_document_id or "").strip(),
+                    invoice_document_id,
+                    contract_document_id,
                     created_at,
                     updated_at,
                     str(linked_by or ""),
@@ -7930,6 +7932,7 @@ class RegistryUploadDbBackedRuntime:
             }
 
     def delete_invoice_contract_link(self, invoice_document_id: str, *, preparation_request: dict[str, Any] | None = None) -> bool:
+        invoice_document_id = str(invoice_document_id or "").strip()
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
@@ -7941,7 +7944,7 @@ class RegistryUploadDbBackedRuntime:
                 DELETE FROM sheet_vitrina_v1_invoice_contract_links
                 WHERE invoice_document_id = ?
                 """,
-                (str(invoice_document_id or "").strip(),),
+                (invoice_document_id,),
             )
             conn.commit()
             return cursor.rowcount > 0

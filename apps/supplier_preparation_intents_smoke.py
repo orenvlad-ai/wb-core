@@ -447,7 +447,7 @@ def test_explicit_document_coverage():
 
 
 def test_standalone_link_supersession():
-    for decision in ('shipment_link', 'invoice_link', 'shipment_unlink', 'invoice_unlink', 'before_consumer_write', 'rollback'):
+    for decision in ('shipment_link', 'invoice_link', 'invoice_link_spaced', 'shipment_unlink', 'invoice_unlink', 'invoice_unlink_spaced', 'before_consumer_write', 'rollback'):
         with TemporaryDirectory() as raw:
             rt, block = _standalone_link_fixture(raw)
             with patch.object(rt, 'save_invoice_contract_link', side_effect=OSError('pending-A')):
@@ -478,8 +478,12 @@ def test_standalone_link_supersession():
                 block.link_shipment_contract('source', contract_document_id='B')
             elif decision == 'invoice_link':
                 block.link_invoice_to_contract('invoice', contract_document_id='B')
+            elif decision == 'invoice_link_spaced':
+                block.link_invoice_to_contract(' invoice ', contract_document_id=' B ')
             elif decision == 'shipment_unlink':
                 block.unlink_shipment_contract('source')
+            elif decision == 'invoice_unlink_spaced':
+                block.unlink_invoice_contract(' invoice ')
             else:
                 block.unlink_invoice_contract('invoice')
             if decision != 'rollback':
@@ -489,7 +493,7 @@ def test_standalone_link_supersession():
             fresh = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw))
             assert intents.drain_supplier_preparation_intents(fresh)['status'] == 'queued'
             link = rt.load_invoice_contract_link('invoice')
-            if decision in {'shipment_unlink', 'invoice_unlink'}:
+            if decision in {'shipment_unlink', 'invoice_unlink', 'invoice_unlink_spaced'}:
                 assert link is None
             else:
                 assert link['contract_document_id'] == ('A' if decision == 'rollback' else 'B'), link
