@@ -472,20 +472,24 @@ class SupplierShipmentsBlock:
             "warnings": warnings,
             "errors": errors,
         }
-        self.runtime.save_supplier_shipment(header=header, lines=lines)
-        if actual_ff_acceptance_date:
-            self._record_ff_stock_receipt({"header": header, "lines": lines})
-            self._materialize_ff_cost_layer(shipment_id)
-            self._reconcile_ff_reservations()
-        self._autolink_invoice_contract_from_metadata(
-            invoice_document_id=str(invoice_document.get("document_id") or ""),
-            contract_no=str(metadata.get("contract_no") or ""),
-            contract_date=str(metadata.get("contract_date") or ""),
-            linked_by="system",
-            source=TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
+        # Resolve automatic matching before the primary commit. Persist a fixed
+        # invoice/contract identity so a retry cannot choose a later candidate.
+        contracts = self.find_contract_candidates(
+            str(metadata.get("contract_no") or ""),
+            str(metadata.get("contract_date") or ""),
         )
-        result = self.get_shipment(shipment_id)
-        result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        actions = {}
+        if len(contracts) == 1 and self.runtime.load_invoice_contract_link(str(header["invoice_document_id"])) is None:
+            actions["invoice_contract"] = {
+                "invoice_document_id": str(header["invoice_document_id"]),
+                "contract_document_id": str(contracts[0]["document_id"]),
+                "linked_by": "system", "source": TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
+            }
+        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions)
+        targeted = self._enqueue_warehouse_recalculation({"header": header})
+        result = self._saved_shipment_payload(header, lines)
+        result["warehouse_targeted_recalculation"] = targeted
+        result["operation_applied"] = True
         return result
 
     def create_shipment_supplier_safe(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -700,6 +704,8 @@ class SupplierShipmentsBlock:
             cost_affecting_changed
             or actual_shipment_date != str(existing_header.get("actual_shipment_date") or "")
             or actual_ff_acceptance_date != str(existing_header.get("actual_ff_acceptance_date") or "")
+            or shipment_date != str(existing_header.get("shipment_date") or "")
+            or approx_yuan_rate != existing_header.get("approx_yuan_rate")
         )
         header = {
             **existing_header,
@@ -729,35 +735,26 @@ class SupplierShipmentsBlock:
         }
         if cost_affecting_changed:
             header["expenses_complete"] = False
-        self.runtime.save_supplier_shipment(header=header, lines=lines)
-        if cost_affecting_changed:
-            from packages.application.own_product_capital import OwnProductCapitalBlock
-
-            OwnProductCapitalBlock(
-                runtime=self.runtime,
-                timestamp_factory=self.timestamp_factory,
-            ).set_expenses_certification(
-                shipment_id=shipment_id,
-                expenses_complete=False,
-            )
-        if actual_ff_acceptance_date:
-            self._record_ff_stock_receipt({"header": header, "lines": lines})
-            self._materialize_ff_cost_layer(shipment_id)
-            self._reconcile_ff_reservations()
+        actions = {}
         if "contract_document_id" in payload:
-            contract_document_id = str(payload.get("contract_document_id") or "").strip()
-            if contract_document_id:
-                self.link_shipment_contract(
-                    shipment_id,
-                    contract_document_id=contract_document_id,
-                    linked_by="operator",
-                    source=TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
-                )
-            else:
-                self.unlink_shipment_contract(shipment_id)
-        result = self.get_shipment(shipment_id)
-        if warehouse_affecting_changed:
-            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+            invoice_id = str(header.get("invoice_document_id") or "")
+            contract_id = str(payload.get("contract_document_id") or "").strip()
+            invoice = self.runtime.load_trade_document(invoice_id)
+            if invoice is None or invoice.get("document_type") != TRADE_DOCUMENT_TYPE_INVOICE:
+                raise ValueError(f"invoice document not found: {invoice_id}")
+            if contract_id:
+                self._validated_invoice_contract_pair(invoice_id, contract_id)
+            actions["invoice_contract"] = {
+                "invoice_document_id": invoice_id,
+                "contract_document_id": contract_id,
+                "linked_by": "operator", "source": TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+            }
+        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions)
+        targeted = self._enqueue_warehouse_recalculation({"header": header}) if warehouse_affecting_changed or actions else None
+        result = self._saved_shipment_payload(header, lines)
+        if targeted is not None:
+            result["warehouse_targeted_recalculation"] = targeted
+        result["operation_applied"] = True
         return result
 
     def update_shipment_supplier_safe(
@@ -1086,16 +1083,7 @@ class SupplierShipmentsBlock:
         )
         if not updated:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
-        ).set_expenses_certification(
-            shipment_id=shipment_id,
-            expenses_complete=normalized,
-        )
-        result = self.get_shipment(shipment_id)
+        result = self._saved_shipment_payload({**existing["header"], "expenses_complete": normalized}, list(existing.get("lines") or []))
         result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
         return result
 
@@ -1110,103 +1098,18 @@ class SupplierShipmentsBlock:
         cost_block.materialize_wb_supply_cost_layers()
 
     def _enqueue_warehouse_recalculation(self, shipment: Mapping[str, Any]) -> dict[str, Any]:
-        from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
+        from packages.application.supplier_preparation_intents import resume_supplier_preparation
 
-        # Public detail is flat while persistence-oriented callers may pass a
-        # nested header. Hash the same bounded source fields in both cases;
-        # otherwise an invoice-metadata-only edit can reuse a completed queue.
         header = dict(shipment.get("header") or shipment)
-        shipment_id = str(header.get("shipment_id") or shipment.get("shipment_id") or "").strip()
-        lines = [
-            dict(line)
-            for line in shipment.get("lines") or []
-            if str(line.get("line_type") or "") == LINE_TYPE_PRODUCT
-        ]
-        nm_ids = sorted(
-            {
-                int(line.get("internal_nm_id") or 0)
-                for line in lines
-                if int(line.get("internal_nm_id") or 0) > 0
-            }
-        )
-        effective_date = next(
-            (
-                str(value)[:10]
-                for value in (
-                    header.get("invoice_date"),
-                    header.get("shipment_date"),
-                    header.get("actual_shipment_date"),
-                    header.get("actual_ff_acceptance_date"),
-                    header.get("created_at"),
-                )
-                if str(value or "")[:10]
-            ),
-            date.today().isoformat(),
-        )
-        revision_payload = {
-            "shipment_id": shipment_id,
-            "header": {
-                key: header.get(key)
-                for key in (
-                    "invoice_no",
-                    "invoice_date",
-                    "currency",
-                    "shipment_date",
-                    "actual_shipment_date",
-                    "actual_ff_acceptance_date",
-                    "order_status",
-                    "expenses_complete",
-                    "approx_yuan_rate",
-                    "declared_invoice_total",
-                    "invoice_amount_total",
-                    "match_status",
-                )
-            },
-            "lines": [
-                {
-                    key: line.get(key)
-                    for key in (
-                        "line_id",
-                        "line_type",
-                        "internal_nm_id",
-                        "internal_sku",
-                        "barcode",
-                        "qty",
-                        "unit_price",
-                        "amount",
-                    )
-                }
-                for line in lines
-            ],
-        }
-        revision = "sha256:" + hashlib.sha256(
-            json.dumps(
-                revision_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
-        stable_source_id = f"supplier_shipment:{shipment_id}"
+        return resume_supplier_preparation(self.runtime, str(header.get("shipment_id") or ""))
+
+    def _saved_shipment_payload(self, header: Mapping[str, Any], lines: list[Mapping[str, Any]]) -> dict[str, Any]:
         try:
-            return enqueue_warehouse_targeted_recalculation(
-                runtime=self.runtime,
-                stable_source_id=stable_source_id,
-                source_revision=revision,
-                effective_date=effective_date,
-                affected_nm_ids=nm_ids,
-                requested_at=self.timestamp_factory(),
-            )
-        except Exception as exc:  # noqa: BLE001 - source mutation remains independently durable.
-            return {
-                "status": "replay_error",
-                "presentation_status": "Ошибка пересчёта",
-                "stable_source_id": stable_source_id,
-                "source_revision": revision,
-                "affected_nm_ids": nm_ids,
-                "error": str(exc).replace("\n", " ")[:500],
-            }
+            return self.get_shipment(str(header["shipment_id"]))
+        except Exception as exc:
+            return {**dict(header), "lines": [dict(line) for line in lines],
+                    "operation_applied": True, "readback_pending": True,
+                    "readback_error": str(exc).replace("\n", " ")[:500]}
 
     def _record_ff_stock_receipt(self, shipment_detail: Mapping[str, Any]) -> dict[str, Any] | None:
         return FfStockLedgerBlock(
@@ -1315,7 +1218,6 @@ class SupplierShipmentsBlock:
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(detail.get("header") or {})
-        invoice_document_id = str(header.get("invoice_document_id") or "")
         archived_at = self.timestamp_factory()
         archive_event = self.runtime.archive_supplier_shipment(
             shipment_id=shipment_id,
@@ -1323,21 +1225,6 @@ class SupplierShipmentsBlock:
         )
         if archive_event is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        if invoice_document_id:
-            try:
-                self.runtime.archive_trade_document(invoice_document_id, updated_at=archived_at)
-            except ValueError:
-                pass
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
-        ).set_expenses_certification(
-            shipment_id=shipment_id,
-            expenses_complete=False,
-            actor="supplier_shipment_archive",
-        )
         archived_header = {
             **header,
             "updated_at": archived_at,
@@ -1357,6 +1244,7 @@ class SupplierShipmentsBlock:
             # implementation is a controlled archive, never a physical delete.
             "deleted": True,
             "archived": True,
+            "operation_applied": True,
             "shipment_id": shipment_id,
             "archive_event_id": str(archive_event.get("event_id") or ""),
             "source_fingerprint": str(archive_event.get("source_fingerprint") or ""),
@@ -1439,27 +1327,9 @@ class SupplierShipmentsBlock:
         if rematch_changed:
             header["expenses_complete"] = False
         self.runtime.save_supplier_shipment(header=header, lines=lines)
+        result = self._saved_shipment_payload(header, lines)
         if rematch_changed:
-            from packages.application.own_product_capital import OwnProductCapitalBlock
-
-            OwnProductCapitalBlock(
-                runtime=self.runtime,
-                timestamp_factory=self.timestamp_factory,
-            ).set_expenses_certification(
-                shipment_id=shipment_id,
-                expenses_complete=False,
-            )
-        result = self.get_shipment(shipment_id)
-        if rematch_changed:
-            # Include both identities so a corrected nmID invalidates the old
-            # projection as well as materialising the new one.
-            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(
-                {
-                    **result,
-                    "header": dict(result.get("header") or result),
-                    "lines": source_lines + [dict(item) for item in lines],
-                }
-            )
+            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
         return result
 
     def download_invoice(self, shipment_id: str) -> tuple[bytes, str, str]:
@@ -1676,7 +1546,29 @@ class SupplierShipmentsBlock:
         contract_document_id: str,
         linked_by: str = "",
         source: str = TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+        preparation_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        invoice, contract = self._validated_invoice_contract_pair(invoice_document_id, contract_document_id)
+        now = self.timestamp_factory()
+        existing = self.runtime.load_invoice_contract_link(invoice_document_id)
+        link = self.runtime.save_invoice_contract_link(
+            invoice_document_id=invoice_document_id,
+            contract_document_id=contract_document_id,
+            created_at=str((existing or {}).get("created_at") or now),
+            updated_at=now,
+            linked_by=linked_by,
+            source=source,
+            preparation_request=preparation_request,
+        )
+        return {
+            "contract_name": "sheet_vitrina_v1_invoice_contract_links",
+            "status": "ok",
+            "link": link,
+            "invoice": self._with_document_download_path(self.runtime.load_trade_document(invoice_document_id) or invoice),
+            "contract": self._with_document_download_path(contract),
+        }
+
+    def _validated_invoice_contract_pair(self, invoice_document_id: str, contract_document_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         invoice = self.runtime.load_trade_document(invoice_document_id)
         if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
             raise ValueError(f"invoice document not found: {invoice_document_id}")
@@ -1687,29 +1579,13 @@ class SupplierShipmentsBlock:
             raise ValueError(f"contract document not found: {contract_document_id}")
         if str(contract.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
             raise ValueError(f"contract document is not active: {contract_document_id}")
-        now = self.timestamp_factory()
-        existing = self.runtime.load_invoice_contract_link(invoice_document_id)
-        link = self.runtime.save_invoice_contract_link(
-            invoice_document_id=invoice_document_id,
-            contract_document_id=contract_document_id,
-            created_at=str((existing or {}).get("created_at") or now),
-            updated_at=now,
-            linked_by=linked_by,
-            source=source,
-        )
-        return {
-            "contract_name": "sheet_vitrina_v1_invoice_contract_links",
-            "status": "ok",
-            "link": link,
-            "invoice": self._with_document_download_path(self.runtime.load_trade_document(invoice_document_id) or invoice),
-            "contract": self._with_document_download_path(contract),
-        }
+        return invoice, contract
 
-    def unlink_invoice_contract(self, invoice_document_id: str) -> dict[str, Any]:
+    def unlink_invoice_contract(self, invoice_document_id: str, *, preparation_request: dict[str, Any] | None = None) -> dict[str, Any]:
         invoice = self.runtime.load_trade_document(invoice_document_id)
         if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
             raise ValueError(f"invoice document not found: {invoice_document_id}")
-        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id)
+        deleted = self.runtime.delete_invoice_contract_link(invoice_document_id, preparation_request=preparation_request)
         return {
             "contract_name": "sheet_vitrina_v1_invoice_contract_links",
             "status": "ok",

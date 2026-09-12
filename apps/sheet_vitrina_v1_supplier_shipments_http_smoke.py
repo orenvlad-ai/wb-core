@@ -613,8 +613,8 @@ def _assert_authoritative_group_rebinding_smoke() -> None:
             raise AssertionError(
                 "invoice identity/date source change must create a new queued revision after a completed one"
             )
-        if metadata_queue.get("effective_date") != "2026-05-16":
-            raise AssertionError(f"metadata replay must retain the edited invoice date: {metadata_queue}")
+        if metadata_queue.get("effective_date") != "2026-05-14":
+            raise AssertionError(f"metadata replay must retain the earlier old invoice date: {metadata_queue}")
         certified = block.update_expenses_complete(created["shipment_id"], True)
 
         checksum_edit = json.loads(json.dumps(certified))

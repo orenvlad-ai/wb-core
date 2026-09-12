@@ -1391,8 +1391,8 @@ def _assert_vtb_statement_parser_and_preview() -> None:
                 f"remaining exact operations reviewable: {partial_import}"
             )
         with patch(
-            "packages.application.warehouse_functional.enqueue_warehouse_targeted_recalculation",
-            side_effect=RuntimeError("injected replay queue failure"),
+            "packages.application.supplier_preparation_intents._prepare",
+            side_effect=RuntimeError("injected saved-source preparation failure"),
         ):
             confirmed = block.confirm_bank_fee_statement_import(
                 "sup_financial",
@@ -1442,7 +1442,7 @@ def _assert_vtb_statement_parser_and_preview() -> None:
             or (
                 confirmed.get("warehouse_targeted_recalculation") or {}
             ).get("status")
-            != "replay_error"
+            != "pending"
         ):
             raise AssertionError(
                 "selected logical groups must import five atomic rows and repeat as no-op: "
@@ -3161,8 +3161,15 @@ def _assert_http_api_smoke() -> None:
                     collection_url + "/confirm-upload",
                     {"confirmation_token": preview["confirmation_token"]},
                 )
-                if status != 200 or not payload.get("document_id") or payload.get("parse_status") != "parsed":
+                expected_status = 200 if filename == "quote.pdf" else 202
+                if status != expected_status or not payload.get("document_id") or payload.get("parse_status") != "parsed":
                     raise AssertionError(f"financial upload failed for {filename}: {status} {payload}")
+                if expected_status == 202:
+                    # This fixture has no matched product lines. The source is
+                    # saved, while its exact warehouse scope needs correction.
+                    pending = payload.get("warehouse_targeted_recalculation") or {}
+                    if not payload.get("operation_applied") or pending.get("status") != "pending" or "no proven SKU/date scope" not in pending.get("error", ""):
+                        raise AssertionError(f"saved financial source must expose pending scope: {payload}")
             list_status, listed = _get_json(collection_url)
             if list_status != 200 or len(listed.get("documents", [])) != 4 or len(listed.get("expense_lines", [])) != 14:
                 raise AssertionError(f"financial list/detail count mismatch: {list_status} {listed}")
@@ -3479,7 +3486,8 @@ def _assert_http_api_smoke() -> None:
                     raise AssertionError(
                         f"bank document preview failed for {filename}: {preview_status} {preview}"
                     )
-                if status != 200 or payload.get("parse_status") != "needs_review" or payload.get("order_match_status") != "mismatch":
+                expected_status = 202 if filename == "bank-transfer.pdf" else 200
+                if status != expected_status or payload.get("parse_status") != "needs_review" or payload.get("order_match_status") != "mismatch":
                     raise AssertionError(f"bank document upload failed for {filename}: {status} {payload}")
                 if not any("другому заказу" in warning for warning in payload.get("warnings", [])):
                     raise AssertionError(f"bank document mismatch warning missing for {filename}: {payload}")

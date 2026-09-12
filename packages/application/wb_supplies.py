@@ -669,6 +669,11 @@ class WbSuppliesBlock:
         reservations remain reserved for physical shortage or identity
         ambiguity.
         """
+        from packages.application.supplier_preparation_intents import drain_supplier_preparation_intents
+
+        supplier_preparation = drain_supplier_preparation_intents(self.runtime)
+        # An unmatched supplier remains visible in its own pending request.
+        # Independent physical returns/debits and healthy supplier targets can proceed.
         checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
             reason="warehouse_functional_bounded_sync"
         )
@@ -697,6 +702,7 @@ class WbSuppliesBlock:
             self.runtime.list_wb_supplies_cache_records()
         )
         return {
+            "supplier_preparation": supplier_preparation,
             "checkpoint": checkpoint,
             "supply_returns": supply_returns,
             "deleted_returned_supply_records": deleted_returned_records,
