@@ -78,6 +78,7 @@ from packages.application.web_vitrina_page_composition import (
     build_web_vitrina_page_composition_probe,
 )
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
+from packages.adapters import search_cluster_cleaner_http
 from packages.application.wb_prices_management import WbPricesManagementError
 from packages.application.wb_autoanswers_runtime import AutoanswersRuntimeError
 from packages.application.sku_management import SkuManagementError
@@ -504,9 +505,11 @@ def _inject_sheet_vitrina_ui_system(template: str) -> str:
 def _web_vitrina_ui_base_template() -> str:
     """Cache source text only; request-owned config and barriers stay dynamic."""
 
-    return _inject_sheet_vitrina_ui_system(
-        WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
-    )
+    template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+    for marker, filename in (("<!-- KEYWORD_CLEANER_PANEL -->", "sheet_vitrina_v1_keyword_cleaner.html"),
+                             ("/* KEYWORD_CLEANER_SCRIPT */", "sheet_vitrina_v1_keyword_cleaner.js")):
+        template = template.replace(marker, WEB_VITRINA_UI_TEMPLATE_PATH.with_name(filename).read_text(encoding="utf-8"))
+    return _inject_sheet_vitrina_ui_system(template)
 
 
 def _render_sheet_vitrina_message_page(
@@ -665,6 +668,16 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if search_cluster_cleaner_http.handles(parsed.path):
+                if not _ensure_business_data_write_allowed(self, parsed.path):
+                    return
+                search_cluster_cleaner_http.dispatch(
+                    self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
+                    authenticated_user=_authenticated_web_user,
+                    has_ads=lambda user: _user_has_section_access(user, WEB_AUTH_SECTION_ADS),
+                    write_json=_write_json_response,
+                )
                 return
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_PERFORMANCE_PATH:
                 if not _ensure_web_vitrina_performance_same_origin(self):
@@ -3027,6 +3040,14 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if search_cluster_cleaner_http.handles(parsed.path):
+                search_cluster_cleaner_http.dispatch(
+                    self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
+                    authenticated_user=_authenticated_web_user,
+                    has_ads=lambda user: _user_has_section_access(user, WEB_AUTH_SECTION_ADS),
+                    write_json=_write_json_response,
+                )
                 return
             if parsed.path == DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH:
                 _write_json_response(
@@ -5703,6 +5724,14 @@ def _build_handler(
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
                 return
+            if search_cluster_cleaner_http.handles(parsed.path):
+                search_cluster_cleaner_http.dispatch(
+                    self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
+                    authenticated_user=_authenticated_web_user,
+                    has_ads=lambda user: _user_has_section_access(user, WEB_AUTH_SECTION_ADS),
+                    write_json=_write_json_response,
+                )
+                return
             if not _ensure_business_data_write_allowed(self, parsed.path):
                 return
             if _is_settings_user_item_path(parsed.path):
@@ -5923,6 +5952,14 @@ def _build_handler(
         def do_DELETE(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
             if not _ensure_web_auth(self, parsed):
+                return
+            if search_cluster_cleaner_http.handles(parsed.path):
+                search_cluster_cleaner_http.dispatch(
+                    self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
+                    authenticated_user=_authenticated_web_user,
+                    has_ads=lambda user: _user_has_section_access(user, WEB_AUTH_SECTION_ADS),
+                    write_json=_write_json_response,
+                )
                 return
             if not _ensure_business_data_write_allowed(self, parsed.path):
                 return

@@ -20,13 +20,41 @@
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
-        "apps/sku_inventory_balance_browser_smoke.py"
+        "apps/sku_inventory_balance_browser_smoke.py",
+        "apps/search_cluster_cleaner_browser_smoke.py"
       ],
       "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     }
   },
   "groups": {
+    "search_cluster_cleaner": {
+      "patterns": [
+        "packages/contracts/search_cluster_cleaner.py",
+        "packages/domain/search_cluster_*.py",
+        "packages/application/search_cluster_cleaner*.py",
+        "apps/search_cluster_cleaner*.py",
+        "apps/fixtures/search_cluster_cleaner_holdout.json",
+        "apps/fixtures/search_cluster_cleaner_legacy_registry.json",
+        "packages/adapters/search_cluster_cleaner*.py",
+        "packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.*",
+        "packages/application/change_registry_search_cluster.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/search_cluster_cleaner_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/search_cluster_cleaner_holdout_smoke.py"
+        ],
+        ["python3", "apps/search_cluster_cleaner_write_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_registry_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_http_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_browser_smoke.py", "--output", "/tmp/wbc-cleaner-browser-ci"]
+      ]
+    },
     "warehouse_recovery_retention": {
       "patterns": [
         "apps/warehouse_recovery_retention.py",

@@ -53,6 +53,7 @@ from packages.application.sheet_vitrina_v1_feedbacks_ai import SheetVitrinaV1Fee
 from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import SheetVitrinaV1FeedbacksAutoComplaintsBlock
 from packages.application.sheet_vitrina_v1_feedbacks_complaints import SheetVitrinaV1FeedbacksComplaintsBlock
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
+from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
@@ -1029,6 +1030,7 @@ class RegistryUploadHttpEntrypoint:
         autoanswers_lifecycle: Any | None = None,
         autoanswers_node_bridge: NodeAutoanswersBridge | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
+        cleaner_web: CleanerWeb | None = None,
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
         buyer_session_block: WbBuyerSessionBlock | None = None,
@@ -1040,6 +1042,7 @@ class RegistryUploadHttpEntrypoint:
         promo_artifact_gc_runner: PromoArtifactGcRunner | None = None,
     ) -> None:
         self.runtime = runtime or RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
+        self.cleaner_web = cleaner_web if cleaner_web is not None else CleanerWeb.from_env(self.runtime.runtime_dir)
         self.activated_at_factory = activated_at_factory or _default_activated_at_factory
         self.refreshed_at_factory = refreshed_at_factory or _default_activated_at_factory
         self.now_factory = now_factory or _default_now_factory
