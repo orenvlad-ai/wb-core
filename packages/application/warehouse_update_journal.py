@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Mapping
@@ -37,6 +38,23 @@ PHASE_LABELS_RU = {
 }
 
 
+class WarehouseRequestConflict(ValueError):
+    """The same scoped request key refers to a different request body."""
+
+
+def validate_warehouse_request(payload: Mapping[str, Any] | None, scope: str) -> tuple[str, str, str]:
+    body = dict(payload or {})
+    key = body.pop("request_key", "")
+    if not isinstance(key, str) or (key and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key)):
+        raise ValueError("request_key must contain 16..128 letters, digits, '_' or '-'")
+    if not scope or len(scope) > 200:
+        raise ValueError("warehouse request scope is required")
+    encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if len(encoded.encode("utf-8")) > 16384:
+        raise ValueError("warehouse request payload is too large")
+    return key, hashlib.sha256(encoded.encode("utf-8")).hexdigest(), encoded
+
+
 class WarehouseUpdateJournal:
     def __init__(self, *, db_path: Path, runtime_dir: Path | None = None, timestamp_factory: Any | None = None) -> None:
         self.db_path = Path(db_path)
@@ -48,6 +66,147 @@ class WarehouseUpdateJournal:
             ensure_warehouse_update_journal_schema(conn)
             conn.commit()
 
+    def accept(self, *, request_key: str, request_scope: str, payload_fingerprint: str,
+               request_payload_json: str) -> tuple[dict[str, Any], bool]:
+        """Commit intent and its public alias together, independently of claim."""
+        now = self.timestamp_factory()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if request_key:
+                prior = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs WHERE request_scope=? AND request_key=?",
+                    (request_scope, request_key),
+                ).fetchone()
+                if prior is not None:
+                    if prior["payload_fingerprint"] != payload_fingerprint:
+                        raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                    return self._job(conn, prior), False
+            # Preserve the existing one-flight manual button contract. A busy
+            # request is not accepted and never acquires someone else's key.
+            active = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs "
+                "WHERE public_job_id<>'' AND status IN ('accepted','running') ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                return self._job(conn, active), False
+            run_id, public_id = "whur_" + uuid4().hex[:24], uuid4().hex
+            conn.execute(
+                """INSERT INTO sheet_vitrina_v1_warehouse_update_runs(
+                    run_id,trigger_source,status,scheduled_for,started_at,active_phase,last_error,result_json,
+                    functional_version_id,business_date,created_at,updated_at,owner_scope,
+                    public_job_id,request_key,request_scope,payload_fingerprint,request_payload_json
+                ) VALUES(?,'manual','accepted','','','','','{}','','',?,?,?,?,?,?,?,?)""",
+                (run_id, now, now, str(self.runtime_dir.resolve()), public_id, request_key,
+                 request_scope, payload_fingerprint, request_payload_json),
+            )
+            for phase in PHASES:
+                conn.execute(
+                    """INSERT INTO sheet_vitrina_v1_warehouse_update_phases
+                    (run_id,phase_key,status,item_count,last_error,details_json)
+                    VALUES(?,?,'pending',0,'','{}')""", (run_id, phase),
+                )
+            row = conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?", (run_id,)).fetchone()
+            conn.commit()
+            return self._job(conn, row), True
+
+    def lookup(self, *, public_id: str = "", request_key: str = "", request_scope: str) -> dict[str, Any] | None:
+        """Exact lookup only. No schema/bootstrap, latest scan, or status writes."""
+        if bool(public_id) == bool(request_key):
+            raise ValueError("supply exactly one run_id or request_key")
+        with _connect(self.db_path, query_only=True) as conn:
+            if public_id:
+                row = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs "
+                    "WHERE (public_job_id=? OR (public_job_id='' AND run_id=?)) "
+                    "AND (request_scope=? OR request_scope='')",
+                    (public_id, public_id, request_scope),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs WHERE request_scope=? AND request_key=?",
+                    (request_scope, request_key),
+                ).fetchone()
+            return self._job(conn, row) if row is not None else None
+
+    def latest_job(self, *, request_scope: str) -> dict[str, Any] | None:
+        with _connect(self.db_path, query_only=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs "
+                "WHERE trigger_source IN ('manual','operator') AND (request_scope=? OR request_scope='') "
+                "ORDER BY created_at DESC,run_id DESC LIMIT 1", (request_scope,),
+            ).fetchone()
+            return self._job(conn, row) if row is not None else None
+
+    def needs_pickup(self) -> bool:
+        with _connect(self.db_path, query_only=True) as conn:
+            return conn.execute(
+                "SELECT 1 FROM sheet_vitrina_v1_warehouse_update_runs "
+                "WHERE public_job_id<>'' AND status IN ('accepted','running') LIMIT 1"
+            ).fetchone() is not None
+
+    def recover_and_pick(self) -> dict[str, Any] | None:
+        """Only a new live admission may classify an orphan; never a GET."""
+        owner = require_warehouse_job_owner(self.runtime_dir)
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._interrupt_orphans(conn, owner, self.timestamp_factory())
+            row = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs "
+                "WHERE public_job_id<>'' AND status='accepted' ORDER BY created_at,run_id LIMIT 1"
+            ).fetchone()
+            conn.commit()
+            return self._job(conn, row) if row is not None else None
+
+    def claim(self, run_id: str) -> bool:
+        owner = require_warehouse_job_owner(self.runtime_dir)
+        now = self.timestamp_factory()
+        with _connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_update_runs SET status='running',owner_token=?,"
+                "attempt_id=?,started_at=?,updated_at=? WHERE run_id=? AND status='accepted' AND owner_scope=?",
+                (owner, uuid4().hex, now, now, run_id, str(self.runtime_dir.resolve())),
+            ).rowcount
+            conn.commit()
+            return changed == 1
+
+    def _job(self, conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+        phases = [dict(phase) for phase in conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_warehouse_update_phases WHERE run_id=? ORDER BY rowid", (row["run_id"],)
+        )]
+        for phase in phases:
+            phase["details"] = json.loads(phase.pop("details_json") or "{}")
+            phase["label_ru"] = PHASE_LABELS_RU[phase["phase_key"]]
+        return {"job_id": row["public_job_id"] or row["run_id"], "durable_run_id": row["run_id"],
+                "request_scope": row["request_scope"], "request_key": row["request_key"],
+                "payload_fingerprint": row["payload_fingerprint"], "attempt_id": row["attempt_id"],
+                "operation": "warehouse_current_source_sync", "status": row["status"],
+                "started_at": row["started_at"] or row["created_at"], "finished_at": row["finished_at"],
+                "result": json.loads(row["result_json"] or "{}"), "error": row["last_error"],
+                "phases": phases, "log_lines": []}
+
+    def _interrupt_orphans(self, conn: sqlite3.Connection, owner: str, now: str) -> None:
+        rows = conn.execute(
+            "SELECT run_id,started_at,owner_token,owner_scope FROM sheet_vitrina_v1_warehouse_update_runs WHERE status='running'"
+        ).fetchall()
+        scope = str(self.runtime_dir.resolve())
+        if any(row["owner_scope"] and row["owner_scope"] != scope for row in rows):
+            raise WarehouseJobOwnershipError("running warehouse run belongs to a different admission scope")
+        if any(row["owner_token"] == owner for row in rows):
+            raise WarehouseJobOwnershipError("this admission already has a running warehouse run")
+        for row in rows:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_update_runs SET status='interrupted',finished_at=?,"
+                "duration_ms=?,last_error='Прошлый запуск прерван до завершения; сохранён last-good',updated_at=? WHERE run_id=?",
+                (now, _duration_ms(row["started_at"], now), now, row["run_id"]),
+            )
+            # Preserve confirmed phases, receipt details and the last active phase.
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_warehouse_update_phases SET status='failed',finished_at=?,"
+                "last_error='Запуск прерван до завершения' WHERE run_id=? AND status='running'",
+                (now, row["run_id"]),
+            )
+
     def start(self, *, trigger_source: str, scheduled_for: str = "", owner_token: str | None = None) -> str:
         owner = require_warehouse_job_owner(self.runtime_dir, owner_token)
         started_at = self.timestamp_factory()
@@ -56,40 +215,8 @@ class WarehouseUpdateJournal:
         ).hexdigest()[:24]
         with _connect(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            interrupted = conn.execute(
-                "SELECT run_id,started_at,owner_token,owner_scope FROM sheet_vitrina_v1_warehouse_update_runs "
-                "WHERE status='running'"
-            ).fetchall()
             scope = str(self.runtime_dir.resolve())
-            if any(row["owner_scope"] and row["owner_scope"] != scope for row in interrupted):
-                raise WarehouseJobOwnershipError("running warehouse run belongs to a different admission scope")
-            if any(row["owner_token"] == owner for row in interrupted):
-                raise WarehouseJobOwnershipError("this admission already has a running warehouse run")
-            for row in interrupted:
-                prior_run_id = str(row["run_id"])
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_warehouse_update_runs
-                    SET status='interrupted',finished_at=?,duration_ms=?,active_phase='',
-                        last_error='Прошлый запуск прерван до завершения; сохранён last-good',
-                        updated_at=? WHERE run_id=?
-                    """,
-                    (
-                        started_at,
-                        _duration_ms(str(row["started_at"] or ""), started_at),
-                        started_at,
-                        prior_run_id,
-                    ),
-                )
-                conn.execute(
-                    """
-                    UPDATE sheet_vitrina_v1_warehouse_update_phases
-                    SET status='failed',finished_at=?,
-                        last_error='Запуск прерван до завершения'
-                    WHERE run_id=? AND status='running'
-                    """,
-                    (started_at, prior_run_id),
-                )
+            self._interrupt_orphans(conn, owner, started_at)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_warehouse_update_runs(
@@ -170,7 +297,9 @@ class WarehouseUpdateJournal:
                     status,
                     now,
                     str(error or "")[:2000],
-                    _json(_bounded_details(details or {})),
+                    _json(dict(details or {}) if conn.execute(
+                        "SELECT public_job_id FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?", (run_id,)
+                    ).fetchone()[0] else _bounded_details(details or {})),
                     run_id,
                     phase_key,
                 ),
@@ -213,7 +342,9 @@ class WarehouseUpdateJournal:
                     now,
                     duration_ms,
                     str(error or "")[:2000],
-                    _json(_bounded_details(payload)),
+                    _json(payload if conn.execute(
+                        "SELECT public_job_id FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?", (run_id,)
+                    ).fetchone()[0] else _bounded_details(payload)),
                     str(active_version.get("version_id") or payload.get("functional_version_id") or ""),
                     str(active_version.get("business_effective_date") or payload.get("business_date") or "")[:10],
                     now,
@@ -231,10 +362,12 @@ class WarehouseUpdateJournal:
         if row is None or row["owner_token"] != owner or row["status"] != "running":
             raise WarehouseJobOwnershipError("warehouse run is not running under this admission owner")
 
-    def public_status(self) -> dict[str, Any]:
+    def public_status(self, *, request_scope: str | None = None) -> dict[str, Any]:
         with _connect(self.db_path, query_only=True) as conn:
             runs = [dict(row) for row in conn.execute(
-                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs ORDER BY started_at DESC,run_id DESC LIMIT 50"
+                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs "
+                "WHERE (? IS NULL OR request_scope=? OR request_scope='') "
+                "ORDER BY started_at DESC,run_id DESC LIMIT 50", (request_scope, request_scope),
             ).fetchall()]
             latest_automatic = next(
                 (row for row in runs if str(row["trigger_source"]) in {"hourly", "automatic", "timer"}),
@@ -273,10 +406,12 @@ class WarehouseUpdateJournal:
                 for row in conn.execute(
                     """
                     SELECT phase_key,MAX(last_good_at) AS last_good_at
-                    FROM sheet_vitrina_v1_warehouse_update_phases
+                    FROM sheet_vitrina_v1_warehouse_update_phases phase
+                    JOIN sheet_vitrina_v1_warehouse_update_runs run ON run.run_id=phase.run_id
                     WHERE last_good_at IS NOT NULL AND last_good_at<>''
+                      AND (? IS NULL OR run.request_scope=? OR run.request_scope='')
                     GROUP BY phase_key
-                    """
+                    """, (request_scope, request_scope),
                 ).fetchall()
             }
             version = conn.execute(
@@ -362,9 +497,15 @@ def ensure_warehouse_update_journal_schema(conn: sqlite3.Connection) -> None:
     columns = {str(row[1]) for row in conn.execute(
         "PRAGMA table_info(sheet_vitrina_v1_warehouse_update_runs)"
     )}
-    for name in ("owner_token", "owner_scope"):
+    for name in ("owner_token", "owner_scope", "public_job_id", "request_key", "request_scope",
+                 "payload_fingerprint", "request_payload_json", "attempt_id"):
         if name not in columns:
             conn.execute(f"ALTER TABLE sheet_vitrina_v1_warehouse_update_runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS warehouse_update_public_id "
+                 "ON sheet_vitrina_v1_warehouse_update_runs(public_job_id) WHERE public_job_id<>''")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS warehouse_update_request_key "
+                 "ON sheet_vitrina_v1_warehouse_update_runs(request_scope,request_key) WHERE request_key<>''")
 
 
 def _run_public(

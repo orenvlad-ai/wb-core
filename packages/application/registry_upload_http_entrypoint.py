@@ -226,7 +226,10 @@ from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
 )
 from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
-from packages.application.warehouse_update_journal import WarehouseUpdateJournal
+from packages.application.warehouse_functional_maintenance import warehouse_start_is_held
+from packages.application.warehouse_update_journal import (
+    WarehouseUpdateJournal, WarehouseRequestConflict, validate_warehouse_request,
+)
 from packages.application.calculation_parameters import CalculationParametersBlock
 from packages.application.calculation_parameters_v4 import ProxyV4ParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
@@ -1374,6 +1377,11 @@ class RegistryUploadHttpEntrypoint:
                 seller_id=registry_seller_id,
                 account_scope=registry_scope,
             )
+
+        self.operator_jobs.resume_warehouse_pending(
+            runtime_dir=self.runtime.runtime_dir, journal=self.warehouse_update_journal,
+            runner=self._run_warehouse_manual_sync_job,
+        )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
@@ -3380,9 +3388,13 @@ class RegistryUploadHttpEntrypoint:
             }
 
     def handle_sheet_operator_job_request(self, job_id: str) -> dict[str, Any]:
-        return self.operator_jobs.get(job_id)
+        job = self.operator_jobs.get(job_id)
+        if job.get("operation") == "warehouse_current_source_sync":
+            raise ValueError("warehouse status requires the scoped warehouse status route")
+        return job
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
+        self.handle_sheet_operator_job_request(job_id)
         return self.operator_jobs.get_text(job_id)
 
     def handle_seller_portal_recovery_status_request(
@@ -6744,9 +6756,8 @@ class RegistryUploadHttpEntrypoint:
         payload["lock_metrics"] = metrics
         return payload
 
-    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str) -> dict[str, Any]:
+    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str, durable_run_id: str = "") -> dict[str, Any]:
         require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
-        durable_run_id = ""
         active_phase = ""
 
         def run_phase(phase_key: str, operation: Callable[[], Any]) -> Any:
@@ -6781,9 +6792,8 @@ class RegistryUploadHttpEntrypoint:
             return value
 
         try:
-            durable_run_id = self.warehouse_update_journal.start(
-                trigger_source="manual"
-            )
+            if not durable_run_id:
+                durable_run_id = self.warehouse_update_journal.start(trigger_source="manual")
             economics_backup = (
                 self.calculation_parameters_block.prepare_functional_economics_backup()
             )
@@ -6909,85 +6919,80 @@ class RegistryUploadHttpEntrypoint:
                 self.warehouse_functional_block.record_failed_sync(exc)
             raise
 
-    def handle_warehouse_manual_sync_start_request(self) -> dict[str, Any]:
+    def handle_warehouse_manual_sync_start_request(
+        self, payload: Mapping[str, Any] | None = None, *, request_scope: str = "local_operator",
+    ) -> dict[str, Any]:
+        key, fingerprint, body = validate_warehouse_request(payload, request_scope)
+        if key:
+            prior = self.warehouse_update_journal.lookup(request_key=key, request_scope=request_scope)
+            if prior:
+                if prior["payload_fingerprint"] != fingerprint:
+                    raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                return self._warehouse_manual_sync_status_payload(prior, request_scope=request_scope)
         job, busy = self.operator_jobs.start_warehouse_if_idle(
-            runtime_dir=self.runtime.runtime_dir,
+            runtime_dir=self.runtime.runtime_dir, journal=self.warehouse_update_journal,
             runner=self._run_warehouse_manual_sync_job,
+            request={"request_key": key, "request_scope": request_scope,
+                     "payload_fingerprint": fingerprint, "request_payload_json": body},
         )
-        # An external CLI owner has no process-local operator status ID.
-        if job is None:
-            return {"contract_name": "warehouse_current_source_sync_status",
-                    "status": "busy", "run_id": "",
-                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
-        return self._warehouse_manual_sync_status_payload(job, busy=busy)
+        if job is None and key:
+            # Close the cross-process race between the initial key lookup and
+            # another worker's acceptance under the shared admission.
+            prior = self.warehouse_update_journal.lookup(request_key=key, request_scope=request_scope)
+            if prior:
+                if prior["payload_fingerprint"] != fingerprint:
+                    raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                return self._warehouse_manual_sync_status_payload(prior, request_scope=request_scope)
+        if job and job.get("acceptance_unknown"):
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "consumer_pending", "run_id": "",
+                    "user_status": "Принятие заявки пока не подтверждено; проверяем её по сохранённому ключу",
+                    "short_log": [], "next_action": "read_status", "can_start_new": False, "request_accepted": None}
+        if job is None or (job.get("request_scope") and job["request_scope"] != request_scope):
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт; новая заявка не принята", "short_log": [],
+                    "next_action": "read_status", "can_start_new": False, "request_accepted": False}
+        response = self._warehouse_manual_sync_status_payload(job, busy=busy, request_scope=request_scope)
+        response["request_accepted"] = not busy
+        return response
 
     def handle_warehouse_manual_sync_status_request(
-        self,
-        run_id: str | None = None,
+        self, run_id: str | None = None, *, request_key: str = "", request_scope: str = "local_operator",
     ) -> dict[str, Any]:
-        operation = "warehouse_current_source_sync"
         requested = str(run_id or "").strip()
-        if requested:
-            return self._warehouse_manual_sync_status_payload(
-                self.operator_jobs.get(requested)
+        if requested or request_key:
+            if request_key:
+                validate_warehouse_request({"request_key": request_key}, request_scope)
+            job = self.warehouse_update_journal.lookup(
+                public_id=requested, request_key=request_key, request_scope=request_scope,
             )
-        job = self.operator_jobs.active_job(operations=(operation,))
-        if job is None and warehouse_functional_job_is_busy(self.runtime.runtime_dir):
-            # A busy POST without a process-local ID is polled through this
-            # same empty-ID route. Never replace a live CLI owner with an old
-            # manual success/never; no durable alias is invented here.
-            return {"contract_name": "warehouse_current_source_sync_status",
-                    "status": "busy", "run_id": "",
-                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
-        if job is None:
-            job = self.operator_jobs.latest_relevant_job(operations=(operation,))
-        if job is None:
-            durable = self.warehouse_update_journal.public_status()
-            manual = dict(durable.get("manual_updates") or {})
-            if str(manual.get("status") or "") != "never":
-                return {
-                    "contract_name": "warehouse_current_source_sync_status",
-                    "status": str(manual.get("status") or "never"),
-                    "run_id": str(manual.get("run_id") or ""),
-                    "user_status": (
-                        "Выполняется обновление всех складов и себестоимостей"
-                        if str(manual.get("status") or "") == "running"
-                        else "Последнее ручное обновление сохранено в журнале"
-                    ),
-                    "short_log": [],
-                    "last_attempt_at": str(manual.get("last_attempt_at") or ""),
-                    "last_success_at": str(manual.get("last_success_at") or ""),
-                    "finished_at": str(manual.get("finished_at") or ""),
-                    "changed_warehouses": 0,
-                    "changed_skus": 0,
-                    "functional_version_id": str(manual.get("functional_version_id") or ""),
-                    "business_date": str(manual.get("business_date") or ""),
-                    "durable_journal": durable,
-                }
-            return {
-                "contract_name": "warehouse_current_source_sync_status",
-                "status": "never",
-                "run_id": "",
-                "user_status": "Обновление ещё не запускалось",
-                "short_log": [],
-                "last_attempt_at": "",
-                "last_success_at": "",
-                "changed_warehouses": 0,
-                "changed_skus": 0,
-                "functional_version_id": "",
-                "business_date": "",
-                "durable_journal": durable,
-            }
-        return self._warehouse_manual_sync_status_payload(job)
+            if job is None:
+                raise ValueError("warehouse operation not found in this scope")
+            return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
+        if warehouse_functional_job_is_busy(self.runtime.runtime_dir):
+            job = self.warehouse_update_journal.latest_job(request_scope=request_scope)
+            if job and job["status"] in {"accepted", "running"}:
+                return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт", "short_log": [],
+                    "next_action": "read_status", "can_start_new": False}
+        job = self.warehouse_update_journal.latest_job(request_scope=request_scope)
+        if job:
+            return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
+        return {"contract_name": "warehouse_current_source_sync_status", "status": "never", "run_id": "",
+                "user_status": "Обновление ещё не запускалось", "short_log": [], "last_attempt_at": "",
+                "last_success_at": "", "changed_warehouses": 0, "changed_skus": 0,
+                "functional_version_id": "", "business_date": "", "next_action": "start",
+                "can_start_new": True, "durable_journal": self.warehouse_update_journal.public_status(request_scope=request_scope)}
 
     def _run_warehouse_manual_sync_job(
         self,
         emit: OperatorLogEmitter,
+        durable_run_id: str = "",
     ) -> dict[str, Any]:
         emit("Проверяем общий warehouse lock и предусмотренный restore point.")
         emit("Получаем текущие WB supplies, official stock snapshot и canonical cost layers.")
         result = self._handle_owned_warehouse_manual_sync_request(
-            owner_token=require_warehouse_job_owner(self.runtime.runtime_dir),
+            owner_token=require_warehouse_job_owner(self.runtime.runtime_dir), durable_run_id=durable_run_id,
         )
         diff = dict(result.get("diff") or {})
         lines = [
@@ -7034,43 +7039,71 @@ class RegistryUploadHttpEntrypoint:
         job: Mapping[str, Any],
         *,
         busy: bool = False,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
-        status = str(job.get("status") or "running")
+        status = str(job.get("status") or "accepted")
+        if status == "running" and not warehouse_functional_job_is_busy(self.runtime.runtime_dir):
+            # The owner may have committed terminal status after our first read
+            # and released admission. Re-read this exact scoped ID before
+            # classifying an orphan; never substitute the latest operation.
+            current = self.warehouse_update_journal.lookup(
+                public_id=str(job.get("job_id") or ""), request_scope=request_scope,
+            )
+            if current is not None:
+                job = current
+                status = str(job.get("status") or "accepted")
+            if status == "running":
+                status = "interrupted"  # Read-only; picker persists classification.
         result = dict(job.get("result") or {})
+        # New durable results retain the exact phase receipts and final payload.
+        lines = list(dict(result.get("diff") or {}).get("lines") or [])
+        active_version = dict(result.get("active_version") or {})
+        changed_warehouses = result.get("changed_warehouses", len({str(line.get("warehouse_key")) for line in lines}))
+        changed_skus = result.get("changed_skus", len({int(line["nm_id"]) for line in lines if line.get("nm_id")}))
+        messages = {"accepted": "Заявка принята; ожидает начала обновления", "queued": "Заявка ожидает выполнения",
+                    "running": "Выполняется обновление всех складов и себестоимостей",
+                    "interrupted": "Обновление прервано; подтверждённые этапы сохранены. Требуется проверка",
+                    "consumer_pending": "Данные сохранены; зависимое обновление ожидается",
+                    "deferred": "Обновление отложено; требуется проверка"}
         if busy:
             user_status = "Уже выполняется другой пересчёт"
-        elif status == "running":
-            user_status = "Выполняется обновление всех складов и себестоимостей"
-        elif status == "success" and result.get("status") == "no_change":
-            user_status = "Без изменений: данные уже актуальны"
         elif status == "success":
-            user_status = "Готово: все 6 складов и себестоимости обновлены"
+            user_status = "Без изменений: данные уже актуальны" if not changed_warehouses and not changed_skus else "Готово: все 6 складов и себестоимости обновлены"
         else:
-            user_status = "Не завершено: " + str(
-                job.get("error") or "неизвестная причина"
-            )
-        successful = self.operator_jobs.latest_successful_job(
-            operations=("warehouse_current_source_sync",),
-        )
+            user_status = messages.get(status) or "Не завершено: " + str(job.get("error") or "требуется проверка")
+        durable = self.warehouse_update_journal.public_status(request_scope=request_scope)
+        # Exact status must never show phases belonging to the latest run.
+        if "phases" in job:
+            durable["phases"] = job["phases"]
+            durable["manual_updates"] = {
+                "run_id": job.get("durable_run_id"), "status": status,
+                "last_attempt_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+                "last_success_at": job.get("finished_at") if status == "success" else "",
+                "functional_version_id": result.get("functional_version_id") or active_version.get("version_id") or "",
+                "business_date": result.get("business_date") or active_version.get("business_effective_date") or "",
+            }
+        try:
+            live = self.operator_jobs.get(str(job.get("job_id") or ""))
+        except ValueError:
+            live = {}
+        # Optional live log/lock diagnostics are not identity or completion proof.
+        if (live.get("result") or {}).get("lock_metrics"):
+            result["lock_metrics"] = live["result"]["lock_metrics"]
+        can_start = status == "success" and not busy
         return {
-            "contract_name": "warehouse_current_source_sync_status",
-            "status": "busy" if busy else status,
-            "run_id": str(job.get("job_id") or ""),
-            "user_status": user_status,
-            "short_log": list(job.get("log_lines") or [])[-8:],
+            "contract_name": "warehouse_current_source_sync_status", "status": "busy" if busy else status,
+            "run_id": str(job.get("job_id") or ""), "durable_run_id": str(job.get("durable_run_id") or ""),
+            "attempt_id": str(job.get("attempt_id") or ""), "user_status": user_status,
+            "short_log": list(live.get("log_lines") or job.get("log_lines") or [])[-8:],
             "last_attempt_at": str(job.get("started_at") or ""),
-            "last_success_at": str(
-                (successful or {}).get("finished_at")
-                or (job.get("finished_at") if status == "success" else "")
-                or ""
-            ),
-            "finished_at": str(job.get("finished_at") or ""),
-            "changed_warehouses": int(result.get("changed_warehouses") or 0),
-            "changed_skus": int(result.get("changed_skus") or 0),
-            "functional_version_id": str(result.get("functional_version_id") or ""),
-            "business_date": str(result.get("business_date") or ""),
-            "technical_details": result,
-            "durable_journal": self.warehouse_update_journal.public_status(),
+            "last_success_at": str(job.get("finished_at") or "") if status == "success" else "",
+            "finished_at": str(job.get("finished_at") or ""), "changed_warehouses": changed_warehouses,
+            "changed_skus": changed_skus,
+            "functional_version_id": str(result.get("functional_version_id") or active_version.get("version_id") or ""),
+            "business_date": str(result.get("business_date") or active_version.get("business_date") or active_version.get("business_effective_date") or ""),
+            "technical_details": result, "durable_journal": durable,
+            "can_start_new": can_start,
+            "next_action": "start" if can_start else "read_status" if status in {"accepted", "queued", "running"} or busy else "review_required",
         }
 
     def handle_warehouse_emergency_preview_request(self) -> dict[str, Any]:
@@ -10106,15 +10139,28 @@ class SheetVitrinaV1OperatorJobStore:
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
 
-    def start_warehouse_if_idle(
-        self, *, runtime_dir: Path,
-        runner: Callable[[OperatorLogEmitter], dict[str, Any]],
-    ) -> tuple[dict[str, Any] | None, bool]:
-        """One worker owns both admission and execution; request waits only for admission.
+    def resume_warehouse_pending(self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
+                                 runner: Callable[..., dict[str, Any]]) -> threading.Thread | None:
+        if not journal.needs_pickup():
+            return None
+        def pick() -> None:
+            # Busy live owners are never reclassified. Retry only admission, not effects.
+            while journal.needs_pickup():
+                self.start_warehouse_if_idle(runtime_dir=runtime_dir, journal=journal, runner=runner)
+                time.sleep(5.0)
+        thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
+        thread.start()
+        return thread
 
-        The serial handshake prevents two simultaneous POSTs creating hidden
-        workers. No RLock or open file descriptor crosses a thread boundary.
-        A rejected external admission creates no operator job or domain record.
+    def start_warehouse_if_idle(
+        self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
+        runner: Callable[..., dict[str, Any]], request: Mapping[str, str] | None = None,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Durable acceptance precedes acknowledgement; claim precedes all effects.
+
+        The handshake holds the existing domain admission in the worker thread.
+        Cancellation before acceptance is harmless. After acceptance the pending
+        row survives cancellation/process loss and is eligible for startup pickup.
         """
         deadline = time.monotonic() + 5.0
         if not self._warehouse_start_lock.acquire(timeout=5.0):
@@ -10122,43 +10168,69 @@ class SheetVitrinaV1OperatorJobStore:
         try:
             with self._lock:
                 active = self._jobs.get(self._warehouse_admitted_job or "")
-                if active is not None and active.status == "running":
-                    return active.snapshot(), True
-            ready = threading.Event()
-            proceed = threading.Event()
+                if active is not None and active.status in {"accepted", "running"}:
+                    if request is None:
+                        return None, True
+                    prior = journal.lookup(public_id=active.job_id, request_scope=request["request_scope"])
+                    if prior and request["request_key"] and prior["request_key"] == request["request_key"]:
+                        if prior["payload_fingerprint"] != request["payload_fingerprint"]:
+                            raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                        return prior, False
+                    return prior, True
+            ready, proceed = threading.Event(), threading.Event()
             admission: dict[str, Any] = {}
-            job_id = uuid4().hex
 
             def worker() -> None:
+                job_id = ""
+                accepted: dict[str, Any] | None = None
+                claimed = False
                 metrics: dict[str, Any] = {}
                 result: dict[str, Any] = {}
                 error: BaseException | None = None
                 try:
                     with warehouse_functional_job_lock(runtime_dir) as metrics:
+                        # Startup pickup must respect the same maintenance
+                        # boundary as a new HTTP request, including invalid state.
+                        if warehouse_start_is_held(runtime_dir):
+                            raise WarehouseFunctionalBusyError("warehouse updates are paused for maintenance")
                         with self._lock:
                             if admission.get("cancelled"):
                                 return
+                        pending = journal.recover_and_pick()
+                        if request is not None:
+                            accepted, created = journal.accept(**request)
+                        else:
+                            accepted, created = pending, True
+                        if accepted is None:
+                            return
+                        job_id = accepted["job_id"]
+                        with self._lock:
+                            admission["job"] = accepted
+                            admission["busy"] = not created and (not request or accepted.get("request_key") != request.get("request_key"))
+                            if accepted["status"] != "accepted":
+                                return
                             self._jobs[job_id] = SheetVitrinaV1OperatorJob(
                                 job_id=job_id, operation="warehouse_current_source_sync",
-                                status="running", started_at=self.timestamp_factory(),
+                                status="accepted", started_at=accepted["started_at"],
                             )
                             self._threads[job_id] = threading.current_thread()
                             self._warehouse_admitted_job = job_id
-                            admission["job"] = self._jobs[job_id].snapshot()
                         ready.set()
                         permitted = proceed.wait(timeout=5.0)
+                        if not permitted or admission.get("cancelled"):
+                            return  # Durable pending is retained, never deleted.
+                        if warehouse_start_is_held(runtime_dir):
+                            return  # A hold acquired during acceptance also keeps this ID pending.
+                        claimed = journal.claim(accepted["durable_run_id"])
+                        if not claimed:
+                            return
                         with self._lock:
-                            if not permitted or admission.get("cancelled"):
-                                admission["cancelled"] = True
-                                return
+                            self._jobs[job_id].status = "running"
                         context_token = SHEET_OPERATOR_JOB_ID.set(job_id)
                         try:
-                            result = runner(lambda message: self._append_log(job_id, message))
+                            result = runner(lambda message: self._append_log(job_id, message), accepted["durable_run_id"])
                         finally:
                             SHEET_OPERATOR_JOB_ID.reset(context_token)
-                            with self._lock:
-                                if self._warehouse_admitted_job == job_id:
-                                    self._warehouse_admitted_job = None
                 except BaseException as exc:
                     error = exc
                     if "job" not in admission:
@@ -10167,38 +10239,35 @@ class SheetVitrinaV1OperatorJobStore:
                         else:
                             admission["error"] = exc
                 finally:
-                    # Domain journal terminal happened under admission. Publish
-                    # operator terminal with complete diagnostics after release.
                     with self._lock:
-                        if admission.get("cancelled"):
-                            self._jobs.pop(job_id, None)
-                            self._threads.pop(job_id, None)
-                        elif "job" in admission:
+                        if job_id in self._jobs:
                             job = self._jobs[job_id]
                             job.result = {**result, "lock_metrics": metrics}
-                            job.finished_at = self.timestamp_factory()
-                            job.status = "error" if error is not None else "success"
+                            job.finished_at = self.timestamp_factory() if claimed else None
+                            job.status = ("error" if error is not None else "success") if claimed else "accepted"
                             if error is not None:
                                 job.error = str(error)
                                 job.log_lines.append(f"{job.finished_at} Ошибка: {error}")
                         if self._warehouse_admitted_job == job_id:
                             self._warehouse_admitted_job = None
                     ready.set()
+                    if accepted and accepted["status"] == "accepted" and not claimed:
+                        # Acceptance can commit after the request's bounded
+                        # handshake expires. Recover it in this process too.
+                        self.resume_warehouse_pending(runtime_dir=runtime_dir, journal=journal, runner=runner)
 
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
             observed = ready.wait(timeout=max(0.0, deadline - time.monotonic()))
             with self._lock:
-                if not observed or admission.get("cancelled"):
+                if not observed and "job" not in admission:
                     admission["cancelled"] = True
                     proceed.set()
-                    return None, True
+                    return {"acceptance_unknown": True}, True
                 if "error" in admission:
                     raise admission["error"]
-                if admission.get("busy"):
-                    return None, True
                 proceed.set()
-                return admission["job"], False
+                return admission.get("job"), bool(admission.get("busy"))
         finally:
             self._warehouse_start_lock.release()
 

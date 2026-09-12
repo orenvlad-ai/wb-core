@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from packages.application.warehouse_functional_lock import (
     WAREHOUSE_FUNCTIONAL_LOCK_FILENAME,
+    warehouse_functional_job_is_busy,
 )
 from packages.application.business_data_write_barrier import barrier_status
 
@@ -230,8 +231,12 @@ def _lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
     result: dict[str, Any] = {
         "path": str(lock_path),
         "exists": lock_path.exists(),
-        "held": False,
+        # Admission covers acceptance/claim and network phases between writes.
+        # A quiet short writer lock alone cannot prove that the job drained.
+        "job_held": warehouse_functional_job_is_busy(runtime_dir),
+        "writer_held": False,
     }
+    result["held"] = result["job_held"]
     if not lock_path.exists():
         return result
     stat = lock_path.stat()
@@ -246,6 +251,7 @@ def _lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        result["writer_held"] = True
         result["held"] = True
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -270,6 +276,17 @@ def _load_state(runtime_dir: Path) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         raise RuntimeError("warehouse maintenance state is not a JSON object")
     return payload
+
+
+def warehouse_start_is_held(runtime_dir: Path) -> bool:
+    """Read existing maintenance gates without systemd calls or state changes."""
+    try:
+        if barrier_status(runtime_dir).get("active"):
+            return True
+        state = _load_state(runtime_dir)
+    except (OSError, ValueError, RuntimeError):
+        return True
+    return state is not None and state.get("phase") != "restored"
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
