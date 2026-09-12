@@ -213,7 +213,7 @@ def cancelled_handshake(root):
         result = entry.handle_warehouse_manual_sync_start_request()
         elapsed = time.monotonic() - started
         assert blocked.is_set() and 4.9 <= elapsed < 6.5
-        assert result["status"] == "busy" and result["run_id"] == ""
+        assert result["status"] == "consumer_pending" and result["run_id"] == "" and result["request_accepted"] is None
         release.set()
         assert finished.wait(3)
     assert not effects and not entry.operator_jobs._jobs, "cancelled late worker performed an effect"

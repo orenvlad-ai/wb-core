@@ -362,10 +362,12 @@ class WarehouseUpdateJournal:
         if row is None or row["owner_token"] != owner or row["status"] != "running":
             raise WarehouseJobOwnershipError("warehouse run is not running under this admission owner")
 
-    def public_status(self) -> dict[str, Any]:
+    def public_status(self, *, request_scope: str | None = None) -> dict[str, Any]:
         with _connect(self.db_path, query_only=True) as conn:
             runs = [dict(row) for row in conn.execute(
-                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs ORDER BY started_at DESC,run_id DESC LIMIT 50"
+                "SELECT * FROM sheet_vitrina_v1_warehouse_update_runs "
+                "WHERE (? IS NULL OR request_scope=? OR request_scope='') "
+                "ORDER BY started_at DESC,run_id DESC LIMIT 50", (request_scope, request_scope),
             ).fetchall()]
             latest_automatic = next(
                 (row for row in runs if str(row["trigger_source"]) in {"hourly", "automatic", "timer"}),
@@ -404,10 +406,12 @@ class WarehouseUpdateJournal:
                 for row in conn.execute(
                     """
                     SELECT phase_key,MAX(last_good_at) AS last_good_at
-                    FROM sheet_vitrina_v1_warehouse_update_phases
+                    FROM sheet_vitrina_v1_warehouse_update_phases phase
+                    JOIN sheet_vitrina_v1_warehouse_update_runs run ON run.run_id=phase.run_id
                     WHERE last_good_at IS NOT NULL AND last_good_at<>''
+                      AND (? IS NULL OR run.request_scope=? OR run.request_scope='')
                     GROUP BY phase_key
-                    """
+                    """, (request_scope, request_scope),
                 ).fetchall()
             }
             version = conn.execute(

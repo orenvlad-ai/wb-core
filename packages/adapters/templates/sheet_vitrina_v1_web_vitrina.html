@@ -10844,7 +10844,7 @@
       const manual = durable.manual_updates || {};
       const activeVersion = durable.active_version || {};
       state.warehouses.updateRunId = String((payload && payload.run_id) || state.warehouses.updateRunId || "");
-      if (payload && payload.can_start_new === true) {
+      if (payload && (payload.can_start_new === true || payload.request_accepted === false)) {
         localStorage.removeItem(warehouseCurrentSyncStorageKey());
         state.warehouses.updateRequestKey = "";
       } else if (state.warehouses.updateRequestKey) {
@@ -11077,6 +11077,7 @@
         const payload = await response.json();
         if (!response.ok) throw new Error(String(payload.error || ("HTTP " + response.status)));
         renderWarehouseCurrentSyncStatus(payload);
+        if (payload.request_accepted === null) await loadWarehouseCurrentSyncStatus(state.warehouses.updateRunId);
       } catch (error) {
         warehouseCurrentSyncUnresolved("Ответ на заявку не подтверждён");
         if (state.warehouses.updateRequestKey) await loadWarehouseCurrentSyncStatus(state.warehouses.updateRunId);

@@ -95,6 +95,31 @@ def crash_cases(root):
         print("durable restart:", boundary, result["status"], "same ID; no duplicate effect")
 
 
+def delayed_acceptance_case(root):
+    entry, effects, _ = entry_fixture(root)
+    assert entry.operator_jobs.resume_warehouse_pending(runtime_dir=root, journal=entry.warehouse_update_journal,
+        runner=entry._run_warehouse_manual_sync_job) is None
+    blocker = sqlite3.connect(entry.runtime.db_path)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with patch("packages.application.fbs_accounting_runtime.refresh", return_value={}):
+            response = entry.handle_warehouse_manual_sync_start_request({"request_key": KEY})
+            assert response["status"] == "consumer_pending" and response["request_accepted"] is None
+            blocker.rollback()
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                job = entry.warehouse_update_journal.lookup(request_key=KEY, request_scope=SCOPE)
+                if job and job["status"] == "success":
+                    break
+                time.sleep(.03)
+            assert job and job["status"] == "success", job
+            assert effects.count("network") == 1
+            assert entry.handle_warehouse_manual_sync_start_request({"request_key": KEY})["run_id"] == job["job_id"]
+    finally:
+        blocker.close()
+    print("delayed SQL acceptance: unknown ACK; same-process pickup; one effect without restart/new POST")
+
+
 def identity_cases(root):
     entry, _, _ = entry_fixture(root)
     journal = entry.warehouse_update_journal
@@ -206,6 +231,19 @@ def http_cases(root):
                 if status["status"] == "success": break
                 time.sleep(.02)
             assert status["status"] == "success", status
+        code, _, overview = request(port, PATH + "/status", cookie=cookies["other"])
+        encoded = json.dumps(overview)
+        assert code == 200 and job["run_id"] not in encoded and status["durable_run_id"] not in encoded
+        assert not overview["durable_journal"]["phases"]
+        # Also protect the overview during a live owner's private receipt.
+        with warehouse_functional_job_lock(root):
+            private, _ = accept(entry.warehouse_update_journal, key="warehouse_private_0002", scope=owner_scope)
+            entry.warehouse_update_journal.claim(private["durable_run_id"])
+            entry.warehouse_update_journal.phase_started(private["durable_run_id"], PHASES[0])
+            entry.warehouse_update_journal.phase_finished(private["durable_run_id"], PHASES[0], details={"private_receipt": "must-not-leak", "confirmed_ids": list(range(81))})
+            _, _, overview = request(port, PATH + "/status", cookie=cookies["other"])
+            assert "must-not-leak" not in json.dumps(overview) and private["durable_run_id"] not in json.dumps(overview)
+            entry.warehouse_update_journal.finish(private["durable_run_id"], status="success")
         for query in ("run_id=" + job["run_id"], "request_key=" + KEY):
             assert request(port, PATH + "/status?" + query, cookie=cookies["other"])[0] == 404
             assert request(port, PATH + "/status?" + query, cookie=cookies["owner"])[0] == 200
@@ -230,6 +268,7 @@ def main():
         root = Path(raw)
         identity_cases(root / "identity")
         crash_cases(root / "crash")
+        delayed_acceptance_case(root / "delayed")
         http_cases(root / "http")
     print("warehouse_durable_identity_smoke: OK")
 

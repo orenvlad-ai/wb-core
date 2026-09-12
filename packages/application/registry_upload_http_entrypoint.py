@@ -6927,7 +6927,7 @@ class RegistryUploadHttpEntrypoint:
             if prior:
                 if prior["payload_fingerprint"] != fingerprint:
                     raise WarehouseRequestConflict("request_key already accepted with a different payload")
-                return self._warehouse_manual_sync_status_payload(prior)
+                return self._warehouse_manual_sync_status_payload(prior, request_scope=request_scope)
         job, busy = self.operator_jobs.start_warehouse_if_idle(
             runtime_dir=self.runtime.runtime_dir, journal=self.warehouse_update_journal,
             runner=self._run_warehouse_manual_sync_job,
@@ -6941,12 +6941,18 @@ class RegistryUploadHttpEntrypoint:
             if prior:
                 if prior["payload_fingerprint"] != fingerprint:
                     raise WarehouseRequestConflict("request_key already accepted with a different payload")
-                return self._warehouse_manual_sync_status_payload(prior)
+                return self._warehouse_manual_sync_status_payload(prior, request_scope=request_scope)
+        if job and job.get("acceptance_unknown"):
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "consumer_pending", "run_id": "",
+                    "user_status": "Принятие заявки пока не подтверждено; проверяем её по сохранённому ключу",
+                    "short_log": [], "next_action": "read_status", "can_start_new": False, "request_accepted": None}
         if job is None or (job.get("request_scope") and job["request_scope"] != request_scope):
             return {"contract_name": "warehouse_current_source_sync_status", "status": "busy", "run_id": "",
-                    "user_status": "Уже выполняется другой пересчёт", "short_log": [],
-                    "next_action": "read_status", "can_start_new": False}
-        return self._warehouse_manual_sync_status_payload(job, busy=busy)
+                    "user_status": "Уже выполняется другой пересчёт; новая заявка не принята", "short_log": [],
+                    "next_action": "read_status", "can_start_new": False, "request_accepted": False}
+        response = self._warehouse_manual_sync_status_payload(job, busy=busy, request_scope=request_scope)
+        response["request_accepted"] = not busy
+        return response
 
     def handle_warehouse_manual_sync_status_request(
         self, run_id: str | None = None, *, request_key: str = "", request_scope: str = "local_operator",
@@ -6960,22 +6966,22 @@ class RegistryUploadHttpEntrypoint:
             )
             if job is None:
                 raise ValueError("warehouse operation not found in this scope")
-            return self._warehouse_manual_sync_status_payload(job)
+            return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
         if warehouse_functional_job_is_busy(self.runtime.runtime_dir):
             job = self.warehouse_update_journal.latest_job(request_scope=request_scope)
             if job and job["status"] in {"accepted", "running"}:
-                return self._warehouse_manual_sync_status_payload(job)
+                return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
             return {"contract_name": "warehouse_current_source_sync_status", "status": "busy", "run_id": "",
                     "user_status": "Уже выполняется другой пересчёт", "short_log": [],
                     "next_action": "read_status", "can_start_new": False}
         job = self.warehouse_update_journal.latest_job(request_scope=request_scope)
         if job:
-            return self._warehouse_manual_sync_status_payload(job)
+            return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
         return {"contract_name": "warehouse_current_source_sync_status", "status": "never", "run_id": "",
                 "user_status": "Обновление ещё не запускалось", "short_log": [], "last_attempt_at": "",
                 "last_success_at": "", "changed_warehouses": 0, "changed_skus": 0,
                 "functional_version_id": "", "business_date": "", "next_action": "start",
-                "can_start_new": True, "durable_journal": self.warehouse_update_journal.public_status()}
+                "can_start_new": True, "durable_journal": self.warehouse_update_journal.public_status(request_scope=request_scope)}
 
     def _run_warehouse_manual_sync_job(
         self,
@@ -7032,6 +7038,7 @@ class RegistryUploadHttpEntrypoint:
         job: Mapping[str, Any],
         *,
         busy: bool = False,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
         status = str(job.get("status") or "accepted")
         if status == "running" and not warehouse_functional_job_is_busy(self.runtime.runtime_dir):
@@ -7053,7 +7060,7 @@ class RegistryUploadHttpEntrypoint:
             user_status = "Без изменений: данные уже актуальны" if not changed_warehouses and not changed_skus else "Готово: все 6 складов и себестоимости обновлены"
         else:
             user_status = messages.get(status) or "Не завершено: " + str(job.get("error") or "требуется проверка")
-        durable = self.warehouse_update_journal.public_status()
+        durable = self.warehouse_update_journal.public_status(request_scope=request_scope)
         # Exact status must never show phases belonging to the latest run.
         if "phases" in job:
             durable["phases"] = job["phases"]
@@ -10164,6 +10171,8 @@ class SheetVitrinaV1OperatorJobStore:
 
             def worker() -> None:
                 job_id = ""
+                accepted: dict[str, Any] | None = None
+                claimed = False
                 metrics: dict[str, Any] = {}
                 result: dict[str, Any] = {}
                 error: BaseException | None = None
@@ -10195,7 +10204,8 @@ class SheetVitrinaV1OperatorJobStore:
                         permitted = proceed.wait(timeout=5.0)
                         if not permitted or admission.get("cancelled"):
                             return  # Durable pending is retained, never deleted.
-                        if not journal.claim(accepted["durable_run_id"]):
+                        claimed = journal.claim(accepted["durable_run_id"])
+                        if not claimed:
                             return
                         with self._lock:
                             self._jobs[job_id].status = "running"
@@ -10216,14 +10226,18 @@ class SheetVitrinaV1OperatorJobStore:
                         if job_id in self._jobs:
                             job = self._jobs[job_id]
                             job.result = {**result, "lock_metrics": metrics}
-                            job.finished_at = self.timestamp_factory()
-                            job.status = "error" if error is not None else "success"
+                            job.finished_at = self.timestamp_factory() if claimed else None
+                            job.status = ("error" if error is not None else "success") if claimed else "accepted"
                             if error is not None:
                                 job.error = str(error)
                                 job.log_lines.append(f"{job.finished_at} Ошибка: {error}")
                         if self._warehouse_admitted_job == job_id:
                             self._warehouse_admitted_job = None
                     ready.set()
+                    if accepted and accepted["status"] == "accepted" and not claimed:
+                        # Acceptance can commit after the request's bounded
+                        # handshake expires. Recover it in this process too.
+                        self.resume_warehouse_pending(runtime_dir=runtime_dir, journal=journal, runner=runner)
 
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
@@ -10232,7 +10246,7 @@ class SheetVitrinaV1OperatorJobStore:
                 if not observed and "job" not in admission:
                     admission["cancelled"] = True
                     proceed.set()
-                    return None, True
+                    return {"acceptance_unknown": True}, True
                 if "error" in admission:
                     raise admission["error"]
                 proceed.set()

@@ -84,6 +84,13 @@ def main():
         assert page.evaluate("localStorage.getItem(warehouseCurrentSyncStorageKey())") is None
         # New account cannot inherit this account's pending request key.
         assert page.evaluate("localStorage.getItem('warehouse-current-sync-v1:another_user')") is None
+        # A definite busy rejection never accepted this key. Clear it, then
+        # reload can use the overview and enable a new explicit request.
+        page.evaluate("state.warehouses.updateRequestKey='definite_busy_key'; state.warehouses.updateRunId=''; localStorage.setItem(warehouseCurrentSyncStorageKey(),JSON.stringify({request_key:'definite_busy_key',run_id:''})); renderWarehouseCurrentSyncStatus({status:'busy',run_id:'',request_accepted:false,can_start_new:false})")
+        assert page.evaluate("localStorage.getItem(warehouseCurrentSyncStorageKey())") is None
+        page.reload(); page.add_script_tag(content=client_script())
+        page.evaluate("loadWarehouseCurrentSyncStatus()")
+        assert "?" not in gets[-1] and not page.locator("button").is_disabled() and len(posts) == 1
         browser.close()
     print("warehouse_durable_identity_browser_check: OK; lost ACK/reload GET-only, key-before-POST, six pending states, bounded polling, unknown stop")
 

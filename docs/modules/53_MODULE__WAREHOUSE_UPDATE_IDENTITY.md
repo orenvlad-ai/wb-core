@@ -18,13 +18,15 @@ single-flight границу с CLI: занятый внешний owner воз�
 Неизвестный номер или чужая область дают 404. Чтение не мигрирует схему и не
 исправляет journal. Пустой query сохраняет обзор последнего ручного запуска;
 его нельзя использовать для восстановления потерянного acknowledgement.
+Обзор, active_run и вложенные phases также фильтруются по области.
 Старые durable ID читаются; связь утраченного in-memory UUID не угадывается.
 Generic operator JSON/text endpoints не раскрывают warehouse jobs в обход
 scoped route.
 
 При построении application сначала подготавливается additive schema; после
 построения всех зависимостей startup picker проверяет сохранённые операции.
-Он повторяет только admission к занятому owner. `accepted` получает claim под
+Он повторяет только admission к занятому owner. Если accepted успел сохраниться
+после истечения HTTP handshake, локальный picker запускается также без рестарта. `accepted` получает claim под
 прежним ID. Запуск прежнего owner, который уже получил claim, переходит в
 `interrupted` без replay с первой фазы; подтверждённые этапы и точные receipts
 сохраняются. Если терминальный journal commit не состоялся, GET наблюдает
@@ -33,7 +35,9 @@ scoped route.
 
 Browser хранит ключ до POST в localStorage, отдельно по principal. Потерянный
 ответ и reload восстанавливаются только exact GET. Автоопрос ограничен 100
-попытками, один запрос — 15 секундами; unknown/error прекращает опрос. Состояния
+попытками, один запрос — 15 секундами; unknown/error прекращает опрос.
+Доказанный busy отказ без принятия (`request_accepted=false`) освобождает ключ;
+неоднозначный timeout (`request_accepted=null`) сохраняет его для exact GET. Состояния
 accepted/queued/deferred/consumer_pending/interrupted и ошибки не разрешают новый
 эффект. Подтверждённый success освобождает ключ для следующего явного запуска.
 Legacy caller без ключа получает устойчивый номер, но не может восстановить
