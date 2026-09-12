@@ -492,11 +492,14 @@ def _ensure_supplier_expense_event_trigger(conn: sqlite3.Connection, definition:
         return conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='warehouse_projection_own_capital_event'").fetchone()
 
     current = installed()
-    marker = "NEW.event_id || '_' || NEW.evidence_hash"
+    def normalized(sql: str) -> str:
+        return " ".join(sql.split()).replace("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER").rstrip(";")
+
+    expected = normalized(definition)
     if current is None:
         conn.execute(definition)
         return
-    if marker in str(current[0]):
+    if normalized(str(current[0])) == expected:
         return
     # DDL must not expose a committed trigger gap. Own only this upgrade;
     # preserve a caller's source transaction, including its rollback boundary.
@@ -506,7 +509,7 @@ def _ensure_supplier_expense_event_trigger(conn: sqlite3.Connection, definition:
         current = installed()
         if current is None:
             conn.execute(definition)
-        elif marker not in str(current[0]):
+        elif normalized(str(current[0])) != expected:
             conn.execute("DROP TRIGGER warehouse_projection_own_capital_event")
             conn.execute(definition)
     except BaseException:
@@ -546,9 +549,14 @@ def ensure_warehouse_projection_source_outbox(
                 business_effective_date,affected_nm_ids_json,source_kind,
                 status,requested_at,started_at,finished_at,error
               ) VALUES(
-                CASE WHEN instr(NEW.event_id,'cost_payment:financial_expense:')=1
+                CASE WHEN (NEW.event_type='supplier_payment' AND EXISTS(
+                    SELECT 1 FROM sheet_vitrina_v1_cny_documents
+                    WHERE document_id=json_extract(NEW.payload_json,'$.payment_id')))
+                  OR (instr(NEW.event_id,'cost_payment:')=1 AND instr(NEW.event_id,':transfer_fee:')>0)
                   THEN 'whbpo_event_' || NEW.event_id || '_' || NEW.evidence_hash
-                  ELSE 'whbpo_event_' || NEW.event_id END,
+                  ELSE CASE WHEN instr(NEW.event_id,'cost_payment:financial_expense:')=1
+                  THEN 'whbpo_event_' || NEW.event_id || '_' || NEW.evidence_hash
+                  ELSE 'whbpo_event_' || NEW.event_id END END,
                 'own_capital_event:' || NEW.event_id,
                 NEW.evidence_hash,
                 NEW.effective_date,

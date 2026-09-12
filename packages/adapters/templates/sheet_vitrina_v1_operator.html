@@ -11600,11 +11600,21 @@
         if (cnyAverageRate) {
           cnyAverageRate.textContent = formatCnyRate(summary.average_rate);
         }
+        const preparation = payload && payload.account_preparation ? payload.account_preparation : {};
+        const continuation = preparation.warehouse_targeted_recalculation || {};
         if (cnyReplayStatus) {
-          cnyReplayStatus.textContent = cnyReplayDisplay(replay, diagnostics);
+          cnyReplayStatus.textContent = preparation.status === "pending"
+            ? "Документы сохранены. Пересчёт счёта ожидает обработки."
+            : cnyReplayDisplay(replay, diagnostics);
         }
         if (cnyAccountState) {
-          cnyAccountState.textContent = cnyAccountStateDisplay(summary, replay, diagnostics);
+          cnyAccountState.textContent = preparation.status === "pending"
+            ? (continuation.diagnostic_code === "cny_replay_shipment_scope_missing"
+              ? "Пересчёт ожидает исправления связи документа с поставкой. Повторно загружать документ не нужно."
+              : "Сохранённое задание продолжит обычный пересчёт. Повторно загружать документы не нужно.")
+            : (["queued", "running"].includes(continuation.status)
+              ? "Счёт пересчитан. Связанные поставки ожидают складского пересчёта."
+              : cnyAccountStateDisplay(summary, replay, diagnostics));
         }
         const operations = Array.isArray(payload && payload.ledger_operations) ? payload.ledger_operations : [];
         renderCnyConversions(Array.isArray(payload && payload.conversions) ? payload.conversions : [], operations);
