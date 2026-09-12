@@ -10859,7 +10859,8 @@
       if (warehouseUpdateSuccessNode) warehouseUpdateSuccessNode.textContent = warehouseDate((payload && payload.last_success_at) || manual.last_success_at);
       if (warehouseUpdateRunIdNode) warehouseUpdateRunIdNode.textContent = state.warehouses.updateRunId || "—";
       if (warehouseUpdateChangesNode) warehouseUpdateChangesNode.textContent =
-        warehouseNumber(payload && payload.changed_warehouses) + " / " + warehouseNumber(payload && payload.changed_skus);
+        (payload && payload.changed_warehouses != null ? warehouseNumber(payload.changed_warehouses) : "—") + " / " +
+        (payload && payload.changed_skus != null ? warehouseNumber(payload.changed_skus) : "—");
       if (warehouseUpdateVersionNode) warehouseUpdateVersionNode.textContent = String((payload && payload.functional_version_id) || manual.functional_version_id || "—");
       if (warehouseUpdateBusinessDateNode) warehouseUpdateBusinessDateNode.textContent = String((payload && payload.business_date) || manual.business_date || "—");
       if (warehouseAutoAttemptNode) {

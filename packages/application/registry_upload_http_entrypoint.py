@@ -7056,10 +7056,15 @@ class RegistryUploadHttpEntrypoint:
                 status = "interrupted"  # Read-only; picker persists classification.
         result = dict(job.get("result") or {})
         # New durable results retain the exact phase receipts and final payload.
-        lines = list(dict(result.get("diff") or {}).get("lines") or [])
+        diff = result.get("diff")
+        raw_lines = diff.get("lines") if isinstance(diff, Mapping) else None
+        # Legacy journal compaction stores lists as {item_count, details_omitted}.
+        # Such a count does not identify distinct warehouses or SKU.
+        lines_known = isinstance(raw_lines, list) and all(isinstance(line, Mapping) for line in raw_lines)
+        lines = raw_lines if lines_known else []
         active_version = dict(result.get("active_version") or {})
-        changed_warehouses = result.get("changed_warehouses", len({str(line.get("warehouse_key")) for line in lines}))
-        changed_skus = result.get("changed_skus", len({int(line["nm_id"]) for line in lines if line.get("nm_id")}))
+        changed_warehouses = result.get("changed_warehouses", len({str(line.get("warehouse_key")) for line in lines}) if lines_known else None)
+        changed_skus = result.get("changed_skus", len({int(line["nm_id"]) for line in lines if line.get("nm_id")}) if lines_known else None)
         messages = {"accepted": "Заявка принята; ожидает начала обновления", "queued": "Заявка ожидает выполнения",
                     "running": "Выполняется обновление всех складов и себестоимостей",
                     "interrupted": "Обновление прервано; подтверждённые этапы сохранены. Требуется проверка",
@@ -7068,7 +7073,10 @@ class RegistryUploadHttpEntrypoint:
         if busy:
             user_status = "Уже выполняется другой пересчёт"
         elif status == "success":
-            user_status = "Без изменений: данные уже актуальны" if not changed_warehouses and not changed_skus else "Готово: все 6 складов и себестоимости обновлены"
+            if changed_warehouses is None or changed_skus is None:
+                user_status = "Обновление завершено; подробности изменений не сохранены"
+            else:
+                user_status = "Без изменений: данные уже актуальны" if not changed_warehouses and not changed_skus else "Готово: все 6 складов и себестоимости обновлены"
         else:
             user_status = messages.get(status) or "Не завершено: " + str(job.get("error") or "требуется проверка")
         durable = self.warehouse_update_journal.public_status(request_scope=request_scope)

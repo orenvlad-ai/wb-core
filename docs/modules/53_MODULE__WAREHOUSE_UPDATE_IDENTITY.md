@@ -53,6 +53,10 @@ accepted/queued/deferred/consumer_pending/interrupted и ошибки не ра�
 эффект. Подтверждённый success освобождает ключ для следующего явного запуска.
 Legacy caller без ключа получает устойчивый номер, но не может восстановить
 неизвестный ему номер после потери ответа.
+Старые compacted `diff.lines` с `item_count/details_omitted` не содержат точного
+числа изменённых складов и SKU. Exact reader сохраняет terminal status и исходные
+details, использует отдельно сохранённые точные счётчики, а при их отсутствии
+возвращает `null` и показывает «—» с пояснением. Отсутствие подробностей не равно нулю.
 
 ## Выпуск и откат
 
@@ -82,6 +86,8 @@ pending/alias и не выполнять обратную миграцию. Ес
   два POST, источник изменён до publication, ошибки и отмена handshake.
 - `python3 apps/warehouse_update_journal_smoke.py` и
   `python3 apps/warehouse_process_fixture_smoke.py`: legacy journal и owner fencing.
+- `python3 apps/warehouse_legacy_status_smoke.py`: реальная legacy compaction,
+  exact ID старше 50 строк, query-only, неизвестные и сохранённые точные счётчики.
 - `python3 apps/warehouse_durable_identity_browser_check.py`: локальный Chromium,
   реальные функции template, ключ до POST, потеря ack/reload, bounded polling.
   Эта адресная браузерная проверка выполняется локально; её Playwright dependency

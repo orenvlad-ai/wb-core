@@ -15,7 +15,7 @@ def client_script():
     names = sorted(set(re.findall(r"\bwarehouse\w+(?:Node|Button)\b", "\n".join(sections))))
     declarations = []
     for name in names:
-        selector = "button" if name.endswith("Button") else "#status" if name == "warehouseUpdateStatusNode" else "#run" if name == "warehouseUpdateRunIdNode" else None
+        selector = "button" if name.endswith("Button") else "#status" if name == "warehouseUpdateStatusNode" else "#run" if name == "warehouseUpdateRunIdNode" else "#changes" if name == "warehouseUpdateChangesNode" else None
         declarations.append(f"const {name} = " + (f"document.querySelector('{selector}');" if selector else "null;"))
     return "\n".join(["const WEB_VITRINA_CONFIG = {user_config_key:'fixture_owner'};",
         "const state = {warehouses:{activeKey:'update',updateRunId:'',updateRequestKey:'',updatePollCount:0,updatePollTimer:null}};",
@@ -33,7 +33,7 @@ def main():
         def route(request):
             req = request.request
             if req.is_navigation_request():
-                request.fulfill(status=200, content_type="text/html", body='<button>Обновить</button><p id="status"></p><p id="run"></p>')
+                request.fulfill(status=200, content_type="text/html", body='<button>Обновить</button><p id="status"></p><p id="run"></p><p id="changes"></p>')
             elif req.method == "POST":
                 body = req.post_data_json
                 saved = page.evaluate("JSON.parse(localStorage.getItem(warehouseCurrentSyncStorageKey()))")
@@ -98,6 +98,10 @@ def main():
         page.reload(); page.add_script_tag(content=client_script())
         page.evaluate("loadWarehouseCurrentSyncStatus()")
         assert "?" not in gets[-1] and not page.locator("button").is_disabled() and len(posts) == 1
+        page.evaluate("renderWarehouseCurrentSyncStatus({status:'success',run_id:'legacy_original',changed_warehouses:null,changed_skus:null,can_start_new:true})")
+        assert page.locator("#changes").inner_text() == "— / —"
+        page.evaluate("renderWarehouseCurrentSyncStatus({status:'success',run_id:'legacy_zero',changed_warehouses:0,changed_skus:0,can_start_new:true})")
+        assert page.locator("#changes").inner_text() == "0 / 0"
         browser.close()
     print("warehouse_durable_identity_browser_check: OK; lost ACK/reload GET-only, key-before-POST, six pending states, bounded polling, unknown stop")
 
