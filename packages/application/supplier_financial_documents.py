@@ -2174,6 +2174,9 @@ class SupplierFinancialDocumentsBlock:
         """Resume the source-owned continuation without submitting the document again."""
         if self.runtime.load_supplier_financial_document(supplier_order_id=supplier_order_id, document_id=document_id) is None:
             raise ValueError(f"financial document not found: {document_id}")
+        from packages.application.supplier_preparation_intents import ensure_explicit_document_continuation
+
+        ensure_explicit_document_continuation(self.runtime, supplier_order_id, document_id)
         return self._resume_saved_preparation(supplier_order_id)
 
     def _resume_saved_preparation(self, supplier_order_id: str) -> dict[str, Any]:

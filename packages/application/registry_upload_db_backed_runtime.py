@@ -5847,6 +5847,7 @@ class RegistryUploadDbBackedRuntime:
         *,
         header: Mapping[str, Any],
         lines: list[Mapping[str, Any]],
+        preparation_actions: dict[str, Any] | None = None,
     ) -> None:
         shipment_id = str(header.get("shipment_id") or "").strip()
         if not shipment_id:
@@ -6042,7 +6043,7 @@ class RegistryUploadDbBackedRuntime:
                     for index, item in enumerate(lines, start=1)
                 ],
             )
-            finish_source_change(conn, supplier_before, reset_expenses=False)
+            finish_source_change(conn, supplier_before, reset_expenses=False, post_actions=preparation_actions)
             conn.commit()
 
     def list_supplier_shipments(self) -> list[dict[str, Any]]:
@@ -6353,7 +6354,8 @@ class RegistryUploadDbBackedRuntime:
                     shipment_id,
                 ),
             )
-            finish_source_change(conn, supplier_before, reset_expenses=False)
+            actions = {"invoice_archive": {"invoice_document_id": str(header_row["invoice_document_id"]), "updated_at": archived_at}} if header_row["invoice_document_id"] else {}
+            finish_source_change(conn, supplier_before, reset_expenses=False, post_actions=actions)
             conn.commit()
             return {
                 "event_id": event_id,

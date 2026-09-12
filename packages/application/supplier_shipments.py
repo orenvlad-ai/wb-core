@@ -472,16 +472,24 @@ class SupplierShipmentsBlock:
             "warnings": warnings,
             "errors": errors,
         }
-        self.runtime.save_supplier_shipment(header=header, lines=lines)
-        self._autolink_invoice_contract_from_metadata(
-            invoice_document_id=str(invoice_document.get("document_id") or ""),
-            contract_no=str(metadata.get("contract_no") or ""),
-            contract_date=str(metadata.get("contract_date") or ""),
-            linked_by="system",
-            source=TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
+        # Resolve automatic matching before the primary commit. Persist a fixed
+        # invoice/contract identity so a retry cannot choose a later candidate.
+        contracts = self.find_contract_candidates(
+            str(metadata.get("contract_no") or ""),
+            str(metadata.get("contract_date") or ""),
         )
+        actions = {}
+        if len(contracts) == 1 and self.runtime.load_invoice_contract_link(str(header["invoice_document_id"])) is None:
+            actions["invoice_contract"] = {
+                "invoice_document_id": str(header["invoice_document_id"]),
+                "contract_document_id": str(contracts[0]["document_id"]),
+                "linked_by": "system", "source": TRADE_DOCUMENT_LINK_SOURCE_SUPPLIER_SHIPMENT_AUTO,
+            }
+        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions)
+        targeted = self._enqueue_warehouse_recalculation({"header": header})
         result = self._saved_shipment_payload(header, lines)
-        result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        result["warehouse_targeted_recalculation"] = targeted
+        result["operation_applied"] = True
         return result
 
     def create_shipment_supplier_safe(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -727,21 +735,26 @@ class SupplierShipmentsBlock:
         }
         if cost_affecting_changed:
             header["expenses_complete"] = False
-        self.runtime.save_supplier_shipment(header=header, lines=lines)
+        actions = {}
         if "contract_document_id" in payload:
-            contract_document_id = str(payload.get("contract_document_id") or "").strip()
-            if contract_document_id:
-                self.link_shipment_contract(
-                    shipment_id,
-                    contract_document_id=contract_document_id,
-                    linked_by="operator",
-                    source=TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
-                )
-            else:
-                self.unlink_shipment_contract(shipment_id)
+            invoice_id = str(header.get("invoice_document_id") or "")
+            contract_id = str(payload.get("contract_document_id") or "").strip()
+            invoice = self.runtime.load_trade_document(invoice_id)
+            if invoice is None or invoice.get("document_type") != TRADE_DOCUMENT_TYPE_INVOICE:
+                raise ValueError(f"invoice document not found: {invoice_id}")
+            if contract_id:
+                self._validated_invoice_contract_pair(invoice_id, contract_id)
+            actions["invoice_contract"] = {
+                "invoice_document_id": invoice_id,
+                "contract_document_id": contract_id,
+                "linked_by": "operator", "source": TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
+            }
+        self.runtime.save_supplier_shipment(header=header, lines=lines, preparation_actions=actions)
+        targeted = self._enqueue_warehouse_recalculation({"header": header}) if warehouse_affecting_changed or actions else None
         result = self._saved_shipment_payload(header, lines)
-        if warehouse_affecting_changed:
-            result["warehouse_targeted_recalculation"] = self._enqueue_warehouse_recalculation(result)
+        if targeted is not None:
+            result["warehouse_targeted_recalculation"] = targeted
+        result["operation_applied"] = True
         return result
 
     def update_shipment_supplier_safe(
@@ -1205,7 +1218,6 @@ class SupplierShipmentsBlock:
         if detail is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
         header = dict(detail.get("header") or {})
-        invoice_document_id = str(header.get("invoice_document_id") or "")
         archived_at = self.timestamp_factory()
         archive_event = self.runtime.archive_supplier_shipment(
             shipment_id=shipment_id,
@@ -1213,11 +1225,6 @@ class SupplierShipmentsBlock:
         )
         if archive_event is None:
             raise ValueError(f"supplier shipment not found: {shipment_id}")
-        if invoice_document_id:
-            try:
-                self.runtime.archive_trade_document(invoice_document_id, updated_at=archived_at)
-            except ValueError:
-                pass
         archived_header = {
             **header,
             "updated_at": archived_at,
@@ -1237,6 +1244,7 @@ class SupplierShipmentsBlock:
             # implementation is a controlled archive, never a physical delete.
             "deleted": True,
             "archived": True,
+            "operation_applied": True,
             "shipment_id": shipment_id,
             "archive_event_id": str(archive_event.get("event_id") or ""),
             "source_fingerprint": str(archive_event.get("source_fingerprint") or ""),
@@ -1539,16 +1547,7 @@ class SupplierShipmentsBlock:
         linked_by: str = "",
         source: str = TRADE_DOCUMENT_LINK_SOURCE_OPERATOR,
     ) -> dict[str, Any]:
-        invoice = self.runtime.load_trade_document(invoice_document_id)
-        if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
-            raise ValueError(f"invoice document not found: {invoice_document_id}")
-        if str(invoice.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
-            raise ValueError(f"invoice document is not active: {invoice_document_id}")
-        contract = self.runtime.load_trade_document(contract_document_id)
-        if contract is None or str(contract.get("document_type") or "") != TRADE_DOCUMENT_TYPE_CONTRACT:
-            raise ValueError(f"contract document not found: {contract_document_id}")
-        if str(contract.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
-            raise ValueError(f"contract document is not active: {contract_document_id}")
+        invoice, contract = self._validated_invoice_contract_pair(invoice_document_id, contract_document_id)
         now = self.timestamp_factory()
         existing = self.runtime.load_invoice_contract_link(invoice_document_id)
         link = self.runtime.save_invoice_contract_link(
@@ -1566,6 +1565,19 @@ class SupplierShipmentsBlock:
             "invoice": self._with_document_download_path(self.runtime.load_trade_document(invoice_document_id) or invoice),
             "contract": self._with_document_download_path(contract),
         }
+
+    def _validated_invoice_contract_pair(self, invoice_document_id: str, contract_document_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        invoice = self.runtime.load_trade_document(invoice_document_id)
+        if invoice is None or str(invoice.get("document_type") or "") != TRADE_DOCUMENT_TYPE_INVOICE:
+            raise ValueError(f"invoice document not found: {invoice_document_id}")
+        if str(invoice.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
+            raise ValueError(f"invoice document is not active: {invoice_document_id}")
+        contract = self.runtime.load_trade_document(contract_document_id)
+        if contract is None or str(contract.get("document_type") or "") != TRADE_DOCUMENT_TYPE_CONTRACT:
+            raise ValueError(f"contract document not found: {contract_document_id}")
+        if str(contract.get("status") or "") != TRADE_DOCUMENT_STATUS_ACTIVE:
+            raise ValueError(f"contract document is not active: {contract_document_id}")
+        return invoice, contract
 
     def unlink_invoice_contract(self, invoice_document_id: str) -> dict[str, Any]:
         invoice = self.runtime.load_trade_document(invoice_document_id)

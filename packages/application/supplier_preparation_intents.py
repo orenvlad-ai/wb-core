@@ -57,8 +57,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         source_fingerprint TEXT NOT NULL, affected_nm_ids_json TEXT NOT NULL,
         effective_date TEXT NOT NULL, document_ids_json TEXT NOT NULL,
         status TEXT NOT NULL, requested_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        prepared_at TEXT, queue_id TEXT, error TEXT
+        prepared_at TEXT, queue_id TEXT, error TEXT,
+        post_actions_json TEXT NOT NULL DEFAULT '{{}}', costs_required INTEGER NOT NULL DEFAULT 1
     )""")
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({TABLE})")}
+    for name, definition in (("post_actions_json", "TEXT NOT NULL DEFAULT '{}'"), ("costs_required", "INTEGER NOT NULL DEFAULT 1")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {definition}")
 
 
 def _selected(row: Any, fields: Iterable[str]) -> dict[str, Any]:
@@ -85,10 +90,11 @@ def begin_source_change(conn: sqlite3.Connection, shipment_ids: Iterable[str]) -
     return {key: capture_source(conn, key) for key in sorted(set(shipment_ids)) if key}
 
 
-def finish_source_change(conn: sqlite3.Connection, before: dict[str, Any], *, reset_expenses: bool = False) -> None:
+def finish_source_change(conn: sqlite3.Connection, before: dict[str, Any], *, reset_expenses: bool = False, post_actions: dict[str, Any] | None = None) -> None:
     for shipment_id, previous in before.items():
         current = capture_source(conn, shipment_id)
-        if current == previous:
+        source_changed = current != previous
+        if not source_changed and not post_actions:
             continue
         if reset_expenses and (current["documents"] != previous["documents"] or current["expenses"] != previous["expenses"]):
             conn.execute(f"UPDATE {PREFIX}supplier_shipments SET expenses_complete=0 WHERE shipment_id=?", (shipment_id,))
@@ -96,6 +102,11 @@ def finish_source_change(conn: sqlite3.Connection, before: dict[str, Any], *, re
         ensure_schema(conn)
         existing = conn.execute(f"SELECT * FROM {TABLE} WHERE shipment_id=?", (shipment_id,)).fetchone()
         pending = dict(existing) if existing is not None and existing["status"] != "delivered" else {}
+        actions = {**json.loads(pending.get("post_actions_json", "{}")), **(post_actions or {})}
+        if "invoice_archive" in actions:
+            # The newer archive supersedes an unfinished link edit. Linking
+            # after archiving would require an invoice that is no longer active.
+            actions.pop("invoice_contract", None)
         ids = set(json.loads(pending.get("affected_nm_ids_json", "[]")))
         docs = set(json.loads(pending.get("document_ids_json", "[]")))
         dates = [pending.get("effective_date", "")]
@@ -114,17 +125,74 @@ def finish_source_change(conn: sqlite3.Connection, before: dict[str, Any], *, re
         # shipment's source boundary; never use all shipments as empty fallback.
         dates.extend(str(row[0] or "")[:10] for row in conn.execute(f"SELECT operation_date FROM {PREFIX}cny_documents WHERE source_order_id=?", (shipment_id,)))
         now = _now()
-        conn.execute(f"""INSERT INTO {TABLE} VALUES(?,?,?,?,?,?,'pending',?,?,NULL,NULL,NULL)
+        conn.execute(f"""INSERT INTO {TABLE}(shipment_id,revision,source_fingerprint,affected_nm_ids_json,effective_date,document_ids_json,status,requested_at,updated_at,prepared_at,queue_id,error,post_actions_json,costs_required)
+            VALUES(?,?,?,?,?,?,'pending',?,?,NULL,NULL,NULL,?,?)
             ON CONFLICT(shipment_id) DO UPDATE SET
                 revision=excluded.revision,source_fingerprint=excluded.source_fingerprint,
                 affected_nm_ids_json=excluded.affected_nm_ids_json,effective_date=excluded.effective_date,
                 document_ids_json=excluded.document_ids_json,status='pending',
                 requested_at=excluded.requested_at,updated_at=excluded.updated_at,
-                prepared_at=NULL,queue_id=NULL,error=NULL""", (
+                prepared_at=NULL,queue_id=NULL,error=NULL,
+                post_actions_json=excluded.post_actions_json,costs_required=excluded.costs_required""", (
             shipment_id, int(existing["revision"] if existing is not None else 0) + 1,
             _fingerprint(current), _json(sorted(ids)), min((day for day in dates if day), default=""),
             _json(sorted(docs)), pending.get("requested_at") or now, now,
+            _json(actions), int(source_changed or bool(pending.get("costs_required"))),
         ))
+
+
+def ensure_explicit_document_continuation(runtime: Any, shipment_id: str, document_id: str) -> None:
+    """Admit one explicitly requested legacy source; never scan historical sources."""
+    from packages.application.registry_upload_db_backed_runtime import _connect
+
+    with _connect(runtime.db_path) as conn:
+        ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute(f"SELECT 1 FROM {TABLE} WHERE shipment_id=?", (shipment_id,)).fetchone():
+            return
+        current = capture_source(conn, shipment_id)
+        document = next((doc for doc in current["documents"] if doc["document_id"] == document_id), None)
+        if not current["header"] or document is None:
+            raise ValueError("explicit supplier continuation has no saved cost source")
+        previous = {**current, "documents": [doc for doc in current["documents"] if doc["document_id"] != document_id],
+                    "expenses": [row for row in current["expenses"] if row["financial_document_id"] != document_id]}
+        finish_source_change(conn, {shipment_id: previous})
+        conn.commit()
+
+
+def _prepare_post_actions(runtime: Any, request: dict[str, Any]) -> None:
+    from packages.application.supplier_shipments import SupplierShipmentsBlock
+
+    for kind, action in json.loads(request["post_actions_json"]).items():
+        shipment = runtime.load_supplier_shipment(request["shipment_id"])
+        invoice_id = str(action.get("invoice_document_id") or "")
+        if shipment is None or not invoice_id or shipment["header"].get("invoice_document_id") != invoice_id:
+            raise ValueError("supplier invoice link continuation has no exact invoice source")
+        block = SupplierShipmentsBlock(runtime=runtime)
+        if kind == "invoice_archive":
+            invoice = runtime.load_trade_document(invoice_id)
+            if invoice is None or invoice.get("status") != "archived":
+                runtime.archive_trade_document(invoice_id, updated_at=str(action["updated_at"]))
+        elif kind == "invoice_contract":
+            existing = runtime.load_invoice_contract_link(invoice_id)
+            if action.get("contract_document_id"):
+                if existing is None or existing["contract_document_id"] != action["contract_document_id"]:
+                    block.link_invoice_to_contract(**action)
+            elif existing is not None:
+                block.unlink_invoice_contract(invoice_id)
+        else:
+            raise ValueError("unknown supplier post-save continuation")
+
+
+def _request_source_matches(conn: sqlite3.Connection, request: dict[str, Any]) -> bool:
+    if _fingerprint(capture_source(conn, request["shipment_id"])) != request["source_fingerprint"]:
+        return False
+    actions = json.loads(request["post_actions_json"])
+    if actions:
+        header = conn.execute(f"SELECT invoice_document_id FROM {PREFIX}supplier_shipments WHERE shipment_id=?", (request["shipment_id"],)).fetchone()
+        if header is None or any(action.get("invoice_document_id") != header[0] for action in actions.values()):
+            return False
+    return True
 
 
 def _prepare(runtime: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -283,7 +351,7 @@ def drain_supplier_preparation_intents(runtime: Any, *, shipment_ids: Iterable[s
                 with _connect(runtime.db_path) as conn:
                     conn.execute("BEGIN")
                     captured = conn.execute(f"SELECT * FROM {TABLE} WHERE shipment_id=?", (request["shipment_id"],)).fetchone()
-                    unchanged = captured is not None and dict(captured) == request and _fingerprint(capture_source(conn, request["shipment_id"])) == request["source_fingerprint"]
+                    unchanged = captured is not None and dict(captured) == request and _request_source_matches(conn, request)
                 if not unchanged:
                     # Another consumer may have delivered this request while
                     # we waited. Do not repeat its domain preparation.
@@ -293,19 +361,20 @@ def drain_supplier_preparation_intents(runtime: Any, *, shipment_ids: Iterable[s
                 if not preparation_complete:
                     if inject_failure:
                         inject_failure("before_preparation", request)
-                    preparation = _prepare(runtime, request)
+                    _prepare_post_actions(runtime, request)
+                    preparation = _prepare(runtime, request) if request["costs_required"] else {}
                     preparation_complete = True
                     if inject_failure:
                         inject_failure("after_preparation", request)
-                if not json.loads(request["affected_nm_ids_json"]) or not request["effective_date"]:
+                if request["costs_required"] and (not json.loads(request["affected_nm_ids_json"]) or not request["effective_date"]):
                     raise ValueError("supplier preparation has no proven SKU/date scope")
                 with _connect(runtime.db_path) as conn:
                     ensure_warehouse_functional_schema(conn)
                     conn.execute("BEGIN IMMEDIATE")
                     current = conn.execute(f"SELECT * FROM {TABLE} WHERE shipment_id=?", (request["shipment_id"],)).fetchone()
-                    if current is None or dict(current) != request or _fingerprint(capture_source(conn, request["shipment_id"])) != request["source_fingerprint"]:
+                    if current is None or dict(current) != request or not _request_source_matches(conn, request):
                         raise ValueError("supplier preparation source revision changed; retry pending revision")
-                    queue = enqueue_supplier_replay_in_connection(conn, request=request)
+                    queue = enqueue_supplier_replay_in_connection(conn, request=request) if request["costs_required"] else {"status": "complete", "queue_id": None, "reason": "supplier_post_actions_completed"}
                     if inject_failure:
                         inject_failure("before_ack", request)
                     conn.execute(f"UPDATE {TABLE} SET status='delivered',prepared_at=?,queue_id=?,error=NULL WHERE shipment_id=? AND revision=? AND source_fingerprint=?", (_now(), queue["queue_id"], request["shipment_id"], request["revision"], request["source_fingerprint"]))
@@ -315,7 +384,7 @@ def drain_supplier_preparation_intents(runtime: Any, *, shipment_ids: Iterable[s
             error = str(exc).replace("\n", " ")[:500]
             with _connect(runtime.db_path) as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                prepared_at = _now() if preparation_complete and _fingerprint(capture_source(conn, request["shipment_id"])) == request["source_fingerprint"] else request["prepared_at"]
+                prepared_at = _now() if preparation_complete and _request_source_matches(conn, request) else request["prepared_at"]
                 conn.execute(f"UPDATE {TABLE} SET status='error',error=?,prepared_at=? WHERE shipment_id=? AND revision=? AND source_fingerprint=? AND status<>'delivered'", (error, prepared_at, request["shipment_id"], request["revision"], request["source_fingerprint"]))
                 conn.commit()
             results.append({**preparation, "status": "pending", "retryable": not error.startswith("supplier preparation has no proven"), "shipment_id": request["shipment_id"], "preparation_revision": request["revision"], "stable_source_id": "supplier_shipment:" + request["shipment_id"], "source_revision": "supplier-preparation:" + str(request["revision"]) + ":" + request["source_fingerprint"], "affected_nm_ids_json": request["affected_nm_ids_json"], "error": error})
@@ -341,8 +410,12 @@ def _resume_supplier_preparation(runtime: Any, shipment_id: str) -> dict[str, An
             row = conn.execute(f"SELECT * FROM {TABLE} WHERE shipment_id=?", (shipment_id,)).fetchone()
             if row is not None:
                 if row["status"] == "delivered":
+                    if not _request_source_matches(conn, dict(row)):
+                        return {"status": "pending", "retryable": False, "shipment_id": shipment_id, "error": "saved source differs from its completed preparation"}
+                    if not row["costs_required"]:
+                        return {"status": "complete", "shipment_id": shipment_id, "preparation_revision": row["revision"], "reason": "supplier_post_actions_completed"}
                     queued = conn.execute(f"SELECT * FROM {PREFIX}warehouse_targeted_recalc_queue WHERE queue_id=?", (row["queue_id"],)).fetchone()
                     if queued is not None:
                         return {**dict(queued), "preparation_revision": row["revision"], "shipment_id": shipment_id}
                 return {"status": "pending", "queue_id": row["queue_id"], "preparation_revision": row["revision"], "shipment_id": shipment_id}
-    return {"status": "no_op", "shipment_id": shipment_id, "reason": "source_cost_inputs_unchanged"}
+    return {"status": "pending", "retryable": False, "shipment_id": shipment_id, "error": "saved source has no proven continuation; explicit source finalization required"}

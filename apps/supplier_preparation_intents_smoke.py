@@ -283,6 +283,118 @@ def test_existing_worker_and_broken_scope():
         assert outcome['status'] == 'pending'
         assert 'no proven SKU/date scope' in outcome['requests'][0]['error']
         assert len(queue(rt)) == 1
+        source(rt, {**HEADER, 'invoice_no': 'healthy-revision'})
+        with patch.object(block, '_ensure_ff_stock_wb_auto_writeoff_checkpoint', return_value={}) as checkpoint, patch.object(block.ff_stock_ledger, 'apply_confirmed_wb_supply_returns', return_value={}) as returns, patch.object(block.ff_stock_ledger, 'record_wb_supply_debits', return_value={}) as debits:
+            resumed = block.reconcile_functional_ff_state()
+        assert resumed['supplier_preparation']['status'] == 'pending'
+        assert [checkpoint.call_count, returns.call_count, debits.call_count] == [1, 1, 1]
+        assert request(rt)['status'] == 'delivered' and len(queue(rt)) == 2
+        with _connect(rt.db_path) as conn:
+            assert conn.execute(f"SELECT status FROM {intents.TABLE} WHERE shipment_id='broken'").fetchone()[0] == 'error'
+
+
+def test_explicit_legacy_finalize():
+    from packages.application.supplier_financial_documents import SupplierFinancialDocumentsBlock
+    with TemporaryDirectory() as raw:
+        rt = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw)); source(rt)
+        source(rt, {**HEADER, 'shipment_id': 'untouched'}, [{**LINES[0], 'line_id': 'other-line', 'internal_nm_id': 202}])
+        doc = dict(document_id='legacy-statement', supplier_order_id='source', document_type='bank_fee_statement', file_sha256='a'*64, uploaded_at=NOW, updated_at=NOW, document_date='2026-08-05', parse_status='confirmed', total_amount_rub=200)
+        rt.save_supplier_financial_document(document=doc, expense_lines=[dict(line_id='legacy-fee', amount=200, amount_rub=200, currency='RUB', category='bank_fee', status='confirmed')])
+        with _connect(rt.db_path) as conn:
+            conn.execute(f'DELETE FROM {intents.TABLE}'); conn.commit()
+        # Simulate pre-rollout source commit -> stop. Normal worker does not
+        # discover or backfill either old shipment; unrelated queue is no proof.
+        assert intents.drain_supplier_preparation_intents(rt)['status'] == 'no_op'
+        assert intents.resume_supplier_preparation(rt, 'source')['status'] == 'pending'
+        block = SupplierFinancialDocumentsBlock(runtime=rt)
+        with patch.object(intents, '_prepare', side_effect=RuntimeError('legacy-finalize-stop')):
+            result = block.finalize_bank_fee_statement_import('source', 'legacy-statement')
+        assert result['operation_applied'] and result['status'] == 'pending'
+        captured = request(rt)
+        assert captured['revision'] == 1 and json.loads(captured['document_ids_json']) == ['legacy-statement']
+        assert json.loads(captured['affected_nm_ids_json']) == [101]
+        fresh = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw))
+        outcome = intents.drain_supplier_preparation_intents(fresh)
+        assert outcome['status'] == 'queued', outcome
+        with _connect(rt.db_path) as conn:
+            assert conn.execute(f'SELECT COUNT(*) FROM {intents.TABLE}').fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_own_capital_events WHERE shipment_id='source'").fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_financial_documents WHERE document_id='legacy-statement'").fetchone()[0] == 1
+        with patch.object(intents, '_prepare', side_effect=AssertionError('duplicate legacy finalization')):
+            block.finalize_bank_fee_statement_import('source', 'legacy-statement')
+        assert len(queue(rt)) == 1
+
+
+def test_post_save_invoice_actions():
+    from packages.application.supplier_shipments import SupplierShipmentsBlock
+    from apps.sheet_vitrina_v1_supplier_shipments_http_smoke import _build_invoice_fixture
+    with TemporaryDirectory() as raw:
+        rt = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw))
+        block = SupplierShipmentsBlock(runtime=rt, timestamp_factory=lambda: NOW)
+        for index, barcode in enumerate(('1111111111111', '2222222222222', '3333333333333'), start=101):
+            rt.save_nomenclature_item(dict(item_id=str(index), nm_id=index, barcode=barcode, is_active=True, created_at=NOW, updated_at=NOW, product_type='clear', nomenclature_name='temporary item'))
+        for document_id, number in (('auto-contract', 'CNT-2026-0513'), ('changed-contract', 'new-contract')):
+            rt.save_trade_document(dict(document_id=document_id, document_type='contract', number=number, document_date='2026-05-13', status='active', created_at=NOW, updated_at=NOW))
+        parsed = block.parse_upload(_build_invoice_fixture(), uploaded_filename='temporary-invoice.xlsx')
+        with patch.object(rt, 'save_invoice_contract_link', side_effect=OSError('late-create-link-stop')):
+            created = block.create_shipment({'upload_id': parsed['upload_id'], 'shipment_date': '2026-09-20'}, allow_unassigned_target_facility=True)
+        shipment_id, invoice_id = created['shipment_id'], created['invoice_document_id']
+        assert created['operation_applied'] and created['warehouse_targeted_recalculation']['status'] == 'pending', created
+        assert len(rt.list_supplier_shipments()) == 1 and rt.load_invoice_contract_link(invoice_id) is None
+        with _connect(rt.db_path) as conn:
+            saved = dict(conn.execute(f'SELECT * FROM {intents.TABLE} WHERE shipment_id=?', (shipment_id,)).fetchone())
+        assert json.loads(saved['post_actions_json'])['invoice_contract']['contract_document_id'] == 'auto-contract'
+        fresh = RegistryUploadDbBackedRuntime(runtime_dir=Path(raw))
+        assert intents.drain_supplier_preparation_intents(fresh)['status'] == 'queued'
+        assert fresh.load_invoice_contract_link(invoice_id)['contract_document_id'] == 'auto-contract'
+        with patch.object(rt, 'save_invoice_contract_link', side_effect=OSError('late-update-link-stop')):
+            updated = block.update_shipment(shipment_id, {'shipment_date': '2026-09-25', 'contract_document_id': 'changed-contract'})
+        assert updated['operation_applied'] and updated['warehouse_targeted_recalculation']['status'] == 'pending'
+        assert rt.load_supplier_shipment(shipment_id)['header']['shipment_date'] == '2026-09-25'
+        assert rt.load_invoice_contract_link(invoice_id)['contract_document_id'] == 'auto-contract'
+        assert intents.drain_supplier_preparation_intents(fresh)['status'] == 'queued'
+        assert rt.load_invoice_contract_link(invoice_id)['contract_document_id'] == 'changed-contract'
+        before_invalid = rt.load_supplier_shipment(shipment_id)
+        try:
+            block.update_shipment(shipment_id, {'shipment_date': '2026-09-29', 'contract_document_id': 'absent-contract'})
+        except ValueError as exc:
+            assert 'contract document not found' in str(exc)
+        else:
+            raise AssertionError('invalid link target admitted')
+        assert rt.load_supplier_shipment(shipment_id) == before_invalid
+        # A link-only edit needs no SKU recalculation. Its durable retry neither
+        # writes the primary shipment again nor creates an unrelated queue.
+        queue_count = len(queue(rt))
+        with patch.object(rt, 'delete_invoice_contract_link', side_effect=OSError('late-unlink-stop')):
+            unlinked = block.update_shipment(shipment_id, {'contract_document_id': ''})
+        assert unlinked['warehouse_targeted_recalculation']['status'] == 'pending'
+        with patch.object(intents, '_prepare', side_effect=AssertionError('link-only cost replay')):
+            assert intents.drain_supplier_preparation_intents(fresh)['status'] == 'queued'
+        assert rt.load_invoice_contract_link(invoice_id) is None and len(queue(rt)) == queue_count
+        # Stop after the link write but before acknowledgement: duplicate
+        # consumer checks exact saved link and does not rewrite it.
+        original = rt.save_invoice_contract_link
+        def save_then_stop(**kwargs):
+            original(**kwargs)
+            raise OSError('link-committed-receipt-stop')
+        with patch.object(rt, 'save_invoice_contract_link', side_effect=save_then_stop):
+            applied_link = block.update_shipment(shipment_id, {'contract_document_id': 'changed-contract'})
+        assert applied_link['warehouse_targeted_recalculation']['status'] == 'pending'
+        with patch.object(fresh, 'save_invoice_contract_link', side_effect=AssertionError('duplicate link write')):
+            intents.drain_supplier_preparation_intents(fresh)
+        with patch.object(rt, 'save_invoice_contract_link', side_effect=OSError('superseded-link-stop')):
+            pending_link = block.update_shipment(shipment_id, {'contract_document_id': 'auto-contract'})
+        assert pending_link['warehouse_targeted_recalculation']['status'] == 'pending'
+        with patch.object(rt, 'archive_trade_document', side_effect=OSError('late-archive-stop')):
+            archived = block.delete_shipment(shipment_id)
+        assert archived['operation_applied'] and archived['warehouse_targeted_recalculation']['status'] == 'pending'
+        assert rt.load_supplier_shipment(shipment_id)['header']['archived_at']
+        assert rt.load_trade_document(invoice_id)['status'] == 'active'
+        intents.drain_supplier_preparation_intents(fresh)
+        assert rt.load_trade_document(invoice_id)['status'] == 'archived'
+        with _connect(rt.db_path) as conn:
+            assert conn.execute('SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_shipment_archive_events').fetchone()[0] == 1
+        assert len(rt.list_supplier_shipments()) == 0
 
 
 def test_invoice_audit_recovery():
@@ -359,7 +471,19 @@ def test_statement_composite_restart():
                 assert late['document_id']=='statement'
                 assert len(rt.list_supplier_bank_operation_assignments())==1
                 assert len([row for row in rt.list_cny_documents() if row.get('linked_financial_document_id')=='statement'])==1
-            # The archive source commit must retain linked-status + replay work.
+            # Shipment archive retains the existing money sources. It reverses
+            # the shipment's warehouse boundary, not payments or confirmations.
+            financial_before = rt.load_supplier_financial_document(supplier_order_id='source', document_id='statement')
+            with _connect(rt.db_path) as conn:
+                events_before = [dict(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_own_capital_events WHERE shipment_id='source' ORDER BY event_id")]
+            rt.archive_supplier_shipment(shipment_id='source', archived_at=NOW)
+            assert intents.drain_supplier_preparation_intents(rt)['status'] == 'queued'
+            assert rt.load_supplier_financial_document(supplier_order_id='source', document_id='statement') == financial_before
+            assert [row for row in rt.list_cny_documents() if row.get('linked_financial_document_id')=='statement'][0]['status'] == 'posted'
+            assert len(rt.list_supplier_bank_operation_assignments()) == 1
+            with _connect(rt.db_path) as conn:
+                assert [dict(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_own_capital_events WHERE shipment_id='source' ORDER BY event_id")] == events_before
+            # An explicit financial exclusion separately owns linked-status + replay work.
             rt.update_supplier_financial_document_status(supplier_order_id='source',document_id='statement',parse_status='excluded',updated_at=NOW)
             outcome = intents.drain_supplier_preparation_intents(rt)
             assert outcome['status'] == 'queued', outcome
@@ -449,6 +573,7 @@ def test_consumer_to_functional_result():
             conn.execute("INSERT INTO sheet_vitrina_v1_warehouse_opening_cost_map SELECT cutover_id,101,'10','10','direct_24_06','{}','fixture',? FROM sheet_vitrina_v1_warehouse_functional_cutovers", (now,))
             conn.execute("INSERT INTO sheet_vitrina_v1_canonical_cost_baseline_versions VALUES('fixture',1,'2026-07-01','fixture','2026-07-01','0',0,'0',0,0,'fixture','{}',1,?,NULL)", (now,))
             conn.commit()
+        source(rt, {**HEADER, 'shipment_id': 'unmatched', 'invoice_date': '2026-07-01'}, [{**LINES[0], 'line_id': 'unmatched-line', 'internal_nm_id': None}])
         import time
         start = time.perf_counter_ns()
         rt.save_supplier_financial_document(document=dict(document_id='fixture-logistics',supplier_order_id='source',document_type='logistics_invoice',uploaded_at=now,updated_at=now,document_date='2026-07-01',parse_status='confirmed',total_amount_rub=200),expense_lines=[dict(line_id='fixture-logistics-line',amount=200,amount_rub=200,currency='RUB',category='domestic_transport',status='confirmed')])
@@ -458,7 +583,8 @@ def test_consumer_to_functional_result():
         worker = WbSuppliesBlock(runtime=rt)
         with patch.object(worker, '_ensure_ff_stock_wb_auto_writeoff_checkpoint', return_value={}), patch.object(worker.ff_stock_ledger, 'apply_confirmed_wb_supply_returns', return_value={}), patch.object(worker.ff_stock_ledger, 'record_wb_supply_debits', return_value={}):
             outcome = worker.reconcile_functional_ff_state()
-        assert outcome['supplier_preparation']['status'] == 'queued'
+        assert outcome['supplier_preparation']['status'] == 'pending'
+        assert any(row['shipment_id'] == 'unmatched' and row['status'] == 'pending' for row in outcome['supplier_preparation']['requests'])
         queue_persisted = time.perf_counter_ns()
         accepted = queue(rt)[0]
         plan = functional.build_targeted_recovery_plan(affected_nm_ids=[101], stable_source_ids=['supplier_shipment:source'], targeted_recalc_requests=[accepted])
@@ -466,7 +592,7 @@ def test_consumer_to_functional_result():
         published = functional.apply_plan(plan, confirm_fingerprint=plan['plan_fingerprint'])
         result_published = time.perf_counter_ns()
         assert published['status'] == 'ready' and queue(rt)[0]['status'] == 'complete'
-        print('consumer_pipeline_once: ' + json.dumps({'n':1,'pending_age_before_consumer_ms':pending_age_ms,'source_method_ms':(source_committed-start)/1e6,'source_return_to_queue_ms':(queue_persisted-source_committed)/1e6,'source_return_to_functional_result_ms':(result_published-source_committed)/1e6,'note':'single temporary paid shipment +logistics; upper-bound completion measurements; not production latency'}))
+        print('consumer_pipeline_once: ' + json.dumps({'n':1,'pending_age_before_consumer_ms':pending_age_ms,'source_method_ms':(source_committed-start)/1e6,'source_return_to_queue_ms':(queue_persisted-source_committed)/1e6,'source_return_to_functional_result_ms':(result_published-source_committed)/1e6,'note':'temporary paid shipment +logistics +independent unmatched source; upper-bound completion measurements; not production latency or the v1 timing workload'}))
         assert queue(rt)[0]['source_revision'] == accepted['source_revision']
         with _connect(rt.db_path) as conn:
             row = conn.execute("SELECT quantity,capital_rub FROM sheet_vitrina_v1_warehouse_functional_balances WHERE version_id=(SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1) AND warehouse_key='china_to_ff' AND nm_id=101").fetchone()
@@ -483,7 +609,7 @@ def test_consumer_to_functional_result():
                 conn.commit()
             document = rt.load_supplier_financial_document(supplier_order_id='source',document_id='fixture-logistics')
             rt.save_supplier_financial_document(document={**document,'total_amount_rub':amount},expense_lines=[{**document['expense_lines'][0],'amount':amount,'amount_rub':amount}])
-            assert intents.drain_supplier_preparation_intents(rt)['status']=='queued'
+            assert intents.drain_supplier_preparation_intents(rt, shipment_ids=['source'])['status']=='queued'
             pending = [row for row in queue(rt) if row['status']=='queued']
             assert len(pending)==1 and pending[0]['source_revision'] not in revisions
             revisions.append(pending[0]['source_revision'])
@@ -518,7 +644,7 @@ def test_two_consumers_one_preparation():
 
 
 def main():
-    for test in (test_source_boundaries,test_retry_and_new_revision,test_financial_scope_and_archive,test_financial_rebind_and_revision,test_trigger_upgrade_atomicity,test_existing_worker_and_broken_scope,test_invoice_audit_recovery,test_statement_composite_restart,test_invoice_late_audit_receipt,test_uncaught_process_exit,test_consumer_to_functional_result,test_two_consumers_one_preparation):
+    for test in (test_source_boundaries,test_retry_and_new_revision,test_financial_scope_and_archive,test_financial_rebind_and_revision,test_trigger_upgrade_atomicity,test_existing_worker_and_broken_scope,test_explicit_legacy_finalize,test_post_save_invoice_actions,test_invoice_audit_recovery,test_statement_composite_restart,test_invoice_late_audit_receipt,test_uncaught_process_exit,test_consumer_to_functional_result,test_two_consumers_one_preparation):
         test(); print(test.__name__ + ': OK')
     print('supplier_preparation_intents_smoke: OK')
 
