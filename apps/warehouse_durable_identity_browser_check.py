@@ -68,10 +68,17 @@ def main():
         for status in ("accepted", "queued", "deferred", "consumer_pending", "interrupted", "failed"):
             page.evaluate("(status) => renderWarehouseCurrentSyncStatus({status:status,run_id:'public_original',can_start_new:false})", status)
             assert page.locator("button").is_disabled(), status
-        # Bound automatic polling even if every response remains queued/running.
-        page.evaluate("state.warehouses.updatePollCount=100; renderWarehouseCurrentSyncStatus({status:'queued',run_id:'public_original',can_start_new:false})")
+        # A normal 8m42s cycle stays observable; the 20-minute wall budget is bounded.
+        page.evaluate("state.warehouses.updatePollCount=104; state.warehouses.updatePollStartedAt=Date.now()-522000; renderWarehouseCurrentSyncStatus({status:'running',run_id:'public_original',can_start_new:false})")
+        assert page.evaluate("state.warehouses.updatePollTimer !== null")
+        page.evaluate("state.warehouses.updatePollStartedAt=Date.now()-1200000; renderWarehouseCurrentSyncStatus({status:'queued',run_id:'public_original',can_start_new:false})")
         assert page.evaluate("state.warehouses.updatePollTimer === null")
-        assert "Опрос приостановлен" in page.locator("#status").inner_text()
+        assert "Обновите страницу, чтобы проверить ту же заявку" in page.locator("#status").inner_text()
+        assert page.evaluate("JSON.parse(localStorage.getItem(warehouseCurrentSyncStorageKey())).request_key") == saved_key
+        page.reload(); page.add_script_tag(content=client_script())
+        page.evaluate("loadWarehouseCurrentSyncStatus()")
+        assert "run_id=public_original" in gets[-1] and len(posts) == 1
+        assert page.evaluate("state.warehouses.updatePollTimer !== null")
         scenario["unknown"] = True
         page.evaluate("loadWarehouseCurrentSyncStatus('public_original')")
         assert page.locator("button").is_disabled() and len(posts) == 1

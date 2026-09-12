@@ -100,7 +100,7 @@ def maintenance_pickup_case(root):
     from packages.application.warehouse_functional_maintenance import (
         WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME, warehouse_start_is_held,
     )
-    for mode in ("business_barrier", "holding", "held", "invalid", "during_accept"):
+    for mode in ("business_barrier", "binary_barrier", "holding", "held", "invalid", "during_accept"):
         case = root / mode
         entry, effects, _ = entry_fixture(case)
         marker = case / WAREHOUSE_FUNCTIONAL_MAINTENANCE_STATE_FILENAME
@@ -108,6 +108,11 @@ def maintenance_pickup_case(root):
         if mode == "business_barrier":
             acquire_barrier(case, window_id="fixture-maintenance", window_kind="snapshot", plan_fingerprint=plan,
                             approval_reference="fixture-approved", actor="fixture", reason="test startup pause")
+        elif mode == "binary_barrier":
+            from packages.application.business_data_write_barrier import STATE_FILENAME
+            marker = case / STATE_FILENAME
+            marker.write_bytes(b"\xff")
+            marker.chmod(0o600)
         elif mode != "during_accept":
             marker.write_text("{" if mode == "invalid" else json.dumps({"phase": mode}), encoding="utf-8")
         with patch("packages.application.fbs_accounting_runtime.refresh", return_value={}):
@@ -133,6 +138,8 @@ def maintenance_pickup_case(root):
                 # acquire changed only the disposable barrier; no controls were changed.
                 abort_barrier_acquire(case, window_id="fixture-maintenance", plan_fingerprint=plan, actor="fixture",
                     reason="test exact unchanged controls", restore_readback={"status":"restored", "exact_prior_state_restored":True})
+            elif mode == "binary_barrier":
+                marker.unlink()
             else:
                 marker.write_text(json.dumps({"phase": "restored"}), encoding="utf-8")
             assert not warehouse_start_is_held(case)
@@ -147,6 +154,68 @@ def maintenance_pickup_case(root):
                 assert not picker.is_alive()
             assert result["status"] == "success" and effects.count("network") == 1, (mode, result, effects)
         print("startup maintenance:", mode, "accepted/no claim/no effects; release same ID/effect1")
+
+
+def maintenance_claim_drain_case(root):
+    from apps.warehouse_functional_maintenance_smoke import FakeSystemd
+    from packages.application.warehouse_functional_maintenance import maintenance_hold, maintenance_restore
+    entry, effects, _ = entry_fixture(root)
+    reached = threading.Event()
+    original_claim = entry.warehouse_update_journal.claim
+    blocker = sqlite3.connect(entry.runtime.db_path, check_same_thread=False)
+    def blocked_claim(run_id):
+        blocker.execute("BEGIN IMMEDIATE")
+        reached.set()
+        return original_claim(run_id)  # Real SQLite wait after both guard reads.
+    entry.warehouse_update_journal.claim = blocked_claim
+    systemd = FakeSystemd()
+    proc = root / "proc"
+    proc.mkdir()
+    with patch("packages.application.fbs_accounting_runtime.refresh", return_value={}):
+        response = entry.handle_warehouse_manual_sync_start_request({"request_key": KEY})
+        assert reached.wait(5)
+        try:
+            maintenance_hold(root, client=systemd, proc_root=proc, wait_timeout_seconds=.15, poll_interval_seconds=.01)
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("hold declared quiet while accepted job waits to claim")
+        state = json.loads((root / ".warehouse-functional-maintenance.json").read_text())
+        assert state["phase"] == "holding" and state["last_readback"]["warehouse_lock"]["job_held"]
+        assert not state["last_readback"]["warehouse_lock"]["writer_held"]
+        assert not effects
+        blocker.rollback()
+        blocker.close()
+        result = wait_terminal(entry, response["run_id"])
+        assert result["status"] == "success" and effects.count("network") == 1
+        entry.operator_jobs._threads[response["run_id"]].join(3)
+    held = maintenance_hold(root, client=systemd, proc_root=proc, wait_timeout_seconds=1)
+    assert held["status"] == "held" and not held["warehouse_lock"]["held"]
+    maintenance_restore(root, client=systemd, proc_root=proc)
+    print("maintenance claim race: actual SQLite wait prevents held; admitted job drained before quiet")
+
+
+def terminal_read_race_case(root):
+    for terminal in ("success", "failed"):
+        case = root / terminal
+        entry, _, _ = entry_fixture(case)
+        journal = entry.warehouse_update_journal
+        with warehouse_functional_job_lock(case):
+            job, _ = accept(journal)
+            assert journal.claim(job["durable_run_id"])
+            stale = journal.lookup(public_id=job["job_id"], request_scope=SCOPE)
+            assert stale["status"] == "running"
+            journal.finish(job["durable_run_id"], status=terminal)
+        original_lookup = journal.lookup
+        reads = []
+        def racing_lookup(**identity):
+            reads.append(identity)
+            return stale if len(reads) == 1 else original_lookup(**identity)
+        with patch.object(journal, "lookup", side_effect=racing_lookup):
+            result = entry.handle_warehouse_manual_sync_status_request(job["job_id"])
+        assert result["status"] == terminal and result["run_id"] == job["job_id"], result
+        assert len(reads) == 2 and all(x["public_id"] == job["job_id"] and x["request_scope"] == SCOPE for x in reads)
+    print("terminal read race: stale running then free admission rereads exact ID; success/failed preserved")
 
 
 def delayed_acceptance_case(root):
@@ -324,6 +393,8 @@ def main():
         crash_cases(root / "crash")
         delayed_acceptance_case(root / "delayed")
         maintenance_pickup_case(root / "maintenance")
+        maintenance_claim_drain_case(root / "maintenance_claim")
+        terminal_read_race_case(root / "terminal_read_race")
         http_cases(root / "http")
     print("warehouse_durable_identity_smoke: OK")
 

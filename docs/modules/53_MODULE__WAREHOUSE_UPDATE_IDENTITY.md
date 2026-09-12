@@ -30,16 +30,23 @@ scoped route.
 Активный или повреждённый write barrier, а также существующий warehouse maintenance
 marker (holding/held или нечитаемый) откладывают pickup до восстановления допуска.
 Проверка только читает существующие состояния, до pickup и повторно перед claim;
-в окне обслуживания accepted не получает claim. `accepted` получает claim под
+в подтверждённом окне обслуживания accepted не получает claim. `accepted` получает claim под
 прежним ID. Запуск прежнего owner, который уже получил claim, переходит в
 `interrupted` без replay с первой фазы; подтверждённые этапы и точные receipts
 сохраняются. Если терминальный journal commit не состоялся, GET наблюдает
 остановленного owner как `interrupted`, не объявляя успех по памяти worker.
 Полное продолжение частично исполненных фаз относится к Б2-07.
+Warehouse maintenance подтверждает quiet/held только после освобождения обоих
+существующих locks: job admission и короткого writer. Уже допущенный job,
+включая ожидание SQLite claim, должен завершиться до подтверждения held.
+При free admission статус повторно читается по тому же scoped ID: terminal commit
+между первым чтением и освобождением lock не превращается в ложный interrupted.
 
 Browser хранит ключ до POST в localStorage, отдельно по principal. Потерянный
-ответ и reload восстанавливаются только exact GET. Автоопрос ограничен 100
-попытками, один запрос — 15 секундами; unknown/error прекращает опрос.
+ответ и reload восстанавливаются только exact GET. Автоопрос раз в 5 секунд
+ограничен 20 минутами и 240 попытками, один запрос — 15 секундами;
+unknown/error прекращает опрос. По истечении бюджета UI предлагает обновить
+страницу для проверки той же заявки и сохраняет её ключ.
 Доказанный busy отказ без принятия (`request_accepted=false`) освобождает ключ;
 неоднозначный timeout (`request_accepted=null`) сохраняет его для exact GET. Состояния
 accepted/queued/deferred/consumer_pending/interrupted и ошибки не разрешают новый

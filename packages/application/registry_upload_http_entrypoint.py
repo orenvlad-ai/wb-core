@@ -7043,7 +7043,17 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         status = str(job.get("status") or "accepted")
         if status == "running" and not warehouse_functional_job_is_busy(self.runtime.runtime_dir):
-            status = "interrupted"  # Read-only observation; the picker persists classification.
+            # The owner may have committed terminal status after our first read
+            # and released admission. Re-read this exact scoped ID before
+            # classifying an orphan; never substitute the latest operation.
+            current = self.warehouse_update_journal.lookup(
+                public_id=str(job.get("job_id") or ""), request_scope=request_scope,
+            )
+            if current is not None:
+                job = current
+                status = str(job.get("status") or "accepted")
+            if status == "running":
+                status = "interrupted"  # Read-only; picker persists classification.
         result = dict(job.get("result") or {})
         # New durable results retain the exact phase receipts and final payload.
         lines = list(dict(result.get("diff") or {}).get("lines") or [])

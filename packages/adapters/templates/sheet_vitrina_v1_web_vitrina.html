@@ -7926,6 +7926,7 @@
         error: "",
         updateRunId: "",
         updatePollCount: 0,
+        updatePollStartedAt: 0,
         updateRequestKey: "",
         updatePollTimer: null,
         incidentPolicy: null,
@@ -10827,14 +10828,15 @@
     function scheduleWarehouseCurrentSyncPolling() {
       stopWarehouseCurrentSyncPolling();
       if (state.warehouses.activeKey !== "update") return;
+      if (!state.warehouses.updatePollStartedAt) state.warehouses.updatePollStartedAt = Date.now();
       state.warehouses.updatePollCount += 1;
-      if (state.warehouses.updatePollCount > 100) {
-        if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent += " Опрос приостановлен; проверьте эту же заявку позже.";
+      if (state.warehouses.updatePollCount > 240 || Date.now() - state.warehouses.updatePollStartedAt >= 20 * 60 * 1000) {
+        if (warehouseUpdateStatusNode) warehouseUpdateStatusNode.textContent += " Опрос приостановлен. Обновите страницу, чтобы проверить ту же заявку.";
         return;
       }
       state.warehouses.updatePollTimer = window.setTimeout(function() {
         loadWarehouseCurrentSyncStatus(state.warehouses.updateRunId);
-      }, 1800);
+      }, 5000);
     }
 
     function renderWarehouseCurrentSyncStatus(payload) {
@@ -11066,6 +11068,7 @@
         state.warehouses.updateRequestKey = crypto.randomUUID();
         state.warehouses.updateRunId = "";
         state.warehouses.updatePollCount = 0;
+        state.warehouses.updatePollStartedAt = 0;
         // Storage must succeed before POST; an ambiguous response is GET-only.
         localStorage.setItem(warehouseCurrentSyncStorageKey(), JSON.stringify({request_key: state.warehouses.updateRequestKey, run_id: ""}));
         const response = await fetch(basePath + "/sync", {
