@@ -433,14 +433,24 @@ def enqueue_supplier_replay_in_connection(conn: sqlite3.Connection, *, request: 
     """
     stable_id = "supplier_shipment:" + str(request["shipment_id"])
     revision = "supplier-preparation:" + str(request["revision"]) + ":" + str(request["source_fingerprint"])
+    return enqueue_source_replay_in_connection(conn, stable_source_id=stable_id,
+        source_revision=revision, effective_date=request["effective_date"],
+        affected_nm_ids_json=request["affected_nm_ids_json"], requested_at=request["requested_at"])
+
+
+def enqueue_source_replay_in_connection(conn: sqlite3.Connection, *, stable_source_id: str,
+    source_revision: str, effective_date: str, affected_nm_ids_json: str, requested_at: str,
+) -> dict[str, Any]:
+    """Canonical exact queue insert; source owner validates and commits delivery."""
+    stable_id, revision = stable_source_id, source_revision
     queue_id = _stable_id("whrq", {"stable_source_id": stable_id, "source_revision": revision})
     conn.execute("""INSERT INTO sheet_vitrina_v1_warehouse_targeted_recalc_queue(
         queue_id,stable_source_id,source_revision,effective_date,affected_nm_ids_json,
         status,requested_at,started_at,finished_at,error
     ) VALUES(?,?,?,?,?,'queued',?,NULL,NULL,NULL)
     ON CONFLICT(stable_source_id,source_revision) DO NOTHING""", (
-        queue_id, stable_id, revision, request["effective_date"],
-        request["affected_nm_ids_json"], request["requested_at"],
+        queue_id, stable_id, revision, effective_date,
+        affected_nm_ids_json, requested_at,
     ))
     row = conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE stable_source_id=? AND source_revision=?", (stable_id, revision)).fetchone()
     return dict(row)
@@ -740,6 +750,13 @@ def load_supplier_flow_cost_state(
                 for document_id in cny_document_ids
             ],
         ]
+        # Account replay can affect several payments, including an old owner
+        # after relink. Read its saved scope rather than every CNY account row.
+        from packages.application.cny_preparation_intents import TABLE as cny_intents_table, SOURCE_ID as cny_source_id
+        if cny_intents_table in tables:
+            account = conn.execute(f"SELECT affected_shipment_ids_json FROM {cny_intents_table} WHERE account_id='account'").fetchone()
+            if account is not None and shipment_id in _loads(account["affected_shipment_ids_json"], []):
+                stable_ids.append(cny_source_id)
         queue_rows = []
         if (
             stable_ids

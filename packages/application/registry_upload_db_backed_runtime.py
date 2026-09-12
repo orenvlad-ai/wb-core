@@ -7344,10 +7344,8 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             document_id = _save_cny_document_in_connection(conn, document)
+            loaded = _cny_document_to_dict(conn.execute("SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?", (document_id,)).fetchone())
             conn.commit()
-        loaded = self.load_cny_document(document_id)
-        if loaded is None:
-            raise ValueError(f"CNY document was not saved: {document_id}")
         return loaded
 
     def update_cny_document_context(
@@ -7362,7 +7360,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
+            from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
+            before = begin_source_change(conn)
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_cny_documents
@@ -7378,12 +7377,14 @@ class RegistryUploadDbBackedRuntime:
                     str(document_id or "").strip(),
                 ),
             )
+            finish_source_change(conn, before)
+            stored = conn.execute("SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?", (document_id,)).fetchone()
+            if stored is None:
+                raise ValueError(f"CNY document not found: {document_id}")
+            loaded = _cny_document_to_dict(stored)
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"CNY document not found: {document_id}")
-        loaded = self.load_cny_document(document_id)
-        if loaded is None:
-            raise ValueError(f"CNY document not found: {document_id}")
         return loaded
 
     def load_cny_document(self, document_id: str) -> dict[str, Any] | None:
@@ -7424,6 +7425,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
+            before = begin_source_change(conn)
             conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_cny_documents
@@ -7431,6 +7434,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (normalized_id,),
             )
+            finish_source_change(conn, before)
             conn.commit()
         return existing
 
@@ -10282,6 +10286,8 @@ def _save_cny_document_in_connection(
     operation_date = str(document.get("operation_date") or "").strip()
     if operation_date:
         _validate_iso_date(operation_date, field_name="operation_date")
+    from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
+    before = begin_source_change(conn)
     conn.execute(
         """
         INSERT INTO sheet_vitrina_v1_cny_documents(
@@ -10361,6 +10367,7 @@ def _save_cny_document_in_connection(
             ),
         ),
     )
+    finish_source_change(conn, before)
     return document_id
 
 
@@ -11886,6 +11893,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         _ensure_schema_uncached(conn)
         from packages.application.supplier_preparation_intents import ensure_schema as ensure_supplier_preparation_schema
         ensure_supplier_preparation_schema(conn)
+        from packages.application.cny_preparation_intents import ensure_schema as ensure_cny_preparation_schema
+        ensure_cny_preparation_schema(conn)
         if not was_in_transaction and conn.in_transaction:
             conn.commit()
         _SCHEMA_READY_KEYS.add(_schema_ready_key(conn))
