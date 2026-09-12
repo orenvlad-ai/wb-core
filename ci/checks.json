@@ -232,11 +232,14 @@
     "supplier_source_operations": {
       "patterns": [
         "apps/supplier_confirmation_flows_smoke.py",
+        "apps/supplier_preparation_intents_smoke.py",
+        "packages/application/supplier_preparation_intents.py",
         "packages/application/supplier_shipments.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py"
       ],
       "commands": [
+        ["python3", "apps/supplier_preparation_intents_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"],
         ["python3", "apps/supplier_confirmation_flows_smoke.py"],
         ["python3", "apps/warehouse_ff_acceptance_form_smoke.py"]

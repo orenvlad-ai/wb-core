@@ -5859,6 +5859,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_supplier_shipments(
@@ -6040,6 +6042,7 @@ class RegistryUploadDbBackedRuntime:
                     for index, item in enumerate(lines, start=1)
                 ],
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False)
             conn.commit()
 
     def list_supplier_shipments(self) -> list[dict[str, Any]]:
@@ -6174,6 +6177,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_shipments
@@ -6183,6 +6188,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (str(order_status or ""), updated_at, shipment_id),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False)
             conn.commit()
             return cursor.rowcount > 0
 
@@ -6200,6 +6206,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_shipments
@@ -6209,6 +6217,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (1 if expenses_complete else 0, updated_at, shipment_id),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False)
             conn.commit()
             return cursor.rowcount > 0
 
@@ -6254,6 +6263,8 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             header_row = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id = ?",
                 (shipment_id,),
@@ -6342,6 +6353,7 @@ class RegistryUploadDbBackedRuntime:
                     shipment_id,
                 ),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False)
             conn.commit()
             return {
                 "event_id": event_id,
@@ -6395,6 +6407,9 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            previous_order = conn.execute("SELECT supplier_order_id FROM sheet_vitrina_v1_supplier_financial_documents WHERE document_id=?", (document_id,)).fetchone()
+            supplier_before = begin_source_change(conn, [supplier_order_id] + ([str(previous_order[0])] if previous_order else []))
             assignments = [
                 dict(item) for item in (bank_operation_assignments or [])
             ]
@@ -6680,13 +6695,14 @@ class RegistryUploadDbBackedRuntime:
                         )
                     continue
                 _save_cny_document_in_connection(conn, cny_document)
+            finish_source_change(conn, supplier_before, reset_expenses=True)
+            stored_row = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_documents WHERE supplier_order_id=? AND document_id=?", (supplier_order_id, document_id)).fetchone()
+            if stored_row is None:
+                raise ValueError(f"financial document not found: {document_id}")
+            stored_lines = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? AND financial_document_id=? ORDER BY sort_order,line_id", (supplier_order_id, document_id)).fetchall()
+            loaded = _supplier_financial_document_to_dict(stored_row)
+            loaded["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in stored_lines]
             conn.commit()
-        loaded = self.load_supplier_financial_document(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-        )
-        if loaded is None:
-            raise ValueError(f"financial document was not saved: {document_id}")
         return loaded
 
     def list_supplier_bank_operation_assignments(self) -> list[dict[str, Any]]:
@@ -7229,6 +7245,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [supplier_order_id])
             row = conn.execute(
                 """
                 SELECT *
@@ -7257,6 +7275,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (supplier_order_id, document_id),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=True)
             conn.commit()
             if cursor.rowcount <= 0:
                 return None
@@ -7276,6 +7295,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [supplier_order_id])
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_financial_documents
@@ -7291,15 +7312,16 @@ class RegistryUploadDbBackedRuntime:
                     str(document_id or "").strip(),
                 ),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=True)
+            stored_row = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_documents WHERE supplier_order_id=? AND document_id=?", (supplier_order_id, document_id)).fetchone()
+            if stored_row is None:
+                raise ValueError(f"financial document not found: {document_id}")
+            stored_lines = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? AND financial_document_id=? ORDER BY sort_order,line_id", (supplier_order_id, document_id)).fetchall()
+            loaded = _supplier_financial_document_to_dict(stored_row)
+            loaded["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in stored_lines]
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"financial document not found: {document_id}")
-        loaded = self.load_supplier_financial_document(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-        )
-        if loaded is None:
-            raise ValueError(f"financial document not found: {document_id}")
         return loaded
 
     def list_supplier_financial_documents_all(self) -> list[dict[str, Any]]:
@@ -11850,6 +11872,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             return
         was_in_transaction = conn.in_transaction
         _ensure_schema_uncached(conn)
+        from packages.application.supplier_preparation_intents import ensure_schema as ensure_supplier_preparation_schema
+        ensure_supplier_preparation_schema(conn)
         if not was_in_transaction and conn.in_transaction:
             conn.commit()
         _SCHEMA_READY_KEYS.add(_schema_ready_key(conn))

@@ -5439,38 +5439,21 @@ class RegistryUploadHttpEntrypoint:
                 )
             ),
         )
-        cny_rows = list(payload.pop("cny_fee_rows_for_ledger", []) or [])
-        for row in cny_rows:
-            self.cny_ledger_block.save_bank_fee_document(
-                source_order_id=shipment_id,
-                linked_financial_document_id=document_id,
-                natural_key=str(row.get("cny_ledger_natural_key") or ""),
-                fee_row=row,
-                original_filename=str(payload.get("original_filename") or ""),
-                stored_file_path=str(payload.get("stored_file_path") or ""),
-                file_content_type=str(payload.get("file_content_type") or ""),
-                replay=False,
-            )
-        replay_required = bool(
-            payload.pop("cny_ledger_replay_required", False) or cny_rows
-        )
+        payload.pop("cny_fee_rows_for_ledger", None)
+        payload.pop("cny_ledger_replay_required", None)
         replay_outcome: dict[str, Any] = {}
         try:
-            if replay_required:
-                replay_outcome = self.cny_ledger_block.replay_ledger(
-                    reason="bank_fee_statement_confirm"
-                )
+            # The source transaction owns the entire statement continuation.
+            # Finalize resumes its existing CNY preparation and warehouse handoff.
             downstream = (
                 self.supplier_financial_documents_block.finalize_bank_fee_statement_import(
                     shipment_id,
                     document_id,
                 )
             )
+            replay_outcome = dict(downstream.get("cny_ledger_replay") or {})
         except Exception as exc:  # noqa: BLE001 - parent import is already durable.
-            result = self.supplier_financial_documents_block.get_document(
-                shipment_id,
-                document_id,
-            )
+            result = self.supplier_financial_documents_block._saved_document_payload(shipment_id, payload)
             result.update(
                 {
                     "contract_name": (
@@ -5501,7 +5484,7 @@ class RegistryUploadHttpEntrypoint:
                 }
             )
             return result
-        result = self.supplier_financial_documents_block.get_document(shipment_id, document_id)
+        result = self.supplier_financial_documents_block._saved_document_payload(shipment_id, payload)
         result.update(downstream)
         downstream_queue = dict(
             downstream.get("warehouse_targeted_recalculation") or {}
@@ -5511,7 +5494,7 @@ class RegistryUploadHttpEntrypoint:
         )
         downstream_pending = (
             str(downstream_queue.get("status") or "")
-            in {"error", "replay_error"}
+            in {"error", "replay_error", "pending"}
             or str(downstream_projection.get("status") or "") == "error"
         )
         if str(replay_outcome.get("status") or "") == "pending":
@@ -5535,8 +5518,10 @@ class RegistryUploadHttpEntrypoint:
             )
         elif downstream_pending:
             downstream_retryable = bool(
-                downstream_queue.get("affected_nm_ids")
-                or downstream_queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                downstream_queue.get("retryable", bool(
+                    downstream_queue.get("affected_nm_ids")
+                    or downstream_queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                ))
             )
             result.update(
                 {
@@ -5630,9 +5615,7 @@ class RegistryUploadHttpEntrypoint:
             str(payload.get("parse_status") or ""),
         )
         if result.get("cny_documents_status_changed"):
-            replay = self.cny_ledger_block.replay_account(
-                reason="supplier_financial_document_status_change"
-            )
+            replay = dict(result.get("cny_ledger_replay") or {})
             result["cny_replay"] = replay.get("replay") or replay
             if str(replay.get("status") or "") == "pending":
                 result.update(self._cny_pending_outcome(replay))
@@ -5820,7 +5803,7 @@ class RegistryUploadHttpEntrypoint:
             confirmation_token=confirmation_token,
         )
         if payload.get("cny_documents_archived"):
-            replay = self.cny_ledger_block.replay_account(reason="supplier_financial_document_archive")
+            replay = dict(payload.get("cny_ledger_replay") or {})
             payload["cny_replay"] = replay.get("replay") or replay
             if str(replay.get("status") or "") == "pending":
                 payload.update(self._cny_pending_outcome(replay))
@@ -5828,12 +5811,14 @@ class RegistryUploadHttpEntrypoint:
                 queue = dict(payload.get("warehouse_targeted_recalculation") or {})
                 projection = dict(queue.get("business_projection") or {})
                 if (
-                    str(queue.get("status") or "") in {"error", "replay_error"}
+                    str(queue.get("status") or "") in {"error", "replay_error", "pending"}
                     or str(projection.get("status") or "") == "error"
                 ):
                     retryable = bool(
-                        queue.get("affected_nm_ids")
-                        or queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                        queue.get("retryable", bool(
+                            queue.get("affected_nm_ids")
+                            or queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                        ))
                     )
                     payload.update(
                         {

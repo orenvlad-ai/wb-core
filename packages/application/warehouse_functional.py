@@ -425,6 +425,27 @@ def enqueue_warehouse_targeted_recalculation(
     }
 
 
+def enqueue_supplier_replay_in_connection(conn: sqlite3.Connection, *, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Connection-aware queue delivery after supplier preparation; no drain/commit.
+
+    Like the existing inventory transaction helper, insert the canonical queue
+    with exact source identity. The caller owns schema setup and source recheck.
+    """
+    stable_id = "supplier_shipment:" + str(request["shipment_id"])
+    revision = "supplier-preparation:" + str(request["revision"]) + ":" + str(request["source_fingerprint"])
+    queue_id = _stable_id("whrq", {"stable_source_id": stable_id, "source_revision": revision})
+    conn.execute("""INSERT INTO sheet_vitrina_v1_warehouse_targeted_recalc_queue(
+        queue_id,stable_source_id,source_revision,effective_date,affected_nm_ids_json,
+        status,requested_at,started_at,finished_at,error
+    ) VALUES(?,?,?,?,?,'queued',?,NULL,NULL,NULL)
+    ON CONFLICT(stable_source_id,source_revision) DO NOTHING""", (
+        queue_id, stable_id, revision, request["effective_date"],
+        request["affected_nm_ids_json"], request["requested_at"],
+    ))
+    row = conn.execute("SELECT * FROM sheet_vitrina_v1_warehouse_targeted_recalc_queue WHERE stable_source_id=? AND source_revision=?", (stable_id, revision)).fetchone()
+    return dict(row)
+
+
 def _targeted_enqueue_noop_row(
     *,
     before_images: Iterable[Mapping[str, Any]],

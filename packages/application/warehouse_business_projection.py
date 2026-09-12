@@ -487,6 +487,42 @@ def ensure_warehouse_business_projection_schema(conn: sqlite3.Connection) -> Non
         )
 
 
+def _ensure_supplier_expense_event_trigger(conn: sqlite3.Connection, definition: str) -> None:
+    def installed():
+        return conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='warehouse_projection_own_capital_event'").fetchone()
+
+    current = installed()
+    marker = "NEW.event_id || '_' || NEW.evidence_hash"
+    if current is None:
+        conn.execute(definition)
+        return
+    if marker in str(current[0]):
+        return
+    # DDL must not expose a committed trigger gap. Own only this upgrade;
+    # preserve a caller's source transaction, including its rollback boundary.
+    own_transaction = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if own_transaction else "SAVEPOINT supplier_expense_trigger_upgrade")
+    try:
+        current = installed()
+        if current is None:
+            conn.execute(definition)
+        elif marker not in str(current[0]):
+            conn.execute("DROP TRIGGER warehouse_projection_own_capital_event")
+            conn.execute(definition)
+    except BaseException:
+        if own_transaction:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO supplier_expense_trigger_upgrade")
+            conn.execute("RELEASE supplier_expense_trigger_upgrade")
+        raise
+    else:
+        if own_transaction:
+            conn.commit()
+        else:
+            conn.execute("RELEASE supplier_expense_trigger_upgrade")
+
+
 def ensure_warehouse_projection_source_outbox(
     conn: sqlite3.Connection,
 ) -> None:
@@ -500,7 +536,7 @@ def ensure_warehouse_projection_source_outbox(
         ).fetchall()
     }
     if "sheet_vitrina_v1_own_capital_events" in tables:
-        conn.execute(
+        _ensure_supplier_expense_event_trigger(conn,
             f"""
             CREATE TRIGGER IF NOT EXISTS warehouse_projection_own_capital_event
             AFTER INSERT ON sheet_vitrina_v1_own_capital_events
@@ -510,7 +546,9 @@ def ensure_warehouse_projection_source_outbox(
                 business_effective_date,affected_nm_ids_json,source_kind,
                 status,requested_at,started_at,finished_at,error
               ) VALUES(
-                'whbpo_event_' || NEW.event_id,
+                CASE WHEN instr(NEW.event_id,'cost_payment:financial_expense:')=1
+                  THEN 'whbpo_event_' || NEW.event_id || '_' || NEW.evidence_hash
+                  ELSE 'whbpo_event_' || NEW.event_id END,
                 'own_capital_event:' || NEW.event_id,
                 NEW.evidence_hash,
                 NEW.effective_date,
