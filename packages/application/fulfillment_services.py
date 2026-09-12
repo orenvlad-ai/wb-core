@@ -21,6 +21,7 @@ from openpyxl.utils import get_column_letter
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application import fulfillment_recalc_intents as recalc_intents
 
 
 CONTRACT_NAME = "sheet_vitrina_v1_fulfillment_services"
@@ -149,6 +150,15 @@ class FulfillmentServicesBlock:
         now = self.timestamp_factory()
         upload_id = "ffu_" + uuid4().hex[:16]
         file_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
+        with self._connect() as conn:
+            _ensure_schema(conn)
+            existing = conn.execute(f"SELECT * FROM {UPLOADS_TABLE} WHERE file_sha256=? AND validation_status='ok' AND deleted_at IS NULL ORDER BY created_at,upload_id LIMIT 1", (file_sha256,)).fetchone()
+            if existing is not None:
+                recalculation = recalc_intents.read_request(conn, existing["upload_id"], recalc_intents.source_revision(existing))
+                if recalculation.get("durable_saved"):
+                    result = self.get_upload(existing["upload_id"])
+                    result.update(operation_applied=True, durable_saved=True, duplicate=True)
+                    return result
         stored_file_path = self._store_uploaded_file(upload_id, filename, workbook_bytes)
         parsed_lines, parse_errors = self._parse_workbook(workbook_bytes)
         validated_lines, validation_errors = self._validate_lines(parsed_lines)
@@ -178,7 +188,7 @@ class FulfillmentServicesBlock:
             )
             pdf_file_path = self._store_pdf_file(upload_id, payment_validation_id, pdf_bytes)
 
-        self._save_upload(
+        saved_id, recalculation = self._save_upload(
             upload_id=upload_id,
             filename=filename,
             stored_file_path=stored_file_path,
@@ -195,7 +205,23 @@ class FulfillmentServicesBlock:
             updated_at=now,
             lines=validated_lines,
         )
-        return self.get_upload(upload_id)
+        if saved_id != upload_id:
+            # A competing identical upload won; these unreferenced candidates
+            # belong only to this attempt, never to the accepted document.
+            for path in (stored_file_path, pdf_file_path):
+                if path:
+                    try:
+                        self._runtime_path(path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        try:
+            result = self.get_upload(saved_id)
+        except Exception as exc:  # The committed source must not be reported unsaved.
+            result = {"upload": {"upload_id": saved_id, "validation_status": validation_status}, "validation_status": validation_status,
+                "status": "pending", "readback_error": str(exc).replace("\n", " ")[:300]}
+        result.update(operation_applied=True, durable_saved=True, duplicate=saved_id != upload_id)
+        result["warehouse_targeted_recalculation"] = recalculation
+        return result
 
     def list_uploads(self, *, limit: int = 20) -> dict[str, Any]:
         normalized_limit = max(1, min(int(limit or 20), 100))
@@ -248,12 +274,14 @@ class FulfillmentServicesBlock:
                 """,
                 (normalized_id,),
             ).fetchall()
+            recalculation = recalc_intents.read_request(conn, normalized_id, recalc_intents.source_revision(upload_row))
         upload = _upload_row_to_dict(upload_row, include_links=True)
         lines = [_line_row_to_dict(row) for row in line_rows]
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
             "upload": upload,
+            "warehouse_targeted_recalculation": recalculation,
             "lines": lines,
             "validation_status": upload["validation_status"],
             "row_errors": [
@@ -303,6 +331,8 @@ class FulfillmentServicesBlock:
         already_deleted = False
         with self._connect() as conn:
             _ensure_schema(conn)
+            self._ensure_recalculation_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
             upload_row = conn.execute(
                 f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ?",
                 (normalized_id,),
@@ -343,6 +373,7 @@ class FulfillmentServicesBlock:
                         normalized_id,
                     ),
                 )
+            recalculation = recalc_intents.capture_request(conn, normalized_id, requested_at=now)
             conn.commit()
         if pdf_file_path:
             try:
@@ -354,6 +385,9 @@ class FulfillmentServicesBlock:
             "contract_version": CONTRACT_VERSION,
             "upload_id": normalized_id,
             "deleted": True,
+            "operation_applied": True,
+            "durable_saved": True,
+            "warehouse_targeted_recalculation": recalculation,
             "already_deleted": already_deleted,
             "deleted_at": deleted_at,
             "soft_deleted": True,
@@ -365,25 +399,33 @@ class FulfillmentServicesBlock:
     def approved_overlay_by_supply(self) -> dict[str, dict[str, Any]]:
         with self._connect() as conn:
             _ensure_schema(conn)
-            rows = conn.execute(
-                f"""
-                SELECT line.*, upload.payment_validation_id, upload.uploaded_at
-                FROM {LINES_TABLE} AS line
-                JOIN {UPLOADS_TABLE} AS upload ON upload.upload_id = line.upload_id
-                WHERE upload.validation_status = ?
-                  AND upload.deleted_at IS NULL
-                  AND line.match_status = ?
-                  AND COALESCE(line.is_storage_line, 0) = 0
-                ORDER BY upload.uploaded_at ASC, line.row_index ASC
-                """,
-                (VALIDATION_OK, MATCH_OK),
-            ).fetchall()
+            return self.approved_overlay_in_connection(conn)
+
+    @staticmethod
+    def approved_overlay_in_connection(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        """The same overlay calculation for a coherent warehouse source capture."""
+        rows = conn.execute(
+            f"""
+            SELECT line.*, upload.payment_validation_id, upload.uploaded_at
+            FROM {LINES_TABLE} AS line
+            JOIN {UPLOADS_TABLE} AS upload ON upload.upload_id = line.upload_id
+            WHERE upload.validation_status = ?
+              AND upload.deleted_at IS NULL
+              AND line.match_status = ?
+              AND COALESCE(line.is_storage_line, 0) = 0
+            ORDER BY upload.uploaded_at ASC, line.row_index ASC
+            """,
+            (VALIDATION_OK, MATCH_OK),
+        ).fetchall()
         grouped: dict[str, dict[str, Any]] = {}
         by_canonical: dict[str, dict[str, Any]] = {}
         for row in rows:
             canonical = str(row["matched_wb_cache_key"] or row["matched_wb_supply_id"] or row["supply_id_input"] or "").strip()
             if not canonical:
                 continue
+            supply = recalc_intents.load_supply_in_connection(conn, canonical)
+            if supply is not None:
+                canonical = str(supply["cache_key"] or supply["supply_id"])
             item = by_canonical.setdefault(
                 canonical,
                 {
@@ -415,7 +457,10 @@ class FulfillmentServicesBlock:
             _append_unique(item["upload_ids"], str(row["upload_id"] or ""))
             _append_unique(item["payment_validation_ids"], str(row["payment_validation_id"] or ""))
             _append_unique(item["service_names"], str(row["service_name"] or ""))
-            for identity in _line_identity_values(row):
+            identities = _line_identity_values(row)
+            if supply is not None:
+                identities.update(str(supply[key]) for key in ("supply_id", "cache_key", "wb_supply_id", "preorder_id") if supply[key])
+            for identity in identities:
                 grouped[identity] = item
         return grouped
 
@@ -582,9 +627,19 @@ class FulfillmentServicesBlock:
         created_at: str,
         updated_at: str,
         lines: list[_ParsedLine],
-    ) -> None:
+    ) -> tuple[str, dict[str, Any]]:
         with self._connect() as conn:
             _ensure_schema(conn)
+            self._ensure_recalculation_schema(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            # The exact accepted file is the document identity for a retry.
+            # A different file or a re-upload after deletion remains a new source.
+            prior = conn.execute(f"SELECT upload_id FROM {UPLOADS_TABLE} WHERE file_sha256=? AND validation_status='ok' AND deleted_at IS NULL ORDER BY created_at,upload_id LIMIT 1", (file_sha256,)).fetchone()
+            if prior is not None:
+                existing_id = str(prior["upload_id"])
+                recalculation = recalc_intents.capture_request(conn, existing_id, requested_at=updated_at)
+                conn.commit()
+                return existing_id, recalculation
             conn.execute(
                 f"""
                 INSERT INTO {UPLOADS_TABLE}(
@@ -665,7 +720,16 @@ class FulfillmentServicesBlock:
                 """,
                 [_line_insert_values(upload_id, line, created_at) for line in lines],
             )
+            recalculation = recalc_intents.capture_request(conn, upload_id, requested_at=updated_at)
             conn.commit()
+            return upload_id, recalculation
+
+    @staticmethod
+    def _ensure_recalculation_schema(conn: sqlite3.Connection) -> None:
+        from packages.application.warehouse_functional import ensure_warehouse_functional_schema
+        ensure_warehouse_functional_schema(conn)
+        recalc_intents.ensure_schema(conn)
+        conn.commit()
 
     def _new_payment_validation_id(self) -> str:
         with self._connect() as conn:

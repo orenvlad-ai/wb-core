@@ -12179,6 +12179,7 @@
         updateFulfillmentServicesBusyState();
         setFulfillmentServicesMessage("Загружаем XLSX...", "");
         renderFulfillmentErrors(null);
+        let operationApplied = false;
         try {
           const formData = new FormData();
           formData.append("file", file, file.name || "fulfillment-services.xlsx");
@@ -12191,14 +12192,16 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
+          operationApplied = !!payload.operation_applied && (payload.upload || {}).validation_status === "ok";
           if (fulfillmentFileInput) {
             fulfillmentFileInput.value = "";
           }
           const upload = payload && payload.upload ? payload.upload : {};
           const isOk = upload.validation_status === "ok";
+          const processing = payload.warehouse_targeted_recalculation || {};
           setFulfillmentServicesMessage(
             isOk
-              ? "Документ принят. Все строки смэтчены, PDF-виза сформирована."
+              ? (payload.duplicate ? "Этот документ уже принят." : (payload.pdf_available ? "Документ принят. Все строки смэтчены, PDF-виза сформирована." : "Документ принят.")) + (processing.terminal_no_op ? " Пересчёт не требуется." : (processing.status === "complete" ? " Пересчёт завершён." : " Пересчёт сохранён и ожидает обработки."))
               : "Документ не принят. Исправьте ошибки и загрузите файл заново.",
             isOk ? "success" : "warning"
           );
@@ -12208,7 +12211,7 @@
           }
         } catch (error) {
           setFulfillmentServicesMessage(
-            "Документ не принят. Исправьте ошибки и загрузите файл заново. " + (error instanceof Error ? error.message : String(error)),
+            (operationApplied ? "Документ сохранён. Не удалось обновить отображение; повторная загрузка не требуется. " : "Не удалось подтвердить загрузку. Проверьте список документов. ") + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         } finally {
@@ -12356,6 +12359,7 @@
         fulfillmentDeletingUploadId = normalizedId;
         setFulfillmentServicesMessage("Удаляем документ...", "");
         renderFulfillmentServices(fulfillmentServicesPayload || { list: { uploads: [] }, detail: null });
+        let operationApplied = false;
         try {
           const response = await fetch(config.fulfillment_services_uploads_path.replace(/\/$/, "") + "/" + encodeURIComponent(normalizedId), {
             method: "DELETE",
@@ -12365,15 +12369,16 @@
           if (!response.ok) {
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
+          operationApplied = !!payload.operation_applied;
           fulfillmentDeleteConfirmUploadId = "";
-          setFulfillmentServicesMessage("Документ удалён. Данные услуг ФФ удалены из Wildberries overlay.", "success");
+          setFulfillmentServicesMessage("Документ удалён." + ((payload.warehouse_targeted_recalculation || {}).terminal_no_op ? " Пересчёт не требуется." : " Пересчёт сохранён и ожидает обработки."), "success");
           await loadFulfillmentServices({ preserveMessage: true });
           if (wbSuppliesInitialized) {
             await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
           }
         } catch (error) {
           setFulfillmentServicesMessage(
-            "Документ не удалён: " + (error instanceof Error ? error.message : String(error)),
+            (operationApplied ? "Документ удалён. Не удалось обновить отображение; повторять удаление не требуется. " : "Не удалось подтвердить удаление. Проверьте список документов. ") + (error instanceof Error ? error.message : String(error)),
             "error"
           );
         } finally {
