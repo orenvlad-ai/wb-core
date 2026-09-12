@@ -15,9 +15,17 @@ from packages.contracts.ads_daily_report import COUNTS, FIELDS, checked_ads_coun
 from packages.contracts.source_attempt_diagnostics import source_digest
 
 
-def assemble(source, nm_ids):
+RETAINED_CLOSED_DAY = 'retained_closed_day'
+HISTORICAL_ADS10 = 'historical_ads10'
+
+
+def assemble(source, nm_ids, *, publication_mode=RETAINED_CLOSED_DAY):
     day = source['date']
-    if day < '2026-09-11' or datetime.fromisoformat(day).date().isoformat() != day:
+    if publication_mode not in (RETAINED_CLOSED_DAY, HISTORICAL_ADS10):
+        raise ValueError('ads-partial-publication-mode-invalid')
+    if (datetime.fromisoformat(day).date().isoformat() != day
+            or (publication_mode == HISTORICAL_ADS10 and day != '2026-09-10')
+            or (publication_mode == RETAINED_CLOSED_DAY and day < '2026-09-11')):
         raise ValueError('ads-partial-date-outside-contract')
     catalog = source['catalog']
     expected = HttpBackedAdsCompactSource(complete_catalog=True)._extract_non_archived_advert_ids(catalog['payload'], snapshot_date=day)
