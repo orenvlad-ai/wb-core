@@ -257,6 +257,8 @@ class DenseFbsService:
                     "item_id": str(item["item_id"]),
                     "nm_id": int(item["nm_id"]),
                     "updated_at": str(item["updated_at"]),
+                    **({"source_revision": int(item["source_revision"])}
+                       if "source_revision" in item else {}),
                 }
                 for item in staged_items
             ),
@@ -280,11 +282,17 @@ class DenseFbsService:
                 request_identity=str(request_identity),
                 actor=str(actor),
             )
+            if list(intent["plan"]["expected_subject"]["staged_items"]) != normalized:
+                raise DenseFbsError("dense_intent_identity_conflict", "Staged SKU scope differs from its durable plan")
+            # Validate before any canonical document work, including exact-id resume.
+            with self._read() as conn:
+                self._require_current_skus(conn, normalized, intent=intent)
             materialized = self._materialize(intent)
             now = self._now()
             with self._write() as conn:
                 ensure_ff_pool_fbs_applicability_schema(conn)
                 conn.execute("BEGIN IMMEDIATE")
+                self._require_current_skus(conn, normalized, intent=intent)
                 try:
                     self._verify_materialized_under_transaction(conn, intent)
                 except DenseFbsError as exc:
@@ -394,6 +402,8 @@ class DenseFbsService:
                     },
                     recorded_at=now,
                 )
+                from packages.application.nomenclature_activation_intents import acknowledge_source
+                acknowledge_source(conn, normalized, intent_id=str(intent["intent_id"]))
                 conn.commit()
             return {
                 "contract_name": CONTRACT_NAME,
@@ -402,6 +412,26 @@ class DenseFbsService:
                 "coverage": materialized,
                 "idempotent": False,
             }
+
+    def _require_current_skus(
+        self, conn: sqlite3.Connection, items: Sequence[Mapping[str, Any]], *, intent: Mapping[str, Any],
+    ) -> None:
+        from packages.application.nomenclature_activation_intents import require_current_source
+
+        active = dense_intent_state(conn, str(intent["intent_id"]))["state"] == "active"
+        require_current_source(conn, items, active=active)
+        for item in items:
+            row = conn.execute(
+                f"SELECT is_active,is_hidden,nm_id,updated_at FROM {NOMENCLATURE_TABLE} WHERE item_id=?",
+                (item["item_id"],),
+            ).fetchone()
+            if (row is None or bool(row[0]) != active or bool(row[1])
+                    or int(row[2] or 0) != item["nm_id"] or str(row[3]) != item["updated_at"]):
+                raise DenseFbsError(
+                    "sku_activation_request_already_terminal" if active else "sku_activation_cas_drift",
+                    "Nomenclature changed before dense FBS continuation",
+                    details={"item_id": item["item_id"]},
+                )
 
     def record_applicability(
         self,
@@ -1288,6 +1318,8 @@ class DenseFbsService:
             ).fetchone()
             if existing is not None:
                 return _intent_from_row(existing, expected_identity=request_identity)
+            from packages.application.nomenclature_activation_intents import require_current_source
+            require_current_source(conn, staged_items)
             for item in staged_items:
                 row = conn.execute(
                     f"SELECT is_active,is_hidden,nm_id,updated_at FROM {NOMENCLATURE_TABLE} "

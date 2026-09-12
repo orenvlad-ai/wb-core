@@ -1429,13 +1429,14 @@
 
       function renderRow(item) {
         const compatibleKeys = Array.isArray(item.compatible_model_keys) ? item.compatible_model_keys : [];
+        const requestedActive = Boolean(item.is_active) || item.activation_status === "pending";
         const rowClass = (!item.is_active || item.is_hidden) ? ' class="muted-row"' : "";
         const hiddenAction = item.is_hidden
           ? '<button class="icon-button restore" type="button" data-restore-item title="Вернуть SKU" aria-label="Вернуть SKU">↩</button>'
           : '<button class="icon-button disable" type="button" data-hide-item title="Скрыть SKU" aria-label="Скрыть SKU">⏸</button>';
         return [
           '<tr data-item-id="' + escapeHtml(item.item_id || "") + '"' + rowClass + '>',
-          '<td class="checkbox-cell" data-column="active"><input type="checkbox" data-field="is_active"' + (item.is_active ? " checked" : "") + '></td>',
+          '<td class="checkbox-cell" data-column="active"><input type="checkbox" data-field="is_active" aria-label="Активировать товар"' + (requestedActive ? " checked" : "") + '></td>',
           '<td data-column="nm_id"><input class="narrow" data-field="nm_id" value="' + escapeHtml(item.nm_id ?? "") + '"></td>',
           '<td data-column="barcode"><input class="wide" data-field="barcode" inputmode="numeric" value="' + escapeHtml(item.barcode || "") + '">' + renderBarcodeStatus(item) + '</td>',
           '<td data-column="nomenclature_name"><input class="wide" data-field="nomenclature_name" value="' + escapeHtml(item.nomenclature_name || "") + '"></td>',
@@ -1479,10 +1480,12 @@
         const status = String(item.wb_sync_status || item.barcode_status || "");
         const updated = item.wb_synced_at || item.updated_at || "-";
         const hidden = item.is_hidden ? '<div class="barcode-status is-warning">hidden</div>' : "";
+        const activation = item.activation_status === "pending"
+          ? '<div class="barcode-status is-warning" data-activation-status>Ожидает активации</div>' : "";
         const className = status === "needs_review" || status === "sync_error" || status === "token_missing"
           ? "barcode-status is-warning"
           : "barcode-status is-ready";
-        return '<div>' + escapeHtml(updated) + '</div><div class="' + className + '">' + escapeHtml(status || "—") + '</div>' + hidden;
+        return '<div>' + escapeHtml(updated) + '</div><div class="' + className + '">' + escapeHtml(status || "—") + '</div>' + activation + hidden;
       }
 
       function renderAllBarcodes(item) {
@@ -1599,6 +1602,12 @@
         }
         const itemId = row.dataset.itemId || "";
         const isNew = !itemId;
+        const activeControl = row.querySelector('[data-field="is_active"]');
+        // Existing unchanged controls carry metadata only; keep the current
+        // activation decision under the source writer lock, including late off.
+        if (!isNew && activeControl.checked === activeControl.defaultChecked) {
+          delete payload.is_active;
+        }
         const url = isNew ? nomenclaturePath : nomenclaturePath + "/" + encodeURIComponent(itemId);
         setMessage("Сохраняем строку справочника...", "");
         try {

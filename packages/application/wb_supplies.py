@@ -676,6 +676,8 @@ class WbSuppliesBlock:
         cny_preparation = drain_cny_preparation_intents(self.runtime)
         from packages.application.fulfillment_recalc_intents import drain_fulfillment_recalc_intents
         fulfillment_preparation = drain_fulfillment_recalc_intents(self.runtime)
+        from packages.application.nomenclature_activation_intents import drain_nomenclature_activation_intents
+        nomenclature_activation = drain_nomenclature_activation_intents(self.runtime)
         # An unmatched supplier remains visible in its own pending request.
         # Independent physical returns/debits and healthy supplier targets can proceed.
         checkpoint = self._ensure_ff_stock_wb_auto_writeoff_checkpoint(
@@ -709,6 +711,7 @@ class WbSuppliesBlock:
             "supplier_preparation": supplier_preparation,
             "cny_preparation": cny_preparation,
             "fulfillment_preparation": fulfillment_preparation,
+            "nomenclature_activation": nomenclature_activation,
             "checkpoint": checkpoint,
             "supply_returns": supply_returns,
             "deleted_returned_supply_records": deleted_returned_records,
