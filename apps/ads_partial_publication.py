@@ -9,7 +9,7 @@ import sqlite3
 
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter, readonly, private_json
 from packages.application.web_vitrina_management_history import digest, dated_parameters
-from packages.application.ads_partial_publication import assemble, project, RETAINED_CLOSED_DAY, HISTORICAL_ADS10
+from packages.application.ads_partial_publication import assemble, project, retained_result, RETAINED_CLOSED_DAY, HISTORICAL_ADS10, RETAINED_ACCEPTED_CLOSED
 from packages.application.registry_upload_db_backed_runtime import _load_metric_items, _load_formula_items, _load_config_items
 from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
@@ -37,11 +37,14 @@ class AdsPartialPublicationAdapter:
         return runtime, db
 
     def build(self, request, operation_id, conn):
-        source = request['source']; day = source['date']
         publication_mode = request.get('publication_mode', RETAINED_CLOSED_DAY)
+        retained = publication_mode == RETAINED_ACCEPTED_CLOSED
+        source = request.get('source', {}); day = request['date'] if retained else source['date']
+        if retained and request['ready_as_of_date'] != day:
+            raise ValueError('ads-retained-ready-target-mismatch')
         if publication_mode == HISTORICAL_ADS10 and request['ready_as_of_date'] != day:
             raise ValueError('ads-historical-ready-target-mismatch')
-        if digest(source) != request['source_sha256']:
+        if not retained and digest(source) != request['source_sha256']:
             raise ValueError('ads-source-drift')
         prepared = datetime.fromisoformat(request['prepared_at'].replace('Z', '+00:00'))
         if prepared.tzinfo is None:
@@ -72,7 +75,16 @@ class AdsPartialPublicationAdapter:
             existing, _ = resolve_ads_snapshot_payload(json.loads(item['payload_json']));kind = (existing or {}).get('kind')
             if kind in ('success', 'empty'):
                 raise ValueError('ads-complete-snapshot-preserved')
-        result = assemble(source, nms, publication_mode=publication_mode)
+        accepted = next((r for r in slots if r['snapshot_role'] == 'accepted_closed_day_snapshot'), None)
+        if retained:
+            if accepted is None or digest(accepted) != request['source_sha256']:
+                raise ValueError('ads-retained-source-drift')
+            result = retained_result(json.loads(accepted['payload_json']), nms, day)
+            captured = datetime.fromisoformat(accepted['captured_at'].replace('Z', '+00:00'))
+            if captured.tzinfo is None or captured > prepared:
+                raise ValueError('ads-retained-source-clock-invalid')
+        else:
+            result = assemble(source, nms, publication_mode=publication_mode)
         observed = datetime.fromisoformat(result.diagnostics['source_observed_at'].replace('Z','+00:00'))
         if observed > prepared: raise ValueError('ads-source-clock-after-preparation')
         params = dated_parameters(conn, day)
@@ -107,6 +119,10 @@ class AdsPartialPublicationAdapter:
                 attempt_count=prior_closure.get('attempt_count', 0),
                 last_attempt_at=prior_closure.get('last_attempt_at'),
                 last_reason='retained_historical_partial_requires_qualified_repair')
+        if retained:
+            closure = next((c for c in closures if c['slot_kind'] == 'yesterday_closed'), None)
+            if closure is None:
+                raise ValueError('ads-retained-closure-missing')
         prestate = {'ready':before,'slots':slots,'closures':closures,'registry':registry,
                     'metrics':[asdict(x) for x in metrics.values()], 'formulas':[asdict(x) for x in formulas.values()],
                     'config':[asdict(x) for x in manual.values()], 'parameters':[asdict(x) for x in params]}
@@ -114,7 +130,8 @@ class AdsPartialPublicationAdapter:
         prestate['parameters'] = json.loads(json.dumps(prestate['parameters'],default=str,sort_keys=True))
         return {'operation_id':operation_id,'date':day,'prestate_sha256':digest(prestate),
             'source_sha256':request['source_sha256'],'before_image':prestate,
-            'slot_after':{'source_key':'ads_compact','snapshot_date':day,'snapshot_role':'accepted_closed_day_snapshot',
+            'preserve_temporal':retained,
+            'slot_after':accepted if retained else {'source_key':'ads_compact','snapshot_date':day,'snapshot_role':'accepted_closed_day_snapshot',
                           'captured_at':request['prepared_at'],'payload_json':payload},
             'closure_after':closure,'ready_after_json':json.dumps(revised,ensure_ascii=False,separators=(',',':')),
             'changes':changes,'observed_campaign_count':len(result.diagnostics['observed_campaign_ids']),
@@ -133,7 +150,9 @@ class AdsPartialPublicationAdapter:
                 candidate = self.build(request, operation_id, conn)
         return {'operation_id':operation_id,'target':str(db),
             'scope':{'date':candidate['date'],'source':'ads_compact','ready_as_of_date':request['ready_as_of_date'],
-                     'changed_cells':len(candidate['changes']),'source_slots':1,'closure_rows':1},
+                     'changed_cells':len(candidate['changes']),
+                     'source_slots':0 if candidate.get('preserve_temporal') else 1,
+                     'closure_rows':0 if candidate.get('preserve_temporal') else 1},
             'prestate_sha256':candidate['prestate_sha256'],'candidate_sha256':digest(candidate),
             'recovery':{'kind':'exact-before-images-and-atomic-rollback','path':str(backup)},'candidate':candidate}
 
@@ -151,8 +170,9 @@ class AdsPartialPublicationAdapter:
                 private_json(backup,image)
                 if digest(json.loads(backup.read_text())) != digest(image): raise ValueError('ads-backup-verification-failed')
                 slot=candidate['slot_after'];closure=candidate['closure_after']
-                conn.execute('INSERT OR REPLACE INTO temporal_source_slot_snapshots('+','.join(slot)+') VALUES('+','.join('?' for _ in slot)+')',tuple(slot.values()))
-                conn.execute('INSERT OR REPLACE INTO temporal_source_closure_state('+','.join(closure)+') VALUES('+','.join('?' for _ in closure)+')',tuple(closure.values()))
+                if not candidate.get('preserve_temporal'):
+                    conn.execute('INSERT OR REPLACE INTO temporal_source_slot_snapshots('+','.join(slot)+') VALUES('+','.join('?' for _ in slot)+')',tuple(slot.values()))
+                    conn.execute('INSERT OR REPLACE INTO temporal_source_closure_state('+','.join(closure)+') VALUES('+','.join('?' for _ in closure)+')',tuple(closure.values()))
                 before=candidate['before_image']['ready']
                 replace_ready(conn,expected=ExpectedReady(before['bundle_version'],before['as_of_date'],before['plan_json']),
                               plan_json=candidate['ready_after_json'],refreshed_at=request['prepared_at'])
@@ -184,6 +204,8 @@ class AdsPartialPublicationAdapter:
                     plan_json=before['ready']['plan_json'],refreshed_at=before['ready']['refreshed_at'])
                 for table, originals, after in (('temporal_source_slot_snapshots',before['slots'],candidate['slot_after']),
                                                 ('temporal_source_closure_state',before['closures'],candidate['closure_after'])):
+                    if candidate.get('preserve_temporal'):
+                        continue
                     keys = (['source_key','snapshot_date','snapshot_role'] if table == 'temporal_source_slot_snapshots'
                             else ['source_key','target_date','slot_kind'])
                     original = next((r for r in originals if all(r[k]==after[k] for k in keys)),None)

@@ -84,6 +84,41 @@ class Tests(unittest.TestCase):
   newer=self.snapshot()
   with self.assertRaisesRegex(ValueError,'after-image-drift'):self.adapter.rollback(self.request,'fixture-newer')
   self.assertEqual(newer,self.snapshot())
+ def retained_fixture(self):
+  from dataclasses import asdict
+  from packages.application.ads_partial_publication import assemble,RETAINED_ACCEPTED_CLOSED
+  payload=asdict(assemble(source(),[101,102]))
+  slot={'source_key':'ads_compact','snapshot_date':DAY,'snapshot_role':'accepted_closed_day_snapshot','captured_at':OBS,'payload_json':json.dumps(payload)}
+  with closing(sqlite3.connect(self.db)) as c,c:
+   c.execute('INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)',tuple(slot.values()))
+   c.execute('INSERT INTO temporal_source_closure_state VALUES(?,?,?,?,?,?,?,?,?,?)',('ads_compact',DAY,'yesterday_closed','closure_retrying',2,'2026-09-12T01:00:00Z','partial',OBS,None,OBS))
+   plan=json.loads(c.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots').fetchone()[0])
+   plan['sheets'][0]['header']=['label','key',DAY,'2026-09-12'];plan['date_columns']=[DAY,'2026-09-12']
+   for row in plan['sheets'][0]['rows']:row[2],row[3]=row[3],row[2]
+   plan['temporal_slots']=[{'slot_key':'yesterday_closed','column_date':DAY},{'slot_key':'today_current','column_date':'2026-09-12'}]
+   plan['sheets'][1]['rows']=[plan['sheets'][1]['rows'][-1]]
+   c.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET as_of_date=?,plan_json=?',(DAY,json.dumps(plan)))
+  self.request.update(publication_mode=RETAINED_ACCEPTED_CLOSED,date=DAY,ready_as_of_date=DAY,source_sha256=digest(slot))
+ def test_retained_source_only_publishes_ready_and_preserves_clocks(self):
+  self.retained_fixture();before=self.snapshot()
+  p=self.adapter.preview(self.request,'fixture-retained');self.assertEqual(self.snapshot(),before)
+  self.assertEqual(p['scope']['source_slots'],0);self.assertEqual(p['scope']['closure_rows'],0)
+  self.adapter.apply(self.request,'fixture-retained',p);after=self.snapshot()
+  self.assertEqual(after[1:],before[1:]);self.assertEqual(self.adapter.readback(self.request,'fixture-retained')['state'],'applied')
+  a,b=json.loads(after[0][0][2]),json.loads(before[0][0][2]);self.assertEqual([r[3] for r in a['sheets'][0]['rows']],[r[3] for r in b['sheets'][0]['rows']])
+  self.assertEqual(a['sheets'][1]['rows'][0],b['sheets'][1]['rows'][0]);self.assertEqual(a['sheets'][1]['rows'][1][1],'incomplete')
+  self.assertEqual(self.adapter.rollback(self.request,'fixture-retained')['state'],'restored');self.assertEqual(self.snapshot(),before)
+ def test_retained_drift_and_unqualified_source_fail_closed(self):
+  self.retained_fixture();p=self.adapter.preview(self.request,'fixture-retained-drift')
+  with closing(sqlite3.connect(self.db)) as c,c:c.execute("UPDATE temporal_source_slot_snapshots SET captured_at='2026-09-11T18:11:00Z'")
+  before=self.snapshot()
+  with self.assertRaisesRegex(ValueError,'retained-source-drift'):self.adapter.apply(self.request,'fixture-retained-drift',p)
+  self.assertEqual(self.snapshot(),before)
+  from packages.application.ads_partial_publication import retained_result
+  payload=json.loads(before[1][0][4])
+  for key,value in [('kind','success'),('snapshot_date','2026-09-10'),('missing_nm_ids',[]),('diagnostics',{})]:
+   bad={**payload,key:value}
+   with self.subTest(key=key),self.assertRaises(ValueError):retained_result(bad,[101,102],DAY)
  def test_actual_clock_and_stale_operands(self):
   self.adapter.now_factory=lambda:datetime(2026,9,11,18,30,tzinfo=timezone.utc)
   with self.assertRaisesRegex(ValueError,'closed-date'):self.adapter.preview(self.request,'fixture-future')

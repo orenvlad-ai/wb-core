@@ -14,6 +14,8 @@ from packages.application.sheet_vitrina_v1_live_plan import TEMPORAL_ROLE_ACCEPT
 from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
 from packages.application.warehouse_sync_lock import warehouse_sync_lock
 from packages.business_time import current_business_date_iso
+from packages.domain.finance_daily_report import validate_finance_daily_projection
+from packages.contracts.fin_report_daily_block import FinReportDailySuccess, FinReportDailyItem, FinReportDailyStorageTotal
 
 CONTROL_FILES = ('.business-data-write-barrier.json', '.auto-updates-policy.json',
                  '.business-data-maintenance.json', '.warehouse-functional-maintenance.json')
@@ -37,6 +39,11 @@ class FinanceDailyPublicationAdapter:
 
     def build(self, request, operation_id, conn):
         runtime, db = self.target(request)
+        mode = request.get('publication_mode', 'acquired_report')
+        if mode == 'retained_accepted_closed':
+            return self.build_retained(request, operation_id, conn, runtime, db)
+        if mode != 'acquired_report':
+            raise ValueError('finance-publication-mode-invalid')
         path = Path(request['source_path']).resolve()
         if not path.is_relative_to(runtime / 'private-evidence') or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
             raise ValueError('finance-private-source-path-invalid')
@@ -87,6 +94,51 @@ class FinanceDailyPublicationAdapter:
             'changes': projection['changes'], 'target_keys': projection['target_keys'],
             'non_target_digest': projection['non_target_digest'], 'roster_nm_ids': nm_ids}
 
+    def build_retained(self, request, operation_id, conn, runtime, db):
+        """Publish a qualified accepted fact without rewriting source or clocks."""
+        day = request['date']
+        now = self.now_factory()
+        prepared = datetime.fromisoformat(request['prepared_at'].replace('Z', '+00:00'))
+        if prepared.tzinfo is None or prepared > now or day >= current_business_date_iso(now):
+            raise ValueError('finance-exact-closed-date-required')
+        registry = dict(conn.execute('SELECT * FROM registry_upload_current_state WHERE slot=1').fetchone())
+        if registry['bundle_version'] != request['bundle_version']:
+            raise ValueError('finance-active-bundle-drift')
+        record = conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?',
+                              (request['bundle_version'], day)).fetchone()
+        if record is None or record['snapshot_id'] != request['snapshot_id']:
+            raise ValueError('finance-dated-ready-identity-drift')
+        before = dict(record); plan = json.loads(before['plan_json']); nm_ids = roster(plan)
+        if nm_ids != request['roster_nm_ids']:
+            raise ValueError('finance-dated-roster-drift')
+        slots = [dict(r) for r in conn.execute("SELECT * FROM temporal_source_slot_snapshots WHERE source_key='fin_report_daily' AND snapshot_date=? ORDER BY snapshot_role", (day,))]
+        closures = [dict(r) for r in conn.execute("SELECT * FROM temporal_source_closure_state WHERE source_key='fin_report_daily' AND target_date=? ORDER BY slot_kind", (day,))]
+        slot = next((r for r in slots if r['snapshot_role'] == TEMPORAL_ROLE_ACCEPTED_CLOSED), None)
+        if slot is None or digest(slot) != request['source_sha256']:
+            raise ValueError('finance-retained-source-drift')
+        payload = json.loads(slot['payload_json'])
+        proof = validate_finance_daily_projection(payload, expected_date=day, expected_nm_ids=nm_ids)
+        payload = payload.get('result', payload)
+        result = FinReportDailySuccess(**{**payload,
+            'items': [FinReportDailyItem(**item) for item in payload['items']],
+            'storage_total': FinReportDailyStorageTotal(**payload['storage_total'])})
+        observed = datetime.fromisoformat(proof['source_observed_at'].replace('Z', '+00:00'))
+        captured = datetime.fromisoformat(slot['captured_at'].replace('Z', '+00:00'))
+        if observed.tzinfo is None or captured.tzinfo is None or max(observed, captured) > prepared:
+            raise ValueError('finance-source-observed-after-preparation')
+        projection = project(plan, result, operation_id, allow_missing_status=True)
+        prestate = {'ready': before, 'slots': slots, 'closures': closures, 'registry': registry,
+                    'authority': capture_authority(runtime, db_path=db)}
+        ready_after = {**before, 'plan_json': json.dumps(projection['plan'], ensure_ascii=False, separators=(',', ':')),
+                       'refreshed_at': request['prepared_at']}
+        return {'operation_id': operation_id, 'date': day, 'prestate_sha256': digest(prestate),
+            'source_sha256': request['source_sha256'], 'before_image': prestate,
+            'preserve_temporal': True, 'slot_after': slot,
+            'closure_after': next((r for r in closures if r['slot_kind'] == 'yesterday_closed'), None),
+            'ready_after': ready_after, 'ready_after_json': ready_after['plan_json'],
+            'changes': projection['changes'], 'target_keys': projection['target_keys'],
+            'non_target_digest': projection['non_target_digest'], 'roster_nm_ids': nm_ids}
+
     def preview(self, request, operation_id):
         runtime, db = self.target(request)
         backup = runtime / 'evidence' / (operation_id + '.finance-before.json')
@@ -100,7 +152,9 @@ class FinanceDailyPublicationAdapter:
                 conn.execute('BEGIN')
                 candidate = self.build(request, operation_id, conn)
         return {'operation_id': operation_id, 'target': str(db),
-            'scope': {'date': candidate['date'], 'source': 'fin_report_daily', 'source_slots': 1, 'closure_rows': 1,
+            'scope': {'date': candidate['date'], 'source': 'fin_report_daily',
+                      'source_slots': 0 if candidate.get('preserve_temporal') else 1,
+                      'closure_rows': 0 if candidate.get('preserve_temporal') else 1,
                       'ready_as_of_date': candidate['date'], 'target_cells': len(candidate['target_keys']),
                       'changed_cells': sum(c['before'] != c['after'] for c in candidate['changes'])},
             'prestate_sha256': candidate['prestate_sha256'], 'candidate_sha256': digest(candidate),
@@ -125,6 +179,8 @@ class FinanceDailyPublicationAdapter:
                     raise ValueError('finance-backup-verification-failed')
                 for table, row in (('temporal_source_slot_snapshots', candidate['slot_after']),
                                    ('temporal_source_closure_state', candidate['closure_after'])):
+                    if candidate.get('preserve_temporal'):
+                        continue
                     conn.execute('INSERT OR REPLACE INTO ' + table + '(' + ','.join(row) + ') VALUES(' + ','.join('?' for _ in row) + ')', tuple(row.values()))
                 before = candidate['before_image']['ready']
                 replace_ready(conn, expected=ExpectedReady(before['bundle_version'], before['as_of_date'], before['plan_json'], candidate['before_image']['authority']),
@@ -187,6 +243,8 @@ class FinanceDailyPublicationAdapter:
                 for table, originals, after, keys in (
                     ('temporal_source_slot_snapshots', before['slots'], candidate['slot_after'], ('source_key', 'snapshot_date', 'snapshot_role')),
                     ('temporal_source_closure_state', before['closures'], candidate['closure_after'], ('source_key', 'target_date', 'slot_kind'))):
+                    if candidate.get('preserve_temporal'):
+                        continue
                     original = next((r for r in originals if all(r[k] == after[k] for k in keys)), None)
                     conn.execute('DELETE FROM ' + table + ' WHERE ' + ' AND '.join(k + '=?' for k in keys), tuple(after[k] for k in keys))
                     if original:
