@@ -597,7 +597,7 @@ def _planning_row(
                             if _proven_legacy_wb(legacy_presentation) else None)
             if legacy_value is not None and legacy_value != "":
                 values[column_date] = legacy_value
-                presentation[column_date] = _legacy_wb_presentation()
+                presentation[column_date] = _legacy_wb_presentation(operand, legacy_presentation)
                 if operand:
                     presentation[column_date]['legacy_wb_operand'] = operand
     if current_date in date_columns:
@@ -951,8 +951,8 @@ def _inapplicable_presentation() -> dict[str, str]:
     }
 
 
-def _legacy_wb_presentation() -> dict[str, str]:
-    return {
+def _legacy_wb_presentation(operand=None, source_presentation=None) -> dict[str, str]:
+    result = {
         "state": "",
         "tone": "success",
         "reason": "",
@@ -961,6 +961,25 @@ def _legacy_wb_presentation() -> dict[str, str]:
         "quality_label": "Остатки WB",
         "quality_reason": INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU,
     }
+    # A WB-only domain does not establish completeness. Retain the dated
+    # source quality for both SKU cells and TOTAL (whose quality is on policy).
+    operand = operand or {}
+    policy = operand.get('policy') or {}
+    source = operand.get('source_cell') or source_presentation or {}
+    for key in ('state', 'tone', 'reason', 'quality_state', 'quality_label', 'quality_reason'):
+        if key in source:
+            result[key] = source[key]
+    if policy.get('state'):
+        result['quality_state'] = policy['state']
+        result['quality_label'] = policy.get('label_ru') or result['quality_label']
+        result['quality_reason'] = policy.get('message_ru') or result['quality_reason']
+    if (policy.get('pagination_complete') is False
+            or result['quality_state'] in {'provisional_received_rows', 'inventory_history_partial'}):
+        result['tone'] = 'neutral'
+        result['quality_state'] = 'inventory_history_partial'
+        result['quality_label'] = 'Полнота WB не подтверждена'
+        result['quality_reason'] = policy.get('message_ru') or source.get('quality_reason') or 'Рассчитано по полученным строкам; полнота WB не подтверждена.'
+    return result
 
 
 def _proven_legacy_wb(presentation):

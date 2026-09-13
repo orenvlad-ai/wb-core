@@ -227,6 +227,12 @@ class ManagementInventoryTests(unittest.TestCase):
             wb = next(r for r in original.rows if r.row_id == 'TOTAL|total_inventory_wb_total_qty_v1')
             self.assertEqual(wb.values_by_date['2026-04-20'], 15)
             self.assertEqual(wb.presentation_by_date['2026-04-20']['legacy_wb_operand']['source_metric'], 'total_wb_stock_fact_qty')
+            for retained in [r for r in original.rows if r.metric_key.removeprefix('total_') == 'inventory_wb_total_qty_v1' and r.values_by_date.get('2026-04-20') != '']:
+                quality = retained.presentation_by_date['2026-04-20']
+                self.assertEqual(quality['quality_state'], 'inventory_history_partial')
+                self.assertNotEqual(quality['tone'], 'success')
+                self.assertIn('Полнота WB не подтверждена', quality['quality_label'])
+                self.assertIn('полнота WB не подтверждена', quality['quality_reason'])
             with closing(sqlite3.connect(fixture.entrypoint.runtime.db_path)) as conn, conn:
                 raw = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date='2026-04-20'").fetchone()[0])
                 raw['metadata'].pop('incident_projection_quality_by_date')
