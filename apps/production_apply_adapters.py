@@ -20,6 +20,7 @@ from apps.web_vitrina_wb_history_recovery import WebVitrinaWbHistoryRecoveryAdap
 from apps.ads_partial_publication import AdsPartialPublicationAdapter
 from apps.finance_daily_publication import FinanceDailyPublicationAdapter
 from apps.web_vitrina_web_source_publication import WebSourcePublicationAdapter
+from apps.inventory_retention_publication import InventoryRetentionPublicationAdapter
 
 
 class Adapter(Protocol):
@@ -29,6 +30,7 @@ class Adapter(Protocol):
 
 
 ADAPTERS: dict[str, Adapter] = {
+    "inventory_retention_publication_v1": InventoryRetentionPublicationAdapter(),
     "web_source_publication_v1": WebSourcePublicationAdapter(),
     "finance_daily_publication_v1": FinanceDailyPublicationAdapter(),
     "ads_partial_publication_v1": AdsPartialPublicationAdapter(),
