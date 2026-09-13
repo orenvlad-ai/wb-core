@@ -46,7 +46,10 @@ class ManagementInventoryTests(unittest.TestCase):
         self.runtime = RegistryUploadDbBackedRuntime(runtime_dir=self.root / 'runtime')
         self.runtime.ingest_bundle(json.loads((ROOT / 'artifacts/registry_upload_http_entrypoint/input/registry_upload_bundle__fixture.json').read_text()), activated_at='2026-09-07T10:00:00Z')
         self.state = self.runtime.load_current_state()
-        self.nms = [c.nm_id for c in self.state.config_v2 if c.enabled][:2]
+        self.prepare_quantities([c.nm_id for c in self.state.config_v2 if c.enabled][:2])
+
+    def prepare_quantities(self, nms):
+        self.nms = nms
         self.target = {'bundle_version': self.state.bundle_version, 'as_of_date': DAY}
         self.book = json.loads(json.dumps(book_fixture(self.nms)).replace('2026-09-08', DAY).replace('2026-09-09', '2026-09-13'))
         for day in (DAY, '2026-09-13'):
@@ -63,6 +66,12 @@ class ManagementInventoryTests(unittest.TestCase):
             self.book['state']['periods'][day] = {'status': 'open', 'snapshot': deepcopy(payload['quantity_snapshot'])}
         self.book['effective_date'] = '2026-09-08'
         self.plan = plan_fixture(self.nms, DAY)
+        # Existing production ready retains the FBS aggregate compatibility row.
+        sheet = self.plan.sheets[0]
+        aggregate_rows = [['FBS', 'TOTAL|total_inventory_fbs_total_qty_v1', 129344]]
+        aggregate_rows += [['FBS', f'SKU:{nm}|inventory_fbs_total_qty_v1', 129344 if nm == self.nms[0] else 0] for nm in self.nms]
+        self.plan = replace(self.plan, sheets=[replace(sheet, rows=sheet.rows + aggregate_rows,
+            row_count=sheet.row_count + len(aggregate_rows)), *self.plan.sheets[1:]])
         self.seed(self.book)
 
     def seed(self, book):
@@ -106,7 +115,10 @@ class ManagementInventoryTests(unittest.TestCase):
         self.assertEqual(selected[0]['scopes']['TOTAL']['wb']['source_watermark'], DAY+'T18:19:00Z')
 
     def test_2_sku_total_api_view_table_and_export_contract(self):
+        self.prepare_quantities([*self.nms, *range(2000000000, 2000000090)])
+        self.assertEqual(len(self.nms), 92)
         expected = {'stock_total': 167189, 'inventory_wb_total_qty_v1': 37845,
+            'inventory_fbs_total_qty_v1': 129344,
             inventory_planning_facility_metric_key('moscow'): 105863, inventory_planning_facility_metric_key('orenburg'): 23481}
         for now in (DAY, '2026-09-13', '2026-09-14'):
             contract = self.contract(now)
@@ -115,7 +127,8 @@ class ManagementInventoryTests(unittest.TestCase):
             view = build_web_vitrina_view_model(contract)
             adapter = asdict(build_web_vitrina_gravity_table_adapter(view))
             for key, value in expected.items():
-                for scope, prefix, number in [('TOTAL', 'total_', value), (f'SKU:{self.nms[0]}', '', value), (f'SKU:{self.nms[1]}', '', 0)]:
+                for scope, prefix, number in [('TOTAL', 'total_', value),
+                        *[(f'SKU:{nm}', '', value if nm == self.nms[0] else 0) for nm in self.nms]]:
                     rid = scope+'|'+prefix+key
                     self.assertEqual(rows[rid].values_by_date[DAY], number)
                     self.assertEqual(rows[rid].presentation_by_date[DAY]['publication_state'], 'preliminary')
@@ -172,6 +185,9 @@ class ManagementInventoryTests(unittest.TestCase):
         self.assertNotEqual(self.read()['dates'][DAY]['capture_id'], before['capture_id'])
         rows = {r.row_id:r for r in self.contract().rows}
         self.assertEqual(rows['TOTAL|total_inventory_wb_total_qty_v1'].values_by_date[DAY], 37846)
+        self.assertEqual(rows['TOTAL|total_inventory_fbs_total_qty_v1'].values_by_date[DAY], 129344)
+        self.assertEqual(rows['TOTAL|total_inventory_fbs_total_qty_v1'].presentation_by_date[DAY]['finalization_id'],
+            self.read()['dates'][DAY]['finalization_id'])
         self.assertEqual(self.read(), self.read())
         self.assertNotIn('2026-09-11', self.read()['dates'])
 
@@ -205,6 +221,7 @@ class ManagementInventoryTests(unittest.TestCase):
         self.assertEqual(scope['facilities']['moscow']['state'], 'missing')
         rows = {r.row_id:r for r in self.contract().rows}
         self.assertEqual(rows['TOTAL|total_stock_total'].presentation_by_date[DAY]['quality_state'], 'inventory_history_partial')
+        self.assertEqual(rows['TOTAL|total_inventory_fbs_total_qty_v1'].values_by_date[DAY], '')
         self.assertEqual(rows['TOTAL|total_'+inventory_planning_facility_metric_key('moscow')].values_by_date[DAY], '')
         with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
             conn.execute('DELETE FROM sheet_vitrina_v1_ready_publications')

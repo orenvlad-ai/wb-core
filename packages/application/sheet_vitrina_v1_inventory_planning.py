@@ -844,6 +844,9 @@ def _historical_metric_value(spec: _MetricSpec, scope: Mapping[str, Any]) -> tup
 def restore_finalized_inventory_history(rows, *, history, current_date):
     """Last quantity-only overlay for final or verified accepted management evidence."""
     specs = _public_metric_specs({}, history=history, include_facilities=True)
+    # Retained plans can contain the compatibility aggregate even though the
+    # public row order no longer adds it. Restore only such existing rows.
+    specs += [spec for spec in _metric_specs({}) if spec.sku_key == INVENTORY_FBS_TOTAL_KEY]
     specs_by_key = {key: spec for spec in specs for key in (spec.sku_key, spec.total_key)}
     result = []
     for row in rows:
