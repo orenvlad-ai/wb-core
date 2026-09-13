@@ -13,8 +13,6 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 
-from playwright.sync_api import sync_playwright
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -328,6 +326,8 @@ def run_browser_checks(
     expected_final_badge_tone: str | None = None,
     run_actions: bool = True,
 ) -> dict[str, object]:
+    from playwright.sync_api import sync_playwright
+
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     if as_of_date:
         page_url = f"{page_url}?history_mode=explicit&as_of_date={as_of_date}"
@@ -449,19 +449,17 @@ def run_browser_checks(
                             f"persisted legacy WB stock row must not render: {metric_key}"
                         )
                 wb_stock_cell = page.locator(
-                    'td[data-quality-state="inventory_history_legacy_wb_exact"]'
+                    'td[data-quality-state="inventory_history_partial"]'
                     f'[data-metric-key="{CURRENT_WB_STOCK_METRIC_KEY}"]'
                     '[data-cell-date="2026-04-20"]'
                 )
-                if wb_stock_cell.count() != 1 or wb_stock_cell.inner_text().strip() != "15":
+                if (wb_stock_cell.count() != 1 or wb_stock_cell.inner_text().strip() != "15◐"
+                        or wb_stock_cell.locator('.inventory-partial-marker').count() != 1):
                     raise AssertionError(
                         "the explicit WB row must retain the historical WB-only value 15 once, "
                         f"got {wb_stock_cell.all_text_contents()}"
                     )
-                quality_phrase = (
-                    "Историческое значение сохранено по прежней формуле; "
-                    "inventory_planning_v1 не применён задним числом."
-                )
+                quality_phrase = "полнота WB не подтверждена"
                 if (
                     quality_phrase not in (
                         wb_stock_cell.get_attribute("title") or ""
@@ -875,6 +873,8 @@ def run_browser_checks(
 
 
 def run_error_state_check(base_url: str, *, ignore_https_errors: bool) -> dict[str, object]:
+    from playwright.sync_api import sync_playwright
+
     page_url = base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
