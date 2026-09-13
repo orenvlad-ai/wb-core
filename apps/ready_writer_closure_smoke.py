@@ -30,6 +30,7 @@ WRITERS = {
     "apps/sheet_vitrina_v1_proxy_v4_reconcile.py",
     "apps/sheet_vitrina_v1_proxy_v4_transit_repair.py",
     "apps/web_vitrina_management_history.py",
+    "apps/web_vitrina_web_source_publication.py",
     "packages/application/registry_upload_db_backed_runtime.py",
     "packages/application/warehouse_functional_economics_backfill.py",
     "packages/application/warehouse_historical_recovery.py",

@@ -355,6 +355,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             displayed_metrics=effective_metrics,
             **presentation_arguments,
         )
+        from packages.application.management_inventory_history import legacy_wb_operands
+        for row_id, cells in legacy_wb_operands(snapshot).items():
+            for day, operand in cells.items():
+                server_cell_presentation.setdefault(row_id, {}).setdefault(day, {})['legacy_wb_operand'] = operand
         rows = _normalize_rows(
             data_sheet.rows,
             date_columns=snapshot.date_columns,
@@ -404,8 +408,9 @@ class SheetVitrinaV1WebVitrinaBlock:
             history_arguments["lifecycle_quality_resolver"] = (
                 lifecycle_quality_resolver
             )
-        inventory_history = read_inventory_history_window(
-            self.runtime.db_path, dates=snapshot.date_columns,
+        from packages.application.management_inventory_history import read_management_inventory_history
+        inventory_history = read_management_inventory_history(
+            self.runtime.db_path, runtime_dir=self.runtime.runtime_dir, plan=snapshot,
             current_date=inventory_current_date, **history_arguments,
         )
         rows = extend_rows_with_inventory_planning(

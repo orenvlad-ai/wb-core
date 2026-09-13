@@ -585,101 +585,106 @@ def read_inventory_history_window(
                 ).fetchone()
             if row is not None:
                 capture_by_date[business_date] = row
-        result_dates: dict[str, Any] = {}
-        facility_catalog: dict[str, dict[str, Any]] = {}
-        for business_date, capture in capture_by_date.items():
-            roster = _loads(capture["facility_roster_json"], [])
-            for item in roster if isinstance(roster, list) else []:
-                if isinstance(item, Mapping) and str(item.get("facility_id") or ""):
-                    facility_catalog[str(item["facility_id"])] = dict(item)
-            rows = conn.execute(
-                f"""SELECT * FROM {COMPONENTS_TABLE}
-                    WHERE capture_id=?
-                    ORDER BY scope_kind,scope_key,component_kind,component_id""",
-                (str(capture["capture_id"]),),
-            ).fetchall()
-            requested_nm_ids = {
-                int(row["nm_id"])
-                for row in rows
-                if row["nm_id"] is not None and int(row["nm_id"]) > 0
-            }
-            source_manifest = _loads(capture["source_manifest_json"], {})
-            typed = source_manifest.get("contract") == QUANTITY_CONTRACT
-            known_bad = (business_date, str(capture["capture_id"]), str(capture["source_digest"])) in KNOWN_BAD_CAPTURES
-            lifecycle_quality = {} if typed else (
-                dict(lifecycle_quality_resolver(business_date, requested_nm_ids))
-                if lifecycle_quality_resolver is not None
-                else fbs_lifecycle_quality_coverage(
-                    conn,
-                    as_of_date=business_date,
-                    requested_nm_ids=requested_nm_ids,
-                )
-            )
-            scopes: dict[str, list[dict[str, Any]]] = {}
-            for row in rows:
-                component = dict(row)
-                component["provenance"] = _loads(component.get("provenance_json"), {})
-                if known_bad and component["component_kind"] == "WB":
-                    component.update(state="missing", quantity=None, diagnostic=REPAIR_REASON)
-                if (
-                    not typed and
-                    str(component["component_kind"]) == "FBS_FACILITY"
-                    and fbs_lifecycle_group_blocked(
-                        lifecycle_quality,
-                        facility_id=str(component["component_id"]),
-                        nm_id=(
-                            None
-                            if component["nm_id"] is None
-                            else int(component["nm_id"])
-                        ),
-                    )
-                ):
-                    component.update(
-                        {
-                            "state": "missing",
-                            "quantity": None,
-                            "source_revision": "lifecycle_identity_coverage_pending",
-                            "source_digest": str(
-                                lifecycle_quality.get("digest") or ""
-                            ),
-                            "source_watermark": "",
-                        }
-                    )
-                scopes.setdefault(str(row["scope_key"]), []).append(component)
-            result_dates[business_date] = {
-                "capture_id": str(capture["capture_id"]),
-                "source_digest": str(capture["source_digest"]),
-                "formula_version": str(capture["formula_version"]),
-                "captured_at": str(capture["captured_at"]),
-                "finalization_id": str(capture["finalization_id"]),
-                "finalization_digest": str(capture["finalization_digest"]),
-                "finalized_at": str(capture["finalized_at"]),
-                "facility_roster": roster,
-                "diagnostic_policy_version": POLICY_VERSION,
-                "scopes": {
-                    scope_key: {**_materialize_scope(components),
-                        "finalization_id": str(capture["finalization_id"]),
-                        "finalization_digest": str(capture["finalization_digest"]),
-                        "typed_quantity": typed, "diagnostic": REPAIR_REASON if known_bad else ""}
-                    for scope_key, components in scopes.items()
-                },
-            }
-        return {
-            "contract": CONTRACT_NAME,
-            "contract_version": CONTRACT_VERSION,
-            "dates": result_dates,
-            "facilities": sorted(
-                facility_catalog.values(),
-                key=lambda item: (
-                    int(item.get("display_order") or 0),
-                    str(item.get("code") or ""),
-                    str(item.get("facility_id") or ""),
-                ),
-            ),
-        }
+        return _materialize_captures(conn, capture_by_date, lifecycle_quality_resolver=lifecycle_quality_resolver)
     finally:
         if owns_connection:
             conn.close()
+
+
+def _materialize_captures(conn, capture_by_date, *, lifecycle_quality_resolver=None):
+    """Render an already selected bounded set; selection policy belongs to the caller."""
+    result_dates: dict[str, Any] = {}
+    facility_catalog: dict[str, dict[str, Any]] = {}
+    for business_date, capture in capture_by_date.items():
+        roster = _loads(capture["facility_roster_json"], [])
+        for item in roster if isinstance(roster, list) else []:
+            if isinstance(item, Mapping) and str(item.get("facility_id") or ""):
+                facility_catalog[str(item["facility_id"])] = dict(item)
+        rows = conn.execute(
+            f"""SELECT * FROM {COMPONENTS_TABLE}
+                WHERE capture_id=?
+                ORDER BY scope_kind,scope_key,component_kind,component_id""",
+            (str(capture["capture_id"]),),
+        ).fetchall()
+        requested_nm_ids = {
+            int(row["nm_id"])
+            for row in rows
+            if row["nm_id"] is not None and int(row["nm_id"]) > 0
+        }
+        source_manifest = _loads(capture["source_manifest_json"], {})
+        typed = source_manifest.get("contract") == QUANTITY_CONTRACT
+        known_bad = (business_date, str(capture["capture_id"]), str(capture["source_digest"])) in KNOWN_BAD_CAPTURES
+        lifecycle_quality = {} if typed else (
+            dict(lifecycle_quality_resolver(business_date, requested_nm_ids))
+            if lifecycle_quality_resolver is not None
+            else fbs_lifecycle_quality_coverage(
+                conn,
+                as_of_date=business_date,
+                requested_nm_ids=requested_nm_ids,
+            )
+        )
+        scopes: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            component = dict(row)
+            component["provenance"] = _loads(component.get("provenance_json"), {})
+            if known_bad and component["component_kind"] == "WB":
+                component.update(state="missing", quantity=None, diagnostic=REPAIR_REASON)
+            if (
+                not typed and
+                str(component["component_kind"]) == "FBS_FACILITY"
+                and fbs_lifecycle_group_blocked(
+                    lifecycle_quality,
+                    facility_id=str(component["component_id"]),
+                    nm_id=(
+                        None
+                        if component["nm_id"] is None
+                        else int(component["nm_id"])
+                    ),
+                )
+            ):
+                component.update(
+                    {
+                        "state": "missing",
+                        "quantity": None,
+                        "source_revision": "lifecycle_identity_coverage_pending",
+                        "source_digest": str(
+                            lifecycle_quality.get("digest") or ""
+                        ),
+                        "source_watermark": "",
+                    }
+                )
+            scopes.setdefault(str(row["scope_key"]), []).append(component)
+        result_dates[business_date] = {
+            "capture_id": str(capture["capture_id"]),
+            "source_digest": str(capture["source_digest"]),
+            "formula_version": str(capture["formula_version"]),
+            "captured_at": str(capture["captured_at"]),
+            "finalization_id": str(capture["finalization_id"]),
+            "finalization_digest": str(capture["finalization_digest"]),
+            "finalized_at": str(capture["finalized_at"]),
+            "facility_roster": roster,
+            "diagnostic_policy_version": POLICY_VERSION,
+            "scopes": {
+                scope_key: {**_materialize_scope(components),
+                    "finalization_id": str(capture["finalization_id"]),
+                    "finalization_digest": str(capture["finalization_digest"]),
+                    "typed_quantity": typed, "diagnostic": REPAIR_REASON if known_bad else ""}
+                for scope_key, components in scopes.items()
+            },
+        }
+    return {
+        "contract": CONTRACT_NAME,
+        "contract_version": CONTRACT_VERSION,
+        "dates": result_dates,
+        "facilities": sorted(
+            facility_catalog.values(),
+            key=lambda item: (
+                int(item.get("display_order") or 0),
+                str(item.get("code") or ""),
+                str(item.get("facility_id") or ""),
+            ),
+        ),
+    }
 
 
 def _materialize_scope(components: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
