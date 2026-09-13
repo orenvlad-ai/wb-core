@@ -52,6 +52,58 @@ def assemble(source, nm_ids):
     return result
 
 
+def _expected_values(result):
+    expected = {f"SKU:{item.nm_id}|{key}": round(finite_money(getattr(item, key)), 6)
+                for item in result.items for key in SKU_METRICS}
+    for key in SKU_METRICS:
+        expected["TOTAL|total_" + key] = round(sum(finite_money(getattr(item, key)) for item in result.items), 6)
+    expected["TOTAL|fin_storage_fee_total"] = round(finite_money(result.storage_total.fin_storage_fee_total), 6)
+    return expected
+
+
+def _presentation_cells(proof, expected, nm_ids, operation_id=None):
+    day = proof["snapshot_date"]
+    cells = {}
+    for key, value in expected.items():
+        scope, metric = key.split("|", 1)
+        cell = {"source": "finance_daily_report_v1", "source_as_of_date": day,
+                "source_observed_at": proof["source_observed_at"], "source_digest": proof["source_digest"],
+                "quality_state": "exact", "completeness_state": "complete", "missing_sku_count": 0,
+                "value_state": "confirmed_zero" if value == 0 else "exact"}
+        if operation_id is not None:
+            cell["operation_id"] = operation_id
+        if scope == "TOTAL":
+            cell["metric_scope_evidence"] = {"operand_date": day,
+                "applicable_scope": [f"SKU:{nm_id}" for nm_id in nm_ids],
+                "missing_scope": [], "sku_metric_keys": [metric.removeprefix("total_")] if metric.startswith("total_") else [],
+                "group_scopes": {}}
+        cells[key] = cell
+    return cells
+
+
+def native_presentation(result, *, day, nm_ids, values):
+    """Describe only values backed by this refresh's qualified dated source.
+
+    Legacy/unavailable reports remain unqualified. No previous plan or recovery
+    operation is carried forward, and this function never changes numeric cells.
+    """
+    diagnostics = getattr(result, "diagnostics", None)
+    has_report = ("finance_report" in diagnostics if isinstance(diagnostics, dict)
+                  else hasattr(diagnostics, "finance_report"))
+    if result is None or not has_report:
+        return {}
+    proof = validate_finance_daily_projection(result, expected_date=day, expected_nm_ids=nm_ids)
+    expected = _expected_values(result)
+    selected = {}
+    for key, value in values.items():
+        if key not in expected or value in (None, ""):
+            continue
+        if round(finite_money(value), 6) != expected[key]:
+            raise ValueError("finance-presentation-source-value-mismatch:" + key)
+        selected[key] = expected[key]
+    return {key: {day: cell} for key, cell in _presentation_cells(proof, selected, nm_ids).items()}
+
+
 def project(plan, result, operation_id, *, allow_missing_status=False):
     """Derive keys from this dated target; reject any incomplete topology."""
     day = result.snapshot_date
@@ -61,11 +113,7 @@ def project(plan, result, operation_id, *, allow_missing_status=False):
     if plan.get("as_of_date") != day or sheet["header"].count(day) != 1:
         raise ValueError("finance-recovery-requires-own-closed-date-ready")
     index = sheet["header"].index(day)
-    expected = {f"SKU:{item.nm_id}|{key}": round(finite_money(getattr(item, key)), 6)
-                for item in result.items for key in SKU_METRICS}
-    for key in SKU_METRICS:
-        expected["TOTAL|total_" + key] = round(sum(finite_money(getattr(item, key)) for item in result.items), 6)
-    expected["TOTAL|fin_storage_fee_total"] = round(finite_money(result.storage_total.fin_storage_fee_total), 6)
+    expected = _expected_values(result)
     actual = [str(row[1]) for row in sheet["rows"] if len(row) > 1 and
               ("|fin_" in str(row[1]) or "|total_fin_" in str(row[1]))]
     if len(actual) != len(set(actual)) or set(actual) != set(expected):
@@ -116,18 +164,7 @@ def project(plan, result, operation_id, *, allow_missing_status=False):
             raise ValueError("finance-status-column-topology")
         matches[0][status["header"].index(key)] = value
     presentations = after.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
-    for key in expected:
-        scope, metric = key.split("|", 1)
-        cell = {"source": "finance_daily_report_v1", "source_as_of_date": day,
-                "source_observed_at": proof["source_observed_at"], "source_digest": proof["source_digest"],
-                "operation_id": operation_id, "quality_state": "exact",
-                "completeness_state": "complete", "missing_sku_count": 0,
-                "value_state": "confirmed_zero" if expected[key] == 0 else "exact"}
-        if scope == "TOTAL":
-            cell["metric_scope_evidence"] = {"operand_date": day,
-                "applicable_scope": [f"SKU:{nm_id}" for nm_id in nm_ids],
-                "missing_scope": [], "sku_metric_keys": [metric.removeprefix("total_")] if metric.startswith("total_") else [],
-                "group_scopes": {}}
+    for key, cell in _presentation_cells(proof, expected, nm_ids, operation_id).items():
         presentations.setdefault(key, {})[day] = cell
     if non_target_digest(plan, day, set(expected)) != non_target_digest(after, day, set(expected)):
         raise ValueError("finance-non-target-change")

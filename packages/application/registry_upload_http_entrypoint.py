@@ -12044,6 +12044,19 @@ def _with_full_refresh_metadata(
     # bundle. Read it by column date, without changing other metrics' preservation.
     statuses = _updated_cell_statuses_by_source_and_date(plan)
     for day in plan.date_columns:
+        if runtime is not None and day < business_date:
+            # Source publication can certify tomorrow's column in yesterday's
+            # ready. Reusing its values must keep their matching dated proof.
+            priors = [previous_plan]
+            try:
+                priors.append(runtime.load_sheet_vitrina_ready_snapshot(
+                    as_of_date=(date.fromisoformat(day) - timedelta(days=1)).isoformat()))
+            except ValueError:
+                pass
+            for prior_source in priors:
+                if prior_source is not None:
+                    plan = _preserve_closed_web_source_presentation(
+                        plan, previous_plan=prior_source, day=day, runtime=runtime)
         unconfirmed = not _source_date_allows_cell_merge(
             statuses, source_key=weighted_price_source(day), as_of_date=day)
         if day >= business_date and not unconfirmed:
@@ -12125,6 +12138,92 @@ def _load_existing_ready_snapshot_for_preservation(
     except ValueError:
         return None, ""
     return previous_plan, str(getattr(previous_status, "refreshed_at", "") or "")
+
+
+def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtime):
+    """Keep existing portal proof only for identical dated accepted operands.
+
+    This does not certify a new source, recalculate values, or carry another
+    metric family's metadata. A newer accepted source owns its own provenance.
+    """
+    groups = {
+        "seller_funnel_snapshot": {
+            "view_count", "open_card_count", "total_view_count", "total_open_card_count"},
+        "web_source_snapshot": {
+            "views_current", "ctr_current", "total_views_current", "avg_ctr_current"},
+    }
+    current = _find_sheet(plan, "DATA_VITRINA")
+    previous = _find_sheet(previous_plan, "DATA_VITRINA")
+    if current is None or previous is None or day not in current.header or day not in previous.header:
+        return plan
+    old_rows = {_row_id(row): row for row in previous.rows}
+    old_cells = previous_plan.metadata.get("server_cell_presentation", {})
+    metadata = deepcopy(plan.metadata)
+    cells = metadata.setdefault("server_cell_presentation", {})
+    index, old_index = current.header.index(day), previous.header.index(day)
+    for source, metrics in groups.items():
+        payload, captured = runtime.load_temporal_source_slot_snapshot(
+            source_key=source, snapshot_date=day, snapshot_role="accepted_closed_day_snapshot")
+        if payload is None or getattr(payload, "kind", None) != "success":
+            continue
+        payload_dates = {getattr(payload, name) for name in ("date", "date_from", "date_to")
+                         if hasattr(payload, name)}
+        if payload_dates != {day}:
+            continue
+        source_stamp = getattr(payload, "source_fetched_at", None) or captured
+        items = {item.nm_id: item for item in payload.items}
+        sku_keys = {key for key in metrics if not key.startswith(("total_", "avg_"))}
+        expected = {f"SKU:{nm}|{metric}": (getattr(item, metric) / 100
+                    if metric == "ctr_current" else getattr(item, metric))
+                    for nm, item in items.items() for metric in sku_keys}
+        if source == "seller_funnel_snapshot":
+            expected.update({"TOTAL|total_" + metric: sum(getattr(item, metric) for item in items.values())
+                             for metric in sku_keys})
+        else:
+            views = sum(item.views_current for item in items.values())
+            expected.update({"TOTAL|total_views_current": views,
+                "TOTAL|avg_ctr_current": round(sum(item.ctr_current * item.views_current
+                    for item in items.values()) / views / 100, 6) if views else ""})
+        group_rows = [row for row in current.rows if _metric_key_from_row_id(_row_id(row)) in metrics]
+        scope = {key.split("|")[0] for key in map(_row_id, group_rows) if key.startswith("SKU:")}
+        missing = scope - {f"SKU:{nm}" for nm in items}
+        group_cells = {}
+        valid = bool(scope) and set(items).issubset({int(key[4:]) for key in scope})
+        for row in group_rows:
+            key = _row_id(row)
+            old = old_rows.get(key)
+            cell = old_cells.get(key, {}).get(day, {})
+            if (old is None or index >= len(row) or old_index >= len(old)
+                or row[index] != old[old_index] or row[index] != expected.get(key, "")
+                or cell.get("source_key") != source or cell.get("source_date") != day
+                or cell.get("source_fetched_at") != source_stamp
+                or cell.get("source_completeness") != "complete"
+                or cell.get("zero_fill_applied") is not False or not cell.get("source_digest")):
+                valid = False
+                break
+            missing_count = len(missing) if key.startswith("TOTAL|") else int(key.split("|")[0] in missing)
+            if (cell.get("missing_sku_count") != missing_count
+                or cell.get("completeness_state") != ("partial" if missing_count else "complete")):
+                valid = False
+                break
+            if key.startswith("TOTAL|"):
+                proof = cell.get("metric_scope_evidence", {})
+                if (proof.get("operand_date") != day or set(proof.get("applicable_scope", [])) != scope
+                    or set(proof.get("missing_scope", [])) != missing):
+                    valid = False
+                    break
+            group_cells[key] = cell
+        # The retained digest identifies the original observation (not the
+        # normalized payload). Its entire group, including missing SKU, must
+        # agree with the same dated accepted source before that proof is reused.
+        if (not valid or len(group_cells) != len(scope) * len(sku_keys) + 2
+            or len({cell["source_digest"] for cell in group_cells.values()}) != 1):
+            continue
+        for key, cell in group_cells.items():
+            existing = cells.setdefault(key, {}).get(day, {})
+            if not existing.get("source_key") and not existing.get("source"):
+                cells[key][day] = deepcopy(cell)
+    return replace(plan, metadata=metadata)
 
 
 def _preserve_unconfirmed_source_cells_from_previous_plan(
