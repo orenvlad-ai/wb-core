@@ -236,10 +236,14 @@ def main() -> int:
             as_of_date="2026-04-20",
         )
         assert not ({row.metric_key for row in historical.rows} & hidden_metric_keys)
+        legacy_wb = next(row for row in historical.rows if row.metric_key == 'total_inventory_wb_total_qty_v1')
+        assert legacy_wb.values_by_date['2026-04-20'] == 15
+        assert legacy_wb.presentation_by_date['2026-04-20']['legacy_wb_operand']['source_metric'] == 'total_wb_stock_fact_qty'
         assert not any(
             value not in (None, "")
             for row in historical.rows
             if is_inventory_planning_presentation_metric_key(row.metric_key)
+            and row.metric_key.removeprefix('total_') != INVENTORY_WB_TOTAL_KEY
             for value in row.values_by_date.values()
         ), "an evidence-free historical window must not gain invented inventory quantities"
         persisted_after = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")

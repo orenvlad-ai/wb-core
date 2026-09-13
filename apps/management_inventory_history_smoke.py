@@ -217,6 +217,27 @@ class ManagementInventoryTests(unittest.TestCase):
             legacy = replace(row, values_by_date={DAY:value}, presentation_by_date={DAY:{'source':source}})
             rows = extend_rows_with_inventory_planning([legacy], planning={}, history={}, date_columns=[DAY], enabled_config=[])
             self.assertEqual(next(r for r in rows if r.metric_key == 'total_inventory_wb_total_qty_v1').values_by_date[DAY], expected)
+        from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer
+        fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True)
+        with fixture:
+            def legacy_contract():
+                return fixture.entrypoint.web_vitrina_block.build(page_route='/sheet-vitrina-v1/vitrina',
+                    read_route='/v1/sheet-vitrina-v1/web-vitrina', as_of_date='2026-04-20')
+            original = legacy_contract()
+            wb = next(r for r in original.rows if r.row_id == 'TOTAL|total_inventory_wb_total_qty_v1')
+            self.assertEqual(wb.values_by_date['2026-04-20'], 15)
+            self.assertEqual(wb.presentation_by_date['2026-04-20']['legacy_wb_operand']['source_metric'], 'total_wb_stock_fact_qty')
+            with closing(sqlite3.connect(fixture.entrypoint.runtime.db_path)) as conn, conn:
+                raw = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date='2026-04-20'").fetchone()[0])
+                raw['metadata'].pop('incident_projection_quality_by_date')
+                for sheet in raw['sheets']:
+                    for r in sheet['rows']:
+                        if str(r[1]).endswith('stock_total'):
+                            r[2] = 167189
+                            raw['metadata']['server_cell_presentation'].setdefault(r[1], {})['2026-04-20'] = {'source': BOOK_SOURCE}
+                conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date='2026-04-20'", (json.dumps(raw),))
+            rejected = next(r for r in legacy_contract().rows if r.row_id == 'TOTAL|total_inventory_wb_total_qty_v1')
+            self.assertEqual(rejected.values_by_date['2026-04-20'], '')
 
     def test_7_paused_lifecycle_failed_new_attempt_and_get_readonly(self):
         real_connect = sqlite3.connect
@@ -260,9 +281,22 @@ class ManagementInventoryTests(unittest.TestCase):
         self.assertNotIn(DAY, self.read()['dates'])
         transition = {'operation_id': 'scoped-ready-recovery', 'phase': 'publication',
             'before_images': {'ready': [before]}, 'after_images': {'ready': [after]}}
+        closure, slots = [], []
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            for source in ('seller_funnel_snapshot', 'web_source_snapshot'):
+                conn.execute("INSERT INTO temporal_source_closure_state(source_key,target_date,slot_kind,state,attempt_count,last_reason,last_success_at,accepted_at) VALUES(?,?,'yesterday_closed','success',1,?,?,?)",
+                    (source, DAY, 'dated_source_recovery:scoped-ready-recovery', CAPTURED, CAPTURED))
+                conn.execute("INSERT INTO temporal_source_slot_snapshots VALUES(?,?,'accepted_closed_day_snapshot',?,?)", (source, DAY, CAPTURED, '{"accepted":true}'))
+            closure = [dict(r) for r in conn.execute('SELECT * FROM temporal_source_closure_state')]
+            slots = [dict(r) for r in conn.execute('SELECT * FROM temporal_source_slot_snapshots')]
+            conn.execute('DELETE FROM temporal_source_closure_state')
+            conn.execute('DELETE FROM temporal_source_slot_snapshots')
+        transition['after_images'].update(closure=closure, slots=slots)
         evidence = self.runtime.runtime_dir / 'evidence' / 'scoped-ready-recovery.before.json'
         evidence.parent.mkdir(exist_ok=True)
-        evidence.write_text(json.dumps({'candidate': transition}))
+        evidence.write_text(json.dumps({'operation_id': transition['operation_id'], 'candidate': transition,
+            'request': {'dates': [DAY], 'phase': 'publication'}}))
         request = {'dates': [DAY], 'ready_target': self.target, 'transition_evidence': str(evidence),
             'transition_evidence_sha256': 'sha256:' + hashlib.sha256(evidence.read_bytes()).hexdigest(),
             'transition_candidate_sha256': fingerprint(transition), 'transition_operation_id': transition['operation_id']}
@@ -270,7 +304,14 @@ class ManagementInventoryTests(unittest.TestCase):
         class Adapter(InventoryRetentionPublicationAdapter):
             def target(self, request):
                 return outer.runtime.runtime_dir.resolve(), outer.runtime.db_path.resolve()
-        adapter = Adapter(); op = 'inventory-retention-fixture'; preview = adapter.preview(request, op)
+        adapter = Adapter(); op = 'inventory-retention-fixture'
+        with self.assertRaisesRegex(ValueError, 'terminal-state-drift'):
+            adapter.preview(request, op)
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+            for table, rows in [('temporal_source_closure_state', closure), ('temporal_source_slot_snapshots', slots)]:
+                for row in rows:
+                    conn.execute('INSERT INTO ' + table + '(' + ','.join(row) + ') VALUES(' + ','.join('?' for _ in row) + ')', tuple(row.values()))
+        preview = adapter.preview(request, op)
         args = dict(adapter_name='fixture', operation_id=op, request=request, adapters={'fixture': adapter},
             expected_prestate=preview['prestate_sha256'], expected_candidate=preview['candidate_sha256'])
         receipt = execute(action='apply', **args)

@@ -590,12 +590,16 @@ def _planning_row(
             values[column_date] = "" if historical_value is None else historical_value
             presentation[column_date] = historical_presentation
             continue
-        if (spec.sku_key == INVENTORY_WB_TOTAL_KEY and legacy_wb_row is not None
-                and _proven_legacy_wb(legacy_wb_row.presentation_by_date.get(column_date, {}))):
-            legacy_value = legacy_wb_row.values_by_date.get(column_date)
+        if spec.sku_key == INVENTORY_WB_TOTAL_KEY and legacy_wb_row is not None:
+            legacy_presentation = legacy_wb_row.presentation_by_date.get(column_date, {})
+            operand = legacy_presentation.get('legacy_wb_operand') or {}
+            legacy_value = (operand.get('value') if operand else legacy_wb_row.values_by_date.get(column_date)
+                            if _proven_legacy_wb(legacy_presentation) else None)
             if legacy_value is not None and legacy_value != "":
                 values[column_date] = legacy_value
                 presentation[column_date] = _legacy_wb_presentation()
+                if operand:
+                    presentation[column_date]['legacy_wb_operand'] = operand
     if current_date in date_columns:
         value, reason, quality, missing_components = _metric_value(spec, value_source)
         values[current_date] = value if value is not None else ""
@@ -961,7 +965,7 @@ def _legacy_wb_presentation() -> dict[str, str]:
 
 def _proven_legacy_wb(presentation):
     """A metric name or absence of typed fields does not certify WB-only stock."""
-    return presentation.get('source') == 'ready_snapshot.stock_total.wb_only'
+    return presentation.get('source') in {'ready_snapshot.stock_total.wb_only', 'stocks'}
 
 
 def _history_unavailable_presentation() -> dict[str, str]:

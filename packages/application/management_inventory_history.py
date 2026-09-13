@@ -27,6 +27,49 @@ def verify_capture_content(conn, capture):
     return preview['capture_id'] == capture['capture_id'] and preview['source_digest'] == capture['source_digest']
 
 
+def legacy_wb_operands(plan):
+    """Read the retained WB fact operand from the dated legacy incident contract.
+
+    Archived fact/incident/effective columns have a defined WB-only domain
+    meaning. Their dated policy evidence survives even though active UI hides
+    the old columns. The public combined stock_total is never the operand.
+    """
+    from packages.application.inventory_quantity import quantity
+    rows = {str(r[1]): r for s in plan.sheets if s.sheet_name == 'DATA_VITRINA' for r in s.rows}
+    metadata = dict(plan.metadata or {})
+    result = {}
+    for day in plan.date_columns:
+        policy = metadata.get('incident_projection_quality_by_date', {}).get(day, {})
+        if not policy.get('policy_revision') or not policy.get('policy_effective_date') or policy['policy_effective_date'] > day:
+            continue
+        index = 2 + plan.date_columns.index(day)
+        for key, row in rows.items():
+            scope, metric = key.split('|', 1)
+            prefix = 'total_' if scope == 'TOTAL' else ''
+            if metric != prefix + 'wb_stock_fact_qty':
+                continue
+            stock_key = scope + '|' + prefix + 'stock_total'
+            fact_meta = metadata.get('server_cell_presentation', {}).get(key, {}).get(day, {})
+            # TOTAL inherited the dated policy record; SKU also retains the
+            # source-owned cell marker. Neither a bare row name nor labels count.
+            if scope != 'TOTAL' and fact_meta.get('source') != 'WebCore incident policy':
+                continue
+            incident = rows.get(scope + '|' + prefix + 'wb_stock_incident_qty')
+            effective = rows.get(scope + '|' + prefix + 'wb_stock_effective_qty')
+            if incident is None or effective is None:
+                continue
+            try:
+                fact, blocked, available = [quantity(v[index]) for v in (row, incident, effective)]
+            except (ValueError, IndexError):
+                continue
+            if fact is None or blocked is None or available is None or fact - blocked != available:
+                continue
+            result.setdefault(stock_key, {})[day] = {'value': fact, 'business_date': day,
+                'source': 'WebCore incident policy', 'source_metric': metric, 'policy': policy,
+                'policy_digest': digest(json.dumps(policy, sort_keys=True)), 'source_cell': fact_meta}
+    return result
+
+
 def read_management_inventory_history(db_path, *, runtime_dir, plan, current_date,
                                       lifecycle_quality_resolver=None):
     """Keep accepted dated quantity evidence without relaxing strict history reads."""

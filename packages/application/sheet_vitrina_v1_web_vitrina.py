@@ -355,6 +355,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             displayed_metrics=effective_metrics,
             **presentation_arguments,
         )
+        from packages.application.management_inventory_history import legacy_wb_operands
+        for row_id, cells in legacy_wb_operands(snapshot).items():
+            for day, operand in cells.items():
+                server_cell_presentation.setdefault(row_id, {}).setdefault(day, {})['legacy_wb_operand'] = operand
         rows = _normalize_rows(
             data_sheet.rows,
             date_columns=snapshot.date_columns,

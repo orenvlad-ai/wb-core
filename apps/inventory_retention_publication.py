@@ -26,6 +26,37 @@ from packages.application.warehouse_sync_lock import warehouse_sync_lock
 
 
 class InventoryRetentionPublicationAdapter(WebVitrinaManagementHistoryAdapter):
+    def completion(self, conn, *, transition, recovery):
+        """The source owner wrote these terminal rows in its ready transaction."""
+        operation = transition['operation_id']
+        retained_request = recovery.get('request', {})
+        if recovery.get('operation_id') != operation or retained_request.get('phase') != 'publication':
+            raise ValueError('inventory-transition-owner-record-missing')
+        pairs = {(source, day) for source in ('seller_funnel_snapshot', 'web_source_snapshot')
+                 for day in retained_request.get('dates', [])}
+        closure = [r for r in transition['after_images'].get('closure', [])
+                   if (r['source_key'], r['target_date']) in pairs and r['slot_kind'] == 'yesterday_closed']
+        slots = [r for r in transition['after_images'].get('slots', [])
+                 if (r['source_key'], r['snapshot_date']) in pairs and r['snapshot_role'] == 'accepted_closed_day_snapshot']
+        if (not pairs or {(r['source_key'], r['target_date']) for r in closure} != pairs
+                or {(r['source_key'], r['snapshot_date']) for r in slots} != pairs
+                or any(r['state'] != 'success' or r['last_reason'] != 'dated_source_recovery:' + operation
+                       or not r['accepted_at'] or r['last_success_at'] != r['accepted_at'] for r in closure)):
+            raise ValueError('inventory-transition-not-completed')
+        proof = {'closure': closure, 'slots': slots}
+        self.check_completion(conn, proof)
+        return proof
+
+    def check_completion(self, conn, proof):
+        for table, key_names, rows in (
+                ('temporal_source_closure_state', ('source_key', 'target_date', 'slot_kind'), proof['closure']),
+                ('temporal_source_slot_snapshots', ('source_key', 'snapshot_date', 'snapshot_role'), proof['slots'])):
+            for expected in rows:
+                actual = conn.execute('SELECT * FROM ' + table + ' WHERE ' + ' AND '.join(k + '=?' for k in key_names),
+                    tuple(expected[k] for k in key_names)).fetchone()
+                if actual is None or dict(actual) != expected:
+                    raise ValueError('inventory-transition-terminal-state-drift')
+
     def candidate(self, request, operation_id, conn):
         runtime, db = self.target(request)
         evidence_path = Path(request['transition_evidence'])
@@ -40,6 +71,7 @@ class InventoryRetentionPublicationAdapter(WebVitrinaManagementHistoryAdapter):
                 or transition['operation_id'] != request['transition_operation_id']
                 or transition['phase'] != 'publication'):
             raise ValueError('inventory-transition-candidate-invalid')
+        completion = self.completion(conn, transition=transition, recovery=recovery)
         target = request['ready_target']
         key = (target['bundle_version'], target['as_of_date'])
         def select(records):
@@ -60,6 +92,7 @@ class InventoryRetentionPublicationAdapter(WebVitrinaManagementHistoryAdapter):
             'transition_operation_id': transition['operation_id'],
             'transition_candidate_sha256': request['transition_candidate_sha256'],
             'transition_evidence_sha256': request['transition_evidence_sha256'],
+            'transition_completion_digest': fingerprint(completion),
             'before_content_digest': digest(before['plan_json']), 'after_content_digest': digest(after['plan_json']), 'dates': {}}
         for day in dates:
             binding = old.metadata.get('fbs_accounting_bindings', {}).get(day)
@@ -111,6 +144,8 @@ class InventoryRetentionPublicationAdapter(WebVitrinaManagementHistoryAdapter):
         # Resolve the large retained evidence before taking the sole writer.
         with readonly(db) as read_conn:
             candidate = self.candidate(request, operation_id, read_conn)
+            recovery = json.loads(Path(request['transition_evidence']).read_text())
+            completion = self.completion(read_conn, transition=recovery['candidate'], recovery=recovery)
         if fingerprint(candidate) != preview['candidate_sha256']:
             raise ValueError('inventory-transition-cas-drift')
         with warehouse_functional_job_lock(runtime, blocking=False), warehouse_sync_lock(runtime, blocking=False), \
@@ -119,6 +154,7 @@ class InventoryRetentionPublicationAdapter(WebVitrinaManagementHistoryAdapter):
                 conn.row_factory = sqlite3.Row
                 conn.execute('BEGIN IMMEDIATE')
                 self.target(request)
+                self.check_completion(conn, completion)
                 target = request['ready_target']
                 row = conn.execute('SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?',
                     (target['bundle_version'], target['as_of_date'])).fetchone()
