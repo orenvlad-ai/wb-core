@@ -237,9 +237,11 @@ def main() -> int:
         )
         assert not ({row.metric_key for row in historical.rows} & hidden_metric_keys)
         assert not any(
-            is_inventory_planning_presentation_metric_key(row.metric_key)
+            value not in (None, "")
             for row in historical.rows
-        ), "an evidence-free historical window must not gain synthetic inventory rows"
+            if is_inventory_planning_presentation_metric_key(row.metric_key)
+            for value in row.values_by_date.values()
+        ), "an evidence-free historical window must not gain invented inventory quantities"
         persisted_after = runtime.load_sheet_vitrina_ready_snapshot(as_of_date="2026-04-20")
         assert persisted_after == before, "hidden legacy rows must remain byte-for-byte in ready history"
     finally:

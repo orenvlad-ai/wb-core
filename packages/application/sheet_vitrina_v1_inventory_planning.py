@@ -590,7 +590,8 @@ def _planning_row(
             values[column_date] = "" if historical_value is None else historical_value
             presentation[column_date] = historical_presentation
             continue
-        if spec.sku_key == INVENTORY_WB_TOTAL_KEY and legacy_wb_row is not None:
+        if (spec.sku_key == INVENTORY_WB_TOTAL_KEY and legacy_wb_row is not None
+                and _proven_legacy_wb(legacy_wb_row.presentation_by_date.get(column_date, {}))):
             legacy_value = legacy_wb_row.values_by_date.get(column_date)
             if legacy_value is not None and legacy_value != "":
                 values[column_date] = legacy_value
@@ -807,10 +808,12 @@ def _historical_metric_value(spec: _MetricSpec, scope: Mapping[str, Any]) -> tup
     value, presentation = _legacy_historical_metric_value(spec, scope)
     if not scope.get("typed_quantity"):
         return value, presentation
-    if spec.sku_key == COMBINED_TOTAL_ALIAS_KEY:
+    if spec.sku_key in {COMBINED_TOTAL_ALIAS_KEY, INVENTORY_FBS_TOTAL_KEY}:
         operands = [scope.get("wb", {}), *scope.get("facilities", {}).values()]
-        semantic = "wb_physical_plus_fbs_available_qty"
-        label = "WB на складе + доступный FBS"
+        if spec.sku_key == INVENTORY_FBS_TOTAL_KEY:
+            operands = list(scope.get("facilities", {}).values())
+        semantic = "wb_physical_plus_fbs_available_qty" if spec.sku_key == COMBINED_TOTAL_ALIAS_KEY else FBS_KIND
+        label = "WB на складе + доступный FBS" if spec.sku_key == COMBINED_TOTAL_ALIAS_KEY else "Доступно FBS по официальному снимку"
     else:
         operands = [component]
         semantic = component.get("provenance", {}).get("semantic_kind", "")
@@ -818,15 +821,24 @@ def _historical_metric_value(spec: _MetricSpec, scope: Mapping[str, Any]) -> tup
     observation = {str(index): item.get("source_watermark", "") for index, item in enumerate(operands)}
     presentation.update({"source": CONTRACT, "inventory_quantity_contract": CONTRACT,
         "semantic_kind": semantic, "unit": "pcs", "source_observed_at": min(observation.values(), default=""),
-        "quantity_sources": operands, "quality_label": label if value is not None else presentation["quality_label"],
-        "quality_reason": label if value is not None else presentation["quality_reason"],
+        "quantity_sources": operands, "quality_label": (
+            label + (' · Частичные данные' if presentation.get('quality_state') == 'inventory_history_partial' else '')
+            if value is not None else presentation["quality_label"]),
+        "quality_reason": (label if value is not None and presentation.get('quality_state') != 'inventory_history_partial'
+                           else presentation['quality_reason']),
         "finalization_id": scope.get("finalization_id", ""),
         "finalization_digest": scope.get("finalization_digest", ""), "diagnostic_policy_version": POLICY_VERSION})
+    if scope.get('accepted_preliminary'):
+        presentation.update(publication_state='preliminary', captured_at=scope['captured_at'],
+            accepted_publication=scope['accepted_publication'])
+        if value is not None:
+            presentation['quality_label'] += ' · Предварительно'
+            presentation['quality_reason'] += ' · Предварительно'
     return value, presentation
 
 
 def restore_finalized_inventory_history(rows, *, history, current_date):
-    """Last quantity-only overlay; dated finalizations win over materialized ready cells."""
+    """Last quantity-only overlay for final or verified accepted management evidence."""
     specs = _public_metric_specs({}, history=history, include_facilities=True)
     specs_by_key = {key: spec for spec in specs for key in (spec.sku_key, spec.total_key)}
     result = []
@@ -837,7 +849,7 @@ def restore_finalized_inventory_history(rows, *, history, current_date):
             continue
         values, presentations = dict(row.values_by_date), dict(row.presentation_by_date)
         for day, dated in history.get("dates", {}).items():
-            if day == current_date or day not in values or not dated.get("finalization_id"):
+            if day not in values or not (dated.get("finalization_id") or dated.get('accepted_publication')):
                 continue
             scope = dated.get("scopes", {}).get(row.scope_key)
             if scope is None or not (scope.get("typed_quantity") or scope.get("diagnostic")):
@@ -853,6 +865,18 @@ def _legacy_historical_metric_value(
     spec: _MetricSpec,
     scope: Mapping[str, Any],
 ) -> tuple[int | None, dict[str, Any]]:
+    if spec.sku_key == INVENTORY_FBS_TOTAL_KEY:
+        components = [c for c in scope.get('facilities', {}).values() if c.get('state') != 'inapplicable']
+        known = [c['value'] for c in components if c.get('state') in {'exact', 'exact_zero'}]
+        if not known:
+            return None, _history_unavailable_presentation()
+        missing = [c['label'] for c in components if c.get('state') == 'missing']
+        presentation = _exact_history_presentation()
+        if missing:
+            reason = 'Отсутствуют компоненты: ' + ', '.join(missing)
+            presentation.update(quality_state='inventory_history_partial', quality_label='Частичные данные',
+                quality_reason=reason, reason=reason, missing_components=', '.join(missing), tone='neutral')
+        return sum(known), presentation
     if spec.sku_key == COMBINED_TOTAL_ALIAS_KEY:
         value = scope.get("total")
         quality = str(scope.get("quality") or "unavailable")
@@ -933,6 +957,11 @@ def _legacy_wb_presentation() -> dict[str, str]:
         "quality_label": "Остатки WB",
         "quality_reason": INVENTORY_PLANNING_LEGACY_HISTORY_REASON_RU,
     }
+
+
+def _proven_legacy_wb(presentation):
+    """A metric name or absence of typed fields does not certify WB-only stock."""
+    return presentation.get('source') == 'ready_snapshot.stock_total.wb_only'
 
 
 def _history_unavailable_presentation() -> dict[str, str]:
