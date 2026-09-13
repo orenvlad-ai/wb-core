@@ -456,6 +456,7 @@ class SlotLookups:
     sku_action_error: str = ""
     column_date: str = ""
     order_price_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    fin_report_daily_result: Any = None
 
 
 @dataclass(frozen=True)
@@ -1573,6 +1574,8 @@ class SheetVitrinaV1LivePlanBlock:
                 "server_cell_presentation": _merge_cell_presentations(
                     evaluator_scope_presentation(rows=data_rows, slots=temporal_slots,
                         evaluator=evaluator, current_date=current_date),
+                    _finance_daily_cell_presentation(rows=data_rows, slots=temporal_slots,
+                        live_sources=live_sources, nm_ids=[item.nm_id for item in enabled_config]),
                     weighted_price_presentation(slots=temporal_slots,
                         evaluator=evaluator, current_date=current_date),
                     ads_partial_presentation(
@@ -2016,6 +2019,7 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "ads_compact":
                     current_lookups.ads_compact_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "fin_report_daily":
+                    current_lookups.fin_report_daily_result = payload
                     current_lookups.fin_lookup = _index_items_by_nm_id(payload)
                     storage_total = getattr(payload, "storage_total", None)
                     if storage_total is not None:
@@ -6242,6 +6246,17 @@ def _own_product_capital_cell_presentation(
                     "source": "WebCore",
                 }
     return result
+
+
+def _finance_daily_cell_presentation(*, rows, slots, live_sources, nm_ids):
+    from packages.application.finance_daily_publication import native_presentation
+    presentations = []
+    for index, slot in enumerate(slots, start=2):
+        lookup = live_sources.slot_lookups.get(slot.slot_key)
+        presentations.append(native_presentation(
+            getattr(lookup, "fin_report_daily_result", None), day=slot.column_date,
+            nm_ids=sorted(nm_ids), values={str(row[1]): row[index] for row in rows}))
+    return _merge_cell_presentations(*presentations)
 
 
 def _merge_cell_presentations(
