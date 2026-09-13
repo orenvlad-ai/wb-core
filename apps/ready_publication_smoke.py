@@ -49,13 +49,21 @@ def clock(now=NOW):
         yield
 
 
-def make_book(root, *, quantity="1000", opening=False, now=NOW):
+def make_book(root, *, quantity="1000", opening=False, now=NOW, typed=False):
     day = current_business_date_iso(now)
     stamp = now.isoformat().replace("+00:00", "Z")
     image = capture(day, quantity=quantity, docs=[] if opening else [document(day=day)], timestamp=stamp)
     image["captured_at"] = stamp
-    image["source_digest"] = fingerprint({key: value for key, value in image.items() if key != "source_digest"})
     component = wb(day)
+    if typed:
+        image["quantity_snapshot"].update(source="official_fbs_stock_snapshot_v1", facility_evidence={
+            "ff-1": {"facility_name": "Fixture", "stock_run_id": "run-" + day,
+                "stock_digest": "digest-" + day, "mapping_id": "mapping-1", "captured_at": stamp}})
+        component.update(source={"snapshot_date": day, "fetched_at": stamp},
+            authority_complete=True, requested_nm_ids=[1])
+        component["rows"][0]["components"] = {"physical": "500"}
+        component["source_digest"] = fingerprint({key: value for key, value in component.items() if key != "source_digest"})
+    image["source_digest"] = fingerprint({key: value for key, value in image.items() if key != "source_digest"})
     with patch.object(book, "capture_current", return_value=image), \
          patch.object(book, "capture_wb_component", return_value=component), \
          patch.object(book, "capture_retained_stages", return_value=retained(component)):
@@ -186,15 +194,96 @@ class PublicationTests(unittest.TestCase):
                 return list(conn.iterdump()), list(books.iterdump())
 
         before = state()
-        # Exercise both the ordinary current caller and the writer admission.
-        for direct in (False, True):
-            with clock(now), patch.object(book, "prepare", return_value=prepared):
-                with self.assertRaisesRegex(publication.ReadyPublicationConflict, "current_book_target_missing_date"):
-                    if direct:
-                        save(self.runtime, historical, prepared=prepared, now=now)
-                    else:
-                        book.refresh(self.root, ready_runtime=self.runtime)
-            self.assertEqual(state(), before)
+        with self.assertRaisesRegex(publication.ReadyPublicationConflict, "current_book_target_missing_date"):
+            save(self.runtime, historical, prepared=prepared, now=now)
+        self.assertEqual(state(), before)
+
+    def _seed_rollover(self):
+        from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+        SheetVitrinaV1LivePlanBlock(self.runtime)  # Seed ordinary parameter defaults.
+        initial_now = datetime(2026, 9, 12, 14, tzinfo=timezone.utc)
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute("""INSERT INTO sheet_vitrina_v1_nomenclature_items(
+                item_id,nm_id,nomenclature_name,product_type,match_key,aliases_json,is_active,is_hidden,created_at,updated_at)
+                VALUES('item-1',1,'Fixture','Fixture','fixture','[]',1,0,?,?)""", (STAMP, STAMP))
+        prior = make_plan("2026-09-11", "2026-09-12")
+        prior = replace(prior, metadata={"server_cell_presentation": {
+            "SKU:1|foreign_metric": {"2026-09-12": {
+                "source": "accepted_fixture", "source_as_of_date": "2026-09-12", "value": 159}}}})
+        save(self.runtime, prior, now=initial_now)
+        initial, expected = make_book(self.root, opening=True, now=initial_now, typed=True)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        return prior
+
+    def test_warehouse_rollover_builds_current_target_without_external_sources(self):
+        from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock
+        from packages.application.calculation_parameters_v4 import ProxyV4ParametersBlock
+        prior = self._seed_rollover()
+        protected = self.runtime.load_sheet_vitrina_ready_snapshot("2026-09-11")
+        for current_day, previous_day in ((13, 12), (14, 13)):
+            # UTC is still the previous date: the target follows business time.
+            now = datetime(2026, 9, current_day - 1, 23, 37, tzinfo=timezone.utc)
+            prepared = make_book(self.root, quantity="900", now=now, typed=True)
+            with clock(now), patch.object(book, "prepare", return_value=prepared), \
+                 patch.object(SheetVitrinaV1LivePlanBlock, "_capture_slot_source", side_effect=AssertionError("external source")), \
+                 patch.object(SheetVitrinaV1LivePlanBlock, "_sync_current_web_source_snapshot", side_effect=AssertionError("web sync")), \
+                 patch.object(ProxyV4ParametersBlock, "materialize_latest_confirmed_window", side_effect=AssertionError("rollover")):
+                result = book.refresh(self.root, ready_runtime=self.runtime)
+            day, outer = f"2026-09-{current_day}", f"2026-09-{previous_day}"
+            plan = self.runtime.load_sheet_vitrina_ready_snapshot(outer)
+            self.assertEqual(plan.date_columns, [outer, day])
+            receipt = book.current_publication_receipt(self.runtime, now=now)
+            self.assertEqual((receipt["operation_id"], receipt["business_date"]), (result["operation_id"], day))
+            self.assertEqual(plan.metadata["fbs_accounting_bindings"][day]["book_version"], book.load(self.root)[1])
+            self.assertEqual(plan.metadata["fbs_accounting_bindings"][day]["ready_target"]["as_of_date"], outer)
+            row = next(r for s in plan.sheets if s.sheet_name == "DATA_VITRINA" for r in s.rows if r[1] == "SKU:1|foreign_metric")
+            self.assertEqual(row[-1], "")  # No yesterday-to-today copy.
+            if current_day == 13:
+                self.assertEqual(row[-2], 159)
+                self.assertEqual(plan.metadata["server_cell_presentation"][row[1]][outer], prior.metadata["server_cell_presentation"][row[1]][outer])
+            self.assertEqual(self.runtime.load_sheet_vitrina_ready_snapshot("2026-09-11"), protected)
+
+    def test_current_target_with_wrong_columns_still_fails_before_book_commit(self):
+        self._seed_rollover()
+        now = datetime(2026, 9, 13, 1, tzinfo=timezone.utc)
+        malformed = replace(make_plan("2026-09-11", "2026-09-12"), as_of_date="2026-09-12")
+        with sqlite3.connect(self.runtime.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            publication.replace_ready(conn, expected=publication.ExpectedReady(self.current.bundle_version, "2026-09-12", None),
+                plan_json=dbmod._serialize_sheet_vitrina_plan(malformed), activated_at=STAMP,
+                snapshot_id=malformed.snapshot_id, plan_version=malformed.plan_version, refreshed_at=STAMP)
+        prepared = make_book(self.root, quantity="900", now=now)
+        before = book.load(self.root)[1]
+        with clock(now), patch.object(book, "prepare", return_value=prepared):
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, "current_book_target_missing_date"):
+                book.refresh(self.root, ready_runtime=self.runtime)
+        self.assertEqual(book.load(self.root)[1], before)
+
+    def test_rollover_rejects_changed_predecessor_and_new_target(self):
+        for changed_target in (False, True):
+            with self.subTest(changed_target=changed_target), TemporaryDirectory() as temporary:
+                original_root, original_runtime, original_current = self.root, self.runtime, self.current
+                self.root = Path(temporary); self.runtime = seed(self.root); self.current = self.runtime.load_current_state()
+                try:
+                    self._seed_rollover()
+                    now = datetime(2026, 9, 13, 1, tzinfo=timezone.utc)
+                    prepared = make_book(self.root, quantity="900", now=now)
+                    before = book.load(self.root)[1]
+                    def changed(*args, **kwargs):
+                        target = "2026-09-12" if changed_target else "2026-09-11"
+                        expected = self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=self.current.bundle_version, as_of_date=target)
+                        with sqlite3.connect(self.runtime.db_path) as conn:
+                            conn.execute("BEGIN IMMEDIATE")
+                            publication.replace_ready(conn, expected=expected,
+                                plan_json=dbmod._serialize_sheet_vitrina_plan(make_plan(target, "2026-09-13")),
+                                activated_at=STAMP, snapshot_id="changed", plan_version="changed", refreshed_at=STAMP)
+                        return prepared
+                    with clock(now), patch.object(book, "prepare", side_effect=changed):
+                        with self.assertRaisesRegex(publication.ReadyPublicationConflict, "ready_(target_changed|history_changed_during_build)"):
+                            book.refresh(self.root, ready_runtime=self.runtime)
+                    self.assertEqual(book.load(self.root)[1], before)
+                finally:
+                    self.root, self.runtime, self.current = original_root, original_runtime, original_current
 
     def test_exact_raw_cas_and_first_insert_real_processes(self):
         for first in (True, False):
