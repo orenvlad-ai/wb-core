@@ -144,3 +144,10 @@ presentations remain incomplete with unknown SKU impact where unproven. Current
 catalog observations are not proof of a complete historical campaign roster;
 missing contributions remain unknown and are never zero-filled. Adjacent dated
 readies and Finance source/closure/values are outside this write-set.
+
+The `retained_accepted_closed` mode publishes the canonical accepted closed-date
+partial observation into that date's own ready. It pins the entire source row,
+validates its date, roster, partial proof and amounts, and preserves source,
+closure and their clocks. Only Ads, dependent economics and their dated status
+and presentation may change. Missing SKU contributions remain blank, including
+formula branches that would otherwise turn a missing Ads operand into zero.

@@ -52,7 +52,7 @@ def assemble(source, nm_ids):
     return result
 
 
-def project(plan, result, operation_id):
+def project(plan, result, operation_id, *, allow_missing_status=False):
     """Derive keys from this dated target; reject any incomplete topology."""
     day = result.snapshot_date
     nm_ids = roster(plan)
@@ -89,6 +89,19 @@ def project(plan, result, operation_id):
         raise ValueError("finance-status-topology")
     status = statuses[0]
     matches = [r for r in status["rows"] if r and r[0] == STATUS_KEY]
+    if not matches and allow_missing_status:
+        added = ["" for _ in status["header"]]
+        if not added or status["header"][0] != "source_key":
+            raise ValueError("finance-status-column-topology")
+        added[0] = STATUS_KEY
+        status["rows"].append(added)
+        matches = [added]
+        if "row_count" in status:
+            from packages.application.sheet_vitrina_v1 import _column_name
+            if status.get("write_start_cell") != "A1":
+                raise ValueError("finance-status-start-cell-invalid")
+            status.update(row_count=len(status["rows"]), column_count=len(status["header"]),
+                          write_rect=f"A1:{_column_name(len(status['header']))}{len(status['rows']) + 1}")
     if len(matches) != 1:
         raise ValueError("finance-closed-status-topology")
     values = {"source_key": STATUS_KEY, "kind": "success", "freshness": day,
@@ -102,6 +115,20 @@ def project(plan, result, operation_id):
         if status["header"].count(key) != 1 or len(matches[0]) <= status["header"].index(key):
             raise ValueError("finance-status-column-topology")
         matches[0][status["header"].index(key)] = value
+    presentations = after.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
+    for key in expected:
+        scope, metric = key.split("|", 1)
+        cell = {"source": "finance_daily_report_v1", "source_as_of_date": day,
+                "source_observed_at": proof["source_observed_at"], "source_digest": proof["source_digest"],
+                "operation_id": operation_id, "quality_state": "exact",
+                "completeness_state": "complete", "missing_sku_count": 0,
+                "value_state": "confirmed_zero" if expected[key] == 0 else "exact"}
+        if scope == "TOTAL":
+            cell["metric_scope_evidence"] = {"operand_date": day,
+                "applicable_scope": [f"SKU:{nm_id}" for nm_id in nm_ids],
+                "missing_scope": [], "sku_metric_keys": [metric.removeprefix("total_")] if metric.startswith("total_") else [],
+                "group_scopes": {}}
+        presentations.setdefault(key, {})[day] = cell
     if non_target_digest(plan, day, set(expected)) != non_target_digest(after, day, set(expected)):
         raise ValueError("finance-non-target-change")
     return {"plan": after, "changes": changes, "target_keys": sorted(expected),
@@ -117,7 +144,16 @@ def non_target_digest(plan, day, keys):
             row[index] = "<finance-target>"
     for status in copy["sheets"]:
         if status["sheet_name"] == "STATUS":
-            for row in status["rows"]:
-                if row and row[0] == STATUS_KEY:
-                    row[:] = [STATUS_KEY, "<finance-status-target>"]
+            status["rows"] = [row for row in status["rows"] if not row or row[0] != STATUS_KEY]
+            for key in ("row_count", "column_count", "write_rect"):
+                status.pop(key, None)
+    metadata = copy.get("metadata", {})
+    cells = metadata.get("server_cell_presentation", {})
+    for key in keys:
+        if key in cells:
+            cells[key].pop(day, None)
+            if not cells[key]:
+                cells.pop(key)
+    if not cells:
+        metadata.pop("server_cell_presentation", None)
     return digest(copy)

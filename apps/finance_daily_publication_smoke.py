@@ -127,6 +127,68 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'cas-drift'): self.adapter.apply(self.request, 'fixture-finance-drift', preview)
         self.assertEqual(before, self.state())
 
+    def retained_request(self):
+        from dataclasses import asdict
+        result = assemble(self.src, NMS)
+        slot = {'source_key': 'fin_report_daily', 'snapshot_date': DAY,
+                'snapshot_role': 'accepted_closed_day_snapshot', 'captured_at': OBS,
+                'payload_json': json.dumps(asdict(result))}
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute('INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)', tuple(slot.values()))
+            c.execute('INSERT INTO temporal_source_closure_state VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      ('fin_report_daily', DAY, 'yesterday_closed', 'success', 2, None, 'accepted', OBS, OBS, OBS))
+            p = plan(); p['sheets'][1]['rows'].pop(0)
+            p['sheets'][1].update(row_count=1,column_count=11,write_start_cell='A1',write_rect='A1:K2')
+            p['metadata']['server_cell_presentation'] = {'TOTAL|total_fin_buyout_rub': {
+                DAY: {'completeness_state': 'partial', 'missing_sku_count': 92,
+                      'metric_scope_evidence': {'operand_date': DAY, 'missing_scope': ['SKU:' + str(n) for n in NMS]}},
+                '2026-09-11': {'source': 'untouched-neighbour'}}}
+            c.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=?', (json.dumps(p),))
+        return {**self.request, 'publication_mode': 'retained_accepted_closed', 'source_sha256': digest(slot)}
+
+    def test_retained_accepted_preserves_temporal_and_adds_missing_status(self):
+        request = self.retained_request(); before = self.state()
+        preview = self.adapter.preview(request, 'fixture-finance-retained')
+        self.assertEqual(self.state(), before)
+        self.assertEqual(preview['scope']['source_slots'], 0)
+        self.assertEqual(preview['scope']['closure_rows'], 0)
+        self.assertEqual(preview['scope']['changed_cells'], 466)
+        self.adapter.apply(request, 'fixture-finance-retained', preview)
+        self.assertEqual(self.state()[1:], before[1:])
+        self.assertEqual(self.adapter.readback(request, 'fixture-finance-retained')['verified_cells'], 466)
+        after = json.loads(self.state()[0][0][2])
+        self.assertEqual(after['sheets'][1]['rows'][0], plan()['sheets'][1]['rows'][1])
+        self.assertEqual(after['sheets'][1]['rows'][1][0:2], [STATUS_KEY, 'success'])
+        self.assertEqual(after['sheets'][1]['row_count'], 2)
+        self.assertEqual(after['sheets'][1]['write_rect'], 'A1:K3')
+        cell = after['metadata']['server_cell_presentation']['TOTAL|total_fin_buyout_rub']
+        self.assertEqual(cell[DAY]['completeness_state'], 'complete')
+        self.assertEqual(cell[DAY]['metric_scope_evidence']['missing_scope'], [])
+        self.assertEqual(cell['2026-09-11'], {'source': 'untouched-neighbour'})
+        self.assertEqual([r[3] for r in after['sheets'][0]['rows']], [r[3] for r in plan()['sheets'][0]['rows']])
+        self.assertEqual(self.adapter.rollback(request, 'fixture-finance-retained')['state'], 'restored')
+        self.assertEqual(self.state(), before)
+
+    def test_retained_source_drift_and_unqualified_payload_are_rejected(self):
+        request = self.retained_request()
+        preview = self.adapter.preview(request, 'fixture-retained-drift')
+        with closing(sqlite3.connect(self.db)) as c, c:
+            c.execute("UPDATE temporal_source_slot_snapshots SET captured_at='2026-09-11T12:01:00Z'")
+        before = self.state()
+        with self.assertRaisesRegex(ValueError, 'retained-source-drift'):
+            self.adapter.apply(request, 'fixture-retained-drift', preview)
+        self.assertEqual(self.state(), before)
+        from dataclasses import asdict
+        for field, value in [('kind', 'incomplete'), ('snapshot_date', '2026-09-09'), ('diagnostics', {})]:
+            payload = asdict(assemble(self.src, NMS)); payload[field] = value
+            slot = dict(zip(('source_key','snapshot_date','snapshot_role','captured_at','payload_json'), before[1][0]))
+            slot['payload_json'] = json.dumps(payload)
+            with closing(sqlite3.connect(self.db)) as c, c:
+                c.execute('UPDATE temporal_source_slot_snapshots SET payload_json=?', (slot['payload_json'],))
+            request['source_sha256'] = digest(slot)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.adapter.preview(request, 'fixture-retained-invalid')
+
     def test_failure_is_atomic_and_rollback_checks_later_writes(self):
         before = self.state(); preview = self.adapter.preview(self.request, 'fixture-finance-fail')
         with patch('apps.finance_daily_publication.replace_ready', side_effect=RuntimeError('injected failure')):

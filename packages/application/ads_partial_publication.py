@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
 import json
+import math
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -17,6 +18,41 @@ from packages.contracts.source_attempt_diagnostics import source_digest
 
 RETAINED_CLOSED_DAY = 'retained_closed_day'
 HISTORICAL_ADS10 = 'historical_ads10'
+RETAINED_ACCEPTED_CLOSED = 'retained_accepted_closed'
+
+
+def retained_result(payload, nm_ids, day):
+    """Admit only the exact persisted partial observation and its known scope."""
+    from packages.contracts.ads_compact_block import AdsCompactPartial, AdsCompactItem
+    d = payload.get('diagnostics', {})
+    if (day < '2026-09-11' or payload.get('snapshot_date') != day or payload.get('kind') != 'incomplete'
+            or d.get('source_date') != day or d.get('partial_observation_contract') != 'ads_partial_observed_v1'
+            or d.get('completeness_state') != 'partial' or d.get('dated_roster_state') != 'unqualified'
+            or d.get('zero_fill_applied') is not False or d.get('missing_sku_count') is not None
+            or d.get('affected_nm_ids') is not None or not d.get('observed_campaign_ids')
+            or not isinstance(d.get('source_digest'), str) or not d['source_digest'].startswith('sha256:')
+            or not d.get('source_observed_at')):
+        raise ValueError('ads-retained-partial-proof-invalid')
+    items = payload.get('items', [])
+    ids = [i['nm_id'] for i in items]
+    if (not items or any(type(n) is not int or n <= 0 for n in ids)
+            or len(ids) != len(set(ids)) or not set(ids).issubset(nm_ids)
+            or payload.get('count') != len(ids) or payload.get('covered_count') != len(ids)
+            or payload.get('requested_count') != len(nm_ids)
+            or payload.get('missing_nm_ids') != sorted(set(nm_ids) - set(ids))):
+        raise ValueError('ads-retained-roster-invalid')
+    for item in items:
+        for f in FIELDS:
+            value = item['ads_' + f]
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError('ads-retained-value-invalid')
+            if f in COUNTS and (value != int(value) or checked_ads_count(value) != value):
+                raise ValueError('ads-retained-count-invalid')
+        for field, numerator, denominator in (('ads_cpc','ads_sum','ads_clicks'), ('ads_ctr','ads_clicks','ads_views'), ('ads_cr','ads_orders','ads_clicks')):
+            expected = item[numerator] / item[denominator] if item[denominator] > 0 else None
+            if item[field] != expected:
+                raise ValueError('ads-retained-ratio-invalid')
+    return AdsCompactPartial(**{**payload, 'items': [AdsCompactItem(**item) for item in items]})
 
 
 def assemble(source, nm_ids, *, publication_mode=RETAINED_CLOSED_DAY):
@@ -127,6 +163,17 @@ def project(plan, *, result, config, metrics, formulas, parameters, operation_id
     slots_by_key = {s['slot_key']:s['column_date'] for s in working.get('temporal_slots', [])}
     for status_sheet in working['sheets']:
         if status_sheet['sheet_name'] != 'STATUS': continue
+        day_keys = [key for key, value in slots_by_key.items() if value == day]
+        if len(day_keys) == 1 and not any(row and row[0] == 'ads_compact[' + day_keys[0] + ']' for row in status_sheet['rows']):
+            if not status_sheet['header'] or status_sheet['header'][0] != 'source_key':
+                raise ValueError('ads-status-topology-invalid')
+            status_sheet['rows'].append(['ads_compact[' + day_keys[0] + ']'] + [''] * (len(status_sheet['header']) - 1))
+            if 'row_count' in status_sheet:
+                from packages.application.sheet_vitrina_v1 import _column_name
+                if status_sheet.get('write_start_cell') != 'A1':
+                    raise ValueError('ads-status-start-cell-invalid')
+                status_sheet.update(row_count=len(status_sheet['rows']),column_count=len(status_sheet['header']),
+                    write_rect=f"A1:{_column_name(len(status_sheet['header']))}{len(status_sheet['rows']) + 1}")
         for row in status_sheet['rows']:
             old = dict(zip(status_sheet['header'], row))
             source_key = str(old.get('source_key', ''))

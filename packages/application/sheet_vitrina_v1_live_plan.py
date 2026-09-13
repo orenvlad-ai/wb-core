@@ -3346,6 +3346,12 @@ class _MetricEvaluator:
         if metric is None:
             raise ValueError(f"metric_key missing in current registry: {metric_key}")
 
+        if (metric_key != "ads_sum" and metric_key in self.ads_dependent_metrics
+                and self._partial_ads_slot(temporal_slot)
+                and self.resolve_sku("ads_sum", nm_id, temporal_slot) is None):
+            self.sku_cache[cache_key] = None
+            return None
+
         if metric.calc_type == "metric":
             if metric.calc_ref != metric.metric_key:
                 value = self.resolve_sku(metric.calc_ref, nm_id, temporal_slot)

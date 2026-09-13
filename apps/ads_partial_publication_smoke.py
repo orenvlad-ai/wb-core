@@ -92,6 +92,7 @@ class Tests(unittest.TestCase):
         formulas={x['formula_id']:FormulaV2Item(**x) for x in json.loads((ROOT/'artifacts/sheet_vitrina_v1_registry_seed_v3_bootstrap/input/formulas_v3_seed__fixture.json').read_text())['items']}
         def m(key,scope,kind,ref):return MetricV2Item(key,True,scope,key,kind,ref,True,'number',1,'ads')
         metrics={x.metric_key:x for x in [m('orderSum','SKU','metric','orderSum'),m('ads_sum','SKU','metric','ads_sum'),m('total_orderSum','TOTAL','metric','orderSum'),m('total_ads_sum','TOTAL','metric','ads_sum'),m('drr','TOTAL','formula','F_ADS_ROAS_TOTAL'),m('drr_group','GROUP','formula','F_ADS_ROAS')]}
+        metrics['drr_sku']=m('drr_sku','SKU','formula','F_ADS_ROAS')
         slot=NS(slot_key='today_current',column_date=DAY)
         status=NS(source_key='ads_compact',kind='incomplete',temporal_slot=slot.slot_key,column_date=DAY,diagnostics=partial().diagnostics)
         evaluator=_MetricEvaluator(enabled_config=[ConfigV2Item(101,True,'A','g',1),ConfigV2Item(102,True,'B','g',2)],metrics_by_key=metrics,formulas_by_id=formulas,live_sources=NS(statuses=[status]))
@@ -99,6 +100,7 @@ class Tests(unittest.TestCase):
         evaluator._resolve_direct_sku=lambda key,nm,slot:inputs.get((nm,key))
         self.assertEqual(evaluator.resolve_total('drr',slot.slot_key),.1)
         self.assertEqual(evaluator.resolve_group('drr_group','g',slot.slot_key),.1)
+        self.assertIsNone(evaluator.resolve_sku('drr_sku',102,slot.slot_key))
         data=[['total','TOTAL|drr',.1]]
         merged=_merge_cell_presentations(evaluator_scope_presentation(rows=data,slots=[slot],evaluator=evaluator,current_date=DAY),ads_partial_presentation(rows=data,slots=[slot],statuses=[status],metrics=metrics,formulas=formulas),{'TOTAL|drr':{DAY:{'state':'unconfirmed','evidence':{'domain':'fixture'}}}})
         cell=merged['TOTAL|drr'][DAY]
