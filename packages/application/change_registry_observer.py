@@ -1380,7 +1380,7 @@ class ChangeRegistryReadSurface:
             ).fetchall()
             facts = conn.execute(
                 f"SELECT * FROM {FACTS_TABLE} WHERE seller_id=? "
-                "AND account_scope=? ORDER BY proven_at DESC,fact_id DESC LIMIT ?",
+                "AND account_scope=? AND target_kind<>'search_cluster' ORDER BY proven_at DESC,fact_id DESC LIMIT ?",
                 (self.seller_id, self.account_scope, exact_limit),
             ).fetchall()
             incidents = conn.execute(

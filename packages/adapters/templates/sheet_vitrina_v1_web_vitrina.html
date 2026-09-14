@@ -6566,10 +6566,15 @@
 	    </section>
 
     <section class="unified-tab-panel" data-unified-tab-panel="ads" hidden>
+      <nav class="kc-subtabs" aria-label="Разделы рекламы">
+        <button class="button secondary" type="button" data-ads-section="bids" aria-pressed="true">Рекламные ставки</button>
+        <button class="button secondary" type="button" data-ads-section="keyword-cleaner" aria-pressed="false">Чистка ключей <span data-kc-indicator hidden aria-label="Требуется внимание">●</span></button>
+      </nav>
+      <!-- KEYWORD_CLEANER_PANEL -->
       <section class="panel ads-panel" data-ads-panel>
         <div class="ads-toolbar">
           <div>
-            <h2>Реклама</h2>
+            <h2>Рекламные ставки</h2>
             <p class="panel-meta" data-ads-meta>WB Promotion API</p>
           </div>
           <button class="button secondary" type="button" data-ads-refresh>Обновить</button>
@@ -25253,7 +25258,7 @@
       skuManagementSubtabButtons.forEach(function(button){const active=button.getAttribute("data-sku-management-subtab")===normalized;button.classList.toggle("is-active",active);button.setAttribute("aria-selected",active?"true":"false");});
       skuManagementSubpanels.forEach(function(panel){panel.hidden=panel.getAttribute("data-sku-management-subpanel")!==normalized;});
       const url=new URL(window.location.href);url.searchParams.set("sku_tab",normalized);window.history.replaceState({},"",url);
-      if(normalized==="inventory-balance")loadInventoryBalance({force:true});else if(normalized==="change-registry")loadChangeRegistry();else if(normalized==="prices")ensurePricesLoaded();else if(normalized==="ads")ensureAdsLoaded();
+      if(normalized==="inventory-balance")loadInventoryBalance({force:true});else if(normalized==="change-registry")loadChangeRegistry();else if(normalized==="prices")ensurePricesLoaded();else if(normalized==="ads")activateAdsSection(new URL(window.location.href).searchParams.get("ads_tab"));
     }
 
 
@@ -26199,6 +26204,8 @@
       const rows=state.skuManagement.historyRows||[];skuManagementHistoryBodyNode.innerHTML=rows.length?rows.map(function(row){const warnings=(row.warnings||[]).join(", ");const status=row.commit_status+" / "+(row.readback_status||"not_started")+(row.commit_status==="confirmed"?(": "+(row.confirmed_value==null?"—":row.confirmed_value)):(": "+(row.error||"controlled error")));return '<tr><td>'+escapeHtml(row.confirmed_at||row.requested_at||"—")+'</td><td>'+escapeHtml(row.nm_id)+'</td><td>'+escapeHtml(row.parameter)+'</td><td>'+escapeHtml(row.old_value==null?"—":row.old_value)+' → '+escapeHtml(row.confirmed_value==null?(row.requested_value==null?"—":row.requested_value):row.confirmed_value)+'</td><td>'+escapeHtml(row.delta==null?"—":row.delta)+'</td><td>'+escapeHtml((row.campaign||row.advert_id||"")+((row.placement)?" / "+row.placement:""))+'</td><td>'+escapeHtml(row.actor||"—")+'</td><td class="wrap">'+escapeHtml(warnings||"—")+((row.stabilization_override||row.warning_override)?" · override":"")+'</td><td class="wrap">'+escapeHtml(status)+'</td></tr>';}).join(""):'<tr><td colspan="9">История пуста.</td></tr>';
       const page=Math.floor(state.skuManagement.historyOffset/state.skuManagement.historyLimit)+1;if(skuManagementHistoryPageNode)skuManagementHistoryPageNode.textContent=String(page);if(skuManagementHistoryPrevButton)skuManagementHistoryPrevButton.disabled=state.skuManagement.historyOffset<=0;if(skuManagementHistoryNextButton)skuManagementHistoryNextButton.disabled=state.skuManagement.historyOffset+state.skuManagement.historyLimit>=state.skuManagement.historyTotal;
     }
+
+    /* KEYWORD_CLEANER_SCRIPT */
 
     initializeSkuWorkspace();
     applyUnifiedTabAccess();

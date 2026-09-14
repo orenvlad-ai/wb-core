@@ -72,6 +72,8 @@ def _assert_schema_contract(db_path: Path) -> None:
     expected = set(IMMUTABLE_TABLES) | {
         MANUAL_PENDING_CURRENT_TABLE,
         OBSERVER_LEASES_TABLE,
+        "change_registry_search_cluster_queries",
+        "change_registry_search_cluster_readbacks",
     }
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row

@@ -121,10 +121,13 @@ def build_plan_from_paths(
 
     for path in python_paths:
         if path.endswith("_smoke.py"):
-            commands.append(["python3", path])
+            # A trusted group may supply required arguments (e.g. browser
+            # artifact output). Do not append a second bare invocation.
+            if not any(command[:2] == ["python3", path] for command in commands):
+                commands.append(["python3", path])
             continue
         sibling = path[:-3] + "_smoke.py"
-        if file_exists(head, sibling):
+        if file_exists(head, sibling) and not any(command[:2] == ["python3", sibling] for command in commands):
             commands.append(["python3", sibling])
 
     # Close dependencies over the final selection, including changed/sibling

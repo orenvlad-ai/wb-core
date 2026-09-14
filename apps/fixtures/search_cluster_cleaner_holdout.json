@@ -1,0 +1,1824 @@
+{
+  "provenance": {
+    "frozen_at": "2026-09-10T19:45:23.422663+00:00",
+    "labeler": "root; no classifier outputs or classifier code used for labels",
+    "independence": "Synthetic phrases, semantic families explicitly labelled; not independent production observations",
+    "source_sha256": "f1791fe9bc713f625739b37ea48474c9924954d7d6e2dbcce2991c82baf509b5",
+    "selection_basis": "Select by phrase identity only before first evaluation; remove preexisting corpus and explicit project examples. No labels changed.",
+    "first_evaluation": "2026-09-10: 215 cases; 0 false allow/exclude; 95.27% automation; classifier f8c3bccd2d843949a4416bf9f44ed0d507bb1a7414ce775311208e6a48627863"
+  },
+  "profiles": [
+    {
+      "sku": "900000001",
+      "nm_id": 900000001,
+      "category": "phone_screen_glass",
+      "models": [
+        "16 promax"
+      ],
+      "kind": "clean",
+      "frame": "black",
+      "version": 1,
+      "synthetic": true,
+      "compatibility_source": "Synthetic test profile, accepted product rules only",
+      "verified_at": "2026-09-11"
+    },
+    {
+      "sku": "900000002",
+      "nm_id": 900000002,
+      "category": "phone_screen_glass",
+      "models": [
+        "15 promax"
+      ],
+      "kind": "matte",
+      "frame": "black",
+      "version": 1,
+      "synthetic": true,
+      "compatibility_source": "Synthetic test profile, accepted product rules only",
+      "verified_at": "2026-09-11"
+    },
+    {
+      "sku": "900000003",
+      "nm_id": 900000003,
+      "category": "phone_screen_glass",
+      "models": [
+        "14 promax"
+      ],
+      "kind": "anti",
+      "frame": "black",
+      "version": 1,
+      "synthetic": true,
+      "compatibility_source": "Synthetic test profile, accepted product rules only",
+      "verified_at": "2026-09-11"
+    },
+    {
+      "sku": "900000004",
+      "nm_id": 900000004,
+      "category": "phone_screen_glass",
+      "models": [
+        "16 pro"
+      ],
+      "kind": "clean",
+      "frame": "black",
+      "version": 1,
+      "synthetic": true,
+      "compatibility_source": "Synthetic test profile, accepted product rules only",
+      "verified_at": "2026-09-11"
+    },
+    {
+      "sku": "900000005",
+      "nm_id": 900000005,
+      "category": "phone_screen_glass",
+      "models": [
+        "15 pro"
+      ],
+      "kind": "matte",
+      "frame": "black",
+      "version": 1,
+      "synthetic": true,
+      "compatibility_source": "Synthetic test profile, accepted product rules only",
+      "verified_at": "2026-09-11"
+    },
+    {
+      "sku": "900000006",
+      "nm_id": 900000006,
+      "category": "phone_screen_glass",
+      "models": [
+        "13"
+      ],
+      "kind": "anti",
+      "frame": "black",
+      "version": 1,
+      "synthetic": true,
+      "compatibility_source": "Synthetic test profile, accepted product rules only",
+      "verified_at": "2026-09-11"
+    }
+  ],
+  "cases": [
+    {
+      "id": "H002",
+      "nm_id": 900000001,
+      "query": "защитное стекло для айфон 16 про макс",
+      "expected": "allow",
+      "family": "base",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H003",
+      "nm_id": 900000001,
+      "query": "стекло Gorilla iphone 16 pro max",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H004",
+      "nm_id": 900000001,
+      "query": "стекло горилла айфон 16 про макс",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H005",
+      "nm_id": 900000001,
+      "query": "стекло в упаковке iphone 16 pro max",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H006",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max в упаковке",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H007",
+      "nm_id": 900000001,
+      "query": "стекло с салфеткой iphone 16 pro max",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H008",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max с салфеткой",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H009",
+      "nm_id": 900000001,
+      "query": "стикло iphone 16 pro max",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H010",
+      "nm_id": 900000001,
+      "query": "cтекло iphone 16 pro max",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H011",
+      "nm_id": 900000001,
+      "query": "стекло под чехол iphone 16 pro max",
+      "expected": "allow",
+      "family": "case_compatibility",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H012",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max вырез под камеру",
+      "expected": "allow",
+      "family": "camera_cutout",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H014",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max 2.5d",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H015",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max 0.3 мм",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H017",
+      "nm_id": 900000001,
+      "query": "стекло с установочной рамкой iphone 16 pro max",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H018",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max в боксе для установки",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H020",
+      "nm_id": 900000001,
+      "query": "обычное стекло iphone 16 pro max",
+      "expected": "allow",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H021",
+      "nm_id": 900000001,
+      "query": "чехол для iphone 16 pro max",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H022",
+      "nm_id": 900000001,
+      "query": "чехол со стеклом для iphone 16 pro max",
+      "expected": "exclude",
+      "family": "mixed_products",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H023",
+      "nm_id": 900000001,
+      "query": "стекло для камеры iphone 16 pro max",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H024",
+      "nm_id": 900000001,
+      "query": "защита задней панели iphone 16 pro max",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H025",
+      "nm_id": 900000001,
+      "query": "дисплей iphone 16 pro max",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H026",
+      "nm_id": 900000001,
+      "query": "салфетки для очистки экрана iphone 16 pro max",
+      "expected": "exclude",
+      "family": "consumables",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H027",
+      "nm_id": 900000001,
+      "query": "стекло remax iphone 16 pro max",
+      "expected": "exclude",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H028",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max без рамки",
+      "expected": "exclude",
+      "family": "frame",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H029",
+      "nm_id": 900000001,
+      "query": "антишпионное стекло iphone 16 pro max",
+      "expected": "exclude",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H030",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max и iphone 11",
+      "expected": "exclude",
+      "family": "mixed_models",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H033",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max ultra",
+      "expected": "review",
+      "family": "unknown_suffix",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H034",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max с магнитным креплением",
+      "expected": "review",
+      "family": "unknown_feature",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H035",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max для замены экрана",
+      "expected": "review",
+      "family": "ambiguous_role",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H036",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max кроме матового",
+      "expected": "review",
+      "family": "negation_coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H037",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max flexible ceramic",
+      "expected": "review",
+      "family": "unknown_material",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H038",
+      "nm_id": 900000001,
+      "query": "стекло iphone 16 pro max только не чехол",
+      "expected": "review",
+      "family": "negation_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H040",
+      "nm_id": 900000002,
+      "query": "защитное стекло для айфон 15 про макс",
+      "expected": "allow",
+      "family": "base",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H041",
+      "nm_id": 900000002,
+      "query": "стекло Gorilla iphone 15 pro max",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H042",
+      "nm_id": 900000002,
+      "query": "стекло горилла айфон 15 про макс",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H043",
+      "nm_id": 900000002,
+      "query": "стекло в упаковке iphone 15 pro max",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H044",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max в упаковке",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H045",
+      "nm_id": 900000002,
+      "query": "стекло с салфеткой iphone 15 pro max",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H046",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max с салфеткой",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H047",
+      "nm_id": 900000002,
+      "query": "стикло iphone 15 pro max",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H048",
+      "nm_id": 900000002,
+      "query": "cтекло iphone 15 pro max",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H049",
+      "nm_id": 900000002,
+      "query": "стекло под чехол iphone 15 pro max",
+      "expected": "allow",
+      "family": "case_compatibility",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H050",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max вырез под камеру",
+      "expected": "allow",
+      "family": "camera_cutout",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H051",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max 100d",
+      "expected": "allow",
+      "family": "quality",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H052",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max 2.5d",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H053",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max 0.3 мм",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H054",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max 3 штуки",
+      "expected": "allow",
+      "family": "quantity",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H055",
+      "nm_id": 900000002,
+      "query": "стекло с установочной рамкой iphone 15 pro max",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H056",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max в боксе для установки",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H058",
+      "nm_id": 900000002,
+      "query": "матовое стекло iphone 15 pro max",
+      "expected": "allow",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H059",
+      "nm_id": 900000002,
+      "query": "чехол для iphone 15 pro max",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H060",
+      "nm_id": 900000002,
+      "query": "чехол со стеклом для iphone 15 pro max",
+      "expected": "exclude",
+      "family": "mixed_products",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H061",
+      "nm_id": 900000002,
+      "query": "стекло для камеры iphone 15 pro max",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H062",
+      "nm_id": 900000002,
+      "query": "защита задней панели iphone 15 pro max",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H063",
+      "nm_id": 900000002,
+      "query": "дисплей iphone 15 pro max",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H064",
+      "nm_id": 900000002,
+      "query": "салфетки для очистки экрана iphone 15 pro max",
+      "expected": "exclude",
+      "family": "consumables",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H065",
+      "nm_id": 900000002,
+      "query": "стекло remax iphone 15 pro max",
+      "expected": "exclude",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H066",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max без рамки",
+      "expected": "exclude",
+      "family": "frame",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H067",
+      "nm_id": 900000002,
+      "query": "антишпионное стекло iphone 15 pro max",
+      "expected": "exclude",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H068",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max и iphone 11",
+      "expected": "exclude",
+      "family": "mixed_models",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H069",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max не remax",
+      "expected": "review",
+      "family": "negation_brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H070",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max без салфетки",
+      "expected": "review",
+      "family": "negation_component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H071",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max ultra",
+      "expected": "review",
+      "family": "unknown_suffix",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H072",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max с магнитным креплением",
+      "expected": "review",
+      "family": "unknown_feature",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H073",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max для замены экрана",
+      "expected": "review",
+      "family": "ambiguous_role",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H074",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max кроме матового",
+      "expected": "review",
+      "family": "negation_coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H075",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max flexible ceramic",
+      "expected": "review",
+      "family": "unknown_material",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H076",
+      "nm_id": 900000002,
+      "query": "стекло iphone 15 pro max только не чехол",
+      "expected": "review",
+      "family": "negation_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H078",
+      "nm_id": 900000003,
+      "query": "защитное стекло для айфон 14 про макс",
+      "expected": "allow",
+      "family": "base",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H079",
+      "nm_id": 900000003,
+      "query": "стекло Gorilla iphone 14 pro max",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H080",
+      "nm_id": 900000003,
+      "query": "стекло горилла айфон 14 про макс",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H081",
+      "nm_id": 900000003,
+      "query": "стекло в упаковке iphone 14 pro max",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H082",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max в упаковке",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H083",
+      "nm_id": 900000003,
+      "query": "стекло с салфеткой iphone 14 pro max",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H084",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max с салфеткой",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H085",
+      "nm_id": 900000003,
+      "query": "стикло iphone 14 pro max",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H086",
+      "nm_id": 900000003,
+      "query": "cтекло iphone 14 pro max",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H087",
+      "nm_id": 900000003,
+      "query": "стекло под чехол iphone 14 pro max",
+      "expected": "allow",
+      "family": "case_compatibility",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H088",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max вырез под камеру",
+      "expected": "allow",
+      "family": "camera_cutout",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H089",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max 100d",
+      "expected": "allow",
+      "family": "quality",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H090",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max 2.5d",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H091",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max 0.3 мм",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H092",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max 3 штуки",
+      "expected": "allow",
+      "family": "quantity",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H093",
+      "nm_id": 900000003,
+      "query": "стекло с установочной рамкой iphone 14 pro max",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H094",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max в боксе для установки",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H095",
+      "nm_id": 900000003,
+      "query": "аксессуары для iphone 14 pro max",
+      "expected": "allow",
+      "family": "accessory",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H096",
+      "nm_id": 900000003,
+      "query": "антишпионное стекло iphone 14 pro max",
+      "expected": "allow",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H097",
+      "nm_id": 900000003,
+      "query": "чехол для iphone 14 pro max",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H098",
+      "nm_id": 900000003,
+      "query": "чехол со стеклом для iphone 14 pro max",
+      "expected": "exclude",
+      "family": "mixed_products",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H099",
+      "nm_id": 900000003,
+      "query": "стекло для камеры iphone 14 pro max",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H100",
+      "nm_id": 900000003,
+      "query": "защита задней панели iphone 14 pro max",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H101",
+      "nm_id": 900000003,
+      "query": "дисплей iphone 14 pro max",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H102",
+      "nm_id": 900000003,
+      "query": "салфетки для очистки экрана iphone 14 pro max",
+      "expected": "exclude",
+      "family": "consumables",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H103",
+      "nm_id": 900000003,
+      "query": "стекло remax iphone 14 pro max",
+      "expected": "exclude",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H104",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max без рамки",
+      "expected": "exclude",
+      "family": "frame",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H105",
+      "nm_id": 900000003,
+      "query": "матовое стекло iphone 14 pro max",
+      "expected": "exclude",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H106",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max и iphone 11",
+      "expected": "exclude",
+      "family": "mixed_models",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H107",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max не remax",
+      "expected": "review",
+      "family": "negation_brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H108",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max без салфетки",
+      "expected": "review",
+      "family": "negation_component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H109",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max ultra",
+      "expected": "review",
+      "family": "unknown_suffix",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H110",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max с магнитным креплением",
+      "expected": "review",
+      "family": "unknown_feature",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H111",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max для замены экрана",
+      "expected": "review",
+      "family": "ambiguous_role",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H112",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max кроме матового",
+      "expected": "review",
+      "family": "negation_coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H113",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max flexible ceramic",
+      "expected": "review",
+      "family": "unknown_material",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H114",
+      "nm_id": 900000003,
+      "query": "стекло iphone 14 pro max только не чехол",
+      "expected": "review",
+      "family": "negation_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H116",
+      "nm_id": 900000004,
+      "query": "защитное стекло для айфон 16 про",
+      "expected": "allow",
+      "family": "base",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H117",
+      "nm_id": 900000004,
+      "query": "стекло Gorilla iphone 16 pro",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H118",
+      "nm_id": 900000004,
+      "query": "стекло горилла айфон 16 про",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H119",
+      "nm_id": 900000004,
+      "query": "стекло в упаковке iphone 16 pro",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H120",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro в упаковке",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H121",
+      "nm_id": 900000004,
+      "query": "стекло с салфеткой iphone 16 pro",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H122",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro с салфеткой",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H123",
+      "nm_id": 900000004,
+      "query": "стикло iphone 16 pro",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H124",
+      "nm_id": 900000004,
+      "query": "cтекло iphone 16 pro",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H125",
+      "nm_id": 900000004,
+      "query": "стекло под чехол iphone 16 pro",
+      "expected": "allow",
+      "family": "case_compatibility",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H126",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro вырез под камеру",
+      "expected": "allow",
+      "family": "camera_cutout",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H127",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro 100d",
+      "expected": "allow",
+      "family": "quality",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H128",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro 2.5d",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H129",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro 0.3 мм",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H130",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro 3 штуки",
+      "expected": "allow",
+      "family": "quantity",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H131",
+      "nm_id": 900000004,
+      "query": "стекло с установочной рамкой iphone 16 pro",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H132",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro в боксе для установки",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H133",
+      "nm_id": 900000004,
+      "query": "аксессуары для iphone 16 pro",
+      "expected": "allow",
+      "family": "accessory",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H134",
+      "nm_id": 900000004,
+      "query": "обычное стекло iphone 16 pro",
+      "expected": "allow",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H135",
+      "nm_id": 900000004,
+      "query": "чехол для iphone 16 pro",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H136",
+      "nm_id": 900000004,
+      "query": "чехол со стеклом для iphone 16 pro",
+      "expected": "exclude",
+      "family": "mixed_products",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H137",
+      "nm_id": 900000004,
+      "query": "стекло для камеры iphone 16 pro",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H138",
+      "nm_id": 900000004,
+      "query": "защита задней панели iphone 16 pro",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H139",
+      "nm_id": 900000004,
+      "query": "дисплей iphone 16 pro",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H140",
+      "nm_id": 900000004,
+      "query": "салфетки для очистки экрана iphone 16 pro",
+      "expected": "exclude",
+      "family": "consumables",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H141",
+      "nm_id": 900000004,
+      "query": "стекло remax iphone 16 pro",
+      "expected": "exclude",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H142",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro без рамки",
+      "expected": "exclude",
+      "family": "frame",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H143",
+      "nm_id": 900000004,
+      "query": "антишпионное стекло iphone 16 pro",
+      "expected": "exclude",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H144",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro и iphone 11",
+      "expected": "exclude",
+      "family": "mixed_models",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H145",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro не remax",
+      "expected": "review",
+      "family": "negation_brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H146",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro без салфетки",
+      "expected": "review",
+      "family": "negation_component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H147",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro ultra",
+      "expected": "review",
+      "family": "unknown_suffix",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H148",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro с магнитным креплением",
+      "expected": "review",
+      "family": "unknown_feature",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H149",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro для замены экрана",
+      "expected": "review",
+      "family": "ambiguous_role",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H150",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro кроме матового",
+      "expected": "review",
+      "family": "negation_coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H151",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro flexible ceramic",
+      "expected": "review",
+      "family": "unknown_material",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H152",
+      "nm_id": 900000004,
+      "query": "стекло iphone 16 pro только не чехол",
+      "expected": "review",
+      "family": "negation_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H154",
+      "nm_id": 900000005,
+      "query": "защитное стекло для айфон 15 про",
+      "expected": "allow",
+      "family": "base",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H155",
+      "nm_id": 900000005,
+      "query": "стекло Gorilla iphone 15 pro",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H156",
+      "nm_id": 900000005,
+      "query": "стекло горилла айфон 15 про",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H157",
+      "nm_id": 900000005,
+      "query": "стекло в упаковке iphone 15 pro",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H158",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro в упаковке",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H159",
+      "nm_id": 900000005,
+      "query": "стекло с салфеткой iphone 15 pro",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H160",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro с салфеткой",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H161",
+      "nm_id": 900000005,
+      "query": "стикло iphone 15 pro",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H162",
+      "nm_id": 900000005,
+      "query": "cтекло iphone 15 pro",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H163",
+      "nm_id": 900000005,
+      "query": "стекло под чехол iphone 15 pro",
+      "expected": "allow",
+      "family": "case_compatibility",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H164",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro вырез под камеру",
+      "expected": "allow",
+      "family": "camera_cutout",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H165",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro 100d",
+      "expected": "allow",
+      "family": "quality",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H166",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro 2.5d",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H167",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro 0.3 мм",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H168",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro 3 штуки",
+      "expected": "allow",
+      "family": "quantity",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H169",
+      "nm_id": 900000005,
+      "query": "стекло с установочной рамкой iphone 15 pro",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H170",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro в боксе для установки",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H171",
+      "nm_id": 900000005,
+      "query": "аксессуары для iphone 15 pro",
+      "expected": "allow",
+      "family": "accessory",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H172",
+      "nm_id": 900000005,
+      "query": "матовое стекло iphone 15 pro",
+      "expected": "allow",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H173",
+      "nm_id": 900000005,
+      "query": "чехол для iphone 15 pro",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H174",
+      "nm_id": 900000005,
+      "query": "чехол со стеклом для iphone 15 pro",
+      "expected": "exclude",
+      "family": "mixed_products",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H175",
+      "nm_id": 900000005,
+      "query": "стекло для камеры iphone 15 pro",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H176",
+      "nm_id": 900000005,
+      "query": "защита задней панели iphone 15 pro",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H177",
+      "nm_id": 900000005,
+      "query": "дисплей iphone 15 pro",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H178",
+      "nm_id": 900000005,
+      "query": "салфетки для очистки экрана iphone 15 pro",
+      "expected": "exclude",
+      "family": "consumables",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H179",
+      "nm_id": 900000005,
+      "query": "стекло remax iphone 15 pro",
+      "expected": "exclude",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H180",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro без рамки",
+      "expected": "exclude",
+      "family": "frame",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H181",
+      "nm_id": 900000005,
+      "query": "антишпионное стекло iphone 15 pro",
+      "expected": "exclude",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H182",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro и iphone 11",
+      "expected": "exclude",
+      "family": "mixed_models",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H183",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro не remax",
+      "expected": "review",
+      "family": "negation_brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H184",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro без салфетки",
+      "expected": "review",
+      "family": "negation_component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H185",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro ultra",
+      "expected": "review",
+      "family": "unknown_suffix",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H186",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro с магнитным креплением",
+      "expected": "review",
+      "family": "unknown_feature",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H187",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro для замены экрана",
+      "expected": "review",
+      "family": "ambiguous_role",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H188",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro кроме матового",
+      "expected": "review",
+      "family": "negation_coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H189",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro flexible ceramic",
+      "expected": "review",
+      "family": "unknown_material",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H190",
+      "nm_id": 900000005,
+      "query": "стекло iphone 15 pro только не чехол",
+      "expected": "review",
+      "family": "negation_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H192",
+      "nm_id": 900000006,
+      "query": "защитное стекло для айфон 13",
+      "expected": "allow",
+      "family": "base",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H193",
+      "nm_id": 900000006,
+      "query": "стекло Gorilla iphone 13",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H194",
+      "nm_id": 900000006,
+      "query": "стекло горилла айфон 13",
+      "expected": "allow",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H195",
+      "nm_id": 900000006,
+      "query": "стекло в упаковке iphone 13",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H196",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 в упаковке",
+      "expected": "allow",
+      "family": "packaging",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H197",
+      "nm_id": 900000006,
+      "query": "стекло с салфеткой iphone 13",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H198",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 с салфеткой",
+      "expected": "allow",
+      "family": "component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H199",
+      "nm_id": 900000006,
+      "query": "стикло iphone 13",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H200",
+      "nm_id": 900000006,
+      "query": "cтекло iphone 13",
+      "expected": "allow",
+      "family": "typo",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H201",
+      "nm_id": 900000006,
+      "query": "стекло под чехол iphone 13",
+      "expected": "allow",
+      "family": "case_compatibility",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H202",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 вырез под камеру",
+      "expected": "allow",
+      "family": "camera_cutout",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H203",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 100d",
+      "expected": "allow",
+      "family": "quality",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H204",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 2.5d",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H205",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 0.3 мм",
+      "expected": "allow",
+      "family": "dimensions",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H206",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 3 штуки",
+      "expected": "allow",
+      "family": "quantity",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H207",
+      "nm_id": 900000006,
+      "query": "стекло с установочной рамкой iphone 13",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H208",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 в боксе для установки",
+      "expected": "allow",
+      "family": "installation",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H210",
+      "nm_id": 900000006,
+      "query": "антишпионное стекло iphone 13",
+      "expected": "allow",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H211",
+      "nm_id": 900000006,
+      "query": "чехол для iphone 13",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H212",
+      "nm_id": 900000006,
+      "query": "чехол со стеклом для iphone 13",
+      "expected": "exclude",
+      "family": "mixed_products",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H213",
+      "nm_id": 900000006,
+      "query": "стекло для камеры iphone 13",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H214",
+      "nm_id": 900000006,
+      "query": "защита задней панели iphone 13",
+      "expected": "exclude",
+      "family": "other_surface",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H215",
+      "nm_id": 900000006,
+      "query": "дисплей iphone 13",
+      "expected": "exclude",
+      "family": "other_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H216",
+      "nm_id": 900000006,
+      "query": "салфетки для очистки экрана iphone 13",
+      "expected": "exclude",
+      "family": "consumables",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H217",
+      "nm_id": 900000006,
+      "query": "стекло remax iphone 13",
+      "expected": "exclude",
+      "family": "brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H218",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 без рамки",
+      "expected": "exclude",
+      "family": "frame",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H219",
+      "nm_id": 900000006,
+      "query": "матовое стекло iphone 13",
+      "expected": "exclude",
+      "family": "coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H220",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 и iphone 11",
+      "expected": "exclude",
+      "family": "mixed_models",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H221",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 не remax",
+      "expected": "review",
+      "family": "negation_brand",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H222",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 без салфетки",
+      "expected": "review",
+      "family": "negation_component",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H223",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 ultra",
+      "expected": "review",
+      "family": "unknown_suffix",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H224",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 с магнитным креплением",
+      "expected": "review",
+      "family": "unknown_feature",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H225",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 для замены экрана",
+      "expected": "review",
+      "family": "ambiguous_role",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H226",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 кроме матового",
+      "expected": "review",
+      "family": "negation_coating",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H227",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 flexible ceramic",
+      "expected": "review",
+      "family": "unknown_material",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    },
+    {
+      "id": "H228",
+      "nm_id": 900000006,
+      "query": "стекло iphone 13 только не чехол",
+      "expected": "review",
+      "family": "negation_product",
+      "basis": "Approved project sections 3,7,15.1; incompatible property/model/product -> exclude; uncertain new meaning or unresolved negation -> review"
+    }
+  ],
+  "thresholds": {
+    "false_allow": 0,
+    "false_exclude": 0,
+    "minimum_auto_rate_on_decisive": 0.95,
+    "decisive_on_review": 0
+  }
+}
