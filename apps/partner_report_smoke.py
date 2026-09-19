@@ -45,6 +45,7 @@ from packages.application.partner_report import (  # noqa: E402
     _display_breakdown,
 )
 from packages.application.shared_sku_cost import build_shared_cost_day  # noqa: E402
+from packages.application.wb_finance_weekly import cost_economic_signature  # noqa: E402
 
 WEEK_ONE = date(2026, 7, 6)
 WEEK_TWO = date(2026, 7, 13)
@@ -74,6 +75,7 @@ def main() -> None:
         _assert_workbook(block, report)
         _assert_only_marketing_workbook(block)
         _assert_partial_cost_surface(block)
+        _assert_cost_signature_exact_precision()
         _assert_incomplete_and_stale_states(block)
         _assert_negative_profit_and_validation(block)
         performance = _assert_indexed_performance(block)
@@ -85,6 +87,35 @@ def main() -> None:
         f"raw_scan_ms={performance['raw_scan_ms']}, indexed_preview_ms={performance['indexed_preview_ms']}, "
         f"raw_rows={performance['raw_rows']}"
     )
+
+
+def _assert_cost_signature_exact_precision() -> None:
+    """Per-row display rounding must not mask a material aggregate change."""
+
+    def rows(unit_cost: str) -> list[dict[str, object]]:
+        return [
+            {
+                "nm_id": str(TARGET_NM), "operation_date": "2026-07-07",
+                "channel": "WB", "pool": "FBO", "facility_id": "wb",
+                "fbs_order_id": 0, "source_date": "2026-07-07",
+                "source_quality": "certified", "projection_quality": "exact",
+                "selection_method": "exact", "formula_version": "v1",
+                "movement": "sale", "quantity": 1, "signed_quantity": 1,
+                "unit_cost_rub": "1.0000", "signed_cogs_rub": "1.0000",
+                "economic_unit_cost_rub": unit_cost,
+                "economic_signed_cogs_rub": unit_cost,
+            }
+            for _ in range(1000)
+        ]
+
+    _old, old_signature = cost_economic_signature(rows("1.00000"))
+    new_buckets, new_signature = cost_economic_signature(rows("1.00004"))
+    if old_signature == new_signature or new_buckets[0]["signed_cogs_rub"] != "1000.04":
+        raise AssertionError("economic signature lost an amplified sub-kopeck cost change")
+    mixed = rows("1.00000")[:1] + [{**rows("1.00000")[0], "channel": "FBS", "pool": "FBS", "fbs_order_id": 7}]
+    mixed_buckets, _mixed_signature = cost_economic_signature(mixed)
+    if {item["channel"] for item in mixed_buckets} != {"WB", "FBS"}:
+        raise AssertionError("same-day WB/FBS economics collapsed into one routing bucket")
 
 
 def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
@@ -347,6 +378,9 @@ def _assert_pre_effective_shared_fbs_arguments(
             details = coverage["detail_rows"]
             if str(week_start) == WEEK_ONE.isoformat():
                 details[0]["channel"] = "FBS"
+                for bucket in coverage.get("cost_economic_buckets") or []:
+                    if str(bucket.get("operation_date") or "") == str(details[0]["operation_date"]):
+                        bucket["channel"] = "FBS"
             for detail in details:
                 expected_digest_by_day[str(detail["operation_date"])] = str(
                     detail["source_digest"]
@@ -867,12 +901,110 @@ def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
             (TARGET_NM,),
         )
         conn.commit()
-    stale = block.preview(
+    # A legacy projection with resolver drift may only reuse target period
+    # metrics when capitalization has no global linked-layer dependency.
+    with sqlite3.connect(block.db_path) as conn:
+        stored_coverage, stored_metrics = conn.execute(
+            """SELECT coverage_json,metrics_json FROM wb_finance_weekly_sku_aggregates
+               WHERE nm_id=? AND week_start=?""",
+            (str(TARGET_NM), WEEK_ONE.isoformat()),
+        ).fetchone()
+        linked_coverage = json.loads(str(stored_coverage))
+        linked_metrics = json.loads(str(stored_metrics))
+        linked_coverage.pop("cost_economic_signature", None)
+        linked_coverage.pop("cost_economic_signature_version", None)
+        linked_coverage.pop("cost_economic_buckets", None)
+        linked_coverage["detail_rows"][0]["source_digest"] = "sha256:stale"
+        linked_metrics["capitalization_reconciliation"] = {
+            "lineage": [{"canonical_layer_id": "layer-linked", "wb_supply_id": "s", "nm_id": str(TARGET_NM)}]
+        }
+        conn.execute(
+            """UPDATE wb_finance_weekly_sku_aggregates SET coverage_json=?,metrics_json=?
+               WHERE nm_id=? AND week_start=?""",
+            (json.dumps(linked_coverage), json.dumps(linked_metrics), str(TARGET_NM), WEEK_ONE.isoformat()),
+        )
+        conn.commit()
+    linked_stale = block.preview(
         {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
     )
-    if not any(item["code"] == "finance_sku_aggregate_cost_stale" for item in stale["blockers"]):
-        raise AssertionError(f"canonical cost correction did not invalidate aggregate: {stale}")
-    block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
+    if not any(item["code"] == "finance_capitalization_projection_stale" for item in linked_stale["blockers"]):
+        raise AssertionError("legacy linked capitalization drift was not blocked")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """UPDATE wb_finance_weekly_sku_aggregates SET coverage_json=?,metrics_json=?
+               WHERE nm_id=? AND week_start=?""",
+            (stored_coverage, stored_metrics, str(TARGET_NM), WEEK_ONE.isoformat()),
+        )
+        conn.commit()
+    with sqlite3.connect(block.db_path) as conn:
+        saved_cost = conn.execute(
+            """SELECT cutover_id,quantity,wac_rub,capital_rub,quality,provenance_json,fingerprint,created_at
+               FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        ).fetchone()
+        conn.execute(
+            """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        )
+        conn.commit()
+    missing_cost = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if not any(item["code"] == "partner_cost_coverage_incomplete" for item in missing_cost["blockers"]):
+        raise AssertionError("missing current cost was masked during legacy rehydration")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
+                   cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,quality,
+                   provenance_json,fingerprint,created_at
+               ) VALUES(?,'2026-07-07',?,?,?,?,?,?,?,?)""",
+            (saved_cost[0], TARGET_NM, *saved_cost[1:]),
+        )
+        conn.commit()
+    provenance_only = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if provenance_only["status"] != "ready":
+        raise AssertionError(
+            f"lineage-only cost fingerprint change blocked an identical economic projection: {provenance_only['blockers']}"
+        )
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+               SET wac_rub='90000',capital_rub='900000'
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        )
+        conn.commit()
+    economic_change = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if (
+        economic_change["status"] != "ready"
+        or economic_change["weeks"][0]["values"]["cogs"] != "90000.0000"
+        or economic_change["source_digest"] == provenance_only["source_digest"]
+    ):
+        raise AssertionError("cost rehydration did not replace changed economic COGS")
+    try:
+        block.build_preview_workbook(
+            {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]},
+            expected_source_digest=str(provenance_only["source_digest"]),
+        )
+    except PartnerReportError as exc:
+        if exc.code != "preview_source_digest_changed":
+            raise
+    else:
+        raise AssertionError("Excel accepted a preview before economic cost change")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+               SET wac_rub='83837',capital_rub='838370'
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        )
+        conn.commit()
     with sqlite3.connect(block.db_path) as conn:
         row = conn.execute(
             """SELECT coverage_json FROM wb_finance_weekly_sku_aggregates
@@ -894,13 +1026,8 @@ def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
     formula_stale = block.preview(
         {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
     )
-    if not any(
-        item["code"] == "finance_sku_aggregate_cost_stale"
-        for item in formula_stale["blockers"]
-    ):
-        raise AssertionError(
-            f"old canonical cost formula remained ready: {formula_stale}"
-        )
+    if formula_stale["status"] != "ready":
+        raise AssertionError("legacy detail provenance is not an economic freshness input")
     block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
 
 

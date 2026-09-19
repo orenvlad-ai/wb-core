@@ -72,8 +72,22 @@ only the exact same-`nmId`, same-day common inventory fallback. WB/FBO keep
 daily warehouse WAC, including migration-109 lineage for its exact 18 legacy
 `nmId`. Partner never resolves either source independently, never imports an
 order/facility lifecycle WAC and never converts missing coverage to zero.
-Source correction therefore requires projection rebuild and cannot silently
-reuse old values.
+Raw resolver lineage remains observable, but current projections also retain a
+normalized economic COGS signature: operation day, resolved channel/pool/
+facility/FBS-order scope, sale/return quantities, unit cost, signed COGS and
+cost-selection semantics. A provenance-only digest change is accepted only
+when that complete signature is equal. A changed price, quantity, day,
+channel, return, formula or missing resolver input is never waived.
+
+Older indexed projections without that signature use a bounded read-only
+fallback only after a stale-cost check: it reads direct target rows plus
+`nmId`-empty alias candidates for the requested week, resolves membership with
+the canonical nomenclature index, and requires the reconstructed target row
+identity digest to equal the stored projection. It recalculates target COGS
+and cost-derived profit fields in memory; it does not write Finance or scan
+other SKUs/history. Any membership mismatch, candidate-limit breach, missing
+cost or stale capitalization lineage remains a blocker. The ordinary
+preview/XLSX path still does not open raw Finance.
 
 Per-SKU Finance values include net revenue, canonical COGS, agent remuneration, acquiring, logistics, storage, acceptance, penalties/corrections, review points and other attributable deductions. Agent and acquiring are separate and enter the margin exactly once.
 
