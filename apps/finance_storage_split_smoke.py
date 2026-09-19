@@ -3319,6 +3319,25 @@ class MigrationSmoke(unittest.TestCase):
                     ).fetchone()[0],
                     2,
                 )
+            # The regular preview must stay entirely in the operational
+            # generation.  It must not recreate the compatibility TEMP VIEW
+            # that generic write-capable Partner connections require.
+            with partner._preview_connection() as conn:  # noqa: SLF001
+                self.assertEqual(
+                    conn.execute("PRAGMA query_only").fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    {str(row[1]) for row in conn.execute("PRAGMA database_list")},
+                    {"main"},
+                )
+                self.assertIsNone(
+                    conn.execute(
+                        """SELECT 1 FROM sqlite_master
+                           WHERE type='table'
+                             AND name='wb_finance_weekly_raw_rows'"""
+                    ).fetchone()
+                )
             mark_barrier_restoring(
                 runtime,
                 window_id=window_id,

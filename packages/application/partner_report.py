@@ -10,7 +10,9 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
+import sys
 import time
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 import zipfile
@@ -34,6 +36,7 @@ from packages.application.wb_finance_weekly import (
 )
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.canonical_wb_cost_resolver import (
+    CanonicalChannelCostSnapshot,
     resolve_channel_location_cost,
 )
 from packages.application.storage_registry import StoreRegistry
@@ -441,24 +444,66 @@ class PartnerReportBlock:
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
-        if not self.finance.shared_cost_is_candidate:
-            self.ensure_schema()
+        phase_timings_ms: dict[str, float] = {}
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
             payload.get("selected_weeks"), require_continuous=False
         )
-        with self._preview_connection() as conn:
-            settings = self._load_settings(conn, nm_id=nm_id)
-            report = self._calculate_report(
-                conn,
-                settings=settings,
-                selected_weeks=weeks,
-                finalization=False,
-            )[0]
+        request_id = secrets.token_hex(6)
+        active_phase = "snapshot_open"
+        active_phase_started = started
+        self._emit_preview_started(request_id)
+        try:
+            with self._preview_connection(phase_timings_ms) as conn:
+                active_phase = "settings_lookup"
+                phase_started = time.perf_counter()
+                active_phase_started = phase_started
+                settings = self._load_settings(conn, nm_id=nm_id)
+                phase_timings_ms["settings_lookup"] = self._elapsed_ms(phase_started)
+                active_phase = "calculation"
+                phase_started = time.perf_counter()
+                active_phase_started = phase_started
+                report = self._calculate_report(
+                    conn,
+                    settings=settings,
+                    selected_weeks=weeks,
+                    finalization=False,
+                )[0]
+                phase_timings_ms["calculation"] = self._elapsed_ms(phase_started)
+        except sqlite3.OperationalError as exc:
+            phase_timings_ms["total"] = self._elapsed_ms(started)
+            self._emit_preview_timing(
+                phase_timings_ms,
+                outcome="error",
+                request_id=request_id,
+                active_phase=active_phase,
+                active_phase_elapsed_ms=self._elapsed_ms(active_phase_started),
+            )
+            self._raise_missing_schema_error(exc)
+            raise
+        except Exception:
+            phase_timings_ms["total"] = self._elapsed_ms(started)
+            self._emit_preview_timing(
+                phase_timings_ms,
+                outcome="error",
+                request_id=request_id,
+                active_phase=active_phase,
+                active_phase_elapsed_ms=self._elapsed_ms(active_phase_started),
+            )
+            raise
+        phase_timings_ms["total"] = self._elapsed_ms(started)
+        self._emit_preview_timing(
+            phase_timings_ms,
+            outcome=str(report["status"]),
+            request_id=request_id,
+            active_phase="complete",
+            active_phase_elapsed_ms=0.0,
+        )
         return {
             **report,
             "performance": {
-                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                "duration_ms": phase_timings_ms["total"],
+                "phase_timings_ms": phase_timings_ms,
                 "raw_finance_full_scan": self.finance.shared_cost_is_candidate,
                 "source": (
                     "candidate week projection from raw Finance rows"
@@ -645,44 +690,46 @@ class PartnerReportBlock:
         *,
         expected_source_digest: str = "",
     ) -> tuple[bytes, str, dict[str, Any]]:
-        if not self.finance.shared_cost_is_candidate:
-            self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
             payload.get("selected_weeks"), require_continuous=False
         )
-        with self._preview_connection() as conn:
-            settings = self._load_settings(conn, nm_id=nm_id)
-            report, provenance = self._calculate_report(
-                conn,
-                settings=settings,
-                selected_weeks=weeks,
-                finalization=False,
-            )
-            if report["status"] != "ready":
-                raise PartnerReportError(
-                    "preview Excel is blocked by source coverage",
-                    code="source_coverage_incomplete",
-                    blockers=report["blockers"],
+        try:
+            with self._preview_connection() as conn:
+                settings = self._load_settings(conn, nm_id=nm_id)
+                report, provenance = self._calculate_report(
+                    conn,
+                    settings=settings,
+                    selected_weeks=weeks,
+                    finalization=False,
                 )
-            if expected_source_digest and expected_source_digest != str(report["source_digest"]):
-                raise PartnerReportError(
-                    "preview inputs changed before Excel export; rebuild the on-screen report",
-                    code="preview_source_digest_changed",
+                if report["status"] != "ready":
+                    raise PartnerReportError(
+                        "preview Excel is blocked by source coverage",
+                        code="source_coverage_incomplete",
+                        blockers=report["blockers"],
+                    )
+                if expected_source_digest and expected_source_digest != str(report["source_digest"]):
+                    raise PartnerReportError(
+                        "preview inputs changed before Excel export; rebuild the on-screen report",
+                        code="preview_source_digest_changed",
+                    )
+                workbook = self._build_main_workbook(report)
+                first_week = str(report["selected_weeks"][0])
+                last_week = str(report["selected_weeks"][-1])
+                filename = (
+                    f"Партнёрский_отчёт_{self._safe_filename(report['product_name']) or nm_id}_"
+                    f"{nm_id}_{first_week}_{last_week}.xlsx"
                 )
-            workbook = self._build_main_workbook(report)
-            first_week = str(report["selected_weeks"][0])
-            last_week = str(report["selected_weeks"][-1])
-            filename = (
-                f"Партнёрский_отчёт_{self._safe_filename(report['product_name']) or nm_id}_"
-                f"{nm_id}_{first_week}_{last_week}.xlsx"
-            )
-            return workbook, filename, {
-                "source_digest": report["source_digest"],
-                "formula_version": report["formula_version"],
-                "nm_id": nm_id,
-                "selected_weeks": report["selected_weeks"],
-            }
+                return workbook, filename, {
+                    "source_digest": report["source_digest"],
+                    "formula_version": report["formula_version"],
+                    "nm_id": nm_id,
+                    "selected_weeks": report["selected_weeks"],
+                }
+        except sqlite3.OperationalError as exc:
+            self._raise_missing_schema_error(exc)
+            raise
 
     def _calculate_report_legacy_deprecated(
         self,
@@ -983,6 +1030,7 @@ class PartnerReportBlock:
             key: ZERO for key, _label in OTHER_EXPENSE_CATEGORIES
         }
         visible_other_expense_keys: set[str] = set()
+        canonical_snapshot: CanonicalChannelCostSnapshot | None = None
         for week_start_text in selected_weeks:
             sync = conn.execute(
                 """SELECT week_start,week_end,status,content_hash,raw_row_count
@@ -1074,7 +1122,7 @@ class PartnerReportBlock:
                     continue
                 if shared is not None and finalization and shared.applies_to(operation_day) and not shared.closed_for(operation_day.isoformat()):
                     blockers.append({"code": "shared_cost_day_not_closed", "date": operation_day.isoformat()})
-                if shared is not None:
+                if shared is not None and shared.applies_to(operation_day):
                     current = resolve_channel_location_cost(
                         conn, nm_id=nm_id, operation_date=operation_day,
                         operation={"deliveryType": "FBS"} if detail.get("channel") == "FBS" else None,
@@ -1082,11 +1130,20 @@ class PartnerReportBlock:
                         shared_cost_snapshot=shared,
                     )
                 else:
+                    if canonical_snapshot is None:
+                        canonical_snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
                     current = resolve_channel_location_cost(
                         conn,
                         nm_id=nm_id,
                         operation_date=operation_day,
+                        operation=(
+                            {"deliveryType": "FBS"}
+                            if shared is not None and detail.get("channel") == "FBS"
+                            else None
+                        ),
                         fbs_order_id=int(detail.get("fbs_order_id") or 0) or None,
+                        snapshot=canonical_snapshot,
+                        shared_cost_snapshot=shared,
                     )
                 current_formula = (
                     shared.formula_version
@@ -2958,14 +3015,117 @@ class PartnerReportBlock:
         cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", value).strip("._")
         return cleaned[:80]
 
+    @staticmethod
+    def _elapsed_ms(started: float) -> float:
+        return round((time.perf_counter() - started) * 1000, 3)
+
+    @staticmethod
+    def _raise_missing_schema_error(exc: sqlite3.OperationalError) -> None:
+        if "no such table" in str(exc).casefold():
+            raise PartnerReportError(
+                "Partner Report preview is unavailable until service schema initialization completes",
+                code="report_unavailable",
+            ) from exc
+
+    @staticmethod
+    def _emit_preview_timing(
+        phase_timings_ms: Mapping[str, float],
+        *,
+        outcome: str,
+        request_id: str,
+        active_phase: str,
+        active_phase_elapsed_ms: float,
+    ) -> None:
+        """Emit bounded operational timings without report inputs or values."""
+
+        print(
+            json.dumps(
+                {
+                    "event": "partner_report_preview_timing",
+                    "request_id": str(request_id)[:24],
+                    "outcome": str(outcome)[:32],
+                    "active_phase": str(active_phase)[:48],
+                    "active_phase_elapsed_ms": round(float(active_phase_elapsed_ms), 3),
+                    "phase_timings_ms": {
+                        str(name): round(float(value), 3)
+                        for name, value in phase_timings_ms.items()
+                    },
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    @staticmethod
+    def _emit_preview_started(request_id: str) -> None:
+        """Mark handler entry without including user or financial data."""
+
+        print(
+            json.dumps(
+                {
+                    "event": "partner_report_preview_started",
+                    "request_id": str(request_id)[:24],
+                },
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
     @contextmanager
-    def _preview_connection(self):
+    def _preview_connection(self, phase_timings_ms: dict[str, float] | None = None):
+        """Open the indexed preview on a request-scoped read snapshot.
+
+        The active shared-cost book is intentionally pinned only for this
+        request.  Normal previews never touch raw Finance rows, so they do not
+        attach the raw store or create a temporary view.  Candidate previews
+        retain their existing raw-read transaction path.
+        """
+
         if self.finance.shared_cost_is_candidate:
+            started = time.perf_counter()
             with closing(self._connect()) as conn, conn:
+                if phase_timings_ms is not None:
+                    phase_timings_ms["candidate_snapshot_open"] = self._elapsed_ms(started)
                 yield conn
-        else:
-            with self._connect() as conn:
-                yield conn
+            return
+
+        from packages.application.fbs_accounting_runtime import load_shared
+
+        shared_started = time.perf_counter()
+        shared = load_shared(self.runtime_dir)
+        if phase_timings_ms is not None:
+            phase_timings_ms["shared_cost_load"] = self._elapsed_ms(shared_started)
+        previous_shared = self.finance._shared_cost_snapshot  # noqa: SLF001
+        self.finance._shared_cost_snapshot = shared  # noqa: SLF001
+        conn: sqlite3.Connection | None = None
+        try:
+            connection_started = time.perf_counter()
+            manifest = self.store_registry.load()
+            conn = self.store_registry.connect(
+                "operational",
+                mode="ro",
+                operation="partner_report_preview",
+                manifest=manifest,
+            )
+            if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise RuntimeError("partner preview requires query_only operational store")
+            conn.execute("BEGIN")
+            if phase_timings_ms is not None:
+                phase_timings_ms["operational_snapshot_open"] = self._elapsed_ms(
+                    connection_started
+                )
+            yield conn
+        finally:
+            self.finance._shared_cost_snapshot = previous_shared  # noqa: SLF001
+            if conn is not None:
+                try:
+                    if conn.in_transaction:
+                        conn.rollback()
+                finally:
+                    conn.close()
 
     def _connect(self) -> sqlite3.Connection:
         self.finance._pin_active_cost()
