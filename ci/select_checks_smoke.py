@@ -265,6 +265,7 @@ def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
     scripts = (
+        "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
