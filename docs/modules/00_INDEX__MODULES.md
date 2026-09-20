@@ -61,6 +61,7 @@
 - [Восстановление складских данных](51_MODULE__WAREHOUSE_RECOVERY_POLICY.md)
 - [История остатков витрины](52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md)
 - [Баланс запасов SKU](53_MODULE__SKU_INVENTORY_BALANCE.md)
+- [Финансовая ликвидность](60_MODULE__FINANCE_LIQUIDITY.md)
 
 ## Реестр изменений и здоровье
 

@@ -433,10 +433,31 @@
         "packages/**/*finance*.py",
         "packages/**/*cost*.py"
       ],
+      "exclude_patterns": [
+        "apps/finance_liquidity*.py",
+        "packages/**/finance_liquidity*.py",
+        "packages/**/finance_liquidity/**"
+      ],
       "commands": [
         ["python3", "apps/wb_finance_weekly_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
+    },
+    "finance_liquidity": {
+      "patterns": [
+        "apps/finance_liquidity*.py",
+        "packages/contracts/finance_liquidity*.py",
+        "packages/domain/finance_liquidity/**",
+        "packages/application/finance_liquidity*.py",
+        "packages/adapters/finance_liquidity*.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md"
+      ],
+      "commands": [
+        ["python3", "apps/finance_liquidity_contract_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
     },
     "warehouse": {
       "patterns": [

@@ -110,7 +110,12 @@ def build_plan_from_paths(
 
     for group_name, group in mapping["groups"].items():
         patterns = group.get("patterns") or []
-        if any(fnmatch.fnmatch(path, pattern) for path in safe_paths for pattern in patterns):
+        exclude_patterns = group.get("exclude_patterns") or []
+        if any(
+            any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+            and not any(fnmatch.fnmatch(path, pattern) for pattern in exclude_patterns)
+            for path in safe_paths
+        ):
             groups.append(group_name)
             commands.extend(group.get("commands") or [])
             pip.extend(group.get("pip") or [])
