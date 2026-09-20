@@ -16,6 +16,12 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "finance_liquidity_contract_smoke": (
+        "packages/contracts/finance_liquidity.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+    ),
     'warehouse_recovery_retention_smoke': (
         'apps/warehouse_recovery_retention.py',
         'packages/application/warehouse_recovery_policy.py',
@@ -363,6 +369,50 @@ def exists(_head: str, path: str) -> bool:
     }
 
 
+def finance_liquidity_checks() -> None:
+    own_smoke = ["python3", "apps/finance_liquidity_contract_smoke.py"]
+    legacy_smoke = ["python3", "apps/wb_finance_weekly_smoke.py"]
+    isolated_paths = (
+        "apps/finance_liquidity_contract_smoke.py",
+        "packages/contracts/finance_liquidity.py",
+        "packages/domain/finance_liquidity/money.py",
+        "packages/application/finance_liquidity.py",
+        "packages/adapters/finance_liquidity.py",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+    )
+    for path in isolated_paths:
+        plan = build_plan_from_paths(
+            pull_request=2, base=BASE, head=HEAD, paths=[path],
+            file_exists=lambda _, candidate: candidate == path,
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["finance_liquidity"], (path, plan)
+        assert plan["release_kind"] == (
+            "repo_only" if path.startswith("docs/") else "live_runtime"
+        )
+        # Auth imports require openpyxl even when no other group is selected.
+        assert plan["pip"] == ["openpyxl==3.1.5"], (path, plan)
+        smokes = [command for command in plan["commands"] if command[1] != "-m"]
+        assert smokes == [own_smoke], (path, plan)
+
+    liquidity_path = "packages/domain/finance_liquidity/money.py"
+    legacy_path = "packages/application/finance_value.py"
+    for legacy_exists in (True, False):
+        # Both an ordinary mixed diff and a rename from the legacy namespace
+        # must retain WB coverage; exclusions apply per path, not per plan.
+        plan = build_plan_from_paths(
+            pull_request=2, base=BASE, head=HEAD,
+            paths=[legacy_path, liquidity_path],
+            file_exists=lambda _, path: path == liquidity_path or (
+                legacy_exists and path == legacy_path
+            ),
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["finance", "finance_liquidity"], plan
+        assert plan["commands"].count(own_smoke) == 1, plan
+        assert plan["commands"].count(legacy_smoke) == 1, plan
+
+
 def main() -> None:
     # The hosted system Python may install into user-site, which -I correctly
     # excludes. Dependency install, trusted harness and nested Python must share
@@ -377,6 +427,7 @@ def main() -> None:
     rename_diff_check()
     command_dependency_checks()
     ads_dependency_checks()
+    finance_liquidity_checks()
     docs = build_plan_from_paths(
         pull_request=1, base=BASE, head=HEAD, paths=["docs/example.md"], file_exists=exists
     )

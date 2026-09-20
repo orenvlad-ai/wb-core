@@ -114,6 +114,11 @@ from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
 )
 from packages.contracts.cost_price_upload import CostPriceUploadResult
+from packages.contracts.finance_liquidity import (
+    FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS,
+    expand_finance_capability_hierarchy,
+    without_finance_explicit_only_capabilities,
+)
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.wb_supply_planning_zones import (
@@ -304,6 +309,10 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
     {"section_id": WEB_AUTH_SECTION_INSTRUCTIONS, "label": "Инструкции"},
     {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
+    *(
+        {"section_id": capability, "label": label}
+        for capability, label in FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS
+    ),
 )
 WEB_AUTH_SECTION_IDS = tuple(str(section["section_id"]) for section in WEB_AUTH_SECTION_DEFINITIONS)
 WEB_AUTH_UNIFIED_TAB_SECTIONS = {
@@ -8895,21 +8904,23 @@ def _available_section_records() -> list[dict[str, str]]:
 def _default_allowed_sections_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
     if normalized == WEB_AUTH_ROLE_ADMIN:
-        return list(WEB_AUTH_SECTION_IDS)
+        return list(without_finance_explicit_only_capabilities(WEB_AUTH_SECTION_IDS))
     if normalized == WEB_AUTH_ROLE_OPERATOR:
         # Instructions are a separately granted capability.  Keeping them out
         # of the operator fallback also prevents historical users with a
         # role-only/default record from receiving the new section implicitly.
-        return [
-            section_id
-            for section_id in WEB_AUTH_SECTION_IDS
-            if section_id
-            not in {
-                WEB_AUTH_SECTION_INSTRUCTIONS,
-                WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW,
-                WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN,
-            }
-        ]
+        return list(
+            without_finance_explicit_only_capabilities(
+                section_id
+                for section_id in WEB_AUTH_SECTION_IDS
+                if section_id
+                not in {
+                    WEB_AUTH_SECTION_INSTRUCTIONS,
+                    WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW,
+                    WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN,
+                }
+            )
+        )
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return [WEB_AUTH_SECTION_SUPPLY]
     return []
@@ -8938,7 +8949,7 @@ def _normalize_public_allowed_sections(value: Any, *, role: str = "") -> list[st
         if section_id in valid and section_id not in seen:
             sections.append(section_id)
             seen.add(section_id)
-    return sections
+    return list(expand_finance_capability_hierarchy(sections))
 
 
 def _validate_runtime_allowed_sections(value: Any, *, role: str = "") -> list[str]:
@@ -8956,7 +8967,7 @@ def _validate_runtime_allowed_sections(value: Any, *, role: str = "") -> list[st
         if section_id not in seen:
             sections.append(section_id)
             seen.add(section_id)
-    return sections
+    return list(expand_finance_capability_hierarchy(sections))
 
 
 def _validate_runtime_manage_users(value: Any, *, role: str = "") -> bool:

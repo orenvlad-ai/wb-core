@@ -62,6 +62,11 @@ from packages.contracts.cost_price_upload import (
     CostPriceUploadPayload,
     CostPriceUploadResult,
 )
+from packages.contracts.finance_liquidity import (
+    FINANCE_LIQUIDITY_CAPABILITIES,
+    expand_finance_capability_hierarchy,
+    without_finance_explicit_only_capabilities,
+)
 from packages.contracts.registry_upload_bundle_v1 import (
     ConfigV2Item,
     FormulaV2Item,
@@ -13961,6 +13966,7 @@ _SHEET_VITRINA_USER_SECTION_IDS = (
     "research",
     "instructions",
     "settings",
+    *FINANCE_LIQUIDITY_CAPABILITIES,
 )
 
 
@@ -14012,21 +14018,32 @@ def _normalize_sheet_vitrina_user_sections(value: Any, *, role: str = "") -> lis
             continue
         seen.add(section_id)
         allowed.append(section_id)
-    return allowed
+    return list(expand_finance_capability_hierarchy(allowed))
 
 
 def _default_sheet_vitrina_sections_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
     if normalized == "admin":
-        return list(_SHEET_VITRINA_USER_SECTION_IDS)
+        return list(
+            without_finance_explicit_only_capabilities(
+                _SHEET_VITRINA_USER_SECTION_IDS
+            )
+        )
     if normalized == "operator":
         # New knowledge-base access is intentionally opt-in for non-admin
         # users, including historical role-only records.
-        return [
-            section_id
-            for section_id in _SHEET_VITRINA_USER_SECTION_IDS
-            if section_id not in {"instructions", "feedbacks.ai_review", "feedbacks.autoanswers_admin"}
-        ]
+        return list(
+            without_finance_explicit_only_capabilities(
+                section_id
+                for section_id in _SHEET_VITRINA_USER_SECTION_IDS
+                if section_id
+                not in {
+                    "instructions",
+                    "feedbacks.ai_review",
+                    "feedbacks.autoanswers_admin",
+                }
+            )
+        )
     if normalized == "supply_operator":
         return ["supply"]
     return []

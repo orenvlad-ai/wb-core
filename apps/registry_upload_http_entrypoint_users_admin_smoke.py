@@ -175,6 +175,9 @@ def main() -> None:
                     "research",
                     "instructions",
                     "settings",
+                    "finance",
+                    "finance_operate",
+                    "finance_admin",
                 ]:
                     raise AssertionError(f"users API must expose available sections: {users_payload}")
                 if not _env_user_has_readonly_reason(users_payload, admin_username) or not _env_user_has_readonly_reason(users_payload, "hunshang"):
@@ -228,6 +231,45 @@ def main() -> None:
                 )
                 if invalid_code != 400 or "unsupported section" not in str(invalid_payload.get("error")):
                     raise AssertionError(f"invalid section must be rejected: {invalid_code} {invalid_payload}")
+
+                finance_grants = ["finance", "finance_operate", "finance_admin"]
+                finance_payload = _create_user(
+                    admin,
+                    base_url,
+                    {
+                        "username": "finance-grants-user",
+                        "allowed_sections": ["finance_admin"],
+                        "password": "finance-grants-fixture-password",
+                        "is_active": True,
+                    },
+                )
+                finance_user_id = str(finance_payload["user"]["user_id"])
+                if finance_payload["user"]["allowed_sections"] != finance_grants:
+                    raise AssertionError(f"explicit Finance grant must expand on create: {finance_payload}")
+                for granted, wanted in (
+                    ("finance_admin", finance_grants),
+                    ("finance_operate", finance_grants[:2]),
+                    ("finance", finance_grants[:1]),
+                ):
+                    _patch_user(admin, base_url, finance_user_id, {"allowed_sections": [granted]})
+                    code, readback = _opener_json(admin, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
+                    finance_user = _find_user(readback, "finance-grants-user")
+                    if code != 200 or not finance_user or finance_user.get("allowed_sections") != wanted:
+                        raise AssertionError(f"Finance grant/downgrade must persist: {granted} {readback}")
+                    denied_code, denied = _opener_post_json(
+                        admin,
+                        f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}",
+                        {
+                            "username": "supplier-finance-denied",
+                            "role": "supplier",
+                            "allowed_sections": [granted],
+                            "password": "supplier-finance-fixture-password",
+                            "is_active": True,
+                        },
+                    )
+                    if denied_code != 400 or "supplier-only access" not in str(denied.get("error")):
+                        raise AssertionError(f"supplier Finance grant must be rejected: {denied_code} {denied}")
+                _delete_user(admin, base_url, finance_user_id)
 
                 operator_payload = _create_user(
                     admin,
