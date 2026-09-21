@@ -1,0 +1,22 @@
+[Unit]
+Description=WB Core Finance Liquidity Cash Sidecar (dormant candidate)
+After=network.target
+Wants=network.target
+ConditionPathExists=/opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wb-core-runtime/app
+# The signed web-session secret remains in the sanctioned shared environment.
+EnvironmentFile=/opt/wb-ai/.env
+# EnvironmentFile overrides these defaults. This candidate is not installed.
+# Future activation appends a dedicated flags-only EnvironmentFile last.
+Environment=FINANCE_LIQUIDITY_ENABLED=0
+Environment=FINANCE_LIQUIDITY_READ_ENABLED=0
+Environment=FINANCE_LIQUIDITY_WRITE_ENABLED=0
+ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 /usr/bin/python3 /opt/wb-core-runtime/app/apps/finance_liquidity_http.py --db /opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3 --host 127.0.0.1 --port 8767 --runtime-dir /opt/wb-core-runtime/state
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

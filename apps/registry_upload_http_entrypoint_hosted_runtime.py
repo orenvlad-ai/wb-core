@@ -258,6 +258,7 @@ OPTIONAL_RUNTIME_CONTRACT = [
     "SHEET_VITRINA_SELLER_FUNNEL_SNAPSHOT_BASE_URL",
 ]
 RUNTIME_PIP_PACKAGES = [
+    "apsw==3.53.4.0",
     "openpyxl==3.1.5",
     "xlrd==2.0.1",
     "playwright==1.58.0",
@@ -1455,7 +1456,7 @@ def _build_deploy_metadata_command(
 
 def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]:
     package_names = " ".join(shlex.quote(item) for item in RUNTIME_PIP_PACKAGES)
-    python_check = "python3 -c 'import openpyxl, xlrd, playwright, pypdf, reportlab' >/dev/null 2>&1"
+    python_check = "python3 -c 'import apsw, openpyxl, xlrd, playwright, pypdf, reportlab' >/dev/null 2>&1"
     pip_install = f"python3 -m pip install --break-system-packages {package_names}"
     command = f"{python_check} || {pip_install}"
     return _remote_shell_command(target, command)

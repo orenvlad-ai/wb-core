@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import threading
 import json
 import os
@@ -17,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from apps.sheet_vitrina_v1_fulfillment_services_smoke import _wb_supply_row, _seed_wb_supplies, _build_workbook, _valid_row, _storage_row, NOW
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime, _connect
 from packages.application.fulfillment_services import FulfillmentServicesBlock, UPLOADS_TABLE, LINES_TABLE
-from packages.application import fulfillment_recalc_intents as intents
+from packages.application import fulfillment_recalc_intents as intents, fulfillment_services as fulfillment_services_module
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.wb_supplies import WbSuppliesBlock
 
@@ -134,14 +135,90 @@ def test_concurrent_duplicate():
         rt, block = fixture(raw)
         payload = _build_workbook([_valid_row('1001')])
         gate = threading.Barrier(2)
+        thread_state = threading.local()
+        observation_guard = threading.Lock()
+        second_writer_attempted = threading.Event()
+        first_writer_active = threading.Event()
+        first_writer_committed = threading.Event()
+        second_schema_entered = threading.Event()
+        outer_attempts = 0
+        outer_owners = 0
+
+        original_lock = fulfillment_services_module.warehouse_functional_write_lock
+        @contextmanager
+        def observed_lock(*args, **kwargs):
+            nonlocal outer_attempts, outer_owners
+            depth = int(getattr(thread_state, 'lock_depth', 0))
+            outer = bool(getattr(thread_state, 'in_save', False) and depth == 0)
+            if outer:
+                with observation_guard:
+                    outer_attempts += 1
+                    if outer_attempts == 2:
+                        second_writer_attempted.set()
+            thread_state.lock_depth = depth + 1
+            try:
+                with original_lock(*args, **kwargs) as evidence:
+                    if outer:
+                        with observation_guard:
+                            outer_owners += 1
+                            thread_state.writer_order = outer_owners
+                    yield evidence
+            finally:
+                thread_state.lock_depth = depth
+
+        original_connect = block._connect
+        class ObservedConnection:
+            def __init__(self):
+                self.raw = original_connect()
+                self.connection = None
+            def __enter__(self):
+                self.connection = self.raw.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.raw.__exit__(*args)
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+            def commit(self):
+                was_in_transaction = bool(self.connection.in_transaction)
+                result = self.connection.commit()
+                if (was_in_transaction and first_writer_active.is_set()
+                        and getattr(thread_state, 'writer_order', 0) == 1):
+                    first_writer_committed.set()
+                return result
+        block._connect = ObservedConnection
+
+        original_recalculation_schema = block._ensure_recalculation_schema
+        def observed_recalculation_schema(conn):
+            if getattr(thread_state, 'writer_order', 0) == 2:
+                assert first_writer_committed.is_set()
+                second_schema_entered.set()
+            return original_recalculation_schema(conn)
+        block._ensure_recalculation_schema = observed_recalculation_schema
+
+        original_capture = intents.capture_request
+        def observed_capture(conn, *args, **kwargs):
+            if getattr(thread_state, 'writer_order', 0) == 1 and not first_writer_active.is_set():
+                assert conn.in_transaction
+                first_writer_active.set()
+                assert second_writer_attempted.wait(5)
+                assert not second_schema_entered.is_set()
+            return original_capture(conn, *args, **kwargs)
+
         original = block._save_upload
         def save(**kw):
             gate.wait(10)
-            return original(**kw)
+            thread_state.in_save = True
+            try:
+                return original(**kw)
+            finally:
+                thread_state.in_save = False
         block._save_upload = save
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(block.upload_xlsx, payload) for _ in range(2)]
-            results = [future.result(20) for future in futures]
+        with patch.object(fulfillment_services_module, 'warehouse_functional_write_lock', observed_lock), patch.object(intents, 'capture_request', observed_capture):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(block.upload_xlsx, payload) for _ in range(2)]
+                results = [future.result(20) for future in futures]
+        assert first_writer_active.is_set() and first_writer_committed.is_set()
+        assert second_writer_attempted.is_set() and second_schema_entered.is_set()
         assert results[0]['upload']['upload_id'] == results[1]['upload']['upload_id']
         assert count(rt, UPLOADS_TABLE) == len(queue(rt)) == 1
         assert len(list((Path(raw)/'fulfillment_services').rglob('*.pdf'))) == 1

@@ -117,6 +117,7 @@ from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.finance_liquidity import (
     FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS,
     expand_finance_capability_hierarchy,
+    has_finance_capability,
     without_finance_explicit_only_capabilities,
 )
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
@@ -10360,6 +10361,10 @@ def _render_sheet_vitrina_web_vitrina_ui(
     )
     allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
     initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_sections(normalized_sections)
+    finance_navigation_available = _finance_navigation_is_available(
+        role=normalized_role,
+        allowed_sections=normalized_sections,
+    )
     config_payload = {
         "page_title": "Web-витрина",
         "current_role": normalized_role,
@@ -10470,7 +10475,34 @@ def _render_sheet_vitrina_web_vitrina_ui(
     return (
         template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+        .replace(
+            "__SHEET_VITRINA_V1_FINANCE_NAVIGATION_LINK__",
+            '<a class="shell-logout-link" href="/finance/">Финансы</a>'
+            if finance_navigation_available
+            else "",
+        )
     )
+
+
+def _finance_navigation_is_available(
+    *,
+    role: str,
+    allowed_sections: Sequence[str],
+) -> bool:
+    """Expose the Finance sidecar link only for an enabled explicit grant.
+
+    This is intentionally a local navigation decision: it neither opens the
+    Finance store nor calls the sidecar.  The sidecar remains the authoritative
+    per-request session and capability guard.
+    """
+
+    if str(role or "").strip() == WEB_AUTH_ROLE_SUPPLIER:
+        return False
+    if os.environ.get("FINANCE_LIQUIDITY_ENABLED") != "1":
+        return False
+    if os.environ.get("FINANCE_LIQUIDITY_READ_ENABLED") != "1":
+        return False
+    return has_finance_capability(allowed_sections, "finance")
 
 
 def _resolve_sheet_web_vitrina_surface_from_query(query: str) -> str:

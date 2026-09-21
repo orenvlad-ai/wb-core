@@ -334,9 +334,6 @@ def command_dependency_checks():
             paths=["packages/application/fixture_boundary.py"], file_exists=lambda *_: True)
     check(grouped, [future_script])
 
-    # The Finance auth driver is introduced after this trusted-base map. Its
-    # dependency follows only commands that import that driver, whether the
-    # smoke is selected directly or together with other Finance-only checks.
     auth_consumers = (
         "apps/finance_liquidity_auth_smoke.py",
         "apps/finance_liquidity_http_smoke.py",
@@ -349,13 +346,15 @@ def command_dependency_checks():
             base=BASE,
             head=HEAD,
             paths=[script],
-            file_exists=lambda _, candidate, selected=script: (
-                candidate == selected or (select_checks.ROOT / candidate).is_file()
-            ),
+            file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
         )
         verify_plan(direct)
         assert direct["groups"] == ["finance_liquidity"], direct
-        assert direct["pip"] == ["apsw==3.53.4.0", "openpyxl==3.1.5"], direct
+        assert direct["pip"] == [
+            "apsw==3.53.4.0",
+            "openpyxl==3.1.5",
+            "playwright==1.58.0",
+        ], direct
         assert direct["commands"].count(["python3", script]) == 1, direct
 
     finance_only = build_plan_from_paths(
@@ -363,9 +362,7 @@ def command_dependency_checks():
         base=BASE,
         head=HEAD,
         paths=list(auth_consumers),
-        file_exists=lambda _, candidate: (
-            candidate in auth_consumers or (select_checks.ROOT / candidate).is_file()
-        ),
+        file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
     )
     verify_plan(finance_only)
     assert finance_only["groups"] == ["finance_liquidity"], finance_only
@@ -431,15 +428,30 @@ def exists(_head: str, path: str) -> bool:
 
 
 def finance_liquidity_checks() -> None:
-    own_smoke = ["python3", "apps/finance_liquidity_contract_smoke.py"]
+    own_smokes = [
+        ["python3", "apps/finance_liquidity_contract_smoke.py"],
+        ["python3", "apps/finance_liquidity_auth_smoke.py"],
+        ["python3", "apps/finance_liquidity_cash_smoke.py"],
+        ["python3", "apps/finance_liquidity_http_smoke.py"],
+        ["python3", "apps/finance_liquidity_browser_smoke.py"],
+        ["python3", "apps/finance_liquidity_integration_smoke.py"],
+    ]
     legacy_smoke = ["python3", "apps/wb_finance_weekly_smoke.py"]
     isolated_paths = (
         "apps/finance_liquidity_contract_smoke.py",
+        "apps/finance_liquidity_auth_smoke.py",
+        "apps/finance_liquidity_cash_smoke.py",
+        "apps/finance_liquidity_http_smoke.py",
+        "apps/finance_liquidity_browser_smoke.py",
+        "apps/finance_liquidity_integration_smoke.py",
         "packages/contracts/finance_liquidity.py",
         "packages/domain/finance_liquidity/money.py",
         "packages/application/finance_liquidity.py",
         "packages/adapters/finance_liquidity.py",
         "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+        "docs/runbooks/finance_liquidity_cash_dormant_release.md",
+        "artifacts/finance_liquidity_cash/dormant/systemd/wb-core-finance-liquidity.service",
+        "artifacts/finance_liquidity_cash/dormant/nginx/finance-liquidity.routes.candidate.md",
     )
     for path in isolated_paths:
         plan = build_plan_from_paths(
@@ -451,10 +463,13 @@ def finance_liquidity_checks() -> None:
         assert plan["release_kind"] == (
             "repo_only" if path.startswith("docs/") else "live_runtime"
         )
-        # Auth imports require openpyxl even when no other group is selected.
-        assert plan["pip"] == ["openpyxl==3.1.5"], (path, plan)
+        assert plan["pip"] == [
+            "apsw==3.53.4.0",
+            "openpyxl==3.1.5",
+            "playwright==1.58.0",
+        ], (path, plan)
         smokes = [command for command in plan["commands"] if command[1] != "-m"]
-        assert smokes == [own_smoke], (path, plan)
+        assert smokes == own_smokes, (path, plan)
 
     liquidity_path = "packages/domain/finance_liquidity/money.py"
     legacy_path = "packages/application/finance_value.py"
@@ -470,7 +485,8 @@ def finance_liquidity_checks() -> None:
         )
         verify_plan(plan)
         assert plan["groups"] == ["finance", "finance_liquidity"], plan
-        assert plan["commands"].count(own_smoke) == 1, plan
+        for smoke in own_smokes:
+            assert plan["commands"].count(smoke) == 1, plan
         assert plan["commands"].count(legacy_smoke) == 1, plan
 
 
