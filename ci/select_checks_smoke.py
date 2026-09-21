@@ -270,6 +270,7 @@ def rename_diff_check():
 def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
+    future_script = "apps/finance_liquidity_browser_smoke.py"
     scripts = (
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
@@ -300,6 +301,16 @@ def command_dependency_checks():
             paths=[sibling_source], file_exists=lambda _, p: p in {sibling_source, script})
         check(sibling, [script])
 
+    # The dependency prerequisite precedes this future candidate file, so model
+    # only that absent script while retaining existence checks above.
+    direct = build_plan_from_paths(pull_request=30, base=BASE, head=HEAD,
+        paths=[future_script], file_exists=lambda _, p: p == future_script or (select_checks.ROOT / p).is_file())
+    check(direct, [future_script])
+    future_source = future_script.removesuffix("_smoke.py") + ".py"
+    sibling = build_plan_from_paths(pull_request=31, base=BASE, head=HEAD,
+        paths=[future_source], file_exists=lambda _, p: p in {future_source, future_script})
+    check(sibling, [future_script])
+
     for path in ("apps/warehouse_recovery_policy_http_smoke.py", "packages/application/warehouse_recovery_policy.py"):
         plan = build_plan_from_paths(pull_request=35, base=BASE, head=HEAD,
             paths=[path], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
@@ -307,21 +318,21 @@ def command_dependency_checks():
         assert install not in plan["commands"], plan
 
     combined = build_plan_from_paths(pull_request=32, base=BASE, head=HEAD,
-        paths=[*scripts, "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
-        file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
-    check(combined, scripts)
+        paths=[future_script, *scripts, "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
+        file_exists=lambda _, p: p == future_script or (select_checks.ROOT / p).is_file())
+    check(combined, [future_script, *scripts])
     assert combined["commands"][0][:3] == ["python3", "-m", "py_compile"]
 
     # A group can select a browser command even when no browser file changed.
     mapping, mapping_sha = select_checks.load_map()
     mapping["groups"]["fixture_browser_boundary"] = {
         "patterns": ["packages/application/fixture_boundary.py"],
-        "commands": [["python3", scripts[0]]],
+        "commands": [["python3", future_script]],
     }
     with patch.object(select_checks, "load_map", return_value=(mapping, mapping_sha)):
         grouped = build_plan_from_paths(pull_request=33, base=BASE, head=HEAD,
             paths=["packages/application/fixture_boundary.py"], file_exists=lambda *_: True)
-    check(grouped, [scripts[0]])
+    check(grouped, [future_script])
 
     for paths, file_exists in (
         (["packages/application/sku_inventory_balance.py"], lambda *_: True),
