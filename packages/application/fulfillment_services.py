@@ -21,6 +21,7 @@ from openpyxl.utils import get_column_letter
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
 from packages.application import fulfillment_recalc_intents as recalc_intents
 
 
@@ -151,7 +152,7 @@ class FulfillmentServicesBlock:
         upload_id = "ffu_" + uuid4().hex[:16]
         file_sha256 = hashlib.sha256(workbook_bytes).hexdigest()
         with self._connect() as conn:
-            _ensure_schema(conn)
+            self._ensure_service_schema(conn)
             existing = conn.execute(f"SELECT * FROM {UPLOADS_TABLE} WHERE file_sha256=? AND validation_status='ok' AND deleted_at IS NULL ORDER BY created_at,upload_id LIMIT 1", (file_sha256,)).fetchone()
             if existing is not None:
                 recalculation = recalc_intents.read_request(conn, existing["upload_id"], recalc_intents.source_revision(existing))
@@ -226,7 +227,7 @@ class FulfillmentServicesBlock:
     def list_uploads(self, *, limit: int = 20) -> dict[str, Any]:
         normalized_limit = max(1, min(int(limit or 20), 100))
         with self._connect() as conn:
-            _ensure_schema(conn)
+            self._ensure_service_schema(conn)
             rows = conn.execute(
                 f"""
                 SELECT *
@@ -258,7 +259,7 @@ class FulfillmentServicesBlock:
         if not normalized_id:
             raise ValueError("upload_id is required")
         with self._connect() as conn:
-            _ensure_schema(conn)
+            self._ensure_service_schema(conn)
             upload_row = conn.execute(
                 f"SELECT * FROM {UPLOADS_TABLE} WHERE upload_id = ? AND deleted_at IS NULL",
                 (normalized_id,),
@@ -329,8 +330,10 @@ class FulfillmentServicesBlock:
         now = self.timestamp_factory()
         pdf_file_path = ""
         already_deleted = False
-        with self._connect() as conn:
-            _ensure_schema(conn)
+        with warehouse_functional_write_lock(
+            self.runtime.runtime_dir, timeout_seconds=5
+        ), self._connect() as conn:
+            self._ensure_service_schema(conn)
             self._ensure_recalculation_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             upload_row = conn.execute(
@@ -398,7 +401,7 @@ class FulfillmentServicesBlock:
 
     def approved_overlay_by_supply(self) -> dict[str, dict[str, Any]]:
         with self._connect() as conn:
-            _ensure_schema(conn)
+            self._ensure_service_schema(conn)
             return self.approved_overlay_in_connection(conn)
 
     @staticmethod
@@ -628,8 +631,10 @@ class FulfillmentServicesBlock:
         updated_at: str,
         lines: list[_ParsedLine],
     ) -> tuple[str, dict[str, Any]]:
-        with self._connect() as conn:
-            _ensure_schema(conn)
+        with warehouse_functional_write_lock(
+            self.runtime.runtime_dir, timeout_seconds=5
+        ), self._connect() as conn:
+            self._ensure_service_schema(conn)
             self._ensure_recalculation_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             # The exact accepted file is the document identity for a retry.
@@ -731,9 +736,16 @@ class FulfillmentServicesBlock:
         recalc_intents.ensure_schema(conn)
         conn.commit()
 
+    def _ensure_service_schema(self, conn: sqlite3.Connection) -> None:
+        with warehouse_functional_write_lock(
+            self.runtime.runtime_dir, timeout_seconds=5
+        ):
+            _ensure_schema(conn)
+            conn.commit()
+
     def _new_payment_validation_id(self) -> str:
         with self._connect() as conn:
-            _ensure_schema(conn)
+            self._ensure_service_schema(conn)
             for _ in range(100):
                 candidate = "FF-" + uuid4().hex[:8].upper()
                 row = conn.execute(
