@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
-import sqlite3
 import time
 from typing import Any, Mapping
+
+import apsw
 
 from packages.application.storage_registry import StoreRegistry, StorageRegistryError
 from packages.contracts.finance_liquidity import expand_finance_capability_hierarchy
@@ -45,19 +47,55 @@ class FinanceOperationalAuth:
     """Checks the normal signed session, then exact active grants from current store.
 
     It intentionally never calls the main runtime's user loader because that
-    loader can initialise schema/write.  Pin/revalidation rejects manifest or
-    same-path file drift, and query-only is set by StoreRegistry.connect. SQLite
-    exposes only the opened pathname here, so this is deliberately a path-identity
-    guard, not an fstat-level proof of the opened descriptor identity.
+    loader can initialise schema/write. Manifest/path revalidation surrounds a
+    read-only APSW connection, and SQLITE_FCNTL_HAS_MOVED is checked on that exact
+    grant-reading connection before and after the read. A renamed, moved, deleted,
+    or replaced operational owner therefore fails closed.
     """
 
-    def __init__(self, runtime_dir: Path, session_secret: str | None = None) -> None:
+    def __init__(
+        self,
+        runtime_dir: Path,
+        session_secret: str | None = None,
+        *,
+        operational_timeout_ms: int = 5_000,
+    ) -> None:
         self.registry = StoreRegistry(Path(runtime_dir))
+        self.operational_timeout_ms = int(operational_timeout_ms)
+        if self.operational_timeout_ms <= 0:
+            raise ValueError("operational_timeout_ms must be positive")
         self.session_secret = (
             session_secret
             if session_secret is not None
             else str(os.environ.get("WB_CORE_WEB_AUTH_SESSION_SECRET") or "")
         )
+
+    def _open_operational_connection(self, path: Path) -> apsw.Connection:
+        connection = apsw.Connection(str(path), flags=apsw.SQLITE_OPEN_READONLY)
+        connection.set_busy_timeout(self.operational_timeout_ms)
+        connection.execute("PRAGMA query_only=ON")
+        query_only = next(connection.execute("PRAGMA query_only"), None)
+        if (
+            query_only is None
+            or int(query_only[0]) != 1
+            or not connection.readonly("main")
+        ):
+            connection.close()
+            raise FinanceAuthUnavailable("operational authorization is not query-only")
+        return connection
+
+    @staticmethod
+    def _assert_connection_not_moved(connection: Any) -> None:
+        moved = ctypes.c_int(-1)
+        understood = connection.file_control(
+            "main",
+            apsw.SQLITE_FCNTL_HAS_MOVED,
+            ctypes.addressof(moved),
+        )
+        if not understood or moved.value != 0:
+            raise FinanceAuthUnavailable(
+                "operational authorization descriptor moved"
+            )
 
     def authenticate(self, headers: Mapping[str, str]) -> dict[str, Any]:
         if not self.session_secret:
@@ -92,35 +130,72 @@ class FinanceOperationalAuth:
             raise FinanceAuthDenied("expired or forbidden session")
         try:
             pinned = self.registry.load(require_files=True)
-            path = self.registry.resolve("operational", manifest=pinned)
-            expected_path = path.resolve()
+            generation = self.registry.generation("operational", manifest=pinned)
+            expected_path = self.registry.resolve(
+                "operational", manifest=pinned
+            ).resolve()
             before_identity = _identity(expected_path)
-            with self.registry.connect(
-                "operational",
-                mode="ro",
-                operation="finance_liquidity_authorization",
-                manifest=pinned,
-            ) as conn:
-                database_path = Path(
-                    conn.execute("PRAGMA database_list").fetchone()[2]
-                ).resolve()
+            conn = self._open_operational_connection(expected_path)
+            try:
+                database_path = Path(conn.filename).resolve()
                 if (
                     database_path != expected_path
                     or _identity(database_path) != before_identity
                 ):
                     raise FinanceAuthUnavailable("operational authorization path drift")
-                row = conn.execute(
-                    "SELECT username,role,allowed_sections_json,is_active FROM sheet_vitrina_v1_users WHERE username=?",
-                    (username.strip().lower(),),
-                ).fetchone()
+                self._assert_connection_not_moved(conn)
+                conn.execute("BEGIN")
+                if not pinned.implicit and pinned.state != "monolith":
+                    identity = next(
+                        conn.execute(
+                            "SELECT schema_revision,logical_store,generation_id,"
+                            "generation_epoch,source_fingerprint "
+                            "FROM finance_operational_schema_meta WHERE singleton=1"
+                        ),
+                        None,
+                    )
+                    expected_identity = (
+                        generation.schema_revision,
+                        "operational",
+                        generation.generation_id,
+                        generation.generation_epoch,
+                        pinned.source_fingerprint,
+                    )
+                    if identity is None or tuple(identity) != expected_identity:
+                        raise FinanceAuthUnavailable(
+                            "operational authorization generation mismatch"
+                        )
+                raw_row = next(
+                    conn.execute(
+                        "SELECT username,role,allowed_sections_json,is_active "
+                        "FROM sheet_vitrina_v1_users WHERE username=?",
+                        (username.strip().lower(),),
+                    ),
+                    None,
+                )
+                self._assert_connection_not_moved(conn)
+            finally:
+                conn.close()
             after_identity = _identity(expected_path)
             revalidated = self.registry.load(require_files=True)
-        except (StorageRegistryError, sqlite3.DatabaseError, OSError) as exc:
+        except FinanceAuthUnavailable:
+            raise
+        except (StorageRegistryError, apsw.Error, OSError) as exc:
             raise FinanceAuthUnavailable(
                 "operational authorization store unavailable"
             ) from exc
         if revalidated != pinned or before_identity != after_identity:
             raise FinanceAuthUnavailable("operational authorization generation drift")
+        row = (
+            {
+                "username": raw_row[0],
+                "role": raw_row[1],
+                "allowed_sections_json": raw_row[2],
+                "is_active": raw_row[3],
+            }
+            if raw_row is not None
+            else None
+        )
         if row is None or not bool(row["is_active"]) or str(row["role"]) != role:
             raise FinanceAuthDenied("active session principal not found")
         try:

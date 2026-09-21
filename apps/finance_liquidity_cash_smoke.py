@@ -23,6 +23,7 @@ from packages.application.finance_liquidity_cash import (
     bootstrap_finance_cash_store,
 )
 from packages.domain.finance_liquidity import MoneyError, money_from_api, money_to_api
+from apps.finance_liquidity_readiness_smoke import run_readiness_checks
 
 
 ACTOR = "cash-smoke"
@@ -1454,6 +1455,7 @@ def test_cash_ledger(db_path: Path) -> None:
 
 def main() -> None:
     test_money_boundaries()
+    run_readiness_checks()
     with TemporaryDirectory() as directory:
         test_review_007_regressions(
             Path(directory) / "cash-review-007-regressions.sqlite3"

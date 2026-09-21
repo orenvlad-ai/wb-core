@@ -27,6 +27,7 @@ from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE,
     CANONICAL_BUSINESS_TIMEZONE_NAME,
 )
+from packages.contracts.finance_liquidity_cash import FINANCE_CASH_SCHEMA_VERSION
 
 
 class FinanceCashError(ValueError):
@@ -138,8 +139,8 @@ def bootstrap_finance_cash_store(path: Path) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
         conn.execute(
-            "INSERT INTO finance_liquidity_schema_meta(singleton, schema_version, created_at) VALUES(1, 1, ?)",
-            (_now(),),
+            "INSERT INTO finance_liquidity_schema_meta(singleton, schema_version, created_at) VALUES(1, ?, ?)",
+            (FINANCE_CASH_SCHEMA_VERSION, _now()),
         )
         conn.commit()
     finally:
@@ -163,6 +164,7 @@ class FinanceCashService:
         # state transitions.  A plain sqlite connection cannot manufacture a
         # posted transition or an immutable-fact mutation by merely issuing SQL.
         conn.create_function("finance_internal_write", 0, lambda: 1)
+        conn.create_function("finance_internal_operation_id", 0, lambda: None)
         try:
             conn.execute("PRAGMA foreign_keys=ON")
             if not write:
@@ -171,7 +173,7 @@ class FinanceCashService:
             meta = conn.execute(
                 "SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1"
             ).fetchone()
-            if meta is None or int(meta[0]) != 1:
+            if meta is None or int(meta[0]) != FINANCE_CASH_SCHEMA_VERSION:
                 raise FinanceCashError(
                     "finance_schema_unavailable", "Finance schema is unavailable", 503
                 )
@@ -278,8 +280,10 @@ class FinanceCashService:
             conn.execute("SELECT * FROM finance_liquidity_ledger_transactions ORDER BY sequence_no")
         )
         transactions: dict[str, list[sqlite3.Row]] = {}
+        document_transactions: dict[str, list[sqlite3.Row]] = {}
         for row in all_transactions:
             transactions.setdefault(str(row["origin_operation_id"]), []).append(row)
+            document_transactions.setdefault(str(row["document_id"]), []).append(row)
         transaction_ids = {str(row["transaction_id"]) for row in all_transactions}
         entry_transaction_ids = {
             str(row[0])
@@ -308,6 +312,7 @@ class FinanceCashService:
             or transaction_seal_ids != transaction_ids
         ):
             invalid()
+        receipt_documents: set[str] = set()
         for operation_id, seal in seals.items():
             operation = operations.get(operation_id)
             txs = transactions.get(operation_id, [])
@@ -339,6 +344,7 @@ class FinanceCashService:
             if (
                 not isinstance(result, dict)
                 or result.get("operation_id") != operation_id
+                or not str(result.get("receipt_id") or "")
                 or result.get("document_id") != root
                 or result.get("ledger_transaction_ids") != [
                     str(tx["transaction_id"]) for tx in txs
@@ -347,52 +353,87 @@ class FinanceCashService:
                 invalid()
             scope = str(operation["scope"])
             if scope.startswith("document.post:"):
-                if scope.removeprefix("document.post:") != root or any(
-                    tx["document_id"] != root
-                    or tx["phase"]
-                    != (
-                        "transfer_send"
-                        if root_document["document_type"] == "transfer"
-                        and root_document["transfer_mode"] == "two_phase"
-                        else "primary"
+                expected_phase = (
+                    "transfer_send"
+                    if root_document["document_type"] == "transfer"
+                    and root_document["transfer_mode"] == "two_phase"
+                    else "primary"
+                )
+                expected_count = (
+                    0
+                    if root_document["document_type"] == "opening"
+                    and int(root_document["amount_minor"]) == 0
+                    else 1
+                )
+                if (
+                    scope.removeprefix("document.post:") != root
+                    or root_document["status"] not in {"posted", "reversed"}
+                    or len(txs) != expected_count
+                    or any(
+                        tx["document_id"] != root or tx["phase"] != expected_phase
+                        for tx in txs
                     )
-                    for tx in txs
                 ):
                     invalid()
+                receipt_documents.add(root)
             elif scope.startswith("transfer."):
                 action, _, target = scope.removeprefix("transfer.").partition(":")
                 expected_phase = {"complete": "transfer_complete", "cancel": "transfer_cancel"}.get(action)
                 if (
                     target != root
                     or expected_phase is None
-                    or any(tx["document_id"] != root or tx["phase"] != expected_phase for tx in txs)
+                    or root_document["document_type"] != "transfer"
+                    or root_document["transfer_mode"] != "two_phase"
+                    or root_document["transfer_state"]
+                    != {"complete": "completed", "cancel": "cancelled"}[action]
+                    or len(txs) != 1
+                    or txs[0]["document_id"] != root
+                    or txs[0]["phase"] != expected_phase
                 ):
                     invalid()
+                receipt_documents.add(root)
             elif scope.startswith("document.reverse:"):
                 target = scope.removeprefix("document.reverse:")
+                target_document = documents.get(target)
+                original_txs = document_transactions.get(target, [])
+                expected = [
+                    (root, f"reversal:{tx['phase']}") for tx in reversed(original_txs)
+                ]
                 if (
-                    root_document["reversal_of_document_id"] != target
-                    or not txs
-                    or any(tx["document_id"] != root or not str(tx["phase"]).startswith("reversal:") for tx in txs)
+                    target_document is None
+                    or target_document["status"] != "reversed"
+                    or root_document["reversal_of_document_id"] != target
+                    or result.get("reversal_of_document_id") != target
+                    or not original_txs
+                    or [(str(tx["document_id"]), str(tx["phase"])) for tx in txs]
+                    != expected
                 ):
                     invalid()
+                receipt_documents.update({target, root})
             elif scope.startswith("opening.replace:"):
                 target = scope.removeprefix("opening.replace:")
+                target_document = documents.get(target)
+                reversal_id = str(result.get("reversal_document_id") or "")
+                reversal_document = documents.get(reversal_id)
+                expected = []
+                if target_document is not None and int(target_document["amount_minor"]) != 0:
+                    expected.append((reversal_id, "reversal"))
+                if int(root_document["amount_minor"]) != 0:
+                    expected.append((root, "replacement_opening"))
                 if (
-                    root_document["replaces_opening_document_id"] != target
-                    or any(
-                        tx["phase"] not in {"reversal", "replacement_opening"}
-                        or (
-                            tx["document_id"] != root
-                            and (
-                                documents.get(str(tx["document_id"])) is None
-                                or documents[str(tx["document_id"])]["reversal_of_document_id"] != target
-                            )
-                        )
-                        for tx in txs
-                    )
+                    target_document is None
+                    or target_document["document_type"] != "opening"
+                    or target_document["status"] != "reversed"
+                    or root_document["replaces_opening_document_id"] != target
+                    or root_document["document_type"] != "opening"
+                    or reversal_document is None
+                    or reversal_document["document_type"] != "opening"
+                    or reversal_document["reversal_of_document_id"] != target
+                    or [(str(tx["document_id"]), str(tx["phase"])) for tx in txs]
+                    != expected
                 ):
                     invalid()
+                receipt_documents.update({target, reversal_id, root})
             else:
                 invalid()
             for tx in txs:
@@ -440,6 +481,12 @@ class FinanceCashService:
                         f":{document['currency']}"
                     ):
                         invalid()
+        if receipt_documents != {
+            document_id
+            for document_id, document in documents.items()
+            if document["status"] in {"posted", "reversed"}
+        }:
+            invalid()
 
     def _account_view(
         self, conn: sqlite3.Connection, account: sqlite3.Row, as_of: str | None = None
@@ -991,6 +1038,7 @@ class FinanceCashService:
             phase=phase,
             effects=effects,
         )
+        self._seal_operation_effect(conn, operation_id, document_id)
         cursor = conn.execute(
             "UPDATE finance_liquidity_documents SET transfer_state=?,revision=revision+1,updated_at=? WHERE document_id=? AND revision=? AND transfer_state='in_transit'",
             (state, _now(), document_id, doc["revision"]),
@@ -1108,6 +1156,7 @@ class FinanceCashService:
                     for entry in entries
                 ],
             )
+        self._seal_operation_effect(conn, operation_id, reversal_id)
         conn.execute(
             "UPDATE finance_liquidity_documents SET status='reversed',revision=revision+1,updated_at=? WHERE document_id=? AND revision=?",
             (_now(), document_id, original["revision"]),
@@ -1262,6 +1311,7 @@ class FinanceCashService:
             phase="replacement_opening",
             effects=new_effects,
         )
+        self._seal_operation_effect(conn, operation_id, replacement_id)
         conn.execute(
             "UPDATE finance_liquidity_documents SET status='reversed',revision=revision+1,updated_at=? WHERE document_id=? AND revision=?",
             (_now(), document_id, old["revision"]),
@@ -1593,6 +1643,74 @@ class FinanceCashService:
                 self._assert_ledger_integrity(conn)
             return json.loads(record["result_json"])
 
+    def _seal_operation_effect(
+        self,
+        conn: sqlite3.Connection,
+        operation_id: str,
+        root_document_id: str,
+    ) -> list[str]:
+        canonical_transactions = [
+            _row(row)
+            for row in conn.execute(
+                "SELECT transaction_id,document_id,phase,effective_at "
+                "FROM finance_liquidity_ledger_transactions "
+                "WHERE origin_operation_id=? ORDER BY sequence_no",
+                (operation_id,),
+            )
+        ]
+        transaction_ids = [
+            str(transaction["transaction_id"]) for transaction in canonical_transactions
+        ]
+        operation = conn.execute(
+            "SELECT effect_root_document_id FROM finance_liquidity_operations "
+            "WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        if operation is None:
+            raise FinanceCashError(
+                "ledger_integrity_unavailable", "Money operation is unavailable", 500
+            )
+        existing = conn.execute(
+            "SELECT root_document_id,transaction_count,transactions_digest "
+            "FROM finance_liquidity_effect_set_seals WHERE operation_id=?",
+            (operation_id,),
+        ).fetchone()
+        digest = _digest(canonical_transactions)
+        if existing is None:
+            if operation["effect_root_document_id"] is not None:
+                raise FinanceCashError(
+                    "ledger_integrity_unavailable",
+                    "Money operation receipt is incomplete",
+                    500,
+                )
+            conn.execute(
+                "UPDATE finance_liquidity_operations SET effect_root_document_id=? "
+                "WHERE operation_id=? AND effect_root_document_id IS NULL",
+                (root_document_id, operation_id),
+            )
+            conn.execute(
+                "INSERT INTO finance_liquidity_effect_set_seals("
+                "operation_id,root_document_id,transaction_count,transactions_digest,sealed_at"
+                ") VALUES(?,?,?,?,?)",
+                (
+                    operation_id,
+                    root_document_id,
+                    len(transaction_ids),
+                    digest,
+                    _now(),
+                ),
+            )
+        elif (
+            operation["effect_root_document_id"] != root_document_id
+            or existing["root_document_id"] != root_document_id
+            or int(existing["transaction_count"]) != len(transaction_ids)
+            or existing["transactions_digest"] != digest
+        ):
+            raise FinanceCashError(
+                "ledger_integrity_unavailable", "Money operation receipt changed", 500
+            )
+        return transaction_ids
+
     def _command(
         self,
         scope: str,
@@ -1647,7 +1765,15 @@ class FinanceCashService:
                 "INSERT INTO finance_liquidity_operations(operation_id,scope,idempotency_key,request_digest,actor,effect_root_document_id,result_json,created_at) VALUES(?,?,?,?,?,NULL,?,?)",
                 (operation_id, scope, key, request_digest, actor, "{}", _now()),
             )
-            result = dict(action(conn))
+            conn.create_function(
+                "finance_internal_operation_id", 0, lambda: operation_id
+            )
+            try:
+                result = dict(action(conn))
+            finally:
+                conn.create_function(
+                    "finance_internal_operation_id", 0, lambda: None
+                )
             result.update({"operation_id": operation_id, "receipt_id": _id("flop")})
             txids = [
                 str(row[0])
@@ -1666,21 +1792,14 @@ class FinanceCashService:
                     raise FinanceCashError(
                         "ledger_integrity_unavailable", "Money operation lacks a root document", 500
                     )
-                canonical_transactions = [
-                    _row(row)
-                    for row in conn.execute(
-                        "SELECT transaction_id,document_id,phase,effective_at FROM finance_liquidity_ledger_transactions WHERE origin_operation_id=? ORDER BY sequence_no",
-                        (operation_id,),
+                if self._seal_operation_effect(
+                    conn, operation_id, root_document_id
+                ) != txids:
+                    raise FinanceCashError(
+                        "ledger_integrity_unavailable",
+                        "Money operation transaction order changed",
+                        500,
                     )
-                ]
-                conn.execute(
-                    "UPDATE finance_liquidity_operations SET effect_root_document_id=? WHERE operation_id=?",
-                    (root_document_id, operation_id),
-                )
-                conn.execute(
-                    "INSERT INTO finance_liquidity_effect_set_seals(operation_id,root_document_id,transaction_count,transactions_digest,sealed_at) VALUES(?,?,?,?,?)",
-                    (operation_id, root_document_id, len(txids), _digest(canonical_transactions), _now()),
-                )
                 # The read-side integrity check also runs while assembling
                 # balances.  Persist the immutable receipt skeleton first so
                 # it can validate this just-sealed command rather than seeing
@@ -2222,7 +2341,132 @@ CREATE TRIGGER finance_entries_append_only_delete BEFORE DELETE ON finance_liqui
 CREATE TRIGGER finance_entry_after_seal BEFORE INSERT ON finance_liquidity_ledger_entries WHEN EXISTS(SELECT 1 FROM finance_liquidity_ledger_transaction_seals WHERE transaction_id=NEW.transaction_id) BEGIN SELECT RAISE(ABORT,'sealed transaction rejects entries'); END;
 CREATE TRIGGER finance_transaction_after_effect_seal BEFORE INSERT ON finance_liquidity_ledger_transactions WHEN EXISTS(SELECT 1 FROM finance_liquidity_effect_set_seals WHERE operation_id=NEW.origin_operation_id) BEGIN SELECT RAISE(ABORT,'sealed operation rejects transactions'); END;
 CREATE TRIGGER finance_documents_posted_any_update BEFORE UPDATE ON finance_liquidity_documents WHEN OLD.status IN ('posted','reversed') AND finance_internal_write()!=1 BEGIN SELECT RAISE(ABORT,'posted document immutable'); END;
-CREATE TRIGGER finance_documents_posted_legal_transition BEFORE UPDATE ON finance_liquidity_documents WHEN OLD.status IN ('posted','reversed') AND finance_internal_write()=1 AND NOT ((OLD.status='posted' AND NEW.status='reversed' AND NEW.revision=OLD.revision+1 AND NEW.transfer_state IS OLD.transfer_state AND NEW.updated_at>OLD.updated_at AND EXISTS(SELECT 1 FROM finance_liquidity_documents r WHERE r.reversal_of_document_id=OLD.document_id)) OR (OLD.status='posted' AND NEW.status='posted' AND OLD.document_type='transfer' AND OLD.transfer_state='in_transit' AND NEW.transfer_state IN ('completed','cancelled') AND NEW.revision=OLD.revision+1 AND NEW.updated_at>OLD.updated_at)) BEGIN SELECT RAISE(ABORT,'posted document immutable'); END;
+CREATE TRIGGER finance_documents_posted_legal_transition BEFORE UPDATE ON finance_liquidity_documents
+WHEN OLD.status IN ('posted','reversed') AND finance_internal_write()=1 AND (
+  (
+    OLD.status='posted' AND NEW.status='reversed'
+    AND NEW.revision=OLD.revision+1 AND NEW.updated_at>OLD.updated_at
+    AND NEW.document_id IS OLD.document_id
+    AND NEW.document_type IS OLD.document_type
+    AND NEW.transfer_mode IS OLD.transfer_mode
+    AND NEW.transfer_state IS OLD.transfer_state
+    AND NEW.source_account_id IS OLD.source_account_id
+    AND NEW.target_account_id IS OLD.target_account_id
+    AND NEW.category_id IS OLD.category_id
+    AND NEW.amount_minor IS OLD.amount_minor
+    AND NEW.occurred_at IS OLD.occurred_at
+    AND NEW.purpose IS OLD.purpose
+    AND NEW.reversal_of_document_id IS OLD.reversal_of_document_id
+    AND NEW.replaces_opening_document_id IS OLD.replaces_opening_document_id
+    AND NEW.negative_balance_explanation IS OLD.negative_balance_explanation
+    AND NEW.opening_evidence_type IS OLD.opening_evidence_type
+    AND NEW.opening_evidence_digest IS OLD.opening_evidence_digest
+    AND NEW.opening_evidence_ref IS OLD.opening_evidence_ref
+    AND NEW.created_at IS OLD.created_at
+    AND NEW.posted_at IS OLD.posted_at
+    AND NEW.semantic_digest IS OLD.semantic_digest
+    AND NEW.actor IS OLD.actor
+    AND finance_internal_operation_id() IS NOT NULL
+    AND EXISTS(
+      SELECT 1
+      FROM finance_liquidity_operations o
+      JOIN finance_liquidity_effect_set_seals s ON s.operation_id=o.operation_id
+      WHERE o.operation_id=finance_internal_operation_id()
+        AND s.transaction_count=(
+          SELECT COUNT(*) FROM finance_liquidity_ledger_transactions t
+          WHERE t.origin_operation_id=o.operation_id
+        )
+        AND NOT EXISTS(
+          SELECT 1
+          FROM finance_liquidity_ledger_transactions t
+          LEFT JOIN finance_liquidity_ledger_transaction_seals ts
+            ON ts.transaction_id=t.transaction_id
+          WHERE t.origin_operation_id=o.operation_id
+            AND ts.transaction_id IS NULL
+        )
+        AND (
+          (
+            o.scope='document.reverse:'||OLD.document_id
+            AND EXISTS(
+              SELECT 1 FROM finance_liquidity_documents r
+              WHERE r.document_id=s.root_document_id
+                AND r.reversal_of_document_id=OLD.document_id
+            )
+          )
+          OR
+          (
+            o.scope='opening.replace:'||OLD.document_id
+            AND EXISTS(
+              SELECT 1 FROM finance_liquidity_documents replacement
+              WHERE replacement.document_id=s.root_document_id
+                AND replacement.replaces_opening_document_id=OLD.document_id
+            )
+            AND EXISTS(
+              SELECT 1 FROM finance_liquidity_documents reversal
+              WHERE reversal.reversal_of_document_id=OLD.document_id
+            )
+          )
+        )
+    )
+  )
+  OR
+  (
+    OLD.status='posted' AND NEW.status='posted'
+    AND OLD.document_type='transfer'
+    AND OLD.transfer_state='in_transit'
+    AND NEW.transfer_state IN ('completed','cancelled')
+    AND NEW.revision=OLD.revision+1 AND NEW.updated_at>OLD.updated_at
+    AND NEW.document_id IS OLD.document_id
+    AND NEW.document_type IS OLD.document_type
+    AND NEW.transfer_mode IS OLD.transfer_mode
+    AND NEW.source_account_id IS OLD.source_account_id
+    AND NEW.target_account_id IS OLD.target_account_id
+    AND NEW.category_id IS OLD.category_id
+    AND NEW.amount_minor IS OLD.amount_minor
+    AND NEW.occurred_at IS OLD.occurred_at
+    AND NEW.purpose IS OLD.purpose
+    AND NEW.reversal_of_document_id IS OLD.reversal_of_document_id
+    AND NEW.replaces_opening_document_id IS OLD.replaces_opening_document_id
+    AND NEW.negative_balance_explanation IS OLD.negative_balance_explanation
+    AND NEW.opening_evidence_type IS OLD.opening_evidence_type
+    AND NEW.opening_evidence_digest IS OLD.opening_evidence_digest
+    AND NEW.opening_evidence_ref IS OLD.opening_evidence_ref
+    AND NEW.created_at IS OLD.created_at
+    AND NEW.posted_at IS OLD.posted_at
+    AND NEW.semantic_digest IS OLD.semantic_digest
+    AND NEW.actor IS OLD.actor
+    AND finance_internal_operation_id() IS NOT NULL
+    AND EXISTS(
+      SELECT 1
+      FROM finance_liquidity_operations o
+      JOIN finance_liquidity_effect_set_seals s ON s.operation_id=o.operation_id
+      JOIN finance_liquidity_ledger_transactions t
+        ON t.origin_operation_id=o.operation_id
+       AND t.document_id=OLD.document_id
+      JOIN finance_liquidity_ledger_transaction_seals ts
+        ON ts.transaction_id=t.transaction_id
+      WHERE o.operation_id=finance_internal_operation_id()
+        AND o.scope=(
+          CASE NEW.transfer_state
+            WHEN 'completed' THEN 'transfer.complete:'||OLD.document_id
+            ELSE 'transfer.cancel:'||OLD.document_id
+          END
+        )
+        AND s.root_document_id=OLD.document_id
+        AND s.transaction_count=1
+        AND (
+          SELECT COUNT(*) FROM finance_liquidity_ledger_transactions exact_t
+          WHERE exact_t.origin_operation_id=o.operation_id
+        )=1
+        AND t.phase=(
+          CASE NEW.transfer_state
+            WHEN 'completed' THEN 'transfer_complete'
+            ELSE 'transfer_cancel'
+          END
+        )
+    )
+  )
+) IS NOT TRUE BEGIN SELECT RAISE(ABORT,'posted document immutable'); END;
 CREATE TRIGGER finance_documents_posted_no_delete BEFORE DELETE ON finance_liquidity_documents WHEN OLD.status IN ('posted','reversed') BEGIN SELECT RAISE(ABORT,'posted document immutable'); END;
 CREATE TRIGGER finance_transactions_immutable_update BEFORE UPDATE ON finance_liquidity_ledger_transactions BEGIN SELECT RAISE(ABORT,'ledger transactions immutable'); END;
 CREATE TRIGGER finance_transactions_immutable_delete BEFORE DELETE ON finance_liquidity_ledger_transactions BEGIN SELECT RAISE(ABORT,'ledger transactions immutable'); END;
@@ -2238,6 +2482,7 @@ CREATE TRIGGER finance_audit_immutable_delete BEFORE DELETE ON finance_liquidity
 CREATE TRIGGER finance_anchor_immutable_delete BEFORE DELETE ON finance_liquidity_opening_anchors BEGIN SELECT RAISE(ABORT,'opening anchor immutable'); END;
 CREATE TRIGGER finance_anchor_immutable_update BEFORE UPDATE ON finance_liquidity_opening_anchors BEGIN SELECT RAISE(ABORT,'opening anchor immutable'); END;
 CREATE TRIGGER finance_reconciliation_immutable_delete BEFORE DELETE ON finance_liquidity_cash_reconciliations BEGIN SELECT RAISE(ABORT,'reconciliation immutable'); END;
+CREATE TRIGGER finance_reconciliation_internal_insert BEFORE INSERT ON finance_liquidity_cash_reconciliations WHEN finance_internal_write()!=1 OR finance_internal_operation_id() IS NULL OR NEW.record_operation_id IS NOT finance_internal_operation_id() OR NEW.revision!=1 OR NEW.status NOT IN('matched','discrepancy') OR NEW.resolution_operation_id IS NOT NULL OR NEW.resolution_kind IS NOT NULL OR NEW.resolution_reconciliation_id IS NOT NULL OR NEW.resolution_reason IS NOT NULL OR NEW.resolved_at IS NOT NULL OR NEW.resolved_by IS NOT NULL OR NOT EXISTS(SELECT 1 FROM finance_liquidity_operations o WHERE o.operation_id=NEW.record_operation_id AND o.scope='cash.reconciliation.record:'||NEW.account_id AND o.actor=NEW.actor AND o.effect_root_document_id IS NULL) BEGIN SELECT RAISE(ABORT,'invalid reconciliation receipt'); END;
 CREATE TRIGGER finance_reconciliation_any_update BEFORE UPDATE ON finance_liquidity_cash_reconciliations WHEN finance_internal_write()!=1 BEGIN SELECT RAISE(ABORT,'reconciliation immutable'); END;
-CREATE TRIGGER finance_reconciliation_legal_transition BEFORE UPDATE ON finance_liquidity_cash_reconciliations WHEN finance_internal_write()=1 AND (OLD.status!='discrepancy' OR NEW.status!='resolved' OR NEW.revision!=OLD.revision+1 OR NEW.account_id!=OLD.account_id OR NEW.week_ending!=OLD.week_ending OR NEW.balance_as_of!=OLD.balance_as_of OR NEW.business_timezone!=OLD.business_timezone OR NEW.ledger_watermark!=OLD.ledger_watermark OR NEW.ledger_digest!=OLD.ledger_digest OR NEW.expected_minor!=OLD.expected_minor OR NEW.actual_minor!=OLD.actual_minor OR NEW.difference_minor!=OLD.difference_minor OR NEW.checked_at!=OLD.checked_at OR NEW.comment IS NOT OLD.comment OR NEW.actor!=OLD.actor OR NEW.created_at!=OLD.created_at OR NEW.record_operation_id!=OLD.record_operation_id OR NEW.resolution_operation_id IS NULL OR NEW.resolved_at IS NULL OR NEW.resolved_by IS NULL OR (NEW.resolution_kind='matched_followup' AND (NEW.resolution_reconciliation_id IS NULL OR NEW.resolution_reason IS NULL)) OR (NEW.resolution_kind='admin_override' AND (NEW.resolution_reconciliation_id IS NOT NULL OR NEW.resolution_reason IS NULL)) OR NEW.resolution_kind NOT IN ('matched_followup','admin_override')) BEGIN SELECT RAISE(ABORT,'invalid reconciliation transition'); END;
+CREATE TRIGGER finance_reconciliation_legal_transition BEFORE UPDATE ON finance_liquidity_cash_reconciliations WHEN finance_internal_write()=1 AND (OLD.status!='discrepancy' OR NEW.status!='resolved' OR NEW.revision!=OLD.revision+1 OR NEW.reconciliation_id IS NOT OLD.reconciliation_id OR NEW.account_id IS NOT OLD.account_id OR NEW.week_ending IS NOT OLD.week_ending OR NEW.balance_as_of IS NOT OLD.balance_as_of OR NEW.business_timezone IS NOT OLD.business_timezone OR NEW.ledger_watermark IS NOT OLD.ledger_watermark OR NEW.ledger_digest IS NOT OLD.ledger_digest OR NEW.expected_minor IS NOT OLD.expected_minor OR NEW.actual_minor IS NOT OLD.actual_minor OR NEW.difference_minor IS NOT OLD.difference_minor OR NEW.checked_at IS NOT OLD.checked_at OR NEW.comment IS NOT OLD.comment OR NEW.actor IS NOT OLD.actor OR NEW.created_at IS NOT OLD.created_at OR NEW.record_operation_id IS NOT OLD.record_operation_id OR NEW.resolution_operation_id IS NULL OR NEW.resolution_operation_id IS NOT finance_internal_operation_id() OR NEW.resolution_kind IS NULL OR NEW.resolved_at IS NULL OR NEW.resolved_by IS NULL OR NEW.resolution_reason IS NULL OR length(trim(NEW.resolution_reason))=0 OR NOT EXISTS(SELECT 1 FROM finance_liquidity_operations o WHERE o.operation_id=NEW.resolution_operation_id AND o.scope='cash.reconciliation.resolve:'||OLD.reconciliation_id AND o.actor=NEW.resolved_by AND o.effect_root_document_id IS NULL) OR (NEW.resolution_kind='matched_followup' AND (NEW.resolution_reconciliation_id IS NULL OR NEW.resolution_reconciliation_id=OLD.reconciliation_id OR NOT EXISTS(SELECT 1 FROM finance_liquidity_cash_reconciliations follow WHERE follow.reconciliation_id=NEW.resolution_reconciliation_id AND follow.account_id=OLD.account_id AND follow.status='matched' AND follow.checked_at>OLD.checked_at))) OR (NEW.resolution_kind='admin_override' AND NEW.resolution_reconciliation_id IS NOT NULL) OR NEW.resolution_kind NOT IN ('matched_followup','admin_override')) BEGIN SELECT RAISE(ABORT,'invalid reconciliation transition'); END;
 """

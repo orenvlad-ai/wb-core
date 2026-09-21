@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 FINANCE_CASH_CONTRACT = "finance_cash_v1"
-FINANCE_CASH_SCHEMA_VERSION = 1
+FINANCE_CASH_SCHEMA_VERSION = 2
 # 8766 is owned by wb-core-data-mcp in the current deployment topology.
 FINANCE_CASH_DEFAULT_PORT = 8767
 FINANCE_CASH_API_PREFIX = "/v1/finance"

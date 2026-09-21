@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
@@ -157,36 +157,103 @@ def main() -> None:
             lambda: auth.authenticate({"Cookie": session_cookie(secret, max_age=-1)}),
         )
         # A lock/read failure is local to Finance authorization and fails closed.
-        locker = sqlite3.connect(db_path, timeout=0.01)
-        locker.execute("BEGIN EXCLUSIVE")
-        ordinary_connect = auth.registry.connect
-
-        def short_auth_read(*args: object, **kwargs: object):
-            return ordinary_connect(*args, timeout_ms=10, **kwargs)
-
-        auth.registry.connect = short_auth_read  # type: ignore[method-assign]
+        locker = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); "
+                "c.execute('BEGIN EXCLUSIVE'); print('ready',flush=True); "
+                "sys.stdin.read(1); c.rollback(); c.close()",
+                str(db_path),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert locker.stdout is not None and locker.stdout.readline().strip() == "ready"
+        ordinary_timeout = auth.operational_timeout_ms
+        auth.operational_timeout_ms = 10
         try:
             expect(FinanceAuthUnavailable, lambda: auth.authenticate(headers))
         finally:
-            locker.rollback()
-            locker.close()
-            auth.registry.connect = ordinary_connect  # type: ignore[method-assign]
+            assert locker.stdin is not None
+            locker.stdin.write("x")
+            locker.stdin.flush()
+            locker.communicate(timeout=5)
+            assert locker.returncode == 0
+            auth.operational_timeout_ms = ordinary_timeout
 
-        # Replacing the selected path before post-read revalidation is not a
-        # reason to reuse old grants. This proves the path identity guard; it
-        # intentionally does not claim fstat-level opened-descriptor evidence.
-        original_connect = auth.registry.connect
+        # The descriptor-bound reader must retain current-grants behavior for
+        # the operational store's WAL mode and see a committed current row.
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_users SET allowed_sections_json='[\"finance_admin\"]' "
+                "WHERE username='operator'"
+            )
+        assert auth.authenticate(headers)["capabilities"] == [
+            "finance",
+            "finance_operate",
+            "finance_admin",
+        ]
 
-        @contextmanager
-        def replace_after_read(*args: object, **kwargs: object):
-            with original_connect(*args, **kwargs) as connection:
-                yield connection
-            replacement = runtime / "replacement.sqlite3"
-            shutil.copyfile(db_path, replacement)
-            replacement.replace(db_path)
+        # Move the exact grant-reading connection's underlying file after its
+        # first descriptor check. The second connection-bound file-control and
+        # pathname/manifest revalidation must fail closed.
+        original_open = auth._open_operational_connection
 
-        auth.registry.connect = replace_after_read  # type: ignore[method-assign]
-        expect(FinanceAuthUnavailable, lambda: auth.authenticate(headers))
+        class MoveDuringGrantRead:
+            def __init__(self, connection: object) -> None:
+                self.connection = connection
+                self.moved = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self.connection, name)
+
+            def execute(self, sql: str, bindings: object = ()) -> object:
+                if "FROM sheet_vitrina_v1_users" in sql and not self.moved:
+                    replacement = runtime / "replacement.sqlite3"
+                    shutil.copyfile(db_path, replacement)
+                    replacement.replace(db_path)
+                    self.moved = True
+                return self.connection.execute(sql, bindings)  # type: ignore[attr-defined]
+
+        auth._open_operational_connection = (  # type: ignore[method-assign]
+            lambda path: MoveDuringGrantRead(original_open(path))
+        )
+        try:
+            try:
+                auth.authenticate(headers)
+            except FinanceAuthUnavailable as error:
+                assert str(error) == "operational authorization descriptor moved"
+            else:
+                raise AssertionError("moved grant descriptor was accepted")
+        finally:
+            auth._open_operational_connection = original_open  # type: ignore[method-assign]
+
+        class UnsupportedFileControl:
+            def __init__(self, connection: object) -> None:
+                self.connection = connection
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self.connection, name)
+
+            def file_control(self, *_args: object) -> bool:
+                return False
+
+        auth._open_operational_connection = (  # type: ignore[method-assign]
+            lambda path: UnsupportedFileControl(original_open(path))
+        )
+        try:
+            try:
+                auth.authenticate(headers)
+            except FinanceAuthUnavailable as error:
+                assert str(error) == "operational authorization descriptor moved"
+            else:
+                raise AssertionError("unsupported descriptor check was accepted")
+        finally:
+            auth._open_operational_connection = original_open  # type: ignore[method-assign]
     with TemporaryDirectory() as directory:
         runtime = Path(directory)
         make_split_store(runtime)

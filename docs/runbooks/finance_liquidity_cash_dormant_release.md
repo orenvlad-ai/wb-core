@@ -18,38 +18,40 @@ the active managed target.  Verify the deployed code remains default-off:
 are not published; no Finance store exists.  This check must not bootstrap a
 store or start the sidecar.
 
-## Technical acceptance required before activation
+## Technical safeguards required at activation
 
-Dormant code approval does not approve monetary operation. Before installing
-or starting the sidecar, publishing its routes, bootstrapping a store, granting
-access, or entering money, complete and record a separate technical acceptance
-for all of these boundaries:
+Dormant code approval does not approve monetary operation. The accepted
+candidate must retain all of these safeguards before the sidecar is installed
+or started, routes are published, a store is bootstrapped, access is granted,
+or money is entered:
 
-- Prove business cardinality and posted-document ownership in the receipt
-  chain: zero opening has zero transactions; post/send/complete/cancel has one;
-  completed-transfer reversal has exactly the compensated two-phase original
-  set; opening replacement has the correct zero/nonzero reversal and
-  replacement set. The current validator checks operation/effect/transaction/
-  entry membership, counts and digests, but that alone does not prove every
-  expected business cardinality or map every posted document back to its
-  expected receipt.
-- Decide and prove the required SQL trust boundary for terminal document
-  transitions. Entries, transactions and seals are append-only and reject late
-  members, but the current legal-transition trigger does not enumerate every
-  semantic field or require complete/cancel to reference sealed phase evidence.
-  Service-generated atomicity is not a claim of full DB-level immutability.
-- Decide and prove the reconciliation guarantee. The service requires a later
-  matched row for the same account or an explained admin override, while the
-  SQL transition guard does not independently enforce every NULL, self-link,
-  cross-account, ordering and receipt-ownership condition. Record whether the
-  accepted boundary is service-owned or add and accept the missing SQL guards.
-- Accept an authorization/storage owner boundary. Canonical auth revalidates
-  pathname identity before and after its read; it does not prove the identity
-  of the opened SQLite descriptor. Verify the sanctioned live signed session,
-  explicit grants, supplier denial and revocation against the selected current
-  operational owner. A new store must be bootstrapped only after its absence is
-  verified so it receives the current schema; an existing schema requires a
-  separately verified migration before use.
+- Every monetary read and effect-bearing replay validates exact receipt
+  membership, count and digest, the expected business cardinality, and complete
+  posted-document ownership. Zero opening has zero transactions;
+  post/send/complete/cancel has one; completed-transfer reversal matches its
+  exact two original phases; opening replacement matches its zero/nonzero
+  reversal and replacement sides.
+- Allowed terminal document transitions preserve every semantic field. The
+  transition is operation-bound and requires its effect manifest plus sealed
+  transaction before status/state changes. Entries, transactions, seals,
+  operations, audit events and opening anchors remain append-only.
+- Reconciliation remains a non-ledger observation. Record and resolution rows
+  are bound to their exact operation scope. SQL rejects NULL resolution kinds,
+  self/cross-account/earlier/nonmatched links, empty explanations and receipt
+  owner mismatch; the service additionally restricts override to an admin.
+- Operational authorization reads current grants with a read-only APSW
+  connection. `SQLITE_FCNTL_HAS_MOVED` is checked on that exact grant-reading
+  connection before and after the read, together with current manifest,
+  pathname and generation identity revalidation. Missing APSW, unsupported
+  file-control, descriptor movement or identity drift fails closed.
+- An isolated cash store must report the exact current Finance schema version.
+  This candidate requires schema version 2. Bootstrap is only for a verified
+  absent target; any existing earlier schema is refused and needs a separately
+  accepted migration rather than in-place use.
+
+Before activation, rerun the synthetic cash, auth, HTTP and browser checks and
+verify the sanctioned live signed session, explicit grants, supplier denial
+and revocation against the selected operational owner.
 
 ## Separate business activation (requires a new decision)
 
