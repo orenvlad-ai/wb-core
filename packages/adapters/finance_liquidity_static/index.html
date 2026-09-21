@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Финансы · Счета и кассы</title>
+    <link rel="stylesheet" href="./finance.css">
+    <style>
+      .history-amount { display:flex; align-items:baseline; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+      .history-action { margin-left:0; }
+      .reconciliation-list { display:grid; gap:8px; border-top:1px solid var(--border); margin-top:14px; padding-top:16px; }
+      .reconciliation-list h3 { font-size:15px; }
+      .reconciliation-row { display:grid; gap:5px; padding:11px 0; border-bottom:1px solid var(--border); }
+      .reconciliation-row.has-difference strong { color:var(--warn); }
+      .reconciliation-amounts { display:flex; flex-wrap:wrap; gap:5px 14px; color:var(--muted); font-size:12px; }
+    </style>
+  </head>
+  <body>
+    <main class="shell" data-finance-app>
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Финансы</p>
+          <h1>Счета и кассы</h1>
+          <p class="lede">Остатки, движения и сверка денег по каждому счёту.</p>
+        </div>
+        <div class="session-state" data-session-state aria-live="polite">Проверяем доступ…</div>
+      </header>
+
+      <section class="notice is-hidden" data-notice role="status" aria-live="polite"></section>
+      <section class="notice notice-error is-hidden" data-error role="alert"></section>
+
+      <nav class="action-bar" aria-label="Действия со счетами">
+        <button class="button primary" type="button" data-action="new-cash">Новая касса</button>
+        <button class="button" type="button" data-action="opening">Начальный остаток</button>
+        <button class="button" type="button" data-action="income">Поступление</button>
+        <button class="button" type="button" data-action="expense">Расход</button>
+        <button class="button" type="button" data-action="transfer">Перевод</button>
+        <button class="button" type="button" data-action="reconcile">Сверка</button>
+      </nav>
+
+      <section class="overview" aria-labelledby="accounts-title">
+        <div class="section-heading">
+          <div><h2 id="accounts-title">Счета</h2><p>Остатки не складываются между валютами.</p></div>
+          <button class="button quiet" type="button" data-action="reload">Обновить</button>
+        </div>
+        <div class="account-grid" data-accounts aria-live="polite"></div>
+        <div class="empty-state is-hidden" data-accounts-empty>
+          <h3>Пока нет счетов</h3>
+          <p>Создайте кассу или добавьте банковский счёт, чтобы начать учёт.</p>
+        </div>
+      </section>
+
+      <section class="workspace-grid">
+        <section class="panel history-panel" aria-labelledby="history-title">
+          <div class="section-heading">
+            <div><h2 id="history-title">История</h2><p>Проведённые операции нельзя изменить или удалить.</p></div>
+          </div>
+          <form class="filters" data-history-filters>
+            <label>Счёт<select name="account_id" data-account-select><option value="">Все счета</option></select></label>
+            <label>Состояние<select name="status"><option value="">Все</option><option value="draft">Черновики</option><option value="posted">Проведённые</option></select></label>
+            <label>Тип<select name="type"><option value="">Все операции</option><option value="opening">Начальный остаток</option><option value="income">Поступление</option><option value="expense">Расход</option><option value="transfer">Перевод</option></select></label>
+            <button class="button" type="submit">Показать</button>
+          </form>
+          <div class="history-list" data-history></div>
+          <div class="empty-state is-hidden" data-history-empty><p>Операций по выбранным условиям нет.</p></div>
+          <section class="reconciliation-list" data-reconciliations aria-labelledby="reconciliations-title">
+            <h3 id="reconciliations-title">Сверки</h3>
+            <p class="readonly">Здесь остаются и совпадения, и расхождения. Сверка не меняет деньги.</p>
+          </section>
+        </section>
+
+        <aside class="panel side-panel" aria-labelledby="attention-title">
+          <h2 id="attention-title">Требует внимания</h2>
+          <div data-attention></div>
+          <p class="side-note">Сверка фиксирует расхождение, но сама не меняет остаток.</p>
+        </aside>
+      </section>
+    </main>
+
+    <dialog class="dialog" data-dialog>
+      <form method="dialog" class="dialog-card" data-dialog-form>
+        <div class="dialog-heading"><div><p class="eyebrow" data-dialog-kicker>Финансы</p><h2 data-dialog-title>Операция</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
+        <div data-dialog-content></div>
+        <div class="dialog-actions"><button class="button quiet" value="cancel">Отмена</button><button class="button" type="button" data-dialog-save-draft>Сохранить черновик</button><button class="button primary" value="default" data-dialog-submit>Провести</button></div>
+      </form>
+    </dialog>
+    <script src="./finance.js" defer></script>
+  </body>
+</html>

@@ -453,12 +453,20 @@
         "packages/adapters/finance_liquidity*.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/adapters/registry_upload_http_entrypoint.py",
-        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md"
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
+        "artifacts/finance_liquidity_cash/**",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+        "docs/runbooks/finance_liquidity_cash_dormant_release.md"
       ],
       "commands": [
-        ["python3", "apps/finance_liquidity_contract_smoke.py"]
+        ["python3", "apps/finance_liquidity_contract_smoke.py"],
+        ["python3", "apps/finance_liquidity_auth_smoke.py"],
+        ["python3", "apps/finance_liquidity_cash_smoke.py"],
+        ["python3", "apps/finance_liquidity_http_smoke.py"],
+        ["python3", "apps/finance_liquidity_browser_smoke.py"],
+        ["python3", "apps/finance_liquidity_integration_smoke.py"]
       ],
-      "pip": ["openpyxl==3.1.5"]
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
     "warehouse": {
       "patterns": [
