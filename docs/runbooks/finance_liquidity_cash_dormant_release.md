@@ -18,9 +18,43 @@ the active managed target.  Verify the deployed code remains default-off:
 are not published; no Finance store exists.  This check must not bootstrap a
 store or start the sidecar.
 
+## Technical acceptance required before activation
+
+Dormant code approval does not approve monetary operation. Before installing
+or starting the sidecar, publishing its routes, bootstrapping a store, granting
+access, or entering money, complete and record a separate technical acceptance
+for all of these boundaries:
+
+- Prove business cardinality and posted-document ownership in the receipt
+  chain: zero opening has zero transactions; post/send/complete/cancel has one;
+  completed-transfer reversal has exactly the compensated two-phase original
+  set; opening replacement has the correct zero/nonzero reversal and
+  replacement set. The current validator checks operation/effect/transaction/
+  entry membership, counts and digests, but that alone does not prove every
+  expected business cardinality or map every posted document back to its
+  expected receipt.
+- Decide and prove the required SQL trust boundary for terminal document
+  transitions. Entries, transactions and seals are append-only and reject late
+  members, but the current legal-transition trigger does not enumerate every
+  semantic field or require complete/cancel to reference sealed phase evidence.
+  Service-generated atomicity is not a claim of full DB-level immutability.
+- Decide and prove the reconciliation guarantee. The service requires a later
+  matched row for the same account or an explained admin override, while the
+  SQL transition guard does not independently enforce every NULL, self-link,
+  cross-account, ordering and receipt-ownership condition. Record whether the
+  accepted boundary is service-owned or add and accept the missing SQL guards.
+- Accept an authorization/storage owner boundary. Canonical auth revalidates
+  pathname identity before and after its read; it does not prove the identity
+  of the opened SQLite descriptor. Verify the sanctioned live signed session,
+  explicit grants, supplier denial and revocation against the selected current
+  operational owner. A new store must be bootstrapped only after its absence is
+  verified so it receives the current schema; an existing schema requires a
+  separately verified migration before use.
+
 ## Separate business activation (requires a new decision)
 
-Before any money data, the business owner chooses and records the cash accounts,
+After the technical acceptance above, and before any money data, the business
+owner chooses and records the cash accounts,
 responsible people, currencies, opening amounts and dates, evidence, and exact
 explicit Finance grants. Roles, bootstrap admin and supplier never imply a
 Finance grant. Record the recovery owner and successful restore/readback

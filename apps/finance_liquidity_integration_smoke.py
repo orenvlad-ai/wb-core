@@ -7,7 +7,11 @@ import json
 import os
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
+from threading import Thread
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -19,6 +23,129 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     _finance_navigation_is_available,
     _render_sheet_vitrina_web_vitrina_ui,
 )
+
+
+def _dormant_lifecycle_checks() -> None:
+    # Importing the active main runtime must not import the optional sidecar's
+    # auth, HTTP adapter, cash service, or launcher.
+    for module_name in (
+        "packages.adapters.finance_liquidity_auth",
+        "packages.adapters.finance_liquidity_http",
+        "packages.application.finance_liquidity_cash",
+        "apps.finance_liquidity_http",
+    ):
+        assert module_name not in sys.modules, module_name
+
+    # Import and construction of the isolated sidecar objects are also inert:
+    # an absent store and absent auth runtime stay absent.
+    from apps import finance_liquidity_http as launcher
+    from packages.adapters.finance_liquidity_auth import FinanceOperationalAuth
+    from packages.adapters.finance_liquidity_http import (
+        FinanceHttpApp,
+        build_finance_http_server,
+    )
+    from packages.application.finance_liquidity_cash import FinanceCashService
+
+    with TemporaryDirectory(prefix="finance-liquidity-dormant-") as directory:
+        temporary = Path(directory)
+        absent_store = temporary / "finance-state" / "finance.sqlite3"
+        absent_auth_runtime = temporary / "absent-auth-runtime"
+        FinanceCashService(absent_store)
+        FinanceOperationalAuth(absent_auth_runtime, session_secret="fixture-only")
+        assert not absent_store.exists()
+        assert not absent_store.parent.exists()
+        assert not absent_auth_runtime.exists()
+
+        # The ordinary launcher path fails at the master feature flag before
+        # constructing auth/service/server state. Explicit --bootstrap is a
+        # separate manual command and is deliberately not invoked here.
+        def unexpected_launcher_construction(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("disabled launcher constructed Finance runtime")
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "finance_liquidity_http.py",
+                "--db",
+                str(absent_store),
+                "--runtime-dir",
+                str(absent_auth_runtime),
+            ],
+        ), patch.dict(
+            os.environ,
+            {
+                "FINANCE_LIQUIDITY_ENABLED": "0",
+                "FINANCE_LIQUIDITY_READ_ENABLED": "0",
+                "FINANCE_LIQUIDITY_WRITE_ENABLED": "0",
+            },
+            clear=False,
+        ), patch.object(
+            launcher, "FinanceOperationalAuth", unexpected_launcher_construction
+        ), patch.object(
+            launcher, "FinanceCashService", unexpected_launcher_construction
+        ), patch.object(
+            launcher, "FinanceHttpApp", unexpected_launcher_construction
+        ), patch.object(
+            launcher, "build_finance_http_server", unexpected_launcher_construction
+        ):
+            try:
+                launcher.main()
+            except SystemExit as error:
+                assert str(error) == "FINANCE_LIQUIDITY_ENABLED=1 is required"
+            else:
+                raise AssertionError("disabled launcher unexpectedly started")
+        assert not absent_store.exists()
+        assert not absent_store.parent.exists()
+        assert not absent_auth_runtime.exists()
+
+        class NeverCalledAuth:
+            calls = 0
+
+            def authenticate(self, _headers: object) -> dict[str, object]:
+                self.calls += 1
+                raise AssertionError("disabled API called Finance auth")
+
+        class NeverCalledService:
+            calls = 0
+
+            def __getattr__(self, _name: str) -> object:
+                self.calls += 1
+                raise AssertionError("disabled API called Finance service")
+
+        auth, service = NeverCalledAuth(), NeverCalledService()
+        app = FinanceHttpApp(
+            service,  # type: ignore[arg-type]
+            auth,
+            read_enabled=False,
+            write_enabled=False,
+            csrf_secret="fixture-only",
+            static_dir=ROOT / "packages/adapters/finance_liquidity_static",
+            allowed_origin="http://127.0.0.1",
+        )
+        server = build_finance_http_server("127.0.0.1", 0, app)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            try:
+                urlopen(
+                    f"http://127.0.0.1:{server.server_port}/v1/finance/accounts",
+                    timeout=5,
+                )
+            except HTTPError as error:
+                payload = json.loads(error.read())
+                assert error.code == 503
+                assert payload["error"]["code"] == "finance_read_disabled"
+            else:
+                raise AssertionError("disabled Finance API unexpectedly answered")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        assert auth.calls == 0
+        assert service.calls == 0
+        assert not absent_store.exists()
+        assert not absent_store.parent.exists()
 
 
 def _render(*, role: str, grants: list[str], enabled: bool, read_enabled: bool) -> str:
@@ -90,6 +217,7 @@ def _dormant_artifact_checks() -> None:
     assert "FINANCE_LIQUIDITY_ENABLED=0" in unit
     assert "FINANCE_LIQUIDITY_READ_ENABLED=0" in unit
     assert "FINANCE_LIQUIDITY_WRITE_ENABLED=0" in unit
+    assert "--bootstrap" not in unit
     assert "--host 127.0.0.1 --port 8767" in unit
     assert "--runtime-dir /opt/wb-core-runtime/state" in unit
     routes = (candidate_dir / "nginx" / "finance-liquidity.routes.candidate.md").read_text(
@@ -113,6 +241,7 @@ def _dormant_artifact_checks() -> None:
 
 
 def main() -> None:
+    _dormant_lifecycle_checks()
     _navigation_checks()
     _dormant_artifact_checks()
     print("finance_liquidity_integration_smoke: explicit navigation and dormant rollout OK")
