@@ -329,7 +329,9 @@ def main() -> None:
 
                 page.locator('[data-history-filters] [name="type"]').select_option("opening")
                 page.locator('[data-history-filters]').get_by_role("button", name="Показать").click()
-                opening = page.locator("[data-history] [data-replace-opening]").first
+                opening = page.locator(
+                    ".history-row", has_text="Тестовая касса A"
+                ).locator("[data-replace-opening]")
                 expect(opening).to_be_visible()
                 opening.click()
                 _field(page, "occurred_at").fill("2026-09-21T10:00")
@@ -342,8 +344,32 @@ def main() -> None:
                     ".history-row", has_text="Исправление начального остатка: Уточнили после пересчёта"
                 )
                 expect(opening_correction).to_be_visible()
+                expect(opening_correction).to_contain_text("−1\u202f000,00")
                 expect(opening_correction.locator("[data-replace-opening]")).to_have_count(0)
                 expect(page.locator("[data-history]")).not_to_contain_text("Opening reversal:")
+
+                _create_cash(page, "Тестовая касса C", "Тестовый оператор")
+                _opening(
+                    page,
+                    "Тестовая касса C · Тестовый оператор",
+                    "-100,00",
+                    "Отрицательный остаток подтверждён",
+                )
+                negative_opening = page.locator(
+                    ".history-row", has_text="Тестовая касса C"
+                )
+                expect(negative_opening).to_contain_text("−100,00")
+                negative_opening.locator("[data-replace-opening]").click()
+                _field(page, "occurred_at").fill("2026-09-21T10:01")
+                _field(page, "amount").fill("-90,00")
+                _field(page, "reason").fill("Уточнили отрицательный остаток")
+                _submit(page)
+                negative_opening_correction = page.locator(
+                    ".history-row",
+                    has_text="Исправление начального остатка: Уточнили отрицательный остаток",
+                )
+                expect(negative_opening_correction).to_be_visible()
+                expect(negative_opening_correction).to_contain_text("+100,00")
 
                 page.locator('[data-history-filters] [name="type"]').select_option("")
                 page.locator('[data-history-filters]').get_by_role("button", name="Показать").click()

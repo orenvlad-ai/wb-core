@@ -630,6 +630,321 @@ def test_duplicate_and_reconciliation_regressions(db_path: Path) -> None:
     )
 
 
+def test_review_007_regressions(db_path: Path) -> None:
+    """Ordinary service regressions for the four backend review-007 findings."""
+    bootstrap_finance_cash_store(db_path)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+
+    service = FinanceCashService(db_path)
+    source = create_account(service, "Review source")
+    target = create_account(service, "Review target")
+    yen = create_account(service, "Review JPY", "JPY")
+    open_account(service, source, "100.00")
+    open_account(service, target, "0.00")
+    open_account(service, yen, "0")
+
+    income_category = str(
+        service.create_category(
+            {"name": "Review income", "direction": "income"},
+            ACTOR,
+            *reversed(command_id()),
+        )["category_id"]
+    )
+    expense_category = str(
+        service.create_category(
+            {
+                "name": "Review expense",
+                "direction": "expense",
+                "posting_class": "external_outflow",
+            },
+            ACTOR,
+            *reversed(command_id()),
+        )["category_id"]
+    )
+    unused_expense_category = str(
+        service.create_category(
+            {"name": "Unused review expense", "direction": "expense"},
+            ACTOR,
+            *reversed(command_id()),
+        )["category_id"]
+    )
+    expect_error(
+        "invalid_category",
+        lambda: service.create_category(
+            {
+                "name": "Invalid review expense",
+                "direction": "expense",
+                "posting_class": "other",
+            },
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+
+    # A real writer commits in WAL mode after the reader has calculated its
+    # final balance but before it selects movement rows.  Both parts of the
+    # public response must still come from the reader's one snapshot.
+    pending = service.create_document(
+        {
+            "document_type": "income",
+            "target_account_id": source,
+            "category_id": income_category,
+            "amount": "10.00",
+            "occurred_at": "2026-09-21T11:00:00Z",
+            "purpose": "concurrent ordinary posting",
+        },
+        ACTOR,
+        *reversed(command_id()),
+    )
+    balance_ready = Barrier(2)
+    writer_done = Barrier(2)
+
+    class PausedReader(FinanceCashService):
+        balance_calls = 0
+
+        def _balance(
+            self,
+            conn: sqlite3.Connection,
+            account_id: str,
+            as_of: str | None = None,
+        ) -> int:
+            result = super()._balance(conn, account_id, as_of)
+            self.balance_calls += 1
+            if self.balance_calls == 2:
+                balance_ready.wait(timeout=5)
+                writer_done.wait(timeout=5)
+            return result
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(PausedReader(db_path).movements, source)
+        balance_ready.wait(timeout=5)
+        service.post_document(
+            str(pending["document_id"]),
+            {"base_revision": pending["revision"]},
+            ACTOR,
+            *reversed(command_id()),
+        )
+        writer_done.wait(timeout=5)
+        snapshot = future.result(timeout=5)
+    movement_total = sum(
+        int(entry["amount_minor"]) * (1 if entry["side"] == "debit" else -1)
+        for entry in snapshot["movements"]
+    )
+    assert snapshot["balance_minor"] == movement_total == 10_000
+    assert service.get_account(source)["balance_minor"] == 11_000
+
+    # An omitted amount is a true partial PATCH.  Changing to an account with a
+    # different currency requires an explicit replacement amount so stored
+    # minor units are never silently reinterpreted.
+    draft = service.create_document(
+        {
+            "document_type": "income",
+            "target_account_id": source,
+            "category_id": income_category,
+            "amount": "12.34",
+            "occurred_at": "2026-09-21T12:00:00Z",
+            "purpose": "before patch",
+        },
+        ACTOR,
+        *reversed(command_id()),
+    )
+    patched = service.patch_document(
+        str(draft["document_id"]),
+        {"base_revision": 1, "purpose": "after patch"},
+        ACTOR,
+        *reversed(command_id()),
+    )
+    patched_view = service.get_document(str(draft["document_id"]))["document"]
+    assert patched_view["amount_minor"] == 1_234
+    assert patched_view["amount"] == "12.34"
+    assert patched_view["purpose"] == "after patch"
+    posted_partial = service.post_document(
+        str(draft["document_id"]),
+        {"base_revision": patched["revision"]},
+        ACTOR,
+        *reversed(command_id()),
+    )
+    assert posted_partial["financial_effect"] is True
+
+    currency_draft = service.create_document(
+        {
+            "document_type": "income",
+            "target_account_id": source,
+            "category_id": income_category,
+            "amount": "5.00",
+            "occurred_at": "2026-09-21T12:10:00Z",
+            "purpose": "currency patch",
+        },
+        ACTOR,
+        *reversed(command_id()),
+    )
+    expect_error(
+        "invalid_document",
+        lambda: service.patch_document(
+            str(currency_draft["document_id"]),
+            {"base_revision": 1, "target_account_id": yen},
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    unchanged_currency_draft = service.get_document(
+        str(currency_draft["document_id"])
+    )["document"]
+    assert unchanged_currency_draft["revision"] == 1
+    assert unchanged_currency_draft["target_account_id"] == source
+    assert unchanged_currency_draft["amount"] == "5.00"
+    explicit_currency_patch = service.patch_document(
+        str(currency_draft["document_id"]),
+        {"base_revision": 1, "target_account_id": yen, "amount": "5"},
+        ACTOR,
+        *reversed(command_id()),
+    )
+    assert service.get_document(str(currency_draft["document_id"]))["document"][
+        "amount"
+    ] == "5"
+    service.post_document(
+        str(currency_draft["document_id"]),
+        {"base_revision": explicit_currency_patch["revision"]},
+        ACTOR,
+        *reversed(command_id()),
+    )
+    assert service.get_account(yen)["balance_minor"] == 5
+
+    # The reversal date is bounded by the latest exact original phase.  A
+    # rejected between-phase request leaves no document, operation or effect.
+    balances_before_transfer = (
+        service.get_account(source)["balance_minor"],
+        service.get_account(target)["balance_minor"],
+    )
+    transfer = create_and_post(
+        service,
+        {
+            "document_type": "transfer",
+            "source_account_id": source,
+            "target_account_id": target,
+            "amount": "10.00",
+            "occurred_at": "2026-09-21T13:00:00Z",
+            "transfer_mode": "two_phase",
+        },
+    )
+    transfer_id = str(transfer["document_id"])
+    completed = service.transfer_transition(
+        transfer_id,
+        "complete",
+        {"base_revision": 2, "occurred_at": "2026-09-23T13:00:00Z"},
+        ACTOR,
+        *reversed(command_id()),
+    )
+    assert completed["effect_kind"] == "completed"
+    completed_revision = service.get_document(transfer_id)["document"]["revision"]
+    rejected_key, rejected_operation = command_id()
+    with sqlite3.connect(db_path) as conn:
+        counts_before = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM finance_liquidity_documents),"
+            "(SELECT COUNT(*) FROM finance_liquidity_ledger_transactions)"
+        ).fetchone()
+    expect_error(
+        "invalid_reversal",
+        lambda: service.reverse_document(
+            transfer_id,
+            {
+                "base_revision": completed_revision,
+                "reason": "between phases must fail",
+                "occurred_at": "2026-09-22T13:00:00Z",
+            },
+            ACTOR,
+            rejected_operation,
+            rejected_key,
+        ),
+    )
+    with sqlite3.connect(db_path) as conn:
+        counts_after = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM finance_liquidity_documents),"
+            "(SELECT COUNT(*) FROM finance_liquidity_ledger_transactions)"
+        ).fetchone()
+        rejected_receipt = conn.execute(
+            "SELECT 1 FROM finance_liquidity_operations WHERE operation_id=?",
+            (rejected_operation,),
+        ).fetchone()
+    assert counts_after == counts_before
+    assert rejected_receipt is None
+    assert service.movements(target, "2026-09-22T13:30:00Z")["balance_minor"] == 0
+    reversed_transfer = service.reverse_document(
+        transfer_id,
+        {
+            "base_revision": completed_revision,
+            "reason": "at latest phase succeeds",
+            "occurred_at": "2026-09-23T13:00:00Z",
+        },
+        ACTOR,
+        *reversed(command_id()),
+    )
+    assert len(reversed_transfer["ledger_transaction_ids"]) == 2
+    assert (
+        service.get_account(source)["balance_minor"],
+        service.get_account(target)["balance_minor"],
+    ) == balances_before_transfer
+
+    # Category matrix is enforced at storage and classification becomes
+    # immutable only after first posting; names/activity remain outside this
+    # bounded classification guard.
+    create_and_post(
+        service,
+        {
+            "document_type": "expense",
+            "source_account_id": source,
+            "category_id": expense_category,
+            "amount": "1.00",
+            "occurred_at": "2026-09-24T10:00:00Z",
+            "purpose": "use expense classification",
+        },
+    )
+    with sqlite3.connect(db_path) as conn:
+        table_sql = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='finance_liquidity_categories'"
+            ).fetchone()[0]
+        )
+        trigger_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='finance_category_classification_after_use'"
+        ).fetchone()
+        assert "posting_class IN('external_outflow','fee')" in table_sql
+        assert trigger_sql is not None
+
+        def rejected(statement: str, parameters: tuple[Any, ...]) -> None:
+            try:
+                conn.execute(statement, parameters)
+            except sqlite3.IntegrityError:
+                return
+            raise AssertionError(f"category guard accepted: {statement}")
+
+        rejected(
+            "INSERT INTO finance_liquidity_categories VALUES(?,?,?,?,?,?)",
+            ("invalid-income", "Invalid", "income", "external_outflow", 1, OPENING_AT),
+        )
+        rejected(
+            "INSERT INTO finance_liquidity_categories VALUES(?,?,?,?,?,?)",
+            ("invalid-expense", "Invalid", "expense", None, 1, OPENING_AT),
+        )
+        rejected(
+            "UPDATE finance_liquidity_categories SET direction='expense',posting_class='external_outflow' WHERE category_id=?",
+            (income_category,),
+        )
+        rejected(
+            "UPDATE finance_liquidity_categories SET posting_class='fee' WHERE category_id=?",
+            (expense_category,),
+        )
+        conn.execute(
+            "UPDATE finance_liquidity_categories SET posting_class='fee' WHERE category_id=?",
+            (unused_expense_category,),
+        )
+        assert conn.execute(
+            "SELECT posting_class FROM finance_liquidity_categories WHERE category_id=?",
+            (unused_expense_category,),
+        ).fetchone()[0] == "fee"
+
+
 def test_cash_ledger(db_path: Path) -> None:
     unavailable = FinanceCashService(db_path)
     expect_error("finance_unavailable", unavailable.list_accounts)
@@ -1139,6 +1454,10 @@ def test_cash_ledger(db_path: Path) -> None:
 
 def main() -> None:
     test_money_boundaries()
+    with TemporaryDirectory() as directory:
+        test_review_007_regressions(
+            Path(directory) / "cash-review-007-regressions.sqlite3"
+        )
     with TemporaryDirectory() as directory:
         test_cash_ledger(Path(directory) / "cash.sqlite3")
     with TemporaryDirectory() as directory:

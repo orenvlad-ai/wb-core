@@ -167,6 +167,7 @@ class FinanceCashService:
             conn.execute("PRAGMA foreign_keys=ON")
             if not write:
                 conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             meta = conn.execute(
                 "SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1"
             ).fetchone()
@@ -174,13 +175,10 @@ class FinanceCashService:
                 raise FinanceCashError(
                     "finance_schema_unavailable", "Finance schema is unavailable", 503
                 )
-            if write:
-                conn.execute("BEGIN IMMEDIATE")
             yield conn
-            if write:
-                conn.commit()
+            conn.commit()
         except sqlite3.OperationalError as exc:
-            if write:
+            if conn.in_transaction:
                 conn.rollback()
             if "locked" in str(exc).lower() or "busy" in str(exc).lower():
                 raise FinanceCashError(
@@ -188,11 +186,11 @@ class FinanceCashService:
                 ) from exc
             raise
         except FinanceCashError as exc:
-            if write:
-                (conn.commit() if exc.commit else conn.rollback())
+            if conn.in_transaction:
+                (conn.commit() if write and exc.commit else conn.rollback())
             raise
         except Exception:
-            if write:
+            if conn.in_transaction:
                 conn.rollback()
             raise
         finally:
@@ -731,11 +729,21 @@ class FinanceCashService:
             **_row(doc),
             **{key: value for key, value in payload.items() if key != "base_revision"},
         }
+        currency = self._document_currency(conn, doc["document_type"], merged)
+        if "amount" not in payload and doc["amount_minor"] is not None:
+            if currency != doc["currency"]:
+                raise FinanceCashError(
+                    "invalid_document",
+                    "Amount is required when document currency changes",
+                )
+            merged["amount"] = money_to_api(
+                int(doc["amount_minor"]), str(doc["currency"])
+            )
         stored = self._document_fields(
             doc["document_type"],
             merged,
             draft=True,
-            currency=self._document_currency(conn, doc["document_type"], merged),
+            currency=currency,
         )
         if (
             doc["document_type"] == "opening"
@@ -1035,10 +1043,24 @@ class FinanceCashService:
             )
         if int(payload.get("base_revision", -1)) != int(original["revision"]):
             raise FinanceCashError("version_conflict", "Document revision changed", 409)
-        if not reason or not occurred_at or occurred_at < original["occurred_at"]:
+        self._assert_ledger_integrity(conn)
+        original_transactions = list(
+            conn.execute(
+                "SELECT transaction_id,phase,effective_at "
+                "FROM finance_liquidity_ledger_transactions "
+                "WHERE document_id=? ORDER BY sequence_no DESC",
+                (document_id,),
+            )
+        )
+        if not original_transactions:
+            raise FinanceCashError("document_not_reversible", "Document has no sealed effects", 409)
+        latest_original_effect = max(
+            str(transaction["effective_at"]) for transaction in original_transactions
+        )
+        if not reason or not occurred_at or occurred_at < latest_original_effect:
             raise FinanceCashError(
                 "invalid_reversal",
-                "Reason and a date no earlier than the original are required",
+                "Reason and a date no earlier than the latest original phase are required",
             )
         reversal_id, now = _id("fld"), _now()
         conn.execute(
@@ -1061,16 +1083,6 @@ class FinanceCashService:
                 actor,
             ),
         )
-        self._assert_ledger_integrity(conn)
-        original_transactions = list(
-            conn.execute(
-                "SELECT transaction_id,phase FROM finance_liquidity_ledger_transactions "
-                "WHERE document_id=? ORDER BY sequence_no DESC",
-                (document_id,),
-            )
-        )
-        if not original_transactions:
-            raise FinanceCashError("document_not_reversible", "Document has no sealed effects", 409)
         tx_ids: list[str] = []
         # A completed two-phase transfer is reversed in the inverse phase
         # order.  Each original transaction gets its own linked transaction;
@@ -2191,7 +2203,7 @@ class FinanceCashService:
 _SCHEMA = """
 CREATE TABLE finance_liquidity_schema_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE finance_liquidity_accounts(account_id TEXT PRIMARY KEY,name TEXT NOT NULL,account_type TEXT NOT NULL CHECK(account_type IN ('cash','bank')),currency TEXT NOT NULL CHECK(currency GLOB '[A-Z][A-Z][A-Z]'),currency_exponent INTEGER NOT NULL CHECK(currency_exponent BETWEEN 0 AND 9),responsible_name TEXT,is_active INTEGER NOT NULL CHECK(is_active IN(0,1)),revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL, CHECK(account_type!='cash' OR responsible_name IS NOT NULL));
-CREATE TABLE finance_liquidity_categories(category_id TEXT PRIMARY KEY,name TEXT NOT NULL,direction TEXT NOT NULL CHECK(direction IN('income','expense')),posting_class TEXT,is_active INTEGER NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE finance_liquidity_categories(category_id TEXT PRIMARY KEY,name TEXT NOT NULL,direction TEXT NOT NULL CHECK(direction IN('income','expense')),posting_class TEXT,is_active INTEGER NOT NULL,created_at TEXT NOT NULL,CHECK((direction='income' AND posting_class IS NULL) OR (direction='expense' AND posting_class IS NOT NULL AND posting_class IN('external_outflow','fee'))));
 CREATE TABLE finance_liquidity_documents(document_id TEXT PRIMARY KEY,document_type TEXT NOT NULL CHECK(document_type IN('opening','income','expense','transfer')),status TEXT NOT NULL CHECK(status IN('draft','posted','reversed')),transfer_mode TEXT,transfer_state TEXT,source_account_id TEXT REFERENCES finance_liquidity_accounts(account_id),target_account_id TEXT REFERENCES finance_liquidity_accounts(account_id),category_id TEXT REFERENCES finance_liquidity_categories(category_id),amount_minor INTEGER CHECK(amount_minor BETWEEN -9000000000000000 AND 9000000000000000),occurred_at TEXT CHECK(occurred_at IS NULL OR occurred_at GLOB '????-??-??T??:??:??.??????Z'),purpose TEXT,reversal_of_document_id TEXT UNIQUE REFERENCES finance_liquidity_documents(document_id),replaces_opening_document_id TEXT UNIQUE REFERENCES finance_liquidity_documents(document_id),negative_balance_explanation TEXT,opening_evidence_type TEXT,opening_evidence_digest TEXT,opening_evidence_ref TEXT,revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,posted_at TEXT,semantic_digest TEXT,actor TEXT NOT NULL);
 CREATE TABLE finance_liquidity_opening_anchors(anchor_id TEXT PRIMARY KEY,account_id TEXT NOT NULL UNIQUE REFERENCES finance_liquidity_accounts(account_id),opening_document_id TEXT NOT NULL REFERENCES finance_liquidity_documents(document_id),is_active INTEGER NOT NULL,cutover_at TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE finance_liquidity_ledger_transactions(sequence_no INTEGER PRIMARY KEY AUTOINCREMENT,transaction_id TEXT NOT NULL UNIQUE,document_id TEXT NOT NULL REFERENCES finance_liquidity_documents(document_id),origin_operation_id TEXT NOT NULL,phase TEXT NOT NULL,effective_at TEXT NOT NULL);
@@ -2204,6 +2216,7 @@ CREATE TABLE finance_liquidity_audit_events(event_id TEXT PRIMARY KEY,actor TEXT
 CREATE TABLE finance_liquidity_cash_reconciliations(reconciliation_id TEXT PRIMARY KEY,account_id TEXT NOT NULL REFERENCES finance_liquidity_accounts(account_id),week_ending TEXT NOT NULL,balance_as_of TEXT NOT NULL,business_timezone TEXT NOT NULL,ledger_watermark INTEGER NOT NULL,ledger_digest TEXT NOT NULL,expected_minor INTEGER NOT NULL,actual_minor INTEGER NOT NULL,difference_minor INTEGER NOT NULL CHECK(difference_minor BETWEEN -9000000000000000 AND 9000000000000000),status TEXT NOT NULL CHECK(status IN('matched','discrepancy','resolved')),checked_at TEXT NOT NULL,comment TEXT,actor TEXT NOT NULL,created_at TEXT NOT NULL,revision INTEGER NOT NULL,record_operation_id TEXT NOT NULL REFERENCES finance_liquidity_operations(operation_id),resolution_operation_id TEXT REFERENCES finance_liquidity_operations(operation_id),resolution_kind TEXT,resolution_reconciliation_id TEXT REFERENCES finance_liquidity_cash_reconciliations(reconciliation_id),resolution_reason TEXT,resolved_at TEXT,resolved_by TEXT);
 CREATE TRIGGER finance_account_immutable_update BEFORE UPDATE ON finance_liquidity_accounts BEGIN SELECT RAISE(ABORT,'account immutable'); END;
 CREATE TRIGGER finance_account_immutable_delete BEFORE DELETE ON finance_liquidity_accounts BEGIN SELECT RAISE(ABORT,'account immutable'); END;
+CREATE TRIGGER finance_category_classification_after_use BEFORE UPDATE OF direction,posting_class ON finance_liquidity_categories WHEN (NEW.direction!=OLD.direction OR NEW.posting_class IS NOT OLD.posting_class) AND EXISTS(SELECT 1 FROM finance_liquidity_documents WHERE category_id=OLD.category_id AND status IN('posted','reversed')) BEGIN SELECT RAISE(ABORT,'used category classification immutable'); END;
 CREATE TRIGGER finance_entries_append_only_update BEFORE UPDATE ON finance_liquidity_ledger_entries BEGIN SELECT RAISE(ABORT,'ledger entries immutable'); END;
 CREATE TRIGGER finance_entries_append_only_delete BEFORE DELETE ON finance_liquidity_ledger_entries BEGIN SELECT RAISE(ABORT,'ledger entries immutable'); END;
 CREATE TRIGGER finance_entry_after_seal BEFORE INSERT ON finance_liquidity_ledger_entries WHEN EXISTS(SELECT 1 FROM finance_liquidity_ledger_transaction_seals WHERE transaction_id=NEW.transaction_id) BEGIN SELECT RAISE(ABORT,'sealed transaction rejects entries'); END;
