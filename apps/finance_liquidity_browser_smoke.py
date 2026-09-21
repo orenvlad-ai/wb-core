@@ -284,10 +284,17 @@ def main() -> None:
 
                 page.route("**/v1/finance/documents/*/post", lose_duplicate_response, times=1)
                 posts_before_duplicate_response = len(submitted_posts)
-                with page.expect_request(
-                    lambda request: request.method == "POST" and request.url.endswith("/post")
-                ) as duplicate_post_request:
-                    duplicate_draft.locator("[data-post-draft]").click()
+                with page.expect_response(
+                    lambda response: response.request.method == "GET"
+                    and "/v1/finance/operations/" in response.url
+                    and response.status == 200
+                ) as duplicate_operation_readback:
+                    with page.expect_request(
+                        lambda request: request.method == "POST"
+                        and request.url.endswith("/post")
+                    ) as duplicate_post_request:
+                        duplicate_draft.locator("[data-post-draft]").click()
+                duplicate_readback_payload = duplicate_operation_readback.value.json()
                 expect(page.locator("[data-notice]")).to_contain_text("требует вашего решения")
                 if duplicate_post_request.value.header_value("x-operation-id") != duplicate_operation_ids[0]:
                     raise AssertionError("duplicate-response route intercepted a different operation")
@@ -298,6 +305,17 @@ def main() -> None:
                 if len(submitted_posts) != posts_before_duplicate_response + 1:
                     raise AssertionError(f"duplicate action retried the write: {submitted_posts}")
                 duplicate_readback = f"/v1/finance/operations/{duplicate_operation_ids[0]}"
+                if (
+                    duplicate_operation_readback.value.url != f"{base_url}{duplicate_readback}"
+                    or duplicate_readback_payload.get("data", {}).get("operation_id")
+                    != duplicate_operation_ids[0]
+                    or duplicate_readback_payload.get("data", {}).get("action_required")
+                    != "duplicate_confirmation"
+                ):
+                    raise AssertionError(
+                        f"duplicate action readback was not the durable decision: "
+                        f"{duplicate_operation_readback.value.url} {duplicate_readback_payload}"
+                    )
                 if not any(duplicate_readback in url for url in operation_readbacks):
                     raise AssertionError(f"duplicate action did not read back its operation: {operation_readbacks}")
 
