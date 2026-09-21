@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import socket
 import sys
@@ -24,12 +25,6 @@ from packages.adapters.finance_liquidity_http import (  # noqa: E402
 from packages.application.finance_liquidity_cash import (  # noqa: E402
     FinanceCashService,
     bootstrap_finance_cash_store,
-)
-
-
-EVIDENCE_DIR = Path(
-    "/Users/ovlmacbook/Documents/Codex/2026-09-21/"
-    "wbc-0033k2-cash-release/ui"
 )
 
 
@@ -80,8 +75,11 @@ def _opening(page: object, account_name: str, amount: str, comment: str) -> None
 
 
 def main() -> None:
-    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix="finance-liquidity-browser-") as temporary:
+        evidence_dir = Path(
+            os.environ.get("FINANCE_LIQUIDITY_EVIDENCE_DIR", temporary)
+        ).resolve()
+        evidence_dir.mkdir(parents=True, exist_ok=True)
         database = Path(temporary) / "finance.sqlite"
         bootstrap_finance_cash_store(database)
         service = FinanceCashService(database)
@@ -390,10 +388,10 @@ def main() -> None:
                 expect(page.locator("[data-history]")).not_to_contain_text("Нет данных")
                 _open(page, "transfer")
                 expect(_field(page, "transfer_mode")).to_have_value("instant")
-                page.screenshot(path=EVIDENCE_DIR / "cash-transfer-dialog.png", full_page=True)
+                page.screenshot(path=evidence_dir / "cash-transfer-dialog.png", full_page=True)
                 page.get_by_role("button", name="Отмена").click()
                 expect(page.locator("[data-dialog]")).to_be_hidden()
-                page.screenshot(path=EVIDENCE_DIR / "cash-desktop.png", full_page=True)
+                page.screenshot(path=evidence_dir / "cash-desktop.png", full_page=True)
                 mobile_context = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="dark", timezone_id="Pacific/Honolulu")
                 mobile = mobile_context.new_page()
                 mobile.context.add_cookies(
@@ -401,7 +399,7 @@ def main() -> None:
                 )
                 mobile.goto(f"{base_url}/finance/", wait_until="networkidle")
                 expect(mobile.locator("[data-accounts]")).to_contain_text("Тестовая касса A")
-                mobile.screenshot(path=EVIDENCE_DIR / "cash-mobile.png", full_page=True)
+                mobile.screenshot(path=evidence_dir / "cash-mobile.png", full_page=True)
                 mobile.close()
                 mobile_context.close()
                 context.close()
