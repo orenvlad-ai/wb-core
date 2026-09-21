@@ -32,7 +32,10 @@ def money_from_api(value: object, currency: str) -> int:
     exponent = CURRENCY_MINOR_UNIT_EXPONENTS.get(code)
     if exponent is None:
         raise MoneyError("unsupported currency")
-    text = value.strip()
+    # JSON money is a transport value, not a forgiving form field.  Surrounding
+    # whitespace would make one visible payload map to a different canonical
+    # request digest, so reject it instead of silently normalizing it.
+    text = value
     if not text or "e" in text.lower():
         raise MoneyError("money must be a plain decimal string")
     matched = re.fullmatch(r"([+-]?)(\d+)(?:\.(\d+))?", text)

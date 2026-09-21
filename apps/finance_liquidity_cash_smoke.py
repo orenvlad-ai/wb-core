@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -99,6 +101,10 @@ def test_money_boundaries() -> None:
     assert money_to_api(123, "JPY") == "123"
     for invalid in (
         1.0,
+        " 1.00",
+        "1.00 ",
+        "\t1.00",
+        "1.00\n",
         "1.001",
         "1.000000000000000000000000000001",
         "1e2",
@@ -111,6 +117,517 @@ def test_money_boundaries() -> None:
             pass
         else:
             raise AssertionError(invalid)
+
+
+def test_duplicate_and_reconciliation_regressions(db_path: Path) -> None:
+    """Service-level D03 §11.5 and reconciliation contract regressions."""
+    bootstrap_finance_cash_store(db_path)
+    service = FinanceCashService(db_path)
+    source = create_account(service, "Regression cash A")
+    target = create_account(service, "Regression cash B")
+    limit_ok = create_account(service, "Regression limit accepted")
+    limit_negative = create_account(service, "Regression limit negative accepted")
+    limit_over = create_account(service, "Regression limit rejected")
+    open_account(service, source, "100.00")
+    open_account(service, target, "0.00")
+    open_account(service, limit_ok, "-90000000000000.00")
+    open_account(service, limit_negative, "90000000000000.00")
+    open_account(service, limit_over, "-90000000000000.00")
+    key, operation_id = command_id()
+    income_category = str(
+        service.create_category(
+            {"name": "Regression income", "direction": "income"},
+            ACTOR,
+            operation_id,
+            key,
+        )["category_id"]
+    )
+    key, operation_id = command_id()
+    alternate_income_category = str(
+        service.create_category(
+            {"name": "Regression income alternate", "direction": "income"},
+            ACTOR,
+            operation_id,
+            key,
+        )["category_id"]
+    )
+
+    income_payload = {
+        "document_type": "income",
+        "target_account_id": source,
+        "category_id": income_category,
+        "amount": "10.00",
+        "occurred_at": "2026-09-21T11:00:00Z",
+        "purpose": "first manual income",
+    }
+    original = create_and_post(service, income_payload)
+    duplicate_payload = {
+        **income_payload,
+        "category_id": alternate_income_category,
+        "purpose": "same payment, explicit decision",
+    }
+    key, operation_id = command_id()
+    duplicate = service.create_document(duplicate_payload, ACTOR, operation_id, key)
+    warning_document = service.get_document(str(duplicate["document_id"]))["document"]
+    warning_balance = service.get_account(source)["balance_minor"]
+    post_key, post_operation = command_id()
+    first_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(duplicate["document_id"]),
+            {"base_revision": duplicate["revision"]},
+            ACTOR,
+            post_operation,
+            post_key,
+        ),
+    )
+    replay_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(duplicate["document_id"]),
+            {"base_revision": duplicate["revision"]},
+            ACTOR,
+            post_operation,
+            post_key,
+        ),
+    )
+    token = str(first_required.data["duplicate_confirmation_token"])
+    assert token == replay_required.data["duplicate_confirmation_token"]
+    assert first_required.data["candidates"] == replay_required.data["candidates"]
+    action_required = service.get_operation(post_operation, ACTOR, False)
+    assert action_required["action_required"] == "duplicate_confirmation"
+    assert action_required["duplicate_confirmation_token"] == token
+    assert action_required["candidates"] == first_required.data["candidates"]
+    assert service.get_document(str(duplicate["document_id"]))["document"] == warning_document
+    assert service.get_account(source)["balance_minor"] == warning_balance
+
+    # A similar, explicitly confirmed manual posting changes both the ordered
+    # candidate set and the sealed ledger watermark.  Its successful exact
+    # replay is an idempotent receipt, while the earlier warning token is stale.
+    key, operation_id = command_id()
+    changed_candidate = service.create_document(
+        {**income_payload, "purpose": "candidate set drift"}, ACTOR, operation_id, key
+    )
+    change_key, change_operation = command_id()
+    changed_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(changed_candidate["document_id"]),
+            {"base_revision": changed_candidate["revision"]},
+            ACTOR,
+            change_operation,
+            change_key,
+        ),
+    )
+    confirmation_key, confirmation_operation = command_id()
+    confirmed = service.post_document(
+        str(changed_candidate["document_id"]),
+        {
+            "base_revision": changed_candidate["revision"],
+            "duplicate_confirmation_token": changed_required.data["duplicate_confirmation_token"],
+        },
+        ACTOR,
+        confirmation_operation,
+        confirmation_key,
+    )
+    confirmed_replay = service.post_document(
+        str(changed_candidate["document_id"]),
+        {
+            "base_revision": changed_candidate["revision"],
+            "duplicate_confirmation_token": changed_required.data["duplicate_confirmation_token"],
+        },
+        ACTOR,
+        confirmation_operation,
+        confirmation_key,
+    )
+    assert confirmed_replay == confirmed
+    candidate_stale_balance = service.get_account(source)["balance_minor"]
+    stale_candidate = expect_error(
+        "duplicate_confirmation_stale",
+        lambda: service.post_document(
+            str(duplicate["document_id"]),
+            {"base_revision": duplicate["revision"], "duplicate_confirmation_token": token},
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    assert stale_candidate.data == {}
+    assert service.get_document(str(duplicate["document_id"]))["document"] == warning_document
+    assert service.get_account(source)["balance_minor"] == candidate_stale_balance
+
+    # A nonmatching ordinary posting leaves the candidate set unchanged but
+    # advances the global ledger watermark, so it independently stales a token.
+    key, operation_id = command_id()
+    watermark_draft = service.create_document(
+        {**income_payload, "purpose": "watermark only confirmation"}, ACTOR, operation_id, key
+    )
+    watermark_key, watermark_operation = command_id()
+    watermark_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(watermark_draft["document_id"]),
+            {"base_revision": watermark_draft["revision"]},
+            ACTOR,
+            watermark_operation,
+            watermark_key,
+        ),
+    )
+    assert any(
+        item["document_id"] == changed_candidate["document_id"]
+        for item in watermark_required.data["candidates"]
+    )
+    assert watermark_required.data["candidates"] != first_required.data["candidates"]
+    create_and_post(
+        service, {**income_payload, "amount": "7.00", "purpose": "watermark-only drift"}
+    )
+    watermark_document = service.get_document(str(watermark_draft["document_id"]))["document"]
+    watermark_balance = service.get_account(source)["balance_minor"]
+    expect_error(
+        "duplicate_confirmation_stale",
+        lambda: service.post_document(
+            str(watermark_draft["document_id"]),
+            {
+                "base_revision": watermark_draft["revision"],
+                "duplicate_confirmation_token": watermark_required.data["duplicate_confirmation_token"],
+            },
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    assert service.get_document(str(watermark_draft["document_id"]))["document"] == watermark_document
+    assert service.get_account(source)["balance_minor"] == watermark_balance
+
+    original_doc = service.get_document(str(original["document_id"]))["document"]
+    reversed_income = service.reverse_document(
+        str(original["document_id"]),
+        {
+            "base_revision": original_doc["revision"],
+            "reason": "regression reversal",
+            "occurred_at": "2026-09-21T11:10:00Z",
+        },
+        ACTOR,
+        *reversed(command_id()),
+    )
+    key, operation_id = command_id()
+    reversed_candidate_draft = service.create_document(
+        {**income_payload, "purpose": "manual candidate after reversal"}, ACTOR, operation_id, key
+    )
+    reversed_candidate_error = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(reversed_candidate_draft["document_id"]),
+            {"base_revision": reversed_candidate_draft["revision"]},
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    candidates = reversed_candidate_error.data["candidates"]
+    assert any(item["document_id"] == original["document_id"] and item["status"] == "reversed" for item in candidates)
+    assert all(item["document_id"] != reversed_income["document_id"] for item in candidates)
+
+    transfer_payload = {
+        "document_type": "transfer",
+        "source_account_id": source,
+        "target_account_id": target,
+        "amount": "5.00",
+        "occurred_at": "2026-09-21T12:00:00Z",
+        "transfer_mode": "instant",
+        "purpose": "first manual transfer",
+    }
+    transfer = create_and_post(service, transfer_payload)
+    key, operation_id = command_id()
+    transfer_duplicate = service.create_document(
+        {**transfer_payload, "purpose": "same transfer explicit decision"}, ACTOR, operation_id, key
+    )
+    transfer_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(transfer_duplicate["document_id"]),
+            {"base_revision": transfer_duplicate["revision"]},
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    assert any(item["document_id"] == transfer["document_id"] for item in transfer_required.data["candidates"])
+
+    # EKT business-day bounds are UTC 19:00 to 19:00.  This pair crosses a UTC
+    # date but is the same EKT day and therefore warns; the following midnight
+    # boundary is a new business day and posts without a warning.
+    ekt_edge_payload = {
+        **income_payload,
+        "amount": "13.00",
+        "occurred_at": "2026-09-21T19:00:00Z",
+        "purpose": "EKT day start",
+    }
+    ekt_edge = create_and_post(service, ekt_edge_payload)
+    key, operation_id = command_id()
+    ekt_same_day = service.create_document(
+        {**ekt_edge_payload, "occurred_at": "2026-09-22T18:59:59Z", "purpose": "EKT day end"},
+        ACTOR,
+        operation_id,
+        key,
+    )
+    ekt_same_day_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(ekt_same_day["document_id"]),
+            {"base_revision": ekt_same_day["revision"]},
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    assert any(
+        item["document_id"] == ekt_edge["document_id"]
+        for item in ekt_same_day_required.data["candidates"]
+    )
+    create_and_post(
+        service,
+        {**ekt_edge_payload, "occurred_at": "2026-09-22T19:00:00Z", "purpose": "next EKT day"},
+    )
+
+    # The candidate query itself is capped and ordered: only the twenty most
+    # recent ledger effects are returned when there are twenty-one matches.
+    capped_payload = {
+        **income_payload,
+        "amount": "17.00",
+        "occurred_at": "2026-09-21T13:00:00Z",
+        "purpose": "cap original",
+    }
+    create_and_post(service, capped_payload)
+    confirmed_candidate_ids: list[str] = []
+    for index in range(20):
+        key, operation_id = command_id()
+        candidate = service.create_document(
+            {**capped_payload, "purpose": f"cap candidate {index}"},
+            ACTOR,
+            operation_id,
+            key,
+        )
+        key, operation_id = command_id()
+        required = expect_error(
+            "duplicate_confirmation_required",
+            lambda candidate=candidate, key=key, operation_id=operation_id: service.post_document(
+                str(candidate["document_id"]),
+                {"base_revision": candidate["revision"]},
+                ACTOR,
+                operation_id,
+                key,
+            ),
+        )
+        confirmed_candidate_ids.append(
+            str(
+                service.post_document(
+                    str(candidate["document_id"]),
+                    {
+                        "base_revision": candidate["revision"],
+                        "duplicate_confirmation_token": required.data["duplicate_confirmation_token"],
+                    },
+                    ACTOR,
+                    *reversed(command_id()),
+                )["document_id"]
+            )
+        )
+    key, operation_id = command_id()
+    capped_draft = service.create_document(
+        {**capped_payload, "purpose": "cap assertion"}, ACTOR, operation_id, key
+    )
+    capped_required = expect_error(
+        "duplicate_confirmation_required",
+        lambda: service.post_document(
+            str(capped_draft["document_id"]),
+            {"base_revision": capped_draft["revision"]},
+            ACTOR,
+            *reversed(command_id()),
+        ),
+    )
+    assert [item["document_id"] for item in capped_required.data["candidates"]] == list(
+        reversed(confirmed_candidate_ids)
+    )
+
+    def record(account_id: str, actual: str, *, comment: str | None = None, checked_at: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "account_id": account_id,
+            "week_ending": "2026-09-21",
+            "actual_amount": actual,
+        }
+        if comment:
+            payload["comment"] = comment
+        if checked_at:
+            payload["checked_at"] = checked_at
+        return service.record_reconciliation(payload, ACTOR, *reversed(command_id()))
+
+    expect_error(
+        "reconciliation_explanation_required",
+        lambda: record(source, "0.00"),
+    )
+    checked_before = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    first_reconciliation = record(
+        source,
+        "0.00",
+        comment="source discrepancy",
+        checked_at="2000-01-01T00:00:00Z",
+    )
+    checked_after = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+    assert (
+        checked_before
+        <= first_reconciliation["checked_at"]
+        <= checked_after
+        and first_reconciliation["checked_at"] != "2000-01-01T00:00:00Z"
+    )
+    second_reconciliation = record(target, "1.00", comment="target discrepancy")
+    first_revision = service.list_reconciliations(source)[0]["revision"]
+    second_revision = service.list_reconciliations(target)[0]["revision"]
+    # Same key is safe across distinct aggregate routes; both target records
+    # resolve rather than replaying the first receipt.
+    shared_key = "reconciliation-cross-target-key"
+    first_resolve = service.resolve_reconciliation(
+        str(first_reconciliation["reconciliation_id"]),
+        {"base_revision": first_revision, "override_reason": "count corrected"},
+        ACTOR,
+        True,
+        "reconciliation-cross-target-op-a",
+        shared_key,
+    )
+    second_resolve = service.resolve_reconciliation(
+        str(second_reconciliation["reconciliation_id"]),
+        {"base_revision": second_revision, "override_reason": "count corrected"},
+        ACTOR,
+        True,
+        "reconciliation-cross-target-op-b",
+        shared_key,
+    )
+    assert first_resolve["reconciliation_id"] != second_resolve["reconciliation_id"]
+    source_resolved = next(
+        item
+        for item in service.list_reconciliations(source)
+        if item["reconciliation_id"] == first_reconciliation["reconciliation_id"]
+    )
+    target_resolved = next(
+        item
+        for item in service.list_reconciliations(target)
+        if item["reconciliation_id"] == second_reconciliation["reconciliation_id"]
+    )
+    assert source_resolved["status"] == target_resolved["status"] == "resolved"
+
+    raced = record(source, "0.00", comment="concurrent resolution")
+    raced_revision = service.list_reconciliations(source)[0]["revision"]
+    expect_error(
+        "version_conflict",
+        lambda: service.resolve_reconciliation(
+            str(raced["reconciliation_id"]),
+            {"base_revision": raced_revision - 1, "override_reason": "stale CAS"},
+            ACTOR,
+            True,
+            "reconciliation-stale-op",
+            "reconciliation-stale-key",
+        ),
+    )
+    expect_error(
+        "invalid_reconciliation_resolution",
+        lambda: service.resolve_reconciliation(
+            str(raced["reconciliation_id"]),
+            {"base_revision": raced_revision},
+            ACTOR,
+            True,
+            "reconciliation-missing-reason-op",
+            "reconciliation-missing-reason-key",
+        ),
+    )
+
+    race_start = Barrier(2)
+
+    def resolve_race(index: int) -> str:
+        try:
+            race_start.wait()
+            service.resolve_reconciliation(
+                str(raced["reconciliation_id"]),
+                {"base_revision": raced_revision, "override_reason": f"race {index}"},
+                ACTOR,
+                True,
+                f"reconciliation-race-op-{index}",
+                f"reconciliation-race-key-{index}",
+            )
+            return "resolved"
+        except FinanceCashError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        race_results = list(pool.map(resolve_race, range(2)))
+    assert race_results.count("resolved") == 1 and any(
+        result in {"version_conflict", "reconciliation_not_resolvable"}
+        for result in race_results
+    ), race_results
+    raced_after = next(
+        item
+        for item in service.list_reconciliations(source)
+        if item["reconciliation_id"] == raced["reconciliation_id"]
+    )
+    assert raced_after["status"] == "resolved"
+    assert raced_after["revision"] == raced_revision + 1
+
+    matched_followup = record(source, "0.00", comment="follow-up discrepancy")
+    matched_observation = record(
+        source,
+        money_to_api(int(matched_followup["expected_minor"]), "RUB"),
+    )
+    matched_rows = service.list_reconciliations(source)
+    matched_revision = next(
+        item["revision"]
+        for item in matched_rows
+        if item["reconciliation_id"] == matched_followup["reconciliation_id"]
+    )
+    assert next(
+        item["status"]
+        for item in matched_rows
+        if item["reconciliation_id"] == matched_observation["reconciliation_id"]
+    ) == "matched"
+    expect_error(
+        "invalid_reconciliation_resolution",
+        lambda: service.resolve_reconciliation(
+            str(matched_followup["reconciliation_id"]),
+            {
+                "base_revision": matched_revision,
+                "matched_reconciliation_id": matched_observation["reconciliation_id"],
+            },
+            ACTOR,
+            False,
+            "reconciliation-followup-no-reason-op",
+            "reconciliation-followup-no-reason-key",
+        ),
+    )
+    matched_resolve = service.resolve_reconciliation(
+        str(matched_followup["reconciliation_id"]),
+        {
+            "base_revision": matched_revision,
+            "matched_reconciliation_id": matched_observation["reconciliation_id"],
+            "override_reason": "cash count reconciled",
+        },
+        ACTOR,
+        False,
+        "reconciliation-followup-reason-op",
+        "reconciliation-followup-reason-key",
+    )
+    assert (
+        matched_resolve["status"] == "resolved"
+        and matched_resolve["resolution_kind"] == "matched_followup"
+        and matched_resolve["resolution_reconciliation_id"]
+        == matched_observation["reconciliation_id"]
+    )
+
+    accepted_bound = record(limit_ok, "0.00", comment="exact maximum difference")
+    assert accepted_bound["difference_minor"] == 9_000_000_000_000_000
+    accepted_negative_bound = record(
+        limit_negative, "0.00", comment="exact negative maximum difference"
+    )
+    assert accepted_negative_bound["difference_minor"] == -9_000_000_000_000_000
+    expect_error(
+        "reconciliation_difference_out_of_range",
+        lambda: record(limit_over, "90000000000000.00", comment="must exceed range"),
+    )
 
 
 def test_cash_ledger(db_path: Path) -> None:
@@ -624,6 +1141,10 @@ def main() -> None:
     test_money_boundaries()
     with TemporaryDirectory() as directory:
         test_cash_ledger(Path(directory) / "cash.sqlite3")
+    with TemporaryDirectory() as directory:
+        test_duplicate_and_reconciliation_regressions(
+            Path(directory) / "cash-regressions.sqlite3"
+        )
     print("finance_liquidity_cash_smoke: ok")
 
 

@@ -2030,25 +2030,65 @@ class FinanceCashService:
     def _duplicate_candidates(
         self, conn: sqlite3.Connection, doc: sqlite3.Row
     ) -> list[dict[str, Any]]:
-        if doc["document_type"] not in {"income", "expense"}:
+        if doc["document_type"] not in {"income", "expense", "transfer"}:
             return []
+        business_day_start, business_day_end = self._duplicate_business_day_bounds(
+            str(doc["occurred_at"])
+        )
         rows = conn.execute(
-            "SELECT document_id,semantic_digest FROM finance_liquidity_documents WHERE status='posted' AND document_type=? AND amount_minor=? AND COALESCE(source_account_id,'')=COALESCE(?, '') AND COALESCE(target_account_id,'')=COALESCE(?, '') AND COALESCE(category_id,'')=COALESCE(?, '') ORDER BY document_id LIMIT 10",
+            """SELECT d.document_id,d.status,d.semantic_digest,d.occurred_at,
+                   COALESCE(MAX(t.sequence_no),0) AS latest_sequence_no
+               FROM finance_liquidity_documents d
+               LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id
+               LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id
+               LEFT JOIN finance_liquidity_ledger_transactions t ON t.document_id=d.document_id
+               WHERE d.status IN ('posted','reversed')
+                 AND d.reversal_of_document_id IS NULL
+                 AND d.document_type=? AND d.amount_minor=?
+                 AND COALESCE(d.source_account_id,'')=COALESCE(?, '')
+                 AND COALESCE(d.target_account_id,'')=COALESCE(?, '')
+                 AND COALESCE(a.currency,b.currency)=?
+                 AND d.occurred_at>=? AND d.occurred_at<?
+               GROUP BY d.document_id
+               ORDER BY latest_sequence_no DESC,d.document_id ASC
+               LIMIT 20""",
             (
                 doc["document_type"],
                 doc["amount_minor"],
                 doc["source_account_id"],
                 doc["target_account_id"],
-                doc["category_id"],
+                doc["currency"],
+                business_day_start,
+                business_day_end,
             ),
         ).fetchall()
         return [
             {
                 "document_id": row["document_id"],
+                "status": row["status"],
                 "semantic_digest": row["semantic_digest"],
             }
             for row in rows
         ]
+
+    def _duplicate_business_day_bounds(self, occurred_at: str) -> tuple[str, str]:
+        instant = datetime.fromisoformat(
+            _utc_timestamp(occurred_at, "occurred_at")[:-1] + "+00:00"
+        )
+        local_start = datetime.combine(
+            instant.astimezone(CANONICAL_BUSINESS_TIMEZONE).date(),
+            time.min,
+            tzinfo=CANONICAL_BUSINESS_TIMEZONE,
+        )
+        return (
+            local_start.astimezone(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+            (local_start + timedelta(days=1))
+            .astimezone(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+        )
 
     def _consume_duplicate_token(
         self,
