@@ -334,6 +334,56 @@ def command_dependency_checks():
             paths=["packages/application/fixture_boundary.py"], file_exists=lambda *_: True)
     check(grouped, [future_script])
 
+    # The Finance auth driver is introduced after this trusted-base map. Its
+    # dependency follows only commands that import that driver, whether the
+    # smoke is selected directly or together with other Finance-only checks.
+    auth_consumers = (
+        "apps/finance_liquidity_auth_smoke.py",
+        "apps/finance_liquidity_http_smoke.py",
+        "apps/finance_liquidity_browser_smoke.py",
+        "apps/finance_liquidity_integration_smoke.py",
+    )
+    for script in auth_consumers[:2]:
+        direct = build_plan_from_paths(
+            pull_request=37,
+            base=BASE,
+            head=HEAD,
+            paths=[script],
+            file_exists=lambda _, candidate, selected=script: (
+                candidate == selected or (select_checks.ROOT / candidate).is_file()
+            ),
+        )
+        verify_plan(direct)
+        assert direct["groups"] == ["finance_liquidity"], direct
+        assert direct["pip"] == ["apsw==3.53.4.0", "openpyxl==3.1.5"], direct
+        assert direct["commands"].count(["python3", script]) == 1, direct
+
+    finance_only = build_plan_from_paths(
+        pull_request=38,
+        base=BASE,
+        head=HEAD,
+        paths=list(auth_consumers),
+        file_exists=lambda _, candidate: (
+            candidate in auth_consumers or (select_checks.ROOT / candidate).is_file()
+        ),
+    )
+    verify_plan(finance_only)
+    assert finance_only["groups"] == ["finance_liquidity"], finance_only
+    assert finance_only["pip"].count("apsw==3.53.4.0") == 1, finance_only
+    for script in auth_consumers:
+        assert finance_only["commands"].count(["python3", script]) == 1, finance_only
+
+    unrelated_browser = build_plan_from_paths(
+        pull_request=39,
+        base=BASE,
+        head=HEAD,
+        paths=[scripts[0]],
+        file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+    )
+    verify_plan(unrelated_browser)
+    assert "playwright==1.58.0" in unrelated_browser["pip"], unrelated_browser
+    assert "apsw==3.53.4.0" not in unrelated_browser["pip"], unrelated_browser
+
     for paths, file_exists in (
         (["packages/application/sku_inventory_balance.py"], lambda *_: True),
         (["apps/sheet_vitrina_v1_reports_ready_snapshot_browser_smoke.py"], lambda *_: True),
