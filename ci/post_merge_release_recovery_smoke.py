@@ -717,7 +717,25 @@ subprocess.CalledProcessError: Command ["ssh"] returned non-zero exit status 1.
     proof = recovery._prove_failed_stage(log, 77, "One-shot deployed release", case=recovery.RecoveryCase.SELECTIVE_B9_ACTIVATION)
     assert proof["stage"] == "autoanswers-prepare-deploy-drain"
     assert proof["unit"] == "wb-core-autoanswers-worker.service"
-    assert recovery._selective_b9_diff_proof()["immutable_paths_changed"] == []
+    original_git = recovery._git
+    allowed_paths = [
+        "apps/sheet_vitrina_v1_buyout_confirmation_recovery.py", "apps/sheet_vitrina_v1_buyout_confirmation_recovery_smoke.py",
+        "apps/sheet_vitrina_v1_buyout_percent_smoke.py", "ci/checks.json", "ci/post_merge_release_recovery.py",
+        "ci/post_merge_release_recovery_smoke.py", "docs/modules/08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md",
+        "packages/application/calculation_parameters_v4.py", "packages/application/sheet_vitrina_v1_buyout_percent.py",
+    ]
+    def fixture_git(paths):
+        def run(args, *, check=True):
+            assert args == ["diff", "--name-only", f"{recovery.EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA}..{recovery.EXPECTED_SELECTIVE_MERGE_SHA}"]
+            return _completed(args, stdout="\n".join(paths) + "\n")
+        return run
+    try:
+        recovery._git = fixture_git(allowed_paths)
+        assert recovery._selective_b9_diff_proof()["immutable_paths_changed"] == []
+        recovery._git = fixture_git([*allowed_paths, "apps/wb_autoanswers_worker.py"])
+        expect_reason("selective-b9-diff-not-exact", recovery._selective_b9_diff_proof)
+    finally:
+        recovery._git = original_git
     source = Path(recovery.__file__).read_text(encoding="utf-8")
     route = source[source.index("def build_stage_commands"):source.index("def _run_stage")]
     for required in ("_build_autoanswers_prepare_deploy_command", "_build_managed_systemd_commands", "_build_nginx_public_routes_command", "normal_activation_tail"):
