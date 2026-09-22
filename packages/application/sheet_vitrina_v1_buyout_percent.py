@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import hashlib
+import json
+import sqlite3
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from packages.application.registry_upload_db_backed_runtime import (
@@ -25,6 +28,9 @@ from packages.contracts.sales_funnel_history_block import (
 
 
 SALES_FUNNEL_HISTORY_SOURCE_KEY = "sales_funnel_history"
+BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY = (
+    "sales_funnel_history_buyout_confirmation_v1"
+)
 BUYOUT_PERCENT_METRIC_KEY = "buyoutPercent"
 LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY = "avg_buyoutPercent"
 ORDER_COUNT_METRIC_KEY = "orderCount"
@@ -360,15 +366,15 @@ def load_buyout_percent_snapshot_metrics(
     )
     values: dict[int, dict[str, BuyoutPercentSnapshotMetrics]] = {}
     for snapshot_date in dict.fromkeys(str(item) for item in snapshot_dates):
-        payload, captured_at = runtime.load_temporal_source_snapshot(
-            source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
+        payload, captured_at, _source_key = resolve_buyout_percent_snapshot(
+            runtime=runtime,
             snapshot_date=snapshot_date,
         )
         if require_mature_capture and not mature_buyout_capture_proof(
             payload=payload,
             captured_at=captured_at,
             snapshot_date=snapshot_date,
-            enabled_nm_ids=requested_nm_ids or (),
+            enabled_nm_ids=_current_confirmation_nm_ids(runtime),
         ):
             continue
         for nm_id, metrics in _snapshot_metrics_by_nm_id(
@@ -463,8 +469,8 @@ def build_three_closed_week_buyout_reference(
             continue
 
         for snapshot_date in week_dates:
-            payload, captured_at = runtime.load_temporal_source_snapshot(
-                source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
+            payload, captured_at, _source_key = resolve_buyout_percent_snapshot(
+                runtime=runtime,
                 snapshot_date=snapshot_date,
             )
             if payload is None:
@@ -565,6 +571,7 @@ def build_three_closed_week_buyout_reference(
         "maturity_days": BUYOUT_PERCENT_MATURITY_DAYS,
         "trusted_cutoff": trusted_cutoff.isoformat(),
         "source_key": SALES_FUNNEL_HISTORY_SOURCE_KEY,
+        "confirmation_overlay_source_key": BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
         "source_store": "temporal_source_snapshots",
         "value_metric": BUYOUT_PERCENT_METRIC_KEY,
         "weight_metric": ORDER_COUNT_METRIC_KEY,
@@ -589,6 +596,121 @@ def build_three_closed_week_buyout_reference(
             )
         ),
     }
+
+
+def resolve_buyout_percent_snapshot(
+    *,
+    runtime: RegistryUploadDbBackedRuntime,
+    snapshot_date: str,
+) -> tuple[Any | None, str | None, str]:
+    """Select a complete mature buyout overlay, otherwise the original snapshot.
+
+    The overlay is deliberately only a two-metric confirmation for the current
+    registry roster.  It is never a replacement for the broader sales-funnel
+    snapshot used by other consumers.
+    """
+
+    confirmation_nm_ids = _current_confirmation_nm_ids(runtime)
+    overlay_payload, overlay_captured_at = runtime.load_temporal_source_snapshot(
+        source_key=BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+        snapshot_date=snapshot_date,
+    )
+    if confirmation_nm_ids and mature_buyout_capture_proof(
+        payload=overlay_payload,
+        captured_at=overlay_captured_at,
+        snapshot_date=snapshot_date,
+        enabled_nm_ids=confirmation_nm_ids,
+    ):
+        return (
+            overlay_payload,
+            overlay_captured_at,
+            BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+        )
+    payload, captured_at = runtime.load_temporal_source_snapshot(
+        source_key=SALES_FUNNEL_HISTORY_SOURCE_KEY,
+        snapshot_date=snapshot_date,
+    )
+    return payload, captured_at, SALES_FUNNEL_HISTORY_SOURCE_KEY
+
+
+def buyout_source_payload_digest(
+    runtime: RegistryUploadDbBackedRuntime,
+    *,
+    date_from: str,
+    date_to: str,
+) -> str:
+    """Digest the resolver's source selection without changing legacy bytes.
+
+    With no valid overlay this is byte-for-byte the prior V4 digest payload:
+    ``[[snapshot_date, decoded_original_payload], ...]``.  A selected overlay
+    gets an explicit wrapper so only its affected historical dates receive a
+    new fingerprint.
+    """
+
+    with sqlite3.connect(f"file:{runtime.db_path}?mode=ro", uri=True) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        original_rows = {
+            str(row[0]): json.loads(str(row[1]))
+            for row in conn.execute(
+                """
+                SELECT snapshot_date,payload_json
+                FROM temporal_source_snapshots
+                WHERE source_key=? AND snapshot_date>=? AND snapshot_date<=?
+                """,
+                (SALES_FUNNEL_HISTORY_SOURCE_KEY, date_from, date_to),
+            )
+        }
+        overlay_rows = {
+            str(row[0]): (json.loads(str(row[1])), str(row[2]))
+            for row in conn.execute(
+                """
+                SELECT snapshot_date,payload_json,captured_at
+                FROM temporal_source_snapshots
+                WHERE source_key=? AND snapshot_date>=? AND snapshot_date<=?
+                """,
+                (BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY, date_from, date_to),
+            )
+        }
+    confirmation_nm_ids = _current_confirmation_nm_ids(runtime)
+    digest_rows: list[list[Any]] = []
+    for snapshot_date in _iter_iso_dates(date_from, date_to):
+        overlay = overlay_rows.get(snapshot_date)
+        if overlay is not None and confirmation_nm_ids and mature_buyout_capture_proof(
+            payload=overlay[0],
+            captured_at=overlay[1],
+            snapshot_date=snapshot_date,
+            enabled_nm_ids=confirmation_nm_ids,
+        ):
+            digest_rows.append(
+                [
+                    snapshot_date,
+                    {
+                        "source_key": BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+                        "captured_at": overlay[1],
+                        "payload": overlay[0],
+                    },
+                ]
+            )
+        elif snapshot_date in original_rows:
+            digest_rows.append([snapshot_date, original_rows[snapshot_date]])
+    body = json.dumps(
+        digest_rows,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def _current_confirmation_nm_ids(
+    runtime: RegistryUploadDbBackedRuntime,
+) -> set[int]:
+    try:
+        state = runtime.load_current_state()
+    except ValueError:
+        return set()
+    return {int(item.nm_id) for item in state.config_v2 if item.enabled}
 
 
 def _buyout_week_result(
