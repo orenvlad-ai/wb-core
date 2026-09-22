@@ -414,6 +414,25 @@ def ads_dependency_checks():
     print("Ads dependencies: direct/sibling/mixed smokes keep exact openpyxl prerequisite OK")
 
 
+def buyout_percent_dependency_checks():
+    smoke = "apps/sheet_vitrina_v1_buyout_percent_smoke.py"
+    source = "packages/application/sheet_vitrina_v1_buyout_percent.py"
+    for path in (smoke, source):
+        plan = build_plan_from_paths(
+            pull_request=40,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["buyout_percent"], plan
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        assert plan["commands"].count(["python3", smoke]) == 1, plan
+        assert plan["commands"][0][:3] == ["python3", "-m", "py_compile"], plan
+    print("Buyout dependencies: direct smoke and production source select exact openpyxl prerequisite OK")
+
+
 def exists(_head: str, path: str) -> bool:
     return path in {
         "docs/example.md",
@@ -653,6 +672,7 @@ def main() -> None:
     rename_diff_check()
     command_dependency_checks()
     ads_dependency_checks()
+    buyout_percent_dependency_checks()
     finance_liquidity_checks()
     bounded_environment_checks()
     docs = build_plan_from_paths(
