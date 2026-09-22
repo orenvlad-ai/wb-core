@@ -30,7 +30,7 @@ jobs:
   recover:
     name: Proven post-merge deploy-tail recovery
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment: production
     concurrency:
       group: wb-core-production-release

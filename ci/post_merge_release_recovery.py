@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Fail-closed continuation for a proven post-merge deploy tail.
 
-The runner never merges, copies code, installs runtime dependencies, or
-restarts services.  It accepts only a failed canonical Release Runner whose
-trusted log proves the root-storage artifact readback exited 3 after the exact
-merge was deployed.  Recovery code may be newer than that runtime only when
-the complete intervening diff is classified repo-only by the current trusted
-check map.
+The runner never merges, copies code, or installs runtime dependencies.  Its
+storage tail never restarts services; one exact b9 case resumes the canonical
+post-dependency activation stages only after strict receipt, prestate, and
+phase evidence.  Recovery code may be newer only when intervening commits are
+classified repo-only by the current trusted check map.
 """
 
 from __future__ import annotations
@@ -21,9 +20,11 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import textwrap
 import zipfile
 from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,24 @@ REMOTE_DIAGNOSTIC_SCHEMA = "wb-core.release-recovery-remote-diagnostic/v1"
 REMOTE_DIAGNOSTIC_STAGES = frozenset(
     {"metadata", "services", "health", "process-env", "pilot-env", "finance", "nginx", "ss"}
 )
+EXPECTED_SELECTIVE_RUN_ID = 35779532714
+EXPECTED_SELECTIVE_ORIGINAL_BASE_SHA = "e5b62aae8ed1a709253d62cf4ff556720414f714"
+EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA = "ae2d7f2f309cc84f0d5b1b9bb9b7be3161bec329"
+EXPECTED_SELECTIVE_GATE_RUN_ID = 35779448242
+EXPECTED_SELECTIVE_HEAD_SHA = "2aee46a3967e0ae1deaae2ed152d496dff9644c3"
+EXPECTED_SELECTIVE_MERGE_SHA = "b9b709805b9eb1da9d417f3b8028dd22e4ccb1d6"
+
+
+class RecoveryCase(str, Enum):
+    STORAGE_TAIL = "storage-tail"
+    SELECTIVE_B9_ACTIVATION = "normal-b9-activation-tail"
+
+
+def recovery_case(release_run_id: int) -> RecoveryCase:
+    return (RecoveryCase.SELECTIVE_B9_ACTIVATION if release_run_id == EXPECTED_SELECTIVE_RUN_ID
+            else RecoveryCase.STORAGE_TAIL)
+
+
 REMOTE_DIAGNOSTIC_CATEGORIES = frozenset(
     {
         "system-exit",
@@ -162,7 +181,7 @@ def _matching_comments(client: release.GitHub, pr: int, marker: str) -> list[dic
     return found
 
 
-def _validate_original_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_original_receipt(value: Mapping[str, Any], *, case: RecoveryCase = RecoveryCase.STORAGE_TAIL) -> dict[str, Any]:
     required = {
         "schema": release.RECEIPT_SCHEMA,
         "state": "blocked",
@@ -183,37 +202,42 @@ def _validate_original_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
     if not operation.startswith("release-v3-"):
         raise RecoveryError("original-operation-invalid")
     normalized["operation_id"] = operation
+    if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and (
+        normalized["base_sha"] != EXPECTED_SELECTIVE_ORIGINAL_BASE_SHA
+        or normalized["merge_sha"] != EXPECTED_SELECTIVE_MERGE_SHA
+    ):
+        raise RecoveryError("original-receipt-not-exact-selective-b9")
     return normalized
 
 
-def _prove_failed_stage(raw_log: bytes, gate_run_id: int, job_name: str) -> dict[str, Any]:
+def _prove_failed_stage(raw_log: bytes, gate_run_id: int, job_name: str, *, case: RecoveryCase = RecoveryCase.STORAGE_TAIL) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
-    required = (
-        "deploy_current_checkout",
-        'run_stage("readback", root_storage_commands["status_artifact_readback"])',
-        "apps/root_storage_policy.py",
-        "status-readback",
-        "returned non-zero exit status 3",
-        f'--workflow-run-id "{gate_run_id}"',
-    )
+    if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+        required = ("deploy_current_checkout", "wb_autoanswers_activation.py prepare-deploy",
+                    "wb-core-autoanswers-worker.service", "returned non-zero exit status 1",
+                    f'--workflow-run-id "{gate_run_id}"')
+        if any(item not in text for item in required):
+            raise RecoveryError("failed-stage-not-autoanswers-drain-exit1")
+        failures = re.findall(r"subprocess\.CalledProcessError: Command .*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if failures != ["1"] or "exit status 255" in text:
+            raise RecoveryError("failed-stage-not-definite-single-exit1")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "autoanswers-prepare-deploy-drain", "exit_status": 1,
+                "unit": "wb-core-autoanswers-worker.service"}
+    required = ("deploy_current_checkout", 'run_stage("readback", root_storage_commands["status_artifact_readback"])',
+                "apps/root_storage_policy.py", "status-readback", "returned non-zero exit status 3",
+                f'--workflow-run-id "{gate_run_id}"')
     if any(item not in text for item in required):
         raise RecoveryError("failed-stage-not-root-storage-readback-exit3")
-    command_failures = re.findall(
-        r"subprocess\.CalledProcessError: Command .*?returned non-zero exit status (\d+)",
-        text,
-        re.DOTALL,
-    )
-    if command_failures != ["3"] or "exit status 255" in text:
+    failures = re.findall(r"subprocess\.CalledProcessError: Command .*?returned non-zero exit status (\d+)", text, re.DOTALL)
+    if failures != ["3"] or "exit status 255" in text:
         raise RecoveryError("failed-stage-not-definite-single-exit3")
-    return {
-        "job_name": job_name,
-        "job_log_sha256": digest(raw_log),
-        "stage": "root-storage-status-artifact-readback",
-        "exit_status": 3,
-    }
+    return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+            "stage": "root-storage-status-artifact-readback", "exit_status": 3}
 
 
 def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, Any]:
+    case = recovery_case(release_run_id)
     run = client.get(f"/actions/runs/{release_run_id}")
     reasons: list[str] = []
     if client.repository != REPOSITORY:
@@ -241,9 +265,11 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
         "GET", f"/actions/artifacts/{int(artifact['id'])}/zip", raw=True
     )
     original = _validate_original_receipt(
-        _json_file(_zip_files(raw_receipt, "original-receipt-artifact"), "release-receipt.json", "original-receipt")
+        _json_file(_zip_files(raw_receipt, "original-receipt-artifact"), "release-receipt.json", "original-receipt"), case=case
     )
     gate_id = int(original["gate_run_id"])
+    if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and (gate_id != EXPECTED_SELECTIVE_GATE_RUN_ID or original["head_sha"] != EXPECTED_SELECTIVE_HEAD_SHA):
+        raise RecoveryError("selective-original-gate-or-head-not-exact")
     if artifact.get("name") != f"release-receipt-{gate_id}":
         raise RecoveryError("original-receipt-artifact-binding-invalid")
 
@@ -270,7 +296,7 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
     ):
         raise RecoveryError("release-deployed-job-shape-invalid")
     raw_log = client.request("GET", f"/actions/jobs/{int(deployed_job['id'])}/logs", raw=True)
-    failure = _prove_failed_stage(raw_log, gate_id, str(deployed_job["name"]))
+    failure = _prove_failed_stage(raw_log, gate_id, str(deployed_job["name"]), case=case)
     if exact_sha(run.get("head_sha"), "release-run-head") != original["base_sha"]:
         raise RecoveryError("release-run-trusted-source-mismatch")
     gate_run, gate_plan = release.collect_plan(client, gate_id)
@@ -324,6 +350,7 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
         raise RecoveryError("original-blocked-receipt-comment-invalid")
     return {
         "release_run_id": int(release_run_id),
+        "recovery_case": case.value,
         "release_run_head_sha": exact_sha(run.get("head_sha"), "release-run-head"),
         "original_receipt": original,
         "original_receipt_sha256": digest(canonical_bytes(original)),
@@ -684,13 +711,78 @@ except BaseException as exc:
     raise SystemExit(1)
 """
 
-def collect_prestate(target: Any, merge: str, *, require_incomplete: bool) -> dict[str, Any]:
+def _selective_b9_diff_proof() -> dict[str, Any]:
+    allowed = {
+        "apps/sheet_vitrina_v1_buyout_confirmation_recovery.py", "apps/sheet_vitrina_v1_buyout_confirmation_recovery_smoke.py",
+        "apps/sheet_vitrina_v1_buyout_percent_smoke.py", "ci/checks.json", "ci/post_merge_release_recovery.py",
+        "ci/post_merge_release_recovery_smoke.py", "docs/modules/08_MODULE__SALES_FUNNEL_HISTORY_BLOCK.md",
+        "packages/application/calculation_parameters_v4.py", "packages/application/sheet_vitrina_v1_buyout_percent.py",
+    }
+    paths = sorted(filter(None, _git(["diff", "--name-only", f"{EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA}..{EXPECTED_SELECTIVE_MERGE_SHA}"]).stdout.splitlines()))
+    if set(paths) != allowed:
+        raise RecoveryError("selective-b9-diff-not-exact")
+    immutable = ("apps/wb_autoanswers", "packages/application/wb_autoanswers", "packages/adapters/wb_autoanswers",
+                 "packages/node/wb_autoanswers", "artifacts/registry_upload_http_entrypoint/systemd/",
+                 "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+                 "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json",
+                 "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json")
+    changed = [path for path in paths if path.startswith(immutable)]
+    if changed:
+        raise RecoveryError("selective-b9-immutable-closure-changed")
+    return {"base_sha": EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA, "merge_sha": EXPECTED_SELECTIVE_MERGE_SHA,
+            "paths_sha256": digest(canonical_bytes(paths)), "immutable_paths_changed": changed}
+
+
+def _selective_live_contract_script(target: Any) -> str:
+    # Commands are read-only: file hashes, stable unit metadata, installed versions, and nginx config.
+    prefixes = ("apps/wb_autoanswers", "packages/application/wb_autoanswers", "packages/adapters/wb_autoanswers", "packages/node/wb_autoanswers", "artifacts/registry_upload_http_entrypoint/systemd/")
+    direct = ("apps/registry_upload_http_entrypoint_hosted_runtime.py", "apps/change_registry_observer.py", "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json", "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json")
+    files = sorted(set(filter(None, _git(["ls-tree", "-r", "--name-only", EXPECTED_SELECTIVE_MERGE_SHA, "--", *prefixes, *direct]).stdout.splitlines())) | set(direct))
+    expected = {"files": files, "units": [unit.name for unit in target.managed_systemd_units],
+                "autoanswers_units": ["wb-core-autoanswers-worker.service", "wb-core-autoanswers-worker.timer", "wb-core-autoanswers-readonly-sync.service", "wb-core-autoanswers-readonly-sync.timer"]}
+    blobs = {path: _git(["rev-parse", f"{EXPECTED_SELECTIVE_MERGE_SHA}:{path}"]).stdout.strip() for path in expected["files"]}
+    return f'''import hashlib,json,subprocess
+from importlib.metadata import version
+from pathlib import Path
+e={{"target":{target.target_dir!r},"unit_dir":{target.systemd_unit_directory!r},"blobs":{blobs!r},"units":{expected["units"]!r},"autoanswers_units":{expected["autoanswers_units"]!r}}}
+def h(path): return subprocess.run(["git","hash-object",str(path)],check=True,text=True,capture_output=True).stdout.strip()
+for rel,want in e["blobs"].items():
+ p=Path(e["target"])/rel
+ if not p.is_file() or h(p)!=want: raise SystemExit(41)
+units={{}}
+for name in e["units"]:
+ p=Path(e["unit_dir"])/name
+ rel="artifacts/registry_upload_http_entrypoint/systemd/"+name
+ if not p.is_file() or h(p)!=e["blobs"].get(rel): raise SystemExit(42)
+ if "@." in name:
+  units[name]="template-file-hash-verified"
+  continue
+ props=subprocess.run(["systemctl","show",name,"--property=LoadState,UnitFileState,FragmentPath,DropInPaths","--no-page"],check=True,text=True,capture_output=True).stdout
+ values={{line.split("=",1)[0]:line.split("=",1)[1] for line in props.splitlines() if "=" in line}}
+ if name in e["autoanswers_units"] and values.get("DropInPaths", ""): raise SystemExit(44)
+ units[name]=props
+stable={{}}
+expected_states={{"wb-core-autoanswers-worker.service":"static","wb-core-autoanswers-readonly-sync.service":"static","wb-core-autoanswers-worker.timer":"enabled","wb-core-autoanswers-readonly-sync.timer":"enabled"}}
+for name in e["autoanswers_units"]:
+ values={{line.split("=",1)[0]:line.split("=",1)[1] for line in units[name].splitlines() if "=" in line}}
+ if values.get("DropInPaths", "") or values.get("UnitFileState") != expected_states[name]: raise SystemExit(45)
+ stable[name]={{"load_state":values.get("LoadState"),"unit_file_state":values.get("UnitFileState"),"fragment_path":values.get("FragmentPath"),"drop_in_paths":values.get("DropInPaths","")}}
+versions={{"system":subprocess.run(["python3","-c","from importlib.metadata import version; print(*(version(x) for x in ('apsw','openpyxl','xlrd','playwright','pypdf','reportlab')))"],check=True,text=True,capture_output=True).stdout.strip(),"web_bot":subprocess.run(["/opt/wb-web-bot/venv/bin/python","-c","from importlib.metadata import version; print(version('playwright'),version('psycopg2-binary'))"],check=True,text=True,capture_output=True).stdout.strip(),"wb_ai":subprocess.run(["/opt/wb-ai/venv/bin/python","-c","from importlib.metadata import version; print(*(version(x) for x in ('fastapi','uvicorn','psycopg2-binary','requests')))"],check=True,text=True,capture_output=True).stdout.strip(),"node":subprocess.run(["node","--version"],check=True,text=True,capture_output=True).stdout.strip(),"npm":subprocess.run(["npm","--version"],check=True,text=True,capture_output=True).stdout.strip()}}
+expected_versions={{"system":"3.53.4.0 3.1.5 2.0.1 1.58.0 6.4.1 4.4.5","web_bot":"1.58.0 2.9.11","wb_ai":"0.129.1 0.41.0 2.9.11 2.32.5","node":"v22.21.1","npm":"10.9.4"}}
+if versions != expected_versions: raise SystemExit(43)
+nginx=subprocess.run(["nginx","-T"],check=True,text=True,capture_output=True).stdout.encode()
+print(json.dumps({{"installed_unit_contract":units,"stable_autoanswers_units":stable,"dependency_versions":versions,"nginx_sha256":hashlib.sha256(nginx).hexdigest()}},sort_keys=True))'''
+
+
+def collect_prestate(target: Any, merge: str, *, require_incomplete: bool, case: RecoveryCase = RecoveryCase.STORAGE_TAIL) -> dict[str, Any]:
     state = _run_remote_json(target, _prestate_script(target, merge))
     complete = state.get("metadata", {}).get("deployment_complete")
     if require_incomplete and complete is not False:
         raise RecoveryError("target-marker-not-incomplete")
     if not require_incomplete and complete is not True:
         raise RecoveryError("target-marker-not-complete")
+    if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+        state["selective_live_contract"] = _run_remote_json(target, _selective_live_contract_script(target))
     return state
 
 
@@ -703,6 +795,9 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
         "runner": payload["runner"],
         "target": payload["target"],
         "failure": payload["failure"],
+        "recovery_case": payload.get("recovery_case"),
+        "selective_b9_diff": payload.get("selective_b9_diff"),
+        "selective_previous_recovery": payload.get("selective_previous_recovery"),
         "prestate": payload["prestate"],
         "stages": payload["stages"],
         "forbidden_stages": payload["forbidden_stages"],
@@ -711,7 +806,8 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
 
 
 def build_stage_commands(
-    target: Any, merge: str, metadata_sha: str, expected_main_pid: int
+    target: Any, merge: str, metadata_sha: str, expected_main_pid: int,
+    *, case: RecoveryCase = RecoveryCase.STORAGE_TAIL
 ) -> dict[str, Any]:
     from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
 
@@ -762,7 +858,7 @@ finally: os.close(directory_fd)
 print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(new).hexdigest(),'commit':expected_commit,'deployed_at':value.get('deployed_at')}},sort_keys=True))
 """
     completion = _remote_python_command(target)
-    return {
+    commands = {
         "root_storage_readback": root_storage,
         "status": status,
         "auth": auth,
@@ -771,25 +867,53 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
+    if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+        if target.service_name != "wb-core-registry-http.service" or target.restart_command != "systemctl restart wb-core-registry-http.service":
+            raise RecoveryError("normal-tail-restart-contract-invalid")
+        managed = hosted._build_managed_systemd_commands(target)
+        storage = hosted._build_root_storage_policy_commands(target)
+        nginx = hosted._build_nginx_public_routes_command(target, target_file=TARGET_FILE, dry_run=False)
+        required = {"prepare": hosted._build_autoanswers_prepare_deploy_command(target), "install": managed["install"], "daemon_reload": managed["daemon_reload"], "nginx": nginx, "restart": hosted._remote_shell_command(target, f"cd {shlex.quote(target.target_dir)} && {target.restart_command}"), "reconcile": managed["reconcile"], "barrier": managed["preflight"], "storage": storage["status"], "storage_readback": storage["status_artifact_readback"], "status": status, "auth": auth}
+        if any(value is None for value in required.values()):
+            raise RecoveryError("normal-tail-builder-contract-incomplete")
+        commands["normal_activation_tail"] = required
+    return commands
 
 
-def _run_stage(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run_stage(command: list[str], *, input_text: str | None = None, timeout: int = 90) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         input=input_text,
         text=True,
         capture_output=True,
-        timeout=90,
+        timeout=timeout,
         check=False,
     )
 
 
 def _must_succeed(name: str, command: list[str], *, input_text: str | None = None) -> dict[str, Any]:
-    result = _run_stage(command, input_text=input_text)
+    timeout = 720 if name == "autoanswers-prepare-deploy" else 180 if name in {"systemd-reconcile", "managed-service-status"} else 90
+    result = _run_stage(command, input_text=input_text, timeout=timeout)
     if result.returncode != 0:
         raise RecoveryError(f"{name}-failed-{result.returncode}")
     return {"stage": name, "stdout_sha256": digest(result.stdout.encode())}
 
+
+def _bounded_status_readback(command: list[str], *, sleep: Any = time.sleep) -> dict[str, Any]:
+    # Exact hosted status-readback budget: 37 attempts × 5 seconds. Only this
+    # read is retried; SSH transport ambiguity never triggers another mutation.
+    attempts, retry_seconds = 37, 5.0
+    for attempt in range(1, attempts + 1):
+        result = _run_stage(command, timeout=180)
+        if result.returncode == 0:
+            return {"stage": "managed-service-status", "stdout_sha256": digest(result.stdout.encode()), "attempt": attempt}
+        if result.returncode == 255:
+            raise RecoveryError("managed-service-status-transport-ambiguous")
+        if attempt < attempts:
+            sleep(retry_seconds)
+        else:
+            raise RecoveryError(f"managed-service-status-failed-{result.returncode}")
+    raise AssertionError("unreachable")
 
 def _publish_once(client: release.GitHub, pr: int, marker: str, payload: Mapping[str, Any]) -> None:
     existing = _matching_comments(client, pr, marker)
@@ -809,11 +933,33 @@ def _publish_once(client: release.GitHub, pr: int, marker: str, payload: Mapping
         raise RecoveryError("recovery-comment-readback-invalid")
 
 
+EXPECTED_SELECTIVE_PREVIOUS_RECOVERY_RUN_ID = 35779223543
+
+
+def _selective_previous_recovery_proof(client: release.GitHub) -> dict[str, Any]:
+    run = client.get(f"/actions/runs/{EXPECTED_SELECTIVE_PREVIOUS_RECOVERY_RUN_ID}")
+    if (run.get("name"), run.get("path"), run.get("event"), run.get("status"), run.get("conclusion")) != (
+        "Post-merge Release Recovery", ".github/workflows/release-recovery.yml", "workflow_dispatch", "completed", "success"
+    ):
+        raise RecoveryError("selective-previous-recovery-run-invalid")
+    artifacts = client.get(f"/actions/runs/{EXPECTED_SELECTIVE_PREVIOUS_RECOVERY_RUN_ID}/artifacts?per_page=100")
+    candidates = [item for item in (artifacts.get("artifacts") or []) if str(item.get("name") or "").startswith("release-recovery-") and item.get("expired") is not True]
+    if len(candidates) != 1:
+        raise RecoveryError("selective-previous-recovery-artifact-invalid")
+    raw = client.request("GET", f"/actions/artifacts/{int(candidates[0]['id'])}/zip", raw=True)
+    receipt = _json_file(_zip_files(raw, "selective-previous-recovery-artifact"), "recovery-receipt.json", "selective-previous-recovery-receipt")
+    if receipt.get("schema") != RECOVERY_SCHEMA or receipt.get("state") != "complete" or receipt.get("source", {}).get("merge_sha") != EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA:
+        raise RecoveryError("selective-previous-recovery-receipt-invalid")
+    return {"run_id": EXPECTED_SELECTIVE_PREVIOUS_RECOVERY_RUN_ID, "artifact_id": int(candidates[0]["id"]),
+            "receipt_sha256": digest(canonical_bytes(receipt)), "source_merge_sha": EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA}
+
+
 def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> dict[str, Any]:
+    case = recovery_case(release_run_id)
     evidence = collect_evidence(client, release_run_id)
     original = evidence["original_receipt"]
     runner = prove_repo_only_descendant(client, original)
-    prestate = collect_prestate(target, original["merge_sha"], require_incomplete=True)
+    prestate = collect_prestate(target, original["merge_sha"], require_incomplete=True, case=case)
     operation = recovery_operation_id(release_run_id, original)
     result = {
         "schema": RECOVERY_SCHEMA,
@@ -834,16 +980,12 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "runner": runner,
         "target": {"target_id": target.target_id, "ssh_destination": target.ssh_destination, "target_dir": target.target_dir},
         "failure": evidence["failure"],
+        "recovery_case": case.value,
+        "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
+        "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
-        "stages": [
-            "root-storage-status-artifact-readback",
-            "managed-service-status",
-            "auth-preflight",
-            "change-registry-activation-exact-target",
-            "deployment-metadata-cas-complete",
-            "final-runtime-services-health-finance-pilot-readback",
-        ],
-        "forbidden_stages": ["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"],
+        "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if case is RecoveryCase.STORAGE_TAIL else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
+        "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if case is RecoveryCase.STORAGE_TAIL else ["merge", "rsync", "chown", "dependency-install"]),
     }
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
@@ -851,6 +993,10 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
 
 def _receipt_marker(operation: str) -> str:
     return f"<!-- {RECEIPT_MARKER} operation={operation} -->"
+
+
+def _phase_marker(operation: str, phase: str) -> str:
+    return f"<!-- wb-core-release-recovery-phase operation={operation} phase={phase} -->"
 
 
 def _claim_marker(operation: str) -> str:
@@ -883,7 +1029,7 @@ def existing_recovery_readback(
             or len(claims) != 1
         ):
             raise RecoveryError("recovery-receipt-binding-invalid")
-        final = collect_prestate(target, original["merge_sha"], require_incomplete=False)
+        final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=recovery_case(release_run_id))
         return {**receipt, "fresh_final_readback": final, "runner_readback": runner}
     if not claims:
         return None
@@ -898,8 +1044,14 @@ def existing_recovery_readback(
     ):
         raise RecoveryError("recovery-claim-binding-invalid")
     try:
-        final = collect_prestate(target, original["merge_sha"], require_incomplete=False)
+        final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=recovery_case(release_run_id))
     except RecoveryError:
+        if recovery_case(release_run_id) is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+            phases = _matching_comments(client, pr, f"<!-- wb-core-release-recovery-phase operation={operation}")
+            return {"schema": RECOVERY_SCHEMA, "state": "blocked", "operation_id": operation,
+                    "source": claim["source"], "preview_fingerprint": claim.get("preview_fingerprint"),
+                    "reason": "selective-claim-incomplete-readback-only", "phase_evidence": phases,
+                    "runner_readback": runner}
         return {
             "schema": RECOVERY_SCHEMA,
             "state": "ambiguous",
@@ -934,14 +1086,12 @@ def apply_recovery(
     pr = int(preview["source"]["pull_request"])
     receipt_marker = _receipt_marker(operation)
     claim_marker = _claim_marker(operation)
+    case = RecoveryCase(str(preview.get("recovery_case") or RecoveryCase.STORAGE_TAIL.value))
     if _matching_comments(client, pr, receipt_marker) or _matching_comments(client, pr, claim_marker):
         raise RecoveryError("recovery-identity-already-claimed")
 
     commands = build_stage_commands(
-        target,
-        preview["source"]["merge_sha"],
-        preview["prestate"]["metadata_sha256"],
-        int(preview["prestate"]["main_pid"]),
+        target, preview["source"]["merge_sha"], preview["prestate"]["metadata_sha256"], int(preview["prestate"]["main_pid"]), case=case
     )
     # These stages are read-only and precede the durable mutation claim.  A
     # stale artifact or failed service/auth check must not consume the identity.
@@ -966,13 +1116,34 @@ def apply_recovery(
         # immediately before the first production mutation.  A changed PID,
         # metadata hash, or main ref invalidates the reviewed preview.
         fresh = collect_prestate(
-            target, preview["source"]["merge_sha"], require_incomplete=True
+            target, preview["source"]["merge_sha"], require_incomplete=True, case=case
         )
         if canonical_bytes(fresh) != canonical_bytes(preview["prestate"]):
             raise RecoveryError("target-prestate-drift-after-claim")
         fresh_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(fresh_runner) != canonical_bytes(preview["runner"]):
             raise RecoveryError("trusted-main-drift-after-claim")
+        if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+            if canonical_bytes(_selective_b9_diff_proof()) != canonical_bytes(preview["selective_b9_diff"]):
+                raise RecoveryError("normal-tail-diff-drift-after-claim")
+            tail = commands["normal_activation_tail"]
+            phases = (("auth-preflight", tail["auth"]), ("root-storage-status", tail["storage"]), ("systemd-barrier-preflight", tail["barrier"]), ("autoanswers-prepare-deploy", tail["prepare"]), ("systemd-install", tail["install"]), ("daemon-reload", tail["daemon_reload"]), ("nginx", tail["nginx"]), ("registry-http-restart", tail["restart"]), ("systemd-reconcile", tail["reconcile"]), ("root-storage-status", tail["storage"]), ("root-storage-readback", tail["storage_readback"]), ("managed-service-status", tail["status"]), ("auth-readback", tail["auth"]))
+            for ordinal, (phase, command) in enumerate(phases, start=1):
+                phase_id = f"{ordinal:02d}-{phase}"
+                marker = _phase_marker(operation, "before-" + phase_id)
+                if _matching_comments(client, pr, marker):
+                    raise RecoveryError("normal-tail-phase-already-recorded")
+                _publish_once(client, pr, marker, {"schema": RECOVERY_SCHEMA, "state": "before", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
+                stages.append(_bounded_status_readback(command) if phase == "managed-service-status" else _must_succeed(phase, command))
+                _publish_once(client, pr, _phase_marker(operation, "after-" + phase_id), {"schema": RECOVERY_SCHEMA, "state": "after", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
+            restarted = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
+            unchanged = dict(fresh); after = dict(restarted)
+            for key in ("main_pid", "pilot_pid"):
+                unchanged.pop(key, None); after.pop(key, None)
+            if canonical_bytes(unchanged) != canonical_bytes(after) or int(restarted.get("main_pid") or 0) <= 0 or int(restarted["main_pid"]) == int(fresh["main_pid"]):
+                raise RecoveryError("normal-tail-post-restart-drift")
+            fresh = restarted
+            commands = build_stage_commands(target, preview["source"]["merge_sha"], fresh["metadata_sha256"], int(fresh["main_pid"]), case=case)
         activation = _run_stage(commands["activation"])
         if activation.returncode != 0:
             readback = _run_stage(commands["activation_readback"])
@@ -982,7 +1153,7 @@ def apply_recovery(
         else:
             stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
         before_completion = collect_prestate(
-            target, preview["source"]["merge_sha"], require_incomplete=True
+            target, preview["source"]["merge_sha"], require_incomplete=True, case=case
         )
         if canonical_bytes(before_completion) != canonical_bytes(fresh):
             raise RecoveryError("target-drift-before-completion")
@@ -993,11 +1164,11 @@ def apply_recovery(
         if completion.returncode != 0:
             # Never repeat the CAS write.  Accept only an exact complete target
             # readback, otherwise leave the durable claim unresolved.
-            final = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=False)
+            final = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=False, case=case)
             stages.append({"stage": "completion-readback", "stdout_sha256": digest(canonical_bytes(final))})
         else:
             stages.append({"stage": "completion", "stdout_sha256": digest(completion.stdout.encode())})
-        final = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=False)
+        final = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=False, case=case)
     except Exception as exc:
         reason = exc.reason if isinstance(exc, RecoveryError) else type(exc).__name__
         return {

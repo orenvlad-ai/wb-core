@@ -309,13 +309,13 @@ def patch_apply(
     first = {**incomplete, "main_pid": 43} if drift_after_claim else incomplete
     states = [first, incomplete, complete]
 
-    def run(command: list[str], *, input_text: str | None = None):
+    def run(command: list[str], *, input_text: str | None = None, timeout: int = 90):
         name = command[0]
         calls.append(name)
         status = activation_status if name == "activation" else activation_readback_status if name == "activation-readback" else 0
         return subprocess.CompletedProcess(command, status, stdout=name, stderr="")
 
-    def state(_target, _merge, *, require_incomplete: bool):
+    def state(_target, _merge, *, require_incomplete: bool, **_kwargs):
         value = states.pop(0)
         assert value["metadata"]["deployment_complete"] is (not require_incomplete)
         return value
@@ -703,6 +703,81 @@ def test_safe_remote_failure_diagnostics() -> None:
         recovery._remote_python_command = original_command
 
 
+
+
+def test_selective_b9_contract() -> None:
+    assert recovery.recovery_case(recovery.EXPECTED_SELECTIVE_RUN_ID) is recovery.RecoveryCase.SELECTIVE_B9_ACTIVATION
+    assert recovery.recovery_case(77) is recovery.RecoveryCase.STORAGE_TAIL
+    log = b'''deploy_current_checkout
+wb_autoanswers_activation.py prepare-deploy
+systemd quiesce unit unhealthy wb-core-autoanswers-worker.service
+--workflow-run-id "77"
+subprocess.CalledProcessError: Command ["ssh"] returned non-zero exit status 1.
+'''
+    proof = recovery._prove_failed_stage(log, 77, "One-shot deployed release", case=recovery.RecoveryCase.SELECTIVE_B9_ACTIVATION)
+    assert proof["stage"] == "autoanswers-prepare-deploy-drain"
+    assert proof["unit"] == "wb-core-autoanswers-worker.service"
+    assert recovery._selective_b9_diff_proof()["immutable_paths_changed"] == []
+    source = Path(recovery.__file__).read_text(encoding="utf-8")
+    route = source[source.index("def build_stage_commands"):source.index("def _run_stage")]
+    for required in ("_build_autoanswers_prepare_deploy_command", "_build_managed_systemd_commands", "_build_nginx_public_routes_command", "normal_activation_tail"):
+        assert required in route
+    tail = source[source.index("if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:", source.index("def apply_recovery")):source.index("activation = _run_stage", source.index("def apply_recovery"))]
+    for phase in ("autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback"):
+        assert phase in tail
+    assert "normal-tail-phase-already-recorded" in tail
+
+
+def test_bounded_status_readback_retries_only_read() -> None:
+    original = recovery._run_stage
+    calls, sleeps = [], []
+    results = [subprocess.CompletedProcess(["status"], 1, stdout="", stderr=""), subprocess.CompletedProcess(["status"], 0, stdout="ready", stderr="")]
+    recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or results.pop(0))
+    try:
+        result = recovery._bounded_status_readback(["status"], sleep=lambda seconds: sleeps.append(seconds))
+        assert result["attempt"] == 2 and calls == ["status", "status"] and sleeps == [5.0]
+    finally:
+        recovery._run_stage = original
+    calls, sleeps = [], []
+    recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or subprocess.CompletedProcess(command, 255, stdout="", stderr=""))
+    try:
+        expect_reason("managed-service-status-transport-ambiguous", lambda: recovery._bounded_status_readback(["status"], sleep=lambda seconds: sleeps.append(seconds)))
+        assert calls == ["status"] and sleeps == []
+    finally:
+        recovery._run_stage = original
+
+
+def test_normal_tail_apply_and_claim_replay() -> None:
+    value = preview()
+    value["recovery_case"] = recovery.RecoveryCase.SELECTIVE_B9_ACTIVATION.value
+    value["selective_b9_diff"] = {"proof": "normal-test"}
+    value["prestate"]["selective_live_contract"] = {"stable": True}
+    commands_value = commands()
+    commands_value["normal_activation_tail"] = {name: [name] for name in ("prepare", "install", "daemon_reload", "nginx", "restart", "reconcile", "barrier", "storage", "storage_readback", "status", "auth")}
+    calls = []
+    original = (recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._selective_b9_diff_proof)
+    incomplete = value["prestate"]
+    restarted = {**incomplete, "main_pid": 43}
+    complete = {**restarted, "metadata": {**restarted["metadata"], "deployment_complete": True}, "metadata_sha256": "7" * 64}
+    states = [incomplete, restarted, restarted, complete]
+    recovery.build_stage_commands = lambda *_args, **_kwargs: commands_value
+    recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or _completed(command, stdout=command[0]))
+    recovery.collect_prestate = lambda *_args, **_kwargs: states.pop(0)
+    recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: value["runner"]
+    recovery._selective_b9_diff_proof = lambda: {"proof": "normal-test"}
+    client = CommentsClient()
+    try:
+        result = recovery.apply_recovery(client, value, FINGERPRINT, object())
+        assert result["state"] == "complete"
+        assert calls == ["root-readback", "status", "auth", "auth", "storage", "barrier", "prepare", "install", "daemon_reload", "nginx", "restart", "reconcile", "storage", "storage_readback", "status", "auth", "activation", "completion"]
+        before_replay = list(calls)
+        expect_reason("recovery-identity-already-claimed", lambda: recovery.apply_recovery(client, value, FINGERPRINT, object()))
+        assert calls == before_replay
+    except recovery.RecoveryError as exc:
+        raise AssertionError(exc.reason) from exc
+    finally:
+        (recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._selective_b9_diff_proof) = original
+
 def main() -> None:
     test_failure_evidence()
     test_every_intervening_commit_is_repo_only()
@@ -713,6 +788,9 @@ def main() -> None:
     test_target_drift_halts_before_mutation()
     test_existing_claim_is_readback_only()
     test_finance_pilot_prestate_contract()
+    test_selective_b9_contract()
+    test_normal_tail_apply_and_claim_replay()
+    test_bounded_status_readback_retries_only_read()
     test_safe_remote_failure_diagnostics()
     print("post_merge_release_recovery_smoke: ok")
 
