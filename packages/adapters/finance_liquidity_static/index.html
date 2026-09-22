@@ -18,6 +18,7 @@
   </head>
   <body>
     <main class="shell" data-finance-app>
+      {{FINANCE_INSTANCE_BANNER}}
       <header class="page-header">
         <div>
           <p class="eyebrow">Финансы</p>
@@ -80,6 +81,7 @@
 
     <dialog class="dialog" data-dialog>
       <form method="dialog" class="dialog-card" data-dialog-form>
+        {{FINANCE_INSTANCE_BANNER}}
         <div class="dialog-heading"><div><p class="eyebrow" data-dialog-kicker>Финансы</p><h2 data-dialog-title>Операция</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
         <div data-dialog-content></div>
         <div class="dialog-actions"><button class="button quiet" value="cancel">Отмена</button><button class="button" type="button" data-dialog-save-draft>Сохранить черновик</button><button class="button primary" value="default" data-dialog-submit>Провести</button></div>

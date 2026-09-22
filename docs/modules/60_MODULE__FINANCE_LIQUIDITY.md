@@ -48,11 +48,21 @@ cash store/schema/данные и не выдаёт grants. Основной с�
 `finance_admin -> finance_operate -> finance`. Все три ключа входят в
 `explicit_only`: ни `admin`, ни bootstrap admin, ни `operator`, ни другая роль
 не получает их из role defaults. Supplier не может получить Finance-доступ.
-Только явный сохранённый grant проходит нормализацию; более высокий явный grant
+Для runtime-пользователя проходит только явно сохранённый grant. Env-bootstrap
+principal не имеет строки в таблице пользователей, поэтому ограниченный TEST
+pilot использует отдельный repo-owned non-secret access contract: exact
+username должен одновременно совпасть с canonical
+`WB_CORE_WEB_AUTH_USERNAME`, signed session должна иметь роль `admin`, а
+capability должна быть одной из Finance explicit-only. Это совместимость для
+одного указанного env principal, а не role fallback; отсутствие, отзыв,
+ошибка или несовпадение файла запрещает Finance. Более высокий явный grant
 добавляет нижние capabilities своей иерархии.
 
-Sidecar повторно читает эти grants из канонического operational auth owner по
-контракту D02/D03. Навигация `Финансы` → `/finance/` появляется только при
+Sidecar сохраняет descriptor-bound query-only проверку канонического
+operational auth owner по контракту D02/D03. Для runtime users он повторно
+читает текущую строку grants; для exact env-bootstrap principal после той же
+проверки перечитывает общий pilot access contract на каждом запросе. Навигация
+`Финансы` → `/finance/` появляется только при
 явном grant, `FINANCE_LIQUIDITY_ENABLED=1` и
 `FINANCE_LIQUIDITY_READ_ENABLED=1`; supplier не получает ссылку. Эта проверка
 не открывает Finance store и не вызывает sidecar, а sidecar снова проверяет

@@ -88,6 +88,9 @@ def main() -> None:
             static_dir=ROOT / "packages/adapters/finance_liquidity_static",
             allowed_origin="",
             business_runtime_dir=temporary,
+            instance_label="ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ",
+            store_id="finance-liquidity-pilot",
+            store_mode="isolated_test",
         )
         server = build_finance_http_server(
             "127.0.0.1",
@@ -101,6 +104,14 @@ def main() -> None:
         try:
             status, capabilities = request(base, "/v1/finance/capabilities")
             assert status == 200 and capabilities["contract"] == "finance_cash_v1"
+            assert capabilities["data"]["instance_label"] == "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ"  # type: ignore[index]
+            assert capabilities["data"]["store_id"] == "finance-liquidity-pilot"  # type: ignore[index]
+            assert capabilities["data"]["store_mode"] == "isolated_test"  # type: ignore[index]
+            with urlopen(base + "/finance/") as response:
+                html = response.read().decode("utf-8")
+            assert 'data-instance-label' in html
+            assert "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ" in html
+            assert "{{FINANCE_INSTANCE_BANNER}}" not in html
             csrf = str(capabilities["data"]["csrf_token"])  # type: ignore[index]
             status, account = request(
                 base,
