@@ -1,15 +1,28 @@
-# Finance Liquidity cash: dormant rollout and future activation
+# Finance Liquidity cash: dormant release and isolated TEST pilot
 
 ## Current state
 
-This release is code-only.  The candidate unit and nginx fragment under
-`artifacts/finance_liquidity_cash/dormant/` are not in the hosted target's
-managed-unit list or nginx manifest.  No service, timer, route, database,
-schema, user grant, cash account, opening balance or financial document is
-created by deploy, import, startup or GET.  `8766` remains Data MCP; the future
-sidecar uses loopback `127.0.0.1:8767`.
+The dormant artifact remains the default-off reference. The separately reviewed
+pilot candidate uses only the dedicated TEST store
+`/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3`,
+unit `wb-core-finance-liquidity-pilot.service`, loopback port `8767`, and the
+existing `/finance/` and `/v1/finance/` proxy renderer. It never uses the
+reserved production cash path
+`/opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3`.
 
-## Code deploy
+The single non-secret access source is
+`artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot-access.json`.
+It binds the canonical env-bootstrap username `owner`, explicit
+`finance_admin`, the exact pilot store, stable store id, and the visible
+`ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ` label. Main WebCore and the sidecar read
+that same file on every authorization check. Missing, revoked, malformed,
+unknown-capability or username-mismatched content grants nothing. The sidecar
+still validates the signed unexpired admin session and the pinned operational
+store before admitting this exact env principal; ordinary runtime users retain
+their existing SQLite-grant path. No password, password hash or session secret
+is copied into the pilot files.
+
+## Dormant code deploy
 
 Use the ordinary release train without adding the candidate unit or fragment to
 the active managed target.  Verify the deployed code remains default-off:
@@ -53,58 +66,55 @@ Before activation, rerun the synthetic cash, auth, HTTP and browser checks and
 verify the sanctioned live signed session, explicit grants, supplier denial
 and revocation against the selected operational owner.
 
-## Separate business activation (requires a new decision)
+## Reviewed isolated TEST pilot activation
 
-After the technical acceptance above, and before any money data, the business
-owner chooses and records the cash accounts,
-responsible people, currencies, opening amounts and dates, evidence, and exact
-explicit Finance grants. Roles, bootstrap admin and supplier never imply a
-Finance grant. Record the recovery owner and successful restore/readback
-procedure. For a new empty cash-store path, prove that the target is absent
-before bootstrap; no backup of that absent target is needed. Before changing
-existing irrecoverable data, including existing auth grants, take and verify an
-appropriate backup and recovery plan.
+The approved pilot contains synthetic data only. Do not enter real cash
+accounts, opening balances, dates or documents. Before publication, freeze and
+independently review the exact source candidate, including the access JSON,
+shared flags file, unit, hosted target and route manifest.
 
-After that approval, in a controlled change:
+1. Recheck the active host and completed deployed SHA. Prove read-only that the
+   exact pilot path and its resolved path are identical and absent, no existing
+   parent component is a symlink, the reserved production cash path remains
+   absent, `8767` is unused, the pilot unit is absent and both public routes are
+   `404`. Stop on any mismatch. An absent new pilot store needs no data backup.
+2. Immediately before the governed release, materialize only the reviewed pilot
+   path once with the existing explicit CLI:
+   `apps/finance_liquidity_http.py --db /opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3 --bootstrap`.
+   Bootstrap is never part of GET, import, service start or the unit. If the
+   command result is ambiguous, do not send it again: read the same path and
+   schema. Require schema version 2, empty business tables, canonical resolved
+   path, and an unchanged absent production cash path.
+3. Run the ordinary release for the independently accepted SHA. It installs the
+   pilot unit and the shared flags file as the final EnvironmentFile for both
+   main and sidecar. The hosted deploy publishes the two existing-renderer
+   routes before it restarts and reconciles the managed services, so the TEST
+   route may briefly return `502` during startup. The flags bind the public
+   origin and access JSON; no secret values are present. A failed deploy stage
+   blocks completion rather than triggering another bootstrap.
+4. After the release completes, read back the effective unit arguments, exact
+   PID, listener, route map, loopback backend, actual canonical database path,
+   TEST label and store id. Do not perform any UI write before every readback
+   succeeds.
+   With the current signed `owner` cookie, require `/v1/finance/capabilities`
+   to report `finance`, `finance_operate`, `finance_admin`, write enabled, the
+   exact TEST label and `store_id=finance-liquidity-pilot`. Require `/finance/`
+   to show the TEST banner before every money action. A supplier, another admin,
+   an expired session, a mismatched owner name and a revoked access file remain
+   denied. The canonical operational auth reader remains query-only.
+5. Run only the accepted synthetic scenario and reconcile its final balances.
+   Retain the pilot store and evidence after the check; do not delete them as
+   cleanup.
 
-1. Recheck the absent new cash-store target and the recovery procedure. If the
-   activation changes existing auth or money data, take and verify its backup
-   before that change.
-2. Materialize the isolated store exactly once with
-   `apps/finance_liquidity_http.py --db <isolated-path> --bootstrap`; do not use
-   main, supply, CNY, weekly Finance or an HTTP GET for bootstrap.
-3. Install the candidate unit and create explicit post-unit activation drop-ins
-   for both `wb-core-finance-liquidity.service` and
-   `wb-core-registry-http.service`. Set
-   a dedicated flags-only `EnvironmentFile` as the last environment file in
-   both drop-ins. Its explicit `FINANCE_LIQUIDITY_ENABLED=1` and
-   `FINANCE_LIQUIDITY_READ_ENABLED=1` let the sidecar read and the main shell
-   reveal its guarded link. `EnvironmentFile` values override `Environment=`;
-   later environment files override earlier files. Verify the effective flags
-   without logging the shared environment or its secrets. Initially set
-   `FINANCE_LIQUIDITY_WRITE_ENABLED=0` explicitly in the sidecar activation
-   file. Keep the signed-session secret in
-   `/opt/wb-ai/.env`; do not copy it into the flags-only file. The candidate
-   unit's zero values are defaults, not protection against conflicting values
-   in the shared environment. Dormant code release is protected by leaving
-   this unit and these routes outside the active target.
-   In the sidecar file also set `FINANCE_LIQUIDITY_ORIGIN` to the exact public
-   HTTPS origin used by the existing signed-session website, without a path
-   or trailing slash. The loopback default is for local testing; it rejects
-   browser writes through the public reverse proxy. Verify that another
-   origin is rejected and the intended origin passes the CSRF check.
-4. Reload systemd after installing the unit and drop-ins, then start the
-   isolated loopback sidecar and read back `/v1/finance/capabilities`
-   with an explicit grant, a supplier session, and a no-grant session. Confirm
-   that canonical auth is read-only and there are no Finance writes or
-   synchronous dependencies from main, supply or CNY.
-5. Restart the main registry HTTP service through the ordinary governed process
-   so the main process receives its activation
-   flags. Only then add the candidate nginx routes through the governed
-   hosted-route process and verify `/finance/` end-to-end. After those checks,
-   within the already authorized activation scope, set
-   `FINANCE_LIQUIDITY_WRITE_ENABLED=1` in the sidecar activation file and
-   restart that sidecar through the ordinary governed process. Read back its
-   write capability before entering the approved business data.
+Restore is a reviewed source change through the same release train: set the
+access file to `enabled=false`, set all three Finance flags to `0`, remove both
+public routes, remove the pilot unit from `managed_systemd_units`, add its exact
+name to `retired_systemd_units`, and remove the pilot flags EnvironmentFile from
+the main unit. Read back no Finance link/capability, `404` routes, no listener
+and an inactive/absent pilot unit. Keep the synthetic database in place for
+evidence unless a later reviewed retention decision says otherwise. Do not
+alter the operational user table, shared auth secrets or the production cash
+path during activation or restore.
 
-If any check is ambiguous, leave routes unpublished and the sidecar stopped.
+If any check is ambiguous, stop writes and use readback of the same operation;
+do not repeat bootstrap or substitute a direct unmanaged config edit.

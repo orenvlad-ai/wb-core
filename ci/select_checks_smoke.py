@@ -414,6 +414,25 @@ def ads_dependency_checks():
     print("Ads dependencies: direct/sibling/mixed smokes keep exact openpyxl prerequisite OK")
 
 
+def buyout_percent_dependency_checks():
+    smoke = "apps/sheet_vitrina_v1_buyout_percent_smoke.py"
+    source = "packages/application/sheet_vitrina_v1_buyout_percent.py"
+    for path in (smoke, source):
+        plan = build_plan_from_paths(
+            pull_request=40,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["buyout_percent"], plan
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        assert plan["commands"].count(["python3", smoke]) == 1, plan
+        assert plan["commands"][0][:3] == ["python3", "-m", "py_compile"], plan
+    print("Buyout dependencies: direct smoke and production source select exact openpyxl prerequisite OK")
+
+
 def exists(_head: str, path: str) -> bool:
     return path in {
         "docs/example.md",
@@ -490,6 +509,155 @@ def finance_liquidity_checks() -> None:
         assert plan["commands"].count(legacy_smoke) == 1, plan
 
 
+def bounded_environment_checks() -> None:
+    path = select_checks.FINANCE_PILOT_ENV_PATH
+    active = next(
+        payload
+        for payload in select_checks.FINANCE_PILOT_ENV_PAYLOADS
+        if b"FINANCE_LIQUIDITY_ENABLED=1\n" in payload
+    )
+    revoked = next(
+        payload
+        for payload in select_checks.FINANCE_PILOT_ENV_PAYLOADS
+        if b"FINANCE_LIQUIDITY_ENABLED=0\n" in payload
+    )
+    for payload in (active, revoked):
+        plan = build_plan_from_paths(
+            pull_request=12,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: candidate == path,
+            bounded_file_reader=lambda _, candidate: (
+                "100644",
+                payload if candidate == path else b"",
+            ),
+        )
+        verify_plan(plan)
+        assert plan["changed_paths"] == [path], plan
+        assert plan["groups"] == ["finance_liquidity"], plan
+        assert plan["release_kind"] == "live_runtime", plan
+
+    rejected = (
+        active + b"WB_CORE_WEB_AUTH_SESSION_SECRET=secret\n",
+        active + b"UNKNOWN=value\n",
+        active.replace(b"FINANCE_LIQUIDITY_ENABLED=1\n", b"FINANCE_LIQUIDITY_ENABLED=1\nFINANCE_LIQUIDITY_ENABLED=1\n"),
+        active.replace(b"FINANCE_LIQUIDITY_WRITE_ENABLED=1", b"FINANCE_LIQUIDITY_WRITE_ENABLED=0"),
+        active.replace(b"https://api.selleros.pro", b"https://example.invalid"),
+        active.replace(b"https://api.selleros.pro", b"${PUBLIC_ORIGIN}"),
+        active.replace(b"finance-liquidity-pilot-access.json", b"other.json"),
+        active.replace(b"finance-liquidity-pilot-access.json", b"finance-liquidity-pilot-access.json\nMULTILINE=value"),
+        active + b"X" * 4096,
+        b"\xff\xfe",
+    )
+    for payload in rejected:
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[path],
+                file_exists=lambda _, candidate: candidate == path,
+                bounded_file_reader=lambda *_: ("100644", payload),
+            )
+        except PlanError:
+            pass
+        else:
+            raise AssertionError(f"unsafe pilot environment accepted: {payload!r}")
+
+    for candidate in ("artifacts/example.env", "artifacts/finance_liquidity_cash/pilot/other.env"):
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[candidate],
+                file_exists=lambda _, path: path == candidate,
+                bounded_file_reader=lambda *_: ("100644", active),
+            )
+        except PlanError:
+            pass
+        else:
+            raise AssertionError(f"unclassified environment path accepted: {candidate}")
+
+    try:
+        build_plan_from_paths(
+            pull_request=12,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: candidate == path,
+        )
+    except PlanError as exc:
+        assert "file reader" in str(exc), exc
+    else:
+        raise AssertionError("pilot environment accepted without trusted reader")
+
+    for mode in ("100755", "120000", "160000"):
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[path],
+                file_exists=lambda _, candidate: candidate == path,
+                bounded_file_reader=lambda *_: (mode, active),
+            )
+        except PlanError as exc:
+            assert "mode" in str(exc), exc
+        else:
+            raise AssertionError(f"unsafe pilot environment mode accepted: {mode}")
+
+    deleted = build_plan_from_paths(
+        pull_request=12,
+        base=BASE,
+        head=HEAD,
+        paths=[path],
+        file_exists=lambda *_: False,
+        bounded_file_reader=lambda *_: (_ for _ in ()).throw(
+            AssertionError("deleted file was read")
+        ),
+    )
+    verify_plan(deleted)
+    assert deleted["changed_paths"] == [path], deleted
+    assert deleted["groups"] == ["finance_liquidity"], deleted
+    assert deleted["release_kind"] == "live_runtime", deleted
+
+    renamed_into_contract = build_plan_from_paths(
+        pull_request=12,
+        base=BASE,
+        head=HEAD,
+        paths=["artifacts/legacy-pilot.env", path],
+        file_exists=lambda _, candidate: candidate == path,
+        bounded_file_reader=lambda _, candidate: (
+            "100644",
+            active if candidate == path else b"",
+        ),
+    )
+    verify_plan(renamed_into_contract)
+    assert renamed_into_contract["changed_paths"] == sorted(
+        ["artifacts/legacy-pilot.env", path]
+    ), renamed_into_contract
+
+    for failure in (OSError("read failed"), subprocess.CalledProcessError(1, ["git", "show"])):
+        def fail_reader(*_: object, error: Exception = failure) -> tuple[str, bytes]:
+            raise error
+
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[path],
+                file_exists=lambda _, candidate: candidate == path,
+                bounded_file_reader=fail_reader,
+            )
+        except PlanError as exc:
+            assert "cannot read" in str(exc), exc
+        else:
+            raise AssertionError("bounded reader failure did not fail closed")
+
+
 def main() -> None:
     # The hosted system Python may install into user-site, which -I correctly
     # excludes. Dependency install, trusted harness and nested Python must share
@@ -504,7 +672,9 @@ def main() -> None:
     rename_diff_check()
     command_dependency_checks()
     ads_dependency_checks()
+    buyout_percent_dependency_checks()
     finance_liquidity_checks()
+    bounded_environment_checks()
     docs = build_plan_from_paths(
         pull_request=1, base=BASE, head=HEAD, paths=["docs/example.md"], file_exists=exists
     )

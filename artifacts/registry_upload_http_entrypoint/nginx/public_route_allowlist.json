@@ -834,6 +834,20 @@
       "path": "/mcp",
       "methods": ["GET", "POST", "OPTIONS"],
       "proxy_pass_url": "http://127.0.0.1:8766"
+    },
+    {
+      "name": "finance_liquidity_pilot_ui",
+      "match": "prefix",
+      "path": "/finance/",
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8767"
+    },
+    {
+      "name": "finance_liquidity_pilot_api",
+      "match": "prefix",
+      "path": "/v1/finance/",
+      "methods": ["GET", "POST", "PATCH"],
+      "proxy_pass_url": "http://127.0.0.1:8767"
     }
   ]
 }

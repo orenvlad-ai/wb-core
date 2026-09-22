@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -116,13 +119,34 @@ def make_split_store(runtime: Path) -> None:
     atomic_write_manifest(runtime / "storage_generation_manifest.json", manifest)
 
 
+def write_bootstrap_access(path: Path, **updates: object) -> None:
+    payload: dict[str, object] = {
+        "contract_version": "finance_liquidity_bootstrap_access_v1",
+        "enabled": True,
+        "username": "owner",
+        "capability": "finance_admin",
+        "instance_label": "TEST DATABASE",
+        "store_id": "fixture-pilot",
+        "store_path": str(path.parent / "cash.sqlite3"),
+        "mode": "isolated_test",
+    }
+    payload.update(updates)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def main() -> None:
     with TemporaryDirectory() as directory:
-        runtime = Path(directory)
+        runtime = Path(directory).resolve()
         db_path = make_operational_store(runtime)
+        finance_store_path = runtime / "cash.sqlite3"
+        finance_store_path.touch()
         secret = "fixture-secret"
         headers = {"Cookie": session_cookie(secret)}
-        auth = FinanceOperationalAuth(runtime, session_secret=secret)
+        auth = FinanceOperationalAuth(
+            runtime,
+            session_secret=secret,
+            finance_store_path=finance_store_path,
+        )
         principal = auth.authenticate(headers)
         assert principal["capabilities"] == ["finance", "finance_operate"]
 
@@ -156,6 +180,77 @@ def main() -> None:
             FinanceAuthDenied,
             lambda: auth.authenticate({"Cookie": session_cookie(secret, max_age=-1)}),
         )
+
+        # The canonical env bootstrap owner has no runtime-user row. One
+        # strict, non-secret config grants it explicitly, while role/admin or
+        # a missing row alone never does. The same auth object and cookie see
+        # revocation on the next call because the file is reread per request.
+        access_path = runtime / "finance-access.json"
+        write_bootstrap_access(access_path)
+        owner_headers = {
+            "Cookie": session_cookie(secret, username="owner", role="admin")
+        }
+        bootstrap_environment = {
+            "WB_CORE_WEB_AUTH_USERNAME": "owner",
+            "FINANCE_LIQUIDITY_ACCESS_CONFIG": str(access_path),
+        }
+        with patch.dict(os.environ, bootstrap_environment, clear=False):
+            assert auth.authenticate(owner_headers) == {
+                "username": "owner",
+                "role": "admin",
+                "capabilities": ["finance", "finance_operate", "finance_admin"],
+            }
+            expect(
+                FinanceAuthDenied,
+                lambda: auth.authenticate(
+                    {
+                        "Cookie": session_cookie(
+                            secret,
+                            username="owner",
+                            role="admin",
+                            max_age=-1,
+                        )
+                    }
+                ),
+            )
+            write_bootstrap_access(access_path, enabled=False)
+            expect(FinanceAuthDenied, lambda: auth.authenticate(owner_headers))
+            write_bootstrap_access(access_path, username="another-owner")
+            expect(FinanceAuthDenied, lambda: auth.authenticate(owner_headers))
+            write_bootstrap_access(
+                access_path,
+                store_path=str(runtime / "another-cash.sqlite3"),
+            )
+            expect(FinanceAuthUnavailable, lambda: auth.authenticate(owner_headers))
+            write_bootstrap_access(access_path, capability="unknown")
+            expect(FinanceAuthUnavailable, lambda: auth.authenticate(owner_headers))
+            access_path.write_text("{broken", encoding="utf-8")
+            expect(FinanceAuthUnavailable, lambda: auth.authenticate(owner_headers))
+            write_bootstrap_access(access_path)
+            expect(
+                FinanceAuthDenied,
+                lambda: auth.authenticate(
+                    {"Cookie": session_cookie(secret, username="other-admin", role="admin")}
+                ),
+            )
+            expect(
+                FinanceAuthDenied,
+                lambda: auth.authenticate(
+                    {"Cookie": session_cookie(secret, username="supplier", role="supplier")}
+                ),
+            )
+            expect(
+                FinanceAuthDenied,
+                lambda: auth.authenticate(
+                    {"Cookie": session_cookie(secret, username="owner", role="operator")}
+                ),
+            )
+            with patch.dict(
+                os.environ,
+                {"WB_CORE_WEB_AUTH_USERNAME": "renamed-owner"},
+                clear=False,
+            ):
+                expect(FinanceAuthDenied, lambda: auth.authenticate(owner_headers))
         # A lock/read failure is local to Finance authorization and fails closed.
         locker = subprocess.Popen(
             [
@@ -255,7 +350,7 @@ def main() -> None:
         finally:
             auth._open_operational_connection = original_open  # type: ignore[method-assign]
     with TemporaryDirectory() as directory:
-        runtime = Path(directory)
+        runtime = Path(directory).resolve()
         make_split_store(runtime)
         secret, headers = "fixture-secret", {"Cookie": session_cookie("fixture-secret")}
         auth = FinanceOperationalAuth(runtime, session_secret=secret)

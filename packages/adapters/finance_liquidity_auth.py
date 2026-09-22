@@ -14,6 +14,12 @@ from typing import Any, Mapping
 
 import apsw
 
+from packages.adapters.finance_liquidity_access import (
+    FinanceBootstrapAccessUnavailable,
+    load_finance_bootstrap_access,
+    normalize_finance_bootstrap_username,
+    validate_finance_bootstrap_store,
+)
 from packages.application.storage_registry import StoreRegistry, StorageRegistryError
 from packages.contracts.finance_liquidity import expand_finance_capability_hierarchy
 
@@ -59,9 +65,13 @@ class FinanceOperationalAuth:
         session_secret: str | None = None,
         *,
         operational_timeout_ms: int = 5_000,
+        finance_store_path: Path | None = None,
     ) -> None:
         self.registry = StoreRegistry(Path(runtime_dir))
         self.operational_timeout_ms = int(operational_timeout_ms)
+        self.finance_store_path = (
+            Path(finance_store_path) if finance_store_path is not None else None
+        )
         if self.operational_timeout_ms <= 0:
             raise ValueError("operational_timeout_ms must be positive")
         self.session_secret = (
@@ -196,6 +206,40 @@ class FinanceOperationalAuth:
             if raw_row is not None
             else None
         )
+        canonical_bootstrap_username = normalize_finance_bootstrap_username(
+            os.environ.get("WB_CORE_WEB_AUTH_USERNAME")
+        )
+        session_username = normalize_finance_bootstrap_username(username)
+        if canonical_bootstrap_username and session_username == canonical_bootstrap_username:
+            if role != "admin":
+                raise FinanceAuthDenied("active session principal not found")
+            try:
+                access = load_finance_bootstrap_access()
+            except FinanceBootstrapAccessUnavailable as exc:
+                raise FinanceAuthUnavailable(
+                    "Finance bootstrap access config unavailable"
+                ) from exc
+            if access is None or access.username != canonical_bootstrap_username:
+                raise FinanceAuthDenied("Finance capability denied")
+            if self.finance_store_path is None:
+                raise FinanceAuthUnavailable(
+                    "Finance bootstrap store binding unavailable"
+                )
+            try:
+                validate_finance_bootstrap_store(
+                    self.finance_store_path,
+                    access,
+                    require_existing=True,
+                )
+            except FinanceBootstrapAccessUnavailable as exc:
+                raise FinanceAuthUnavailable(
+                    "Finance bootstrap store binding unavailable"
+                ) from exc
+            return {
+                "username": username,
+                "role": role,
+                "capabilities": list(access.capabilities),
+            }
         if row is None or not bool(row["is_active"]) or str(row["role"]) != role:
             raise FinanceAuthDenied("active session principal not found")
         try:

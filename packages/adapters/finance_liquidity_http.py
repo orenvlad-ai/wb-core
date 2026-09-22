@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import hmac
 import json
 from http import HTTPStatus
@@ -40,11 +41,17 @@ class FinanceHttpApp:
         static_dir: Path,
         allowed_origin: str,
         business_runtime_dir: Path | None = None,
+        instance_label: str = "",
+        store_id: str = "",
+        store_mode: str = "",
     ) -> None:
         self.service, self.auth = service, auth
         self.read_enabled, self.write_enabled = read_enabled, write_enabled
         self.csrf_secret, self.static_dir = csrf_secret, Path(static_dir)
         self.allowed_origin = allowed_origin.rstrip("/")
+        self.instance_label = str(instance_label or "").strip()
+        self.store_id = str(store_id or "").strip()
+        self.store_mode = str(store_mode or "").strip()
         self.business_runtime_dir = (
             Path(business_runtime_dir).resolve() if business_runtime_dir else None
         )
@@ -183,6 +190,9 @@ def build_finance_http_server(
                             "csrf_token": app.csrf(actor),
                             "read_enabled": app.read_enabled,
                             "write_enabled": app.write_enabled,
+                            "instance_label": app.instance_label,
+                            "store_id": app.store_id,
+                            "store_mode": app.store_mode,
                         }
                     )
                     return
@@ -359,6 +369,17 @@ def build_finance_http_server(
                 else "application/javascript; charset=utf-8"
             )
             raw = file.read_bytes()
+            if file.name == "index.html":
+                banner = (
+                    '<div class="environment-badge" data-instance-label '
+                    'role="status">' + html.escape(app.instance_label) + "</div>"
+                    if app.instance_label
+                    else ""
+                )
+                raw = raw.replace(
+                    b"{{FINANCE_INSTANCE_BANNER}}",
+                    banner.encode("utf-8"),
+                )
             self.send_response(200)
             self.send_header("Content-Type", mime)
             self.send_header("Cache-Control", "no-store")

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -20,8 +21,11 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     WEB_AUTH_ROLE_ADMIN,
     WEB_AUTH_ROLE_SUPPLIER,
+    _authenticated_web_user,
+    _build_session_cookie,
     _finance_navigation_is_available,
     _render_sheet_vitrina_web_vitrina_ui,
+    _web_auth_config,
 )
 
 
@@ -55,6 +59,82 @@ def _dormant_lifecycle_checks() -> None:
         assert not absent_store.exists()
         assert not absent_store.parent.exists()
         assert not absent_auth_runtime.exists()
+
+        access_config = temporary / "pilot-access.json"
+        access_payload = {
+            "contract_version": "finance_liquidity_bootstrap_access_v1",
+            "enabled": True,
+            "username": "owner",
+            "capability": "finance_admin",
+            "instance_label": "TEST DATABASE",
+            "store_id": "fixture-pilot",
+            "store_path": str(temporary / "pilot" / "pilot.sqlite3"),
+            "mode": "isolated_test",
+        }
+        access_config.write_text(json.dumps(access_payload), encoding="utf-8")
+        wrong_store = temporary / "wrong" / "wrong.sqlite3"
+        with patch.object(
+            sys,
+            "argv",
+            ["finance_liquidity_http.py", "--db", str(wrong_store), "--bootstrap"],
+        ), patch.dict(
+            os.environ,
+            {"FINANCE_LIQUIDITY_ACCESS_CONFIG": str(access_config)},
+            clear=False,
+        ):
+            try:
+                launcher.main()
+            except SystemExit as error:
+                assert str(error) == "Finance database does not match access config store binding"
+            else:
+                raise AssertionError("pilot access config allowed a different bootstrap store")
+        assert not wrong_store.exists()
+
+        real_parent = temporary / "real-pilot"
+        real_parent.mkdir()
+        alias_parent = temporary / "alias-pilot"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        alias_store = alias_parent / "pilot.sqlite3"
+        access_payload["store_path"] = str(alias_store)
+        access_config.write_text(json.dumps(access_payload), encoding="utf-8")
+        with patch.object(
+            sys,
+            "argv",
+            ["finance_liquidity_http.py", "--db", str(alias_store), "--bootstrap"],
+        ), patch.dict(
+            os.environ,
+            {"FINANCE_LIQUIDITY_ACCESS_CONFIG": str(access_config)},
+            clear=False,
+        ):
+            try:
+                launcher.main()
+            except SystemExit as error:
+                assert str(error) == "Finance access-configured database must not use an alias"
+            else:
+                raise AssertionError("pilot bootstrap accepted an aliased store path")
+        assert not (real_parent / "pilot.sqlite3").exists()
+
+        canonical_store = temporary.resolve() / "canonical-pilot" / "pilot.sqlite3"
+        access_payload["store_path"] = str(canonical_store)
+        access_config.write_text(json.dumps(access_payload), encoding="utf-8")
+        with patch.object(
+            sys,
+            "argv",
+            ["finance_liquidity_http.py", "--db", str(canonical_store), "--bootstrap"],
+        ), patch.dict(
+            os.environ,
+            {"FINANCE_LIQUIDITY_ACCESS_CONFIG": str(access_config)},
+            clear=False,
+        ):
+            launcher.main()
+        assert canonical_store.is_file()
+        with sqlite3.connect(canonical_store) as connection:
+            assert connection.execute(
+                "SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1"
+            ).fetchone()[0] == 2
+            assert connection.execute(
+                "SELECT COUNT(*) FROM finance_liquidity_accounts"
+            ).fetchone()[0] == 0
 
         # The ordinary launcher path fails at the master feature flag before
         # constructing auth/service/server state. Explicit --bootstrap is a
@@ -206,8 +286,77 @@ def _navigation_checks() -> None:
             allowed_sections=["finance_admin"],
         )
 
+    with TemporaryDirectory(prefix="finance-bootstrap-main-") as directory:
+        access_path = Path(directory) / "access.json"
+        payload = {
+            "contract_version": "finance_liquidity_bootstrap_access_v1",
+            "enabled": True,
+            "username": "owner",
+            "capability": "finance_admin",
+            "instance_label": "TEST DATABASE",
+            "store_id": "fixture-pilot",
+            "store_path": str(Path(directory) / "pilot.sqlite3"),
+            "mode": "isolated_test",
+        }
+        access_path.write_text(json.dumps(payload), encoding="utf-8")
+        environment = {
+            "WB_CORE_WEB_AUTH_USERNAME": "owner",
+            "WB_CORE_WEB_AUTH_PASSWORD_HASH": "fixture-not-used",
+            "WB_CORE_WEB_AUTH_SESSION_SECRET": "fixture-session-secret",
+            "FINANCE_LIQUIDITY_ACCESS_CONFIG": str(access_path),
+            "FINANCE_LIQUIDITY_ENABLED": "1",
+            "FINANCE_LIQUIDITY_READ_ENABLED": "1",
+        }
+        with patch.dict(os.environ, environment, clear=False):
+            config = _web_auth_config()
+            granted = list(config["operator"]["allowed_sections"])
+            assert granted[-3:] == ["finance", "finance_operate", "finance_admin"]
+            class OwnerHandler:
+                headers: dict[str, str] = {"Host": "api.selleros.pro"}
 
-def _dormant_artifact_checks() -> None:
+            owner_handler = OwnerHandler()
+            owner_handler.headers["Cookie"] = _build_session_cookie(
+                owner_handler,  # type: ignore[arg-type]
+                "owner",
+                config,
+                role=WEB_AUTH_ROLE_ADMIN,
+                display_name="Owner",
+            ).split(";", 1)[0]
+            signed_owner = _authenticated_web_user(owner_handler, config)  # type: ignore[arg-type]
+            assert signed_owner is not None
+            assert list(signed_owner["allowed_sections"])[-3:] == [
+                "finance",
+                "finance_operate",
+                "finance_admin",
+            ]
+            assert 'href="/finance/">Финансы</a>' in _render(
+                role=WEB_AUTH_ROLE_ADMIN,
+                grants=granted,
+                enabled=True,
+                read_enabled=True,
+            )
+            payload["enabled"] = False
+            access_path.write_text(json.dumps(payload), encoding="utf-8")
+            revoked_config = _web_auth_config()
+            revoked = list(revoked_config["operator"]["allowed_sections"])
+            assert not {"finance", "finance_operate", "finance_admin"}.intersection(revoked)
+            revoked_owner = _authenticated_web_user(owner_handler, revoked_config)  # type: ignore[arg-type]
+            assert revoked_owner is not None
+            assert not {"finance", "finance_operate", "finance_admin"}.intersection(
+                revoked_owner["allowed_sections"]
+            )
+            assert 'href="/finance/">Финансы</a>' not in _render(
+                role=WEB_AUTH_ROLE_ADMIN,
+                grants=revoked,
+                enabled=True,
+                read_enabled=True,
+            )
+            access_path.write_text("{broken", encoding="utf-8")
+            malformed = list(_web_auth_config()["operator"]["allowed_sections"])
+            assert not {"finance", "finance_operate", "finance_admin"}.intersection(malformed)
+
+
+def _pilot_artifact_checks() -> None:
     candidate_dir = ROOT / "artifacts" / "finance_liquidity_cash" / "dormant"
     unit = (candidate_dir / "systemd" / "wb-core-finance-liquidity.service").read_text(
         encoding="utf-8"
@@ -227,24 +376,60 @@ def _dormant_artifact_checks() -> None:
     assert "location ^~ /v1/finance/" in routes
     assert routes.count("proxy_pass http://127.0.0.1:8767;") == 2
 
+    pilot_dir = ROOT / "artifacts" / "finance_liquidity_cash" / "pilot"
+    access = json.loads((pilot_dir / "finance-liquidity-pilot-access.json").read_text(encoding="utf-8"))
+    pilot_store = "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3"
+    assert access == {
+        "contract_version": "finance_liquidity_bootstrap_access_v1",
+        "enabled": True,
+        "username": "owner",
+        "capability": "finance_admin",
+        "instance_label": "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ",
+        "store_id": "finance-liquidity-pilot",
+        "store_path": pilot_store,
+        "mode": "isolated_test",
+    }
+    assert access["store_path"] != "/opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3"
+    flags = (pilot_dir / "finance-liquidity-pilot.env").read_text(encoding="utf-8")
+    assert "FINANCE_LIQUIDITY_ENABLED=1" in flags
+    assert "FINANCE_LIQUIDITY_READ_ENABLED=1" in flags
+    assert "FINANCE_LIQUIDITY_WRITE_ENABLED=1" in flags
+    assert "FINANCE_LIQUIDITY_ACCESS_CONFIG=/opt/wb-core-runtime/app/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot-access.json" in flags
+    assert "PASSWORD" not in flags and "SECRET" not in flags
+
+    pilot_unit = (ROOT / "artifacts" / "registry_upload_http_entrypoint" / "systemd" / "wb-core-finance-liquidity-pilot.service").read_text(encoding="utf-8")
+    assert f"ConditionPathExists={pilot_store}" in pilot_unit
+    assert f"--db {pilot_store}" in pilot_unit
+    assert "--bootstrap" not in pilot_unit
+    assert "--host 127.0.0.1 --port 8767" in pilot_unit
+    assert pilot_unit.index("EnvironmentFile=/opt/wb-ai/.env") < pilot_unit.index("EnvironmentFile=/opt/wb-core-runtime/app/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env")
+    main_unit = (ROOT / "artifacts" / "registry_upload_http_entrypoint" / "systemd" / "wb-core-registry-http.service").read_text(encoding="utf-8")
+    assert main_unit.index("EnvironmentFile=/opt/wb-ai/.env") < main_unit.index("EnvironmentFile=/opt/wb-core-runtime/app/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env")
+
     target = json.loads(
         (ROOT / "artifacts" / "registry_upload_http_entrypoint" / "input" / "hosted_runtime_target__europe_api.json").read_text(encoding="utf-8")
     )
     managed_units = {item["name"] for item in target.get("managed_systemd_units", [])}
     assert "wb-core-finance-liquidity.service" not in managed_units
+    assert "wb-core-finance-liquidity-pilot.service" in managed_units
     routes_manifest = json.loads(
         (ROOT / "artifacts" / "registry_upload_http_entrypoint" / "nginx" / "public_route_allowlist.json").read_text(encoding="utf-8")
     )
-    published_paths = {item["path"] for item in routes_manifest.get("routes", [])}
-    assert "/finance/" not in published_paths
-    assert "/v1/finance/" not in published_paths
+    finance_routes = {
+        item["path"]: item
+        for item in routes_manifest.get("routes", [])
+        if item["path"] in {"/finance/", "/v1/finance/"}
+    }
+    assert finance_routes["/finance/"]["methods"] == ["GET"]
+    assert finance_routes["/v1/finance/"]["methods"] == ["GET", "POST", "PATCH"]
+    assert {item["proxy_pass_url"] for item in finance_routes.values()} == {"http://127.0.0.1:8767"}
 
 
 def main() -> None:
     _dormant_lifecycle_checks()
     _navigation_checks()
-    _dormant_artifact_checks()
-    print("finance_liquidity_integration_smoke: explicit navigation and dormant rollout OK")
+    _pilot_artifact_checks()
+    print("finance_liquidity_integration_smoke: owner grant and isolated TEST pilot config OK")
 
 
 if __name__ == "__main__":

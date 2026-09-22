@@ -9,6 +9,11 @@
       "commands": [],
       "pip": ["openpyxl==3.1.5"]
     },
+    "buyout_percent_imports": {
+      "scripts": ["apps/sheet_vitrina_v1_buyout_percent_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "recovery_http_imports": {
       "scripts": ["apps/warehouse_recovery_policy_http_smoke.py"],
       "commands": [],
@@ -239,6 +244,14 @@
         ["python3", "apps/web_vitrina_daily_pool_smoke.py"],
         ["python3", "apps/web_vitrina_management_history_smoke.py"]
       ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "buyout_percent": {
+      "patterns": [
+        "apps/sheet_vitrina_v1_buyout_percent_smoke.py",
+        "packages/application/sheet_vitrina_v1_buyout_percent.py"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_buyout_percent_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "supplier_source_operations": {

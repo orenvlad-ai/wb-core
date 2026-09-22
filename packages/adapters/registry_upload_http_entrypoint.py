@@ -120,6 +120,11 @@ from packages.contracts.finance_liquidity import (
     has_finance_capability,
     without_finance_explicit_only_capabilities,
 )
+from packages.adapters.finance_liquidity_access import (
+    FinanceBootstrapAccessUnavailable,
+    load_finance_bootstrap_access,
+    normalize_finance_bootstrap_username,
+)
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.wb_supply_planning_zones import (
@@ -8122,6 +8127,7 @@ def _web_auth_config() -> dict[str, Any]:
     enabled = bool(username and password_hash and session_secret)
     supplier_enabled = bool(supplier_username and supplier_password_hash and session_secret)
     configured = enabled or not required
+    operator_sections = _configured_bootstrap_operator_sections(username)
     return {
         "enabled": enabled,
         "configured": configured,
@@ -8133,6 +8139,7 @@ def _web_auth_config() -> dict[str, Any]:
             "password_hash": password_hash,
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": username,
+            "allowed_sections": operator_sections,
         },
         "supplier": {
             "enabled": supplier_enabled,
@@ -8144,6 +8151,17 @@ def _web_auth_config() -> dict[str, Any]:
         "session_secret": session_secret,
         "max_age": max_age,
     }
+
+
+def _configured_bootstrap_operator_sections(username: str) -> list[str]:
+    defaults = _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+    try:
+        access = load_finance_bootstrap_access()
+    except FinanceBootstrapAccessUnavailable:
+        return defaults
+    if access is None or access.username != normalize_finance_bootstrap_username(username):
+        return defaults
+    return list(expand_finance_capability_hierarchy([*defaults, access.capability]))
 
 
 def _ensure_web_auth(handler: BaseHTTPRequestHandler, parsed: urllib_parse.ParseResult) -> bool:
@@ -8794,7 +8812,10 @@ def _env_principal_user_records(config: Mapping[str, Any]) -> list[dict[str, Any
                 "username": operator_username,
                 "display_name": str(operator.get("display_name") or operator_username),
                 "role": WEB_AUTH_ROLE_ADMIN,
-                "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+                "allowed_sections": list(
+                    operator.get("allowed_sections")
+                    or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+                ),
                 "manage_users": True,
                 "is_active": True,
                 "created_at": "",
@@ -9158,7 +9179,10 @@ def _match_web_auth_principal(
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(operator.get("display_name") or username),
-            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+            "allowed_sections": list(
+                operator.get("allowed_sections")
+                or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+            ),
             "manage_users": True,
         }
     runtime_user = _load_runtime_user_by_username(entrypoint, normalized_username)
@@ -9226,7 +9250,10 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(payload.get("d") or operator.get("display_name") or username),
-            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+            "allowed_sections": list(
+                operator.get("allowed_sections")
+                or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+            ),
             "manage_users": True,
         }
     runtime_user = _load_runtime_user_by_username(

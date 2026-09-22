@@ -15,6 +15,11 @@ from packages.adapters.finance_liquidity_auth import (
     FinanceOperationalAuth,
     FixtureFinanceAuth,
 )
+from packages.adapters.finance_liquidity_access import (
+    FinanceBootstrapAccessUnavailable,
+    load_finance_bootstrap_access,
+    validate_finance_bootstrap_store,
+)
 from packages.adapters.finance_liquidity_http import (
     FinanceHttpApp,
     build_finance_http_server,
@@ -24,6 +29,7 @@ from packages.application.finance_liquidity_cash import (
     bootstrap_finance_cash_store,
 )
 from packages.contracts.finance_liquidity_cash import FINANCE_CASH_DEFAULT_PORT
+
 
 def _loopback(host: str) -> bool:
     return host.strip().lower() in {"127.0.0.1", "localhost", "::1"}
@@ -38,6 +44,19 @@ def main() -> None:
     parser.add_argument("--runtime-dir", type=Path)
     parser.add_argument("--auth-fixture", type=Path)
     args = parser.parse_args()
+    try:
+        bootstrap_access = load_finance_bootstrap_access()
+    except FinanceBootstrapAccessUnavailable as exc:
+        raise SystemExit("Finance bootstrap access config unavailable") from exc
+    if bootstrap_access is not None:
+        try:
+            validate_finance_bootstrap_store(
+                args.db,
+                bootstrap_access,
+                require_existing=not args.bootstrap,
+            )
+        except FinanceBootstrapAccessUnavailable as exc:
+            raise SystemExit(str(exc)) from exc
     if args.bootstrap:
         bootstrap_finance_cash_store(args.db)
         return
@@ -58,7 +77,7 @@ def main() -> None:
     else:
         if args.runtime_dir is None:
             raise SystemExit("--runtime-dir is required without --auth-fixture")
-        auth = FinanceOperationalAuth(args.runtime_dir)
+        auth = FinanceOperationalAuth(args.runtime_dir, finance_store_path=args.db)
         csrf_secret = str(os.environ.get("WB_CORE_WEB_AUTH_SESSION_SECRET") or "")
     if not csrf_secret:
         raise SystemExit("CSRF secret unavailable")
@@ -74,6 +93,9 @@ def main() -> None:
         static_dir=ROOT / "packages/adapters/finance_liquidity_static",
         allowed_origin=origin,
         business_runtime_dir=args.runtime_dir,
+        instance_label=(bootstrap_access.instance_label if bootstrap_access else ""),
+        store_id=(bootstrap_access.store_id if bootstrap_access else ""),
+        store_mode=(bootstrap_access.mode if bootstrap_access else ""),
     )
     build_finance_http_server(args.host, args.port, app).serve_forever()
 
