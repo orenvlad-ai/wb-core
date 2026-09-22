@@ -56,7 +56,7 @@ FINANCE_FLAGS = (
 )
 REMOTE_DIAGNOSTIC_SCHEMA = "wb-core.release-recovery-remote-diagnostic/v1"
 REMOTE_DIAGNOSTIC_STAGES = frozenset(
-    {"metadata", "services", "health", "process-env", "source-env", "finance", "nginx", "ss"}
+    {"metadata", "services", "health", "process-env", "pilot-env", "finance", "nginx", "ss"}
 )
 REMOTE_DIAGNOSTIC_CATEGORIES = frozenset(
     {
@@ -346,6 +346,16 @@ def prove_repo_only_descendant(client: release.GitHub, original: Mapping[str, An
         raise RecoveryError("trusted-main-remote-drift")
     if _git(["merge-base", "--is-ancestor", merge, current], check=False).returncode != 0:
         raise RecoveryError("trusted-main-not-target-descendant")
+    if current == merge:
+        return {
+            "trusted_main_sha": current,
+            "target_merge_sha": merge,
+            "intervening_proof": "exact-target-no-intervening-commit",
+            "intervening_paths": [],
+            "intervening_plan_sha256": None,
+            "intervening_release_kind": "exact_target",
+            "intervening_commits": [],
+        }
     commits = sorted(
         filter(None, _git(["rev-list", "--reverse", "--ancestry-path", f"{merge}..{current}"]).stdout.splitlines())
     )
@@ -481,27 +491,33 @@ def _run_remote_json(target: Any, script: str) -> dict[str, Any]:
     return value
 
 
-def _finance_off_validator_source() -> str:
+def _finance_pilot_validator_source() -> str:
     """Return the exact validator embedded in the remote prestate program."""
 
     return """
-def require_finance_off(flags, unit_returncode, unit_stdout):
-    allowed = {None, '', '0', 'false', 'no', 'off'}
-    for values in flags.values():
-        for raw in values.values():
-            normalized = None if raw is None else str(raw).strip().strip('"\\'').casefold()
-            if normalized not in allowed:
-                raise SystemExit(23)
-    if unit_returncode != 0:
+def require_finance_pilot(flags, pilot_returncode, pilot_stdout, legacy_returncode, legacy_stdout):
+    if any(
+        str(values.get(source) or '').strip().strip('\"\\\'') != '1'
+        for values in flags.values()
+        for source in ('main_process', 'pilot_process', 'pilot_source')
+    ):
+        raise SystemExit(23)
+    def properties(returncode, stdout, exit_code):
+        if returncode != 0:
+            raise SystemExit(exit_code)
+        result = {}
+        for line in stdout.splitlines():
+            if not line or '=' not in line:
+                raise SystemExit(exit_code)
+            key, value = line.split('=', 1)
+            result[key] = value
+        return result
+    pilot = properties(pilot_returncode, pilot_stdout, 24)
+    if pilot != {'LoadState': 'loaded', 'UnitFileState': 'enabled', 'ActiveState': 'active', 'SubState': 'running'}:
         raise SystemExit(24)
-    properties = {}
-    for line in unit_stdout.splitlines():
-        if not line or '=' not in line:
-            raise SystemExit(24)
-        key, value = line.split('=', 1)
-        properties[key] = value
-    if properties != {'LoadState': 'not-found', 'ActiveState': 'inactive', 'SubState': 'dead'}:
-        raise SystemExit(24)
+    legacy = properties(legacy_returncode, legacy_stdout, 30)
+    if legacy != {'LoadState': 'not-found', 'ActiveState': 'inactive', 'SubState': 'dead'}:
+        raise SystemExit(30)
 """
 
 
@@ -511,23 +527,38 @@ def _prestate_script(target: Any, merge: str) -> str:
         for unit in target.managed_systemd_units
         if unit.enable and unit.name.endswith(".service")
     )
+    pilot_env = (
+        target.target_dir.rstrip("/")
+        + "/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env"
+    )
     expected = {
         "merge": merge,
         "target_dir": target.target_dir.rstrip("/"),
         "service": target.service_name,
         "services": services,
-        "environment_file": target.environment_file,
         "urls": [
             target.loopback_base_url.rstrip("/") + "/login",
             target.public_base_url.rstrip("/") + "/login",
         ],
-        "finance_store": "/opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3",
-        "finance_dir": "/opt/wb-core-runtime/state/finance-liquidity",
-        "finance_unit": "wb-core-finance-liquidity.service",
+        "pilot_store": "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3",
+        "pilot_dir": "/opt/wb-core-runtime/state/finance-liquidity-pilot",
+        "pilot_unit": "wb-core-finance-liquidity-pilot.service",
+        "pilot_env": pilot_env,
+        "legacy_store": "/opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3",
+        "legacy_dir": "/opt/wb-core-runtime/state/finance-liquidity",
+        "legacy_unit": "wb-core-finance-liquidity.service",
         "finance_port": 8767,
         "finance_flags": list(FINANCE_FLAGS),
+        "pilot_env_values": {
+            "FINANCE_LIQUIDITY_ENABLED": "1",
+            "FINANCE_LIQUIDITY_READ_ENABLED": "1",
+            "FINANCE_LIQUIDITY_WRITE_ENABLED": "1",
+            "FINANCE_LIQUIDITY_ORIGIN": "https://api.selleros.pro",
+            "FINANCE_LIQUIDITY_ACCESS_CONFIG": pilot_env.rsplit("/", 1)[0]
+            + "/finance-liquidity-pilot-access.json",
+        },
     }
-    finance_validator = _finance_off_validator_source()
+    finance_validator = _finance_pilot_validator_source()
     body = f"""
 root = Path(e['target_dir'])
 runtime_sha = (root / '.wb-core-runtime-sha').read_text(encoding='utf-8').strip()
@@ -537,7 +568,8 @@ if runtime_sha != e['merge'] or metadata.get('commit') != e['merge']:
     raise SystemExit(20)
 stage = 'services'
 pid = subprocess.run(['systemctl','show','--property','MainPID','--value',e['service']], check=True, text=True, capture_output=True).stdout.strip()
-if not pid.isdigit() or int(pid) <= 0:
+pilot_pid = subprocess.run(['systemctl','show','--property','MainPID','--value',e['pilot_unit']], check=True, text=True, capture_output=True).stdout.strip()
+if not pid.isdigit() or int(pid) <= 0 or not pilot_pid.isdigit() or int(pilot_pid) <= 0:
     raise SystemExit(21)
 for service in e['services']:
     subprocess.run(['systemctl','is-active','--quiet',service], check=True)
@@ -548,44 +580,68 @@ for url in e['urls']:
         health[url] = response.status
         if response.status != 200: raise SystemExit(22)
 stage = 'process-env'
-proc_env = {{}}
-for item in Path('/proc/' + pid + '/environ').read_bytes().split(b'\\0'):
-    if b'=' in item:
-        key, value = item.split(b'=', 1); proc_env[key.decode(errors='replace')] = value.decode(errors='replace')
-stage = 'source-env'
-source_env = {{}}
-for line in Path(e['environment_file']).read_text(encoding='utf-8').splitlines():
+def finance_process_env(process_pid):
+    values = {{}}
+    for item in Path('/proc/' + process_pid + '/environ').read_bytes().split(b'\\0'):
+        if b'=' in item:
+            key, value = item.split(b'=', 1)
+            decoded_key = key.decode(errors='replace')
+            if decoded_key in e['finance_flags']:
+                values[decoded_key] = value.decode(errors='replace')
+    return values
+main_proc_env = finance_process_env(pid)
+pilot_proc_env = finance_process_env(pilot_pid)
+stage = 'pilot-env'
+pilot_source = {{}}
+for line in Path(e['pilot_env']).read_text(encoding='utf-8').splitlines():
     line=line.strip()
     if line and not line.startswith('#') and '=' in line:
-        key,value=line.split('=',1); source_env[key.strip()]=value.strip().strip('"\\'')
+        key,value=line.split('=',1)
+        pilot_source[key.strip()]=value.strip().strip('"\\'')
+if pilot_source != e['pilot_env_values']:
+    raise SystemExit(29)
 stage = 'finance'
-flags = {{name: {{'process': proc_env.get(name), 'source': source_env.get(name)}} for name in e['finance_flags']}}
-unit = subprocess.run(['systemctl','show','--property=LoadState','--property=ActiveState','--property=SubState',e['finance_unit']], text=True, capture_output=True)
-require_finance_off(flags, unit.returncode, unit.stdout)
-if Path(e['finance_store']).exists():
+flags = {{name: {{'main_process': main_proc_env.get(name), 'pilot_process': pilot_proc_env.get(name), 'pilot_source': pilot_source.get(name)}} for name in e['finance_flags']}}
+pilot_unit = subprocess.run(['systemctl','show','--property=LoadState','--property=UnitFileState','--property=ActiveState','--property=SubState',e['pilot_unit']], text=True, capture_output=True)
+legacy_unit = subprocess.run(['systemctl','show','--property=LoadState','--property=ActiveState','--property=SubState',e['legacy_unit']], text=True, capture_output=True)
+require_finance_pilot(flags, pilot_unit.returncode, pilot_unit.stdout, legacy_unit.returncode, legacy_unit.stdout)
+def unit_environment_files(unit):
+    unit_text = subprocess.run(['systemctl','cat',unit], check=True, text=True, capture_output=True).stdout
+    return [line.strip().split('=', 1)[1].strip().lstrip('-') for line in unit_text.splitlines() if line.strip().startswith('EnvironmentFile=')]
+for unit in (e['service'], e['pilot_unit']):
+    if unit_environment_files(unit).count(e['pilot_env']) != 1:
+        raise SystemExit(31)
+pilot_store = Path(e['pilot_store'])
+if (pilot_store.is_symlink() or not pilot_store.is_file() or pilot_store.resolve() != pilot_store or pilot_store.parent.is_symlink()):
     raise SystemExit(25)
-if Path(e['finance_dir']).exists():
+if Path(e['legacy_store']).exists() or Path(e['legacy_dir']).exists():
     raise SystemExit(28)
 stage = 'nginx'
 nginx = subprocess.run(['nginx','-T'], text=True, capture_output=True)
-if nginx.returncode != 0 or '/v1/finance/' in nginx.stdout or 'location ^~ /finance/' in nginx.stdout:
+if nginx.returncode != 0:
     raise SystemExit(26)
+for route in ('/finance/', '/v1/finance/'):
+    pattern = (r'location\\s+\\^~\\s+' + re.escape(route) + r'\\s*' + re.escape(chr(123)) + r'[^' + re.escape(chr(125)) + r']*?proxy_pass\\s+http://127\\.0\\.0\\.1:' + str(e['finance_port']) + r';')
+    if len(re.findall(pattern, nginx.stdout, re.DOTALL)) != 1:
+        raise SystemExit(26)
 stage = 'ss'
 listeners = subprocess.run(['ss','-ltn'], check=True, text=True, capture_output=True).stdout
-if any(line.split()[3].rsplit(':',1)[-1] == str(e['finance_port']) for line in listeners.splitlines()[1:] if len(line.split()) >= 4):
+bound = [line.split()[3] for line in listeners.splitlines()[1:] if len(line.split()) >= 4 and line.split()[3].rsplit(':',1)[-1] == str(e['finance_port'])]
+if bound != ['127.0.0.1:' + str(e['finance_port'])]:
     raise SystemExit(27)
 print(json.dumps({{
   'runtime_sha':runtime_sha,
   'metadata':metadata,
   'metadata_sha256':hashlib.sha256(metadata_raw).hexdigest(),
   'main_pid':int(pid),
+  'pilot_pid':int(pilot_pid),
   'services':e['services'],
   'health':health,
-  'finance':{{'flags':flags,'unit_absent':True,'directory_absent':True,'store_absent':True,'routes_absent':True,'listener_absent':True}},
+  'finance_pilot':{{'flags':flags,'unit_active':True,'environment_bound':True,'store_present':True,'routes_bound':True,'loopback_listener':True,'legacy_unisolated_absent':True}},
 }}, sort_keys=True))
 """
     return f"""
-import hashlib, json, os, subprocess, sys, urllib.error, urllib.request
+import hashlib, json, os, re, subprocess, sys, urllib.error, urllib.request
 from pathlib import Path
 {finance_validator}
 e = {expected!r}
@@ -627,7 +683,6 @@ except BaseException as exc:
         raise
     raise SystemExit(1)
 """
-
 
 def collect_prestate(target: Any, merge: str, *, require_incomplete: bool) -> dict[str, Any]:
     state = _run_remote_json(target, _prestate_script(target, merge))
@@ -786,7 +841,7 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
             "auth-preflight",
             "change-registry-activation-exact-target",
             "deployment-metadata-cas-complete",
-            "final-runtime-services-health-finance-off-readback",
+            "final-runtime-services-health-finance-pilot-readback",
         ],
         "forbidden_stages": ["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"],
     }
