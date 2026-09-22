@@ -25,10 +25,12 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 )
 from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_AGGREGATION_RULE,
+    BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
     BUYOUT_PERCENT_MATURITY_DAYS,
     BUYOUT_PERCENT_METRIC_KEY,
     LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
     aggregate_buyout_percent,
+    buyout_source_payload_digest,
     build_three_closed_week_buyout_reference,
     capture_mature_buyout_percent_snapshots,
     extend_metrics_with_buyout_percent,
@@ -484,6 +486,7 @@ def main() -> None:
             raise AssertionError(f"bounded D-7 catch-up mismatch: {catch_up}")
 
         _assert_separate_buyout_fetch_and_confirmation_scopes()
+        _assert_buyout_confirmation_overlay_resolution()
 
         calculation_parameters = CalculationParametersBlock(runtime=runtime)
         with patch(
@@ -531,6 +534,7 @@ def main() -> None:
         print("buyout_percent_partial_exclusion: ok -> missing mature day blanks only its week")
         print("buyout_percent_mature_capture: ok -> overwrite + idempotency + D-7 catch-up")
         print("buyout_percent_confirmation_scope: ok -> fetch92/confirm33, retain58, fail closed")
+        print("buyout_percent_confirmation_overlay: ok -> D+6 recovery, original retention, digest compatibility")
         print("buyout_percent_current_week_excluded: ok ->", reference["date_to"])
         print("buyout_percent_settings_line: ok -> informational only")
         print("proxy_formula_unchanged: ok ->", proxy["proxy_profit_3"])
@@ -701,6 +705,129 @@ def _assert_separate_buyout_fetch_and_confirmation_scopes() -> None:
                 raise
         else:
             raise AssertionError("confirmation scope without a fetch scope must fail closed")
+
+
+def _assert_buyout_confirmation_overlay_resolution() -> None:
+    """Only a complete D+6 overlay may close September buyout weeks."""
+
+    with TemporaryDirectory(prefix="buyout-confirmation-overlay-") as temp_dir:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir))
+        accepted = runtime.ingest_bundle(
+            json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8")),
+            activated_at="2026-09-23T08:00:00Z",
+        )
+        if accepted.status != "accepted":
+            raise AssertionError("overlay fixture registry must be accepted")
+        nm_ids = [
+            int(item.nm_id)
+            for item in runtime.load_current_state().config_v2
+            if item.enabled
+        ]
+        if not nm_ids:
+            raise AssertionError("overlay fixture requires enabled registry SKU targets")
+        original_dates = ["2026-08-31", "2026-09-01", "2026-09-02"]
+        for snapshot_date in original_dates:
+            _save_snapshot(
+                runtime,
+                snapshot_date,
+                [
+                    item
+                    for nm_id in nm_ids
+                    for item in (
+                        _item(snapshot_date, nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.8),
+                        _item(snapshot_date, nm_id, "orderCount", 10),
+                        _item(snapshot_date, nm_id, "ordersSumRub", 1000),
+                    )
+                ],
+                captured_at="2026-09-08T08:00:00Z",
+            )
+        original_payload, original_captured_at = runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history", snapshot_date="2026-09-02"
+        )
+        original_bytes = json.dumps(
+            original_payload.__dict__ if hasattr(original_payload, "__dict__") else original_payload,
+            default=lambda value: value.__dict__, sort_keys=True,
+        )
+        legacy_rows = []
+        with __import__("sqlite3").connect(runtime.db_path) as conn:
+            for row in conn.execute(
+                """SELECT snapshot_date,payload_json FROM temporal_source_snapshots
+                   WHERE source_key='sales_funnel_history'
+                     AND snapshot_date>='2026-08-31' AND snapshot_date<='2026-09-06'
+                   ORDER BY snapshot_date"""
+            ):
+                legacy_rows.append([str(row[0]), json.loads(str(row[1]))])
+        legacy_digest = "sha256:" + __import__("hashlib").sha256(
+            json.dumps(legacy_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        if buyout_source_payload_digest(
+            runtime, date_from="2026-08-31", date_to="2026-09-06"
+        ) != legacy_digest:
+            raise AssertionError("no-overlay V4 digest must remain byte-compatible")
+
+        for day in range(3, 18):
+            snapshot_date = f"2026-09-{day:02d}"
+            runtime.save_temporal_source_snapshot(
+                source_key=BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+                snapshot_date=snapshot_date,
+                captured_at="2026-09-23T08:00:00Z",
+                payload={
+                    "kind": "success",
+                    "date_from": snapshot_date,
+                    "date_to": snapshot_date,
+                    "count": len(nm_ids) * 2,
+                    "items": [
+                        item
+                        for nm_id in nm_ids
+                        for item in (
+                            _item(snapshot_date, nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.9),
+                            _item(snapshot_date, nm_id, "orderCount", 20),
+                        )
+                    ],
+                },
+            )
+        reference = build_three_closed_week_buyout_reference(
+            runtime=runtime, today=date(2026, 9, 23)
+        )
+        if [item["status"] for item in reference["weeks"]] != ["ready", "ready", "immature"]:
+            raise AssertionError(f"D+6 overlay did not close expected weeks: {reference}")
+        if reference["contributing_week_ranges"] != [
+            ["2026-08-31", "2026-09-06"],
+            ["2026-09-07", "2026-09-13"],
+        ]:
+            raise AssertionError("overlay must make the two completed September weeks ready")
+        retained_payload, retained_captured_at = runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history", snapshot_date="2026-09-02"
+        )
+        retained_bytes = json.dumps(
+            retained_payload.__dict__ if hasattr(retained_payload, "__dict__") else retained_payload,
+            default=lambda value: value.__dict__, sort_keys=True,
+        )
+        if retained_captured_at != original_captured_at or retained_bytes != original_bytes:
+            raise AssertionError("overlay must retain original broad snapshot byte-for-byte")
+        if buyout_source_payload_digest(
+            runtime, date_from="2026-08-31", date_to="2026-09-06"
+        ) == legacy_digest:
+            raise AssertionError("selected overlay must change only its V4 source digest")
+
+        runtime.save_temporal_source_snapshot(
+            source_key=BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+            snapshot_date="2026-09-03",
+            captured_at="2026-09-23T08:00:00Z",
+            payload={
+                "kind": "success", "date_from": "2026-09-03", "date_to": "2026-09-03",
+                "count": (len(nm_ids) - 1) * 2,
+                "items": [
+                    item for nm_id in nm_ids[:-1] for item in (
+                        _item("2026-09-03", nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.9),
+                        _item("2026-09-03", nm_id, "orderCount", 20),
+                    )
+                ],
+            },
+        )
+        rejected = build_three_closed_week_buyout_reference(runtime=runtime, today=date(2026, 9, 23))
+        if rejected["weeks"][0]["status"] != "missing":
+            raise AssertionError("partial overlay must fail closed instead of confirming an observed subset")
 
 
 def _seed_three_closed_week_reference(
