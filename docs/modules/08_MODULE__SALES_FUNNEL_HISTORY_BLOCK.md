@@ -120,6 +120,7 @@ update_note: "Обновлён под immutable Proxy V4: обычный D-6 cap
 - Official `DETAIL_HISTORY_REPORT` request schema, percent/order normalization and strict incomplete-coverage failure подтверждены через `apps/sales_funnel_history_detail_csv_smoke.py`.
 - Exact-date runtime split/reconcile smoke подтверждён через `apps/factory_order_sales_history_smoke.py`.
 - D-6 maturity, overwrite/idempotency/catch-up, immutable read masking, complete-week partial-window aggregation and guarded historical apply are checked by `apps/sheet_vitrina_v1_buyout_percent_smoke.py` and `apps/sheet_vitrina_v1_buyout_mature_backfill_smoke.py`.
+- Mature-buyout capture may fetch the reporting nomenclature while proving readiness only against an explicit registry confirmation subset. The exact response is retained intact; absence of any required confirmation SKU fails closed and does not replace an earlier snapshot. The Web buyout rows and TOTAL use that same confirmation subset.
 
 # 7. Что уже доказано по модулю
 
