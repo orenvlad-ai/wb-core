@@ -1,0 +1,10 @@
+{
+  "contract_version": "finance_liquidity_bootstrap_access_v1",
+  "enabled": true,
+  "username": "owner",
+  "capability": "finance_admin",
+  "instance_label": "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ",
+  "store_id": "finance-liquidity-pilot",
+  "store_path": "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3",
+  "mode": "isolated_test"
+}

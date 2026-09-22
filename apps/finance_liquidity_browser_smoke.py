@@ -9,7 +9,10 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 import threading
+import time
 
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import expect, sync_playwright
 
 
@@ -55,6 +58,9 @@ def _submit(page: object) -> None:
 def _open(page: object, action: str) -> None:
     page.locator(f'[data-action="{action}"]').click()
     expect(page.locator("[data-dialog]")).to_be_visible()
+    expect(page.locator("[data-dialog] [data-instance-label]")).to_have_text(
+        "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ"
+    )
 
 
 def _create_cash(page: object, name: str, responsible: str) -> None:
@@ -117,6 +123,9 @@ def main() -> None:
             static_dir=ROOT / "packages/adapters/finance_liquidity_static",
             allowed_origin=base_url,
             business_runtime_dir=Path(temporary),
+            instance_label="ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ",
+            store_id="finance-liquidity-pilot",
+            store_mode="isolated_test",
         )
         server = build_finance_http_server("127.0.0.1", port, app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -131,6 +140,7 @@ def main() -> None:
                 expected_validation_seen = {"value": False}
                 submitted_posts: list[tuple[str, str]] = []
                 operation_readbacks: list[str] = []
+                operation_responses: list[tuple[str, int]] = []
 
                 def observe_request(request: object) -> None:
                     if request.method == "POST" and request.url.endswith("/post"):
@@ -139,6 +149,15 @@ def main() -> None:
                         operation_readbacks.append(request.url)
 
                 page.on("request", observe_request)
+
+                def observe_response(response: object) -> None:
+                    if (
+                        response.request.method == "GET"
+                        and "/v1/finance/operations/" in response.url
+                    ):
+                        operation_responses.append((response.url, response.status))
+
+                page.on("response", observe_response)
                 page.on(
                     "console",
                     lambda message: console_errors.append(message.text)
@@ -149,6 +168,9 @@ def main() -> None:
                     [{"name": "finance_fixture_session", "value": "fixture-admin", "url": base_url}]
                 )
                 page.goto(f"{base_url}/finance/", wait_until="networkidle")
+                expect(page.locator("main > [data-instance-label]")).to_have_text(
+                    "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ"
+                )
                 expect(page.locator("[data-session-state]")).to_contain_text("операциям")
                 expect(page.get_by_text("Пока нет счетов")).to_be_visible()
 
@@ -237,15 +259,42 @@ def main() -> None:
 
                 page.route("**/v1/finance/documents/*/post", lose_post_response, times=1)
                 posts_before_lost_response = len(submitted_posts)
-                with page.expect_request(
-                    lambda request: request.method == "POST" and request.url.endswith("/post")
-                ) as lost_post_request:
-                    lost_transfer.locator("[data-post-draft]").click()
+                try:
+                    with page.expect_request(
+                        lambda request: request.method == "POST" and request.url.endswith("/post")
+                    ) as lost_post_request, page.expect_response(
+                        lambda response: response.request.method == "GET"
+                        and "/v1/finance/operations/" in response.url
+                        and response.status == 200
+                    ) as lost_readback_response:
+                        lost_transfer.locator("[data-post-draft]").click()
+                except PlaywrightTimeoutError as caught:
+                    pending_transfers = [
+                        item
+                        for item in service.list_documents()
+                        if item["document_type"] == "transfer"
+                    ]
+                    raise AssertionError(
+                        "lost-response readback timed out: "
+                        f"post_status={lost_response_status!r}; "
+                        f"post_body={lost_response_body!r}; "
+                        f"post_operation_ids={lost_response_operation_ids!r}; "
+                        f"submitted_posts={submitted_posts[posts_before_lost_response:]!r}; "
+                        f"readback_requests={operation_readbacks!r}; "
+                        f"readback_responses={operation_responses!r}; "
+                        f"notice={page.locator('[data-notice]').inner_text()!r}; "
+                        f"error={page.locator('[data-error]').inner_text()!r}; "
+                        f"transfers={pending_transfers!r}"
+                    ) from caught
                 expect(page.locator("[data-notice]")).to_contain_text("Результат операции подтверждён")
                 if not lost_response_seen["value"]:
                     raise AssertionError(f"invalid-response route did not run: {page.locator('[data-error]').inner_text()}")
                 if lost_post_request.value.header_value("x-operation-id") != lost_response_operation_ids[0]:
                     raise AssertionError("lost-response route intercepted a different operation")
+                if not lost_readback_response.value.url.endswith(
+                    "/" + lost_response_operation_ids[0]
+                ):
+                    raise AssertionError("lost-response readback used a different operation")
                 pending_transfers = [item for item in service.list_documents() if item["document_type"] == "transfer"]
                 if not pending_transfers or pending_transfers[-1]["status"] != "posted":
                     raise AssertionError(f"invalid-response post did not become durable: {lost_response_status} {lost_response_body} {pending_transfers}")
@@ -283,7 +332,26 @@ def main() -> None:
                     )
 
                 page.route("**/v1/finance/documents/*/post", lose_duplicate_response, times=1)
+                stalled_readbacks: list[str] = []
+
+                def stall_first_operation_readback(route: object) -> None:
+                    stalled_readbacks.append(route.request.url)
+                    # Keep the route pending beyond the UI deadline. Chromium's
+                    # AbortController fires independently of this test callback.
+                    time.sleep(6)
+                    try:
+                        route.continue_()
+                    except PlaywrightError:
+                        # The expected abort can dispose the pending route first.
+                        pass
+
+                page.route(
+                    "**/v1/finance/operations/*",
+                    stall_first_operation_readback,
+                    times=1,
+                )
                 posts_before_duplicate_response = len(submitted_posts)
+                readbacks_before_duplicate_response = len(operation_readbacks)
                 with page.expect_response(
                     lambda response: response.request.method == "GET"
                     and "/v1/finance/operations/" in response.url
@@ -305,6 +373,9 @@ def main() -> None:
                 if len(submitted_posts) != posts_before_duplicate_response + 1:
                     raise AssertionError(f"duplicate action retried the write: {submitted_posts}")
                 duplicate_readback = f"/v1/finance/operations/{duplicate_operation_ids[0]}"
+                duplicate_readback_requests = operation_readbacks[
+                    readbacks_before_duplicate_response:
+                ]
                 if (
                     duplicate_operation_readback.value.url != f"{base_url}{duplicate_readback}"
                     or duplicate_readback_payload.get("data", {}).get("operation_id")
@@ -315,6 +386,18 @@ def main() -> None:
                     raise AssertionError(
                         f"duplicate action readback was not the durable decision: "
                         f"{duplicate_operation_readback.value.url} {duplicate_readback_payload}"
+                    )
+                if stalled_readbacks != [f"{base_url}{duplicate_readback}"]:
+                    raise AssertionError(
+                        f"first same-operation readback was not stalled: {stalled_readbacks}"
+                    )
+                if duplicate_readback_requests != [
+                    f"{base_url}{duplicate_readback}",
+                    f"{base_url}{duplicate_readback}",
+                ]:
+                    raise AssertionError(
+                        "readback timeout did not retry the exact same operation: "
+                        f"{duplicate_readback_requests}"
                     )
                 if not any(duplicate_readback in url for url in operation_readbacks):
                     raise AssertionError(f"duplicate action did not read back its operation: {operation_readbacks}")

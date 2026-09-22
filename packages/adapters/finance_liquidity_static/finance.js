@@ -1,6 +1,7 @@
 (() => {
   "use strict";
   const apiRoot = "/v1/finance";
+  const operationReadbackDeadlineMs = 5000;
   const app = document.querySelector("[data-finance-app]");
   const $ = (selector, root = document) => root.querySelector(selector);
   const state = { capabilities: null, accounts: [], categories: [], documents: [], reconciliations: [], csrf: "", inFlight: new Map() };
@@ -20,7 +21,7 @@
   function uncertainOperation(message, operation) {
     return Object.assign(new Error(message), { uncertain: true, operation });
   }
-  async function request(path, { method = "GET", body, operation } = {}) {
+  async function request(path, { method = "GET", body, operation, timeoutMs = 0 } = {}) {
     const headers = { Accept: "application/json" };
     if (body !== undefined) {
       state.inFlight.set(operation.id, operation);
@@ -29,14 +30,20 @@
       headers["Idempotency-Key"] = operation.key;
       headers["X-Operation-Id"] = operation.id;
     }
-    let response;
-    try { response = await fetch(`${apiRoot}${path}`, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) }); }
-    catch (networkError) { if (operation) throw uncertainOperation("Сеть не ответила. Операция не отправлена повторно; проверяем её результат.", operation); throw networkError; }
     let payload;
-    try { payload = await response.json(); }
-    catch {
-      if (operation) throw uncertainOperation("Ответ на запись не удалось подтвердить. Новая отправка не выполняется; проверяем результат.", operation);
-      throw new Error("Сервер вернул неожиданный ответ.");
+    let response;
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      try { response = await fetch(`${apiRoot}${path}`, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body), signal: controller?.signal }); }
+      catch (networkError) { if (operation) throw uncertainOperation("Сеть не ответила. Операция не отправлена повторно; проверяем её результат.", operation); throw networkError; }
+      try { payload = await response.json(); }
+      catch {
+        if (operation) throw uncertainOperation("Ответ на запись не удалось подтвердить. Новая отправка не выполняется; проверяем результат.", operation);
+        throw new Error("Сервер вернул неожиданный ответ.");
+      }
+    } finally {
+      if (timeout !== null) window.clearTimeout(timeout);
     }
     if (payload.contract !== "finance_cash_v1") {
       if (operation) throw uncertainOperation("Ответ на запись пришёл не в ожидаемом виде. Новая отправка не выполняется; проверяем результат.", operation);
@@ -198,7 +205,7 @@
     state.inFlight.set(op.id, op);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const result = await request(`/operations/${encodeURIComponent(op.id)}`);
+        const result = await request(`/operations/${encodeURIComponent(op.id)}`, {timeoutMs:operationReadbackDeadlineMs});
         if (result) { state.inFlight.delete(op.id); await loadAll(); if (result.action_required || result.status === "action_required") notice("Запрос сохранён и требует вашего решения. Деньги пока не изменены."); else notice("Результат операции подтверждён."); return true; }
       } catch (caught) { if (caught.status && caught.status !== 404) break; }
       await new Promise(resolve => window.setTimeout(resolve, 500));
@@ -213,7 +220,7 @@
       else if (kind === "reverse") { const doc = state.documents.find(item => item.id === sourceId); await request(`/documents/${encodeURIComponent(sourceId)}/reverse`, {method:"POST",body:{...body,base_revision:doc?.revision ?? doc?.base_revision},operation:operation()}); successMessage = "Исправление создано. Исходная операция сохранена в истории."; }
       else if (kind === "replace-opening") { const doc = state.documents.find(item => item.id === sourceId); await request(`/documents/${encodeURIComponent(sourceId)}/replace-opening`, {method:"POST",body:{...body,base_revision:doc?.revision,opening_evidence_type:"manual_confirmation"},operation:operation()}); successMessage = "Начальный остаток заменён. Прежний факт сохранён в истории."; }
       else if (kind === "transfer-transition") { const doc = state.documents.find(item => item.id === sourceId); await request(`/transfers/${encodeURIComponent(sourceId)}/${ui.dialogContent.dataset.transition}`, {method:"POST",body:{base_revision:doc?.revision ?? doc?.base_revision, ...body},operation:operation()}); successMessage = ui.dialogContent.dataset.transition === "cancel" ? "Перевод отменён." : "Перевод завершён."; }
-      else { const draft = await createDraft({document_type:kind,...body, ...(kind === "opening" ? {opening_evidence_type:"manual_confirmation"} : {})}); if (ui.dialogContent.dataset.submitMode === "post") await postDraft(draft.document_id); ui.dialog.close(); return; } ui.dialog.close(); await loadAll(); notice(successMessage); }
+      else { const draft = await createDraft({document_type:kind,...body, ...(kind === "opening" ? {opening_evidence_type:"manual_confirmation"} : {})}); if (ui.dialogContent.dataset.submitMode === "post") await postDraft(draft.document_id); ui.dialog.close(); return; } await loadAll(); notice(successMessage); ui.dialog.close(); }
     catch (caught) { if (caught.code === "negative_balance_explanation_required" || /negative cash/i.test(caught.message)) { error("Для этого расхода добавьте пояснение к отрицательному остатку."); } else if (caught.code === "version_conflict") { error("Данные изменились у другого пользователя. Форма сохранена; обновите данные и проверьте её ещё раз."); await loadAll(); } else if (caught.uncertain) { await readUncertainOperation(caught.operation); } else { error(caught.message); } submit.disabled = false; }
   }
   async function postDraft(id, duplicateToken) { const doc = state.documents.find(d => d.id === id); if (!doc) return; const op = operation(); try { const body = {base_revision:doc.revision ?? doc.base_revision}; if (duplicateToken) body.duplicate_confirmation_token = duplicateToken; await request(`/documents/${encodeURIComponent(id)}/post`, {method:"POST",body,operation:op}); await loadAll(); notice("Операция проведена и зафиксирована."); }
