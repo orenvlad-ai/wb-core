@@ -12,6 +12,13 @@ from packages.application.business_data_write_barrier import barrier_status
 from packages.contracts.search_cluster_cleaner import CleanerError, Target, canonical, digest, query_hash
 from packages.adapters.search_cluster_cleaner_wb import WriteResponse
 
+READBACK_PENDING_STATES=frozenset({'dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'})
+TYPED_OUTCOME_STATES=frozenset({'validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'})
+# A known validation rejection is already terminal for writing; bound only its
+# forensic readback.  Ambiguous/200-partial outcomes retain the established
+# durable late-readback behaviour and never receive a new POST.
+MAX_VALIDATION_READBACK_ATTEMPTS=3
+
 
 class CleanerWriter:
     def __init__(self,cleaner,source,session,*,generation,preflight_max_age=30,hook=None,registry=None):
@@ -57,7 +64,7 @@ class CleanerWriter:
         with app.store.transaction() as c:
             s,run=self._guard(c,run_id,token)
             if c.execute('SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?',(app.key,t.key)).fetchone():raise CleanerError('target_hold','Цель приостановлена',409)
-            previous=c.execute("SELECT * FROM cleaner_write_operations WHERE account=? AND target=? AND state IN('prepared','dispatching','submitted','unresolved')",(app.key,t.key)).fetchone()
+            previous=c.execute("SELECT * FROM cleaner_write_operations WHERE account=? AND target=? AND state IN('prepared','dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error','requires_review')",(app.key,t.key)).fetchone()
             if previous:
                 if previous['state']!='prepared':raise CleanerError('target_unresolved','Предыдущая операция не разрешена',409)
                 c.execute("UPDATE cleaner_write_operations SET state='cancelled_before_send',updated_at=? WHERE operation_id=?",(app.clock(),previous['operation_id']))
@@ -133,6 +140,10 @@ class CleanerWriter:
         return expected
 
     def apply_target(self,run_id,token,snapshot,candidates):
+        # list.active supplies coverage only.  Keep its exclude decision visible,
+        # but do not let it cancel unrelated statistics-fresh additions in the
+        # same full-set transaction.
+        candidates=[row for row in candidates if 'statistics' in snapshot.sources.get(row['query'],())]
         if not candidates:return None
         app=self.app;app.renew_lease(run_id,token,self.generation,phase='preparing')
         initial,membership=self.source.refresh_target(snapshot.target)
@@ -155,10 +166,20 @@ class CleanerWriter:
         except (TimeoutError,ConnectionError,OSError):response=WriteResponse(None,0,'transport_ambiguous')
         self.hook('after_network',op)
         with app.store.transaction() as c:
-            state='submitted' if response.status==200 else 'unresolved'
-            c.execute("UPDATE cleaner_write_operations SET state=?,evidence=?,updated_at=? WHERE operation_id=? AND state='dispatching'",(state,canonical(asdict(response)),app.clock(),op))
+            if response.status==200: state='submitted'
+            elif response.status==400 and response.error=='validation_rejected': state='validation_rejected'
+            elif response.status==401: state='unauthorized'
+            elif response.status==403: state='forbidden'
+            elif response.status==429: state='rate_limited'
+            elif response.status is None or response.status>=500: state='transport_ambiguous'
+            else: state='http_error'
+            # Keep the write receipt distinct from all later get-minus evidence.
+            # Raw error body is bounded and redacted by the adapter; events carry
+            # only its safe classification, never its contents.
+            evidence=dict(receipt=asdict(response))
+            c.execute("UPDATE cleaner_write_operations SET state=?,evidence=?,updated_at=? WHERE operation_id=? AND state='dispatching'",(state,canonical(evidence),app.clock(),op))
             if response.retry_after:c.execute('UPDATE cleaner_readback_jobs SET retry_not_before=? WHERE operation_id=?',(plus_seconds(app.clock(),int(response.retry_after)+1),op))
-            app._event(c,'write_response',dict(status=response.status,error=response.error),run_id=run_id,operation_id=op)
+            app._event(c,'write_response',dict(status=response.status,outcome=state),run_id=run_id,operation_id=op)
         self.hook('after_receipt',op)
         if response.status in {401,403}:raise CleanerError('unauthorized' if response.status==401 else 'forbidden','WB отказал всему аккаунту',403)
         return op
@@ -182,9 +203,9 @@ class CleanerReadback:
             return self.record(job,minus,observed)
         except CleanerError as exc:
             delay=max(20,getattr(exc,'retry_after',0))
-            self.defer(job,exc.code,delay);return dict(operation_id=op['operation_id'],state='unresolved',reason=exc.code)
+            return self.defer(job,exc.code,delay)
         except (TimeoutError,ConnectionError,OSError):
-            self.defer(job,'readback_unavailable',20);return dict(operation_id=op['operation_id'],state='unresolved')
+            return self.defer(job,'readback_unavailable',20)
 
     def _job(self,c,job):
         row=c.execute('SELECT * FROM cleaner_readback_jobs WHERE account=? AND operation_id=?',(self.app.key,job['operation_id'])).fetchone()
@@ -194,13 +215,35 @@ class CleanerReadback:
 
     def _retry(self,attempt):return 20 if attempt%3 else 300
 
+    @staticmethod
+    def _evidence(op,readback):
+        previous=json.loads(op['evidence'])
+        # Compatibility with the first D receipt shape: retain any old evidence
+        # as the receipt instead of silently replacing it during migration.
+        receipt=previous.get('receipt',previous)
+        return dict(receipt=receipt,readback=readback)
+
+    def _require_review(self,c,op,job,reason,readback):
+        evidence=self._evidence(op,readback)
+        c.execute("UPDATE cleaner_write_operations SET state='requires_review',evidence=?,updated_at=? WHERE operation_id=?",(canonical(evidence),self.app.clock(),op['operation_id']))
+        c.execute("UPDATE cleaner_readback_jobs SET state='done',worker_token=NULL,lease_expires_at=NULL,retry_not_before=NULL WHERE operation_id=?",(op['operation_id'],))
+        c.execute('INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)',(self.app.key,op['target'],'readback_inconclusive',self.app.clock()))
+        c.execute("UPDATE cleaner_run_targets SET state='partial',reason='readback_inconclusive' WHERE run_id=? AND target=?",(op['run_id'],op['target']))
+        self.app._event(c,'readback_requires_review',dict(target=op['target'],reason=reason,attempt=job['attempts']),run_id=op['run_id'],operation_id=op['operation_id'])
+        return dict(operation_id=op['operation_id'],state='requires_review',reason=reason)
+
     def defer(self,job,reason,delay):
         with self.app.store.transaction() as c:
             row=self._job(c,job)
+            op=c.execute('SELECT * FROM cleaner_write_operations WHERE operation_id=?',(job['operation_id'],)).fetchone()
+            readback=dict(status='unavailable',reason=reason,attempt=row['attempts'],observed_at=self.app.clock())
+            if op['state']=='validation_rejected' and row['attempts']>=MAX_VALIDATION_READBACK_ATTEMPTS:
+                return self._require_review(c,op,row,reason,readback)
             c.execute("UPDATE cleaner_readback_jobs SET state='queued',worker_token=NULL,lease_expires_at=NULL,retry_not_before=? WHERE operation_id=?",(plus_seconds(self.app.clock(),int(max(delay,self._retry(row['attempts'])))+1),job['operation_id']))
-            c.execute("UPDATE cleaner_write_operations SET state='unresolved',updated_at=? WHERE operation_id=? AND state IN('dispatching','submitted','unresolved')",(self.app.clock(),job['operation_id']))
-            op=c.execute('SELECT run_id FROM cleaner_write_operations WHERE operation_id=?',(job['operation_id'],)).fetchone()
-            self.app._event(c,'readback_deferred',dict(reason=reason,attempt=row['attempts']),run_id=op[0],operation_id=job['operation_id'])
+            state=op['state'] if op['state'] in TYPED_OUTCOME_STATES else 'unresolved'
+            c.execute("UPDATE cleaner_write_operations SET state=?,evidence=?,updated_at=? WHERE operation_id=? AND state IN('dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error')",(state,canonical(self._evidence(op,readback)),self.app.clock(),job['operation_id']))
+            self.app._event(c,'readback_deferred',dict(reason=reason,attempt=row['attempts']),run_id=op['run_id'],operation_id=job['operation_id'])
+            return dict(operation_id=op['operation_id'],state=state,reason=reason)
 
     def record(self,job,minus,observed):
         app=self.app
@@ -210,14 +253,34 @@ class CleanerReadback:
         with app.store.transaction() as c:
             row=self._job(c,job)
             op=c.execute('SELECT * FROM cleaner_write_operations WHERE account=? AND operation_id=?',(app.key,job['operation_id'])).fetchone()
-            if op['state'] not in {'dispatching','submitted','unresolved'}:raise CleanerError('readback_not_applicable','Операция уже завершена')
+            if op['state'] not in READBACK_PENDING_STATES:raise CleanerError('readback_not_applicable','Операция уже завершена')
             if timestamp(observed)<timestamp(op['preflight_at']):raise CleanerError('readback_stale','Чтение старше допуска')
             before=set(json.loads(op['before_json']));expected=set(json.loads(op['expected_json']));added=set(json.loads(op['additions']));actual=set(minus)
             missing_old=sorted(before-actual);extra=sorted(actual-expected);present=sorted(added&actual);missing=sorted(added-actual)
-            evidence=dict(minus=sorted(actual),missing_old=missing_old,extra=extra,present=present,missing=missing,observed_at=observed)
+            readback_evidence=dict(status='read',minus=sorted(actual),missing_old=missing_old,extra=extra,present=present,missing=missing,observed_at=observed,attempt=row['attempts'])
+            validation_rejected=op['state']=='validation_rejected'
+            if validation_rejected and actual==before and not missing_old and not extra:
+                previously_confirmed=c.execute("SELECT count(*) FROM cleaner_write_items WHERE operation_id=? AND confirmed_at IS NOT NULL",(op['operation_id'],)).fetchone()[0]
+                if previously_confirmed:
+                    # A previous partial readback already made immutable registry
+                    # facts.  A later return to `before` cannot rewrite those
+                    # terminal confirmations into rejections.  Preserve them and
+                    # close this inconsistent observation for manual resolution.
+                    readback_evidence['previously_confirmed']=previously_confirmed
+                    return self._require_review(c,op,row,'validation_readback_reverted_after_partial',readback_evidence)
+                # WB explicitly rejected the full set.  Never credit additions
+                # from a later read as this operation's success or try a subset.
+                self.registry.reject_search_cluster_operation_in_transaction(c,operation_id=op['operation_id'],observed_at=observed,evidence=readback_evidence)
+                c.execute("UPDATE cleaner_write_items SET state='rejected' WHERE operation_id=?",(op['operation_id'],))
+                c.execute('INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)',(app.key,op['target'],'known_validation_rejected',app.clock()))
+                c.execute("UPDATE cleaner_run_targets SET state='partial',reason='known_validation_rejected' WHERE run_id=? AND target=?",(op['run_id'],op['target']))
+                c.execute("UPDATE cleaner_write_operations SET state='rejected',updated_at=?,evidence=? WHERE operation_id=?",(app.clock(),canonical(self._evidence(op,readback_evidence)),op['operation_id']))
+                c.execute("UPDATE cleaner_readback_jobs SET state='done',worker_token=NULL,lease_expires_at=NULL,retry_not_before=NULL WHERE operation_id=?",(op['operation_id'],))
+                app._event(c,'write_rejected',dict(target=op['target'],reason='known_validation_rejected'),run_id=op['run_id'],operation_id=op['operation_id'])
+                return dict(operation_id=op['operation_id'],state='rejected',confirmed=0,newly_confirmed=0,late=False,missing_old=missing_old,extra=extra)
             run=c.execute('SELECT * FROM cleaner_runs WHERE run_id=?',(op['run_id'],)).fetchone();late=bool(run['scan_finished_at'])
             previous={r[0] for r in c.execute("SELECT query_hash FROM cleaner_write_items WHERE operation_id=? AND confirmed_at IS NOT NULL",(op['operation_id'],))}
-            facts=self.registry.confirm_search_cluster_items_in_transaction(c,operation_id=op['operation_id'],present_queries=present,observed_at=observed,before_at=op['preflight_at'],evidence=evidence)
+            facts=self.registry.confirm_search_cluster_items_in_transaction(c,operation_id=op['operation_id'],present_queries=present,observed_at=observed,before_at=op['preflight_at'],evidence=readback_evidence)
             newly=set(facts)-previous
             for qh in facts:
                 c.execute("UPDATE cleaner_write_items SET state='confirmed',confirmed_at=coalesce(confirmed_at,?) WHERE operation_id=? AND query_hash=?",(observed,op['operation_id'],qh))
@@ -225,12 +288,18 @@ class CleanerReadback:
             if missing_old or extra:
                 c.execute('INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)',(app.key,op['target'],'readback_drift',app.clock()))
             complete=actual==expected and not (missing_old or extra)
-            state='confirmed' if complete else 'unresolved'
-            c.execute('UPDATE cleaner_write_operations SET state=?,updated_at=?,evidence=? WHERE operation_id=?',(state,app.clock(),canonical(evidence),op['operation_id']))
+            if validation_rejected and not complete:
+                # A 400 remains diagnostic evidence, but a readback that differs
+                # from before has real state to reconcile and must retain the
+                # normal facts/late-confirmation path.
+                c.execute('INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)',(app.key,op['target'],'validation_readback_partial',app.clock()))
+                c.execute("UPDATE cleaner_run_targets SET state='partial',reason='validation_readback_partial' WHERE run_id=? AND target=?",(op['run_id'],op['target']))
+            state='confirmed' if complete else (op['state'] if op['state'] in TYPED_OUTCOME_STATES else 'unresolved')
+            c.execute('UPDATE cleaner_write_operations SET state=?,updated_at=?,evidence=? WHERE operation_id=?',(state,app.clock(),canonical(self._evidence(op,readback_evidence)),op['operation_id']))
             c.execute("UPDATE cleaner_readback_jobs SET state=?,worker_token=NULL,lease_expires_at=NULL,retry_not_before=? WHERE operation_id=?",('done' if complete else 'queued',None if complete else plus_seconds(app.clock(),self._retry(row['attempts'])),op['operation_id']))
             source=json.loads(op['versions'])['source'];counts=dict(confirmed_automatic=len(newly) if source=='automatic' else 0,confirmed_manual=len(newly) if source=='owner_decision' else 0)
             app._event(c,'late_confirmation' if late else 'readback_result',dict(target=op['target'],state=state,late=late,**counts,missing=len(missing),missing_old=len(missing_old),extra=len(extra)),run_id=op['run_id'],operation_id=op['operation_id'])
             if complete:
-                unsettled=c.execute("SELECT 1 FROM cleaner_write_operations WHERE run_id=? AND state IN('prepared','dispatching','submitted','unresolved')",(op['run_id'],)).fetchone()
+                unsettled=c.execute("SELECT 1 FROM cleaner_write_operations WHERE run_id=? AND state IN('prepared','dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error','requires_review')",(op['run_id'],)).fetchone()
                 if not unsettled and late:c.execute('UPDATE cleaner_runs SET settled_at=coalesce(settled_at,?) WHERE run_id=?',(app.clock(),op['run_id']))
             return dict(operation_id=op['operation_id'],state=state,confirmed=len(present),newly_confirmed=len(newly),late=late,missing_old=missing_old,extra=extra)

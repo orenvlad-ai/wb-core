@@ -74,6 +74,133 @@ class WriteTests(unittest.TestCase):
                 self.assertEqual(len(f.fake.writes),1);self.assertEqual(f.count('change_registry_facts'),0)
                 self.assertEqual(f.rows('cleaner_write_operations')[0]['dispatch_count'],1)
 
+    def test_validation_400_keeps_receipt_readback_and_holds_only_target(self):
+        with fixture() as f:
+            f.fake.targets[12]=copy.deepcopy(f.fake.targets[11]);f.fake.targets[12]['minus']=[]
+            f.fake.write_modes[11]='400_validation';f.start()
+            with f.worker() as (worker,_,__):result=worker.tick()
+            operations={r['target']:r for r in f.rows('cleaner_write_operations')}
+            rejected=operations['11:101'];confirmed=operations['12:101']
+            receipt=json.loads(rejected['evidence'])
+            self.assertEqual(rejected['state'],'rejected');self.assertEqual(confirmed['state'],'confirmed')
+            self.assertEqual(rejected['dispatch_count'],1);self.assertEqual(receipt['receipt']['request_id'],'synthetic-json-receipt')
+            self.assertEqual(receipt['receipt']['error'],'validation_rejected');self.assertEqual(receipt['readback']['status'],'read')
+            self.assertEqual(f.rows('cleaner_readback_jobs')[0]['state'],'done');self.assertEqual(f.app.summary(OWNER)['rejected_item_count'],2)
+            self.assertEqual(result['state'],'partial');self.assertEqual(f.count('change_registry_facts'),2)
+            with f.store.registry.session('operational',mode='ro',operation='validation_reject_check') as c:
+                terminal=[r[0] for r in c.execute("""SELECT e.state FROM change_registry_attempt_events e
+                    JOIN change_registry_items i ON i.change_item_id=e.change_item_id
+                    WHERE e.sequence_no=3 AND i.operation_id=? ORDER BY e.change_item_id""",(rejected['operation_id'],))]
+            self.assertEqual(terminal,['rejected','rejected'])
+            self.assertEqual(len(f.fake.writes),2);f.clock.advance(400);f.start()
+            with f.worker() as (worker,_,__):worker.tick()
+            self.assertEqual(len(f.fake.writes),2)
+
+    def test_validation_400_readback_remains_source_of_truth_for_expected_and_partial(self):
+        for mode,expected_state,facts,hold in [('normal','confirmed',2,0),('partial','validation_rejected',1,1)]:
+            with self.subTest(mode=mode),fixture() as f:
+                original=f.fake.response;f.fake.mode=mode
+                def response(method,path,body):
+                    status,value=original(method,path,body)
+                    if path.endswith('/set-minus'):
+                        return 400,{'error':"norm_query 'legacy invalid phrase' is not valid for nm 101"}
+                    return status,value
+                f.fake.response=response;f.start()
+                with f.worker() as (worker,_,__):worker.tick()
+                self.assertEqual(f.rows('cleaner_write_operations')[0]['state'],expected_state)
+                self.assertEqual(f.count('change_registry_facts'),facts)
+                self.assertEqual(f.count('cleaner_target_holds'),hold)
+
+    def test_validation_400_partial_then_before_preserves_fact_and_requires_review(self):
+        with fixture() as f:
+            before=list(f.fake.targets[11]['minus']);original=f.fake.response;f.fake.mode='partial'
+            def response(method,path,body):
+                status,value=original(method,path,body)
+                if path.endswith('/set-minus'):
+                    return 400,{'error':"norm_query 'legacy invalid phrase' is not valid for nm 101"}
+                return status,value
+            f.fake.response=response;f.start()
+            with f.worker() as (worker,_,readback):
+                worker.tick()
+                self.assertEqual(f.count('change_registry_facts'),1)
+                self.assertEqual(f.rows('cleaner_write_operations')[0]['state'],'validation_rejected')
+                f.fake.targets[11]['minus']=before
+                f.clock.advance(30)
+                result=readback.tick()
+            operation=f.rows('cleaner_write_operations')[0]
+            self.assertEqual(result['state'],'requires_review')
+            self.assertEqual(operation['state'],'requires_review')
+            self.assertEqual(f.rows('cleaner_readback_jobs')[0]['state'],'done')
+            self.assertEqual(f.count('change_registry_facts'),1)
+            self.assertEqual(len(f.fake.writes),1)
+            self.assertTrue(f.count('cleaner_target_holds'))
+            with f.store.registry.session('operational',mode='ro',operation='validation_partial_before_check') as c:
+                terminal=[r[0] for r in c.execute("""SELECT e.state FROM change_registry_attempt_events e
+                    JOIN change_registry_items i ON i.change_item_id=e.change_item_id
+                    WHERE e.sequence_no=3 AND i.operation_id=? ORDER BY e.change_item_id""",(operation['operation_id'],))]
+            self.assertEqual(terminal,['confirmed'])
+
+    def test_typed_outcomes_and_bounded_redacted_error_receipt(self):
+        expected={'429':'rate_limited','500':'transport_ambiguous','401':'unauthorized','403':'forbidden','302':'http_error'}
+        for mode,state in expected.items():
+            with self.subTest(mode=mode),fixture() as f:
+                f.fake.mode=mode;f.start()
+                with f.worker() as (worker,_,__):worker.tick()
+                operation=f.rows('cleaner_write_operations')[0]
+                self.assertEqual(operation['state'],state);self.assertEqual(operation['dispatch_count'],1)
+                self.assertEqual(len(f.fake.writes),1)
+        with fixture() as f:
+            f.fake.mode='malformed_large';f.start()
+            with f.worker() as (worker,_,__):worker.tick()
+            receipt=json.loads(f.rows('cleaner_write_operations')[0]['evidence'])['receipt']
+            self.assertEqual(receipt['status'],400);self.assertTrue(receipt['body_truncated'])
+            self.assertTrue(receipt['body_prefix_sha256']);self.assertNotIn('synthetic-secret-token',receipt['body_excerpt'])
+            self.assertLessEqual(len(receipt['body_excerpt']),2048)
+
+    def test_list_only_exclusion_is_not_reported_as_cleared(self):
+        with fixture() as f:
+            f.fake.targets[11]['active']=[Q1];f.fake.targets[11]['stats']=[];f.start()
+            with f.worker() as (worker,_,__):result=worker.tick()
+            self.assertEqual(len(f.fake.writes),0);self.assertEqual(result['summary']['confirmed_automatic'],0)
+            self.assertEqual(result['summary']['excluded_not_executed'],1)
+            candidates=f.app.pending_candidates(result['run_id'])
+            self.assertEqual(candidates[0]['execution_eligibility'],'list_only')
+            summary=f.app.summary(OWNER)
+            self.assertEqual(summary['execution_blocked_count'],1);self.assertEqual(summary['rejected_item_count'],0)
+
+    def test_list_only_does_not_block_statistics_fresh_addition_in_same_target(self):
+        with fixture() as f:
+            before=list(f.fake.targets[11]['minus'])
+            f.fake.targets[11]['active']=[Q1];f.fake.targets[11]['stats']=[Q2];f.start()
+            with f.worker() as (worker,_,__):result=worker.tick()
+            self.assertEqual(len(f.fake.writes),1)
+            self.assertEqual(f.fake.writes[0]['norm_queries'],sorted(before+[Q2]))
+            self.assertEqual(result['summary']['confirmed_automatic'],1)
+            self.assertEqual(result['summary']['excluded_not_executed'],1)
+            self.assertEqual(f.app.summary(OWNER)['execution_blocked_count'],1)
+
+    def test_statistics_window_is_seven_calendar_days(self):
+        with fixture() as f:
+            target=f.source.catalog()[0][0];f.source.snapshot(target)
+            stats=next(body for _,path,body in f.fake.calls if path.endswith('/normquery/stats'))
+            self.assertEqual(stats['from'],'2026-09-05');self.assertEqual(stats['to'],'2026-09-11')
+
+    def test_validation_readback_stops_after_three_unavailable_attempts(self):
+        with fixture() as f:
+            def hook(stage,operation):
+                if stage=='after_receipt':f.fake.codes['/adv/v0/normquery/get-minus']=500
+            f.fake.mode='400_validation'
+            f.start()
+            with f.worker(hook=hook) as (worker,_,readback):worker.tick()
+            result=None
+            for _ in range(3):
+                f.clock.advance(30);result=readback.tick()
+                if result and result.get('state')=='requires_review':break
+            operation=f.rows('cleaner_write_operations')[0]
+            self.assertEqual(result['state'],'requires_review');self.assertEqual(operation['state'],'requires_review')
+            self.assertEqual(f.rows('cleaner_readback_jobs')[0]['state'],'done');self.assertEqual(len(f.fake.writes),1)
+            self.assertEqual(f.app.summary(OWNER)['requires_review_count'],1)
+
     def test_stale_guard_zero_dispatch(self):
         for mutation in ['disable','settings','profile','rules','override','lease','generation','preflight_age','candidate','maintenance']:
             with self.subTest(mutation=mutation),fixture() as f:

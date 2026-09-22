@@ -1224,6 +1224,10 @@ class ChangeRegistryRepository:
         from packages.application.change_registry_search_cluster import confirm_in_transaction
         return confirm_in_transaction(conn, **kwargs)
 
+    def reject_search_cluster_operation_in_transaction(self, conn, **kwargs):
+        from packages.application.change_registry_search_cluster import reject_in_transaction
+        return reject_in_transaction(conn, **kwargs)
+
     def prepare_writer_operation(
         self,
         *,

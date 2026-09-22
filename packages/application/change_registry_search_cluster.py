@@ -137,3 +137,22 @@ def confirm_in_transaction(conn, *, operation_id, present_queries, observed_at, 
                 observed_at=now,evidence_json=canonical_json(evidence),evidence_digest=evidence_digest))
         result[item['query_hash']]=fact
     return result
+
+
+def reject_in_transaction(conn, *, operation_id, observed_at, evidence):
+    """Close an explicitly rejected full set without manufacturing facts."""
+    from packages.application.change_registry import canonical_digest, canonical_json
+    if not conn.in_transaction: raise RuntimeError('atomic caller transaction required')
+    now=_time(observed_at);evidence_digest=canonical_digest(evidence)
+    for item in conn.execute("SELECT * FROM change_registry_items WHERE operation_id=? AND target_kind='search_cluster'",(operation_id,)).fetchall():
+        attempt=_id('crca_',item['change_item_id'])
+        existing=conn.execute('SELECT state FROM change_registry_attempt_events WHERE attempt_id=? AND sequence_no=3',(attempt,)).fetchone()
+        if existing is None:
+            _insert(conn,'change_registry_attempt_events',dict(attempt_event_id=_id('crce_',attempt,3),attempt_id=attempt,
+                change_item_id=item['change_item_id'],sequence_no=3,state='rejected',occurred_at=now,native_event_key='cleaner_validation_rejected'))
+        elif existing['state']!='rejected':
+            raise ValueError('search cluster operation already has a different terminal receipt')
+        eid=_id('crcb_',item['change_item_id'],now,evidence_digest)
+        if not conn.execute(f'SELECT 1 FROM {EVIDENCE_TABLE} WHERE evidence_id=?',(eid,)).fetchone():
+            _insert(conn,EVIDENCE_TABLE,dict(evidence_id=eid,change_item_id=item['change_item_id'],fact_id=None,
+                observed_at=now,evidence_json=canonical_json(evidence),evidence_digest=evidence_digest))

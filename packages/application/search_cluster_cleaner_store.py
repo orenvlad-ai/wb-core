@@ -11,7 +11,7 @@ from typing import Iterator
 
 from packages.application.storage_registry import StoreRegistry
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleaner_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
 INSERT OR IGNORE INTO cleaner_schema VALUES(1,1);
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS cleaner_write_operations(
  FOREIGN KEY(run_id) REFERENCES cleaner_runs(run_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cleaner_unresolved_target ON cleaner_write_operations(account,target)
- WHERE state IN('prepared','dispatching','submitted','unresolved');
+ WHERE state IN('prepared','dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error','requires_review');
 CREATE TABLE IF NOT EXISTS cleaner_write_items(
  operation_id TEXT NOT NULL,query_hash TEXT NOT NULL,query TEXT NOT NULL,decision_id TEXT NOT NULL,
  override_revision INTEGER,state TEXT NOT NULL,confirmed_at TEXT,registry_item_id TEXT,
@@ -141,7 +141,17 @@ def install_schema(conn: sqlite3.Connection) -> None:
     for table in ('cleaner_settings','cleaner_runs'):
         if 'transport_enabled' not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
             conn.execute(f'ALTER TABLE {table} ADD COLUMN transport_enabled INTEGER NOT NULL DEFAULT 0 CHECK(transport_enabled IN(0,1))')
-    if conn.execute("SELECT version FROM cleaner_schema WHERE singleton=1").fetchone()[0] != SCHEMA_VERSION:
+    version=conn.execute("SELECT version FROM cleaner_schema WHERE singleton=1").fetchone()[0]
+    if version==1:
+        # Existing D installations have no new columns, but their partial index
+        # must also block a second submit while a typed WB outcome awaits
+        # readback or owner review.
+        conn.execute("DROP INDEX cleaner_unresolved_target")
+        conn.execute("""CREATE UNIQUE INDEX cleaner_unresolved_target ON cleaner_write_operations(account,target)
+          WHERE state IN('prepared','dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error','requires_review')""")
+        conn.execute("UPDATE cleaner_schema SET version=? WHERE singleton=1",(SCHEMA_VERSION,))
+        version=SCHEMA_VERSION
+    if version != SCHEMA_VERSION:
         raise RuntimeError("unsupported cleaner schema version")
     for table in IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):

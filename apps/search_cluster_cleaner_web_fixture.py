@@ -74,6 +74,14 @@ def seed_cleaner(runtime_dir: Path, mode='normal'):
         with cleaner.store.transaction() as c:
             c.execute("""INSERT INTO cleaner_write_operations(operation_id,account,target,run_id,state,before_json,expected_json,additions,candidate_digest,versions,dispatch_count,created_at,updated_at)
               VALUES('fixture-unresolved',?, '10101:101',?,'unresolved','[]','[]','[]','synthetic','{}',1,?,?)""", (cleaner.key, run_id, FIXTURE_NOW, FIXTURE_NOW))
+    if mode == 'rejected':
+        with cleaner.store.transaction() as c:
+            c.execute("UPDATE cleaner_settings SET transport_enabled=1 WHERE account=?",(cleaner.key,))
+            decision=c.execute("SELECT decision_id,query_hash,query FROM cleaner_auto_decisions WHERE account=? ORDER BY created_at LIMIT 1",(cleaner.key,)).fetchone()
+            c.execute("""INSERT INTO cleaner_write_operations(operation_id,account,target,run_id,state,before_json,expected_json,additions,candidate_digest,versions,dispatch_count,created_at,updated_at)
+              VALUES('fixture-rejected',?, '10101:101',?,'rejected','[]','[]','[]','synthetic','{}',1,?,?)""", (cleaner.key, run_id, FIXTURE_NOW, FIXTURE_NOW))
+            c.execute("INSERT INTO cleaner_write_items(operation_id,query_hash,query,decision_id,override_revision,state) VALUES('fixture-rejected',?,?,?,?, 'rejected')",(decision['query_hash'],decision['query'],decision['decision_id'],None))
+            c.execute("INSERT INTO cleaner_target_holds VALUES(?,?,?,?)",(cleaner.key,'10101:101','known_validation_rejected',FIXTURE_NOW))
     return cleaner
 
 
@@ -171,7 +179,7 @@ def running_fixture(mode='normal', port=0):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--serve',action='store_true',required=True);parser.add_argument('--mode',choices=['normal','empty','partial','failed','unresolved','unready','profile-required','confirmed'],default='normal');parser.add_argument('--port',type=int,default=0);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--serve',action='store_true',required=True);parser.add_argument('--mode',choices=['normal','empty','partial','failed','unresolved','rejected','unready','profile-required','confirmed'],default='normal');parser.add_argument('--port',type=int,default=0);args=parser.parse_args()
     with running_fixture(args.mode,args.port) as fixture:
         print(json.dumps(dict(url=fixture.url,username='owner',password=PASSWORD,synthetic=True),ensure_ascii=False),flush=True)
         try:

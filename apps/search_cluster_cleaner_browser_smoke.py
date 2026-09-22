@@ -98,7 +98,7 @@ def run(output:Path):
             page.goto(f.base_url+f.url.split(f.base_url)[1].split('?')[0]+'?tab=ads',wait_until='domcontentloaded');expect(page.locator('[data-ads-panel]')).to_be_visible();expect(page.locator('[data-keyword-cleaner]')).to_be_hidden();check('old_ads_deep_link_opens_bids')
             check('no_browser_js_errors',not errors);page.close()
         # Each variant is rendered by the real app from isolated synthetic SQL state.
-        for mode,status in [('empty','Выполнено'),('partial','Выполнено частично'),('failed','Не выполнено'),('unresolved','Проверяем результат WB'),('profile-required','Выполнено частично')]:
+        for mode,status in [('empty','Выполнено'),('partial','Выполнено частично'),('failed','Не выполнено'),('unresolved','Проверяем результат WB'),('rejected','Не выполнено'),('profile-required','Выполнено частично')]:
             with running_fixture(mode) as f:
                 page=browser.new_page(viewport={'width':1280,'height':960})
                 if mode=='failed':
@@ -106,7 +106,7 @@ def run(output:Path):
                     page.goto(f.url,wait_until='domcontentloaded')
                 else: browser_login(page,f)
                 expect(page.locator('[data-kc-status]')).to_have_text(status)
-                if mode in {'partial','failed','unresolved'}:check(mode+'_not_success',page.locator('[data-kc-status]').get_attribute('data-tone')!='success')
+                if mode in {'partial','failed','unresolved','rejected'}:check(mode+'_not_success',page.locator('[data-kc-status]').get_attribute('data-tone')!='success')
                 if mode=='empty':expect(page.locator('[data-kc-reviews]')).to_contain_text('Все вопросы разобраны');check('empty_review_state')
                 if mode=='failed':check('missing_counts_are_not_zero',page.locator('[data-kc-checked]').inner_text()=='—')
                 if mode=='unresolved':
@@ -115,6 +115,10 @@ def run(output:Path):
                     page.locator('[data-kc-refresh]').click();expect(page.locator('[data-kc-enabled]')).to_be_enabled();page.locator('[data-kc-enabled]').click();expect(page.locator('[data-kc-enabled-label]')).to_have_text('Останавливается');check('disable_inflight_stopping')
                     with f.cleaner.store.transaction() as c:c.execute("UPDATE cleaner_write_operations SET state='unresolved' WHERE operation_id='fixture-unresolved'")
                     page.locator('[data-kc-refresh]').click();expect(page.locator('[data-kc-enabled-label]')).to_have_text('Авточистка выключена');expect(page.locator('[data-kc-status]')).to_have_text('Проверяем результат WB');check('disabled_unresolved_not_disguised')
+                if mode=='rejected':
+                    expect(page.locator('[data-kc-alerts]')).to_contain_text('Не выполнено: WB не принял исключение. Ключей: 1.')
+                    expect(page.locator('[data-kc-excluded]')).to_have_text('0')
+                    check('rejected_is_not_confirmed_and_reason_visible')
                 if mode=='profile-required':
                     expect(page.locator('[data-kc-alerts]')).to_contain_text('Нужна настройка товаров');page.locator('[data-kc-profiles-open]').click();expect(page.locator('[data-kc-profiles]')).to_contain_text('Товар WB 102');check('unknown_profile_visible_setting')
                 filename=mode+'.png';page.screenshot(path=str(output/filename),full_page=True);screens.append(filename);page.close()

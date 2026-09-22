@@ -36,7 +36,7 @@ class Clock:
 class FakeWB:
     def __init__(self):
         self.targets={11:dict(nm=101,stats=[Q1,Q2],active=[],minus=[' Старое исключение  ','OLD'],archived=[],bid='manual',status=9,payment='cpm',members=[101])}
-        self.calls=[];self.writes=[];self.mode='normal';self.codes={};self.slow=False;self.on_call=None
+        self.calls=[];self.writes=[];self.mode='normal';self.write_modes={};self.codes={};self.slow=False;self.on_call=None
     def response(self,method,path,body):
         endpoint=urlparse(path).path;self.calls.append((method,endpoint,body))
         if self.on_call:self.on_call(endpoint,body)
@@ -47,12 +47,15 @@ class FakeWB:
             return 200,dict(adverts=[dict(id=i,bid_type=v['bid'],status=v['status'],settings=dict(payment_type=v['payment'],name='Synthetic target'),nm_settings=[dict(nm_id=n) for n in v['members']]) for i,v in self.targets.items() if i in ids])
         if endpoint.endswith('/set-minus'):
             self.writes.append(body);v=self.targets[body['advert_id']];before=list(v['minus']);new=body['norm_queries']
-            if self.mode=='normal':v['minus']=new
-            elif self.mode=='partial':v['minus']=before+[q for q in new if q not in before][:1]
-            elif self.mode=='missing_old':v['minus']=[q for q in new if q!=before[0]]
-            elif self.mode=='extra':v['minus']=new+['Чужая точная строка']
-            elif self.mode=='timeout':v['minus']=new;return 'disconnect',{}
-            elif self.mode in {'429','500','401','403','302'}:return int(self.mode),{}
+            mode=self.write_modes.get(body['advert_id'],self.mode)
+            if mode=='normal':v['minus']=new
+            elif mode=='partial':v['minus']=before+[q for q in new if q not in before][:1]
+            elif mode=='missing_old':v['minus']=[q for q in new if q!=before[0]]
+            elif mode=='extra':v['minus']=new+['Чужая точная строка']
+            elif mode=='timeout':v['minus']=new;return 'disconnect',{}
+            elif mode=='400_validation':return 400,{'error':"norm_query 'legacy invalid phrase' is not valid for nm 101",'request_id':'synthetic-json-receipt'}
+            elif mode=='malformed_large':return 400,(b'{"pad":"'+b'x'*2040+b'","authorization":"Bearer synthetic-secret-token","tail":"'+b'not-json-'*2000)
+            elif mode in {'429','500','401','403','302'}:return int(mode),{}
             return 200,{}
         pair=body['items'][0];aid=pair.get('advert_id',pair.get('advertId'));nm=pair.get('nm_id',pair.get('nmId'));v=self.targets[aid]
         if endpoint.endswith('/list'):return 200,dict(items=[dict(advertId=aid,nmId=nm,normQueries=dict(active=[q for q in v['active'] if q not in v['minus']],excluded=v['minus'],archived=v['archived']))])
@@ -71,10 +74,11 @@ class FakeWB:
                 body=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))) or b'null')
                 status,value=fake.response(self.command,self.path,body)
                 if status=='disconnect':self.connection.shutdown(socket.SHUT_RDWR);self.connection.close();return
-                payload=json.dumps(value,ensure_ascii=False).encode();self.send_response(status)
+                payload=value if isinstance(value,bytes) else json.dumps(value,ensure_ascii=False).encode();self.send_response(status)
                 self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(payload)))
                 if status==429:self.send_header('Retry-After','7')
                 if status==302:self.send_header('Location','/adv/v0/normquery/set-minus')
+                if self.path.endswith('/set-minus') and status!=400:self.send_header('X-Request-ID','synthetic-write-receipt')
                 self.end_headers()
                 try:
                     if fake.slow:

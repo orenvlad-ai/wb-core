@@ -5,6 +5,7 @@ server runtime and seller; the fixture constructor accepts only loopback URLs.
 """
 from __future__ import annotations
 import base64
+import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,17 @@ class WriteResponse:
     status: int | None
     retry_after: float = 0
     error: str = ''
+    request_id: str = ''
+    request_id_header: str = ''
+    body_prefix_sha256: str = ''
+    body_excerpt: str = ''
+    body_truncated: bool = False
+    body_capture_error: str = ''
+
+
+ERROR_BODY_LIMIT = 8192
+ERROR_BODY_EXCERPT_LIMIT = 2048
+STATS_WINDOW_DAYS = 7
 
 
 class AccountLimiter:
@@ -110,6 +122,31 @@ class CleanerWbSource:
             try:return max(0,(parsedate_to_datetime(raw)-datetime.now(timezone.utc)).total_seconds())
             except (ValueError,TypeError):return 60
 
+    @staticmethod
+    def _safe_request_id(candidate):
+        if isinstance(candidate,str) and len(candidate)<=200 and all(c.isalnum() or c in '._:-' for c in candidate):
+            return candidate
+        return ''
+
+    def _error_body(self,response):
+        """Capture a bounded, redacted diagnostic receipt for a rejected write."""
+        raw=response.read(ERROR_BODY_LIMIT+1)
+        truncated=len(raw)>ERROR_BODY_LIMIT
+        raw=raw[:ERROR_BODY_LIMIT]
+        text=raw.decode('utf-8','replace')
+        try: payload=json.loads(text)
+        except ValueError: payload={}
+        request_id=self._safe_request_id(payload.get('request_id',payload.get('requestId','')) if isinstance(payload,dict) else '')
+        # A response must never turn an authentication token into operational
+        # evidence.  Redact the exact runtime token first, then common bearer
+        # and JSON token shapes which can be echoed by a proxy.
+        if self.runtime.token:
+            text=text.replace(self.runtime.token,'[redacted]')
+        import re
+        text=re.sub(r'(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;"}]+',r'\1[redacted]',text)
+        text=re.sub(r'(?i)("(?:authorization|token|access_token|api[_-]?key)"\s*:\s*")(?:bearer\s+)?[^"]*',r'\1[redacted]',text)
+        return dict(request_id=request_id,body_prefix_sha256=hashlib.sha256(raw).hexdigest(),body_excerpt=text[:ERROR_BODY_EXCERPT_LIMIT],body_truncated=truncated)
+
     def _call(self,method,path,payload=None,*,deadline,write=False):
         if self._target_deadline is not None:deadline=min(deadline,self._target_deadline)
         if not write:self.limiter.wait(deadline,statistics=path.endswith("/normquery/stats"))
@@ -130,8 +167,19 @@ class CleanerWbSource:
             status=response.status;delay=self._retry_after(response.headers)
             if status==429:self.limiter.backoff(max(delay,1))
             if write:
-                # Response headers are only receipt evidence; body is irrelevant.
-                return WriteResponse(status,delay,'http_error' if status!=200 else '')
+                if status==200:return WriteResponse(status,delay)
+                request_id_header=self._safe_request_id(response.headers.get('X-Request-ID',response.headers.get('Request-ID','')))
+                try:receipt=self._error_body(response)
+                except (TimeoutError,ConnectionError,OSError,http.client.HTTPException):
+                    # The HTTP status is still durable receipt evidence.  A body
+                    # read failure must not erase it or suppress independent
+                    # get-minus readback.
+                    return WriteResponse(status,delay,'http_error',request_id_header=request_id_header,body_capture_error='body_capture_failed')
+                body=receipt['body_excerpt'].casefold()
+                validation=(status==400 and 'norm_query' in body
+                            and ('not valid' in body or 'invalid' in body or 'невалид' in body))
+                return WriteResponse(status,delay,'validation_rejected' if validation else 'http_error',
+                    request_id=receipt.pop('request_id'),request_id_header=request_id_header,**receipt)
             if status!=200:
                 raise WbReadError({401:'unauthorized',403:'forbidden',429:'rate_limited'}.get(status,'http_error'),status,delay)
             raw=response.read(16*1024*1024+1)
@@ -202,7 +250,7 @@ class CleanerWbSource:
         pair={'advert_id':target.advert_id,'nm_id':target.nm_id}
         listing=self._pair(self._call('POST','/adv/v0/normquery/list',{'items':[{'advertId':target.advert_id,'nmId':target.nm_id}]},deadline=deadline),'items',target,camel=True).get('normQueries');times['list']=self.clock()
         day=datetime.fromisoformat(self.clock().replace('Z','+00:00')).date()
-        stats=self._pair(self._call('POST','/adv/v0/normquery/stats',{'from':(day-timedelta(days=1)).isoformat(),'to':day.isoformat(),'items':[pair]},deadline=deadline),'stats',target).get('stats');times['statistics']=self.clock()
+        stats=self._pair(self._call('POST','/adv/v0/normquery/stats',{'from':(day-timedelta(days=STATS_WINDOW_DAYS-1)).isoformat(),'to':day.isoformat(),'items':[pair]},deadline=deadline),'stats',target).get('stats');times['statistics']=self.clock()
         if not isinstance(stats,list) or any(not isinstance(v,dict) or not isinstance(v.get('norm_query'),str) for v in stats):raise WbReadError('statistics_malformed')
         minus=self._pair(self._call('POST','/adv/v0/normquery/get-minus',{'items':[pair]},deadline=deadline),'items',target).get('norm_queries');times['minus']=self.clock()
         return union_snapshot(target,list_entry=listing,stats_queries=[v['norm_query'] for v in stats],minus_queries=minus,observed_at=self.clock(),source_times=times)

@@ -249,7 +249,9 @@ Playwright с Chromium; для HTTP smoke достаточно зависимо�
 excluded/archived имеют приоритет.
 
 На аккаунт общий интервал normquery не меньше 0.5 секунды, для stats отдельный
-интервал не меньше 6.1 секунды. Чтение одной snapshot — три вызова list/stats/minus.
+интервал не меньше 6.1 секунды. Статистика берётся за семь календарных дней,
+включая текущий; она сужает допуск новой строки к записи, но не доказывает, что
+WB примет полный список. Чтение одной snapshot — три вызова list/stats/minus.
 Общий бюджет обработки цели 120 секунд охватывает начальное чтение, fresh
 preflight, ожидание лимита и CAS; отдельный HTTP-вызов ограничен 20 секундами или
 меньшим runtime timeout. Абсолютный receive deadline проверяется при каждом recv,
@@ -289,8 +291,15 @@ price/bid/campaign dataclass identities, значения, ключи и сер�
 state. Связь item(query A)→fact(query B) запрещена также SQL-триггером.
 
 Readback использует независимые durable jobs и lease, работает после выключения
-и не занимает FIFO-слот scan/manual_apply. В одном окне до трёх чтений с шагом
-20 секунд, затем отсрочка 300 секунд; Retry-After может увеличить её. Каждая
+и не занимает FIFO-слот scan/manual_apply. Для обычной ambiguous/partial
+операции поздняя сверка сохраняет прежнее durable продолжение без нового POST.
+Только для уже известного validation HTTP 400 после трёх недоступных readback
+операция получает «требует разбора» и target hold, без бесконечного polling.
+Для non-200 writer сохраняет
+ограниченную redacted receipt (status, request id при наличии, hash и excerpt)
+отдельно от readback. Распознанный validation HTTP 400 после обязательного
+readback становится terminal rejected + target hold; legacy `before` не
+обрезается и новый POST не создаётся. Каждая
 появившаяся новая фраза получает один fact; следующие чтения добавляют evidence
 к тому же fact. Совпадение полного списка закрывает исходную операцию. Missing
 old/extra ставит target hold; корректирующей записи нет. Неопределённая цель A
