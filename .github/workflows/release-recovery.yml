@@ -1,0 +1,80 @@
+name: Post-merge Release Recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Failed canonical Release Runner run ID
+        required: true
+        type: string
+      mode:
+        description: Read-only preview or exact reviewed apply
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - apply
+      preview_fingerprint:
+        description: Exact fingerprint printed by a prior preview; required for apply
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  recover:
+    name: Proven post-merge deploy-tail recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: wb-core-production-release
+      cancel-in-progress: false
+    steps:
+      - name: Checkout trusted main recovery runner
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install command-construction dependencies
+        run: >-
+          python3 -m pip install --disable-pip-version-check
+          openpyxl==3.1.5 xlrd==2.0.1 playwright==1.58.0
+          pypdf==6.4.1 reportlab==4.4.5
+
+      - name: Validate evidence and preview or continue only the proven tail
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WB_CORE_DEPLOY_SSH_KEY: ${{ secrets.WB_CORE_DEPLOY_SSH_KEY }}
+          WB_CORE_DEPLOY_KNOWN_HOSTS: ${{ secrets.WB_CORE_DEPLOY_KNOWN_HOSTS }}
+          RECOVERY_MODE: ${{ inputs.mode }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          PREVIEW_FINGERPRINT: ${{ inputs.preview_fingerprint }}
+        run: |
+          set -eu
+          args=(
+            "$RECOVERY_MODE"
+            --release-run-id "$RELEASE_RUN_ID"
+            --output "$RUNNER_TEMP/recovery-receipt.json"
+          )
+          if [ "$RECOVERY_MODE" = apply ]; then
+            test -n "$PREVIEW_FINGERPRINT"
+            args+=(--preview-fingerprint "$PREVIEW_FINGERPRINT")
+          fi
+          python3 ci/post_merge_release_recovery.py "${args[@]}"
+
+      - name: Upload immutable recovery preview or receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-recovery-${{ inputs.release_run_id }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-receipt.json
+          if-no-files-found: warn
+          retention-days: 90
