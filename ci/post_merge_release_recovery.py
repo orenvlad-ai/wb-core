@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import textwrap
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -52,6 +53,24 @@ FINANCE_FLAGS = (
     "FINANCE_LIQUIDITY_ENABLED",
     "FINANCE_LIQUIDITY_READ_ENABLED",
     "FINANCE_LIQUIDITY_WRITE_ENABLED",
+)
+REMOTE_DIAGNOSTIC_SCHEMA = "wb-core.release-recovery-remote-diagnostic/v1"
+REMOTE_DIAGNOSTIC_STAGES = frozenset(
+    {"metadata", "services", "health", "process-env", "source-env", "finance", "nginx", "ss"}
+)
+REMOTE_DIAGNOSTIC_CATEGORIES = frozenset(
+    {
+        "system-exit",
+        "subprocess",
+        "http",
+        "url",
+        "json",
+        "file-not-found",
+        "permission",
+        "timeout",
+        "os",
+        "generic",
+    }
 )
 
 
@@ -386,6 +405,62 @@ def _remote_python_command(target: Any) -> list[str]:
     return [*hosted._remote_shell_command(target, "python3 -")]
 
 
+def _remote_failure_reason(returncode: int, stderr: str) -> str:
+    fallback = f"remote-readback-failed-{returncode}"
+    candidate = stderr.strip()
+    if not candidate or len(candidate) > 512 or "\n" in candidate:
+        return fallback
+    try:
+        diagnostic = json.loads(candidate)
+    except json.JSONDecodeError:
+        return fallback
+    if not isinstance(diagnostic, dict):
+        return fallback
+    required = {"schema", "stage", "exception_category"}
+    numeric_fields = {"guard_status", "subprocess_returncode", "http_status", "errno"}
+    if not required <= diagnostic.keys() or not diagnostic.keys() <= required | numeric_fields:
+        return fallback
+    if diagnostic["schema"] != REMOTE_DIAGNOSTIC_SCHEMA:
+        return fallback
+    stage = diagnostic["stage"]
+    exception_category = diagnostic["exception_category"]
+    if not isinstance(stage, str) or stage not in REMOTE_DIAGNOSTIC_STAGES:
+        return fallback
+    if not isinstance(exception_category, str) or exception_category not in REMOTE_DIAGNOSTIC_CATEGORIES:
+        return fallback
+    optional = [name for name in numeric_fields if name in diagnostic]
+    if len(optional) > 1:
+        return fallback
+    suffix = ""
+    if optional:
+        name = optional[0]
+        value = diagnostic[name]
+        bounds = {
+            "guard_status": (1, 255),
+            "subprocess_returncode": (-255, 255),
+            "http_status": (100, 599),
+            "errno": (1, 4095),
+        }
+        if isinstance(value, bool) or not isinstance(value, int) or not bounds[name][0] <= value <= bounds[name][1]:
+            return fallback
+        expected_field = {
+            "system-exit": "guard_status",
+            "subprocess": "subprocess_returncode",
+            "http": "http_status",
+            "os": "errno",
+            "file-not-found": "errno",
+            "permission": "errno",
+            "timeout": "errno",
+        }.get(exception_category)
+        if name != expected_field:
+            return fallback
+        suffix = f"-{name}-{value}"
+    canonical = json.dumps(diagnostic, sort_keys=True, separators=(",", ":"))
+    if candidate != canonical:
+        return fallback
+    return f"{fallback}-stage-{stage}-{exception_category}{suffix}"
+
+
 def _run_remote_json(target: Any, script: str) -> dict[str, Any]:
     result = subprocess.run(
         _remote_python_command(target),
@@ -396,7 +471,7 @@ def _run_remote_json(target: Any, script: str) -> dict[str, Any]:
         check=False,
     )
     if result.returncode != 0:
-        raise RecoveryError(f"remote-readback-failed-{result.returncode}")
+        raise RecoveryError(_remote_failure_reason(result.returncode, result.stderr))
     try:
         value = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -453,36 +528,37 @@ def _prestate_script(target: Any, merge: str) -> str:
         "finance_flags": list(FINANCE_FLAGS),
     }
     finance_validator = _finance_off_validator_source()
-    return f"""
-import hashlib, json, os, subprocess, urllib.request
-from pathlib import Path
-{finance_validator}
-e = {expected!r}
+    body = f"""
 root = Path(e['target_dir'])
 runtime_sha = (root / '.wb-core-runtime-sha').read_text(encoding='utf-8').strip()
 metadata_raw = (root / '.wb-core-deploy.json').read_bytes()
 metadata = json.loads(metadata_raw)
 if runtime_sha != e['merge'] or metadata.get('commit') != e['merge']:
     raise SystemExit(20)
+stage = 'services'
 pid = subprocess.run(['systemctl','show','--property','MainPID','--value',e['service']], check=True, text=True, capture_output=True).stdout.strip()
 if not pid.isdigit() or int(pid) <= 0:
     raise SystemExit(21)
 for service in e['services']:
     subprocess.run(['systemctl','is-active','--quiet',service], check=True)
+stage = 'health'
 health = {{}}
 for url in e['urls']:
     with urllib.request.urlopen(url, timeout=10) as response:
         health[url] = response.status
         if response.status != 200: raise SystemExit(22)
+stage = 'process-env'
 proc_env = {{}}
 for item in Path('/proc/' + pid + '/environ').read_bytes().split(b'\\0'):
     if b'=' in item:
         key, value = item.split(b'=', 1); proc_env[key.decode(errors='replace')] = value.decode(errors='replace')
+stage = 'source-env'
 source_env = {{}}
 for line in Path(e['environment_file']).read_text(encoding='utf-8').splitlines():
     line=line.strip()
     if line and not line.startswith('#') and '=' in line:
         key,value=line.split('=',1); source_env[key.strip()]=value.strip().strip('"\\'')
+stage = 'finance'
 flags = {{name: {{'process': proc_env.get(name), 'source': source_env.get(name)}} for name in e['finance_flags']}}
 unit = subprocess.run(['systemctl','show','--property=LoadState','--property=ActiveState','--property=SubState',e['finance_unit']], text=True, capture_output=True)
 require_finance_off(flags, unit.returncode, unit.stdout)
@@ -490,9 +566,11 @@ if Path(e['finance_store']).exists():
     raise SystemExit(25)
 if Path(e['finance_dir']).exists():
     raise SystemExit(28)
+stage = 'nginx'
 nginx = subprocess.run(['nginx','-T'], text=True, capture_output=True)
 if nginx.returncode != 0 or '/v1/finance/' in nginx.stdout or 'location ^~ /finance/' in nginx.stdout:
     raise SystemExit(26)
+stage = 'ss'
 listeners = subprocess.run(['ss','-ltn'], check=True, text=True, capture_output=True).stdout
 if any(line.split()[3].rsplit(':',1)[-1] == str(e['finance_port']) for line in listeners.splitlines()[1:] if len(line.split()) >= 4):
     raise SystemExit(27)
@@ -505,6 +583,49 @@ print(json.dumps({{
   'health':health,
   'finance':{{'flags':flags,'unit_absent':True,'directory_absent':True,'store_absent':True,'routes_absent':True,'listener_absent':True}},
 }}, sort_keys=True))
+"""
+    return f"""
+import hashlib, json, os, subprocess, sys, urllib.error, urllib.request
+from pathlib import Path
+{finance_validator}
+e = {expected!r}
+stage = 'metadata'
+try:
+{textwrap.indent(body.strip(), '    ')}
+except BaseException as exc:
+    if isinstance(exc, SystemExit):
+        category = 'system-exit'
+    elif isinstance(exc, subprocess.CalledProcessError):
+        category = 'subprocess'
+    elif isinstance(exc, urllib.error.HTTPError):
+        category = 'http'
+    elif isinstance(exc, urllib.error.URLError):
+        category = 'url'
+    elif isinstance(exc, json.JSONDecodeError):
+        category = 'json'
+    elif isinstance(exc, FileNotFoundError):
+        category = 'file-not-found'
+    elif isinstance(exc, PermissionError):
+        category = 'permission'
+    elif isinstance(exc, TimeoutError):
+        category = 'timeout'
+    elif isinstance(exc, OSError):
+        category = 'os'
+    else:
+        category = 'generic'
+    diagnostic = {{'schema': {REMOTE_DIAGNOSTIC_SCHEMA!r}, 'stage': stage, 'exception_category': category}}
+    if isinstance(exc, SystemExit) and isinstance(exc.code, int):
+        diagnostic['guard_status'] = exc.code
+    elif isinstance(exc, subprocess.CalledProcessError):
+        diagnostic['subprocess_returncode'] = int(exc.returncode)
+    elif isinstance(exc, urllib.error.HTTPError):
+        diagnostic['http_status'] = int(exc.code)
+    elif isinstance(exc, OSError) and isinstance(exc.errno, int):
+        diagnostic['errno'] = exc.errno
+    print(json.dumps(diagnostic, sort_keys=True, separators=(',', ':')), file=sys.stderr)
+    if isinstance(exc, SystemExit) and isinstance(exc.code, int):
+        raise
+    raise SystemExit(1)
 """
 
 

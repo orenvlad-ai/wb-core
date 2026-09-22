@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -414,6 +416,171 @@ def test_finance_off_prestate_contract() -> None:
         recovery._run_remote_json = original_remote
 
 
+def test_safe_remote_failure_diagnostics() -> None:
+    secret = "SECRET-token-path-command-output-stderr"
+
+    def target(directory: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            managed_systemd_units=(SimpleNamespace(name="main.service", enable=True),),
+            target_dir=directory,
+            service_name="main.service",
+            environment_file="/env",
+            loopback_base_url="http://127.0.0.1:1",
+            public_base_url="https://example.invalid",
+        )
+
+    def execute(script: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    missing = execute(recovery._prestate_script(target(f"/missing-{secret}"), M))
+    assert missing.returncode == 1
+    assert missing.stdout == ""
+    assert secret not in missing.stdout + missing.stderr
+    missing_diagnostic = json.loads(missing.stderr)
+    assert missing_diagnostic == {
+        "errno": 2,
+        "exception_category": "file-not-found",
+        "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+        "stage": "metadata",
+    }
+    assert recovery._remote_failure_reason(1, missing.stderr) == (
+        "remote-readback-failed-1-stage-metadata-file-not-found-errno-2"
+    )
+
+    base = recovery._prestate_script(target("/unused"), M)
+    injection_point = "    root = Path(e['target_dir'])"
+    injected_exceptions = (
+        (
+            "subprocess",
+            "subprocess_returncode",
+            9,
+            "    raise subprocess.CalledProcessError(9, ['cmd', %r], output=%r, stderr=%r)"
+            % (secret, secret, secret),
+        ),
+        ("timeout", "errno", 110, "    raise TimeoutError(110, %r)" % secret),
+        ("generic", None, None, "    raise RuntimeError(%r)" % secret),
+    )
+    for category, numeric_name, numeric_value, replacement in injected_exceptions:
+        script = base.replace(injection_point, replacement, 1)
+        assert script != base
+        failed = execute(script)
+        assert failed.returncode == 1
+        assert failed.stdout == ""
+        assert secret not in failed.stdout + failed.stderr
+        diagnostic = json.loads(failed.stderr)
+        assert diagnostic["stage"] == "metadata"
+        assert diagnostic["exception_category"] == category
+        if numeric_name is not None:
+            assert diagnostic[numeric_name] == numeric_value
+        assert secret not in recovery._remote_failure_reason(1, failed.stderr)
+
+    with tempfile.TemporaryDirectory(prefix="recovery-diagnostic-") as directory:
+        root = Path(directory)
+        (root / ".wb-core-runtime-sha").write_text("wrong\n", encoding="utf-8")
+        (root / ".wb-core-deploy.json").write_text(
+            json.dumps({"commit": M, "deployment_complete": False}), encoding="utf-8"
+        )
+        guard = execute(recovery._prestate_script(target(directory), M))
+    assert guard.returncode == 20
+    assert json.loads(guard.stderr) == {
+        "exception_category": "system-exit",
+        "guard_status": 20,
+        "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+        "stage": "metadata",
+    }
+
+    generic = "remote-readback-failed-1"
+    malformed = (
+        "",
+        secret,
+        "{bad-json",
+        json.dumps(
+            {
+                "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+                "stage": [],
+                "exception_category": "generic",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+                "stage": "metadata",
+                "exception_category": [],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+                "stage": "unknown-stage",
+                "exception_category": "generic",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+                "stage": "metadata",
+                "exception_category": "SecretCustomError",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+                "stage": "metadata",
+                "exception_category": "file-not-found",
+                "errno": "2",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            {
+                "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+                "stage": "metadata",
+                "exception_category": "generic",
+                "extra": secret,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        missing.stderr + "untrusted trailing output",
+    )
+    for stderr in malformed:
+        reason = recovery._remote_failure_reason(1, stderr)
+        assert reason == generic
+        assert secret not in reason
+    assert recovery._remote_failure_reason(255, "") == "remote-readback-failed-255"
+
+    original_command = recovery._remote_python_command
+    original_run = recovery.subprocess.run
+    recovery._remote_python_command = lambda _target: ["remote"]
+    try:
+        recovery.subprocess.run = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr=secret
+        )
+        expect_reason(generic, lambda: recovery._run_remote_json(None, "unused"))
+        recovery.subprocess.run = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout='{"ok":true}', stderr=secret
+        )
+        assert recovery._run_remote_json(None, "unused") == {"ok": True}
+    finally:
+        recovery.subprocess.run = original_run
+        recovery._remote_python_command = original_command
+
+
 def main() -> None:
     test_failure_evidence()
     test_every_intervening_commit_is_repo_only()
@@ -422,6 +589,7 @@ def main() -> None:
     test_target_drift_halts_before_mutation()
     test_existing_claim_is_readback_only()
     test_finance_off_prestate_contract()
+    test_safe_remote_failure_diagnostics()
     print("post_merge_release_recovery_smoke: ok")
 
 
