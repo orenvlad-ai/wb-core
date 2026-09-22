@@ -146,6 +146,84 @@ def test_every_intervening_commit_is_repo_only() -> None:
         recovery.build_plan_from_paths = original_plan
 
 
+
+def test_empty_intervening_commit_is_rejected() -> None:
+    original_git = recovery._git
+    original_plan = recovery.build_plan_from_paths
+
+    class DescendantClient:
+        repository = recovery.REPOSITORY
+
+        def get(self, path: str):
+            assert path == "/git/ref/heads/main"
+            return {"object": {"sha": C1}}
+
+    def fake_git(args: list[str], *, check: bool = True):
+        if args == ["rev-parse", "HEAD"]:
+            return _completed(args, stdout=C1 + "\n")
+        if args[:2] == ["merge-base", "--is-ancestor"]:
+            return _completed(args)
+        if args[:3] == ["rev-list", "--reverse", "--ancestry-path"]:
+            return _completed(args, stdout=C1 + "\n")
+        if args[:3] == ["show", "-s", "--format=%P"]:
+            return _completed(args, stdout=M + "\n")
+        if args[:2] == ["diff", "--name-only"]:
+            return _completed(args, stdout="")
+        raise AssertionError(args)
+
+    recovery._git = fake_git
+    recovery.build_plan_from_paths = lambda **_kwargs: {"release_kind": "repo_only", "plan_sha256": "e" * 64}
+    try:
+        expect_reason(
+            "intervening-commit-not-repo-only",
+            lambda: recovery.prove_repo_only_descendant(
+                DescendantClient(), {"merge_sha": M, "pull_request": 7}
+            ),
+        )
+    finally:
+        recovery._git = original_git
+        recovery.build_plan_from_paths = original_plan
+
+
+def test_exact_target_requires_no_intervening_diff() -> None:
+    original_git = recovery._git
+    original_plan = recovery.build_plan_from_paths
+
+    class ExactClient:
+        repository = recovery.REPOSITORY
+
+        def get(self, path: str):
+            assert path == "/git/ref/heads/main"
+            return {"object": {"sha": M}}
+
+    def fake_git(args: list[str], *, check: bool = True):
+        if args == ["rev-parse", "HEAD"]:
+            return _completed(args, stdout=M + "\n")
+        if args[:2] == ["merge-base", "--is-ancestor"]:
+            return _completed(args)
+        raise AssertionError(args)
+
+    recovery._git = fake_git
+    recovery.build_plan_from_paths = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("exact target must not manufacture an intervening plan")
+    )
+    try:
+        proof = recovery.prove_repo_only_descendant(
+            ExactClient(), {"merge_sha": M, "pull_request": 7}
+        )
+    finally:
+        recovery._git = original_git
+        recovery.build_plan_from_paths = original_plan
+    assert proof == {
+        "trusted_main_sha": M,
+        "target_merge_sha": M,
+        "intervening_proof": "exact-target-no-intervening-commit",
+        "intervening_paths": [],
+        "intervening_plan_sha256": None,
+        "intervening_release_kind": "exact_target",
+        "intervening_commits": [],
+    }
+
 def preview() -> dict:
     value = {
         "schema": recovery.RECOVERY_SCHEMA,
@@ -173,12 +251,14 @@ def preview() -> dict:
             "main_pid": 42,
             "services": ["main.service"],
             "health": {"https://example/login": 200},
-            "finance": {
+            "finance_pilot": {
                 "flags": {},
-                "unit_absent": True,
-                "store_absent": True,
-                "routes_absent": True,
-                "listener_absent": True,
+                "unit_active": True,
+                "environment_bound": True,
+                "store_present": True,
+                "routes_bound": True,
+                "loopback_listener": True,
+                "legacy_unisolated_absent": True,
             },
         },
         "stages": [
@@ -187,7 +267,7 @@ def preview() -> dict:
             "auth-preflight",
             "change-registry-activation-exact-target",
             "deployment-metadata-cas-complete",
-            "final-runtime-services-health-finance-off-readback",
+            "final-runtime-services-health-finance-pilot-readback",
         ],
         "forbidden_stages": ["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"],
     }
@@ -333,9 +413,12 @@ def test_existing_claim_is_readback_only() -> None:
     assert len(client.values) == 1
 
 
-def test_finance_off_prestate_contract() -> None:
+def test_finance_pilot_prestate_contract() -> None:
     target = SimpleNamespace(
-        managed_systemd_units=(SimpleNamespace(name="main.service", enable=True),),
+        managed_systemd_units=(
+            SimpleNamespace(name="main.service", enable=True),
+            SimpleNamespace(name="wb-core-finance-liquidity-pilot.service", enable=True),
+        ),
         target_dir="/runtime",
         service_name="main.service",
         environment_file="/env",
@@ -344,50 +427,79 @@ def test_finance_off_prestate_contract() -> None:
     )
     script = recovery._prestate_script(target, M)
     for required in (
+        "wb-core-finance-liquidity-pilot.service",
+        "finance-liquidity-pilot.sqlite3",
+        "finance-liquidity-pilot.env",
         "wb-core-finance-liquidity.service",
-        "finance-liquidity.sqlite3",
         "/v1/finance/",
         "FINANCE_LIQUIDITY_WRITE_ENABLED",
+        "FINANCE_LIQUIDITY_ORIGIN",
+        "finance-liquidity-pilot-access.json",
         "8767",
+        "EnvironmentFile=",
         "metadata_sha256",
         "MainPID",
     ):
         assert required in script
+    assert "finance_pilot" in script
+    assert "pilot_source != e['pilot_env_values']" in script
+    assert "pilot_proc_env = finance_process_env(pilot_pid)" in script
+    assert "unit_environment_files(unit).count(e['pilot_env']) != 1" in script
+    assert "require_finance_off" not in script
+    ast.parse(script)
     namespace: dict = {}
-    validator_source = recovery._finance_off_validator_source()
+    validator_source = recovery._finance_pilot_validator_source()
     exec(validator_source, namespace)
-    validate = namespace["require_finance_off"]
-    exact_absent = "SubState=dead\nLoadState=not-found\nActiveState=inactive\n"
-    for off in (None, "", "0", "false", "FALSE", "no", "off", "'off'", '"0"'):
-        validate({"flag": {"process": off, "source": None}}, 0, exact_absent)
-    for enabled_or_unknown in ("1", "true", "yes", "on", "enabled", "garbage"):
+    validate = namespace["require_finance_pilot"]
+    pilot_active = "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nSubState=running\n"
+    legacy_absent = "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+    exact_flags = {
+        name: {"main_process": "1", "pilot_process": "1", "pilot_source": "1"}
+        for name in recovery.FINANCE_FLAGS
+    }
+    validate(exact_flags, 0, pilot_active, 0, legacy_absent)
+    for bad_flags in (
+        {name: {"main_process": "0", "pilot_process": "1", "pilot_source": "1"} for name in recovery.FINANCE_FLAGS},
+        {name: {"main_process": "1", "pilot_process": "0", "pilot_source": "1"} for name in recovery.FINANCE_FLAGS},
+        {name: {"main_process": "1", "pilot_process": "1", "pilot_source": None} for name in recovery.FINANCE_FLAGS},
+    ):
         try:
-            validate(
-                {"flag": {"process": enabled_or_unknown, "source": None}},
-                0,
-                exact_absent,
-            )
+            validate(bad_flags, 0, pilot_active, 0, legacy_absent)
         except SystemExit as exc:
             assert exc.code == 23
         else:
-            raise AssertionError(f"Finance flag accepted: {enabled_or_unknown}")
-    for returncode, properties in (
-        (1, exact_absent),
-        (0, "LoadState=loaded\nActiveState=inactive\nSubState=dead\n"),
-        (0, "LoadState=masked\nActiveState=inactive\nSubState=dead\n"),
-        (0, "LoadState=not-found\nActiveState=failed\nSubState=dead\n"),
+            raise AssertionError("Finance pilot flag mismatch accepted")
+    for pilot_returncode, pilot_properties in (
+        (1, pilot_active),
+        (0, "LoadState=loaded\nUnitFileState=enabled\nActiveState=inactive\nSubState=dead\n"),
+        (0, "LoadState=loaded\nUnitFileState=disabled\nActiveState=active\nSubState=running\n"),
     ):
         try:
-            validate({"flag": {"process": None, "source": None}}, returncode, properties)
+            validate(exact_flags, pilot_returncode, pilot_properties, 0, legacy_absent)
         except SystemExit as exc:
             assert exc.code == 24
         else:
-            raise AssertionError(f"Finance unit state accepted: {returncode} {properties!r}")
+            raise AssertionError("Finance pilot unit mismatch accepted")
+    try:
+        validate(
+            exact_flags,
+            0,
+            pilot_active,
+            0,
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\n",
+        )
+    except SystemExit as exc:
+        assert exc.code == 30
+    else:
+        raise AssertionError("Legacy Finance unit accepted")
     assert validator_source.strip() in script
     finance_unit_line = next(
-        line for line in script.splitlines() if "e['finance_unit']" in line
+        line
+        for line in script.splitlines()
+        if "--property=LoadState" in line and "e['pilot_unit']" in line
     )
     assert "--property=LoadState" in finance_unit_line
+    assert "--property=UnitFileState" in finance_unit_line
     assert "--property=ActiveState" in finance_unit_line
     assert "--property=SubState" in finance_unit_line
     assert "--value" not in finance_unit_line
@@ -397,9 +509,7 @@ def test_finance_off_prestate_contract() -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, bytes)
     ]
     assert b"\x00" in byte_literals
-    sample_environ = (
-        b"FIRST=value\x00FINANCE_LIQUIDITY_ENABLED=1\x00LAST=value\x00"
-    )
+    sample_environ = b"FIRST=value\x00FINANCE_LIQUIDITY_ENABLED=1\x00LAST=value\x00"
     entries = sample_environ.split(next(value for value in byte_literals if value == b"\x00"))
     parsed = dict(entry.split(b"=", 1) for entry in entries if b"=" in entry)
     assert parsed[b"FINANCE_LIQUIDITY_ENABLED"] == b"1"
@@ -414,7 +524,6 @@ def test_finance_off_prestate_contract() -> None:
         )
     finally:
         recovery._run_remote_json = original_remote
-
 
 def test_safe_remote_failure_diagnostics() -> None:
     secret = "SECRET-token-path-command-output-stderr"
@@ -562,6 +671,19 @@ def test_safe_remote_failure_diagnostics() -> None:
         reason = recovery._remote_failure_reason(1, stderr)
         assert reason == generic
         assert secret not in reason
+    pilot_environment_failure = json.dumps(
+        {
+            "schema": recovery.REMOTE_DIAGNOSTIC_SCHEMA,
+            "stage": "pilot-env",
+            "exception_category": "system-exit",
+            "guard_status": 29,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert recovery._remote_failure_reason(1, pilot_environment_failure) == (
+        "remote-readback-failed-1-stage-pilot-env-system-exit-guard_status-29"
+    )
     assert recovery._remote_failure_reason(255, "") == "remote-readback-failed-255"
 
     original_command = recovery._remote_python_command
@@ -584,11 +706,13 @@ def test_safe_remote_failure_diagnostics() -> None:
 def main() -> None:
     test_failure_evidence()
     test_every_intervening_commit_is_repo_only()
+    test_empty_intervening_commit_is_rejected()
+    test_exact_target_requires_no_intervening_diff()
     test_exact_tail_and_completion()
     test_activation_failure_never_completes()
     test_target_drift_halts_before_mutation()
     test_existing_claim_is_readback_only()
-    test_finance_off_prestate_contract()
+    test_finance_pilot_prestate_contract()
     test_safe_remote_failure_diagnostics()
     print("post_merge_release_recovery_smoke: ok")
 
