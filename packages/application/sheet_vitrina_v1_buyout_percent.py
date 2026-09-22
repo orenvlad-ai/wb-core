@@ -68,6 +68,7 @@ class MatureBuyoutCaptureResult:
     failed_dates: tuple[str, ...]
     proof_dates: tuple[str, ...]
     requested_nm_id_count: int
+    confirmation_nm_id_count: int
     detail: str
 
     def public(self) -> dict[str, Any]:
@@ -83,6 +84,7 @@ class MatureBuyoutCaptureResult:
             "failed_dates": list(self.failed_dates),
             "proof_dates": list(self.proof_dates),
             "requested_nm_id_count": self.requested_nm_id_count,
+            "confirmation_nm_id_count": self.confirmation_nm_id_count,
             "detail": self.detail,
         }
 
@@ -102,6 +104,7 @@ def capture_mature_buyout_percent_snapshots(
     runtime: RegistryUploadDbBackedRuntime,
     sales_funnel_history_block: SalesFunnelHistoryBlock,
     enabled_nm_ids: Iterable[int],
+    required_confirmation_nm_ids: Iterable[int] | None = None,
     now: datetime,
     captured_at_factory: Callable[[], str] | None = None,
 ) -> MatureBuyoutCaptureResult:
@@ -109,14 +112,30 @@ def capture_mature_buyout_percent_snapshots(
 
     A persisted snapshot proves completion only when its capture business date
     is at least six calendar days after the snapshot date and the exact payload
-    covers every enabled SKU. This makes same-day manual refreshes idempotent
-    without introducing another scheduler or orchestration state machine.
+    covers every required confirmation SKU. Fetch and confirmation scopes may
+    differ so the stored official payload retains reporting-only observations;
+    the default remains the previous strict same-scope contract.
     """
 
     business_date = date.fromisoformat(current_business_date_iso(now))
     trusted_cutoff = trusted_buyout_cutoff(business_date)
     requested_nm_ids = sorted({int(nm_id) for nm_id in enabled_nm_ids})
-    if not requested_nm_ids:
+    confirmation_nm_ids = sorted(
+        {
+            int(nm_id)
+            for nm_id in (
+                required_confirmation_nm_ids
+                if required_confirmation_nm_ids is not None
+                else requested_nm_ids
+            )
+        }
+    )
+    unexpected_confirmation_nm_ids = set(confirmation_nm_ids) - set(requested_nm_ids)
+    if unexpected_confirmation_nm_ids:
+        raise ValueError(
+            "required confirmation SKU targets must be a subset of fetched SKU targets"
+        )
+    if not requested_nm_ids or not confirmation_nm_ids:
         return MatureBuyoutCaptureResult(
             status="skipped",
             business_date=business_date.isoformat(),
@@ -126,8 +145,9 @@ def capture_mature_buyout_percent_snapshots(
             saved_dates=(),
             failed_dates=(),
             proof_dates=(),
-            requested_nm_id_count=0,
-            detail="No enabled SKU targets.",
+            requested_nm_id_count=len(requested_nm_ids),
+            confirmation_nm_id_count=len(confirmation_nm_ids),
+            detail="No fetch or confirmation SKU targets.",
         )
 
     earliest_fetchable = business_date - timedelta(
@@ -147,7 +167,7 @@ def capture_mature_buyout_percent_snapshots(
             payload=payload,
             captured_at=captured_at,
             snapshot_date=snapshot_date,
-            enabled_nm_ids=requested_nm_ids,
+            enabled_nm_ids=confirmation_nm_ids,
         ):
             proof_dates.append(snapshot_date)
         else:
@@ -164,6 +184,7 @@ def capture_mature_buyout_percent_snapshots(
             failed_dates=(),
             proof_dates=tuple(proof_dates),
             requested_nm_id_count=len(requested_nm_ids),
+            confirmation_nm_id_count=len(confirmation_nm_ids),
             detail="Persisted mature capture proof already covers the bounded window.",
         )
 
@@ -188,7 +209,7 @@ def capture_mature_buyout_percent_snapshots(
         if exact_payload is None or not buyout_snapshot_has_enabled_sku_coverage(
             exact_payload,
             snapshot_date=snapshot_date,
-            enabled_nm_ids=set(requested_nm_ids),
+            enabled_nm_ids=set(confirmation_nm_ids),
         ):
             failed_dates.append(snapshot_date)
             continue
@@ -210,10 +231,11 @@ def capture_mature_buyout_percent_snapshots(
         failed_dates=tuple(failed_dates),
         proof_dates=tuple(proof_dates),
         requested_nm_id_count=len(requested_nm_ids),
+        confirmation_nm_id_count=len(confirmation_nm_ids),
         detail=(
-            "Authoritative mature exact-date payload persisted."
+            "Authoritative mature exact-date payload persisted for the required confirmation scope."
             if not failed_dates
-            else "Official payload did not fully cover every enabled SKU for all requested dates."
+            else "Official payload did not fully cover every required confirmation SKU for all requested dates."
         ),
     )
 

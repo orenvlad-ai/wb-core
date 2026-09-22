@@ -1049,6 +1049,24 @@ def bind_local_derive_publication(runtime, plan, current_state, expected):
     return current, latest
 
 
+def _buyout_capture_scopes(
+    *,
+    reporting_config_items: Iterable[ConfigV2Item],
+    registry_config_items: Iterable[ConfigV2Item],
+) -> tuple[list[int], list[int]]:
+    """Keep broad reporting collection separate from the buyout confirmation set."""
+
+    fetch_nm_ids = sorted({int(item.nm_id) for item in reporting_config_items})
+    confirmation_nm_ids = sorted(
+        {
+            int(item.nm_id)
+            for item in registry_config_items
+            if item.enabled
+        }
+    )
+    return fetch_nm_ids, confirmation_nm_ids
+
+
 class SheetVitrinaV1LivePlanBlock:
     def __init__(
         self,
@@ -1217,6 +1235,15 @@ class SheetVitrinaV1LivePlanBlock:
                                     key=lambda item: item.display_order)
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
+        buyout_fetch_nm_ids, buyout_confirmation_nm_ids = _buyout_capture_scopes(
+            reporting_config_items=enabled_config,
+            registry_config_items=current_state.config_v2,
+        )
+        diagnostics["buyout_confirmation_scope"] = {
+            "nm_ids": buyout_confirmation_nm_ids,
+            "policy": "registry_enabled_config_v1",
+            "reporting_nm_id_count": len(buyout_fetch_nm_ids),
+        }
 
         if _collection is not None:
             from packages.application.ready_publication import ReadyPublicationConflict
@@ -1243,7 +1270,8 @@ class SheetVitrinaV1LivePlanBlock:
                 mature_buyout_capture = capture_mature_buyout_percent_snapshots(
                     runtime=self.runtime,
                     sales_funnel_history_block=self.sales_funnel_history_block,
-                    enabled_nm_ids=[item.nm_id for item in enabled_config],
+                    enabled_nm_ids=buyout_fetch_nm_ids,
+                    required_confirmation_nm_ids=buyout_confirmation_nm_ids,
                     now=self.now_factory(),
                     captured_at_factory=self._diagnostic_timestamp,
                 ).public()
@@ -1254,7 +1282,8 @@ class SheetVitrinaV1LivePlanBlock:
                     "trusted_cutoff": (
                         date.fromisoformat(current_date) - timedelta(days=6)
                     ).isoformat(),
-                    "requested_nm_id_count": len(enabled_config),
+                    "requested_nm_id_count": len(buyout_fetch_nm_ids),
+                    "confirmation_nm_id_count": len(buyout_confirmation_nm_ids),
                     "detail": str(exc),
                 }
             diagnostics["mature_buyout_capture"] = mature_buyout_capture
