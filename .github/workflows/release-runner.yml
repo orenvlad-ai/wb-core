@@ -81,6 +81,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: production
+    concurrency:
+      group: wb-core-production-release
+      cancel-in-progress: false
     steps:
       - name: Checkout trusted main runner
         uses: actions/checkout@v5
