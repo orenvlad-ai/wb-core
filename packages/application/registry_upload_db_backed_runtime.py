@@ -11902,7 +11902,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if schema_key in _SCHEMA_READY_KEYS:
             return
         was_in_transaction = conn.in_transaction
-        _ensure_schema_uncached(conn)
+        # The cleaner extension rebuilds populated legacy registry tables and
+        # therefore owns its migration transaction.  Run that one explicit
+        # setup before this broad runtime bootstrap starts its own DML.  An
+        # actual business transaction still fails closed in the migration;
+        # never commit or otherwise take ownership of its caller transaction.
+        from packages.application.change_registry_search_cluster import needs_schema_migration
+        registry_schema_ready = needs_schema_migration(conn)
+        if registry_schema_ready:
+            from packages.application.change_registry import ensure_change_registry_schema
+            ensure_change_registry_schema(conn)
+        _ensure_schema_uncached(conn, registry_schema_ready=registry_schema_ready)
         from packages.application.supplier_preparation_intents import ensure_schema as ensure_supplier_preparation_schema
         ensure_supplier_preparation_schema(conn)
         from packages.application.cny_preparation_intents import ensure_schema as ensure_cny_preparation_schema
@@ -11921,7 +11931,9 @@ def _schema_ready_key(conn: sqlite3.Connection) -> tuple[str, int, int, int]:
     return str(db_path), int(stat.st_dev), int(stat.st_ino), schema_version
 
 
-def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
+def _ensure_schema_uncached(
+    conn: sqlite3.Connection, *, registry_schema_ready: bool = False
+) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS registry_upload_versions (
@@ -13830,7 +13842,8 @@ def _ensure_schema_uncached(conn: sqlite3.Connection) -> None:
           )
         """
     )
-    ensure_change_registry_schema(conn)
+    if not registry_schema_ready:
+        ensure_change_registry_schema(conn)
     from packages.application.warehouse_business_projection import ensure_warehouse_business_projection_schema
     ensure_warehouse_business_projection_schema(conn)
     from packages.application.ready_publication import ensure_publication_schema
