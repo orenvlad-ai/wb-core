@@ -13,6 +13,8 @@ import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from packages.application.change_registry import ensure_change_registry_schema,ChangeRegistryRepository,target_identity,canonical_digest
 from packages.application.change_registry_search_cluster import prepare_in_transaction,confirm_in_transaction
+from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime,_ensure_schema
+from packages.application.warehouse_functional import WarehouseFunctionalBlock
 from packages.contracts.search_cluster_cleaner import Account,Target
 
 LEGACY=Path(__file__).parent/'fixtures/search_cluster_cleaner_legacy_registry.json'
@@ -35,6 +37,11 @@ def snapshot(conn):
     return result
 
 
+def registry_objects(conn):
+    return [tuple(row) for row in conn.execute("""SELECT type,name,tbl_name,sql
+        FROM sqlite_master WHERE name LIKE 'change_registry_%' ORDER BY type,name""")]
+
+
 class FailingConnection(sqlite3.Connection):
     fail=False
     def execute(self,sql,*args,**kwargs):
@@ -43,6 +50,36 @@ class FailingConnection(sqlite3.Connection):
 
 
 class RegistryTests(unittest.TestCase):
+    def test_runtime_startup_migrates_legacy_registry_before_runtime_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime=RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp)/'runtime');runtime.runtime_dir.mkdir()
+            with sqlite3.connect(runtime.db_path) as conn:
+                conn.executescript(legacy_sql());conn.commit()
+            # This is the actual registry startup path: WarehouseFunctionalBlock
+            # builds CanonicalCostEngine, which calls the runtime bootstrap.
+            WarehouseFunctionalBlock(runtime=runtime)
+            with sqlite3.connect(runtime.db_path) as conn:
+                self.assertEqual(len([r for r in conn.execute('PRAGMA table_info(change_registry_items)') if r[1]=='query_hash']),1)
+                self.assertEqual(len([r for r in conn.execute('PRAGMA table_info(change_registry_facts)') if r[1]=='query_hash']),1)
+                self.assertEqual(conn.execute('SELECT count(*) FROM change_registry_facts').fetchone()[0],3)
+                self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[])
+                before=(snapshot(conn),registry_objects(conn))
+            WarehouseFunctionalBlock(runtime=runtime)
+            with sqlite3.connect(runtime.db_path) as conn:
+                self.assertEqual((snapshot(conn),registry_objects(conn)),before)
+
+    def test_runtime_schema_refuses_legacy_migration_inside_owner_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn=sqlite3.connect(Path(tmp)/'legacy.sqlite3');conn.row_factory=sqlite3.Row;conn.executescript(legacy_sql())
+            conn.execute('CREATE TABLE outer_marker(value TEXT)');conn.execute('BEGIN IMMEDIATE');conn.execute("INSERT INTO outer_marker VALUES('must_rollback')")
+            with self.assertRaisesRegex(RuntimeError,'explicit setup outside a business transaction'):
+                _ensure_schema(conn)
+            self.assertTrue(conn.in_transaction)
+            conn.rollback()
+            self.assertEqual(conn.execute('SELECT count(*) FROM outer_marker').fetchone()[0],0)
+            self.assertNotIn('query_hash',{r[1] for r in conn.execute('PRAGMA table_info(change_registry_items)')})
+            conn.close()
+
     def test_populated_legacy_migration_reinitialize(self):
         conn=sqlite3.connect(':memory:');conn.row_factory=sqlite3.Row;conn.executescript(legacy_sql());conn.execute('PRAGMA foreign_keys=ON')
         before=snapshot(conn);self.assertEqual(len(before['change_registry_facts'][1]),3)

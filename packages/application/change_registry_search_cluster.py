@@ -13,6 +13,16 @@ DOMAIN_TABLE = 'change_registry_search_cluster_queries'
 EVIDENCE_TABLE = 'change_registry_search_cluster_readbacks'
 
 
+def needs_schema_migration(conn) -> bool:
+    """Whether legacy registry items/facts lack the query identity column."""
+    from packages.application.change_registry import ITEMS_TABLE, FACTS_TABLE
+    return any(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        and 'query_hash' not in {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
+        for table in (ITEMS_TABLE, FACTS_TABLE)
+    )
+
+
 def migrate_search_cluster_schema(conn, schema_sql):
     from packages.application.change_registry import ITEMS_TABLE, FACTS_TABLE
     tables = [t for t in (ITEMS_TABLE, FACTS_TABLE)
