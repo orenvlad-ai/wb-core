@@ -466,12 +466,15 @@
         "ci/**",
         "apps/github_release_runner.py",
         "apps/github_release_runner_smoke.py",
+        "apps/production_apply_adapters.py",
+        "apps/production_apply_adapters_smoke.py",
         "apps/production_apply_launcher.py",
         "apps/production_apply_launcher_smoke.py"
       ],
       "commands": [
         ["python3", "ci/select_checks_smoke.py"],
         ["python3", "apps/github_release_runner_smoke.py"],
+        ["python3", "apps/production_apply_adapters_smoke.py"],
         ["python3", "apps/production_apply_launcher_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5"]
