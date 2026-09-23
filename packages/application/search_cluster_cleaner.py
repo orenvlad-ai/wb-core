@@ -95,6 +95,9 @@ class KeywordCleaner:
         def command(c,actor):
             s = self._settings(c)
             if payload.get("expected_revision") != s["revision"]: raise CleanerError("revision_conflict", "Настройки уже изменились",409)
+            manual_only=bool(c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_bootstrap' LIMIT 1",(self.key,)).fetchone())
+            if manual_only and (payload.get("enabled") is True or "schedule_time" in payload):
+                raise CleanerError("manual_only","По расписанию чистка не включается",409)
             enabled = payload.get("enabled",bool(s["enabled"]))
             time = payload.get("schedule_time",s["schedule_time"])
             if type(enabled) is not bool or not isinstance(time,str) or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d",time) is None:
@@ -275,18 +278,38 @@ class KeywordCleaner:
     def start_run(self,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
             s=self._settings(c)
-            if not s["enabled"] or not s["baseline_ready"]: raise CleanerError("not_ready","Чистка выключена или исходная база не сверена",409)
-            active=c.execute("SELECT run_id,kind FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running') ORDER BY CASE WHEN state='queued' THEN 1 ELSE 0 END,created_at LIMIT 1",(self.key,)).fetchone()
-            if active: return dict(status=202,run_id=active["run_id"],active_run_id=active["run_id"],kind=active["kind"],reused=True)
-            rid=self._new_run(c,"scan","manual",request_id=payload["request_id"])
-            return dict(status=202,run_id=rid,kind="scan",reused=False)
+            manual_target = payload.get("advert_id"), payload.get("nm_id")
+            manual = manual_target != (None, None)
+            if manual:
+                if (type(manual_target[0]) is not int or manual_target[0] <= 0
+                        or type(manual_target[1]) is not int or manual_target[1] <= 0):
+                    raise CleanerError("target_invalid", "Нужна точная кампания и товар", 422)
+                if s["enabled"] or not s["baseline_ready"]:
+                    raise CleanerError("not_ready", "Ручной режим ещё не подготовлен", 409)
+            elif not s["enabled"] or not s["baseline_ready"]:
+                raise CleanerError("not_ready","Чистка выключена или исходная база не сверена",409)
+            active=c.execute("SELECT run_id,kind,trigger,state,targets FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running') ORDER BY CASE WHEN state='queued' THEN 1 ELSE 0 END,created_at LIMIT 1",(self.key,)).fetchone()
+            if active:
+                if manual:
+                    requested=[dict(target=Target(*manual_target).key,advert_id=manual_target[0],nm_id=manual_target[1])]
+                    if active['state']=='queued' and active['kind']=='scan' and active['trigger']=='manual_exact':
+                        if json.loads(active['targets'])==requested:
+                            return dict(status=202,run_id=active['run_id'],kind='scan',reused=True,manual_target=requested[0])
+                        c.execute("UPDATE cleaner_runs SET state='stopped',phase='finished',scan_finished_at=?,reason='manual_superseded' WHERE run_id=? AND state='queued'",(self.clock(),active['run_id']))
+                        self._event(c,'run_finished',dict(state='stopped',reason='manual_superseded'),run_id=active['run_id'])
+                    else: raise CleanerError("manual_queue_blocked", "Сначала завершите уже подготовленную проверку", 409)
+                else:return dict(status=202,run_id=active["run_id"],active_run_id=active["run_id"],kind=active["kind"],reused=True)
+            targets=[] if not manual else [dict(target=Target(*manual_target).key,advert_id=manual_target[0],nm_id=manual_target[1])]
+            rid=self._new_run(c,"scan","manual_exact" if manual else "manual",request_id=payload["request_id"],targets=targets)
+            return dict(status=202,run_id=rid,kind="scan",reused=False,manual_target=targets[0] if targets else None)
         return self._command(principal,"runs",payload,command)
 
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
             s=self._settings(c);verdict=payload.get("decision")
             if verdict not in {"allow","exclude"}: raise CleanerError("invalid_decision","Выберите оставить или исключить")
-            if verdict=="exclude" and not s["enabled"]: raise CleanerError("disabled","Чистка выключена",409)
+            if verdict=="exclude" and not s["enabled"] and not s["baseline_ready"]:
+                raise CleanerError("disabled","Ручной режим ещё не подготовлен",409)
             r=c.execute("SELECT * FROM cleaner_reviews WHERE account=? AND review_id=?",(self.key,review_id)).fetchone()
             if r is None: raise CleanerError("not_found","Вопрос не найден",404)
             if r["state"]!="open" or r["revision"]!=payload.get("expected_revision"): raise CleanerError("revision_conflict","Вопрос уже изменился",409)
@@ -318,6 +341,62 @@ class KeywordCleaner:
             self._event(c,"owner_decision",dict(review_id=review_id,decision=verdict,revision=revision,actor=actor,targets=targets,already_excluded=already_excluded,execution_blocked=execution_blocked),run_id=rid)
             return dict(decision_revision=revision,review_revision=r["revision"]+1,run_id=rid,status=202 if rid else 200,already_excluded=already_excluded,execution_blocked=execution_blocked,admitted_operations=self._admitted(c))
         return self._command(principal,f"reviews/{review_id}/decision",payload,command)
+
+    def _manual_apply_preview(self, c, scan_run_id: str, target: Target) -> dict:
+        """Read the exact write scope discovered by one completed manual scan.
+
+        A direct approved rule may yield ``pending_exclude`` without creating a
+        review.  The Stage E owner action deliberately turns that already-read
+        scope into an ordinary ``manual_apply`` run; it never invents a review
+        or lets the scheduler consume it.
+        """
+        run=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,scan_run_id)).fetchone()
+        if not run or run['kind']!='scan' or run['trigger']!='manual_exact' or run['state'] not in {'complete','partial'}:
+            raise CleanerError('manual_scan_not_ready','Точная ручная проверка ещё не завершена',409)
+        declared=json.loads(run['targets'])
+        if declared != [dict(target=target.key,advert_id=target.advert_id,nm_id=target.nm_id)]:
+            raise CleanerError('manual_scope_drift','Область ручной проверки изменилась',409)
+        checked=c.execute("SELECT complete FROM cleaner_run_targets WHERE run_id=? AND target=?",(scan_run_id,target.key)).fetchone()
+        if not checked or not checked['complete']:
+            raise CleanerError('manual_scan_incomplete','Нет полного свежего снимка кампании',409)
+        rows=c.execute("""SELECT o.*,d.rules_version,d.profile_version,d.fingerprint,d.override_revision,d.source
+          FROM cleaner_observations o JOIN cleaner_auto_decisions d ON o.decision_id=d.decision_id
+          WHERE o.account=? AND o.last_run_id=? AND o.target=? AND o.state='pending_exclude'""",(self.key,scan_run_id,target.key)).fetchall()
+        candidates=[]
+        for row in rows:
+            if 'statistics' not in json.loads(row['sources']): continue
+            if c.execute("SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone(): continue
+            if c.execute(f"SELECT 1 FROM cleaner_write_operations WHERE account=? AND target=? AND state IN({BLOCKING_WRITE_STATES})",(self.key,target.key)).fetchone(): continue
+            p=self._profile(c,row['nm_id'])
+            if not p or p.version!=row['profile_version'] or p.semantic_fingerprint!=row['fingerprint'] or row['rules_version']!=self._settings(c)['rules_version']: continue
+            candidates.append(dict(row))
+        rows=[dict(target=v['target'],query_hash=v['query_hash'],decision_id=v['decision_id']) for v in candidates]
+        if not rows: raise CleanerError('manual_candidates_empty','Нет подтверждённых свежей статистикой исключений',409)
+        basis=dict(scan_run_id=scan_run_id,target=target.key,candidates=sorted(rows,key=lambda v:(v['query_hash'],v['decision_id'])))
+        return dict(scan_run_id=scan_run_id,target=target.key,candidates=rows,
+                    prestate_sha256='sha256:'+digest(dict(run_id=scan_run_id,target=target.key,state=run['state'],checked=bool(checked['complete']))),
+                    candidate_sha256='sha256:'+digest(basis))
+
+    def manual_apply_preview(self, scan_run_id: str, target: Target) -> dict:
+        with self.store.read() as c:
+            return self._manual_apply_preview(c,scan_run_id,target)
+
+    def prepare_manual_apply(self, scan_run_id: str, target: Target, expected_candidate: str, request_id: str, principal: Principal) -> dict:
+        def command(c,actor):
+            s=self._settings(c)
+            if s['enabled'] or not s['baseline_ready']:
+                raise CleanerError('manual_not_ready','Ручной режим недоступен',409)
+            # Recompute under the command transaction, so a changed decision,
+            # target hold or a second run cannot be rebound to an old preview.
+            preview=self._manual_apply_preview(c,scan_run_id,target)
+            if preview['candidate_sha256'] != expected_candidate:
+                raise CleanerError('manual_prepare_drift','Кандидат ручного применения изменился',409)
+            active=c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running')",(self.key,)).fetchone()
+            if active: raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
+            rid=self._new_run(c,'manual_apply','manual_exact_candidates',request_id=request_id,targets=preview['candidates'],apply_group_id=new_id())
+            self._event(c,'manual_apply_prepared',dict(production_operation_id=request_id,scan_run_id=scan_run_id,target=target.key,candidate_sha256=expected_candidate,count=len(preview['candidates']),actor=actor),run_id=rid)
+            return dict(status=202,run_id=rid,target=target.key,candidate_sha256=expected_candidate)
+        return self._command(principal,f"manual-scans/{scan_run_id}/prepare-apply",dict(request_id=request_id,target=target.key,expected_candidate=expected_candidate),command)
 
     def scheduler_tick(self) -> str | None:
         """One current local date, including a due obligation on an in-flight scan."""
@@ -371,6 +450,36 @@ class KeywordCleaner:
             self._event(c,"run_claimed",dict(worker_token=token,generation=generation),run_id=run["run_id"])
             return dict(c.execute("SELECT * FROM cleaner_runs WHERE run_id=?",(run["run_id"],)).fetchone())
 
+    def claim_exact_manual_run(self, *, run_id: str, targets: list[Target], generation: str, lease_seconds: int = 180) -> dict:
+        """Claim one declared manual scope without scheduler/FIFO fallback.
+
+        This is deliberately separate from ``claim_run``: the ordinary worker
+        remains unable to execute while ``enabled`` is false.
+        """
+        if not targets or len({t.key for t in targets}) != len(targets):
+            raise CleanerError("manual_scope_invalid", "Нужна непустая точная область ручной проверки", 422)
+        now=self.clock(); wanted={t.key for t in targets}
+        with self.store.transaction() as c:
+            s=self._settings(c)
+            if s["generation"] != generation: raise CleanerError("generation_conflict","Поколение worker не совпало",409)
+            if s["enabled"] or not s["baseline_ready"]: raise CleanerError("manual_not_ready","Ручной режим недоступен",409)
+            run=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
+            if run is None or run["state"] != "queued" or run["trigger"] not in {"manual_exact","manual_exact_candidates","owner_decision"}:
+                raise CleanerError("manual_run_not_ready","Ручное задание уже обработано или не соответствует допуску",409)
+            others=c.execute("SELECT run_id FROM cleaner_runs WHERE account=? AND run_id<>? AND state IN('queued','accepted','running')",(self.key,run_id)).fetchone()
+            if others: raise CleanerError("manual_queue_blocked","Есть другое незавершённое задание",409)
+            scope=json.loads(run["targets"])
+            if run["kind"] == "scan":
+                declared={str(v.get("target") or "") for v in scope}
+            else:
+                declared={str(v.get("target") or "") for v in scope}
+            if declared != wanted:
+                raise CleanerError("manual_scope_drift","Область ручного запуска изменилась",409)
+            token=new_id()
+            c.execute("UPDATE cleaner_runs SET state='running',phase='manual_starting',worker_token=?,lease_expires_at=?,worker_generation=?,started_at=coalesce(started_at,?) WHERE run_id=? AND state='queued'",(token,plus_seconds(now,lease_seconds),generation,now,run_id))
+            self._event(c,"run_claimed",dict(worker_token=token,generation=generation,manual=True),run_id=run_id)
+            return dict(c.execute("SELECT * FROM cleaner_runs WHERE run_id=?",(run_id,)).fetchone())
+
     def _lease(self,c,run_id,token,generation,*,require_enabled=False) -> sqlite3.Row:
         row=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
         s=self._settings(c)
@@ -379,11 +488,13 @@ class KeywordCleaner:
         if require_enabled and not s["enabled"]: raise CleanerError("disabled","Чистка выключена",409)
         return row
 
-    def renew_lease(self,run_id:str,token:str,generation:str,*,phase:str,lease_seconds:int=180) -> None:
+    def renew_lease(self,run_id:str,token:str,generation:str,*,phase:str,lease_seconds:int=180,manual_only:bool=False) -> None:
         with self.store.transaction() as c:
             self._lease(c,run_id,token,generation)
+            if manual_only and self._settings(c)["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
             c.execute("UPDATE cleaner_runs SET lease_expires_at=?,phase=? WHERE run_id=?",(plus_seconds(self.clock(),lease_seconds),phase,run_id))
-            c.execute("UPDATE cleaner_settings SET heartbeat_at=? WHERE account=?",(self.clock(),self.key))
+            if not manual_only:
+                c.execute("UPDATE cleaner_settings SET heartbeat_at=? WHERE account=?",(self.clock(),self.key))
 
     def sync_catalog(self,run_id:str,token:str,generation:str,targets:list[Target],errors:list[str]) -> None:
         keys=[t.key for t in targets]
@@ -415,10 +526,11 @@ class KeywordCleaner:
                 return Target(**json.loads(r["metadata"]))
             return None
 
-    def record_snapshot(self,run_id:str,token:str,generation:str,snapshot:Snapshot) -> dict:
+    def record_snapshot(self,run_id:str,token:str,generation:str,snapshot:Snapshot,*,manual_only:bool=False) -> dict:
         t=snapshot.target;counts=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,excluded_not_executed=0)
         with self.store.transaction() as c:
             self._lease(c,run_id,token,generation)
+            if manual_only and self._settings(c)["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
             old_result=c.execute("SELECT counters FROM cleaner_run_targets WHERE run_id=? AND target=?",(run_id,t.key)).fetchone()
             if old_result: counts.update(json.loads(old_result[0]))
             reason=t.unsupported_reason or "; ".join(snapshot.reasons)
@@ -514,32 +626,33 @@ class KeywordCleaner:
                 results.append(item)
             return results
 
-    def finish_run(self,run_id:str,token:str,generation:str,*,reason:str="",remaining:list[Mapping] | None=None) -> dict:
+    def finish_run(self,run_id:str,token:str,generation:str,*,reason:str="",remaining:list[Mapping] | None=None,manual_only:bool=False) -> dict:
         with self.store.transaction() as c:
             run=self._lease(c,run_id,token,generation)
             s=self._settings(c);state="complete"
+            if manual_only and s["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
             targets=c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=?",(run_id,)).fetchall()
-            summary=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,excluded_not_executed=0,confirmed_automatic=0,confirmed_manual=0,pairs=len(targets),campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=not bool(run["transport_enabled"]))
+            summary=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,excluded_not_executed=0,confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=0,pairs=len(targets),campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=not bool(run["transport_enabled"]))
             for t in targets:
                 for k,v in json.loads(t["counters"]).items():
                     if k in summary: summary[k]+=v
             for event in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='readback_result'",(run_id,)):
                 counts=json.loads(event[0])
-                for field in ('confirmed_automatic','confirmed_manual'): summary[field]+=counts.get(field,0)
+                for field in ('confirmed_automatic','confirmed_manual','confirmed_pilot'): summary[field]+=counts.get(field,0)
             summary['unresolved_operations']=c.execute(f"SELECT count(*) FROM cleaner_write_operations WHERE run_id=? AND state IN({PENDING_WRITE_STATES})",(run_id,)).fetchone()[0]
             summary['requires_review_operations']=c.execute("SELECT count(*) FROM cleaner_write_operations WHERE run_id=? AND state='requires_review'",(run_id,)).fetchone()[0]
             summary['rejected_not_executed']=c.execute("""SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id)
                 WHERE o.run_id=? AND o.state='rejected' AND i.confirmed_at IS NULL""",(run_id,)).fetchone()[0]
             if summary['unresolved_operations'] or summary['requires_review_operations'] or summary['rejected_not_executed'] or summary['excluded_not_executed']: state='partial'
             if any(t["state"]!="done" for t in targets) or reason or run["reason"]: state="partial"
-            if not s["enabled"]: state="stopped"
-            if run["kind"]=="scan":
+            if not s["enabled"] and not manual_only: state="stopped"
+            if run["kind"]=="scan" and run["trigger"]!="manual_exact":
                 due=c.execute("SELECT max(due_at) FROM cleaner_schedule_dates WHERE run_id=?",(run_id,)).fetchone()[0]
                 available=c.execute("SELECT target FROM cleaner_scan_queue WHERE account=? AND available=1",(self.key,)).fetchall()
                 completed={r["target"] for r in targets if not due or (r["observed_at"] and timestamp(r["observed_at"])>=timestamp(due))}
                 missing=[r[0] for r in available if r[0] not in completed]
                 summary["unread_pairs"]=len(missing)
-                if missing: state="partial" if s["enabled"] else "stopped"
+                if missing: state="partial" if (s["enabled"] or manual_only) else "stopped"
             if remaining and run["kind"]=="manual_apply":
                 original={(v["target"],v["query_hash"],v["decision_id"]) for v in json.loads(run["targets"])}
                 retained=[]
@@ -560,19 +673,66 @@ class KeywordCleaner:
             self._event(c,"run_finished",dict(state=state,summary=summary),run_id=run_id)
             return dict(run_id=run_id,state=state,summary=summary)
 
+    def set_manual_transport(self, *, enabled: bool, generation: str) -> None:
+        """Runner-only marker; never enables scheduler or a generic worker."""
+        with self.store.transaction() as c:
+            s=self._settings(c)
+            if s["enabled"] or (enabled and s["generation"] != generation):
+                raise CleanerError("manual_mode_changed","Авточистка включена или поколение изменилось",409)
+            c.execute("UPDATE cleaner_settings SET transport_enabled=? WHERE account=?",(int(enabled),self.key))
+
+    def set_manual_restore_hold(self, *, held: bool, generation: str) -> None:
+        """Temporary runner-only release; automatic execution stays disabled."""
+        with self.store.transaction() as c:
+            s=self._settings(c)
+            if s["enabled"] or s["generation"] != generation or not s["baseline_ready"]:
+                raise CleanerError("manual_mode_changed","Ручной допуск изменился",409)
+            c.execute("UPDATE cleaner_settings SET restore_hold=? WHERE account=?",(int(held),self.key))
+
+    def close_manual_window(self) -> None:
+        """Fail closed in one transaction, including an exception path."""
+        with self.store.transaction() as c:
+            c.execute("UPDATE cleaner_settings SET transport_enabled=0,restore_hold=1 WHERE account=?",(self.key,))
+
+    def finalize_recovered_manual_run(self, *, run_id: str, production_operation_id: str, allow_no_operations: bool = False) -> str:
+        """Close only the exact crashed manual run after terminal readback."""
+        with self.store.transaction() as c:
+            s=self._settings(c)
+            if s['enabled']: raise CleanerError('manual_mode_changed','Авточистка включена',409)
+            run=c.execute('SELECT * FROM cleaner_runs WHERE account=? AND run_id=?',(self.key,run_id)).fetchone()
+            if not run or run['state'] not in {'running','accepted'}: return run['state'] if run else 'missing'
+            bindings=[json.loads(row[0]) for row in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='stage_e_manual_binding'",(run_id,))]
+            if not any(v.get('operation_id')==production_operation_id for v in bindings): raise CleanerError('manual_binding_missing','Нет точной привязки ручного запуска',409)
+            operations=c.execute('SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchall()
+            if not operations:
+                if not allow_no_operations or not run['lease_expires_at'] or timestamp(run['lease_expires_at'])>timestamp(self.clock()):
+                    raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
+                state='partial'
+            elif any(row['state'] not in {'confirmed','rejected','requires_review'} for row in operations):
+                raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
+            else:
+                state='complete' if all(row['state']=='confirmed' for row in operations) else 'partial'
+            summary=dict(recovered_manual=True,confirmed_pilot=c.execute("SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id) WHERE o.run_id=? AND i.confirmed_at IS NOT NULL",(run_id,)).fetchone()[0])
+            c.execute("UPDATE cleaner_runs SET state=?,phase='finished',scan_finished_at=coalesce(scan_finished_at,?),summary=?,worker_token=NULL,lease_expires_at=NULL WHERE run_id=?",(state,self.clock(),canonical(summary),run_id))
+            self._event(c,'run_finished',dict(state=state,summary=summary,recovered=True),run_id=run_id)
+            return state
+
     def queue_readback(self,operation_id:str) -> None:
         with self.store.transaction() as c:
             op=c.execute("SELECT state FROM cleaner_write_operations WHERE account=? AND operation_id=?",(self.key,operation_id)).fetchone()
             if op is None or op["state"] not in {"dispatching","submitted","unresolved"}: raise CleanerError("readback_not_applicable","Нет допущенной операции для сверки",409)
             c.execute("INSERT OR IGNORE INTO cleaner_readback_jobs(operation_id,account) VALUES(?,?)",(operation_id,self.key))
 
-    def claim_readback(self,*,generation:str,lease_seconds:int=90) -> dict | None:
+    def claim_readback(self,*,generation:str,lease_seconds:int=90,operation_id:str|None=None) -> dict | None:
         # Independent of the account scan slot and enabled toggle. No submit
         # authority is returned even after expiry of this read-only lease.
         with self.store.transaction() as c:
             if self._settings(c)["generation"]!=generation: raise CleanerError("generation_conflict","Поколение worker не совпало",409)
             now=self.clock()
-            row=c.execute("SELECT * FROM cleaner_readback_jobs WHERE account=? AND state!='done' AND (retry_not_before IS NULL OR retry_not_before<=?) AND (lease_expires_at IS NULL OR lease_expires_at<=?) ORDER BY coalesce(retry_not_before,''),operation_id LIMIT 1",(self.key,now,now)).fetchone()
+            if operation_id:
+                row=c.execute("SELECT * FROM cleaner_readback_jobs WHERE account=? AND operation_id=? AND state!='done' AND (retry_not_before IS NULL OR retry_not_before<=?) AND (lease_expires_at IS NULL OR lease_expires_at<=?)",(self.key,operation_id,now,now)).fetchone()
+            else:
+                row=c.execute("SELECT * FROM cleaner_readback_jobs WHERE account=? AND state!='done' AND (retry_not_before IS NULL OR retry_not_before<=?) AND (lease_expires_at IS NULL OR lease_expires_at<=?) ORDER BY coalesce(retry_not_before,''),operation_id LIMIT 1",(self.key,now,now)).fetchone()
             if not row: return None
             token=new_id()
             c.execute("UPDATE cleaner_readback_jobs SET state='running',worker_token=?,lease_expires_at=?,attempts=attempts+1 WHERE operation_id=?",(token,plus_seconds(now,lease_seconds),row["operation_id"]))
@@ -624,6 +784,9 @@ class KeywordCleaner:
             for field in ('automatic','manual'):
                 result[field]+=facts.get('confirmed_'+field,0)
                 if row['kind']=='late_confirmation':result['late_'+field]+=facts.get('confirmed_'+field,0)
+            if facts.get('confirmed_pilot',0):
+                result['pilot']=result.get('pilot',0)+facts['confirmed_pilot']
+                if row['kind']=='late_confirmation':result['late_pilot']=result.get('late_pilot',0)+facts['confirmed_pilot']
         return result
 
     def summary(self,principal:Principal) -> dict:

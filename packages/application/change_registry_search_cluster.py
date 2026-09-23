@@ -105,7 +105,7 @@ def prepare_in_transaction(conn, *, operation_id, account, target, queries, crea
     now=_time(created_at)
     _insert(conn,'change_registry_operations',dict(operation_id=operation_id,seller_id=account.seller_id,
         account_scope=account.account_scope,source_surface='search_cluster_cleaner',actor_principal=actor,
-        actor_kind='human' if source=='owner_decision' else 'service',requested_at=now,created_at=now,
+        actor_kind='human' if source in {'owner_decision','manual_rules_pilot'} else 'service',requested_at=now,created_at=now,
         native_idempotency_key=operation_id,correlation_id=operation_id,provenance_digest=canonical_digest(provenance),mapping_version=MAPPING_VERSION))
     result={}
     for query in queries:

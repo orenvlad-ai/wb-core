@@ -8,18 +8,17 @@
 </style>
 <section class="panel kc" data-keyword-cleaner hidden aria-label="Чистка ключей">
   <section data-kc-page="overview">
-    <div class="kc-head"><h2>Чистка ключей</h2><button class="button primary" type="button" data-kc-run disabled>Проверить сейчас</button></div>
+    <div class="kc-head"><h2>Чистка ключей</h2><div class="kc-actions"><input class="input" type="number" min="1" step="1" placeholder="Кампания" data-kc-manual-advert disabled><input class="input" type="number" min="1" step="1" placeholder="Артикул WB" data-kc-manual-nm disabled><button class="button primary" type="button" data-kc-run disabled>Подготовить проверку</button></div></div>
     <div class="kc-toolbar">
-      <label class="kc-toggle"><input type="checkbox" role="switch" data-kc-enabled disabled><span data-kc-enabled-label>Авточистка выключена</span></label>
-      <div class="kc-schedule"><span>Каждый день в</span><button class="button ghost" type="button" data-kc-time-edit>07:00</button><span>· Екатеринбург</span></div>
+      <label class="kc-toggle"><input type="checkbox" role="switch" data-kc-enabled disabled><span data-kc-enabled-label>Ручной режим</span></label>
+      <div class="kc-schedule"><span>По расписанию выключено</span></div>
     </div>
-    <form class="kc-schedule" data-kc-time-form hidden style="margin-top:14px"><label for="kc-time">Время проверки</label><input class="input" type="time" id="kc-time" data-kc-time required value="07:00"><button class="button secondary" type="submit" data-kc-time-save>Сохранить</button><button class="button ghost" type="button" data-kc-time-cancel>Отмена</button></form>
     <p class="kc-note kc-scope">Поддержанные CPM-кампании, включая приостановленные · проверяем только новые ключи</p>
     <div class="kc-summary">
       <div class="kc-summary-head"><span class="kc-note" data-kc-last-date>Последняя проверка · —</span><span class="kc-status" data-kc-status>Загружаем…</span></div>
       <div class="kc-stats">
         <div class="kc-stat"><div class="kc-number" data-kc-checked>—</div><p class="kc-note">Новых ключей проверено</p></div>
-        <div class="kc-stat"><div class="kc-number" data-kc-excluded>—</div><p class="kc-note">Исключено автоматически</p></div>
+        <div class="kc-stat"><div class="kc-number" data-kc-excluded>—</div><p class="kc-note">Подтверждено исключений</p></div>
         <div class="kc-stat"><div class="kc-number" data-kc-pending>—</div><p class="kc-note">Ожидают разбора</p></div>
       </div>
       <div class="kc-alert" data-kc-alerts></div>

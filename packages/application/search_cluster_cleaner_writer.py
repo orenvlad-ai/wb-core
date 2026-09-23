@@ -21,15 +21,16 @@ MAX_VALIDATION_READBACK_ATTEMPTS=3
 
 
 class CleanerWriter:
-    def __init__(self,cleaner,source,session,*,generation,preflight_max_age=30,hook=None,registry=None):
+    def __init__(self,cleaner,source,session,*,generation,preflight_max_age=30,hook=None,registry=None,manual_only=False):
         self.app,self.source,self.session,self.generation=cleaner,source,session,generation
         if source.account!=cleaner.account:raise CleanerError('account_mismatch','Источник другого аккаунта')
         self.registry=registry or ChangeRegistryRepository(cleaner.store.registry.runtime_dir)
-        self.preflight_max_age=preflight_max_age;self.hook=hook or (lambda stage,op:None)
+        self.preflight_max_age=preflight_max_age;self.hook=hook or (lambda stage,op:None);self.manual_only=manual_only
 
     def _guard(self,c,run_id,token):
-        run=self.app._lease(c,run_id,token,self.generation,require_enabled=True)
+        run=self.app._lease(c,run_id,token,self.generation,require_enabled=not self.manual_only)
         s=self.app._settings(c)
+        if self.manual_only and s['enabled']:raise CleanerError('manual_mode_changed','Авточистка включена',409)
         if s['restore_hold'] or not s['baseline_ready']:raise CleanerError('restore_hold','Исходная база не допущена',409)
         if s['rules_version']!=self.app.rules_version:raise CleanerError('rules_changed','Версия правил изменилась',409)
         if json.loads(run['captured_versions']).get('rules_hash')!=self.app.rules_digest:
@@ -85,8 +86,11 @@ class CleanerWriter:
             before=sorted(snapshot.minus);additions=sorted({r['query'] for r in exact});expected=sorted(set(before)|set(additions))
             if len(before)!=len(set(before)) or len(additions)!=len(exact):raise CleanerError('invalid_full_set','Повторная идентичность')
             if len(expected)>1000:raise CleanerError('minus_limit','Полный список превышает 1000 строк')
+            item_sources={row['source'] for row in exact}
+            source=('owner_decision' if item_sources=={'owner_decision'} else
+                    'manual_rules_pilot' if run['trigger']=='manual_exact_candidates' else 'automatic')
             versions=dict(settings_revision=s['revision'],rules_digest=app.rules_digest,items=sorted(exact,key=lambda r:r['query_hash']),
-                          target=asdict(t),membership=list(membership),before_at=snapshot.observed_at,source='owner_decision' if run['kind']=='manual_apply' else 'automatic')
+                          target=asdict(t),membership=list(membership),before_at=snapshot.observed_at,source=source)
             basis=dict(account=app.key,target=t.key,run_id=run_id,before=before,expected=expected,additions=additions,versions=versions)
             op=new_id();now=app.clock()
             c.execute('''INSERT INTO cleaner_write_operations(operation_id,account,target,run_id,state,before_json,expected_json,additions,candidate_digest,versions,worker_token,worker_generation,created_at,updated_at)
@@ -126,14 +130,14 @@ class CleanerWriter:
                 if fresh.queries.get(item['query']) not in {'active','statistics'} or 'statistics' not in fresh.sources.get(item['query'],()):raise CleanerError('candidate_not_observed','Кандидат больше не подтверждён свежей статистикой',409)
             ids=self.registry.prepare_search_cluster_operation_in_transaction(c,operation_id=operation,account=app.account,target=fresh.target,
                 queries=additions,created_at=app.clock(),before_at=fresh.observed_at,provenance=basis,
-                actor=app.owner_username if versions['source']=='owner_decision' else 'cleaner',source=versions['source'])
+                actor=app.owner_username if versions['source'] in {'owner_decision','manual_rules_pilot'} else 'cleaner',source=versions['source'])
             for qh,item_id in ids.items():c.execute("UPDATE cleaner_write_items SET registry_item_id=?,state='dispatching' WHERE operation_id=? AND query_hash=?",(item_id,operation,qh))
             changed=c.execute("UPDATE cleaner_write_operations SET state='dispatching',dispatch_count=1,preflight_at=?,updated_at=? WHERE operation_id=? AND state='prepared' AND dispatch_count=0 AND worker_token=?",(fresh.observed_at,app.clock(),operation,token)).rowcount
             if changed!=1:raise CleanerError('cas_lost','Условный допуск потерян',409)
             c.execute('INSERT INTO cleaner_readback_jobs(operation_id,account) VALUES(?,?)',(operation,app.key))
             app._event(c,'dispatch_admitted',dict(target=row['target'],additions=len(additions),source=versions['source']),run_id=run_id,operation_id=operation)
             self.hook('before_seal',operation)
-            self.session.seal(operation,row['target'],row['candidate_digest'])
+            self.session.seal(operation,row['target'],row['candidate_digest'],run_id=run_id)
             self.hook('before_commit',operation)
         self.session.committed(operation)
         self.hook('after_commit',operation)
@@ -145,17 +149,17 @@ class CleanerWriter:
         # same full-set transaction.
         candidates=[row for row in candidates if 'statistics' in snapshot.sources.get(row['query'],())]
         if not candidates:return None
-        app=self.app;app.renew_lease(run_id,token,self.generation,phase='preparing')
+        app=self.app;app.renew_lease(run_id,token,self.generation,phase='preparing',manual_only=self.manual_only)
         initial,membership=self.source.refresh_target(snapshot.target)
         if initial!=snapshot.target:raise CleanerError('target_changed','Состав цели изменился')
         op=self.prepare(run_id,token,snapshot,candidates,membership)
         if op is None:return None
         self.hook('after_prepare',op)
         try:
-            app.renew_lease(run_id,token,self.generation,phase='preflight')
+            app.renew_lease(run_id,token,self.generation,phase='preflight',manual_only=self.manual_only)
             target,members=self.source.refresh_target(snapshot.target)
             fresh=self.source.snapshot(target)
-            app.renew_lease(run_id,token,self.generation,phase='waiting_rate_limit')
+            app.renew_lease(run_id,token,self.generation,phase='waiting_rate_limit',manual_only=self.manual_only)
             slot=self.source.reserve_write() # all waits occur BEFORE the final CAS
             self.hook('before_admission',op)
             expected=self.admit(op,run_id,token,fresh,members)
@@ -192,8 +196,8 @@ class CleanerReadback:
         self.registry=registry or ChangeRegistryRepository(cleaner.store.registry.runtime_dir)
         self.hook=hook or (lambda stage,op:None)
 
-    def tick(self):
-        app=self.app;job=app.claim_readback(generation=self.generation)
+    def tick(self, *, operation_id=None):
+        app=self.app;job=app.claim_readback(generation=self.generation,operation_id=operation_id)
         if not job:return None
         with app.store.read() as c:op=dict(c.execute('SELECT * FROM cleaner_write_operations WHERE operation_id=?',(job['operation_id'],)).fetchone())
         target=Target(**json.loads(op['versions'])['target'])
@@ -297,7 +301,7 @@ class CleanerReadback:
             state='confirmed' if complete else (op['state'] if op['state'] in TYPED_OUTCOME_STATES else 'unresolved')
             c.execute('UPDATE cleaner_write_operations SET state=?,updated_at=?,evidence=? WHERE operation_id=?',(state,app.clock(),canonical(self._evidence(op,readback_evidence)),op['operation_id']))
             c.execute("UPDATE cleaner_readback_jobs SET state=?,worker_token=NULL,lease_expires_at=NULL,retry_not_before=? WHERE operation_id=?",('done' if complete else 'queued',None if complete else plus_seconds(app.clock(),self._retry(row['attempts'])),op['operation_id']))
-            source=json.loads(op['versions'])['source'];counts=dict(confirmed_automatic=len(newly) if source=='automatic' else 0,confirmed_manual=len(newly) if source=='owner_decision' else 0)
+            source=json.loads(op['versions'])['source'];counts=dict(confirmed_automatic=len(newly) if source=='automatic' else 0,confirmed_manual=len(newly) if source=='owner_decision' else 0,confirmed_pilot=len(newly) if source=='manual_rules_pilot' else 0)
             app._event(c,'late_confirmation' if late else 'readback_result',dict(target=op['target'],state=state,late=late,**counts,missing=len(missing),missing_old=len(missing_old),extra=len(extra)),run_id=op['run_id'],operation_id=op['operation_id'])
             if complete:
                 unsettled=c.execute("SELECT 1 FROM cleaner_write_operations WHERE run_id=? AND state IN('prepared','dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error','requires_review')",(op['run_id'],)).fetchone()

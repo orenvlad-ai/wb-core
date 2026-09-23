@@ -14,6 +14,7 @@ from packages.application.fbs_accounting_apply import FbsAccountingAdapter
 from apps.wb_fbs_mapping_evidence_production_adapter import (
     WbFbsMappingEvidenceProductionAdapter,
 )
+from apps.search_cluster_cleaner_production_adapter import SearchClusterCleanerProductionAdapter
 from packages.application.supplier_shipment_invoice_revision import SupplierInvoiceRevisionAdapter
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter
 from apps.web_vitrina_wb_history_recovery import WebVitrinaWbHistoryRecoveryAdapter
@@ -40,6 +41,7 @@ ADAPTERS: dict[str, Adapter] = {
     "web_vitrina_management_history_v1": WebVitrinaManagementHistoryAdapter(),
     "web_vitrina_wb_history_recovery_v1": WebVitrinaWbHistoryRecoveryAdapter(),
     "wb_fbs_mapping_evidence_v1": WbFbsMappingEvidenceProductionAdapter(),
+    "search_cluster_cleaner_manual_v1": SearchClusterCleanerProductionAdapter(),
 }
 
 

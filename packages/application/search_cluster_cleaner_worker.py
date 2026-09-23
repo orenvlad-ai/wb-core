@@ -4,7 +4,7 @@ import json
 from contextlib import nullcontext
 import time
 from packages.application.search_cluster_cleaner import KeywordCleaner
-from packages.contracts.search_cluster_cleaner import CleanerError, ReadSource, Target
+from packages.contracts.search_cluster_cleaner import CleanerError, ReadSource, Target, digest
 
 
 class CleanerWorker:
@@ -103,6 +103,91 @@ class CleanerWorker:
             return app.finish_run(rid,token,self.generation,reason=exc.code,remaining=remaining)
         except (TimeoutError,ConnectionError,OSError):
             return app.finish_run(rid,token,self.generation,reason='catalog_unavailable',remaining=remaining)
+
+
+class ManualCleanerWorker:
+    """One explicit scope; it never invokes scheduler_tick or FIFO claim_run."""
+    def __init__(self, cleaner: KeywordCleaner, source: ReadSource, guard, *, generation: str):
+        self.cleaner,self.source,self.guard,self.generation=cleaner,source,guard,generation
+
+    @staticmethod
+    def _scope(run_id, targets):
+        return digest(dict(run_id=run_id,targets=sorted(t.key for t in targets)))
+
+    def _read(self, targets):
+        snapshots=[]
+        for requested in targets:
+            with self.source.target_attempt():
+                target,membership=self.source.refresh_target(requested)
+                if target.key!=requested.key:raise CleanerError('wrong_target','Ответ WB относится к другой цели',409)
+                snapshot=self.source.snapshot(target)
+                if snapshot.target!=target:raise CleanerError('wrong_target','Снимок WB относится к другой цели',409)
+                snapshots.append((target,membership,snapshot))
+        return snapshots
+
+    @staticmethod
+    def _prestate_digest(run_id, snapshots):
+        value=dict(run_id=run_id,targets=[dict(target=t.key,membership=list(m),minus=sorted(s.minus),complete=s.complete) for t,m,s in snapshots])
+        return 'sha256:'+digest(value)
+
+    def preview(self, *, run_id: str, targets: list[Target]) -> dict:
+        if not targets or len({t.key for t in targets}) != len(targets):
+            raise CleanerError('manual_scope_invalid','Нужна точная область ручной проверки',422)
+        with self.cleaner.store.read() as c:
+            settings=self.cleaner._settings(c)
+            run=c.execute('SELECT * FROM cleaner_runs WHERE account=? AND run_id=?',(self.cleaner.key,run_id)).fetchone()
+            if settings['enabled'] or not settings['baseline_ready'] or not run or run['state'] != 'queued':
+                raise CleanerError('manual_run_not_ready','Ручное задание недоступно',409)
+            if c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND run_id<>? AND state IN('queued','accepted','running')",(self.cleaner.key,run_id)).fetchone():
+                raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
+            declared={str(v.get('target') or '') for v in json.loads(run['targets'])}
+            if declared != {t.key for t in targets}: raise CleanerError('manual_scope_drift','Область ручного запуска изменилась',409)
+            candidates=[dict(v) for v in self.cleaner.pending_candidates(run_id)] if run['kind']=='manual_apply' else []
+        snapshots=self._read(targets)
+        prestate=dict(run_id=run_id,targets=[dict(target=t.key,membership=list(m),minus=sorted(s.minus),complete=s.complete) for t,m,s in snapshots])
+        candidate=dict(prestate=prestate,kind=run['kind'],candidates=[dict(target=v['target'],query_hash=v['query_hash'],decision_id=v['decision_id'],execution_eligibility=v['execution_eligibility']) for v in candidates])
+        return dict(run_id=run_id,target=','.join(sorted(t.key for t in targets)),scope=dict(target_count=len(targets),kind=run['kind']),prestate_sha256='sha256:'+digest(prestate),candidate_sha256='sha256:'+digest(candidate),recovery=dict(kind='held_manual_capability',scope_digest=self._scope(run_id,targets)))
+
+    def execute(self, *, run_id: str, targets: list[Target], expected_prestate: str, expected_candidate: str, production_operation_id: str, reviewed_candidate: str|None=None) -> dict:
+        preview=self.preview(run_id=run_id,targets=targets)
+        if preview['prestate_sha256'] != expected_prestate or preview['candidate_sha256'] != expected_candidate:
+            raise CleanerError('manual_preview_drift','Свежая ручная проверка изменилась',409)
+        run=self.cleaner.claim_exact_manual_run(run_id=run_id,targets=targets,generation=self.generation)
+        token=run['worker_token'];scope_digest=self._scope(run_id,targets)
+        with self.cleaner.store.transaction() as c:
+            self.cleaner._lease(c,run_id,token,self.generation)
+            self.cleaner._event(c,'stage_e_manual_binding',dict(operation_id=production_operation_id,targets=sorted(t.key for t in targets),prestate_sha256=expected_prestate,candidate_sha256=reviewed_candidate or expected_candidate),run_id=run_id)
+        if run['kind']=='scan':
+            try:
+                snapshots=self._read(targets)
+                if self._prestate_digest(run_id,snapshots)!=expected_prestate:raise CleanerError('manual_preview_drift','Состояние WB изменилось после допуска',409)
+                for _target,_members,snapshot in snapshots:
+                    self.cleaner.record_snapshot(run_id,token,self.generation,snapshot,manual_only=True)
+                return self.cleaner.finish_run(run_id,token,self.generation,manual_only=True)
+            except CleanerError as exc:
+                return self.cleaner.finish_run(run_id,token,self.generation,reason=exc.code,manual_only=True)
+            except (TimeoutError,ConnectionError,OSError):
+                return self.cleaner.finish_run(run_id,token,self.generation,reason='source_temporarily_unavailable',manual_only=True)
+        with self.guard.manual_session(account=self.cleaner.account,generation=self.generation,capability=dict(run_id=run_id,targets=sorted(t.key for t in targets),scope_digest=scope_digest,production_operation_id=production_operation_id,prestate_sha256=expected_prestate,candidate_sha256=reviewed_candidate or expected_candidate)) as session:
+            self.cleaner.set_manual_restore_hold(held=False,generation=self.generation)
+            self.cleaner.set_manual_transport(enabled=True,generation=self.generation)
+            try:
+                from packages.application.search_cluster_cleaner_writer import CleanerWriter, CleanerReadback
+                writer=CleanerWriter(self.cleaner,self.source,session,generation=self.generation,manual_only=True)
+                operations=[]
+                snapshots=self._read(targets)
+                if self._prestate_digest(run_id,snapshots)!=expected_prestate:raise CleanerError('manual_preview_drift','Состояние WB изменилось после допуска',409)
+                for _target,_members,snapshot in snapshots:
+                    candidates=[v for v in self.cleaner.pending_candidates(run_id) if v['target']==snapshot.target.key]
+                    operation=writer.apply_target(run_id,token,snapshot,candidates)
+                    if operation:operations.append(operation)
+                # One immediate readback is safe. Any unavailable result remains
+                # durable for the separate readback-only production action.
+                readback=CleanerReadback(self.cleaner,self.source,generation=self.generation)
+                for operation in operations:readback.tick(operation_id=operation)
+            finally:
+                self.cleaner.close_manual_window()
+        return self.cleaner.finish_run(run_id,token,self.generation,manual_only=True)
 
 
 def product_tick(cleaner,source,admission,*,generation,**options):
