@@ -37,6 +37,7 @@ class Fake:
 
 
 def main() -> None:
+    _assert_cleaner_selection_does_not_import_fbs_dependencies()
     fake = Fake()
     preview = launcher.execute(action="preview", adapter_name="fake", operation_id="operation-0001", request={}, adapters={"fake": fake})
     assert preview["state"] == "preview" and fake.apply_count == 0
@@ -106,6 +107,49 @@ def main() -> None:
     assert "APPLY_REQUEST_JSON:" not in workflow
     assert "GITHUB_EVENT_PATH" in workflow
     print("production_apply_launcher_smoke: ok")
+
+
+def _assert_cleaner_selection_does_not_import_fbs_dependencies() -> None:
+    """The workflow runner need not install dependencies for unrelated adapters."""
+
+    probe = r'''
+import builtins
+import sys
+
+original_import = builtins.__import__
+def without_openpyxl(name, *args, **kwargs):
+    if name == "openpyxl" or name.startswith("openpyxl."):
+        raise ModuleNotFoundError("openpyxl deliberately unavailable")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_openpyxl
+
+from apps.production_apply_adapters import ADAPTERS
+expected = {
+    "inventory_retention_publication_v1",
+    "web_source_publication_v1",
+    "finance_daily_publication_v1",
+    "ads_partial_publication_v1",
+    "fbs_snapshot_accounting_v1",
+    "finance_payout_reconcile_v1",
+    "supplier_invoice_revision_v1",
+    "web_vitrina_management_history_v1",
+    "web_vitrina_wb_history_recovery_v1",
+    "wb_fbs_mapping_evidence_v1",
+    "search_cluster_cleaner_manual_v1",
+}
+assert set(ADAPTERS) == expected
+from apps import production_apply_launcher
+assert production_apply_launcher.ADAPTERS["search_cluster_cleaner_manual_v1"]
+assert "packages.application.fbs_accounting_apply" not in sys.modules
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 if __name__ == "__main__":

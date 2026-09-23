@@ -48,6 +48,11 @@ class Harness(WbFbsMappingEvidenceProductionAdapter):
 
 def main() -> None:
     assert set(ADAPTERS) == {"inventory_retention_publication_v1", "web_source_publication_v1", "finance_daily_publication_v1", "ads_partial_publication_v1", "fbs_snapshot_accounting_v1", "finance_payout_reconcile_v1", "wb_fbs_mapping_evidence_v1", "web_vitrina_management_history_v1", "web_vitrina_wb_history_recovery_v1", "supplier_invoice_revision_v1", "search_cluster_cleaner_manual_v1"}
+    for adapter_name in ADAPTERS:
+        registered = ADAPTERS[adapter_name]
+        assert callable(registered.preview)
+        assert callable(registered.apply)
+        assert callable(registered.readback)
     assert isinstance(
         ADAPTERS["wb_fbs_mapping_evidence_v1"],
         WbFbsMappingEvidenceProductionAdapter,
