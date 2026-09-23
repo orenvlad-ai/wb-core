@@ -142,6 +142,13 @@ non-target digests. Overall day health заново выводится из по
 
 # 9. Что уже доказано по модулю
 
+`finance_daily_publication_v1` также поддерживает `retained_accepted_closed`:
+публикацию уже принятого полного exact-date payload в собственный ready этой
+даты. Режим проверяет versioned report proof и точный датированный roster,
+заполняет только Finance cells/STATUS/presentation, сохраняет source/closure и
+исходные clocks. Старые ready и нецелевые даты не изменяются. Применяются
+те же locks, exact-source/ready CAS, before-image, один submit и readback.
+
 - Parity подтверждена для `normal-case` и `storage-total`.
 - Server-side checkpoint подтверждён как реально рабочий: `normal -> success`, `normal: count -> 2`, `storage_total -> 0.0`.
 - Прежний paused auth-blocker снят заменой server-side canonical WB token path.

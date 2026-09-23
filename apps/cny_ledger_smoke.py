@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import patch
 import socket
 import sqlite3
 import sys
@@ -1113,7 +1114,6 @@ def _assert_http_routes_and_order_integration() -> None:
                     "payment-anchored logical fee group: "
                     f"{import_preview}"
                 )
-            replay_ledger = entrypoint.cny_ledger_block.replay_ledger
 
             def fail_derived_replay_once(*, reason: str = "manual") -> dict[str, object]:
                 raise SQLiteContentionExhausted(
@@ -1122,17 +1122,16 @@ def _assert_http_routes_and_order_integration() -> None:
                     phase="begin",
                 )
 
-            entrypoint.cny_ledger_block.replay_ledger = fail_derived_replay_once
-            confirm_status, pending_statement = _post_json(
-                f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
-                {
-                    "selected_operation_ids": selected_logical_fee_ids,
-                    "source_sha256": statement_preview.get("source_sha256")
-                    or statement_preview.get("file_sha256"),
-                    "target_revision": import_preview.get("target_revision"),
-                },
-            )
-            entrypoint.cny_ledger_block.replay_ledger = replay_ledger
+            with patch.object(CnyLedgerBlock, "replay_ledger", side_effect=fail_derived_replay_once):
+                confirm_status, pending_statement = _post_json(
+                    f"{base_url}{order_doc_path}/{statement_document_id}/confirm-import",
+                    {
+                        "selected_operation_ids": selected_logical_fee_ids,
+                        "source_sha256": statement_preview.get("source_sha256")
+                        or statement_preview.get("file_sha256"),
+                        "target_revision": import_preview.get("target_revision"),
+                    },
+                )
             pending_cny_documents = [
                 item
                 for item in runtime.list_cny_documents()

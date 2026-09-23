@@ -41,6 +41,14 @@ class FinReportDailyStorageTotal:
 
 @dataclass(frozen=True)
 class FinReportDailySuccess:
+    """Normalized aggregates; accepted scope requires the versioned report proof.
+
+    New adapters put finance_daily_report_v1 in diagnostics.finance_report.
+    Items then cover known projection keys, including proven no_activity zeros;
+    diagnostics.covered_count continues to count observed source activity.
+    Unversioned persisted payloads keep their original sparse item semantics.
+    """
+
     kind: Literal["success"]
     snapshot_date: str
     count: int

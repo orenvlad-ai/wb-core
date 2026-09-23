@@ -39,6 +39,7 @@ def transform_legacy_payload(
         date=_require_str(payload, "date"),
         count=len(items) if relevant_nm_ids else _require_int(payload, "count"),
         items=items,
+        source_fetched_at=payload.get("source_fetched_at"),
     )
     if filter_note:
         object.__setattr__(success, "detail", filter_note)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 import json
 import math
@@ -26,10 +27,11 @@ from packages.adapters.sf_period_block import HttpBackedSfPeriodSource
 from packages.adapters.spp_proxy_block import HttpBackedPublicWbCardBuyerPriceSource
 from packages.adapters.spp_block import HttpBackedSppSource
 from packages.adapters.stocks_block import HistoricalCsvBackedStocksSource
-from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync
+from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync, serving_payload_matches
 from packages.adapters.web_source_snapshot_block import HttpBackedWebSourceSnapshotSource
 from packages.application.ads_bids_block import AdsBidsBlock
 from packages.application.ads_compact_block import AdsCompactBlock
+from packages.application.metric_completeness import ads_partial_presentation, evaluator_scope_presentation, ads_dependencies
 from packages.application.calculation_parameters import (
     CalculationParametersBlock,
     DEFAULT_PROXY_PARAMETERS,
@@ -161,6 +163,13 @@ from packages.application.sheet_vitrina_v1_weighted_seller_price import (
     SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
     WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
     extend_metrics_with_weighted_seller_price,
+    index_daily_order_price,
+    observed_order_price,
+    uses_order_price,
+    weighted_price_presentation,
+    ORDER_PRICE_EFFECTIVE_FROM,
+    ORDER_PRICE_AGGREGATION_RULE,
+    WEIGHTED_SELLER_PRICE_DISCOUNTED_AGGREGATION_RULE,
 )
 from packages.application.sheet_vitrina_v1_temporal_policy import (
     CANONICAL_SOURCE_TEMPORAL_POLICIES,
@@ -446,6 +455,8 @@ class SlotLookups:
     sku_action_lookup: dict[int, dict[str, float]] = field(default_factory=dict)
     sku_action_error: str = ""
     column_date: str = ""
+    order_price_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
+    fin_report_daily_result: Any = None
 
 
 @dataclass(frozen=True)
@@ -1002,6 +1013,60 @@ class _SyntheticNoPromoLiveSourceBlock:
         )
 
 
+@dataclass
+class _CollectedBuildSources:
+    """One invocation's accepted source outcomes; never a publishable plan."""
+
+    scope: Any = None
+    effects: dict[str, Any] = field(default_factory=dict)
+    slots: dict[tuple, Any] = field(default_factory=dict)
+    inputs: dict[str, Any] = field(default_factory=dict)
+    capital_reader: OwnProductCapitalBlock | None = None
+
+
+def _registry_state_fingerprint(current_state):
+    from packages.application.ready_publication import canonical, digest
+    return digest(canonical(asdict(current_state)))
+
+
+def bind_local_derive_publication(runtime, plan, current_state, expected):
+    """Resolve the exact predecessor the local derive actually observed.
+
+    A new publication after derive is a conflict, never permission to overwrite
+    it. Legacy/prebuilt builders keep their original exact CAS.
+    """
+    pinned = dict(plan.metadata or {}).get("local_derive_expected_ready_fingerprint")
+    if not pinned:
+        return current_state, expected
+    from packages.application.ready_publication import ReadyPublicationConflict
+    current = runtime.load_current_state()
+    if _registry_state_fingerprint(current) != plan.metadata.get("local_derive_registry_fingerprint"):
+        raise ReadyPublicationConflict("ready_registry_changed_after_local_derive")
+    latest = runtime.prepare_sheet_vitrina_ready_publication(
+        bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
+    if latest.fingerprint != pinned:
+        raise ReadyPublicationConflict("ready_target_changed_after_local_derive")
+    return current, latest
+
+
+def _buyout_capture_scopes(
+    *,
+    reporting_config_items: Iterable[ConfigV2Item],
+    registry_config_items: Iterable[ConfigV2Item],
+) -> tuple[list[int], list[int]]:
+    """Keep broad reporting collection separate from the buyout confirmation set."""
+
+    fetch_nm_ids = sorted({int(item.nm_id) for item in reporting_config_items})
+    confirmation_nm_ids = sorted(
+        {
+            int(item.nm_id)
+            for item in registry_config_items
+            if item.enabled
+        }
+    )
+    return fetch_nm_ids, confirmation_nm_ids
+
+
 class SheetVitrinaV1LivePlanBlock:
     def __init__(
         self,
@@ -1048,7 +1113,8 @@ class SheetVitrinaV1LivePlanBlock:
             HttpBackedOnecStocksSource(),
             stage_mapping=DEFAULT_ONEC_STAGE_MAPPING,
         )
-        self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource(complete_catalog=True))
+        self.ads_compact_block = ads_compact_block or AdsCompactBlock(HttpBackedAdsCompactSource(
+            complete_catalog=True, partial_from_date="2026-09-11"))
         self.fin_report_daily_block = fin_report_daily_block or FinReportDailyBlock(
             HttpBackedFinReportDailySource(runtime_dir=runtime.runtime_dir)
         )
@@ -1061,10 +1127,51 @@ class SheetVitrinaV1LivePlanBlock:
         return _format_runtime_timestamp(self.now_factory())
 
     def build_plan(self, *args, **kwargs) -> SheetVitrinaV1Envelope:
-        from packages.application.ready_publication import capture_build_inputs
-        with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as inputs:
-            plan = self._build_plan(*args, **kwargs)
-            return replace(plan, metadata={**dict(plan.metadata or {}), "publication_inputs": inputs})
+        from packages.application.ready_publication import (
+            ReadyPublicationConflict, capture_build_inputs, capture_expected,
+            check_build_inputs, check_expected, readonly,
+        )
+        args = list(args)
+        for index in (3, 4):
+            if len(args) > index and args[index] is not None:
+                args[index] = tuple(args[index])
+        for key in ("source_keys", "metric_keys"):
+            if kwargs.get(key) is not None:
+                kwargs[key] = tuple(kwargs[key])
+        collected = _CollectedBuildSources()
+        with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as source_inputs:
+            self._build_plan(*args, **kwargs, _collection=collected, _collect_only=True)
+        # Material pins from before external collection are deliberately not
+        # reused. Every local operand is read again below with fresh pins.
+        collected.inputs = deepcopy({key: source_inputs[key] for key in (
+            "sources", "consumed", "conflicts", "authority")})
+        for attempt in range(1, 4):
+            with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as inputs:
+                if inputs["authority"] != collected.inputs["authority"]:
+                    raise ReadyPublicationConflict("ready_collection_authority_changed")
+                inputs.update(deepcopy({key: collected.inputs[key] for key in (
+                    "sources", "consumed", "conflicts")}))
+                try:
+                    # Fail before doing local work if a consumed source already
+                    # changed. Reusing older source values is not a rebase.
+                    with readonly(self.runtime.db_path) as conn:
+                        check_build_inputs(conn, inputs)
+                        expected = capture_expected(conn, bundle_version=collected.scope[0],
+                            as_of_date=collected.scope[1], authority=inputs["authority"])
+                    plan = self._build_plan(*args, **kwargs, _collection=collected)
+                    with readonly(self.runtime.db_path) as conn:
+                        check_build_inputs(conn, inputs)
+                        check_expected(conn, expected)
+                except ReadyPublicationConflict as exc:
+                    if attempt == 3 or not str(exc).startswith((
+                        "ready_material_input_changed:", "ready_history_changed_during_build", "ready_target_changed:",
+                    )):
+                        raise
+                    continue
+                return replace(plan, metadata={**dict(plan.metadata or {}),
+                    "publication_inputs": inputs, "local_derive_attempt": attempt,
+                    "local_derive_expected_ready_fingerprint": expected.fingerprint})
+        raise AssertionError("bounded local derive did not terminate")
 
     def _build_plan(
         self,
@@ -1074,6 +1181,8 @@ class SheetVitrinaV1LivePlanBlock:
         source_keys: Iterable[str] | None = None,
         metric_keys: Iterable[str] | None = None,
         _include_archived_metrics_for_audit: bool = False,
+        _collection: _CollectedBuildSources | None = None,
+        _collect_only: bool = False,
     ) -> SheetVitrinaV1Envelope:
         emit = log or _noop_live_plan_log
         selected_source_keys = {str(item).strip() for item in (source_keys or []) if str(item).strip()}
@@ -1126,18 +1235,43 @@ class SheetVitrinaV1LivePlanBlock:
                                     key=lambda item: item.display_order)
         if not enabled_config:
             raise ValueError("current registry config_v2 does not contain enabled rows")
+        buyout_fetch_nm_ids, buyout_confirmation_nm_ids = _buyout_capture_scopes(
+            reporting_config_items=enabled_config,
+            registry_config_items=current_state.config_v2,
+        )
+        diagnostics["buyout_confirmation_scope"] = {
+            "nm_ids": buyout_confirmation_nm_ids,
+            "policy": "registry_enabled_config_v1",
+            "reporting_nm_id_count": len(buyout_fetch_nm_ids),
+        }
+
+        if _collection is not None:
+            from packages.application.ready_publication import ReadyPublicationConflict
+            scope = (current_state.bundle_version, effective_date, current_date,
+                     [asdict(item) for item in enabled_config],
+                     sorted(selected_source_keys), sorted(selected_metric_keys))
+            if _collect_only:
+                _collection.scope = scope
+            elif _collection.scope != scope:
+                raise ReadyPublicationConflict("ready_collection_scope_or_date_changed")
 
         mature_buyout_started = _start_refresh_phase(
             diagnostics,
             "mature_buyout_capture",
             started_at=self._diagnostic_timestamp(),
         )
-        if not selected_source_keys or "sales_funnel_history" in selected_source_keys:
+        if _collection is not None and not _collect_only:
+            diagnostics["mature_buyout_capture"] = deepcopy(_collection.effects["mature_buyout_capture"])
+            _finish_refresh_phase(diagnostics, mature_buyout_started,
+                finished_at=self._diagnostic_timestamp(), status="skipped",
+                note_kind="retained_source_collection")
+        elif not selected_source_keys or "sales_funnel_history" in selected_source_keys:
             try:
                 mature_buyout_capture = capture_mature_buyout_percent_snapshots(
                     runtime=self.runtime,
                     sales_funnel_history_block=self.sales_funnel_history_block,
-                    enabled_nm_ids=[item.nm_id for item in enabled_config],
+                    enabled_nm_ids=buyout_fetch_nm_ids,
+                    required_confirmation_nm_ids=buyout_confirmation_nm_ids,
                     now=self.now_factory(),
                     captured_at_factory=self._diagnostic_timestamp,
                 ).public()
@@ -1148,7 +1282,8 @@ class SheetVitrinaV1LivePlanBlock:
                     "trusted_cutoff": (
                         date.fromisoformat(current_date) - timedelta(days=6)
                     ).isoformat(),
-                    "requested_nm_id_count": len(enabled_config),
+                    "requested_nm_id_count": len(buyout_fetch_nm_ids),
+                    "confirmation_nm_id_count": len(buyout_confirmation_nm_ids),
                     "detail": str(exc),
                 }
             diagnostics["mature_buyout_capture"] = mature_buyout_capture
@@ -1181,7 +1316,10 @@ class SheetVitrinaV1LivePlanBlock:
                 note_kind="source_scope_excluded",
             )
 
-        proxy_v4_rollover = (
+        if _collection is not None and _collect_only:
+            _collection.effects["mature_buyout_capture"] = deepcopy(diagnostics["mature_buyout_capture"])
+        proxy_v4_rollover = (deepcopy(_collection.effects["proxy_v4_rollover"])
+            if _collection is not None and not _collect_only else (
             self.proxy_v4_parameters_block.materialize_latest_confirmed_window(
                 business_date=current_date,
             )
@@ -1192,7 +1330,9 @@ class SheetVitrinaV1LivePlanBlock:
                 "effective_date": current_date,
                 "detail": "Proxy V4 rollover is owned by the complete Vitrina refresh.",
             }
-        )
+        ))
+        if _collection is not None and _collect_only:
+            _collection.effects["proxy_v4_rollover"] = deepcopy(proxy_v4_rollover)
         diagnostics["proxy_v4_rollover"] = proxy_v4_rollover
         from packages.application.ready_publication import pin_parameters
         pin_parameters(self.runtime.db_path)
@@ -1255,7 +1395,12 @@ class SheetVitrinaV1LivePlanBlock:
             "current_web_source_sync",
             started_at=self._diagnostic_timestamp(),
         )
-        if not selected_source_keys or "web_source_snapshot" in selected_source_keys:
+        if _collection is not None and not _collect_only:
+            current_web_source_sync_note = _collection.effects["current_web_source_sync_note"]
+            _finish_refresh_phase(diagnostics, current_sync_started,
+                finished_at=self._diagnostic_timestamp(), status="skipped",
+                note_kind="retained_source_collection")
+        elif not selected_source_keys or "web_source_snapshot" in selected_source_keys:
             emit(
                 _format_log_event(
                     "current_web_source_sync_start",
@@ -1297,6 +1442,8 @@ class SheetVitrinaV1LivePlanBlock:
                     reason="source group does not include web_source_snapshot",
                 )
             )
+        if _collection is not None and _collect_only:
+            _collection.effects["current_web_source_sync_note"] = current_web_source_sync_note
         live_sources = self._load_live_sources(
             enabled_config,
             temporal_slots,
@@ -1306,7 +1453,13 @@ class SheetVitrinaV1LivePlanBlock:
             log=emit,
             source_keys=selected_source_keys or None,
             diagnostics=diagnostics,
+            _collection=_collection,
+            _collect_only=_collect_only,
         )
+        if _collect_only:
+            diagnostics["finished_at"] = self._diagnostic_timestamp()
+            _collection.effects["collection_diagnostics"] = deepcopy(diagnostics)
+            return None
         evaluator = _MetricEvaluator(
             enabled_config=enabled_config,
             metrics_by_key=metrics_by_key,
@@ -1412,6 +1565,14 @@ class SheetVitrinaV1LivePlanBlock:
             status_layout=_load_json(STATUS_LAYOUT_PATH),
         )
         diagnostics["finished_at"] = self._diagnostic_timestamp()
+        if _collection is not None:
+            collection_diagnostics = _collection.effects["collection_diagnostics"]
+            diagnostics["started_at"] = collection_diagnostics["started_at"]
+            diagnostics["source_slots"] = deepcopy(collection_diagnostics["source_slots"])
+            diagnostics["local_derive_phase_summary"] = deepcopy(diagnostics["phase_summary"])
+            diagnostics["phase_summary"] = (deepcopy(collection_diagnostics["phase_summary"])
+                + [phase for phase in diagnostics["phase_summary"] if phase["phase_key"]
+                   not in {"mature_buyout_capture", "current_web_source_sync", "load_live_sources_total"}])
         diagnostics["duration_ms"] = _duration_ms_from_phase_summary(diagnostics.get("phase_summary"))
         diagnostics["source_summary"] = _build_refresh_source_summary(
             diagnostics.get("source_slots"),
@@ -1420,6 +1581,12 @@ class SheetVitrinaV1LivePlanBlock:
             plan,
             metadata={
                 **dict(getattr(plan, "metadata", {}) or {}),
+                "local_derive_registry_fingerprint": _registry_state_fingerprint(current_state),
+                "weighted_seller_price_formula": {
+                    "effective_from": ORDER_PRICE_EFFECTIVE_FROM,
+                    "before": WEIGHTED_SELLER_PRICE_DISCOUNTED_AGGREGATION_RULE,
+                    "from": ORDER_PRICE_AGGREGATION_RULE,
+                },
                 "refresh_diagnostics": diagnostics,
                 "incident_projection_quality_by_date": {
                     slot.column_date: dict(
@@ -1434,6 +1601,15 @@ class SheetVitrinaV1LivePlanBlock:
                     ].incident_projection_quality
                 },
                 "server_cell_presentation": _merge_cell_presentations(
+                    evaluator_scope_presentation(rows=data_rows, slots=temporal_slots,
+                        evaluator=evaluator, current_date=current_date),
+                    _finance_daily_cell_presentation(rows=data_rows, slots=temporal_slots,
+                        live_sources=live_sources, nm_ids=[item.nm_id for item in enabled_config]),
+                    weighted_price_presentation(slots=temporal_slots,
+                        evaluator=evaluator, current_date=current_date),
+                    ads_partial_presentation(
+                        rows=data_rows, slots=temporal_slots, statuses=live_sources.statuses,
+                        metrics=metrics_by_key, formulas=formulas_by_id),
                     _inventory_cost_cell_presentation(
                         enabled_config=enabled_config,
                         displayed_metrics=displayed_metrics,
@@ -1463,7 +1639,17 @@ class SheetVitrinaV1LivePlanBlock:
             slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
             states=sorted(CLOSURE_PENDING_STATES),
         )
-        return [state for state in states if _closure_attempt_is_due(state, now)]
+        # Older exhausted Finance dates are a separately reviewed historical
+        # repair. Reopen only post-contract dates; the caller refreshes a whole
+        # date, so enrolling legacy gaps here would mutate unrelated history.
+        states += self.runtime.list_temporal_source_closure_states(
+            source_keys=["fin_report_daily"],
+            slot_kind=TEMPORAL_SLOT_YESTERDAY_CLOSED,
+            states=[CLOSURE_STATE_EXHAUSTED],
+        )
+        return [state for state in states
+                if (state.state != CLOSURE_STATE_EXHAUSTED or state.target_date >= "2026-09-12")
+                and _closure_attempt_is_due(state, now)]
 
     def list_due_current_capture_retries(
         self,
@@ -1500,6 +1686,8 @@ class SheetVitrinaV1LivePlanBlock:
         log: LivePlanLogEmitter | None = None,
         source_keys: set[str] | None = None,
         diagnostics: dict[str, Any] | None = None,
+        _collection: _CollectedBuildSources | None = None,
+        _collect_only: bool = False,
     ) -> TemporalLiveSources:
         emit = log or _noop_live_plan_log
         selected_source_keys = _expand_selected_source_keys_for_dependencies(
@@ -1507,7 +1695,14 @@ class SheetVitrinaV1LivePlanBlock:
         )
         requested_nm_ids = [item.nm_id for item in enabled_config]
         requested_groups = sorted({item.group for item in enabled_config})
-        own_product_capital_block = OwnProductCapitalBlock(runtime=self.runtime)
+        if _collection is None or _collect_only:
+            own_product_capital_block = OwnProductCapitalBlock(runtime=self.runtime)
+            if _collection is not None:
+                _collection.capital_reader = own_product_capital_block
+        else:
+            # The constructor bootstraps schema; its read methods hold no
+            # operand cache and reopen the database on each local attempt.
+            own_product_capital_block = _collection.capital_reader
         try:
             own_product_capital_cutover_date = (
                 own_product_capital_block.functional_warehouse_cutover_date()
@@ -1736,6 +1931,8 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_date=slot.column_date,
                     started_at=self._diagnostic_timestamp(),
                 )
+                slot_identity = (source_key, slot.slot_key, slot.column_date,
+                                 tuple(source_nm_ids), stock_scope_error is not None)
                 if stock_scope_error is not None:
                     # An unavailable catalog must not revive a smaller cache or
                     # block unrelated sources in this refresh.
@@ -1750,7 +1947,12 @@ class SheetVitrinaV1LivePlanBlock:
                     requested_nm_ids=source_nm_ids,
                     loader=loader,
                 )
-                if stock_scope_error is not None:
+                if _collection is not None and not _collect_only:
+                    from packages.application.ready_publication import ReadyPublicationConflict
+                    if slot_identity not in _collection.slots:
+                        raise ReadyPublicationConflict("ready_collection_source_scope_changed:" + source_key)
+                    status, payload = deepcopy(_collection.slots[slot_identity])
+                elif stock_scope_error is not None:
                     status, payload = _capture_live_source(**capture_kwargs)
                     status, payload = self._preserve_closed_stocks_without_catalog(status)
                 else:
@@ -1763,6 +1965,8 @@ class SheetVitrinaV1LivePlanBlock:
                             else None
                         ),
                     )
+                if _collection is not None and _collect_only:
+                    _collection.slots[slot_identity] = deepcopy((status, payload))
                 if stock_scope is not None:
                     status = replace(status, diagnostics={
                         **dict(status.diagnostics or {}),
@@ -1790,6 +1994,7 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.seller_funnel_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "sales_funnel_history":
                     current_lookups.history_lookup = _index_history_items(payload)
+                    current_lookups.order_price_lookup = index_daily_order_price(payload, slot.column_date)
                 elif source_key == "web_source_snapshot":
                     current_lookups.web_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "prices_snapshot":
@@ -1813,9 +2018,10 @@ class SheetVitrinaV1LivePlanBlock:
                         ),
                     )
                     stock_items = list(getattr(payload, "items", []) or [])
-                    if all(hasattr(item, "stock_total") for item in stock_items):
+                    if not _collect_only and all(hasattr(item, "stock_total") for item in stock_items):
                         projection = build_vitrina_incident_stock_projection(
                             self.runtime,
+                            cache_enabled=False,
                             items=stock_items,
                             warehouse_rows=list(getattr(payload, "warehouse_rows", []) or []),
                             snapshot_date=str(getattr(payload, "snapshot_date", "") or slot.column_date),
@@ -1842,6 +2048,7 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "ads_compact":
                     current_lookups.ads_compact_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "fin_report_daily":
+                    current_lookups.fin_report_daily_result = payload
                     current_lookups.fin_lookup = _index_items_by_nm_id(payload)
                     storage_total = getattr(payload, "storage_total", None)
                     if storage_total is not None:
@@ -1851,6 +2058,8 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "promo_by_price":
                     current_lookups.promo_lookup = _index_promo_items(payload)
 
+            if _collect_only:
+                continue
             try:
                 current_lookups.our_wb_cost_lookup = self.runtime.load_our_wb_cost_daily_state(
                     as_of_date=slot.column_date
@@ -2374,10 +2583,28 @@ class SheetVitrinaV1LivePlanBlock:
                     cached_payload,
                 )
 
+        strict_closed = source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED
+        if strict_closed and accepted_snapshot is not None:
+            accepted_status, accepted_payload, accepted_at = accepted_snapshot
+            return _append_status_note(accepted_status, f"resolution_rule=accepted_closed_snapshot_preserved; accepted_at={accepted_at}"), accepted_payload
+        if strict_closed and closure_state is not None and closure_state.state == CLOSURE_STATE_SUCCESS:
+            # A legacy success with no source-qualified accepted payload is an
+            # outstanding obligation, even when its old retry counter was high.
+            next_attempt_count = 1
+        elif strict_closed and allow_persisted_retry and not _closure_attempt_is_due(closure_state, now):
+            prior = self._load_slot_snapshot_status(source_key=source_key, temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy, column_date=column_date, requested_nm_ids=requested_nm_ids,
+                snapshot_role=TEMPORAL_ROLE_ACCEPTED_CURRENT)
+            retry_status = _build_closure_retry_status(source_key=source_key, temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy, column_date=column_date, requested_nm_ids=requested_nm_ids,
+                closure_state=closure_state)
+            return retry_status, prior[1] if prior else None
+
         sync_error: str | None = None
+        source_state = getattr(self.current_web_source_sync, "observed_states", {}).get((source_key, column_date)) if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT else None
         if source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED:
             try:
-                self.closed_day_web_source_sync.ensure_closed_day_snapshot(
+                source_state = self.closed_day_web_source_sync.ensure_closed_day_snapshot(
                     source_key=source_key,
                     snapshot_date=column_date,
                 )
@@ -2394,8 +2621,13 @@ class SheetVitrinaV1LivePlanBlock:
         )
         if current_web_source_sync_note:
             status = _append_current_web_source_sync_note(status, current_web_source_sync_note)
+        if source_state is not None and not serving_payload_matches(source_state,payload,requested_nm_ids if source_key=="seller_funnel_snapshot" else None):
+            sync_error="serving_source_generation_mismatch"
         if sync_error:
             status = _append_status_note(status, f"closed_day_sync_error={sync_error}")
+        elif source_state is not None and payload is not None and hasattr(payload, "source_fetched_at"):
+            payload = replace(payload, source_fetched_at=source_state.fetched_at)
+            status = _append_status_note(status, f"source_fetched_at={source_state.fetched_at}")
 
         if payload is not None and _is_exact_snapshot_payload(payload, column_date):
             if source_key in EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS and (
@@ -2435,13 +2667,21 @@ class SheetVitrinaV1LivePlanBlock:
                     accepted_role=accepted_role,
                 )
 
-        candidate_valid = _is_valid_temporal_candidate(
+        candidate_valid = not sync_error and not (source_key in STRICT_CLOSED_DAY_SOURCE_KEYS and current_web_source_sync_note and source_state is None) and _is_valid_temporal_candidate(
             source_key=source_key,
             status=status,
             payload=payload,
             column_date=column_date,
             temporal_slot=temporal_slot,
         )
+        if (source_key == "ads_compact" and status.kind == "incomplete"
+                and accepted_snapshot is not None and accepted_snapshot[0].kind in {"success", "empty"}):
+            # A validated partial contribution cannot downgrade this date's
+            # established complete result. Keep its clocks and explain the attempt.
+            old_status, old_payload, old_at = accepted_snapshot
+            return (_build_preserved_accepted_status(
+                accepted_status=old_status, accepted_at=old_at or now_iso,
+                latest_status=status, temporal_slot=temporal_slot), old_payload)
         if (
             payload is not None
             and _is_exact_snapshot_payload(payload, column_date)
@@ -2451,7 +2691,7 @@ class SheetVitrinaV1LivePlanBlock:
             status = _coerce_invalid_temporal_candidate_status(
                 status=status,
                 requested_nm_ids=requested_nm_ids,
-                note_suffix=_invalid_temporal_candidate_note(source_key, temporal_slot),
+                note_suffix=("closed_day_source_observation_not_accepted" if strict_closed and (sync_error or not _web_source_observation_is_closed(source_key, payload, column_date)) else _invalid_temporal_candidate_note(source_key, temporal_slot)),
             )
 
         if candidate_valid:
@@ -2463,16 +2703,19 @@ class SheetVitrinaV1LivePlanBlock:
                 payload=payload,
             )
             if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                ads_partial = source_key == "ads_compact" and status.kind == "incomplete"
+                retry_at, retry_state = (_next_closure_retry(now, next_attempt_count, "ads_partial_observed")
+                                         if ads_partial else (None, CLOSURE_STATE_SUCCESS))
                 self.runtime.save_temporal_source_closure_state(
                     source_key=source_key,
                     target_date=column_date,
                     slot_kind=temporal_slot,
-                    state=CLOSURE_STATE_SUCCESS,
+                    state=retry_state,
                     attempt_count=next_attempt_count,
-                    next_retry_at=None,
-                    last_reason=_accepted_resolution_note(temporal_slot),
+                    next_retry_at=retry_at,
+                    last_reason="ads_partial_observed_not_complete" if ads_partial else _accepted_resolution_note(temporal_slot),
                     last_attempt_at=now_iso,
-                    last_success_at=now_iso,
+                    last_success_at=(closure_state.last_success_at if closure_state is not None else None) if ads_partial else now_iso,
                     accepted_at=now_iso,
                 )
             return (
@@ -2524,7 +2767,7 @@ class SheetVitrinaV1LivePlanBlock:
                         accepted_at=None,
                     )
                     note_parts.append(f"closure_state={retry_state}")
-                return _append_status_note(prior_status, "; ".join(note_parts)), prior_payload
+                return _append_status_note(replace(prior_status, kind="incomplete"), "; ".join(note_parts)), prior_payload
 
         cached_snapshot = self._load_cached_temporal_source(
             source_key=source_key,
@@ -2567,16 +2810,19 @@ class SheetVitrinaV1LivePlanBlock:
                 payload=accepted_payload,
             )
             if _source_slot_supports_persisted_retry(source_key=source_key, temporal_slot=temporal_slot):
+                ads_partial = source_key == "ads_compact" and accepted_status.kind == "incomplete"
+                retry_at, retry_state = (_next_closure_retry(now, next_attempt_count, "ads_partial_preserved")
+                                         if ads_partial else (None, CLOSURE_STATE_SUCCESS))
                 self.runtime.save_temporal_source_closure_state(
                     source_key=source_key,
                     target_date=column_date,
                     slot_kind=temporal_slot,
-                    state=CLOSURE_STATE_SUCCESS,
-                    attempt_count=closure_state.attempt_count if closure_state is not None else 0,
-                    next_retry_at=None,
+                    state=retry_state,
+                    attempt_count=next_attempt_count if ads_partial else closure_state.attempt_count if closure_state is not None else 0,
+                    next_retry_at=retry_at,
                     last_reason="accepted_snapshot_preserved_after_invalid_attempt",
                     last_attempt_at=now_iso,
-                    last_success_at=preserved_at,
+                    last_success_at=(closure_state.last_success_at if closure_state is not None else None) if ads_partial else preserved_at,
                     accepted_at=preserved_at,
                 )
             return (
@@ -2671,15 +2917,24 @@ class SheetVitrinaV1LivePlanBlock:
             snapshot_date=column_date,
             snapshot_role=snapshot_role,
         )
-        if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
+        confirmed_ads_empty = (source_key == "ads_compact" and cached_payload is not None
+            and getattr(cached_payload, "kind", "") == "empty"
+            and _resolve_freshness(cached_payload) == column_date
+            and _payload_diagnostics(cached_payload).get("completeness_state") == "complete"
+            and _payload_diagnostics(cached_payload).get("no_activity_proven") is True
+            and _payload_diagnostics(cached_payload).get("dated_roster_state") == "caller_qualified_dated_roster")
+        if cached_payload is None or not (_is_exact_snapshot_payload(cached_payload, column_date) or confirmed_ads_empty):
+            return None
+        if require_closed_day_fresh and not _web_source_observation_is_closed(source_key, cached_payload, column_date):
             return None
         preserve_closed_stock = source_key == "stocks" and snapshot_role == TEMPORAL_ROLE_ACCEPTED_CLOSED
-        if require_closed_day_fresh and not preserve_closed_stock and not _closed_day_capture_is_fresh(
+        partial_ads = source_key == "ads_compact" and getattr(cached_payload, "kind", None) == "incomplete"
+        if require_closed_day_fresh and not preserve_closed_stock and not partial_ads and not _closed_day_capture_is_fresh(
             captured_at=cached_at,
             snapshot_date=column_date,
         ):
             return None
-        cached_status, _ = _capture_live_source(
+        cached_status, admitted_payload = _capture_live_source(
             source_key=source_key,
             temporal_slot=temporal_slot,
             temporal_policy=temporal_policy,
@@ -2687,7 +2942,9 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=lambda: cached_payload,
         )
-        return cached_status, cached_payload, cached_at
+        if admitted_payload is None:
+            return None
+        return cached_status, admitted_payload, cached_at
 
     def _preserve_onec_missing_stage_buckets(
         self,
@@ -2835,12 +3092,14 @@ class SheetVitrinaV1LivePlanBlock:
         )
         if cached_payload is None or not _is_exact_snapshot_payload(cached_payload, column_date):
             return None
+        if require_closed_day_fresh and not _web_source_observation_is_closed(source_key, cached_payload, column_date):
+            return None
         if require_closed_day_fresh and not _closed_day_capture_is_fresh(
             captured_at=cached_at,
             snapshot_date=column_date,
         ):
             return None
-        cached_status, _ = _capture_live_source(
+        cached_status, admitted_payload = _capture_live_source(
             source_key=source_key,
             temporal_slot=temporal_slot,
             temporal_policy=temporal_policy,
@@ -2853,7 +3112,9 @@ class SheetVitrinaV1LivePlanBlock:
         cache_note = runtime_cache_note
         if cached_at:
             cache_note = f"{cache_note}; cache_captured_at={cached_at}"
-        return _append_status_note(cached_status, cache_note), cached_payload
+        if admitted_payload is None:
+            return None
+        return _append_status_note(cached_status, cache_note), admitted_payload
 
     def _capture_provisional_current_web_source(
         self,
@@ -3107,6 +3368,7 @@ class _MetricEvaluator:
         self.sku_cache: dict[tuple[str, int, str], float | None] = {}
         self.total_cache: dict[tuple[str, str], float | None] = {}
         self.group_cache: dict[tuple[str, str, str], float | None] = {}
+        self.ads_dependent_metrics = ads_dependencies(metrics_by_key, formulas_by_id)
 
     def resolve_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
         cache_key = (temporal_slot, nm_id, metric_key)
@@ -3116,6 +3378,12 @@ class _MetricEvaluator:
         metric = self.metrics_by_key.get(metric_key)
         if metric is None:
             raise ValueError(f"metric_key missing in current registry: {metric_key}")
+
+        if (metric_key != "ads_sum" and metric_key in self.ads_dependent_metrics
+                and self._partial_ads_slot(temporal_slot)
+                and self.resolve_sku("ads_sum", nm_id, temporal_slot) is None):
+            self.sku_cache[cache_key] = None
+            return None
 
         if metric.calc_type == "metric":
             if metric.calc_ref != metric.metric_key:
@@ -3236,6 +3504,9 @@ class _MetricEvaluator:
             elif metric.metric_key == OWN_TOTAL_CONFIRMED_SHARE_PCT_TOTAL_METRIC_KEY:
                 value = self._aggregate_own_product_capital_confirmed_share(temporal_slot)
             elif metric.metric_key == OWN_CAPITAL_RETURN_PCT_TOTAL_METRIC_KEY:
+                if self._partial_ads_slot(temporal_slot):
+                    self.total_cache[cache_key] = None
+                    return None
                 value = _divide_or_none(
                     self.resolve_total(OUR_WB_TOTAL_PROXY_PROFIT_3_RUB_METRIC_KEY, temporal_slot),
                     self.resolve_total(OWN_TOTAL_CAPITAL_RUB_TOTAL_METRIC_KEY, temporal_slot),
@@ -3327,12 +3598,18 @@ class _MetricEvaluator:
                     temporal_slot,
                 )
             elif metric.metric_key == WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY:
-                value = self._aggregate_positive_weight_fail_closed(
-                    SELLER_PRICE_DISCOUNTED_METRIC_KEY,
-                    SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
-                    self.enabled_config,
-                    temporal_slot,
-                )
+                lookups = self._slot_lookups(temporal_slot)
+                if uses_order_price(lookups.column_date):
+                    value, _, _ = observed_order_price(
+                        lookups.order_price_lookup, (item.nm_id for item in self.enabled_config),
+                    )
+                else:
+                    value = self._aggregate_positive_weight_fail_closed(
+                        SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+                        SELLER_PRICE_ORDER_WEIGHT_METRIC_KEY,
+                        self.enabled_config,
+                        temporal_slot,
+                    )
             elif metric.metric_key.startswith(AGGREGATE_SUM_PREFIX):
                 value = self._aggregate_sum(metric.calc_ref, self.enabled_config, temporal_slot)
             elif metric.metric_key.startswith(AGGREGATE_AVG_PREFIX):
@@ -3343,17 +3620,19 @@ class _MetricEvaluator:
                 value = self._resolve_total_direct(metric.metric_key, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self.resolve_total(numerator_key, temporal_slot)
-            denominator = self.resolve_total(denominator_key, temporal_slot)
-            value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
+            if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot):
+                value = self._aligned_ratio(numerator_key, denominator_key, self.enabled_config, temporal_slot)
+            else:
+                numerator = self.resolve_total(numerator_key, temporal_slot)
+                denominator = self.resolve_total(denominator_key, temporal_slot)
+                value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
             if formula is None:
                 raise ValueError(f"formula missing for metric {metric_key}")
-            value = _evaluate_formula(
-                formula.expression,
-                lambda dependency: self.resolve_total(dependency, temporal_slot),
-            )
+            value = (self._aligned_formula(formula.expression, self.enabled_config, temporal_slot)
+                if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot)
+                else _evaluate_formula(formula.expression, lambda dependency: self.resolve_total(dependency, temporal_slot)))
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
 
@@ -3434,22 +3713,43 @@ class _MetricEvaluator:
                 value = self._aggregate_sum(metric.calc_ref, group_items, temporal_slot)
         elif metric.calc_type == "ratio":
             numerator_key, denominator_key = _split_ratio(metric.calc_ref)
-            numerator = self._aggregate_sum(numerator_key, group_items, temporal_slot)
-            denominator = self._aggregate_sum(denominator_key, group_items, temporal_slot)
-            value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
+            if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot):
+                value = self._aligned_ratio(numerator_key, denominator_key, group_items, temporal_slot)
+            else:
+                numerator = self._aggregate_sum(numerator_key, group_items, temporal_slot)
+                denominator = self._aggregate_sum(denominator_key, group_items, temporal_slot)
+                value = None if numerator is None or denominator in (None, 0) else float(numerator) / float(denominator)
         elif metric.calc_type == "formula":
             formula = self.formulas_by_id.get(metric.calc_ref)
             if formula is None:
                 raise ValueError(f"formula missing for metric {metric_key}")
-            value = _evaluate_formula(
-                formula.expression,
-                lambda dependency: self._aggregate_sum(dependency, group_items, temporal_slot),
-            )
+            value = (self._aligned_formula(formula.expression, group_items, temporal_slot)
+                if metric_key in self.ads_dependent_metrics and self._partial_ads_slot(temporal_slot)
+                else _evaluate_formula(formula.expression, lambda dependency: self._aggregate_sum(dependency, group_items, temporal_slot)))
         else:
             raise ValueError(f"unsupported calc_type: {metric.calc_type}")
 
         self.group_cache[cache_key] = value
         return value
+
+    def _partial_ads_slot(self, temporal_slot):
+        return any(s.source_key == 'ads_compact' and s.temporal_slot == temporal_slot
+                   and s.kind == 'incomplete' for s in self.live_sources.statuses)
+
+    def _aligned_formula(self, expression, members, temporal_slot):
+        keys = sorted(set(FORMULA_TOKEN_RE.findall(expression)))
+        inputs = [{k: self.resolve_sku(k, item.nm_id, temporal_slot) for k in keys} for item in members]
+        eligible = [values for values in inputs if all(v is not None for v in values.values())]
+        if not eligible:
+            return None
+        totals = {k: sum(values[k] for values in eligible) for k in keys}
+        return _evaluate_formula(expression, totals.get)
+
+    def _aligned_ratio(self, numerator, denominator, members, temporal_slot):
+        pairs = [(self.resolve_sku(numerator, item.nm_id, temporal_slot),
+                  self.resolve_sku(denominator, item.nm_id, temporal_slot)) for item in members]
+        pairs = [(n, d) for n, d in pairs if n is not None and d is not None]
+        return _divide_or_none(sum(n for n, d in pairs), sum(d for n, d in pairs)) if pairs else None
 
     def _resolve_total_direct(self, metric_key: str, temporal_slot: str) -> float | None:
         if metric_key == "fin_storage_fee_total":
@@ -4036,6 +4336,8 @@ class _MetricEvaluator:
                 self.resolve_sku(ONEC_STOCKS_SKU_TOTAL_COST_RUB_METRIC_KEY, nm_id, temporal_slot),
             )
         if metric_key == OWN_CAPITAL_RETURN_PCT_METRIC_KEY:
+            if self._partial_ads_slot(temporal_slot):
+                return None
             return _divide_or_none(
                 self.resolve_sku(OUR_WB_PROXY_PROFIT_3_RUB_METRIC_KEY, nm_id, temporal_slot),
                 self.resolve_sku(OWN_TOTAL_CAPITAL_RUB_METRIC_KEY, nm_id, temporal_slot),
@@ -4490,6 +4792,21 @@ def _capture_live_source(
 
     kind = str(getattr(payload, "kind", "missing"))
     payload_diagnostics = _payload_diagnostics(payload)
+    if source_key == "fin_report_daily" and "finance_report" in payload_diagnostics:
+        from packages.domain.finance_daily_report import validate_finance_daily_projection
+        try:
+            validate_finance_daily_projection(
+                payload, expected_date=column_date, expected_nm_ids=requested_nm_ids,
+            )
+        except ValueError as exc:
+            return LiveSourceStatus(
+                source_key=source_key, temporal_slot=temporal_slot,
+                temporal_policy=temporal_policy, column_date=column_date,
+                kind="error", freshness="", snapshot_date="", date="", date_from="", date_to="",
+                requested_count=len(requested_nm_ids), covered_count=0,
+                missing_nm_ids=sorted(set(requested_nm_ids)), note=str(exc),
+                diagnostics=payload_diagnostics,
+            ), None
     if kind == "incomplete":
         missing_nm_ids = list(getattr(payload, "missing_nm_ids", []))
         requested_count = int(getattr(payload, "requested_count", len(requested_nm_ids)))
@@ -4948,7 +5265,7 @@ def _invalid_temporal_candidate_note(source_key: str, temporal_slot: str) -> str
     if source_key == "promo_by_price":
         return "invalid_exact_snapshot=promo_live_source_incomplete"
     if source_key == "fin_report_daily":
-        return "invalid_exact_snapshot=finance_requires_terminal_204_and_full_sku_coverage"
+        return "invalid_exact_snapshot=finance_requires_usable_complete_report_and_projection"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "prices_snapshot":
         return "invalid_exact_snapshot=zero_filled_prices_snapshot"
     if temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and source_key == "ads_bids":
@@ -4967,6 +5284,17 @@ def _is_valid_temporal_candidate(
     temporal_slot: str,
 ) -> bool:
     if payload is None or not _is_exact_snapshot_payload(payload, column_date):
+        return False
+    if source_key == "ads_compact" and status.kind == "incomplete":
+        d = _payload_diagnostics(payload)
+        return bool(column_date >= "2026-09-11" and status.covered_count > 0
+            and d.get("partial_observation_contract") == "ads_partial_observed_v1"
+            and d.get("completeness_state") == "partial"
+            and d.get("zero_fill_applied") is False
+            and d.get("source_date") == column_date
+            and d.get("source_observed_at") and d.get("observed_campaign_ids")
+            and d.get("dated_roster_state") == "unqualified")
+    if temporal_slot == TEMPORAL_SLOT_YESTERDAY_CLOSED and not _web_source_observation_is_closed(source_key, payload, column_date):
         return False
     if status.kind != "success":
         if not (
@@ -5347,7 +5675,7 @@ def _append_current_web_source_sync_note(
     status: LiveSourceStatus,
     note: str | None,
 ) -> LiveSourceStatus:
-    if not note or status.kind == "success":
+    if not note:
         return status
     return _append_status_note(status, note)
 
@@ -5361,6 +5689,15 @@ def _parse_runtime_timestamp(value: str) -> datetime:
     if normalized.endswith("Z"):
         normalized = normalized[:-1] + "+00:00"
     return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+
+
+def _web_source_observation_is_closed(source_key: str, payload: Any, snapshot_date: str) -> bool:
+    # Earlier accepted history predates this provenance contract. The affected
+    # incident dates and all new dates require the actual source clock.
+    if source_key not in STRICT_CLOSED_DAY_SOURCE_KEYS or snapshot_date < "2026-09-11":
+        return True
+    return _closed_day_capture_is_fresh(
+        captured_at=getattr(payload, "source_fetched_at", None), snapshot_date=snapshot_date)
 
 
 def _closed_day_capture_is_fresh(*, captured_at: str | None, snapshot_date: str) -> bool:
@@ -5940,6 +6277,17 @@ def _own_product_capital_cell_presentation(
     return result
 
 
+def _finance_daily_cell_presentation(*, rows, slots, live_sources, nm_ids):
+    from packages.application.finance_daily_publication import native_presentation
+    presentations = []
+    for index, slot in enumerate(slots, start=2):
+        lookup = live_sources.slot_lookups.get(slot.slot_key)
+        presentations.append(native_presentation(
+            getattr(lookup, "fin_report_daily_result", None), day=slot.column_date,
+            nm_ids=sorted(nm_ids), values={str(row[1]): row[index] for row in rows}))
+    return _merge_cell_presentations(*presentations)
+
+
 def _merge_cell_presentations(
     *presentations: Mapping[str, Mapping[str, Mapping[str, str]]],
 ) -> dict[str, dict[str, dict[str, str]]]:
@@ -5948,7 +6296,19 @@ def _merge_cell_presentations(
         for row_id, by_date in presentation.items():
             target = result.setdefault(str(row_id), {})
             for column_date, value in by_date.items():
-                target[str(column_date)] = dict(value)
+                previous = target.get(str(column_date), {})
+                merged = dict(value)
+                # Domain presentation keeps its own evidence. Coverage belongs
+                # to the same cell and must survive later domain overlays.
+                for key in ("metric_scope_evidence", "completeness_state", "missing_sku_count"):
+                    if key in previous and key not in merged:
+                        merged[key] = previous[key]
+                if previous.get("completeness_state") == "unknown_scope":
+                    merged.update(completeness_state="unknown_scope", missing_sku_count=None,
+                                  quality_state="partial")
+                    merged["quality_reason"] = " ".join(filter(None, [previous.get("quality_reason"), merged.get("quality_reason")]))
+                    merged["source_observed_at"] = previous.get("source_observed_at", merged.get("source_observed_at", ""))
+                target[str(column_date)] = merged
     return result
 
 

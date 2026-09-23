@@ -16,6 +16,7 @@ from packages.application.registry_upload_db_backed_runtime import (
 from packages.application.sheet_vitrina_v1_buyout_percent import (
     BUYOUT_PERCENT_AGGREGATION_RULE,
     aggregate_buyout_percent,
+    buyout_source_payload_digest,
     build_three_closed_week_buyout_reference,
     three_closed_week_keys,
 )
@@ -408,7 +409,7 @@ def build_confirmed_aligned_window(
                 {
                     "week_start": week_start,
                     "week_end": week_end,
-                    "digest": _buyout_source_payload_digest(
+                    "digest": buyout_source_payload_digest(
                         runtime,
                         date_from=week_start,
                         date_to=week_end,
@@ -535,7 +536,7 @@ def build_latest_confirmed_week_window(
             "order_count_weight": buyout_selected["order_count_weight"],
             "included_sku_day_count": buyout_selected["included_sku_day_count"],
             "source_payload_digest": (
-                _buyout_source_payload_digest(
+                buyout_source_payload_digest(
                     runtime,
                     date_from=selected[0],
                     date_to=selected[1],
@@ -1471,30 +1472,6 @@ def _unavailable_finance_window(
         "composition": {},
         "fingerprint_payload": {"status": "unavailable", "message": message},
     }
-
-
-def _buyout_source_payload_digest(
-    runtime: RegistryUploadDbBackedRuntime,
-    *,
-    date_from: str,
-    date_to: str,
-) -> str:
-    with _connect(runtime.db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT snapshot_date,payload_json
-            FROM temporal_source_snapshots
-            WHERE source_key=? AND snapshot_date>=? AND snapshot_date<=?
-            ORDER BY snapshot_date
-            """,
-            ("sales_funnel_history", date_from, date_to),
-        ).fetchall()
-    return _digest(
-        [
-            [str(row["snapshot_date"]), json.loads(str(row["payload_json"]))]
-            for row in rows
-        ]
-    )
 
 
 def _parameters_from_values(

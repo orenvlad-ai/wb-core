@@ -26,6 +26,8 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 import zlib
 
+from packages.application.warehouse_update_journal import WarehouseRequestConflict
+
 from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint,
     SheetVitrinaHealthRecoveryConflict,
@@ -113,6 +115,17 @@ from packages.contracts.factory_order_supply import (
     DATASET_STOCK_FF,
 )
 from packages.contracts.cost_price_upload import CostPriceUploadResult
+from packages.contracts.finance_liquidity import (
+    FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS,
+    expand_finance_capability_hierarchy,
+    has_finance_capability,
+    without_finance_explicit_only_capabilities,
+)
+from packages.adapters.finance_liquidity_access import (
+    FinanceBootstrapAccessUnavailable,
+    load_finance_bootstrap_access,
+    normalize_finance_bootstrap_username,
+)
 from packages.contracts.registry_upload_file_backed_service import RegistryUploadResult
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig
 from packages.contracts.wb_supply_planning_zones import (
@@ -303,6 +316,10 @@ WEB_AUTH_SECTION_DEFINITIONS = (
     {"section_id": WEB_AUTH_SECTION_RESEARCH, "label": "Исследования"},
     {"section_id": WEB_AUTH_SECTION_INSTRUCTIONS, "label": "Инструкции"},
     {"section_id": WEB_AUTH_SECTION_SETTINGS, "label": "Настройки"},
+    *(
+        {"section_id": capability, "label": label}
+        for capability, label in FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS
+    ),
 )
 WEB_AUTH_SECTION_IDS = tuple(str(section["section_id"]) for section in WEB_AUTH_SECTION_DEFINITIONS)
 WEB_AUTH_UNIFIED_TAB_SECTIONS = {
@@ -1075,11 +1092,16 @@ def _build_handler(
                 try:
                     body = _load_optional_request_payload(self)
                     if parsed.path == DEFAULT_WAREHOUSES_SYNC_PATH:
-                        payload = entrypoint.handle_warehouse_manual_sync_start_request()
+                        payload = entrypoint.handle_warehouse_manual_sync_start_request(
+                            body, request_scope=_current_web_user_config_key(self),
+                        )
                     elif parsed.path == DEFAULT_WAREHOUSES_EMERGENCY_PREVIEW_PATH:
                         payload = entrypoint.handle_warehouse_emergency_preview_request()
                     else:
                         payload = entrypoint.handle_warehouse_emergency_apply_request(body)
+                except WarehouseRequestConflict as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc), "code": "request_key_conflict"})
+                    return
                 except WarehouseSyncBusyError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
@@ -3125,6 +3147,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        user_config_key=_current_web_user_config_key(self),
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
                     ),
@@ -3178,6 +3201,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        user_config_key=_current_web_user_config_key(self),
                         active_tab="settings",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
@@ -3217,6 +3241,7 @@ def _build_handler(
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
+                        user_config_key=_current_web_user_config_key(self),
                         active_tab="instructions",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
@@ -3321,6 +3346,7 @@ def _build_handler(
                             operator_path=sheet_operator_ui_path,
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
+                            user_config_key=_current_web_user_config_key(self),
                             role=_current_web_user_role(self),
                             allowed_sections=_current_web_user_allowed_sections(self),
                         ),
@@ -4628,7 +4654,9 @@ def _build_handler(
                 try:
                     run_id = _resolve_single_query_param(parsed.query, "run_id")
                     payload = entrypoint.handle_warehouse_manual_sync_status_request(
-                        run_id or None
+                        run_id or None,
+                        request_key=_resolve_single_query_param(parsed.query, "request_key") or "",
+                        request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -8136,6 +8164,7 @@ def _web_auth_config() -> dict[str, Any]:
     enabled = bool(username and password_hash and session_secret)
     supplier_enabled = bool(supplier_username and supplier_password_hash and session_secret)
     configured = enabled or not required
+    operator_sections = _configured_bootstrap_operator_sections(username)
     return {
         "enabled": enabled,
         "configured": configured,
@@ -8147,6 +8176,7 @@ def _web_auth_config() -> dict[str, Any]:
             "password_hash": password_hash,
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": username,
+            "allowed_sections": operator_sections,
         },
         "supplier": {
             "enabled": supplier_enabled,
@@ -8158,6 +8188,17 @@ def _web_auth_config() -> dict[str, Any]:
         "session_secret": session_secret,
         "max_age": max_age,
     }
+
+
+def _configured_bootstrap_operator_sections(username: str) -> list[str]:
+    defaults = _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+    try:
+        access = load_finance_bootstrap_access()
+    except FinanceBootstrapAccessUnavailable:
+        return defaults
+    if access is None or access.username != normalize_finance_bootstrap_username(username):
+        return defaults
+    return list(expand_finance_capability_hierarchy([*defaults, access.capability]))
 
 
 def _ensure_web_auth(handler: BaseHTTPRequestHandler, parsed: urllib_parse.ParseResult) -> bool:
@@ -8808,7 +8849,10 @@ def _env_principal_user_records(config: Mapping[str, Any]) -> list[dict[str, Any
                 "username": operator_username,
                 "display_name": str(operator.get("display_name") or operator_username),
                 "role": WEB_AUTH_ROLE_ADMIN,
-                "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+                "allowed_sections": list(
+                    operator.get("allowed_sections")
+                    or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+                ),
                 "manage_users": True,
                 "is_active": True,
                 "created_at": "",
@@ -8919,21 +8963,23 @@ def _available_section_records() -> list[dict[str, str]]:
 def _default_allowed_sections_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
     if normalized == WEB_AUTH_ROLE_ADMIN:
-        return list(WEB_AUTH_SECTION_IDS)
+        return list(without_finance_explicit_only_capabilities(WEB_AUTH_SECTION_IDS))
     if normalized == WEB_AUTH_ROLE_OPERATOR:
         # Instructions are a separately granted capability.  Keeping them out
         # of the operator fallback also prevents historical users with a
         # role-only/default record from receiving the new section implicitly.
-        return [
-            section_id
-            for section_id in WEB_AUTH_SECTION_IDS
-            if section_id
-            not in {
-                WEB_AUTH_SECTION_INSTRUCTIONS,
-                WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW,
-                WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN,
-            }
-        ]
+        return list(
+            without_finance_explicit_only_capabilities(
+                section_id
+                for section_id in WEB_AUTH_SECTION_IDS
+                if section_id
+                not in {
+                    WEB_AUTH_SECTION_INSTRUCTIONS,
+                    WEB_AUTH_PERMISSION_FEEDBACKS_AI_REVIEW,
+                    WEB_AUTH_PERMISSION_FEEDBACKS_AUTOANSWERS_ADMIN,
+                }
+            )
+        )
     if normalized == WEB_AUTH_ROLE_SUPPLY_OPERATOR:
         return [WEB_AUTH_SECTION_SUPPLY]
     return []
@@ -8962,7 +9008,7 @@ def _normalize_public_allowed_sections(value: Any, *, role: str = "") -> list[st
         if section_id in valid and section_id not in seen:
             sections.append(section_id)
             seen.add(section_id)
-    return sections
+    return list(expand_finance_capability_hierarchy(sections))
 
 
 def _validate_runtime_allowed_sections(value: Any, *, role: str = "") -> list[str]:
@@ -8980,7 +9026,7 @@ def _validate_runtime_allowed_sections(value: Any, *, role: str = "") -> list[st
         if section_id not in seen:
             sections.append(section_id)
             seen.add(section_id)
-    return sections
+    return list(expand_finance_capability_hierarchy(sections))
 
 
 def _validate_runtime_manage_users(value: Any, *, role: str = "") -> bool:
@@ -9170,7 +9216,10 @@ def _match_web_auth_principal(
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(operator.get("display_name") or username),
-            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+            "allowed_sections": list(
+                operator.get("allowed_sections")
+                or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+            ),
             "manage_users": True,
         }
     runtime_user = _load_runtime_user_by_username(entrypoint, normalized_username)
@@ -9238,7 +9287,10 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
             "display_name": str(payload.get("d") or operator.get("display_name") or username),
-            "allowed_sections": _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN),
+            "allowed_sections": list(
+                operator.get("allowed_sections")
+                or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+            ),
             "manage_users": True,
         }
     runtime_user = _load_runtime_user_by_username(
@@ -10363,6 +10415,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     role: str = WEB_AUTH_ROLE_ADMIN,
     allowed_sections: Sequence[str] | None = None,
     active_tab: str = "",
+    user_config_key: str = "local_operator",
 ) -> str:
     normalized_role = _normalize_runtime_role(role) or WEB_AUTH_ROLE_ADMIN
     normalized_sections = (
@@ -10372,9 +10425,14 @@ def _render_sheet_vitrina_web_vitrina_ui(
     )
     allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
     initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_sections(normalized_sections)
+    finance_navigation_available = _finance_navigation_is_available(
+        role=normalized_role,
+        allowed_sections=normalized_sections,
+    )
     config_payload = {
         "page_title": "Web-витрина",
         "current_role": normalized_role,
+        "user_config_key": user_config_key,
         "allowed_sections": normalized_sections,
         "allowed_tabs": allowed_tabs,
         "initial_tab": initial_tab,
@@ -10481,7 +10539,34 @@ def _render_sheet_vitrina_web_vitrina_ui(
     return (
         template.replace("__SHEET_VITRINA_V1_WEB_VITRINA_PAGE_TITLE__", config_payload["page_title"])
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
+        .replace(
+            "__SHEET_VITRINA_V1_FINANCE_NAVIGATION_LINK__",
+            '<a class="shell-logout-link" href="/finance/">Финансы</a>'
+            if finance_navigation_available
+            else "",
+        )
     )
+
+
+def _finance_navigation_is_available(
+    *,
+    role: str,
+    allowed_sections: Sequence[str],
+) -> bool:
+    """Expose the Finance sidecar link only for an enabled explicit grant.
+
+    This is intentionally a local navigation decision: it neither opens the
+    Finance store nor calls the sidecar.  The sidecar remains the authoritative
+    per-request session and capability guard.
+    """
+
+    if str(role or "").strip() == WEB_AUTH_ROLE_SUPPLIER:
+        return False
+    if os.environ.get("FINANCE_LIQUIDITY_ENABLED") != "1":
+        return False
+    if os.environ.get("FINANCE_LIQUIDITY_READ_ENABLED") != "1":
+        return False
+    return has_finance_capability(allowed_sections, "finance")
 
 
 def _resolve_sheet_web_vitrina_surface_from_query(query: str) -> str:

@@ -25,6 +25,10 @@ REQUESTED_NM_IDS = [210183919, 210184534]
 
 
 class _NoopSessionSync(ShellBackedWebSourceCurrentSync):
+    def _collector_command(self, source_key: str, snapshot_date: str) -> list[str]:
+        module = "bot.runner_day" if source_key == "web_source_snapshot" else "bot.runner_sales_funnel_day"
+        return [str(self.config.wb_web_bot_dir / "venv" / "bin" / "python"), "-m", module, snapshot_date]
+
     def _ensure_seller_portal_session_ready(self) -> None:
         return
 

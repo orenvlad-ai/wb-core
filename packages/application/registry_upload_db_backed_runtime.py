@@ -16,7 +16,7 @@ import sqlite3
 import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from types import SimpleNamespace
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from packages.business_time import business_date_from_timestamp
 
@@ -61,6 +61,11 @@ from packages.contracts.cost_price_upload import (
     CostPriceUploadAcceptedCounts,
     CostPriceUploadPayload,
     CostPriceUploadResult,
+)
+from packages.contracts.finance_liquidity import (
+    FINANCE_LIQUIDITY_CAPABILITIES,
+    expand_finance_capability_hierarchy,
+    without_finance_explicit_only_capabilities,
 )
 from packages.contracts.registry_upload_bundle_v1 import (
     ConfigV2Item,
@@ -444,6 +449,10 @@ class RegistryUploadDbBackedRuntime:
             raise ReadyPublicationConflict("ready_candidate_target_mismatch")
         if expected.authority is None:
             raise ReadyPublicationConflict("ready_preparation_authority_required")
+        # A current book commit must publish its current-day binding. Historical
+        # ready-only writes remain valid, but cannot carry a new current book.
+        if _prepared_book is not None and publication_date not in plan.date_columns:
+            raise ReadyPublicationConflict("ready_current_book_target_missing_date")
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
         active_inventory = inventory_from_book(book, now=publication_now) if book and book["active"] else None
         if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
@@ -493,7 +502,8 @@ class RegistryUploadDbBackedRuntime:
             from packages.application.sheet_vitrina_v1_inventory_history import prepare_inventory_history_from_ready_plan
             inventory_history = prepare_inventory_history_from_ready_plan(conn, plan=plan,
                 bundle_version=current_state.bundle_version, refreshed_at=refreshed_at,
-                generation_identity=current_state.bundle_version)
+                generation_identity=current_state.bundle_version, runtime_dir=self.runtime_dir, prepared_book=book,
+                ready_target={"bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date})
         plan = replace(plan, metadata={**dict(plan.metadata or {}), "ready_publication_target": {
             "bundle_version": expected.bundle_version, "as_of_date": expected.as_of_date}})
         serialized_plan = _serialize_sheet_vitrina_plan(plan)
@@ -770,7 +780,7 @@ class RegistryUploadDbBackedRuntime:
                     SELECT plan_json
                     FROM sheet_vitrina_v1_ready_snapshots
                     WHERE bundle_version = ?
-                    ORDER BY refreshed_at DESC, as_of_date DESC
+                    ORDER BY as_of_date DESC, refreshed_at DESC
                     LIMIT 1
                     """,
                     (current_state.bundle_version,),
@@ -1421,7 +1431,7 @@ class RegistryUploadDbBackedRuntime:
                     SELECT activated_at, as_of_date, snapshot_id, plan_version, refreshed_at, plan_json
                     FROM sheet_vitrina_v1_ready_snapshots
                     WHERE bundle_version = ?
-                    ORDER BY refreshed_at DESC, as_of_date DESC
+                    ORDER BY as_of_date DESC, refreshed_at DESC
                     LIMIT 1
                     """,
                     (current_state.bundle_version,),
@@ -5842,6 +5852,7 @@ class RegistryUploadDbBackedRuntime:
         *,
         header: Mapping[str, Any],
         lines: list[Mapping[str, Any]],
+        preparation_actions: dict[str, Any] | None = None,
     ) -> None:
         shipment_id = str(header.get("shipment_id") or "").strip()
         if not shipment_id:
@@ -5854,6 +5865,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_supplier_shipments(
@@ -6035,6 +6048,7 @@ class RegistryUploadDbBackedRuntime:
                     for index, item in enumerate(lines, start=1)
                 ],
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False, post_actions=preparation_actions)
             conn.commit()
 
     def list_supplier_shipments(self) -> list[dict[str, Any]]:
@@ -6169,6 +6183,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_shipments
@@ -6178,6 +6194,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (str(order_status or ""), updated_at, shipment_id),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False)
             conn.commit()
             return cursor.rowcount > 0
 
@@ -6195,6 +6212,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_shipments
@@ -6204,6 +6223,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (1 if expenses_complete else 0, updated_at, shipment_id),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=False)
             conn.commit()
             return cursor.rowcount > 0
 
@@ -6249,6 +6269,8 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [shipment_id])
             header_row = conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id = ?",
                 (shipment_id,),
@@ -6337,6 +6359,8 @@ class RegistryUploadDbBackedRuntime:
                     shipment_id,
                 ),
             )
+            actions = {"invoice_archive": {"invoice_document_id": str(header_row["invoice_document_id"]), "updated_at": archived_at}} if header_row["invoice_document_id"] else {}
+            finish_source_change(conn, supplier_before, reset_expenses=False, post_actions=actions)
             conn.commit()
             return {
                 "event_id": event_id,
@@ -6390,6 +6414,9 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            previous_order = conn.execute("SELECT supplier_order_id FROM sheet_vitrina_v1_supplier_financial_documents WHERE document_id=?", (document_id,)).fetchone()
+            supplier_before = begin_source_change(conn, [supplier_order_id] + ([str(previous_order[0])] if previous_order else []))
             assignments = [
                 dict(item) for item in (bank_operation_assignments or [])
             ]
@@ -6675,13 +6702,14 @@ class RegistryUploadDbBackedRuntime:
                         )
                     continue
                 _save_cny_document_in_connection(conn, cny_document)
+            finish_source_change(conn, supplier_before, reset_expenses=True)
+            stored_row = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_documents WHERE supplier_order_id=? AND document_id=?", (supplier_order_id, document_id)).fetchone()
+            if stored_row is None:
+                raise ValueError(f"financial document not found: {document_id}")
+            stored_lines = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? AND financial_document_id=? ORDER BY sort_order,line_id", (supplier_order_id, document_id)).fetchall()
+            loaded = _supplier_financial_document_to_dict(stored_row)
+            loaded["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in stored_lines]
             conn.commit()
-        loaded = self.load_supplier_financial_document(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-        )
-        if loaded is None:
-            raise ValueError(f"financial document was not saved: {document_id}")
         return loaded
 
     def list_supplier_bank_operation_assignments(self) -> list[dict[str, Any]]:
@@ -7224,6 +7252,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [supplier_order_id])
             row = conn.execute(
                 """
                 SELECT *
@@ -7252,6 +7282,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (supplier_order_id, document_id),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=True)
             conn.commit()
             if cursor.rowcount <= 0:
                 return None
@@ -7271,6 +7302,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import begin_source_change, finish_source_change
+            supplier_before = begin_source_change(conn, [supplier_order_id])
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_supplier_financial_documents
@@ -7286,15 +7319,16 @@ class RegistryUploadDbBackedRuntime:
                     str(document_id or "").strip(),
                 ),
             )
+            finish_source_change(conn, supplier_before, reset_expenses=True)
+            stored_row = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_documents WHERE supplier_order_id=? AND document_id=?", (supplier_order_id, document_id)).fetchone()
+            if stored_row is None:
+                raise ValueError(f"financial document not found: {document_id}")
+            stored_lines = conn.execute("SELECT * FROM sheet_vitrina_v1_supplier_financial_expense_lines WHERE supplier_order_id=? AND financial_document_id=? ORDER BY sort_order,line_id", (supplier_order_id, document_id)).fetchall()
+            loaded = _supplier_financial_document_to_dict(stored_row)
+            loaded["expense_lines"] = [_supplier_financial_expense_line_to_dict(line) for line in stored_lines]
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"financial document not found: {document_id}")
-        loaded = self.load_supplier_financial_document(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-        )
-        if loaded is None:
-            raise ValueError(f"financial document not found: {document_id}")
         return loaded
 
     def list_supplier_financial_documents_all(self) -> list[dict[str, Any]]:
@@ -7315,10 +7349,8 @@ class RegistryUploadDbBackedRuntime:
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
             document_id = _save_cny_document_in_connection(conn, document)
+            loaded = _cny_document_to_dict(conn.execute("SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?", (document_id,)).fetchone())
             conn.commit()
-        loaded = self.load_cny_document(document_id)
-        if loaded is None:
-            raise ValueError(f"CNY document was not saved: {document_id}")
         return loaded
 
     def update_cny_document_context(
@@ -7333,7 +7365,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
-            conn.execute("BEGIN IMMEDIATE")
+            from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
+            before = begin_source_change(conn)
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_cny_documents
@@ -7349,12 +7382,14 @@ class RegistryUploadDbBackedRuntime:
                     str(document_id or "").strip(),
                 ),
             )
+            finish_source_change(conn, before)
+            stored = conn.execute("SELECT * FROM sheet_vitrina_v1_cny_documents WHERE document_id=?", (document_id,)).fetchone()
+            if stored is None:
+                raise ValueError(f"CNY document not found: {document_id}")
+            loaded = _cny_document_to_dict(stored)
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"CNY document not found: {document_id}")
-        loaded = self.load_cny_document(document_id)
-        if loaded is None:
-            raise ValueError(f"CNY document not found: {document_id}")
         return loaded
 
     def load_cny_document(self, document_id: str) -> dict[str, Any] | None:
@@ -7395,6 +7430,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
+            before = begin_source_change(conn)
             conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_cny_documents
@@ -7402,6 +7439,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (normalized_id,),
             )
+            finish_source_change(conn, before)
             conn.commit()
         return existing
 
@@ -7835,12 +7873,18 @@ class RegistryUploadDbBackedRuntime:
         updated_at: str,
         linked_by: str,
         source: str,
+        preparation_request: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        invoice_document_id = str(invoice_document_id or "").strip()
+        contract_document_id = str(contract_document_id or "").strip()
         _validate_timestamp(str(created_at or ""), field_name="created_at")
         _validate_timestamp(str(updated_at or ""), field_name="updated_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import guard_invoice_link_write
+
+            guard_invoice_link_write(conn, invoice_document_id, contract_document_id, preparation_request)
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_invoice_contract_links(
@@ -7859,8 +7903,8 @@ class RegistryUploadDbBackedRuntime:
                     source = excluded.source
                 """,
                 (
-                    str(invoice_document_id or "").strip(),
-                    str(contract_document_id or "").strip(),
+                    invoice_document_id,
+                    contract_document_id,
                     created_at,
                     updated_at,
                     str(linked_by or ""),
@@ -7896,16 +7940,20 @@ class RegistryUploadDbBackedRuntime:
                 "source": row["source"] or "",
             }
 
-    def delete_invoice_contract_link(self, invoice_document_id: str) -> bool:
+    def delete_invoice_contract_link(self, invoice_document_id: str, *, preparation_request: dict[str, Any] | None = None) -> bool:
+        invoice_document_id = str(invoice_document_id or "").strip()
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.supplier_preparation_intents import guard_invoice_link_write
+
+            guard_invoice_link_write(conn, invoice_document_id, "", preparation_request)
             cursor = conn.execute(
                 """
                 DELETE FROM sheet_vitrina_v1_invoice_contract_links
                 WHERE invoice_document_id = ?
                 """,
-                (str(invoice_document_id or "").strip(),),
+                (invoice_document_id,),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -7991,7 +8039,9 @@ class RegistryUploadDbBackedRuntime:
                 ORDER BY is_hidden ASC, is_active DESC, created_at ASC, product_type ASC, match_key ASC, nomenclature_name ASC
                 """
             ).fetchall()
-            return [_nomenclature_item_to_dict(row) for row in rows]
+            from packages.application.nomenclature_activation_intents import source_statuses
+            statuses = source_statuses(conn)
+            return [{**_nomenclature_item_to_dict(row), **statuses.get(row["item_id"], {})} for row in rows]
 
     def load_nomenclature_item(self, item_id: str) -> dict[str, Any] | None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -8005,7 +8055,9 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (item_id,),
             ).fetchone()
-            return _nomenclature_item_to_dict(row) if row is not None else None
+            from packages.application.nomenclature_activation_intents import source_statuses
+            return ({**_nomenclature_item_to_dict(row), **source_statuses(conn, [item_id]).get(item_id, {})}
+                    if row is not None else None)
 
     def active_nomenclature_match_key_exists(self, *, match_key: str, exclude_item_id: str = "") -> bool:
         normalized = str(match_key or "").strip()
@@ -8027,13 +8079,17 @@ class RegistryUploadDbBackedRuntime:
             ).fetchone()
             return row is not None
 
-    def save_nomenclature_item(self, item: Mapping[str, Any]) -> dict[str, Any]:
-        saved_items = self.save_nomenclature_items_atomic([item])
+    def save_nomenclature_item(self, item: Mapping[str, Any], *, preserve_staged_activation: bool = False) -> dict[str, Any]:
+        saved_items = self.save_nomenclature_items_atomic(
+            [item], preserve_staged_item_ids=[str(item["item_id"])] if preserve_staged_activation else [],
+        )
         if not saved_items:
             raise ValueError("nomenclature item was not saved")
         return saved_items[0]
 
-    def save_nomenclature_items_atomic(self, items: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    def save_nomenclature_items_atomic(
+        self, items: list[Mapping[str, Any]], *, preserve_staged_item_ids: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
         prepared_items: list[dict[str, Any]] = []
         for item in items:
             item_id = str(item.get("item_id") or "").strip()
@@ -8127,7 +8183,11 @@ class RegistryUploadDbBackedRuntime:
                 }
             )
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        from packages.application.ff_pool_dense_fbs import DenseFbsService
+        from packages.application.nomenclature_activation_intents import (
+            drain_nomenclature_activation_intents,
+            record_source_write,
+            source_statuses,
+        )
         from packages.application.warehouse_functional_lock import (
             warehouse_functional_write_lock,
         )
@@ -8146,15 +8206,21 @@ class RegistryUploadDbBackedRuntime:
                         [str(item["item_id"]) for item in prepared_items],
                     ).fetchall()
                 } if prepared_items else {}
+                activation_statuses = source_statuses(conn, preserve_staged_item_ids) if preserve_staged_item_ids else {}
                 staged_rows: list[dict[str, Any]] = []
                 for prepared in prepared_items:
+                    prior = existing.get(str(prepared["item_id"]))
+                    if prepared["item_id"] in preserve_staged_item_ids and prior is not None:
+                        # Metadata writers preserve the current decision under the
+                        # shared lock, not the false flag from an older staged read.
+                        prepared["is_active"] = int(bool(prior["is_active"]) or
+                            activation_statuses.get(prepared["item_id"], {}).get("activation_status") == "pending")
                     desired_nm_id = int(prepared["nm_id"] or 0)
                     desired_stock_managed = bool(
                         prepared["is_active"]
                         and not prepared["is_hidden"]
                         and desired_nm_id > 0
                     )
-                    prior = existing.get(str(prepared["item_id"]))
                     prior_nm_id = int(prior["nm_id"] or 0) if prior is not None else 0
                     prior_stock_managed = bool(
                         prior is not None
@@ -8182,28 +8248,15 @@ class RegistryUploadDbBackedRuntime:
                     else:
                         staged_rows.append(prepared)
                 _upsert_nomenclature_rows(conn, staged_rows)
+                record_source_write(
+                    conn, desired_items=prepared_items,
+                    staged_item_ids={item["item_id"] for item in activation_items},
+                )
                 conn.commit()
             if activation_items:
-                activation_material = sorted(
-                    activation_items,
-                    key=lambda item: (item["nm_id"], item["item_id"]),
-                )
-                request_identity = "sha256:" + hashlib.sha256(
-                    json.dumps(
-                        activation_material,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
-                DenseFbsService(
-                    db_path=self.db_path,
-                    runtime_dir=self.runtime_dir,
-                ).activate_staged_skus(
-                    staged_items=activation_material,
-                    orchestration_key="sku-activation:" + request_identity,
-                    request_identity=request_identity,
-                    actor="registry_nomenclature_write",
+                drain_nomenclature_activation_intents(
+                    self, item_ids=[item["item_id"] for item in activation_items],
+                    raise_errors=True,
                 )
         loaded_items: list[dict[str, Any]] = []
         for prepared in prepared_items:
@@ -8233,6 +8286,7 @@ class RegistryUploadDbBackedRuntime:
                     raise ValueError(f"nomenclature item not found: {item_id}")
                 if bool(row[0]) and not bool(row[1]) and int(row[2] or 0) > 0:
                     require_fbs_sku_retirable(conn, nm_id=int(row[2]))
+                from packages.application.nomenclature_activation_intents import cancel_source_activation
                 cursor = conn.execute(
                     """
                     UPDATE sheet_vitrina_v1_nomenclature_items
@@ -8242,6 +8296,7 @@ class RegistryUploadDbBackedRuntime:
                     """,
                     (updated_at, item_id),
                 )
+                cancel_source_activation(conn, item_id)
                 conn.commit()
                 if cursor.rowcount != 1:
                     raise ValueError(f"nomenclature item not found: {item_id}")
@@ -10243,6 +10298,8 @@ def _save_cny_document_in_connection(
     operation_date = str(document.get("operation_date") or "").strip()
     if operation_date:
         _validate_iso_date(operation_date, field_name="operation_date")
+    from packages.application.cny_preparation_intents import begin_source_change, finish_source_change
+    before = begin_source_change(conn)
     conn.execute(
         """
         INSERT INTO sheet_vitrina_v1_cny_documents(
@@ -10322,6 +10379,7 @@ def _save_cny_document_in_connection(
             ),
         ),
     )
+    finish_source_change(conn, before)
     return document_id
 
 
@@ -11845,6 +11903,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             return
         was_in_transaction = conn.in_transaction
         _ensure_schema_uncached(conn)
+        from packages.application.supplier_preparation_intents import ensure_schema as ensure_supplier_preparation_schema
+        ensure_supplier_preparation_schema(conn)
+        from packages.application.cny_preparation_intents import ensure_schema as ensure_cny_preparation_schema
+        ensure_cny_preparation_schema(conn)
         if not was_in_transaction and conn.in_transaction:
             conn.commit()
         _SCHEMA_READY_KEYS.add(_schema_ready_key(conn))
@@ -13904,6 +13966,7 @@ _SHEET_VITRINA_USER_SECTION_IDS = (
     "research",
     "instructions",
     "settings",
+    *FINANCE_LIQUIDITY_CAPABILITIES,
 )
 
 
@@ -13955,21 +14018,32 @@ def _normalize_sheet_vitrina_user_sections(value: Any, *, role: str = "") -> lis
             continue
         seen.add(section_id)
         allowed.append(section_id)
-    return allowed
+    return list(expand_finance_capability_hierarchy(allowed))
 
 
 def _default_sheet_vitrina_sections_for_role(role: str) -> list[str]:
     normalized = str(role or "").strip()
     if normalized == "admin":
-        return list(_SHEET_VITRINA_USER_SECTION_IDS)
+        return list(
+            without_finance_explicit_only_capabilities(
+                _SHEET_VITRINA_USER_SECTION_IDS
+            )
+        )
     if normalized == "operator":
         # New knowledge-base access is intentionally opt-in for non-admin
         # users, including historical role-only records.
-        return [
-            section_id
-            for section_id in _SHEET_VITRINA_USER_SECTION_IDS
-            if section_id not in {"instructions", "feedbacks.ai_review", "feedbacks.autoanswers_admin"}
-        ]
+        return list(
+            without_finance_explicit_only_capabilities(
+                section_id
+                for section_id in _SHEET_VITRINA_USER_SECTION_IDS
+                if section_id
+                not in {
+                    "instructions",
+                    "feedbacks.ai_review",
+                    "feedbacks.autoanswers_admin",
+                }
+            )
+        )
     if normalized == "supply_operator":
         return ["supply"]
     return []

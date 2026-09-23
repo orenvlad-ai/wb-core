@@ -5,7 +5,7 @@ closed daily costs and the presentation consumed by all current readers.
 """
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -73,14 +73,20 @@ def admit(conn):
         raise ValueError("not_an_isolated_fbs_accounting_book")
 
 
-def load(runtime_dir, *, version=None):
+def load(runtime_dir, *, version=None, connection=None):
     file = path(runtime_dir)
     if not file.exists():
         if version is not None:
             raise ValueError("fbs_accounting_bound_revision_missing")
         return None, None
-    with closing(sqlite3.connect(file.as_uri() + "?mode=ro", uri=True)) as conn:
-        conn.execute("PRAGMA query_only=ON")
+    if connection is not None:
+        if (not connection.in_transaction or connection.execute("PRAGMA query_only").fetchone()[0] != 1
+                or Path(connection.execute("PRAGMA database_list").fetchone()[2]).resolve() != file):
+            raise ValueError("fbs_accounting_existing_bound_ro_transaction_required")
+    with (nullcontext(connection) if connection is not None else
+          closing(sqlite3.connect(file.as_uri() + "?mode=ro", uri=True))) as conn:
+        if connection is None:
+            conn.execute("PRAGMA query_only=ON")
         admit(conn)
         row = (conn.execute("SELECT version,payload FROM accounting_revisions WHERE version=?", (version,)).fetchone()
                if version is not None else conn.execute("SELECT r.version,r.payload FROM accounting_current c JOIN accounting_revisions r USING(version)").fetchone())
@@ -251,19 +257,67 @@ def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expec
     return book, expected
 
 
+def _retain_ready_history(plan, previous, *, business_date):
+    """Keep accepted columns on their own date in a newly built dated plan."""
+    dates = set(plan.date_columns) & set(previous.date_columns)
+    dates = {day for day in dates if day < business_date}
+    metadata = deepcopy(dict(plan.metadata or {}))
+    cells = metadata.setdefault("server_cell_presentation", {})
+    prior_cells = dict(previous.metadata or {}).get("server_cell_presentation", {})
+    source = next(sheet for sheet in previous.sheets if sheet.sheet_name == "DATA_VITRINA")
+    sheets = []
+    for sheet in plan.sheets:
+        if sheet.sheet_name != "DATA_VITRINA":
+            sheets.append(sheet)
+            continue
+        rows = deepcopy(sheet.rows)
+        indexed = {str(row[1]): row for row in rows}
+        for prior in source.rows:
+            key = str(prior[1])
+            if dates and key not in indexed:
+                indexed[key] = [prior[0], key, *["" for _ in plan.date_columns]]
+                rows.append(indexed[key])
+            for day in dates:
+                indexed[key][sheet.header.index(day)] = deepcopy(prior[source.header.index(day)])
+                cell = prior_cells.get(key, {}).get(day)
+                cells.setdefault(key, {}).pop(day, None)
+                if cell is not None:
+                    cells[key][day] = deepcopy(cell)
+        sheets.append(replace(sheet, rows=rows, row_count=len(rows),
+            write_rect=re.sub(r"\d+$", str(len(rows) + 1), sheet.write_rect)))
+    return replace(plan, sheets=sheets, metadata=metadata)
+
+
 def refresh(runtime_dir, *, ready_runtime=None):
     prior, prior_version = load(runtime_dir)
     if prior is None or not prior["active"]:
         return {"status": "not_active"}
+    now = datetime.now(timezone.utc)
+    build_inputs = None
     if ready_runtime is not None:
+        from packages.business_time import default_business_as_of_date
         current = ready_runtime.load_current_state()
-        plan = ready_runtime.load_sheet_vitrina_ready_snapshot()
         expected_ready = ready_runtime.prepare_sheet_vitrina_ready_publication(
-            bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
+            bundle_version=current.bundle_version, as_of_date=default_business_as_of_date(now))
         from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
-        plan = _deserialize_sheet_vitrina_plan(expected_ready.plan_json)
+        if expected_ready.exists:
+            plan = _deserialize_sheet_vitrina_plan(expected_ready.plan_json)
+        else:
+            # The hourly warehouse owner can reach a new day before the full
+            # Vitrina refresh. Use its existing dated builder with local capital
+            # only; the prepared book below supplies the current inventory.
+            from packages.application.sheet_vitrina_v1_live_plan import (
+                SheetVitrinaV1LivePlanBlock, bind_local_derive_publication,
+            )
+            from packages.application.sheet_vitrina_v1_own_product_capital import OWN_PRODUCT_CAPITAL_SOURCE_KEY
+            plan = SheetVitrinaV1LivePlanBlock(ready_runtime, now_factory=lambda: now).build_plan(
+                as_of_date=expected_ready.as_of_date, source_keys=(OWN_PRODUCT_CAPITAL_SOURCE_KEY,))
+            current, expected_ready = bind_local_derive_publication(ready_runtime, plan, current, expected_ready)
+            previous = ready_runtime.load_sheet_vitrina_ready_snapshot()
+            plan = _retain_ready_history(plan, previous, business_date=current_business_date_iso(now))
+            build_inputs = plan.metadata["publication_inputs"]
     try:
-        book, expected = prepare(runtime_dir)
+        book, expected = prepare(runtime_dir, now=now)
     except Exception as exc:
         _record_prepare_failure(runtime_dir, expected=prior_version, error=exc)
         raise
@@ -275,7 +329,7 @@ def refresh(runtime_dir, *, ready_runtime=None):
     else:
         ready_result = ready_runtime.save_sheet_vitrina_ready_snapshot(current_state=current, plan=plan,
             refreshed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            expected=expected_ready, _prepared_book=(book, expected))
+            expected=expected_ready, build_inputs=build_inputs, _prepared_book=(book, expected))
         version = fingerprint(book)
         operation_id = ready_result.publication_operation_id
     return {"status": "published", "version": version, "date": max(book["shared_days"]),

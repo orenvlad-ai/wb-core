@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import hashlib
 import importlib
 from io import BytesIO
@@ -180,7 +182,11 @@ from packages.application.sheet_vitrina_v1_sku_actions import (
 )
 from packages.application.sheet_vitrina_v1_weighted_seller_price import (
     WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY,
+    WEIGHTED_PRICE_ROW_ID,
+    ORDER_PRICE_EFFECTIVE_FROM,
     extend_metrics_with_weighted_seller_price,
+    weighted_price_source,
+    preserve_seller_price_history,
 )
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
@@ -227,7 +233,10 @@ from packages.application.wb_transit_cost_replay import (
     reconcile_completed_transit_costs,
 )
 from packages.application.warehouse_recovery_policy import WarehouseRecoveryRegistry
-from packages.application.warehouse_update_journal import WarehouseUpdateJournal
+from packages.application.warehouse_functional_maintenance import warehouse_start_is_held
+from packages.application.warehouse_update_journal import (
+    WarehouseUpdateJournal, WarehouseRequestConflict, validate_warehouse_request,
+)
 from packages.application.calculation_parameters import CalculationParametersBlock
 from packages.application.calculation_parameters_v4 import ProxyV4ParametersBlock
 from apps.promo_campaign_archive_gc import run_promo_campaign_archive_light_gc
@@ -1377,6 +1386,11 @@ class RegistryUploadHttpEntrypoint:
                 seller_id=registry_seller_id,
                 account_scope=registry_scope,
             )
+
+        self.operator_jobs.resume_warehouse_pending(
+            runtime_dir=self.runtime.runtime_dir, journal=self.warehouse_update_journal,
+            runner=self._run_warehouse_manual_sync_job,
+        )
 
     def handle_bundle_payload(self, payload: Mapping[str, Any]) -> RegistryUploadResult:
         return self.runtime.ingest_bundle(
@@ -3383,9 +3397,13 @@ class RegistryUploadHttpEntrypoint:
             }
 
     def handle_sheet_operator_job_request(self, job_id: str) -> dict[str, Any]:
-        return self.operator_jobs.get(job_id)
+        job = self.operator_jobs.get(job_id)
+        if job.get("operation") == "warehouse_current_source_sync":
+            raise ValueError("warehouse status requires the scoped warehouse status route")
+        return job
 
     def handle_sheet_operator_job_text_request(self, job_id: str) -> tuple[str, str]:
+        self.handle_sheet_operator_job_request(job_id)
         return self.operator_jobs.get_text(job_id)
 
     def handle_seller_portal_recovery_status_request(
@@ -5430,38 +5448,21 @@ class RegistryUploadHttpEntrypoint:
                 )
             ),
         )
-        cny_rows = list(payload.pop("cny_fee_rows_for_ledger", []) or [])
-        for row in cny_rows:
-            self.cny_ledger_block.save_bank_fee_document(
-                source_order_id=shipment_id,
-                linked_financial_document_id=document_id,
-                natural_key=str(row.get("cny_ledger_natural_key") or ""),
-                fee_row=row,
-                original_filename=str(payload.get("original_filename") or ""),
-                stored_file_path=str(payload.get("stored_file_path") or ""),
-                file_content_type=str(payload.get("file_content_type") or ""),
-                replay=False,
-            )
-        replay_required = bool(
-            payload.pop("cny_ledger_replay_required", False) or cny_rows
-        )
+        payload.pop("cny_fee_rows_for_ledger", None)
+        payload.pop("cny_ledger_replay_required", None)
         replay_outcome: dict[str, Any] = {}
         try:
-            if replay_required:
-                replay_outcome = self.cny_ledger_block.replay_ledger(
-                    reason="bank_fee_statement_confirm"
-                )
+            # The source transaction owns the entire statement continuation.
+            # Finalize resumes its existing CNY preparation and warehouse handoff.
             downstream = (
                 self.supplier_financial_documents_block.finalize_bank_fee_statement_import(
                     shipment_id,
                     document_id,
                 )
             )
+            replay_outcome = dict(downstream.get("cny_ledger_replay") or {})
         except Exception as exc:  # noqa: BLE001 - parent import is already durable.
-            result = self.supplier_financial_documents_block.get_document(
-                shipment_id,
-                document_id,
-            )
+            result = self.supplier_financial_documents_block._saved_document_payload(shipment_id, payload)
             result.update(
                 {
                     "contract_name": (
@@ -5492,7 +5493,7 @@ class RegistryUploadHttpEntrypoint:
                 }
             )
             return result
-        result = self.supplier_financial_documents_block.get_document(shipment_id, document_id)
+        result = self.supplier_financial_documents_block._saved_document_payload(shipment_id, payload)
         result.update(downstream)
         downstream_queue = dict(
             downstream.get("warehouse_targeted_recalculation") or {}
@@ -5502,7 +5503,7 @@ class RegistryUploadHttpEntrypoint:
         )
         downstream_pending = (
             str(downstream_queue.get("status") or "")
-            in {"error", "replay_error"}
+            in {"error", "replay_error", "pending"}
             or str(downstream_projection.get("status") or "") == "error"
         )
         if str(replay_outcome.get("status") or "") == "pending":
@@ -5526,8 +5527,10 @@ class RegistryUploadHttpEntrypoint:
             )
         elif downstream_pending:
             downstream_retryable = bool(
-                downstream_queue.get("affected_nm_ids")
-                or downstream_queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                downstream_queue.get("retryable", bool(
+                    downstream_queue.get("affected_nm_ids")
+                    or downstream_queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                ))
             )
             result.update(
                 {
@@ -5621,9 +5624,7 @@ class RegistryUploadHttpEntrypoint:
             str(payload.get("parse_status") or ""),
         )
         if result.get("cny_documents_status_changed"):
-            replay = self.cny_ledger_block.replay_account(
-                reason="supplier_financial_document_status_change"
-            )
+            replay = dict(result.get("cny_ledger_replay") or {})
             result["cny_replay"] = replay.get("replay") or replay
             if str(replay.get("status") or "") == "pending":
                 result.update(self._cny_pending_outcome(replay))
@@ -5811,7 +5812,7 @@ class RegistryUploadHttpEntrypoint:
             confirmation_token=confirmation_token,
         )
         if payload.get("cny_documents_archived"):
-            replay = self.cny_ledger_block.replay_account(reason="supplier_financial_document_archive")
+            replay = dict(payload.get("cny_ledger_replay") or {})
             payload["cny_replay"] = replay.get("replay") or replay
             if str(replay.get("status") or "") == "pending":
                 payload.update(self._cny_pending_outcome(replay))
@@ -5819,12 +5820,14 @@ class RegistryUploadHttpEntrypoint:
                 queue = dict(payload.get("warehouse_targeted_recalculation") or {})
                 projection = dict(queue.get("business_projection") or {})
                 if (
-                    str(queue.get("status") or "") in {"error", "replay_error"}
+                    str(queue.get("status") or "") in {"error", "replay_error", "pending"}
                     or str(projection.get("status") or "") == "error"
                 ):
                     retryable = bool(
-                        queue.get("affected_nm_ids")
-                        or queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                        queue.get("retryable", bool(
+                            queue.get("affected_nm_ids")
+                            or queue.get("affected_nm_ids_json") not in {None, "", "[]"}
+                        ))
                     )
                     payload.update(
                         {
@@ -6079,16 +6082,11 @@ class RegistryUploadHttpEntrypoint:
         uploaded_filename: str | None = None,
         uploaded_content_type: str | None = None,
     ) -> dict[str, Any]:
-        result = self.fulfillment_services_block.upload_xlsx(
+        return self.fulfillment_services_block.upload_xlsx(
             workbook_bytes,
             uploaded_filename=uploaded_filename,
             uploaded_content_type=uploaded_content_type,
         )
-        result["warehouse_targeted_recalculation"] = self._enqueue_fulfillment_recalculation(
-            result,
-            revision=str((result.get("upload") or {}).get("file_sha256") or ""),
-        )
-        return result
 
     def handle_fulfillment_services_uploads_request(self) -> dict[str, Any]:
         return self.fulfillment_services_block.list_uploads()
@@ -6097,61 +6095,7 @@ class RegistryUploadHttpEntrypoint:
         return self.fulfillment_services_block.get_upload(upload_id)
 
     def handle_fulfillment_services_upload_delete_request(self, upload_id: str) -> dict[str, Any]:
-        before = self.fulfillment_services_block.get_upload(upload_id)
-        result = self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
-        result["warehouse_targeted_recalculation"] = self._enqueue_fulfillment_recalculation(
-            before,
-            revision=f"deleted:{result.get('deleted_at') or ''}",
-        )
-        return result
-
-    def _enqueue_fulfillment_recalculation(
-        self,
-        detail: Mapping[str, Any],
-        *,
-        revision: str,
-    ) -> dict[str, Any]:
-        upload = dict(detail.get("upload") or {})
-        if str(upload.get("validation_status") or detail.get("validation_status") or "") != "ok":
-            return {"status": "not_eligible", "reason": "fulfillment_document_not_confirmed"}
-        supply_records: dict[str, Mapping[str, Any]] = {}
-        for line in detail.get("lines") or []:
-            if str(line.get("match_status") or "") != "ok" or bool(line.get("is_storage_line")):
-                continue
-            candidates = (
-                line.get("matched_wb_supply_id"),
-                str(line.get("matched_wb_cache_key") or "").removeprefix("supply:"),
-                line.get("supply_id_input"),
-            )
-            for candidate in candidates:
-                supply_id = str(candidate or "").strip()
-                if not supply_id or supply_id in supply_records:
-                    continue
-                record = self.runtime.load_wb_supply_record(supply_id)
-                if record is not None:
-                    supply_records[supply_id] = record
-                    break
-        nm_ids: set[int] = set()
-        effective_dates: list[str] = []
-        for record in supply_records.values():
-            normalized = _normalized_wb_record(record)
-            nm_ids.update(int(item["nm_id"]) for item in _validated_wb_goods(normalized))
-            for field in ("fact_date", "supply_date", "updated_date", "created_date"):
-                value = str(normalized.get(field) or record.get(field) or "")[:10]
-                if value:
-                    effective_dates.append(value)
-                    break
-        if not nm_ids:
-            return {"status": "not_eligible", "reason": "no_matched_supply_skus"}
-        upload_id = str(upload.get("upload_id") or detail.get("upload_id") or "").strip()
-        return enqueue_warehouse_targeted_recalculation(
-            runtime=self.runtime,
-            stable_source_id=f"fulfillment_upload:{upload_id}",
-            source_revision=str(revision or upload.get("updated_at") or upload_id),
-            effective_date=min(effective_dates) if effective_dates else str(upload.get("uploaded_at") or "")[:10],
-            affected_nm_ids=nm_ids,
-            requested_at=self.activated_at_factory(),
-        )
+        return self.fulfillment_services_block.delete_upload(upload_id, deleted_by="operator")
 
     def handle_fulfillment_services_payment_validation_pdf_request(
         self,
@@ -6747,9 +6691,8 @@ class RegistryUploadHttpEntrypoint:
         payload["lock_metrics"] = metrics
         return payload
 
-    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str) -> dict[str, Any]:
+    def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str, durable_run_id: str = "") -> dict[str, Any]:
         require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
-        durable_run_id = ""
         active_phase = ""
 
         def run_phase(phase_key: str, operation: Callable[[], Any]) -> Any:
@@ -6784,9 +6727,8 @@ class RegistryUploadHttpEntrypoint:
             return value
 
         try:
-            durable_run_id = self.warehouse_update_journal.start(
-                trigger_source="manual"
-            )
+            if not durable_run_id:
+                durable_run_id = self.warehouse_update_journal.start(trigger_source="manual")
             economics_backup = (
                 self.calculation_parameters_block.prepare_functional_economics_backup()
             )
@@ -6912,85 +6854,80 @@ class RegistryUploadHttpEntrypoint:
                 self.warehouse_functional_block.record_failed_sync(exc)
             raise
 
-    def handle_warehouse_manual_sync_start_request(self) -> dict[str, Any]:
+    def handle_warehouse_manual_sync_start_request(
+        self, payload: Mapping[str, Any] | None = None, *, request_scope: str = "local_operator",
+    ) -> dict[str, Any]:
+        key, fingerprint, body = validate_warehouse_request(payload, request_scope)
+        if key:
+            prior = self.warehouse_update_journal.lookup(request_key=key, request_scope=request_scope)
+            if prior:
+                if prior["payload_fingerprint"] != fingerprint:
+                    raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                return self._warehouse_manual_sync_status_payload(prior, request_scope=request_scope)
         job, busy = self.operator_jobs.start_warehouse_if_idle(
-            runtime_dir=self.runtime.runtime_dir,
+            runtime_dir=self.runtime.runtime_dir, journal=self.warehouse_update_journal,
             runner=self._run_warehouse_manual_sync_job,
+            request={"request_key": key, "request_scope": request_scope,
+                     "payload_fingerprint": fingerprint, "request_payload_json": body},
         )
-        # An external CLI owner has no process-local operator status ID.
-        if job is None:
-            return {"contract_name": "warehouse_current_source_sync_status",
-                    "status": "busy", "run_id": "",
-                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
-        return self._warehouse_manual_sync_status_payload(job, busy=busy)
+        if job is None and key:
+            # Close the cross-process race between the initial key lookup and
+            # another worker's acceptance under the shared admission.
+            prior = self.warehouse_update_journal.lookup(request_key=key, request_scope=request_scope)
+            if prior:
+                if prior["payload_fingerprint"] != fingerprint:
+                    raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                return self._warehouse_manual_sync_status_payload(prior, request_scope=request_scope)
+        if job and job.get("acceptance_unknown"):
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "consumer_pending", "run_id": "",
+                    "user_status": "Принятие заявки пока не подтверждено; проверяем её по сохранённому ключу",
+                    "short_log": [], "next_action": "read_status", "can_start_new": False, "request_accepted": None}
+        if job is None or (job.get("request_scope") and job["request_scope"] != request_scope):
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт; новая заявка не принята", "short_log": [],
+                    "next_action": "read_status", "can_start_new": False, "request_accepted": False}
+        response = self._warehouse_manual_sync_status_payload(job, busy=busy, request_scope=request_scope)
+        response["request_accepted"] = not busy
+        return response
 
     def handle_warehouse_manual_sync_status_request(
-        self,
-        run_id: str | None = None,
+        self, run_id: str | None = None, *, request_key: str = "", request_scope: str = "local_operator",
     ) -> dict[str, Any]:
-        operation = "warehouse_current_source_sync"
         requested = str(run_id or "").strip()
-        if requested:
-            return self._warehouse_manual_sync_status_payload(
-                self.operator_jobs.get(requested)
+        if requested or request_key:
+            if request_key:
+                validate_warehouse_request({"request_key": request_key}, request_scope)
+            job = self.warehouse_update_journal.lookup(
+                public_id=requested, request_key=request_key, request_scope=request_scope,
             )
-        job = self.operator_jobs.active_job(operations=(operation,))
-        if job is None and warehouse_functional_job_is_busy(self.runtime.runtime_dir):
-            # A busy POST without a process-local ID is polled through this
-            # same empty-ID route. Never replace a live CLI owner with an old
-            # manual success/never; no durable alias is invented here.
-            return {"contract_name": "warehouse_current_source_sync_status",
-                    "status": "busy", "run_id": "",
-                    "user_status": "Уже выполняется другой пересчёт", "short_log": []}
-        if job is None:
-            job = self.operator_jobs.latest_relevant_job(operations=(operation,))
-        if job is None:
-            durable = self.warehouse_update_journal.public_status()
-            manual = dict(durable.get("manual_updates") or {})
-            if str(manual.get("status") or "") != "never":
-                return {
-                    "contract_name": "warehouse_current_source_sync_status",
-                    "status": str(manual.get("status") or "never"),
-                    "run_id": str(manual.get("run_id") or ""),
-                    "user_status": (
-                        "Выполняется обновление всех складов и себестоимостей"
-                        if str(manual.get("status") or "") == "running"
-                        else "Последнее ручное обновление сохранено в журнале"
-                    ),
-                    "short_log": [],
-                    "last_attempt_at": str(manual.get("last_attempt_at") or ""),
-                    "last_success_at": str(manual.get("last_success_at") or ""),
-                    "finished_at": str(manual.get("finished_at") or ""),
-                    "changed_warehouses": 0,
-                    "changed_skus": 0,
-                    "functional_version_id": str(manual.get("functional_version_id") or ""),
-                    "business_date": str(manual.get("business_date") or ""),
-                    "durable_journal": durable,
-                }
-            return {
-                "contract_name": "warehouse_current_source_sync_status",
-                "status": "never",
-                "run_id": "",
-                "user_status": "Обновление ещё не запускалось",
-                "short_log": [],
-                "last_attempt_at": "",
-                "last_success_at": "",
-                "changed_warehouses": 0,
-                "changed_skus": 0,
-                "functional_version_id": "",
-                "business_date": "",
-                "durable_journal": durable,
-            }
-        return self._warehouse_manual_sync_status_payload(job)
+            if job is None:
+                raise ValueError("warehouse operation not found in this scope")
+            return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
+        if warehouse_functional_job_is_busy(self.runtime.runtime_dir):
+            job = self.warehouse_update_journal.latest_job(request_scope=request_scope)
+            if job and job["status"] in {"accepted", "running"}:
+                return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
+            return {"contract_name": "warehouse_current_source_sync_status", "status": "busy", "run_id": "",
+                    "user_status": "Уже выполняется другой пересчёт", "short_log": [],
+                    "next_action": "read_status", "can_start_new": False}
+        job = self.warehouse_update_journal.latest_job(request_scope=request_scope)
+        if job:
+            return self._warehouse_manual_sync_status_payload(job, request_scope=request_scope)
+        return {"contract_name": "warehouse_current_source_sync_status", "status": "never", "run_id": "",
+                "user_status": "Обновление ещё не запускалось", "short_log": [], "last_attempt_at": "",
+                "last_success_at": "", "changed_warehouses": 0, "changed_skus": 0,
+                "functional_version_id": "", "business_date": "", "next_action": "start",
+                "can_start_new": True, "durable_journal": self.warehouse_update_journal.public_status(request_scope=request_scope)}
 
     def _run_warehouse_manual_sync_job(
         self,
         emit: OperatorLogEmitter,
+        durable_run_id: str = "",
     ) -> dict[str, Any]:
         emit("Проверяем общий warehouse lock и предусмотренный restore point.")
         emit("Получаем текущие WB supplies, official stock snapshot и canonical cost layers.")
         result = self._handle_owned_warehouse_manual_sync_request(
-            owner_token=require_warehouse_job_owner(self.runtime.runtime_dir),
+            owner_token=require_warehouse_job_owner(self.runtime.runtime_dir), durable_run_id=durable_run_id,
         )
         diff = dict(result.get("diff") or {})
         lines = [
@@ -7037,43 +6974,79 @@ class RegistryUploadHttpEntrypoint:
         job: Mapping[str, Any],
         *,
         busy: bool = False,
+        request_scope: str = "local_operator",
     ) -> dict[str, Any]:
-        status = str(job.get("status") or "running")
+        status = str(job.get("status") or "accepted")
+        if status == "running" and not warehouse_functional_job_is_busy(self.runtime.runtime_dir):
+            # The owner may have committed terminal status after our first read
+            # and released admission. Re-read this exact scoped ID before
+            # classifying an orphan; never substitute the latest operation.
+            current = self.warehouse_update_journal.lookup(
+                public_id=str(job.get("job_id") or ""), request_scope=request_scope,
+            )
+            if current is not None:
+                job = current
+                status = str(job.get("status") or "accepted")
+            if status == "running":
+                status = "interrupted"  # Read-only; picker persists classification.
         result = dict(job.get("result") or {})
+        # New durable results retain the exact phase receipts and final payload.
+        diff = result.get("diff")
+        raw_lines = diff.get("lines") if isinstance(diff, Mapping) else None
+        # Legacy journal compaction stores lists as {item_count, details_omitted}.
+        # Such a count does not identify distinct warehouses or SKU.
+        lines_known = isinstance(raw_lines, list) and all(isinstance(line, Mapping) for line in raw_lines)
+        lines = raw_lines if lines_known else []
+        active_version = dict(result.get("active_version") or {})
+        changed_warehouses = result.get("changed_warehouses", len({str(line.get("warehouse_key")) for line in lines}) if lines_known else None)
+        changed_skus = result.get("changed_skus", len({int(line["nm_id"]) for line in lines if line.get("nm_id")}) if lines_known else None)
+        messages = {"accepted": "Заявка принята; ожидает начала обновления", "queued": "Заявка ожидает выполнения",
+                    "running": "Выполняется обновление всех складов и себестоимостей",
+                    "interrupted": "Обновление прервано; подтверждённые этапы сохранены. Требуется проверка",
+                    "consumer_pending": "Данные сохранены; зависимое обновление ожидается",
+                    "deferred": "Обновление отложено; требуется проверка"}
         if busy:
             user_status = "Уже выполняется другой пересчёт"
-        elif status == "running":
-            user_status = "Выполняется обновление всех складов и себестоимостей"
-        elif status == "success" and result.get("status") == "no_change":
-            user_status = "Без изменений: данные уже актуальны"
         elif status == "success":
-            user_status = "Готово: все 6 складов и себестоимости обновлены"
+            if changed_warehouses is None or changed_skus is None:
+                user_status = "Обновление завершено; подробности изменений не сохранены"
+            else:
+                user_status = "Без изменений: данные уже актуальны" if not changed_warehouses and not changed_skus else "Готово: все 6 складов и себестоимости обновлены"
         else:
-            user_status = "Не завершено: " + str(
-                job.get("error") or "неизвестная причина"
-            )
-        successful = self.operator_jobs.latest_successful_job(
-            operations=("warehouse_current_source_sync",),
-        )
+            user_status = messages.get(status) or "Не завершено: " + str(job.get("error") or "требуется проверка")
+        durable = self.warehouse_update_journal.public_status(request_scope=request_scope)
+        # Exact status must never show phases belonging to the latest run.
+        if "phases" in job:
+            durable["phases"] = job["phases"]
+            durable["manual_updates"] = {
+                "run_id": job.get("durable_run_id"), "status": status,
+                "last_attempt_at": job.get("started_at"), "finished_at": job.get("finished_at"),
+                "last_success_at": job.get("finished_at") if status == "success" else "",
+                "functional_version_id": result.get("functional_version_id") or active_version.get("version_id") or "",
+                "business_date": result.get("business_date") or active_version.get("business_effective_date") or "",
+            }
+        try:
+            live = self.operator_jobs.get(str(job.get("job_id") or ""))
+        except ValueError:
+            live = {}
+        # Optional live log/lock diagnostics are not identity or completion proof.
+        if (live.get("result") or {}).get("lock_metrics"):
+            result["lock_metrics"] = live["result"]["lock_metrics"]
+        can_start = status == "success" and not busy
         return {
-            "contract_name": "warehouse_current_source_sync_status",
-            "status": "busy" if busy else status,
-            "run_id": str(job.get("job_id") or ""),
-            "user_status": user_status,
-            "short_log": list(job.get("log_lines") or [])[-8:],
+            "contract_name": "warehouse_current_source_sync_status", "status": "busy" if busy else status,
+            "run_id": str(job.get("job_id") or ""), "durable_run_id": str(job.get("durable_run_id") or ""),
+            "attempt_id": str(job.get("attempt_id") or ""), "user_status": user_status,
+            "short_log": list(live.get("log_lines") or job.get("log_lines") or [])[-8:],
             "last_attempt_at": str(job.get("started_at") or ""),
-            "last_success_at": str(
-                (successful or {}).get("finished_at")
-                or (job.get("finished_at") if status == "success" else "")
-                or ""
-            ),
-            "finished_at": str(job.get("finished_at") or ""),
-            "changed_warehouses": int(result.get("changed_warehouses") or 0),
-            "changed_skus": int(result.get("changed_skus") or 0),
-            "functional_version_id": str(result.get("functional_version_id") or ""),
-            "business_date": str(result.get("business_date") or ""),
-            "technical_details": result,
-            "durable_journal": self.warehouse_update_journal.public_status(),
+            "last_success_at": str(job.get("finished_at") or "") if status == "success" else "",
+            "finished_at": str(job.get("finished_at") or ""), "changed_warehouses": changed_warehouses,
+            "changed_skus": changed_skus,
+            "functional_version_id": str(result.get("functional_version_id") or active_version.get("version_id") or ""),
+            "business_date": str(result.get("business_date") or active_version.get("business_date") or active_version.get("business_effective_date") or ""),
+            "technical_details": result, "durable_journal": durable,
+            "can_start_new": can_start,
+            "next_action": "start" if can_start else "read_status" if status in {"accepted", "queued", "running"} or busy else "review_required",
         }
 
     def handle_warehouse_emergency_preview_request(self) -> dict[str, Any]:
@@ -7574,6 +7547,9 @@ class RegistryUploadHttpEntrypoint:
                     log=emit,
                     execution_mode=execution_mode,
                 )
+                from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+                current_state, expected_ready = bind_local_derive_publication(
+                    self.runtime, plan, current_state, expected_ready)
                 _finish_operator_phase(
                     refresh_diagnostics,
                     build_plan_phase,
@@ -7616,6 +7592,7 @@ class RegistryUploadHttpEntrypoint:
                     previous_plan=previous_plan,
                     previous_refreshed_at=previous_refreshed_at,
                     business_date=current_business_date_iso(self.now_factory()),
+                    runtime=self.runtime,
                 )
                 save_snapshot_phase = _start_operator_phase(
                     "save_ready_snapshot",
@@ -7985,6 +7962,7 @@ class RegistryUploadHttpEntrypoint:
                         )
                     ),
                     source_keys=source_keys,
+                    column_date=selected_as_of_date,
                 )
                 if not metric_keys:
                     raise ValueError(f"source group {source_group_id!r} has no enabled web-vitrina metrics")
@@ -8009,6 +7987,9 @@ class RegistryUploadHttpEntrypoint:
                     source_keys=source_keys,
                     metric_keys=metric_keys,
                 )
+                from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+                current_state, expected_ready = bind_local_derive_publication(
+                    self.runtime, partial_plan, current_state, expected_ready)
                 emit(
                     _format_log_event(
                         "group_refresh_stage_finish",
@@ -8066,6 +8047,7 @@ class RegistryUploadHttpEntrypoint:
                     refreshed_at=refreshed_at,
                     previous_refreshed_at=previous_status.refreshed_at,
                     selected_as_of_date=selected_as_of_date,
+                    business_date=current_business_date_iso(self.now_factory()),
                 )
                 emit(
                     _format_log_event(
@@ -10103,15 +10085,28 @@ class SheetVitrinaV1OperatorJobStore:
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
 
-    def start_warehouse_if_idle(
-        self, *, runtime_dir: Path,
-        runner: Callable[[OperatorLogEmitter], dict[str, Any]],
-    ) -> tuple[dict[str, Any] | None, bool]:
-        """One worker owns both admission and execution; request waits only for admission.
+    def resume_warehouse_pending(self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
+                                 runner: Callable[..., dict[str, Any]]) -> threading.Thread | None:
+        if not journal.needs_pickup():
+            return None
+        def pick() -> None:
+            # Busy live owners are never reclassified. Retry only admission, not effects.
+            while journal.needs_pickup():
+                self.start_warehouse_if_idle(runtime_dir=runtime_dir, journal=journal, runner=runner)
+                time.sleep(5.0)
+        thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
+        thread.start()
+        return thread
 
-        The serial handshake prevents two simultaneous POSTs creating hidden
-        workers. No RLock or open file descriptor crosses a thread boundary.
-        A rejected external admission creates no operator job or domain record.
+    def start_warehouse_if_idle(
+        self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
+        runner: Callable[..., dict[str, Any]], request: Mapping[str, str] | None = None,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Durable acceptance precedes acknowledgement; claim precedes all effects.
+
+        The handshake holds the existing domain admission in the worker thread.
+        Cancellation before acceptance is harmless. After acceptance the pending
+        row survives cancellation/process loss and is eligible for startup pickup.
         """
         deadline = time.monotonic() + 5.0
         if not self._warehouse_start_lock.acquire(timeout=5.0):
@@ -10119,43 +10114,69 @@ class SheetVitrinaV1OperatorJobStore:
         try:
             with self._lock:
                 active = self._jobs.get(self._warehouse_admitted_job or "")
-                if active is not None and active.status == "running":
-                    return active.snapshot(), True
-            ready = threading.Event()
-            proceed = threading.Event()
+                if active is not None and active.status in {"accepted", "running"}:
+                    if request is None:
+                        return None, True
+                    prior = journal.lookup(public_id=active.job_id, request_scope=request["request_scope"])
+                    if prior and request["request_key"] and prior["request_key"] == request["request_key"]:
+                        if prior["payload_fingerprint"] != request["payload_fingerprint"]:
+                            raise WarehouseRequestConflict("request_key already accepted with a different payload")
+                        return prior, False
+                    return prior, True
+            ready, proceed = threading.Event(), threading.Event()
             admission: dict[str, Any] = {}
-            job_id = uuid4().hex
 
             def worker() -> None:
+                job_id = ""
+                accepted: dict[str, Any] | None = None
+                claimed = False
                 metrics: dict[str, Any] = {}
                 result: dict[str, Any] = {}
                 error: BaseException | None = None
                 try:
                     with warehouse_functional_job_lock(runtime_dir) as metrics:
+                        # Startup pickup must respect the same maintenance
+                        # boundary as a new HTTP request, including invalid state.
+                        if warehouse_start_is_held(runtime_dir):
+                            raise WarehouseFunctionalBusyError("warehouse updates are paused for maintenance")
                         with self._lock:
                             if admission.get("cancelled"):
                                 return
+                        pending = journal.recover_and_pick()
+                        if request is not None:
+                            accepted, created = journal.accept(**request)
+                        else:
+                            accepted, created = pending, True
+                        if accepted is None:
+                            return
+                        job_id = accepted["job_id"]
+                        with self._lock:
+                            admission["job"] = accepted
+                            admission["busy"] = not created and (not request or accepted.get("request_key") != request.get("request_key"))
+                            if accepted["status"] != "accepted":
+                                return
                             self._jobs[job_id] = SheetVitrinaV1OperatorJob(
                                 job_id=job_id, operation="warehouse_current_source_sync",
-                                status="running", started_at=self.timestamp_factory(),
+                                status="accepted", started_at=accepted["started_at"],
                             )
                             self._threads[job_id] = threading.current_thread()
                             self._warehouse_admitted_job = job_id
-                            admission["job"] = self._jobs[job_id].snapshot()
                         ready.set()
                         permitted = proceed.wait(timeout=5.0)
+                        if not permitted or admission.get("cancelled"):
+                            return  # Durable pending is retained, never deleted.
+                        if warehouse_start_is_held(runtime_dir):
+                            return  # A hold acquired during acceptance also keeps this ID pending.
+                        claimed = journal.claim(accepted["durable_run_id"])
+                        if not claimed:
+                            return
                         with self._lock:
-                            if not permitted or admission.get("cancelled"):
-                                admission["cancelled"] = True
-                                return
+                            self._jobs[job_id].status = "running"
                         context_token = SHEET_OPERATOR_JOB_ID.set(job_id)
                         try:
-                            result = runner(lambda message: self._append_log(job_id, message))
+                            result = runner(lambda message: self._append_log(job_id, message), accepted["durable_run_id"])
                         finally:
                             SHEET_OPERATOR_JOB_ID.reset(context_token)
-                            with self._lock:
-                                if self._warehouse_admitted_job == job_id:
-                                    self._warehouse_admitted_job = None
                 except BaseException as exc:
                     error = exc
                     if "job" not in admission:
@@ -10164,38 +10185,35 @@ class SheetVitrinaV1OperatorJobStore:
                         else:
                             admission["error"] = exc
                 finally:
-                    # Domain journal terminal happened under admission. Publish
-                    # operator terminal with complete diagnostics after release.
                     with self._lock:
-                        if admission.get("cancelled"):
-                            self._jobs.pop(job_id, None)
-                            self._threads.pop(job_id, None)
-                        elif "job" in admission:
+                        if job_id in self._jobs:
                             job = self._jobs[job_id]
                             job.result = {**result, "lock_metrics": metrics}
-                            job.finished_at = self.timestamp_factory()
-                            job.status = "error" if error is not None else "success"
+                            job.finished_at = self.timestamp_factory() if claimed else None
+                            job.status = ("error" if error is not None else "success") if claimed else "accepted"
                             if error is not None:
                                 job.error = str(error)
                                 job.log_lines.append(f"{job.finished_at} Ошибка: {error}")
                         if self._warehouse_admitted_job == job_id:
                             self._warehouse_admitted_job = None
                     ready.set()
+                    if accepted and accepted["status"] == "accepted" and not claimed:
+                        # Acceptance can commit after the request's bounded
+                        # handshake expires. Recover it in this process too.
+                        self.resume_warehouse_pending(runtime_dir=runtime_dir, journal=journal, runner=runner)
 
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
             observed = ready.wait(timeout=max(0.0, deadline - time.monotonic()))
             with self._lock:
-                if not observed or admission.get("cancelled"):
+                if not observed and "job" not in admission:
                     admission["cancelled"] = True
                     proceed.set()
-                    return None, True
+                    return {"acceptance_unknown": True}, True
                 if "error" in admission:
                     raise admission["error"]
-                if admission.get("busy"):
-                    return None, True
                 proceed.set()
-                return admission["job"], False
+                return admission.get("job"), bool(admission.get("busy"))
         finally:
             self._warehouse_start_lock.release()
 
@@ -11633,11 +11651,16 @@ def _web_vitrina_source_status_snapshot_id(
         return contract_snapshot_id
 
 
-def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterable[str]) -> list[str]:
+def _metric_keys_for_source_keys(
+    metrics: Iterable[Any], *, source_keys: Iterable[str], column_date: str = "",
+) -> list[str]:
     source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
     allowed_metric_keys: set[str] = set()
     for source_key in source_key_set:
         allowed_metric_keys.update(WEB_VITRINA_SOURCE_METRIC_KEYS.get(source_key, ()))
+    allowed_metric_keys.discard(WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY)
+    if weighted_price_source(column_date) in source_key_set:
+        allowed_metric_keys.add(WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY)
     ordered: list[str] = []
     for metric in sorted(metrics, key=lambda item: int(getattr(item, "display_order", 0) or 0)):
         metric_key = str(getattr(metric, "metric_key", "") or "").strip()
@@ -11652,8 +11675,10 @@ def _metric_keys_for_source_keys(metrics: Iterable[Any], *, source_keys: Iterabl
     return ordered
 
 
-def _source_key_for_metric_key(metric_key: str) -> str:
+def _source_key_for_metric_key(metric_key: str, column_date: str = "") -> str:
     normalized_metric_key = str(metric_key or "").strip()
+    if normalized_metric_key == WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY:
+        return weighted_price_source(column_date)
     for source_key, metric_keys in WEB_VITRINA_SOURCE_METRIC_KEYS.items():
         if normalized_metric_key in set(metric_keys):
             return source_key
@@ -11675,6 +11700,7 @@ def _merge_source_group_ready_snapshot(
     refreshed_at: str,
     previous_refreshed_at: str,
     selected_as_of_date: str | None = None,
+    business_date: str = "",
 ) -> tuple[SheetVitrinaV1Envelope, dict[str, Any]]:
     metric_key_set = {str(item).strip() for item in metric_keys if str(item).strip()}
     source_key_set = {str(item).strip() for item in source_keys if str(item).strip()}
@@ -11711,6 +11737,9 @@ def _merge_source_group_ready_snapshot(
         for row_id in partial_rows_by_id
         if _metric_key_from_row_id(row_id) in metric_key_set
     }
+    business_date = business_date or current_business_date_iso()
+    if selected_date and selected_date < min(ORDER_PRICE_EFFECTIVE_FROM, business_date):
+        updated_row_ids.discard(WEIGHTED_PRICE_ROW_ID)
     partial_cell_statuses = _updated_cell_statuses_by_source_and_date(partial_plan)
     onec_missing_bucket_metric_keys: set[str] = set()
     if source_group_id == ONEC_STOCKS_SOURCE_GROUP_ID and selected_date:
@@ -11733,7 +11762,7 @@ def _merge_source_group_ready_snapshot(
         row_id = _row_id(row)
         if row_id in updated_row_ids:
             metric_key = _metric_key_from_row_id(row_id)
-            source_key = _source_key_for_metric_key(metric_key)
+            source_key = _source_key_for_metric_key(metric_key, selected_date)
             if selected_date and not _source_date_allows_cell_merge(
                 partial_cell_statuses,
                 source_key=source_key,
@@ -11766,7 +11795,7 @@ def _merge_source_group_ready_snapshot(
     existing_row_ids = {_row_id(row) for row in previous_data.rows if _row_id(row)}
     for row_id in sorted(updated_row_ids - existing_row_ids):
         metric_key = _metric_key_from_row_id(row_id)
-        source_key = _source_key_for_metric_key(metric_key)
+        source_key = _source_key_for_metric_key(metric_key, selected_date)
         if selected_date and not _source_date_allows_cell_merge(
             partial_cell_statuses,
             source_key=source_key,
@@ -11840,6 +11869,26 @@ def _merge_source_group_ready_snapshot(
             merged_sheets.append(sheet)
 
     previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {})
+    # The changed cell and its dated coverage travel together in a group refresh.
+    previous_metadata.pop("weighted_seller_price_history_preserved_dates", None)
+    if WEIGHTED_PRICE_ROW_ID in merged_row_ids:
+        presentation = deepcopy(previous_metadata.get("server_cell_presentation", {}))
+        cells = presentation.setdefault(WEIGHTED_PRICE_ROW_ID, {})
+        partial_cells = partial_plan.metadata.get("server_cell_presentation", {}).get(WEIGHTED_PRICE_ROW_ID, {})
+        for day in ([selected_date] if selected_date else previous_plan.date_columns):
+            if day in partial_cells:
+                cells[day] = deepcopy(partial_cells[day])
+            else:
+                cells.pop(day, None)
+        previous_metadata["server_cell_presentation"] = presentation
+    if "weighted_seller_price_formula" in partial_plan.metadata:
+        previous_metadata["weighted_seller_price_formula"] = deepcopy(partial_plan.metadata["weighted_seller_price_formula"])
+    merged_base = preserve_seller_price_history(
+        replace(previous_plan, sheets=merged_sheets, metadata=previous_metadata),
+        previous_plan=previous_plan, business_date=business_date,
+    )
+    merged_sheets = merged_base.sheets
+    previous_metadata = merged_base.metadata
     row_updated_at = _row_updated_at_metadata(
         previous_plan,
         metadata=previous_metadata,
@@ -11855,10 +11904,7 @@ def _merge_source_group_ready_snapshot(
         group_updated_at[source_group_id] = refreshed_at
     updated_cells = (
         _updated_cells_for_plan(
-            replace(
-                previous_plan,
-                sheets=merged_sheets,
-            ),
+            merged_base,
             row_ids=merged_row_ids,
             date_columns=[selected_date] if selected_date else list(previous_plan.date_columns),
         )
@@ -11975,9 +12021,13 @@ def _with_full_refresh_metadata(
     previous_plan: SheetVitrinaV1Envelope | None = None,
     previous_refreshed_at: str = "",
     business_date: str = "",
+    runtime: Any = None,
 ) -> SheetVitrinaV1Envelope:
     preservation_summary: dict[str, Any] | None = None
     proxy_v4_preservation: dict[str, Any] | None = None
+    metadata = dict(plan.metadata)
+    metadata.pop("weighted_seller_price_history_preserved_dates", None)
+    plan = replace(plan, metadata=metadata)
     if previous_plan is not None:
         plan, preservation_summary = _preserve_unconfirmed_source_cells_from_previous_plan(
             plan=plan,
@@ -11993,6 +12043,38 @@ def _with_full_refresh_metadata(
             previous_plan=previous_plan,
             business_date=business_date,
         )
+    # A closed column may have been published in yesterday's snapshot or an older
+    # bundle. Read it by column date, without changing other metrics' preservation.
+    statuses = _updated_cell_statuses_by_source_and_date(plan)
+    for day in plan.date_columns:
+        if runtime is not None and day < business_date:
+            # Source publication can certify tomorrow's column in yesterday's
+            # ready. Reusing its values must keep their matching dated proof.
+            priors = [previous_plan]
+            try:
+                priors.append(runtime.load_sheet_vitrina_ready_snapshot(
+                    as_of_date=(date.fromisoformat(day) - timedelta(days=1)).isoformat()))
+            except ValueError:
+                pass
+            for prior_source in priors:
+                if prior_source is not None:
+                    plan = _preserve_closed_web_source_presentation(
+                        plan, previous_plan=prior_source, day=day, runtime=runtime)
+        unconfirmed = not _source_date_allows_cell_merge(
+            statuses, source_key=weighted_price_source(day), as_of_date=day)
+        if day >= business_date and not unconfirmed:
+            continue
+        prior = previous_plan
+        if runtime is not None:
+            try:
+                prior = runtime.load_sheet_vitrina_ready_snapshot_covering_date_any_bundle(column_date=day)
+            except ValueError:
+                pass
+        if prior is not None:
+            plan = preserve_seller_price_history(
+                plan, previous_plan=prior, business_date=business_date,
+                column_dates=[day], unconfirmed_dates=[day] if unconfirmed else [],
+            )
     data_sheet = _find_sheet(plan, "DATA_VITRINA")
     previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {}) if previous_plan is not None else {}
     if previous_plan is None:
@@ -12061,6 +12143,92 @@ def _load_existing_ready_snapshot_for_preservation(
     return previous_plan, str(getattr(previous_status, "refreshed_at", "") or "")
 
 
+def _preserve_closed_web_source_presentation(plan, *, previous_plan, day, runtime):
+    """Keep existing portal proof only for identical dated accepted operands.
+
+    This does not certify a new source, recalculate values, or carry another
+    metric family's metadata. A newer accepted source owns its own provenance.
+    """
+    groups = {
+        "seller_funnel_snapshot": {
+            "view_count", "open_card_count", "total_view_count", "total_open_card_count"},
+        "web_source_snapshot": {
+            "views_current", "ctr_current", "total_views_current", "avg_ctr_current"},
+    }
+    current = _find_sheet(plan, "DATA_VITRINA")
+    previous = _find_sheet(previous_plan, "DATA_VITRINA")
+    if current is None or previous is None or day not in current.header or day not in previous.header:
+        return plan
+    old_rows = {_row_id(row): row for row in previous.rows}
+    old_cells = previous_plan.metadata.get("server_cell_presentation", {})
+    metadata = deepcopy(plan.metadata)
+    cells = metadata.setdefault("server_cell_presentation", {})
+    index, old_index = current.header.index(day), previous.header.index(day)
+    for source, metrics in groups.items():
+        payload, captured = runtime.load_temporal_source_slot_snapshot(
+            source_key=source, snapshot_date=day, snapshot_role="accepted_closed_day_snapshot")
+        if payload is None or getattr(payload, "kind", None) != "success":
+            continue
+        payload_dates = {getattr(payload, name) for name in ("date", "date_from", "date_to")
+                         if hasattr(payload, name)}
+        if payload_dates != {day}:
+            continue
+        source_stamp = getattr(payload, "source_fetched_at", None) or captured
+        items = {item.nm_id: item for item in payload.items}
+        sku_keys = {key for key in metrics if not key.startswith(("total_", "avg_"))}
+        expected = {f"SKU:{nm}|{metric}": (getattr(item, metric) / 100
+                    if metric == "ctr_current" else getattr(item, metric))
+                    for nm, item in items.items() for metric in sku_keys}
+        if source == "seller_funnel_snapshot":
+            expected.update({"TOTAL|total_" + metric: sum(getattr(item, metric) for item in items.values())
+                             for metric in sku_keys})
+        else:
+            views = sum(item.views_current for item in items.values())
+            expected.update({"TOTAL|total_views_current": views,
+                "TOTAL|avg_ctr_current": round(sum(item.ctr_current * item.views_current
+                    for item in items.values()) / views / 100, 6) if views else ""})
+        group_rows = [row for row in current.rows if _metric_key_from_row_id(_row_id(row)) in metrics]
+        scope = {key.split("|")[0] for key in map(_row_id, group_rows) if key.startswith("SKU:")}
+        missing = scope - {f"SKU:{nm}" for nm in items}
+        group_cells = {}
+        valid = bool(scope) and set(items).issubset({int(key[4:]) for key in scope})
+        for row in group_rows:
+            key = _row_id(row)
+            old = old_rows.get(key)
+            cell = old_cells.get(key, {}).get(day, {})
+            if (old is None or index >= len(row) or old_index >= len(old)
+                or row[index] != old[old_index] or row[index] != expected.get(key, "")
+                or cell.get("source_key") != source or cell.get("source_date") != day
+                or cell.get("source_fetched_at") != source_stamp
+                or cell.get("source_completeness") != "complete"
+                or cell.get("zero_fill_applied") is not False or not cell.get("source_digest")):
+                valid = False
+                break
+            missing_count = len(missing) if key.startswith("TOTAL|") else int(key.split("|")[0] in missing)
+            if (cell.get("missing_sku_count") != missing_count
+                or cell.get("completeness_state") != ("partial" if missing_count else "complete")):
+                valid = False
+                break
+            if key.startswith("TOTAL|"):
+                proof = cell.get("metric_scope_evidence", {})
+                if (proof.get("operand_date") != day or set(proof.get("applicable_scope", [])) != scope
+                    or set(proof.get("missing_scope", [])) != missing):
+                    valid = False
+                    break
+            group_cells[key] = cell
+        # The retained digest identifies the original observation (not the
+        # normalized payload). Its entire group, including missing SKU, must
+        # agree with the same dated accepted source before that proof is reused.
+        if (not valid or len(group_cells) != len(scope) * len(sku_keys) + 2
+            or len({cell["source_digest"] for cell in group_cells.values()}) != 1):
+            continue
+        for key, cell in group_cells.items():
+            existing = cells.setdefault(key, {}).get(day, {})
+            if not existing.get("source_key") and not existing.get("source"):
+                cells[key][day] = deepcopy(cell)
+    return replace(plan, metadata=metadata)
+
+
 def _preserve_unconfirmed_source_cells_from_previous_plan(
     *,
     plan: SheetVitrinaV1Envelope,
@@ -12102,6 +12270,7 @@ def _preserve_unconfirmed_source_cells_from_previous_plan(
 
         merged_row = list(row)
         for as_of_date, current_indexes in plan_indexes_by_date.items():
+            source_key = _source_key_for_metric_key(_metric_key_from_row_id(row_id), as_of_date)
             if _source_date_allows_cell_merge(
                 status_by_source_date,
                 source_key=source_key,
@@ -12454,6 +12623,11 @@ def _updated_cells_for_plan(
         if not source_key or not source_group_id:
             continue
         for as_of_date in plan.date_columns:
+            source_key = _source_key_for_metric_key(metric_key, as_of_date)
+            source_group_id = _source_group_id_for_source_key(source_key)
+            if (row_id == WEIGHTED_PRICE_ROW_ID and as_of_date in
+                    plan.metadata.get("weighted_seller_price_history_preserved_dates", [])):
+                continue
             if date_filter and as_of_date not in date_filter:
                 continue
             status = status_by_source_date.get((source_key, as_of_date), "updated")

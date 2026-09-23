@@ -35,6 +35,7 @@ def transform_legacy_payload(payload: Mapping[str, Any]) -> WebSourceSnapshotEnv
             date_to=_require_str(payload, "date_to"),
             count=_require_int(payload, "count"),
             items=items,
+            source_fetched_at=payload.get("source_fetched_at"),
         )
     )
 

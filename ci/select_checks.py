@@ -20,6 +20,20 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 KNOWN_ROOTS = {".github", "apps", "artifacts", "ci", "docs", "gas", "packages", "registry"}
 KNOWN_ROOT_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "README.md"}
 KNOWN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".py", ".service", ".timer", ".toml", ".yaml", ".yml"}
+FINANCE_PILOT_ENV_PATH = "artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env"
+FINANCE_PILOT_ENV_COMMON = (
+    "FINANCE_LIQUIDITY_ORIGIN=https://api.selleros.pro\n"
+    "FINANCE_LIQUIDITY_ACCESS_CONFIG=/opt/wb-core-runtime/app/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot-access.json\n"
+)
+FINANCE_PILOT_ENV_PAYLOADS = {
+    (
+        f"FINANCE_LIQUIDITY_ENABLED={flag}\n"
+        f"FINANCE_LIQUIDITY_READ_ENABLED={flag}\n"
+        f"FINANCE_LIQUIDITY_WRITE_ENABLED={flag}\n"
+        f"{FINANCE_PILOT_ENV_COMMON}"
+    ).encode()
+    for flag in ("0", "1")
+}
 REPO_ONLY_PREFIXES = (".github/", "ci/", "docs/", "migration/", "reports/", "workspaces/")
 REPO_ONLY_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "IMPLEMENTATION_REPORT.md", "README.md"}
 
@@ -51,9 +65,18 @@ def safe_path(path: str, *, allow_legacy: bool = False) -> str:
     if not allow_legacy and normalized not in KNOWN_ROOT_FILES and root not in KNOWN_ROOTS:
         raise PlanError(f"unclassified top-level path: {normalized}")
     suffix = Path(normalized).suffix.lower()
-    if not allow_legacy and suffix not in KNOWN_SUFFIXES:
+    if (
+        not allow_legacy
+        and suffix not in KNOWN_SUFFIXES
+        and normalized != FINANCE_PILOT_ENV_PATH
+    ):
         raise PlanError(f"unclassified file type: {normalized}")
     return normalized
+
+
+def validate_bounded_environment(path: str, payload: bytes) -> None:
+    if path != FINANCE_PILOT_ENV_PATH or payload not in FINANCE_PILOT_ENV_PAYLOADS:
+        raise PlanError(f"untrusted repository environment file: {path}")
 
 
 def load_map() -> tuple[dict[str, Any], str]:
@@ -92,6 +115,30 @@ def git_file_exists(head: str, path: str) -> bool:
     return result.returncode == 0
 
 
+def git_bounded_file(head: str, path: str) -> tuple[str, bytes]:
+    try:
+        tree = subprocess.run(
+            ["git", "ls-tree", "-z", head, "--", path],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        metadata, separator, listed_path = tree.rstrip(b"\0").partition(b"\t")
+        fields = metadata.split()
+        if separator != b"\t" or listed_path.decode("utf-8") != path or len(fields) != 3:
+            raise ValueError("candidate tree entry is ambiguous")
+        payload = subprocess.run(
+            ["git", "show", f"{head}:{path}"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        mode = fields[0].decode("ascii")
+    except (OSError, UnicodeDecodeError, ValueError, subprocess.CalledProcessError) as exc:
+        raise PlanError(f"cannot read bounded candidate file: {path}") from exc
+    return mode, payload
+
+
 def build_plan_from_paths(
     *,
     pull_request: int,
@@ -99,18 +146,37 @@ def build_plan_from_paths(
     head: str,
     paths: list[str],
     file_exists: Callable[[str, str], bool],
+    bounded_file_reader: Callable[[str, str], tuple[str, bytes]] | None = None,
 ) -> dict[str, Any]:
     mapping, mapping_sha = load_map()
     safe_paths = [
         safe_path(path, allow_legacy=not file_exists(head, path)) for path in paths
     ]
+    for path in safe_paths:
+        if path == FINANCE_PILOT_ENV_PATH and file_exists(head, path):
+            if bounded_file_reader is None:
+                raise PlanError("trusted candidate file reader is required")
+            try:
+                mode, payload = bounded_file_reader(head, path)
+            except PlanError:
+                raise
+            except Exception as exc:
+                raise PlanError(f"cannot read bounded candidate file: {path}") from exc
+            if mode != "100644":
+                raise PlanError(f"bounded candidate file mode is invalid: {path}")
+            validate_bounded_environment(path, payload)
     groups: list[str] = []
     commands: list[list[str]] = []
     pip: list[str] = []
 
     for group_name, group in mapping["groups"].items():
         patterns = group.get("patterns") or []
-        if any(fnmatch.fnmatch(path, pattern) for path in safe_paths for pattern in patterns):
+        exclude_patterns = group.get("exclude_patterns") or []
+        if any(
+            any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+            and not any(fnmatch.fnmatch(path, pattern) for pattern in exclude_patterns)
+            for path in safe_paths
+        ):
             groups.append(group_name)
             commands.extend(group.get("commands") or [])
             pip.extend(group.get("pip") or [])
@@ -204,6 +270,7 @@ def main() -> int:
         head=head,
         paths=changed_paths(base, head),
         file_exists=git_file_exists,
+        bounded_file_reader=git_bounded_file,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(canonical_bytes(plan) + b"\n")

@@ -31,6 +31,31 @@ Receipt содержит только нужные связи: PR, Gate run, bas
 фактически выпущенную версию, результат и причину ошибки. Блокировка завершает
 workflow ошибкой, а не зелёным статусом.
 
+## Завершение прерванного выпуска после merge
+
+Workflow `Post-merge Release Recovery` поддерживает один определённый случай:
+Release Runner уже слил PR и остановился с кодом 3 на проверке
+`root-storage status-readback` после перезапуска сервисов. Причина отказа должна
+быть устранена отдельно. Другие стадии и транспортно неопределённый исход
+первоначального выпуска этот путь не принимает.
+
+Сначала запусти workflow в режиме `preview` с `release_run_id` исходного
+неуспешного Release Runner. Проверь сформированный план: исходные PR, Gate,
+base/head/merge, доказательство стадии отказа, цель, незавершённую metadata и
+Finance pilot в его утверждённом изолированном состоянии. Для режима `apply`
+передай тот же `release_run_id` и точный `preview_fingerprint` из проверенного
+плана. Изменение состояния между preview и apply останавливает выполнение.
+
+Допустимы только два точных случая: storage-tail после уже выполненного restart
+не повторяет sync, зависимости и сервисные операции; normal activation tail
+после доказанного сбоя drain повторяет с canonical `prepare-deploy` только
+оставшиеся activation stages (install/reload, nginx, restart, reconcile,
+readback, Change Registry и metadata completion). Оба случая сохраняют один
+claim и phase evidence, не делают merge, sync, chown или установку зависимостей,
+а незавершённый claim разрешает лишь readback, без обхода или повторной записи.
+Успех подтверждают связанный recovery receipt, завершённая metadata, точная
+версия, сервисы и неизменный изолированный Finance pilot.
+
 ## Production Apply
 
 Общий launcher не содержит бизнес-логику. Он вызывает только зарегистрированный

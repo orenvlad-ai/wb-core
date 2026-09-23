@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-VALID_ADS_KINDS = frozenset({"success", "empty", "missing", "error"})
+VALID_ADS_KINDS = frozenset({"success", "incomplete", "empty", "missing", "error"})
 
 
 def resolve_ads_snapshot_payload(

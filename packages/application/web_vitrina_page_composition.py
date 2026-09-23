@@ -192,6 +192,7 @@ def build_web_vitrina_page_composition(
             "read_route": read_route,
             "operator_route": operator_route,
             "snapshot_id": str(contract_payload["meta"]["snapshot_id"]),
+            "inventory_history_version": str(contract_payload["meta"].get("inventory_history_version") or ""),
             "as_of_date": str(contract_payload["meta"]["as_of_date"]),
             "snapshot_as_of_date": time_model["snapshot_as_of_date"],
             "yesterday_closed_date": time_model["yesterday_closed_date"],

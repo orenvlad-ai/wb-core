@@ -193,6 +193,11 @@
       "restart": true
     },
     {
+      "name": "wb-core-finance-liquidity-pilot.service",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-autoanswers-readonly-sync.service",
       "enable": false,
       "restart": false

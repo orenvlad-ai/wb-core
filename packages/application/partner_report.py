@@ -10,7 +10,9 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
+import sys
 import time
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 import zipfile
@@ -22,6 +24,7 @@ from openpyxl.worksheet.page import PageMargins
 
 from packages.application.wb_finance_weekly import (
     COST_METHOD_VERSION,
+    COST_ECONOMIC_SIGNATURE_VERSION,
     PROFIT_METHOD_VERSION,
     SKU_AGGREGATE_FORMULA_VERSION,
     WbFinanceWeeklyBlock,
@@ -30,10 +33,13 @@ from packages.application.wb_finance_weekly import (
     _nomenclature_identity_index,
     _operation_date,
     _resolve_finance_nm_id,
+    cost_economic_signature,
+    recalculate_cost_derived_metrics,
     classify_deduction,
 )
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
 from packages.application.canonical_wb_cost_resolver import (
+    CanonicalChannelCostSnapshot,
     resolve_channel_location_cost,
 )
 from packages.application.storage_registry import StoreRegistry
@@ -256,6 +262,7 @@ class PartnerReportBlock:
             now_factory=self.now_factory,
             shared_cost_snapshot=shared_cost_snapshot,
         )
+        self._preview_manifest = None
 
     def ensure_schema(self) -> None:
         self.finance.ensure_schema()
@@ -441,24 +448,66 @@ class PartnerReportBlock:
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         started = time.perf_counter()
-        if not self.finance.shared_cost_is_candidate:
-            self.ensure_schema()
+        phase_timings_ms: dict[str, float] = {}
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
             payload.get("selected_weeks"), require_continuous=False
         )
-        with self._preview_connection() as conn:
-            settings = self._load_settings(conn, nm_id=nm_id)
-            report = self._calculate_report(
-                conn,
-                settings=settings,
-                selected_weeks=weeks,
-                finalization=False,
-            )[0]
+        request_id = secrets.token_hex(6)
+        active_phase = "snapshot_open"
+        active_phase_started = started
+        self._emit_preview_started(request_id)
+        try:
+            with self._preview_connection(phase_timings_ms) as conn:
+                active_phase = "settings_lookup"
+                phase_started = time.perf_counter()
+                active_phase_started = phase_started
+                settings = self._load_settings(conn, nm_id=nm_id)
+                phase_timings_ms["settings_lookup"] = self._elapsed_ms(phase_started)
+                active_phase = "calculation"
+                phase_started = time.perf_counter()
+                active_phase_started = phase_started
+                report = self._calculate_report(
+                    conn,
+                    settings=settings,
+                    selected_weeks=weeks,
+                    finalization=False,
+                )[0]
+                phase_timings_ms["calculation"] = self._elapsed_ms(phase_started)
+        except sqlite3.OperationalError as exc:
+            phase_timings_ms["total"] = self._elapsed_ms(started)
+            self._emit_preview_timing(
+                phase_timings_ms,
+                outcome="error",
+                request_id=request_id,
+                active_phase=active_phase,
+                active_phase_elapsed_ms=self._elapsed_ms(active_phase_started),
+            )
+            self._raise_missing_schema_error(exc)
+            raise
+        except Exception:
+            phase_timings_ms["total"] = self._elapsed_ms(started)
+            self._emit_preview_timing(
+                phase_timings_ms,
+                outcome="error",
+                request_id=request_id,
+                active_phase=active_phase,
+                active_phase_elapsed_ms=self._elapsed_ms(active_phase_started),
+            )
+            raise
+        phase_timings_ms["total"] = self._elapsed_ms(started)
+        self._emit_preview_timing(
+            phase_timings_ms,
+            outcome=str(report["status"]),
+            request_id=request_id,
+            active_phase="complete",
+            active_phase_elapsed_ms=0.0,
+        )
         return {
             **report,
             "performance": {
-                "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                "duration_ms": phase_timings_ms["total"],
+                "phase_timings_ms": phase_timings_ms,
                 "raw_finance_full_scan": self.finance.shared_cost_is_candidate,
                 "source": (
                     "candidate week projection from raw Finance rows"
@@ -645,44 +694,46 @@ class PartnerReportBlock:
         *,
         expected_source_digest: str = "",
     ) -> tuple[bytes, str, dict[str, Any]]:
-        if not self.finance.shared_cost_is_candidate:
-            self.ensure_schema()
         nm_id = str(payload.get("nm_id") or "").strip()
         weeks = self._validate_selected_weeks(
             payload.get("selected_weeks"), require_continuous=False
         )
-        with self._preview_connection() as conn:
-            settings = self._load_settings(conn, nm_id=nm_id)
-            report, provenance = self._calculate_report(
-                conn,
-                settings=settings,
-                selected_weeks=weeks,
-                finalization=False,
-            )
-            if report["status"] != "ready":
-                raise PartnerReportError(
-                    "preview Excel is blocked by source coverage",
-                    code="source_coverage_incomplete",
-                    blockers=report["blockers"],
+        try:
+            with self._preview_connection() as conn:
+                settings = self._load_settings(conn, nm_id=nm_id)
+                report, provenance = self._calculate_report(
+                    conn,
+                    settings=settings,
+                    selected_weeks=weeks,
+                    finalization=False,
                 )
-            if expected_source_digest and expected_source_digest != str(report["source_digest"]):
-                raise PartnerReportError(
-                    "preview inputs changed before Excel export; rebuild the on-screen report",
-                    code="preview_source_digest_changed",
+                if report["status"] != "ready":
+                    raise PartnerReportError(
+                        "preview Excel is blocked by source coverage",
+                        code="source_coverage_incomplete",
+                        blockers=report["blockers"],
+                    )
+                if expected_source_digest and expected_source_digest != str(report["source_digest"]):
+                    raise PartnerReportError(
+                        "preview inputs changed before Excel export; rebuild the on-screen report",
+                        code="preview_source_digest_changed",
+                    )
+                workbook = self._build_main_workbook(report)
+                first_week = str(report["selected_weeks"][0])
+                last_week = str(report["selected_weeks"][-1])
+                filename = (
+                    f"Партнёрский_отчёт_{self._safe_filename(report['product_name']) or nm_id}_"
+                    f"{nm_id}_{first_week}_{last_week}.xlsx"
                 )
-            workbook = self._build_main_workbook(report)
-            first_week = str(report["selected_weeks"][0])
-            last_week = str(report["selected_weeks"][-1])
-            filename = (
-                f"Партнёрский_отчёт_{self._safe_filename(report['product_name']) or nm_id}_"
-                f"{nm_id}_{first_week}_{last_week}.xlsx"
-            )
-            return workbook, filename, {
-                "source_digest": report["source_digest"],
-                "formula_version": report["formula_version"],
-                "nm_id": nm_id,
-                "selected_weeks": report["selected_weeks"],
-            }
+                return workbook, filename, {
+                    "source_digest": report["source_digest"],
+                    "formula_version": report["formula_version"],
+                    "nm_id": nm_id,
+                    "selected_weeks": report["selected_weeks"],
+                }
+        except sqlite3.OperationalError as exc:
+            self._raise_missing_schema_error(exc)
+            raise
 
     def _calculate_report_legacy_deprecated(
         self,
@@ -958,6 +1009,316 @@ class PartnerReportBlock:
         }
         return report, provenance
 
+    def _current_cost_economic_signature(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        nm_id: str,
+        coverage: Mapping[str, Any],
+        shared: SharedSkuCostSnapshot | None,
+        canonical_snapshot: CanonicalChannelCostSnapshot | None,
+    ) -> tuple[str, CanonicalChannelCostSnapshot | None, str]:
+        """Resolve persisted economic buckets without treating lineage as price."""
+
+        buckets = coverage.get("cost_economic_buckets")
+        if (
+            str(coverage.get("cost_economic_signature_version") or "")
+            != COST_ECONOMIC_SIGNATURE_VERSION
+            or not isinstance(buckets, list)
+        ):
+            return "", canonical_snapshot, "legacy_projection"
+        current_rows: list[dict[str, Any]] = []
+        for bucket in buckets:
+            try:
+                operation_day = date.fromisoformat(str(bucket.get("operation_date") or ""))
+            except ValueError:
+                return "", canonical_snapshot, "operation_date_invalid"
+            channel = str(bucket.get("channel") or "")
+            fbs_order_id = int(bucket.get("fbs_order_id") or 0) or None
+            if shared is not None and shared.applies_to(operation_day):
+                current = resolve_channel_location_cost(
+                    conn, nm_id=nm_id, operation_date=operation_day,
+                    operation={"deliveryType": "FBS"} if channel == "FBS" else None,
+                    fbs_order_id=fbs_order_id, shared_cost_snapshot=shared,
+                )
+            else:
+                if canonical_snapshot is None:
+                    canonical_snapshot = self.finance._canonical_channel_snapshot(conn)  # noqa: SLF001
+                current = resolve_channel_location_cost(
+                    conn, nm_id=nm_id, operation_date=operation_day,
+                    # Match the historical routing rule exactly.  In particular,
+                    # an inactive shared book must not turn a WB row into FBS.
+                    operation=(
+                        {"deliveryType": "FBS"}
+                        if shared is not None and channel == "FBS" else None
+                    ),
+                    fbs_order_id=fbs_order_id, snapshot=canonical_snapshot,
+                    shared_cost_snapshot=shared,
+                )
+            if str(current.get("status") or "") != "resolved":
+                return "", canonical_snapshot, str(current.get("reason") or "cost_missing")
+            signed_qty = int(bucket.get("signed_qty") or 0)
+            unit_cost = _decimal(current.get("unit_cost_rub"))
+            current_rows.append(
+                {
+                    "nm_id": nm_id,
+                    "operation_date": operation_day.isoformat(),
+                    "channel": str(current.get("channel") or ""),
+                    "pool": str(current.get("pool") or ""),
+                    "facility_id": str(current.get("facility_id") or ""),
+                    "fbs_order_id": int(current.get("fbs_order_id") or 0),
+                    "source_date": str(current.get("canonical_source_date") or ""),
+                    "source_quality": str(current.get("quality") or ""),
+                    "projection_quality": str(current.get("projection_quality") or ""),
+                    "selection_method": str(current.get("selection_method") or ""),
+                    "formula_version": str(current.get("formula_version") or COST_METHOD_VERSION),
+                    "unit_cost_rub": _decimal_text(unit_cost),
+                    "economic_unit_cost_rub": format(unit_cost.normalize(), "f") if unit_cost else "0",
+                    "movement": "sale",
+                    "quantity": int(bucket.get("sales_qty") or 0),
+                    "signed_quantity": int(bucket.get("sales_qty") or 0),
+                    "signed_cogs_rub": _decimal_text(unit_cost * int(bucket.get("sales_qty") or 0)),
+                    "economic_signed_cogs_rub": format(
+                        (unit_cost * int(bucket.get("sales_qty") or 0)).normalize(), "f"
+                    ) if unit_cost * int(bucket.get("sales_qty") or 0) else "0",
+                }
+            )
+            if int(bucket.get("returns_qty") or 0):
+                current_rows.append({
+                    **current_rows[-1], "movement": "return",
+                    "quantity": int(bucket.get("returns_qty") or 0),
+                    "signed_quantity": -int(bucket.get("returns_qty") or 0),
+                    "signed_cogs_rub": _decimal_text(-unit_cost * int(bucket.get("returns_qty") or 0)),
+                    "economic_signed_cogs_rub": format(
+                        (-unit_cost * int(bucket.get("returns_qty") or 0)).normalize(), "f"
+                    ) if unit_cost * int(bucket.get("returns_qty") or 0) else "0",
+                })
+        _buckets, signature = cost_economic_signature(current_rows)
+        return signature, canonical_snapshot, ""
+
+    def _cost_lineage_is_current(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        nm_id: str,
+        coverage: Mapping[str, Any],
+        shared: SharedSkuCostSnapshot | None,
+        canonical_snapshot: CanonicalChannelCostSnapshot | None,
+    ) -> tuple[bool, CanonicalChannelCostSnapshot | None]:
+        """Preserve the old no-drift path for legacy projections."""
+
+        details = coverage.get("detail_rows") or []
+        if not details:
+            return False, canonical_snapshot
+        checked: set[tuple[str, str, str, str]] = set()
+        for detail in details:
+            try:
+                operation_day = date.fromisoformat(str(detail.get("operation_date") or ""))
+            except ValueError:
+                return False, canonical_snapshot
+            channel = str(detail.get("channel") or "")
+            fbs_order_id = int(detail.get("fbs_order_id") or 0) or None
+            key = (operation_day.isoformat(), channel, str(fbs_order_id or ""), str(detail.get("source_digest") or ""))
+            if key in checked:
+                continue
+            checked.add(key)
+            if shared is not None and shared.applies_to(operation_day):
+                current = resolve_channel_location_cost(
+                    conn, nm_id=nm_id, operation_date=operation_day,
+                    operation={"deliveryType": "FBS"} if channel == "FBS" else None,
+                    fbs_order_id=fbs_order_id, shared_cost_snapshot=shared,
+                )
+                formula = shared.formula_version
+            else:
+                if canonical_snapshot is None:
+                    canonical_snapshot = self.finance._canonical_channel_snapshot(conn)  # noqa: SLF001
+                current = resolve_channel_location_cost(
+                    conn, nm_id=nm_id, operation_date=operation_day,
+                    operation=(
+                        {"deliveryType": "FBS"}
+                        if shared is not None and channel == "FBS" else None
+                    ),
+                    fbs_order_id=fbs_order_id, snapshot=canonical_snapshot,
+                    shared_cost_snapshot=shared,
+                )
+                formula = COST_METHOD_VERSION
+            if (
+                str(current.get("status") or "") != "resolved"
+                or str(current.get("source_digest") or "") != str(detail.get("source_digest") or "")
+                or str(detail.get("formula_version") or "") != formula
+            ):
+                return False, canonical_snapshot
+        return True, canonical_snapshot
+
+    def _rehydrate_legacy_cost(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        sku_row: Mapping[str, Any],
+        week_start: date,
+        week_end: date,
+        nm_id: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
+        """Bounded RO COGS rebuild for a legacy projection without a signature.
+
+        Only direct target rows and rows lacking an nm_id (which can resolve by
+        alias) are read.  The selected source identity must equal the indexed
+        target projection; otherwise the mixed raw/operational image is unsafe.
+        """
+
+        manifest = self._preview_manifest or self.store_registry.load()
+        split = manifest.state == "cutover" and manifest.canonical_source == "split"
+        raw = (
+            self.store_registry.connect(
+                "finance_raw", mode="ro", operation="partner_report_legacy_cost_rehydrate",
+                manifest=manifest, timeout_ms=8_000,
+            )
+            if split else conn
+        )
+        try:
+            if split:
+                raw.execute("BEGIN")
+            table = "finance_raw_current_rows" if split else "wb_finance_weekly_raw_rows"
+            alias_to_nm, ambiguous_aliases, _groups, _items = _nomenclature_identity_index(conn)
+            def resolve_rows(candidate_rows: list[sqlite3.Row]) -> tuple[list[tuple[dict[str, Any], sqlite3.Row]], str]:
+                selected_rows: list[tuple[dict[str, Any], sqlite3.Row]] = []
+                for candidate in candidate_rows:
+                    parsed = json.loads(str(candidate["raw_json"]))
+                    resolved, _method, _problem = _resolve_finance_nm_id(
+                        parsed, alias_to_nm=alias_to_nm, ambiguous_aliases=ambiguous_aliases,
+                    )
+                    if resolved == nm_id:
+                        selected_rows.append((parsed, candidate))
+                digest = "sha256:" + hashlib.sha256(json.dumps(
+                    [[str(item[1]["report_id"]), str(item[1]["rrd_id"]), str(item[1]["row_hash"])] for item in selected_rows],
+                    ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                return selected_rows, digest
+
+            # Normal direct nmId is the common, indexed case.  Its digest is
+            # also proof that no alias row belongs to this target.
+            rows = raw.execute(
+                f"""SELECT report_id,rrd_id,row_hash,raw_json FROM {table}
+                    WHERE seller_id=? AND week_start=? AND week_end=? AND nm_id=?
+                    ORDER BY report_id,rrd_id LIMIT 20001""",
+                (self.seller_id, week_start.isoformat(), week_end.isoformat(), nm_id),
+            ).fetchall()
+            if len(rows) > 20_000:
+                return None, None, "raw_candidate_limit"
+            selected, source_digest = resolve_rows(rows)
+            if source_digest == str(sku_row["raw_source_digest"] or ""):
+                parsed_rows = [item[0] for item in selected]
+                coverage = self.finance._calculate_cogs(conn, parsed_rows, week_start, include_details=True)  # noqa: SLF001
+                buckets, signature = cost_economic_signature(coverage["detail_rows"])
+                return {**coverage, "cost_economic_signature_version": COST_ECONOMIC_SIGNATURE_VERSION, "cost_economic_signature": signature, "cost_economic_buckets": buckets, "rehydrated_read_only": True, "raw_candidate_row_count": len(rows), "raw_selected_row_count": len(selected)}, recalculate_cost_derived_metrics(json.loads(str(sku_row["metrics_json"] or "{}")), coverage), ""
+
+            # ``_resolve_finance_nm_id`` can reach this target from only the
+            # direct nmId, vendorCode or sku/barcode.  Selecting every blank
+            # nmId row materializes unrelated account fees before the bound;
+            # use the same unambiguous canonical aliases in SQL, then resolve
+            # every returned row again below as the final authority.
+            aliases = sorted(
+                alias for alias, resolved_nm in alias_to_nm.items()
+                if resolved_nm == nm_id
+            )
+            raw.create_function(
+                "partner_alias_key", 1,
+                lambda value: str(value or "").strip().casefold(),
+                deterministic=True,
+            )
+            alias_placeholders = ",".join("?" for _alias in aliases)
+            alias_predicate = (
+                f"(partner_alias_key(nm_id)=? OR "
+                f"(partner_alias_key(nm_id) IN ('','0') AND "
+                f"(partner_alias_key(vendor_code) IN ({alias_placeholders}) "
+                f"OR partner_alias_key(barcode) IN ({alias_placeholders}))))"
+                if aliases else "partner_alias_key(nm_id)=?"
+            )
+            rows = raw.execute(
+                f"""SELECT report_id,rrd_id,row_hash,raw_json FROM {table}
+                    WHERE seller_id=? AND week_start=? AND week_end=?
+                      AND {alias_predicate}
+                    ORDER BY report_id,rrd_id LIMIT 20001""",
+                (
+                    self.seller_id, week_start.isoformat(), week_end.isoformat(), nm_id.strip().casefold(),
+                    *aliases, *aliases,
+                ),
+            ).fetchall()
+            if len(rows) > 20_000:
+                return None, None, "raw_candidate_limit"
+            selected, source_digest = resolve_rows(rows)
+            if source_digest != str(sku_row["raw_source_digest"] or ""):
+                return None, None, "raw_membership_mismatch"
+            parsed_rows = [item[0] for item in selected]
+            coverage = self.finance._calculate_cogs(  # noqa: SLF001
+                conn, parsed_rows, week_start, include_details=True,
+            )
+            buckets, signature = cost_economic_signature(coverage["detail_rows"])
+            coverage = {
+                **coverage,
+                "cost_economic_signature_version": COST_ECONOMIC_SIGNATURE_VERSION,
+                "cost_economic_signature": signature,
+                "cost_economic_buckets": buckets,
+                "rehydrated_read_only": True,
+                "raw_candidate_row_count": len(rows),
+                "raw_selected_row_count": len(selected),
+            }
+            return coverage, recalculate_cost_derived_metrics(
+                json.loads(str(sku_row["metrics_json"] or "{}")), coverage
+            ), ""
+        finally:
+            if split:
+                try:
+                    if raw.in_transaction:
+                        raw.rollback()
+                finally:
+                    raw.close()
+
+    @staticmethod
+    def _capitalization_projection_current(
+        conn: sqlite3.Connection, metrics: Mapping[str, Any]
+    ) -> bool:
+        """Do not reuse stored period expenses after a supply-layer change."""
+
+        reconciliation = metrics.get("capitalization_reconciliation") or {}
+        lineage = reconciliation.get("lineage") or []
+        references = [
+            (
+                str(item.get("canonical_layer_id") or ""),
+                str(item.get("canonical_inputs_hash") or ""),
+                str(item.get("wb_supply_id") or ""),
+                str(item.get("nm_id") or ""),
+            )
+            for item in lineage
+        ]
+        if not references:
+            return True
+        present = conn.execute(
+            """SELECT 1 FROM sqlite_master WHERE type='table'
+               AND name='sheet_vitrina_v1_wb_supply_cost_layers'"""
+        ).fetchone()
+        if present is None:
+            return False
+        for layer_id, expected_hash, supply_id, nm_id in references:
+            if layer_id:
+                # The layer hash alone is insufficient: allocation is capped
+                # by the chronological Finance queue across all weeks.  Until
+                # a projection persists that global queue signature, a linked
+                # layer cannot be reused by this narrow COGS-only rebuild.
+                return False
+            elif supply_id and nm_id:
+                # An unmatched Finance expense was deliberately retained in
+                # period profit.  A later canonical layer changes that result;
+                # do not silently keep the negative "no layer" conclusion.
+                current = conn.execute(
+                    """SELECT 1 FROM sheet_vitrina_v1_wb_supply_cost_layers
+                       WHERE wb_supply_id=? AND nm_id=? AND is_current=1""",
+                    (supply_id, nm_id),
+                ).fetchone()
+                if current is not None:
+                    return False
+        return True
+
     def _calculate_report(
         self,
         conn: sqlite3.Connection,
@@ -983,6 +1344,7 @@ class PartnerReportBlock:
             key: ZERO for key, _label in OTHER_EXPENSE_CATEGORIES
         }
         visible_other_expense_keys: set[str] = set()
+        canonical_snapshot: CanonicalChannelCostSnapshot | None = None
         for week_start_text in selected_weeks:
             sync = conn.execute(
                 """SELECT week_start,week_end,status,content_hash,raw_row_count
@@ -1057,70 +1419,89 @@ class PartnerReportBlock:
             coverage = json.loads(str(sku_row["coverage_json"] or "{}"))
             account_metrics = json.loads(str(account_row["metrics_json"] or "{}"))
             account_coverage = json.loads(str(account_row["coverage_json"] or "{}"))
-            stale_cost_rows: list[dict[str, Any]] = []
-            checked_cost_dependencies: set[tuple[str, str]] = set()
-            for detail in coverage.get("detail_rows") or []:
-                dependency_key = (
-                    str(detail.get("operation_date") or ""),
-                    str(detail.get("source_digest") or ""),
-                )
-                if dependency_key in checked_cost_dependencies:
-                    continue
-                checked_cost_dependencies.add(dependency_key)
-                try:
-                    operation_day = date.fromisoformat(str(detail.get("operation_date") or ""))
-                except ValueError:
-                    stale_cost_rows.append({"reason": "operation_date_invalid", **dict(detail)})
-                    continue
-                if shared is not None and finalization and shared.applies_to(operation_day) and not shared.closed_for(operation_day.isoformat()):
-                    blockers.append({"code": "shared_cost_day_not_closed", "date": operation_day.isoformat()})
-                if shared is not None:
-                    current = resolve_channel_location_cost(
-                        conn, nm_id=nm_id, operation_date=operation_day,
-                        operation={"deliveryType": "FBS"} if detail.get("channel") == "FBS" else None,
-                        fbs_order_id=int(detail.get("fbs_order_id") or 0) or None,
-                        shared_cost_snapshot=shared,
+            if shared is not None and finalization:
+                cost_days = {
+                    str(item.get("operation_date") or "")
+                    for item in (
+                        coverage.get("cost_economic_buckets")
+                        or coverage.get("detail_rows")
+                        or []
                     )
+                }
+                for operation_day in sorted(cost_days):
+                    try:
+                        applies = shared.applies_to(date.fromisoformat(operation_day))
+                    except ValueError:
+                        continue
+                    if applies and not shared.closed_for(operation_day):
+                        blockers.append(
+                            {"code": "shared_cost_day_not_closed", "date": operation_day}
+                        )
+            lineage_current, canonical_snapshot = self._cost_lineage_is_current(
+                conn, nm_id=nm_id, coverage=coverage, shared=shared,
+                canonical_snapshot=canonical_snapshot,
+            )
+            if lineage_current:
+                # Preserve the historical indexed fast path: legacy rows with
+                # exact resolver provenance never open raw Finance.
+                if str(coverage.get("cost_economic_signature") or ""):
+                    coverage["current_cost_economic_signature"] = str(
+                        coverage["cost_economic_signature"]
+                    )
+            else:
+                current_signature, canonical_snapshot, signature_reason = (
+                    self._current_cost_economic_signature(
+                        conn, nm_id=nm_id, coverage=coverage, shared=shared,
+                        canonical_snapshot=canonical_snapshot,
+                    )
+                )
+                stored_signature = str(coverage.get("cost_economic_signature") or "")
+                semantic_equal = bool(
+                    stored_signature and current_signature == stored_signature
+                )
+                capitalization_current = (
+                    self._capitalization_projection_current(conn, metrics)
+                    and self._capitalization_projection_current(conn, account_metrics)
+                )
+                if semantic_equal and capitalization_current:
+                    coverage["current_cost_economic_signature"] = current_signature
                 else:
-                    current = resolve_channel_location_cost(
-                        conn,
-                        nm_id=nm_id,
-                        operation_date=operation_day,
-                        fbs_order_id=int(detail.get("fbs_order_id") or 0) or None,
-                    )
-                current_formula = (
-                    shared.formula_version
-                    if shared is not None and shared.applies_to(operation_day)
-                    else COST_METHOD_VERSION
-                )
-                if (
-                    current.get("status") != "resolved"
-                    or str(current.get("source_digest") or "")
-                    != str(detail.get("source_digest") or "")
-                    or str(detail.get("formula_version") or "")
-                    != current_formula
-                ):
-                    stale_cost_rows.append(
-                        {
-                            "operation_date": operation_day.isoformat(),
-                            "expected_source_digest": str(detail.get("source_digest") or ""),
-                            "current_source_digest": str(current.get("source_digest") or ""),
-                            "expected_formula_version": str(
-                                detail.get("formula_version") or ""
-                            ),
-                            "current_formula_version": current_formula,
-                            "current_reason": str(current.get("reason") or ""),
-                        }
-                    )
-            if stale_cost_rows:
-                blockers.append(
-                    {
-                        "code": "finance_sku_aggregate_cost_stale",
-                        "week_start": week_start_text,
-                        "nm_id": nm_id,
-                        "rows": stale_cost_rows,
-                    }
-                )
+                    if not capitalization_current:
+                        refreshed_coverage, refreshed_metrics, reason = (
+                            None, None, "capitalization_projection_stale"
+                        )
+                    else:
+                        refreshed_coverage, refreshed_metrics, reason = self._rehydrate_legacy_cost(
+                            conn, sku_row=sku_row, week_start=week_start, week_end=week_end,
+                            nm_id=nm_id,
+                        )
+                    if refreshed_coverage is None or refreshed_metrics is None:
+                        blockers.append(
+                            {
+                                "code": (
+                                    "finance_capitalization_projection_stale"
+                                    if reason == "capitalization_projection_stale"
+                                    else "finance_sku_aggregate_cost_stale"
+                                ),
+                                "week_start": week_start_text, "nm_id": nm_id,
+                                "reason": reason or signature_reason,
+                            }
+                        )
+                    else:
+                        coverage = refreshed_coverage
+                        metrics = refreshed_metrics
+                        coverage["current_cost_economic_signature"] = str(
+                            coverage["cost_economic_signature"]
+                        )
+                        if int(coverage.get("unmatched_units") or 0):
+                            blockers.append(
+                                {
+                                    "code": "partner_cost_coverage_incomplete",
+                                    "week_start": week_start_text,
+                                    "nm_id": nm_id,
+                                    "problem_skus": coverage.get("problem_skus") or [],
+                                }
+                            )
             if account_coverage.get("identity_blockers"):
                 blockers.append(
                     {
@@ -1250,7 +1631,12 @@ class PartnerReportBlock:
                     "ads_rows": ads_rows,
                     "ads_source_digest": _sha256_json(ads_rows),
                     "cost_rows": coverage.get("detail_rows") or [],
-                    "cost_source_digest": str(coverage.get("cost_state_hash") or ""),
+                    "cost_source_digest": str(
+                        coverage.get("current_cost_economic_signature")
+                        or coverage.get("cost_economic_signature")
+                        or coverage.get("cost_state_hash") or ""
+                    ),
+                    "cost_lineage_digest": str(coverage.get("cost_state_hash") or ""),
                     "common_expense_safe": {
                         "allocated_amount_rub": _decimal_text(allocated_common),
                         "finance_marketing_excluded_rub": _decimal_text(
@@ -2958,14 +3344,120 @@ class PartnerReportBlock:
         cleaned = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "_", value).strip("._")
         return cleaned[:80]
 
+    @staticmethod
+    def _elapsed_ms(started: float) -> float:
+        return round((time.perf_counter() - started) * 1000, 3)
+
+    @staticmethod
+    def _raise_missing_schema_error(exc: sqlite3.OperationalError) -> None:
+        if "no such table" in str(exc).casefold():
+            raise PartnerReportError(
+                "Partner Report preview is unavailable until service schema initialization completes",
+                code="report_unavailable",
+            ) from exc
+
+    @staticmethod
+    def _emit_preview_timing(
+        phase_timings_ms: Mapping[str, float],
+        *,
+        outcome: str,
+        request_id: str,
+        active_phase: str,
+        active_phase_elapsed_ms: float,
+    ) -> None:
+        """Emit bounded operational timings without report inputs or values."""
+
+        print(
+            json.dumps(
+                {
+                    "event": "partner_report_preview_timing",
+                    "request_id": str(request_id)[:24],
+                    "outcome": str(outcome)[:32],
+                    "active_phase": str(active_phase)[:48],
+                    "active_phase_elapsed_ms": round(float(active_phase_elapsed_ms), 3),
+                    "phase_timings_ms": {
+                        str(name): round(float(value), 3)
+                        for name, value in phase_timings_ms.items()
+                    },
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    @staticmethod
+    def _emit_preview_started(request_id: str) -> None:
+        """Mark handler entry without including user or financial data."""
+
+        print(
+            json.dumps(
+                {
+                    "event": "partner_report_preview_started",
+                    "request_id": str(request_id)[:24],
+                },
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
     @contextmanager
-    def _preview_connection(self):
+    def _preview_connection(self, phase_timings_ms: dict[str, float] | None = None):
+        """Open the indexed preview on a request-scoped read snapshot.
+
+        The active shared-cost book is intentionally pinned only for this
+        request.  Normal previews never touch raw Finance rows, so they do not
+        attach the raw store or create a temporary view.  Candidate previews
+        retain their existing raw-read transaction path.
+        """
+
         if self.finance.shared_cost_is_candidate:
+            started = time.perf_counter()
             with closing(self._connect()) as conn, conn:
+                if phase_timings_ms is not None:
+                    phase_timings_ms["candidate_snapshot_open"] = self._elapsed_ms(started)
                 yield conn
-        else:
-            with self._connect() as conn:
-                yield conn
+            return
+
+        from packages.application.fbs_accounting_runtime import load_shared
+
+        shared_started = time.perf_counter()
+        shared = load_shared(self.runtime_dir)
+        if phase_timings_ms is not None:
+            phase_timings_ms["shared_cost_load"] = self._elapsed_ms(shared_started)
+        previous_shared = self.finance._shared_cost_snapshot  # noqa: SLF001
+        previous_manifest = self._preview_manifest
+        self.finance._shared_cost_snapshot = shared  # noqa: SLF001
+        conn: sqlite3.Connection | None = None
+        try:
+            connection_started = time.perf_counter()
+            manifest = self.store_registry.load()
+            self._preview_manifest = manifest
+            conn = self.store_registry.connect(
+                "operational",
+                mode="ro",
+                operation="partner_report_preview",
+                manifest=manifest,
+            )
+            if int(conn.execute("PRAGMA query_only").fetchone()[0]) != 1:
+                raise RuntimeError("partner preview requires query_only operational store")
+            conn.execute("BEGIN")
+            if phase_timings_ms is not None:
+                phase_timings_ms["operational_snapshot_open"] = self._elapsed_ms(
+                    connection_started
+                )
+            yield conn
+        finally:
+            self.finance._shared_cost_snapshot = previous_shared  # noqa: SLF001
+            self._preview_manifest = previous_manifest
+            if conn is not None:
+                try:
+                    if conn.in_transaction:
+                        conn.rollback()
+                finally:
+                    conn.close()
 
     def _connect(self) -> sqlite3.Connection:
         self.finance._pin_active_cost()

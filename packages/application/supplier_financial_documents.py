@@ -2026,7 +2026,7 @@ class SupplierFinancialDocumentsBlock:
             if not bool(rows_by_operation_id[operation_id].get("already_imported"))
         ]
         if not matched_rows:
-            payload = self.get_document(supplier_order_id, document_id)
+            payload = self._saved_document_payload(supplier_order_id, document)
             payload["idempotent"] = True
             payload["already_added"] = True
             confirmed_cny_rows = _confirmed_cny_fee_rows(document)
@@ -2040,10 +2040,7 @@ class SupplierFinancialDocumentsBlock:
             )
             if not defer_downstream:
                 payload.update(
-                    self.finalize_bank_fee_statement_import(
-                        supplier_order_id,
-                        document_id,
-                    )
+                    self._resume_saved_preparation(supplier_order_id)
                 )
             return payload
         now = self.timestamp_factory()
@@ -2148,8 +2145,15 @@ class SupplierFinancialDocumentsBlock:
             ],
             cny_documents=atomic_cny_documents,
         )
-        self._bank_fee_preview_path(document_id).unlink(missing_ok=True)
-        payload = self.get_document(supplier_order_id, document_id)
+        cleanup_error = ""
+        try:
+            self._bank_fee_preview_path(document_id).unlink(missing_ok=True)
+        except OSError as exc:
+            cleanup_error = str(exc).replace("\n", " ")[:500]
+        payload = self._saved_document_payload(supplier_order_id, saved)
+        if cleanup_error:
+            payload["preview_cleanup_pending"] = True
+            payload["preview_cleanup_error"] = cleanup_error
         payload["idempotent"] = False
         payload["already_added"] = False
         payload["cny_fee_rows_for_ledger"] = (
@@ -2160,74 +2164,47 @@ class SupplierFinancialDocumentsBlock:
         payload["cny_ledger_replay_required"] = bool(atomic_cny_documents)
         if not defer_downstream:
             payload.update(
-                self.finalize_bank_fee_statement_import(
-                    supplier_order_id,
-                    document_id,
-                )
+                self._resume_saved_preparation(supplier_order_id)
             )
         return payload
 
     def finalize_bank_fee_statement_import(
-        self,
-        supplier_order_id: str,
-        document_id: str,
+        self, supplier_order_id: str, document_id: str,
     ) -> dict[str, Any]:
-        """Publish derived state only after idempotent CNY ledger writes succeed."""
-
-        document = self.runtime.load_supplier_financial_document(
-            supplier_order_id=supplier_order_id,
-            document_id=document_id,
-        )
-        if document is None:
+        """Resume the source-owned continuation without submitting the document again."""
+        if self.runtime.load_supplier_financial_document(supplier_order_id=supplier_order_id, document_id=document_id) is None:
             raise ValueError(f"financial document not found: {document_id}")
-        payload = self.get_document(supplier_order_id, document_id)
-        result: dict[str, Any] = {
-            "own_product_capital": self._materialize_own_capital_expense_events(
-                supplier_order_id
-            )
+        from packages.application.supplier_preparation_intents import ensure_explicit_document_continuation
+
+        covered = ensure_explicit_document_continuation(self.runtime, supplier_order_id, document_id)
+        return self._resume_saved_preparation(supplier_order_id, prepared_result=covered)
+
+    def _resume_saved_preparation(self, supplier_order_id: str, *, prepared_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        from packages.application.supplier_preparation_intents import resume_supplier_preparation
+
+        result = prepared_result if prepared_result is not None else resume_supplier_preparation(self.runtime, supplier_order_id)
+        outcome = {
+            "operation_applied": True,
+            "cny_ledger_replay": result.get("cny_ledger_replay", {}),
+            "cny_documents_archived": result.get("cny_documents_archived", []),
+            "cny_documents_status_changed": result.get("cny_documents_status_changed", []),
+            "warehouse_targeted_recalculation": result,
+            "own_product_capital": result.get("own_product_capital", {}),
+            "own_product_capital_preparation": result.get("own_product_capital_preparation", {}),
         }
-        cost_affecting = (
-            str(document.get("document_type") or "")
-            in COST_AFFECTING_DOCUMENT_TYPES
-        )
-        capital_preparation = self._recalculate_own_capital_preparation(
-            drain_projection=not cost_affecting
-        )
-        result["own_product_capital_preparation"] = capital_preparation
-        changed_cny_documents: list[str] = []
-        target_cny_status = (
-            CNY_DOCUMENT_STATUS_POSTED
-            if str(document.get("parse_status") or "")
-            == FINANCIAL_DOCUMENT_PARSE_STATUS_CONFIRMED
-            else CNY_DOCUMENT_STATUS_EXCLUDED
-        )
-        for cny_document in self.runtime.list_cny_documents():
-            if str(cny_document.get("linked_financial_document_id") or "") != document_id:
-                continue
-            if str(cny_document.get("document_type") or "") != CNY_DOCUMENT_TYPE_SUPPLIER_PAYMENT:
-                continue
-            if str(cny_document.get("status") or "") == target_cny_status:
-                continue
-            saved_cny = self.runtime.save_cny_document(
-                {
-                    **cny_document,
-                    "status": target_cny_status,
-                    "updated_at": self.timestamp_factory(),
-                }
-            )
-            changed_cny_documents.append(str(saved_cny.get("document_id") or ""))
-        result["cny_documents_status_changed"] = changed_cny_documents
-        if cost_affecting:
-            result["warehouse_targeted_recalculation"] = (
-                capital_preparation
-                if capital_preparation.get("status") == "replay_error"
-                else self._enqueue_functional_recalculation(
-                    supplier_order_id,
-                    source_id=document_id,
-                    source_payload=payload,
-                )
-            )
-        return result
+        if result.get("status") == "pending":
+            outcome.update({"status": "pending", "http_status": 202, "readback_confirmed": True,
+                            "retryable": bool(result.get("retryable", True)), "pending_phase": "derived_replay",
+                            "message": "Документ сохранён. Связанный пересчёт ожидает обработки.",
+                            "durable_retry_identity": {key: result[key] for key in ("stable_source_id", "source_revision") if result.get(key)}})
+        return outcome
+
+    def _saved_document_payload(self, supplier_order_id: str, document: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            return self.get_document(supplier_order_id, str(document["document_id"]))
+        except Exception as exc:
+            return {**self._with_download_path(document), "operation_applied": True,
+                    "readback_pending": True, "readback_error": str(exc).replace("\n", " ")[:500]}
 
     def _bank_fee_preview_revision(
         self,
@@ -2485,37 +2462,9 @@ class SupplierFinancialDocumentsBlock:
         except Exception:
             self._delete_owned_document_file(document)
             raise
+        payload = self._saved_document_payload(supplier_order_id, saved)
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            self.runtime.update_supplier_shipment_expenses_complete(
-                shipment_id=supplier_order_id,
-                expenses_complete=False,
-                updated_at=self.timestamp_factory(),
-            )
-            self._reset_own_capital_expense_certification(supplier_order_id)
-        payload = self.get_document(
-            supplier_order_id, str(saved.get("document_id") or document_id)
-        )
-        payload["own_product_capital"] = self._materialize_own_capital_expense_events(
-            supplier_order_id
-        )
-        cost_affecting = (
-            str(document.get("document_type") or "")
-            in COST_AFFECTING_DOCUMENT_TYPES
-        )
-        capital_preparation = self._recalculate_own_capital_preparation(
-            drain_projection=not cost_affecting
-        )
-        payload["own_product_capital_preparation"] = capital_preparation
-        if cost_affecting:
-            payload["warehouse_targeted_recalculation"] = (
-                capital_preparation
-                if capital_preparation.get("status") == "replay_error"
-                else self._enqueue_functional_recalculation(
-                    supplier_order_id,
-                    source_id=document_id,
-                    source_payload=payload,
-                )
-            )
+            payload.update(self._resume_saved_preparation(supplier_order_id))
         return payload
 
     def update_document_status(self, supplier_order_id: str, document_id: str, parse_status: str) -> dict[str, Any]:
@@ -2529,49 +2478,9 @@ class SupplierFinancialDocumentsBlock:
             parse_status=normalized,
             updated_at=self.timestamp_factory(),
         )
+        payload = self._saved_document_payload(supplier_order_id, document)
         if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            self.runtime.update_supplier_shipment_expenses_complete(
-                shipment_id=supplier_order_id,
-                expenses_complete=False,
-                updated_at=self.timestamp_factory(),
-            )
-            self._reset_own_capital_expense_certification(supplier_order_id)
-        payload = self._with_download_path(document)
-        shipment = self.runtime.load_supplier_shipment(supplier_order_id) or {}
-        payload["summary"] = self._with_canonical_exact_cost(
-            supplier_order_id,
-            build_financial_summary(
-                [payload],
-                list(payload.get("expense_lines") or []),
-                shipment=shipment,
-            ),
-        )
-        if normalized == FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED:
-            payload["own_product_capital"] = (
-                self._remove_own_capital_expense_events(document_id)
-            )
-        else:
-            payload["own_product_capital"] = (
-                self._materialize_own_capital_expense_events(supplier_order_id)
-            )
-        cost_affecting = (
-            str(document.get("document_type") or "")
-            in COST_AFFECTING_DOCUMENT_TYPES
-        )
-        capital_preparation = self._recalculate_own_capital_preparation(
-            drain_projection=not cost_affecting
-        )
-        payload["own_product_capital_preparation"] = capital_preparation
-        if cost_affecting:
-            payload["warehouse_targeted_recalculation"] = (
-                capital_preparation
-                if capital_preparation.get("status") == "replay_error"
-                else self._enqueue_functional_recalculation(
-                    supplier_order_id,
-                    source_id=document_id,
-                    source_payload=payload,
-                )
-            )
+            payload.update(self._resume_saved_preparation(supplier_order_id))
         return payload
 
     def delete_document(self, supplier_order_id: str, document_id: str) -> dict[str, Any]:
@@ -2588,13 +2497,6 @@ class SupplierFinancialDocumentsBlock:
             parse_status=FINANCIAL_DOCUMENT_PARSE_STATUS_EXCLUDED,
             updated_at=self.timestamp_factory(),
         )
-        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
-            self.runtime.update_supplier_shipment_expenses_complete(
-                shipment_id=supplier_order_id,
-                expenses_complete=False,
-                updated_at=self.timestamp_factory(),
-            )
-            self._reset_own_capital_expense_certification(supplier_order_id)
         payload = {
             "contract_name": "sheet_vitrina_v1_supplier_financial_documents",
             "status": "ok",
@@ -2607,40 +2509,8 @@ class SupplierFinancialDocumentsBlock:
             "file_deleted": False,
             "document": self._with_download_path(archived),
         }
-        archived_cny_documents: list[str] = []
-        for cny_document in self.runtime.list_cny_documents():
-            if str(cny_document.get("linked_financial_document_id") or "") != document_id:
-                continue
-            saved_cny = self.runtime.save_cny_document(
-                {
-                    **cny_document,
-                    "status": CNY_DOCUMENT_STATUS_EXCLUDED,
-                    "updated_at": self.timestamp_factory(),
-                }
-            )
-            archived_cny_documents.append(str(saved_cny.get("document_id") or ""))
-        payload["cny_documents_archived"] = archived_cny_documents
-        payload["own_product_capital"] = self._remove_own_capital_expense_events(
-            document_id
-        )
-        cost_affecting = (
-            str(document.get("document_type") or "")
-            in COST_AFFECTING_DOCUMENT_TYPES
-        )
-        capital_preparation = self._recalculate_own_capital_preparation(
-            drain_projection=not cost_affecting
-        )
-        payload["own_product_capital_preparation"] = capital_preparation
-        if cost_affecting:
-            payload["warehouse_targeted_recalculation"] = (
-                capital_preparation
-                if capital_preparation.get("status") == "replay_error"
-                else self._enqueue_functional_recalculation(
-                    supplier_order_id,
-                    source_id=document_id,
-                    source_payload=payload,
-                )
-            )
+        if str(document.get("document_type") or "") in COST_AFFECTING_DOCUMENT_TYPES:
+            payload.update(self._resume_saved_preparation(supplier_order_id))
         return payload
 
     def _reset_own_capital_expense_certification(self, supplier_order_id: str) -> None:

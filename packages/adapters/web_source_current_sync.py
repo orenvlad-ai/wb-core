@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from decimal import Decimal
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,6 +40,49 @@ class ClosedDaySourceState:
     snapshot_date: str
     row_count: int
     fetched_at: str | None
+    item_digests: dict[str, str] | None = None
+
+
+def _serving_item_digest(item):
+    value=asdict(item) if is_dataclass(item) else dict(item)
+    for key,v in value.items():
+        if isinstance(v,(int,float,Decimal)) and not isinstance(v,bool):
+            number=float(v);value[key]=int(number) if number.is_integer() else number
+    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+
+
+def serving_payload_matches(state, payload, nm_ids=None):
+    if state.snapshot_date<'2026-09-11':return True
+    if state.item_digests is None or payload is None:return False
+    items=payload.get('items') if isinstance(payload,dict) else getattr(payload,'items',None)
+    if not isinstance(items,list):return False
+    actual={str(i['nm_id'] if isinstance(i,dict) else i.nm_id):_serving_item_digest(i) for i in items}
+    expected={k:v for k,v in state.item_digests.items() if nm_ids is None or int(k) in nm_ids}
+    return len(actual)==len(items) and actual==expected
+
+
+def qualified_serving_state(source_key,snapshot_date,raw,target):
+    """Bind observation time to the complete serving generation, not raw alone."""
+    empty={'row_count':0,'fetched_at':None,'item_digests':None}
+    if not raw or len(raw)!=len(target):return empty
+    funnel=source_key=='seller_funnel_snapshot'
+    fields=('nm_id','name','vendor_code','view_count','open_card_count','ctr') if funnel else ('nm_id','views_current','ctr_current','orders_current','position_avg')
+    source={r['nm_id']:r for r in raw};serving={r['nm_id']:r for r in target}
+    if len(source)!=len(raw) or len(serving)!=len(target) or set(source)!=set(serving):return empty
+    clocks=[];digests={}
+    for nm,row in source.items():
+        after=serving[nm]
+        if funnel:
+            if row['snapshot_date']!=snapshot_date or after['snapshot_date']!=snapshot_date:return empty
+        elif any(r['date_from']!=snapshot_date or r['date_to']!=snapshot_date for r in (row,after)) or row['raw_json']!=after['raw_json']:return empty
+        if any(row[k]!=after[k] for k in fields):return empty
+        if not row.get('fetched_at') or not after.get('handoff_synced_at'):return empty
+        observed=_parse_timestamp(str(row['fetched_at']))
+        if _parse_timestamp(str(after['handoff_synced_at']))<observed:return empty
+        if funnel and (not after.get('source_fetched_at') or _parse_timestamp(str(after['source_fetched_at']))!=observed):return empty
+        clocks.append(observed)
+        digests[str(nm)]=_serving_item_digest({k:after[k] for k in fields})
+    return {'row_count':len(target),'fetched_at':min(clocks).isoformat(),'item_digests':digests}
 
 
 def load_web_source_current_sync_config() -> WebSourceCurrentSyncConfig:
@@ -97,11 +142,13 @@ class ShellBackedWebSourceCurrentSync:
         closed_day_source_state_loader: Callable[[str, str], ClosedDaySourceState | None] | None = None,
     ) -> None:
         self.config = config or load_web_source_current_sync_config()
+        self.observed_states: dict[tuple[str, str], ClosedDaySourceState] = {}
         self._closed_day_source_state_loader = (
             closed_day_source_state_loader or self._load_closed_day_source_state
         )
 
     def ensure_snapshot(self, snapshot_date: str) -> None:
+        self.observed_states.clear()
         if not self._is_enabled():
             return
 
@@ -118,7 +165,7 @@ class ShellBackedWebSourceCurrentSync:
 
         if not search_ready:
             self._run(
-                [str(bot_python), "-m", "bot.runner_day", snapshot_date],
+                self._collector_command("web_source_snapshot", snapshot_date),
                 cwd=self.config.wb_web_bot_dir,
                 env=bot_env,
                 label=f"search_analytics current-day sync {snapshot_date}",
@@ -139,7 +186,7 @@ class ShellBackedWebSourceCurrentSync:
 
         if not seller_ready:
             self._run(
-                [str(bot_python), "-m", "bot.runner_sales_funnel_day", snapshot_date],
+                self._collector_command("seller_funnel_snapshot", snapshot_date),
                 cwd=self.config.wb_web_bot_dir,
                 env=bot_env,
                 label=f"sales_funnel current-day sync {snapshot_date}",
@@ -169,19 +216,24 @@ class ShellBackedWebSourceCurrentSync:
                 f"{','.join(missing)} on {snapshot_date}"
             )
 
-    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> None:
+    def ensure_closed_day_snapshot(self, *, source_key: str, snapshot_date: str) -> ClosedDaySourceState:
         if not self._is_enabled():
             raise RuntimeError("closed-day web-source sync is disabled in current runtime")
         self._ensure_seller_portal_session_ready()
         if source_key == "web_source_snapshot":
             self._materialize_search_analytics(snapshot_date)
-            self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
-            return
+            return self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
         if source_key == "seller_funnel_snapshot":
             self._materialize_sales_funnel(snapshot_date)
-            self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
-            return
+            return self._ensure_closed_day_source_freshness(source_key=source_key, snapshot_date=snapshot_date)
         raise ValueError(f"unsupported closed-day web-source source_key: {source_key}")
+
+    def _collector_command(self, source_key: str, snapshot_date: str) -> list[str]:
+        return [str(self.config.wb_web_bot_dir / "venv" / "bin" / "python"),
+                str(Path(__file__).resolve().parents[2] / "apps" / "seller_portal_web_source_collect.py"),
+                "--source-key", source_key, "--date", snapshot_date,
+                "--canonical-env", str(self.config.wb_ai_dir / ".env"),
+                "--bot-dir", str(self.config.wb_web_bot_dir), "--write-source"]
 
     def _is_enabled(self) -> bool:
         if self.config.mode == "off":
@@ -199,14 +251,30 @@ class ShellBackedWebSourceCurrentSync:
             f"{self.config.api_base_url.rstrip('/')}/v1/search-analytics/snapshot"
             f"?{parse.urlencode({'date_to': snapshot_date})}"
         )
-        return _is_usable_search_analytics_payload(payload, snapshot_date)
+        return _is_usable_search_analytics_payload(payload, snapshot_date) and self._current_source_is_fresh("web_source_snapshot", snapshot_date,payload)
 
     def _has_sales_funnel_snapshot(self, snapshot_date: str) -> bool:
         payload = _fetch_json(
             f"{self.config.api_base_url.rstrip('/')}/v1/sales-funnel/daily"
             f"?{parse.urlencode({'date': snapshot_date})}"
         )
-        return _is_usable_sales_funnel_payload(payload, snapshot_date)
+        return _is_usable_sales_funnel_payload(payload, snapshot_date) and self._current_source_is_fresh("seller_funnel_snapshot", snapshot_date,payload)
+
+    def _current_source_is_fresh(self, source_key: str, snapshot_date: str, payload=None) -> bool:
+        self.observed_states.pop((source_key, snapshot_date), None)
+        if snapshot_date < "2026-09-11":
+            return True
+        state = self._closed_day_source_state_loader(source_key, snapshot_date)
+        if state is None or state.row_count <= 0 or not state.fetched_at:
+            return False
+        if state.source_key!=source_key or state.snapshot_date!=snapshot_date or (payload is not None and not serving_payload_matches(state,payload)):
+            return False
+        observed = _parse_timestamp(state.fetched_at)
+        now = datetime.now(timezone.utc)
+        if observed > now + timedelta(minutes=5) or observed < now - timedelta(hours=1):
+            return False
+        self.observed_states[(source_key, snapshot_date)] = state
+        return True
 
     def _run(
         self,
@@ -245,7 +313,7 @@ class ShellBackedWebSourceCurrentSync:
         bot_env = _build_env(self.config.wb_web_bot_dir / ".env")
         ai_env = _build_env(self.config.wb_ai_dir / ".env")
         self._run(
-            [str(bot_python), "-m", "bot.runner_day", snapshot_date],
+            self._collector_command("web_source_snapshot", snapshot_date),
             cwd=self.config.wb_web_bot_dir,
             env=bot_env,
             label=f"search_analytics sync {snapshot_date}",
@@ -270,7 +338,7 @@ class ShellBackedWebSourceCurrentSync:
         bot_env = _build_env(self.config.wb_web_bot_dir / ".env")
         ai_env = _build_env(self.config.wb_ai_dir / ".env")
         self._run(
-            [str(bot_python), "-m", "bot.runner_sales_funnel_day", snapshot_date],
+            self._collector_command("seller_funnel_snapshot", snapshot_date),
             cwd=self.config.wb_web_bot_dir,
             env=bot_env,
             label=f"sales_funnel sync {snapshot_date}",
@@ -289,9 +357,9 @@ class ShellBackedWebSourceCurrentSync:
             label=f"sales_funnel handoff {snapshot_date}",
         )
 
-    def _ensure_closed_day_source_freshness(self, *, source_key: str, snapshot_date: str) -> None:
+    def _ensure_closed_day_source_freshness(self, *, source_key: str, snapshot_date: str) -> ClosedDaySourceState:
         state = self._closed_day_source_state_loader(source_key, snapshot_date)
-        if state is None or state.row_count <= 0:
+        if state is None or state.row_count <= 0 or state.source_key != source_key or state.snapshot_date != snapshot_date:
             raise RuntimeError(
                 "closed_day_source_freshness_not_accepted: "
                 f"source_key={source_key}; snapshot_date={snapshot_date}; reason=source_rows_missing_after_sync"
@@ -303,12 +371,14 @@ class ShellBackedWebSourceCurrentSync:
             )
         fetched_at = _parse_timestamp(state.fetched_at)
         required_after = _closed_day_required_fetched_after(snapshot_date)
-        if fetched_at < required_after:
+        if fetched_at < required_after or fetched_at > datetime.now(timezone.utc) + timedelta(minutes=5):
             raise RuntimeError(
                 "closed_day_source_freshness_not_accepted: "
                 f"source_key={source_key}; snapshot_date={snapshot_date}; "
                 f"source_fetched_at={fetched_at.isoformat()}; required_after={required_after.isoformat()}"
             )
+
+        return state
 
     def _load_closed_day_source_state(self, source_key: str, snapshot_date: str) -> ClosedDaySourceState | None:
         ai_python = self.config.wb_ai_dir / "venv" / "bin" / "python"
@@ -320,6 +390,7 @@ class ShellBackedWebSourceCurrentSync:
                 _CLOSED_DAY_SOURCE_STATE_PROBE_SCRIPT,
                 source_key,
                 snapshot_date,
+                str(Path(__file__).resolve().parents[2]),
             ],
             cwd=str(self.config.wb_ai_dir),
             env=ai_env,
@@ -350,6 +421,7 @@ class ShellBackedWebSourceCurrentSync:
             snapshot_date=snapshot_date,
             row_count=int(payload.get("row_count", 0) or 0),
             fetched_at=str(payload.get("fetched_at", "") or "") or None,
+            item_digests=payload.get('item_digests'),
         )
 
     def _ensure_seller_portal_session_ready(self) -> None:
@@ -554,49 +626,29 @@ import json
 import os
 import sys
 import psycopg2
-
-source_key = sys.argv[1]
-snapshot_date = sys.argv[2]
-
-if source_key == "web_source_snapshot":
-    conn = psycopg2.connect(
-        host=os.environ["WEB_SOURCE_SRC_PGHOST"],
-        port=os.environ["WEB_SOURCE_SRC_PGPORT"],
-        dbname=os.environ["WEB_SOURCE_SRC_PGDATABASE"],
-        user=os.environ["WEB_SOURCE_SRC_PGUSER"],
-        password=os.environ["WEB_SOURCE_SRC_PGPASSWORD"],
-        connect_timeout=5,
-    )
-    sql = (
-        "select count(*), max(fetched_at) "
-        "from public.search_analytics_raw "
-        "where date_to = %s::date"
-    )
-elif source_key == "seller_funnel_snapshot":
-    conn = psycopg2.connect(
-        host=os.environ["PGHOST"],
-        port=os.environ["PGPORT"],
-        dbname=os.environ["PGDATABASE"],
-        user=os.environ["PGUSER"],
-        password=os.environ["PGPASSWORD"],
-        connect_timeout=5,
-    )
-    sql = (
-        "select count(*), max(source_fetched_at) "
-        "from public.web_source_sales_funnel_daily "
-        "where snapshot_date = %s::date"
-    )
-else:
-    raise SystemExit(f"unsupported source_key: {source_key}")
-
-with conn:
-    with conn.cursor() as cur:
-        cur.execute(sql, (snapshot_date,))
-        row = cur.fetchone()
-
-row_count = int(row[0] or 0) if row else 0
-fetched_at = row[1].isoformat() if row and row[1] is not None else ""
-print(json.dumps({"row_count": row_count, "fetched_at": fetched_at}))
+sys.path.insert(0,sys.argv[3])
+from packages.adapters.web_source_current_sync import qualified_serving_state
+source_key,snapshot_date=sys.argv[1:3]
+funnel=source_key=='seller_funnel_snapshot'
+if source_key not in {'seller_funnel_snapshot','web_source_snapshot'}:raise SystemExit('unsupported-source-key')
+rows=[]
+for target in (False,True):
+    prefix='' if target else 'WEB_SOURCE_SRC_'
+    conn=psycopg2.connect(**{name:os.environ[prefix+key] for name,key in
+        [('host','PGHOST'),('port','PGPORT'),('dbname','PGDATABASE'),('user','PGUSER'),('password','PGPASSWORD')]},connect_timeout=5)
+    conn.set_session(readonly=True,isolation_level='REPEATABLE READ')
+    table=('web_source_sales_funnel_daily' if funnel else 'web_source_search_analytics_daily') if target else ('sales_funnel_daily_raw' if funnel else 'search_analytics_raw')
+    col='snapshot_date' if funnel else 'date_to'
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT * FROM public.{table} WHERE {col}=%s::date ORDER BY nm_id',(snapshot_date,))
+            values=[dict(zip([c.name for c in cur.description],r)) for r in cur.fetchall()]
+            for row in values:
+                for key in ('snapshot_date','date_from','date_to'):
+                    if key in row:row[key]=row[key].isoformat()
+            rows.append(values)
+    finally:conn.rollback();conn.close()
+print(json.dumps(qualified_serving_state(source_key,snapshot_date,*rows)))
 """
 
 _SELLER_PORTAL_SESSION_PROBE_SCRIPT = r"""

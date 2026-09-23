@@ -25,9 +25,9 @@ class AdsCompactItem:
     ads_orders: float
     ads_sum: float
     ads_sum_price: float
-    ads_cpc: float
-    ads_ctr: float
-    ads_cr: float
+    ads_cpc: float | None
+    ads_ctr: float | None
+    ads_cr: float | None
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,23 @@ class AdsCompactEmpty:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
-AdsCompactResult = Union[AdsCompactSuccess, AdsCompactEmpty]
+@dataclass(frozen=True)
+class AdsCompactPartial:
+    """Validated observed contribution, never a complete account/day report."""
+
+    kind: Literal["incomplete"]
+    snapshot_date: str
+    count: int
+    items: list[AdsCompactItem]
+    requested_count: int
+    covered_count: int
+    missing_nm_ids: list[int]
+    detail: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    temporal_snapshot_acceptable: bool = True
+
+
+AdsCompactResult = Union[AdsCompactSuccess, AdsCompactEmpty, AdsCompactPartial]
 
 
 @dataclass(frozen=True)

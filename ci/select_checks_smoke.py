@@ -16,6 +16,12 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "finance_liquidity_contract_smoke": (
+        "packages/contracts/finance_liquidity.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+    ),
     'warehouse_recovery_retention_smoke': (
         'apps/warehouse_recovery_retention.py',
         'packages/application/warehouse_recovery_policy.py',
@@ -276,7 +282,9 @@ def cleaner_command_checks():
 def command_dependency_checks():
     # Independent entrypoint expectations: browser dependencies follow commands,
     # not a filename heuristic or an unrelated changed-path group.
+    future_script = "apps/finance_liquidity_browser_smoke.py"
     scripts = (
+        "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
@@ -305,6 +313,16 @@ def command_dependency_checks():
             paths=[sibling_source], file_exists=lambda _, p: p in {sibling_source, script})
         check(sibling, [script])
 
+    # The dependency prerequisite precedes this future candidate file, so model
+    # only that absent script while retaining existence checks above.
+    direct = build_plan_from_paths(pull_request=30, base=BASE, head=HEAD,
+        paths=[future_script], file_exists=lambda _, p: p == future_script or (select_checks.ROOT / p).is_file())
+    check(direct, [future_script])
+    future_source = future_script.removesuffix("_smoke.py") + ".py"
+    sibling = build_plan_from_paths(pull_request=31, base=BASE, head=HEAD,
+        paths=[future_source], file_exists=lambda _, p: p in {future_source, future_script})
+    check(sibling, [future_script])
+
     for path in ("apps/warehouse_recovery_policy_http_smoke.py", "packages/application/warehouse_recovery_policy.py"):
         plan = build_plan_from_paths(pull_request=35, base=BASE, head=HEAD,
             paths=[path], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
@@ -312,21 +330,68 @@ def command_dependency_checks():
         assert install not in plan["commands"], plan
 
     combined = build_plan_from_paths(pull_request=32, base=BASE, head=HEAD,
-        paths=[*scripts, "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
-        file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
-    check(combined, scripts)
+        paths=[future_script, *scripts, "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"],
+        file_exists=lambda _, p: p == future_script or (select_checks.ROOT / p).is_file())
+    check(combined, [future_script, *scripts])
     assert combined["commands"][0][:3] == ["python3", "-m", "py_compile"]
 
     # A group can select a browser command even when no browser file changed.
     mapping, mapping_sha = select_checks.load_map()
     mapping["groups"]["fixture_browser_boundary"] = {
         "patterns": ["packages/application/fixture_boundary.py"],
-        "commands": [["python3", scripts[0]]],
+        "commands": [["python3", future_script]],
     }
     with patch.object(select_checks, "load_map", return_value=(mapping, mapping_sha)):
         grouped = build_plan_from_paths(pull_request=33, base=BASE, head=HEAD,
             paths=["packages/application/fixture_boundary.py"], file_exists=lambda *_: True)
-    check(grouped, [scripts[0]])
+    check(grouped, [future_script])
+
+    auth_consumers = (
+        "apps/finance_liquidity_auth_smoke.py",
+        "apps/finance_liquidity_http_smoke.py",
+        "apps/finance_liquidity_browser_smoke.py",
+        "apps/finance_liquidity_integration_smoke.py",
+    )
+    for script in auth_consumers[:2]:
+        direct = build_plan_from_paths(
+            pull_request=37,
+            base=BASE,
+            head=HEAD,
+            paths=[script],
+            file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+        )
+        verify_plan(direct)
+        assert direct["groups"] == ["finance_liquidity"], direct
+        assert direct["pip"] == [
+            "apsw==3.53.4.0",
+            "openpyxl==3.1.5",
+            "playwright==1.58.0",
+        ], direct
+        assert direct["commands"].count(["python3", script]) == 1, direct
+
+    finance_only = build_plan_from_paths(
+        pull_request=38,
+        base=BASE,
+        head=HEAD,
+        paths=list(auth_consumers),
+        file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+    )
+    verify_plan(finance_only)
+    assert finance_only["groups"] == ["finance_liquidity"], finance_only
+    assert finance_only["pip"].count("apsw==3.53.4.0") == 1, finance_only
+    for script in auth_consumers:
+        assert finance_only["commands"].count(["python3", script]) == 1, finance_only
+
+    unrelated_browser = build_plan_from_paths(
+        pull_request=39,
+        base=BASE,
+        head=HEAD,
+        paths=[scripts[0]],
+        file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+    )
+    verify_plan(unrelated_browser)
+    assert "playwright==1.58.0" in unrelated_browser["pip"], unrelated_browser
+    assert "apsw==3.53.4.0" not in unrelated_browser["pip"], unrelated_browser
 
     for paths, file_exists in (
         (["packages/application/sku_inventory_balance.py"], lambda *_: True),
@@ -342,6 +407,44 @@ def command_dependency_checks():
     print("command dependencies: direct/sibling/group/mixed browser routes and backend isolation OK")
 
 
+def ads_dependency_checks():
+    scripts = ["apps/ads_partial_adapter_smoke.py", "apps/ads_partial_publication_smoke.py"]
+    for paths, expected in (
+        ([scripts[0]], [scripts[0]]),
+        ([scripts[1]], [scripts[1]]),
+        (["apps/ads_partial_publication.py"], [scripts[1]]),
+        (["apps/ads_partial_publication.py", scripts[0]], scripts),
+    ):
+        plan = build_plan_from_paths(pull_request=36, base=BASE, head=HEAD,
+            paths=paths, file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+        verify_plan(plan)
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        for script in expected:
+            assert plan["commands"].count(["python3", script]) == 1, plan
+        assert plan["commands"][0][:3] == ["python3", "-m", "py_compile"], plan
+        assert len(plan["commands"]) == 1 + len(expected), plan
+    print("Ads dependencies: direct/sibling/mixed smokes keep exact openpyxl prerequisite OK")
+
+
+def buyout_percent_dependency_checks():
+    smoke = "apps/sheet_vitrina_v1_buyout_percent_smoke.py"
+    source = "packages/application/sheet_vitrina_v1_buyout_percent.py"
+    for path in (smoke, source):
+        plan = build_plan_from_paths(
+            pull_request=40,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["buyout_percent"], plan
+        assert plan["pip"] == ["openpyxl==3.1.5"], plan
+        assert plan["commands"].count(["python3", smoke]) == 1, plan
+        assert plan["commands"][0][:3] == ["python3", "-m", "py_compile"], plan
+    print("Buyout dependencies: direct smoke and production source select exact openpyxl prerequisite OK")
+
+
 def exists(_head: str, path: str) -> bool:
     return path in {
         "docs/example.md",
@@ -353,6 +456,218 @@ def exists(_head: str, path: str) -> bool:
         "apps/example_smoke.py",
         "unknown.bin",
     }
+
+
+def finance_liquidity_checks() -> None:
+    own_smokes = [
+        ["python3", "apps/finance_liquidity_contract_smoke.py"],
+        ["python3", "apps/finance_liquidity_auth_smoke.py"],
+        ["python3", "apps/finance_liquidity_cash_smoke.py"],
+        ["python3", "apps/finance_liquidity_http_smoke.py"],
+        ["python3", "apps/finance_liquidity_browser_smoke.py"],
+        ["python3", "apps/finance_liquidity_integration_smoke.py"],
+    ]
+    legacy_smoke = ["python3", "apps/wb_finance_weekly_smoke.py"]
+    isolated_paths = (
+        "apps/finance_liquidity_contract_smoke.py",
+        "apps/finance_liquidity_auth_smoke.py",
+        "apps/finance_liquidity_cash_smoke.py",
+        "apps/finance_liquidity_http_smoke.py",
+        "apps/finance_liquidity_browser_smoke.py",
+        "apps/finance_liquidity_integration_smoke.py",
+        "packages/contracts/finance_liquidity.py",
+        "packages/domain/finance_liquidity/money.py",
+        "packages/application/finance_liquidity.py",
+        "packages/adapters/finance_liquidity.py",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+        "docs/runbooks/finance_liquidity_cash_dormant_release.md",
+        "artifacts/finance_liquidity_cash/dormant/systemd/wb-core-finance-liquidity.service",
+        "artifacts/finance_liquidity_cash/dormant/nginx/finance-liquidity.routes.candidate.md",
+    )
+    for path in isolated_paths:
+        plan = build_plan_from_paths(
+            pull_request=2, base=BASE, head=HEAD, paths=[path],
+            file_exists=lambda _, candidate: candidate == path,
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["finance_liquidity"], (path, plan)
+        assert plan["release_kind"] == (
+            "repo_only" if path.startswith("docs/") else "live_runtime"
+        )
+        assert plan["pip"] == [
+            "apsw==3.53.4.0",
+            "openpyxl==3.1.5",
+            "playwright==1.58.0",
+        ], (path, plan)
+        smokes = [command for command in plan["commands"] if command[1] != "-m"]
+        assert smokes == own_smokes, (path, plan)
+
+    liquidity_path = "packages/domain/finance_liquidity/money.py"
+    legacy_path = "packages/application/finance_value.py"
+    for legacy_exists in (True, False):
+        # Both an ordinary mixed diff and a rename from the legacy namespace
+        # must retain WB coverage; exclusions apply per path, not per plan.
+        plan = build_plan_from_paths(
+            pull_request=2, base=BASE, head=HEAD,
+            paths=[legacy_path, liquidity_path],
+            file_exists=lambda _, path: path == liquidity_path or (
+                legacy_exists and path == legacy_path
+            ),
+        )
+        verify_plan(plan)
+        assert plan["groups"] == ["finance", "finance_liquidity"], plan
+        for smoke in own_smokes:
+            assert plan["commands"].count(smoke) == 1, plan
+        assert plan["commands"].count(legacy_smoke) == 1, plan
+
+
+def bounded_environment_checks() -> None:
+    path = select_checks.FINANCE_PILOT_ENV_PATH
+    active = next(
+        payload
+        for payload in select_checks.FINANCE_PILOT_ENV_PAYLOADS
+        if b"FINANCE_LIQUIDITY_ENABLED=1\n" in payload
+    )
+    revoked = next(
+        payload
+        for payload in select_checks.FINANCE_PILOT_ENV_PAYLOADS
+        if b"FINANCE_LIQUIDITY_ENABLED=0\n" in payload
+    )
+    for payload in (active, revoked):
+        plan = build_plan_from_paths(
+            pull_request=12,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: candidate == path,
+            bounded_file_reader=lambda _, candidate: (
+                "100644",
+                payload if candidate == path else b"",
+            ),
+        )
+        verify_plan(plan)
+        assert plan["changed_paths"] == [path], plan
+        assert plan["groups"] == ["finance_liquidity"], plan
+        assert plan["release_kind"] == "live_runtime", plan
+
+    rejected = (
+        active + b"WB_CORE_WEB_AUTH_SESSION_SECRET=secret\n",
+        active + b"UNKNOWN=value\n",
+        active.replace(b"FINANCE_LIQUIDITY_ENABLED=1\n", b"FINANCE_LIQUIDITY_ENABLED=1\nFINANCE_LIQUIDITY_ENABLED=1\n"),
+        active.replace(b"FINANCE_LIQUIDITY_WRITE_ENABLED=1", b"FINANCE_LIQUIDITY_WRITE_ENABLED=0"),
+        active.replace(b"https://api.selleros.pro", b"https://example.invalid"),
+        active.replace(b"https://api.selleros.pro", b"${PUBLIC_ORIGIN}"),
+        active.replace(b"finance-liquidity-pilot-access.json", b"other.json"),
+        active.replace(b"finance-liquidity-pilot-access.json", b"finance-liquidity-pilot-access.json\nMULTILINE=value"),
+        active + b"X" * 4096,
+        b"\xff\xfe",
+    )
+    for payload in rejected:
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[path],
+                file_exists=lambda _, candidate: candidate == path,
+                bounded_file_reader=lambda *_: ("100644", payload),
+            )
+        except PlanError:
+            pass
+        else:
+            raise AssertionError(f"unsafe pilot environment accepted: {payload!r}")
+
+    for candidate in ("artifacts/example.env", "artifacts/finance_liquidity_cash/pilot/other.env"):
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[candidate],
+                file_exists=lambda _, path: path == candidate,
+                bounded_file_reader=lambda *_: ("100644", active),
+            )
+        except PlanError:
+            pass
+        else:
+            raise AssertionError(f"unclassified environment path accepted: {candidate}")
+
+    try:
+        build_plan_from_paths(
+            pull_request=12,
+            base=BASE,
+            head=HEAD,
+            paths=[path],
+            file_exists=lambda _, candidate: candidate == path,
+        )
+    except PlanError as exc:
+        assert "file reader" in str(exc), exc
+    else:
+        raise AssertionError("pilot environment accepted without trusted reader")
+
+    for mode in ("100755", "120000", "160000"):
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[path],
+                file_exists=lambda _, candidate: candidate == path,
+                bounded_file_reader=lambda *_: (mode, active),
+            )
+        except PlanError as exc:
+            assert "mode" in str(exc), exc
+        else:
+            raise AssertionError(f"unsafe pilot environment mode accepted: {mode}")
+
+    deleted = build_plan_from_paths(
+        pull_request=12,
+        base=BASE,
+        head=HEAD,
+        paths=[path],
+        file_exists=lambda *_: False,
+        bounded_file_reader=lambda *_: (_ for _ in ()).throw(
+            AssertionError("deleted file was read")
+        ),
+    )
+    verify_plan(deleted)
+    assert deleted["changed_paths"] == [path], deleted
+    assert deleted["groups"] == ["finance_liquidity"], deleted
+    assert deleted["release_kind"] == "live_runtime", deleted
+
+    renamed_into_contract = build_plan_from_paths(
+        pull_request=12,
+        base=BASE,
+        head=HEAD,
+        paths=["artifacts/legacy-pilot.env", path],
+        file_exists=lambda _, candidate: candidate == path,
+        bounded_file_reader=lambda _, candidate: (
+            "100644",
+            active if candidate == path else b"",
+        ),
+    )
+    verify_plan(renamed_into_contract)
+    assert renamed_into_contract["changed_paths"] == sorted(
+        ["artifacts/legacy-pilot.env", path]
+    ), renamed_into_contract
+
+    for failure in (OSError("read failed"), subprocess.CalledProcessError(1, ["git", "show"])):
+        def fail_reader(*_: object, error: Exception = failure) -> tuple[str, bytes]:
+            raise error
+
+        try:
+            build_plan_from_paths(
+                pull_request=12,
+                base=BASE,
+                head=HEAD,
+                paths=[path],
+                file_exists=lambda _, candidate: candidate == path,
+                bounded_file_reader=fail_reader,
+            )
+        except PlanError as exc:
+            assert "cannot read" in str(exc), exc
+        else:
+            raise AssertionError("bounded reader failure did not fail closed")
 
 
 def main() -> None:
@@ -369,6 +684,10 @@ def main() -> None:
     boundary_checks()
     rename_diff_check()
     command_dependency_checks()
+    ads_dependency_checks()
+    buyout_percent_dependency_checks()
+    finance_liquidity_checks()
+    bounded_environment_checks()
     docs = build_plan_from_paths(
         pull_request=1, base=BASE, head=HEAD, paths=["docs/example.md"], file_exists=exists
     )

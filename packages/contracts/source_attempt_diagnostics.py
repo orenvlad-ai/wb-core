@@ -57,6 +57,8 @@ def unknown_diagnostics(source_key: str) -> dict[str, Any]:
     if source_key == "ads_compact":
         result.update({key: None for key in (
             "expected_campaign_ids", "returned_campaign_ids", "missing_campaign_ids",
+            "attempted_campaign_ids", "not_attempted_campaign_ids",
+            "missing_from_received_batches_campaign_ids", "response_error_campaign_ids",
             "duplicate_campaign_ids", "batch_count", "batches",
         )})
     else:

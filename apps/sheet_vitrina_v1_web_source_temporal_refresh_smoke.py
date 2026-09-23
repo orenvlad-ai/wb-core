@@ -134,7 +134,7 @@ def main() -> None:
 
                 second_status_rows = _fetch_status_rows(status_url, SECOND_AS_OF_DATE)
                 for source_key in ("web_source_snapshot", "seller_funnel_snapshot"):
-                    if second_status_rows[f"{source_key}[yesterday_closed]"][1] != "success":
+                    if second_status_rows[f"{source_key}[yesterday_closed]"][1] != "incomplete":
                         raise AssertionError(f"{source_key} yesterday slot must expose latest-confirmed fallback")
                     if second_status_rows[f"{source_key}[today_current]"][1] != "success":
                         raise AssertionError(f"{source_key} today slot must materialize as success")

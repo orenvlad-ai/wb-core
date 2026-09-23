@@ -25,18 +25,24 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
 )
 from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_AGGREGATION_RULE,
+    BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
     BUYOUT_PERCENT_MATURITY_DAYS,
     BUYOUT_PERCENT_METRIC_KEY,
     LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
     aggregate_buyout_percent,
+    buyout_source_payload_digest,
     build_three_closed_week_buyout_reference,
     capture_mature_buyout_percent_snapshots,
     extend_metrics_with_buyout_percent,
+    mature_buyout_capture_proof,
     three_closed_week_keys,
     trusted_buyout_cutoff,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import (  # noqa: E402
     SheetVitrinaV1WebVitrinaBlock,
+)
+from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
+    _buyout_capture_scopes,
 )
 from packages.business_time import current_business_date_iso  # noqa: E402
 from packages.contracts.sheet_vitrina_v1 import (  # noqa: E402
@@ -49,6 +55,7 @@ from packages.contracts.sales_funnel_history_block import (  # noqa: E402
     SalesFunnelHistoryItem,
     SalesFunnelHistorySuccess,
 )
+from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item  # noqa: E402
 
 
 BUNDLE_FIXTURE = (
@@ -106,6 +113,52 @@ class _FakeMatureHistoryBlock:
                             value=0,
                         )
                     )
+            current += timedelta(days=1)
+        return SalesFunnelHistoryEnvelope(
+            result=SalesFunnelHistorySuccess(
+                kind="success",
+                date_from=date_from,
+                date_to=date_to,
+                count=len(items),
+                items=items,
+            )
+        )
+
+
+class _SubsetHistoryBlock:
+    """Official response fixture that retains a larger fetched subset."""
+
+    def __init__(self, returned_nm_ids: set[int]) -> None:
+        self.calls: list[tuple[str, str, tuple[int, ...]]] = []
+        self.returned_nm_ids = set(returned_nm_ids)
+
+    def execute(self, request: object) -> SalesFunnelHistoryEnvelope:
+        date_from = str(getattr(request, "date_from"))
+        date_to = str(getattr(request, "date_to"))
+        requested_nm_ids = tuple(int(value) for value in getattr(request, "nm_ids"))
+        self.calls.append((date_from, date_to, requested_nm_ids))
+        items: list[SalesFunnelHistoryItem] = []
+        current = date.fromisoformat(date_from)
+        end = date.fromisoformat(date_to)
+        while current <= end:
+            snapshot_date = current.isoformat()
+            for nm_id in sorted(self.returned_nm_ids & set(requested_nm_ids)):
+                items.extend(
+                    [
+                        SalesFunnelHistoryItem(
+                            date=snapshot_date,
+                            nm_id=nm_id,
+                            metric=BUYOUT_PERCENT_METRIC_KEY,
+                            value=0.96,
+                        ),
+                        SalesFunnelHistoryItem(
+                            date=snapshot_date,
+                            nm_id=nm_id,
+                            metric="orderCount",
+                            value=10,
+                        ),
+                    ]
+                )
             current += timedelta(days=1)
         return SalesFunnelHistoryEnvelope(
             result=SalesFunnelHistorySuccess(
@@ -432,6 +485,9 @@ def main() -> None:
         ):
             raise AssertionError(f"bounded D-7 catch-up mismatch: {catch_up}")
 
+        _assert_separate_buyout_fetch_and_confirmation_scopes()
+        _assert_buyout_confirmation_overlay_resolution()
+
         calculation_parameters = CalculationParametersBlock(runtime=runtime)
         with patch(
             "packages.application.calculation_parameters.current_business_date_iso",
@@ -477,9 +533,301 @@ def main() -> None:
         print("buyout_percent_weekly_cells: ok ->", [week["weighted_average_pct"] for week in reference["weeks"]])
         print("buyout_percent_partial_exclusion: ok -> missing mature day blanks only its week")
         print("buyout_percent_mature_capture: ok -> overwrite + idempotency + D-7 catch-up")
+        print("buyout_percent_confirmation_scope: ok -> fetch92/confirm33, retain58, fail closed")
+        print("buyout_percent_confirmation_overlay: ok -> D+6 recovery, original retention, digest compatibility")
         print("buyout_percent_current_week_excluded: ok ->", reference["date_to"])
         print("buyout_percent_settings_line: ok -> informational only")
         print("proxy_formula_unchanged: ok ->", proxy["proxy_profit_3"])
+
+
+def _assert_separate_buyout_fetch_and_confirmation_scopes() -> None:
+    """Regression: report fetch scope must not redefine confirmed buyout scope."""
+
+    fetch_nm_ids = list(range(10_001, 10_093))
+    confirmation_nm_ids = fetch_nm_ids[:33]
+    returned_nm_ids = set(fetch_nm_ids[:58])
+    mature_now = datetime(2026, 8, 9, 8, 0, tzinfo=timezone.utc)
+    live_fetch_nm_ids, live_confirmation_nm_ids = _buyout_capture_scopes(
+        reporting_config_items=[
+            ConfigV2Item(nm_id, True, str(nm_id), "reporting", index)
+            for index, nm_id in enumerate(fetch_nm_ids, 1)
+        ],
+        registry_config_items=[
+            ConfigV2Item(nm_id, True, str(nm_id), "registry", index)
+            for index, nm_id in enumerate(confirmation_nm_ids, 1)
+        ],
+    )
+    if (
+        live_fetch_nm_ids != fetch_nm_ids
+        or live_confirmation_nm_ids != confirmation_nm_ids
+    ):
+        raise AssertionError("live plan must fetch reporting92 and confirm registry33")
+    with TemporaryDirectory(prefix="buyout-confirmation-scope-") as temp_dir:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir))
+        capture = capture_mature_buyout_percent_snapshots(
+            runtime=runtime,
+            sales_funnel_history_block=_SubsetHistoryBlock(returned_nm_ids),  # type: ignore[arg-type]
+            enabled_nm_ids=fetch_nm_ids,
+            required_confirmation_nm_ids=confirmation_nm_ids,
+            now=mature_now,
+            captured_at_factory=lambda: "2026-08-09T08:15:00Z",
+        )
+        if (
+            capture.status != "captured"
+            or capture.requested_dates != ("2026-08-02", "2026-08-03")
+            or capture.saved_dates != ("2026-08-02", "2026-08-03")
+            or capture.requested_nm_id_count != 92
+            or capture.confirmation_nm_id_count != 33
+        ):
+            raise AssertionError(f"separate fetch/confirmation capture mismatch: {capture}")
+        payload, captured_at = runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history",
+            snapshot_date="2026-08-03",
+        )
+        stored_nm_ids = {
+            int(item.nm_id)
+            for item in getattr(payload, "items", ())
+            if str(item.metric) == BUYOUT_PERCENT_METRIC_KEY
+        }
+        if stored_nm_ids != returned_nm_ids:
+            raise AssertionError("capture must retain all 58 official returned SKU observations")
+        if not mature_buyout_capture_proof(
+            payload=payload,
+            captured_at=captured_at,
+            snapshot_date="2026-08-03",
+            enabled_nm_ids=confirmation_nm_ids,
+        ) or mature_buyout_capture_proof(
+            payload=payload,
+            captured_at=captured_at,
+            snapshot_date="2026-08-03",
+            enabled_nm_ids=fetch_nm_ids,
+        ):
+            raise AssertionError("33 confirmation proof must not silently become 92 coverage")
+
+        strict_dir = Path(temp_dir) / "strict"
+        strict_dir.mkdir()
+        strict_runtime = RegistryUploadDbBackedRuntime(runtime_dir=strict_dir)
+        strict = capture_mature_buyout_percent_snapshots(
+            runtime=strict_runtime,
+            sales_funnel_history_block=_SubsetHistoryBlock(returned_nm_ids),  # type: ignore[arg-type]
+            enabled_nm_ids=fetch_nm_ids,
+            now=mature_now,
+            captured_at_factory=lambda: "2026-08-09T08:15:00Z",
+        )
+        strict_payload, _ = strict_runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history",
+            snapshot_date="2026-08-03",
+        )
+        if strict.status != "partial" or strict.saved_dates or strict_payload is not None:
+            raise AssertionError("default confirmation scope must remain strict fetch92")
+
+        last_good_dir = Path(temp_dir) / "last-good"
+        last_good_dir.mkdir()
+        last_good_runtime = RegistryUploadDbBackedRuntime(runtime_dir=last_good_dir)
+        _save_snapshot(
+            last_good_runtime,
+            "2026-08-03",
+            [
+                item
+                for nm_id in returned_nm_ids
+                for item in (
+                    _item("2026-08-03", nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.91),
+                    _item("2026-08-03", nm_id, "orderCount", 10),
+                )
+            ],
+            captured_at="2026-08-04T08:00:00Z",
+        )
+        missing_required = returned_nm_ids - {confirmation_nm_ids[-1]}
+        rejected = capture_mature_buyout_percent_snapshots(
+            runtime=last_good_runtime,
+            sales_funnel_history_block=_SubsetHistoryBlock(missing_required),  # type: ignore[arg-type]
+            enabled_nm_ids=fetch_nm_ids,
+            required_confirmation_nm_ids=confirmation_nm_ids,
+            now=mature_now,
+            captured_at_factory=lambda: "2026-08-09T08:15:00Z",
+        )
+        retained_payload, retained_at = last_good_runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history",
+            snapshot_date="2026-08-03",
+        )
+        retained_value = next(
+            item.value
+            for item in getattr(retained_payload, "items", ())
+            if int(item.nm_id) == confirmation_nm_ids[0]
+            and str(item.metric) == BUYOUT_PERCENT_METRIC_KEY
+        )
+        if (
+            rejected.status != "partial"
+            or rejected.saved_dates
+            or retained_at != "2026-08-04T08:00:00Z"
+            or retained_value != 0.91
+        ):
+            raise AssertionError("missing required SKU must not overwrite unproven last-good")
+
+        empty_dir = Path(temp_dir) / "empty"
+        empty_dir.mkdir()
+        empty = capture_mature_buyout_percent_snapshots(
+            runtime=RegistryUploadDbBackedRuntime(runtime_dir=empty_dir),
+            sales_funnel_history_block=_SubsetHistoryBlock(returned_nm_ids),  # type: ignore[arg-type]
+            enabled_nm_ids=fetch_nm_ids,
+            required_confirmation_nm_ids=[],
+            now=mature_now,
+        )
+        if empty.status != "skipped":
+            raise AssertionError("empty confirmation scope must not be treated as ready")
+        invalid_dir = Path(temp_dir) / "invalid"
+        invalid_dir.mkdir()
+        try:
+            capture_mature_buyout_percent_snapshots(
+                runtime=RegistryUploadDbBackedRuntime(runtime_dir=invalid_dir),
+                sales_funnel_history_block=_SubsetHistoryBlock(returned_nm_ids),  # type: ignore[arg-type]
+                enabled_nm_ids=fetch_nm_ids,
+                required_confirmation_nm_ids=[fetch_nm_ids[-1] + 1],
+                now=mature_now,
+            )
+        except ValueError as exc:
+            if "subset" not in str(exc):
+                raise
+        else:
+            raise AssertionError("out-of-fetch confirmation scope must fail closed")
+        empty_fetch_dir = Path(temp_dir) / "empty-fetch"
+        empty_fetch_dir.mkdir()
+        try:
+            capture_mature_buyout_percent_snapshots(
+                runtime=RegistryUploadDbBackedRuntime(runtime_dir=empty_fetch_dir),
+                sales_funnel_history_block=_SubsetHistoryBlock(returned_nm_ids),  # type: ignore[arg-type]
+                enabled_nm_ids=[],
+                required_confirmation_nm_ids=[confirmation_nm_ids[0]],
+                now=mature_now,
+            )
+        except ValueError as exc:
+            if "subset" not in str(exc):
+                raise
+        else:
+            raise AssertionError("confirmation scope without a fetch scope must fail closed")
+
+
+def _assert_buyout_confirmation_overlay_resolution() -> None:
+    """Only a complete D+6 overlay may close September buyout weeks."""
+
+    with TemporaryDirectory(prefix="buyout-confirmation-overlay-") as temp_dir:
+        runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(temp_dir))
+        accepted = runtime.ingest_bundle(
+            json.loads(BUNDLE_FIXTURE.read_text(encoding="utf-8")),
+            activated_at="2026-09-23T08:00:00Z",
+        )
+        if accepted.status != "accepted":
+            raise AssertionError("overlay fixture registry must be accepted")
+        nm_ids = [
+            int(item.nm_id)
+            for item in runtime.load_current_state().config_v2
+            if item.enabled
+        ]
+        if not nm_ids:
+            raise AssertionError("overlay fixture requires enabled registry SKU targets")
+        original_dates = ["2026-08-31", "2026-09-01", "2026-09-02"]
+        for snapshot_date in original_dates:
+            _save_snapshot(
+                runtime,
+                snapshot_date,
+                [
+                    item
+                    for nm_id in nm_ids
+                    for item in (
+                        _item(snapshot_date, nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.8),
+                        _item(snapshot_date, nm_id, "orderCount", 10),
+                        _item(snapshot_date, nm_id, "ordersSumRub", 1000),
+                    )
+                ],
+                captured_at="2026-09-08T08:00:00Z",
+            )
+        original_payload, original_captured_at = runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history", snapshot_date="2026-09-02"
+        )
+        original_bytes = json.dumps(
+            original_payload.__dict__ if hasattr(original_payload, "__dict__") else original_payload,
+            default=lambda value: value.__dict__, sort_keys=True,
+        )
+        legacy_rows = []
+        with __import__("sqlite3").connect(runtime.db_path) as conn:
+            for row in conn.execute(
+                """SELECT snapshot_date,payload_json FROM temporal_source_snapshots
+                   WHERE source_key='sales_funnel_history'
+                     AND snapshot_date>='2026-08-31' AND snapshot_date<='2026-09-06'
+                   ORDER BY snapshot_date"""
+            ):
+                legacy_rows.append([str(row[0]), json.loads(str(row[1]))])
+        legacy_digest = "sha256:" + __import__("hashlib").sha256(
+            json.dumps(legacy_rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        if buyout_source_payload_digest(
+            runtime, date_from="2026-08-31", date_to="2026-09-06"
+        ) != legacy_digest:
+            raise AssertionError("no-overlay V4 digest must remain byte-compatible")
+
+        for day in range(3, 18):
+            snapshot_date = f"2026-09-{day:02d}"
+            runtime.save_temporal_source_snapshot(
+                source_key=BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+                snapshot_date=snapshot_date,
+                captured_at="2026-09-23T08:00:00Z",
+                payload={
+                    "kind": "success",
+                    "date_from": snapshot_date,
+                    "date_to": snapshot_date,
+                    "count": len(nm_ids) * 2,
+                    "items": [
+                        item
+                        for nm_id in nm_ids
+                        for item in (
+                            _item(snapshot_date, nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.9),
+                            _item(snapshot_date, nm_id, "orderCount", 20),
+                        )
+                    ],
+                },
+            )
+        reference = build_three_closed_week_buyout_reference(
+            runtime=runtime, today=date(2026, 9, 23)
+        )
+        if [item["status"] for item in reference["weeks"]] != ["ready", "ready", "immature"]:
+            raise AssertionError(f"D+6 overlay did not close expected weeks: {reference}")
+        if reference["contributing_week_ranges"] != [
+            ["2026-08-31", "2026-09-06"],
+            ["2026-09-07", "2026-09-13"],
+        ]:
+            raise AssertionError("overlay must make the two completed September weeks ready")
+        retained_payload, retained_captured_at = runtime.load_temporal_source_snapshot(
+            source_key="sales_funnel_history", snapshot_date="2026-09-02"
+        )
+        retained_bytes = json.dumps(
+            retained_payload.__dict__ if hasattr(retained_payload, "__dict__") else retained_payload,
+            default=lambda value: value.__dict__, sort_keys=True,
+        )
+        if retained_captured_at != original_captured_at or retained_bytes != original_bytes:
+            raise AssertionError("overlay must retain original broad snapshot byte-for-byte")
+        if buyout_source_payload_digest(
+            runtime, date_from="2026-08-31", date_to="2026-09-06"
+        ) == legacy_digest:
+            raise AssertionError("selected overlay must change only its V4 source digest")
+
+        runtime.save_temporal_source_snapshot(
+            source_key=BUYOUT_CONFIRMATION_OVERLAY_SOURCE_KEY,
+            snapshot_date="2026-09-03",
+            captured_at="2026-09-23T08:00:00Z",
+            payload={
+                "kind": "success", "date_from": "2026-09-03", "date_to": "2026-09-03",
+                "count": (len(nm_ids) - 1) * 2,
+                "items": [
+                    item for nm_id in nm_ids[:-1] for item in (
+                        _item("2026-09-03", nm_id, BUYOUT_PERCENT_METRIC_KEY, 0.9),
+                        _item("2026-09-03", nm_id, "orderCount", 20),
+                    )
+                ],
+            },
+        )
+        rejected = build_three_closed_week_buyout_reference(runtime=runtime, today=date(2026, 9, 23))
+        if rejected["weeks"][0]["status"] != "missing":
+            raise AssertionError("partial overlay must fail closed instead of confirming an observed subset")
 
 
 def _seed_three_closed_week_reference(

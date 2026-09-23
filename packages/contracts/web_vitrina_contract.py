@@ -22,6 +22,7 @@ class WebVitrinaContractMeta:
     incident_policy_badge: dict[str, Any] = field(default_factory=dict)
     incident_projection_quality: dict[str, Any] = field(default_factory=dict)
     warehouse_business_projection: dict[str, Any] = field(default_factory=dict)
+    inventory_history_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ class WebVitrinaContractRow:
     nm_id: int | None
     format: str | None
     values_by_date: dict[str, Any]
-    presentation_by_date: dict[str, dict[str, str]] = field(default_factory=dict)
+    presentation_by_date: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

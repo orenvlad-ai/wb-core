@@ -256,3 +256,50 @@ Approved Fulfillment uploads remain service/payment-validation evidence, not cap
 ## Canonical cost consumer boundary (2026-07-01)
 
 Accepted service/storage documents are financial evidence for `packages/application/canonical_cost_engine.py`. Recognized amount uses the factual document/effective date and supply/SKU allocation provenance; paid projection remains zero until factual payment evidence exists. Quote, `К оплате`, upload time or unaccepted document cannot create paid capital. The module never owns physical FF/WB quantity and cannot replace the exact FF debit snapshot.
+
+
+## Durable recalculation of fulfillment documents (Б2-04C)
+
+`upload_xlsx` / `_save_upload` and `delete_upload` own source persistence and
+`fulfillment_recalc_intents` in one SQLite transaction. Complete matched supply
+scope is delivered to the existing targeted warehouse queue in that transaction;
+incomplete goods/date scope remains explicitly pending and is retried by
+`WbSuppliesBlock.reconcile_functional_ff_state`. HTTP only returns the saved result.
+There is no new worker or schedule.
+
+Identity is an active accepted document's exact XLSX SHA256, regardless of its
+filename. A retry returns that upload/payment-validation ID and makes no new
+primary document or overlay amount. Different bytes are a new document, even for
+the same supply. Upload after a tombstone creates a new upload ID; it never
+resurrects the deleted source. Invalid attempts retain their existing diagnostic
+behavior. The source revision is the saved SHA256 for upload and `deleted:<saved
+deleted_at>` for deletion. Repeated deletion preserves its timestamp/revision.
+
+Deletion retains matched supply identities, SKU IDs and earliest source dates
+from the previous demand before deactivating the overlay. No missing scope falls
+back to all SKUs or history. Queue acknowledgement remains exact by
+queue/source/revision, so old completion cannot close deletion or re-created
+source demand. The warehouse capture checks current fulfillment upload IDs and
+service/storage totals against the actual cost layers. A source change racing
+after ordinary cost materialization stays queued for the next ordinary cycle;
+the existing source CAS rejects changes after capture.
+
+Supply lookup follows the existing runtime aliases, including preorder promotion;
+the guard checks the materializer's actual supply ID. A supply explicitly outside
+the existing current-cost opening window is recorded as a durable `no_op` with
+its exact source revision and reason `fulfillment_supply_outside_current_cost_window`.
+It creates no historical cost layer or queue request. Missing dates or SKU scope
+remain unresolved. A previously captured applicable scope is retained on deletion.
+
+Saved operations report `operation_applied`, `durable_saved` and exact
+`warehouse_targeted_recalculation`. A late readback/UI error does not ask for a
+second primary submission. Queued/pending is not completion. Older documents with
+no tracked request are reported `not_tracked`; deployment does not backfill them.
+Startup and ordinary reconciliation do not schedule existing untracked uploads
+or completed queue entries.
+
+Rollback preserves all demand and source revisions. The previous runtime can
+consume already-delivered warehouse requests but cannot resolve the new pending
+scope requests until a compatible version is restored. Reverting code is not
+completion of pending work. No tariffs, storage allocation, paid-capital rules,
+primary financial records or physical quantities are changed by this delivery.

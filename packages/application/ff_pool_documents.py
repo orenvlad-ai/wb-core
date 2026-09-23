@@ -4280,6 +4280,15 @@ def _dense_fbs_initialization(
             "dense_fbs_intent_binding_invalid",
             "Dense FBS inventory request is not bound to its exact durable intent",
         )
+    if str(intent[0]) == "sku_activation":
+        # A ready canonical request can also be resumed directly. Recheck its
+        # source here, inside the physical posting transaction, before effects.
+        from packages.application.nomenclature_activation_intents import require_current_source
+        from packages.application.ff_pool_dense_fbs import DenseFbsError
+        try:
+            require_current_source(conn, plan.get("expected_subject", {}).get("staged_items", []))
+        except DenseFbsError as exc:
+            raise FfPoolDocumentError(exc.code, str(exc), details=exc.details) from exc
     return dense
 
 

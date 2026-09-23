@@ -11,7 +11,7 @@ ledgers.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
@@ -98,7 +98,191 @@ class InventoryHistoryBackfillError(RuntimeError):
     """A dry-run or apply safety condition failed closed."""
 
 
-def run_backfill(
+class InventoryHistoryReadAdmission:
+    """Stock-only RO admission inside an already confirmed maintenance hold."""
+
+    def __init__(self, runtime_dir, window_id):
+        self.runtime_dir = Path(runtime_dir).resolve()
+        self.window_id = window_id
+        self.control = None
+        self.evidence = {}
+
+    def boundary(self):
+        from packages.application import business_data_write_barrier as barrier
+        from apps import business_data_maintenance as maintenance
+        if not self.window_id:
+            raise InventoryHistoryBackfillError("--maintenance-window-id is required for typed stock backfill")
+        try:
+            state = barrier._load_state(self.runtime_dir) or {}
+        except barrier.BusinessDataWriteBarrierError as exc:
+            raise InventoryHistoryBackfillError("stock RO write barrier is invalid") from exc
+        hold_path = self.runtime_dir / maintenance.STATE_FILENAME
+        hold = _private_object(hold_path)
+        policy = _private_object(self.runtime_dir / maintenance.POLICY_FILENAME)
+        held_policy = (hold.get("hold_readback") or {}).get("auto_updates") or {}
+        if (not self.window_id or state.get("phase") != "held" or state.get("hold_confirmed") is not True
+                or state.get("window_id") != self.window_id or not state.get("plan_fingerprint")
+                or hold.get("schema_version") != maintenance.SCHEMA_VERSION or hold.get("phase") != "held"
+                or (hold.get("hold_readback") or {}).get("quiet") is not True
+                or (state.get("maintenance") or {}).get("state_fingerprint") != barrier._fingerprint(hold)
+                or policy.get("master_desired") is not False
+                or policy.get("revision") != held_policy.get("revision")
+                or policy.get("policy_fingerprint") != held_policy.get("policy_fingerprint")):
+            raise InventoryHistoryBackfillError("stock RO requires exact confirmed held maintenance/control binding")
+        registry = StoreRegistry(self.runtime_dir)
+        authority = registry.load(require_files=True)
+        control = {"window_id": self.window_id, "plan_fingerprint": state["plan_fingerprint"],
+                   "runtime_dir": str(self.runtime_dir), "authority_manifest_sha256": authority.manifest_sha256,
+                   "operational_path": str(registry.resolve("operational", manifest=authority)),
+                   "barrier_fingerprint": barrier._fingerprint(state), "hold_fingerprint": barrier._fingerprint(hold),
+                   "policy_fingerprint": barrier._fingerprint(policy)}
+        if self.control is not None and control != self.control:
+            raise InventoryHistoryBackfillError("stock RO maintenance/control binding changed")
+        self.control = control
+        return control
+
+    def validate(self):
+        self.boundary()
+        os_evidence = _stock_quiet_os_readback(self.runtime_dir)
+        operational = StoreRegistry(self.runtime_dir).resolve("operational")
+        from apps.business_data_maintenance import ACTIVE_RUNTIME_STATES
+        with self.open(operational) as conn:
+            auto = conn.execute("SELECT last_run_status FROM sheet_vitrina_v1_auto_update_state WHERE slot=1").fetchone()
+        web = _optional_object(self.runtime_dir / "sheet_vitrina_v1_auto_refresh_schedules.json")
+        feedback = _optional_object(self.runtime_dir / "sheet_vitrina_v1_feedbacks_auto_complaints.json")
+        spp_root = self.runtime_dir / "sheet_vitrina_v1_prices" / "spp_tests"
+        pointer = _optional_object(spp_root / "current_job.json")
+        job = {}
+        if pointer:
+            from packages.application.wb_spp_tester import JOB_ID_RE
+            if not JOB_ID_RE.fullmatch(str(pointer.get("job_id") or "")):
+                raise InventoryHistoryBackfillError("stock RO SPP job pointer invalid")
+            job = _private_object(spp_root / "jobs" / (pointer["job_id"] + ".json"), private=False)
+        statuses = ([str(auto[0] or "")] if auto else []) + [str(row.get("last_status") or "") for row in web.get("schedules", [])]
+        statuses += [str(row.get("status") or "") for row in feedback.get("runs", [])]
+        statuses += [str(job.get("status") or "")]
+        if (any(status.lower() in ACTIVE_RUNTIME_STATES for status in statuses)
+                or (job.get("status") == "failed" and not (job.get("restore") or {}).get("restored"))):
+            raise InventoryHistoryBackfillError("stock RO runtime job is active or unrestored")
+        self.boundary()
+        self.evidence = {"contract": "inventory_history_held_ro_v1", **self.control,
+                         "os_readback": os_evidence, "runtime_statuses": statuses}
+        return self.evidence
+
+    @contextmanager
+    def open(self, db_path):
+        # Immutable is permitted only within the verified held boundary. Never
+        # use it to bypass an extant WAL, SHM or rollback journal, even if empty.
+        self.boundary()
+        before = _stock_sqlite_file_identity(db_path)
+        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            yield conn
+        finally:
+            conn.close()
+        self.boundary()
+        if _stock_sqlite_file_identity(db_path) != before:
+            raise InventoryHistoryBackfillError("stock RO SQLite file changed during admitted read")
+
+
+def _private_object(path, *, private=True):
+    if path.is_symlink() or not path.is_file() or (private and path.stat().st_mode & 0o077):
+        raise InventoryHistoryBackfillError("stock RO evidence missing, unsafe or not private: " + str(path))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise InventoryHistoryBackfillError("stock RO evidence is not an object: " + str(path))
+    return value
+
+
+def _optional_object(path):
+    return _private_object(path, private=False) if path.exists() else {}
+
+
+def _stock_sqlite_file_identity(path):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise InventoryHistoryBackfillError("stock RO SQLite file missing or not regular: " + str(path))
+    if any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+        raise InventoryHistoryBackfillError("stock RO SQLite sidecar present; quiet file admission required: " + str(path))
+    stat = path.stat()
+    with path.open("rb") as source:
+        header = source.read(100)
+    if len(header) != 100 or header[:16] != b"SQLite format 3\0" or header[18:20] not in (b"\1\1", b"\2\2"):
+        raise InventoryHistoryBackfillError("stock RO SQLite header unsupported")
+    return {"path": str(path.resolve()), "device": stat.st_dev, "inode": stat.st_ino,
+            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns,
+            "journal_header": list(header[18:20])}
+
+
+def _stock_quiet_os_readback(runtime_dir):
+    # Reuse RO parts, not maintenance_status's unrelated DB/owner-policy readers.
+    import fcntl
+    from apps import business_data_maintenance as maintenance
+    if not Path("/proc").is_dir() or os.geteuid() != 0:
+        raise InventoryHistoryBackfillError("stock RO requires authoritative Linux process inventory")
+    systemd = maintenance.SystemdClient()
+    timers = {unit: systemd.unit_state(unit) for unit in maintenance.ALL_BUSINESS_TIMER_UNITS}
+    services = {unit: systemd.unit_state(unit) for unit in maintenance.ALL_BUSINESS_SERVICE_UNITS}
+    inventory = systemd.discovered_timers()
+    writers = maintenance._writer_processes()
+    cron = maintenance._cron_entries()
+    if (any(row["is_enabled"] != "disabled" or row["is_active"] != "inactive" for row in timers.values())
+            or any(row["is_active"] not in maintenance.QUIESCENT_SERVICE_STATES for row in services.values())
+            or set(inventory) - set(maintenance.CLASSIFIED_WB_CORE_TIMER_UNITS) or writers or cron):
+        raise InventoryHistoryBackfillError("stock RO maintenance writer/timer inventory is not quiet")
+    locks = [".warehouse-functional-sync.lock", "sheet_vitrina_v1_auto_refresh_schedules.json.lock",
+             "sheet_vitrina_v1_prices/spp_tests/execution.lock", ".finance-storage-snapshot-retention.lock",
+             ".fbs-snapshot-accounting.lock", maintenance.RESTORE_LOCK_FILENAME]
+    for name in locks:
+        lock = runtime_dir / name
+        if lock.exists():
+            with lock.open("rb") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise InventoryHistoryBackfillError("stock RO writer/restore lock held: " + name) from exc
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    if maintenance.current_lock_status(runtime_dir).get("busy"):
+        raise InventoryHistoryBackfillError("stock RO seller portal writer is busy")
+    return {"timers": timers, "services": services, "discovered_timers": inventory,
+            "writer_processes": writers, "cron_entries": cron, "checked_locks": locks}
+
+
+def run_backfill(*, maintenance_window_id=None, **kwargs):
+    """Typed repair requires an existing held window; this call never creates it."""
+    manifest_path = kwargs.get("manifest_path")
+    manifest = json.loads(Path(manifest_path).expanduser().read_text()) if manifest_path else {}
+    typed = kwargs.get("bound_sources_path") is not None or bool(manifest.get("bound_quantity_sources"))
+    admission = None
+    if typed:
+        runtime_dir = Path(kwargs["runtime_dir"]).expanduser().resolve()
+        _validate_exact_deployment(expected_deployed_sha=_validated_sha(kwargs["deployed_sha"]),
+            deployed_sha_file=Path(kwargs.get("deployed_sha_file") or runtime_dir.parent / "app" / ".wb-core-runtime-sha"))
+        admission = InventoryHistoryReadAdmission(runtime_dir, maintenance_window_id)
+        admission.validate()
+        expected = manifest.get("read_admission")
+        # A retained operation can be read in a freshly qualified held window.
+        # Its runtime/storage authority stays exact; only the temporary hold
+        # may differ. Apply still requires every original control binding.
+        control_keys = ("runtime_dir", "authority_manifest_sha256", "operational_path") if kwargs.get("readback") else admission.control
+        if expected and any(expected.get(key) != admission.control[key] for key in control_keys):
+            raise InventoryHistoryBackfillError("stock RO manifest maintenance/control binding changed")
+    result = _run_backfill(**kwargs, read_admission=admission)
+    if admission is not None:
+        try:
+            admission.validate()
+        except Exception as exc:
+            if not result.get("database_written"):
+                raise
+            result.update(status="committed_readback_pending", readback_error=str(exc), retry_apply_allowed=False)
+        result["read_admission"] = admission.evidence
+    return result
+
+
+def _run_backfill(
     *,
     runtime_dir: Path,
     evidence_dir: Path,
@@ -110,8 +294,10 @@ def run_backfill(
     expected_manifest_sha256: str | None = None,
     approval_reference: str | None = None,
     readback: bool = False,
+    bound_sources_path: Path | None = None,
     deployed_sha_file: Path | None = None,
     now: datetime | None = None,
+    read_admission=None,
 ) -> dict[str, Any]:
     if apply and readback:
         raise InventoryHistoryBackfillError(
@@ -150,7 +336,7 @@ def run_backfill(
             manifest_path=manifest_path.expanduser().resolve(),
             expected_manifest_sha256=str(expected_manifest_sha256),
             deployed_sha=exact_deployed_sha,
-            deployed_sha_file=sha_file,
+            deployed_sha_file=sha_file, read_admission=read_admission,
         )
     if not apply:
         return _dry_run(
@@ -161,6 +347,7 @@ def run_backfill(
             date_from=date_from,
             date_to=min(date_to or last_closed, last_closed),
             created_at=_timestamp(effective_now),
+            runtime_dir=runtime_dir, bound_sources_path=bound_sources_path, read_admission=read_admission,
         )
     if manifest_path is None or not expected_manifest_sha256 or not approval_reference:
         raise InventoryHistoryBackfillError(
@@ -177,7 +364,7 @@ def run_backfill(
                 deployed_sha=exact_deployed_sha,
                 deployed_sha_file=sha_file,
                 approval_reference=str(approval_reference).strip(),
-                applied_at=_timestamp(effective_now),
+                applied_at=_timestamp(effective_now), read_admission=read_admission,
             )
     except WarehouseSyncBusyError as exc:
         raise InventoryHistoryBackfillError(
@@ -194,18 +381,24 @@ def _dry_run(
     date_from: str | None,
     date_to: str,
     created_at: str,
+    runtime_dir: Path | None = None,
+    bound_sources_path: Path | None = None,
+    read_admission=None,
 ) -> dict[str, Any]:
-    before_file = _file_digest(db_path)
-    with _query_only_connection(db_path) as conn:
-        plan = _build_manifest(
-            conn,
+    before_file = _file_digest(db_path) if bound_sources_path is None else None
+    with _query_only_connection(db_path, read_admission=read_admission) as conn:
+        builder_args = {} if bound_sources_path is None else {
+            "runtime_dir": runtime_dir, "sources": json.loads(bound_sources_path.read_text(encoding="utf-8"))["sources"], "read_admission": read_admission}
+        builder = _build_manifest if bound_sources_path is None else _build_bound_quantity_manifest
+        plan = builder(
+            conn, **builder_args,
             storage_manifest=storage_manifest,
             deployed_sha=deployed_sha,
             date_from=date_from,
             date_to=date_to,
             created_at=created_at,
         )
-    after_file = _file_digest(db_path)
+    after_file = _file_digest(db_path) if bound_sources_path is None else None
     if after_file != before_file:
         raise InventoryHistoryBackfillError("dry-run changed canonical SQLite bytes")
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -650,6 +843,141 @@ def _build_manifest(
     return core
 
 
+def _bound_quantity_sources(conn, *, runtime_dir, sources, read_admission=None):
+    """Read exact selected bindings; unrelated current books/raw runs are not CAS inputs."""
+    from packages.application.inventory_quantity import resolve_plan_quantities
+    from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
+    result = {}
+    for source in sources:
+        day = str(source["business_date"])
+        if day in result:
+            raise InventoryHistoryBackfillError("duplicate bound quantity date")
+        target = source["ready_target"]
+        row = conn.execute("SELECT plan_json,snapshot_id FROM sheet_vitrina_v1_ready_snapshots "
+            "WHERE bundle_version=? AND as_of_date=?", (target["bundle_version"], target["as_of_date"])).fetchone()
+        if row is None:
+            raise InventoryHistoryBackfillError("bound quantity ready target missing")
+        plan = _deserialize_sheet_vitrina_plan(row[0])
+        binding = dict(plan.metadata or {}).get("fbs_accounting_bindings", {}).get(day)
+        if plan.snapshot_id != row[1] or binding != source["binding"] or binding.get("ready_target") != target:
+            raise InventoryHistoryBackfillError("bound quantity ready binding changed")
+        from packages.application.fbs_accounting_runtime import path as book_path
+        with (read_admission.open(book_path(runtime_dir)) if read_admission else nullcontext(None)) as book_conn:
+            value = resolve_plan_quantities(plan, day=day, runtime_dir=runtime_dir,
+                                            require_closed=True, book_connection=book_conn)
+        if value is None:
+            raise InventoryHistoryBackfillError("typed quantity source required")
+        result[day] = value
+    if not result:
+        raise InventoryHistoryBackfillError("explicit bound quantity sources required")
+    return result
+
+
+def _bound_quantity_watermarks(operands):
+    material = {day: value["source_manifest"] for day, value in sorted(operands.items())}
+    result = {"contract": "inventory_history_bound_source_cas_v1", "sources": material,
+        "scoped_row_counts": {day: len(value["components"]) for day, value in operands.items()}}
+    result["digest"] = _digest(result)
+    return result
+
+
+def _manifest_source_watermarks(conn, *, manifest, runtime_dir, read_admission=None):
+    if manifest.get("bound_quantity_sources"):
+        return _bound_quantity_watermarks(_bound_quantity_sources(conn, runtime_dir=runtime_dir,
+            sources=manifest["bound_quantity_sources"], read_admission=read_admission))
+    return _source_watermarks(conn, date_from=manifest["scope"]["date_from"], date_to=manifest["scope"]["date_to"])
+
+
+def _history_invalidation_state(conn):
+    from packages.application.ready_publication import REVISIONS
+    rows = conn.execute(f"SELECT source_table,revision FROM {REVISIONS} WHERE source_table IN (?,?,?) ORDER BY source_table",
+                        (CAPTURES_TABLE, COMPONENTS_TABLE, FINALIZATIONS_TABLE)).fetchall()
+    result = {str(row[0]): int(row[1]) for row in rows}
+    if set(result) != {CAPTURES_TABLE, COMPONENTS_TABLE, FINALIZATIONS_TABLE}:
+        raise InventoryHistoryBackfillError("history CAS invalidation keys missing")
+    return result
+
+
+def _build_bound_quantity_manifest(conn, *, runtime_dir, sources, storage_manifest,
+                                    deployed_sha, date_from, date_to, created_at, read_admission=None):
+    """Reuse the existing append/CAS/receipt backfill with a typed dated-book adapter."""
+    from packages.application.inventory_quantity import CONTRACT
+    operands = _bound_quantity_sources(conn, runtime_dir=runtime_dir, sources=sources, read_admission=read_admission)
+    dates = sorted(operands)
+    if not date_from or dates != list(_iter_dates(date_from, date_to)):
+        raise InventoryHistoryBackfillError("bound quantity sources must match the explicit closed date window")
+    before = _target_history_state(conn, date_from=date_from, date_to=date_to)
+    watermarks = _bound_quantity_watermarks(operands)
+    generation = _schema_generation(conn, deployed_sha=deployed_sha, storage_manifest=storage_manifest)
+    captures, blockers = [], []
+    roster_by_id = {}
+    partitions = {"date_quality": {"full": 0, "partial": 0, "unavailable": 0},
+        "scope_quality": {"full": 0, "partial": 0, "unavailable": 0},
+        "component_states": {"exact": 0, "exact_zero": 0, "missing": 0, "inapplicable": 0}}
+    for day, value in sorted(operands.items()):
+        for facility in value["facility_roster"]:
+            roster_by_id[facility["facility_id"]] = facility
+        preview = preview_inventory_history_capture(business_date=day, capture_kind="historical_backfill",
+            formula_version=CONTRACT, facility_roster=value["facility_roster"], source_manifest=value["source_manifest"],
+            components=value["components"], captured_at=created_at)
+        counts = {"full": 0, "partial": 0, "unavailable": 0}
+        for scope in _summarize_components(preview["components"]).values():
+            counts[scope["quality"]] += 1
+        for component in preview["components"]:
+            partitions["component_states"][component["state"]] += 1
+        for quality, count in counts.items():
+            partitions["scope_quality"][quality] += count
+        quality = "unavailable" if counts["unavailable"] else "partial" if counts["partial"] else "full"
+        partitions["date_quality"][quality] += 1
+        if quality != "full":
+            blockers.append(day + ": incomplete typed quantity candidate")
+        prior = before["by_date"].get(day)
+        if prior is None:
+            raise InventoryHistoryBackfillError("typed correction requires an exact existing predecessor")
+        captures.append({"business_date": day, **preview, "formula_version": CONTRACT,
+            "finalization_identity": f"backfill:{CONTRACT}:{deployed_sha}:{day}:{preview['capture_id']}",
+            "finalization_contract": {"contract": CONTRACT, "source_refs": value["source_manifest"]["source_refs"]},
+            "before": {**prior, "values_by_scope": _summarize_components(prior["components"])},
+            "proposed_values_by_scope": _summarize_components(preview["components"]), "quality_counts": counts})
+    new = [item for item in captures if item["capture_id"] not in before["capture_ids"]]
+    new_finalizations = [item for item in captures if (item["business_date"], item["capture_id"], item["finalization_identity"]) not in before["finalization_keys"]]
+    effect = {"capture_count": len(captures), "component_count": sum(len(c["components"]) for c in captures),
+        "scope_count": sum(sum(c["quality_counts"].values()) for c in captures),
+        "sku_count": len({row["nm_id"] for c in captures for row in c["components"] if row["nm_id"] is not None}),
+        "inserted_capture_count": len(new), "inserted_component_count": sum(len(c["components"]) for c in new),
+        "inserted_finalization_count": len(new_finalizations),
+        "write_allowlist": [CAPTURES_TABLE, COMPONENTS_TABLE, FINALIZATIONS_TABLE, APPLIES_TABLE],
+        "append_or_supersede_only": True, "ready_snapshots_rewritten": False}
+    from packages.application.ready_publication import REVISIONS
+    effect["write_allowlist"].append(REVISIONS)
+    effect["invalidation_revision_deltas"] = {CAPTURES_TABLE: effect["inserted_capture_count"],
+        COMPONENTS_TABLE: effect["inserted_component_count"], FINALIZATIONS_TABLE: effect["inserted_finalization_count"]}
+    core = {"schema_version": SCHEMA_VERSION, "status": "blocked" if blockers else "ready", "mode": "dry-run",
+        "database_written": False, "created_at": created_at, "deployed_sha": deployed_sha,
+        "schema_generation": generation, "formula_version": CONTRACT,
+        "bound_quantity_sources": sources,
+        "read_admission": read_admission.evidence if read_admission else {},
+        "scope": {"date_from": date_from, "date_to": date_to, "date_count": len(dates), "dates": dates,
+                  "all_dates_before_or_equal_last_closed_day": True},
+        "source_watermarks": watermarks, "facility_roster": list(roster_by_id.values()), "captures": captures,
+        "partitions": partitions, "source_gaps": [], "blockers": blockers,
+        "pre_change": {"target_digest": before["digest"], "invalidation_revisions": _history_invalidation_state(conn), "capture_count": before["capture_count"],
+            "component_count": before["component_count"], "finalization_count": before["finalization_count"]},
+        "expected_effect": effect,
+        "non_target_invariants": {"source_watermarks_digest": watermarks["digest"],
+            "source_scoped_row_counts": watermarks["scoped_row_counts"], "source_ledgers_written": False,
+            "current_book_pointer_written": False, "ready_written": False},
+        "recovery": {"restore": "append-only forward finalization with exact predecessor CAS; known-bad marker remains"}}
+    qualification = {"contract": "sheet_vitrina_v1_inventory_history_material_qualification_v1",
+        **{key: core[key] for key in ("deployed_sha", "schema_generation", "scope", "expected_effect", "partitions", "non_target_invariants")},
+        "source_watermarks_digest": watermarks["digest"], "target_history_digest": before["digest"],
+        "facility_roster_revision": _digest(core["facility_roster"]),
+        "capture_identities": [{key: item[key] for key in ("business_date", "capture_id", "source_digest", "finalization_identity")} for item in captures]}
+    core.update(material_qualification=qualification, material_qualification_digest=_digest(qualification))
+    core["plan_fingerprint"] = _digest(core)
+    return core
+
+
 def _load_exact_backfill_manifest(
     *,
     manifest_path: Path,
@@ -718,6 +1046,54 @@ def _load_exact_backfill_manifest(
     return manifest, actual_manifest_sha256
 
 
+
+def _readback_history_outcomes(manifest, target, visible):
+    """Separate retained operation evidence from the selected snapshot outcome."""
+    fields = ("scope_kind", "scope_key", "nm_id", "component_kind", "component_id",
+              "component_label", "state", "quantity", "source_revision", "source_digest", "source_watermark")
+    def material(rows):
+        return sorted([{key: row.get(key) for key in fields} for row in rows],
+                      key=lambda row: (row["scope_key"], row["component_kind"], row["component_id"]))
+    captures = {row["capture_id"]: row for row in target["evidence"]["captures"]}
+    operation, selected = {}, {}
+    matches = True
+    for item in manifest["captures"]:
+        day, capture_id = item["business_date"], item["capture_id"]
+        retained = captures.get(capture_id)
+        components = [row for row in target["evidence"]["components"] if row["capture_id"] == capture_id]
+        finals = [row for row in target["evidence"]["finalizations"]
+                  if (row["business_date"], row["capture_id"], row["finalization_identity"])
+                  == (day, capture_id, item["finalization_identity"])]
+        if (retained is None or retained["source_digest"] != item["source_digest"]
+                or material(components) != material(item["components"]) or len(finals) != 1):
+            raise InventoryHistoryBackfillError("immutable operation history evidence mismatch")
+        final = finals[0]
+        operation[day] = {key: final[key] for key in
+            ("capture_id", "finalization_id", "finalization_identity", "finalization_digest")}
+        operation[day].update(source_digest=item["source_digest"], components=material(components))
+        dated = visible.get("dates", {}).get(day, {})
+        current = target["by_date"].get(day, {})
+        current_capture = captures.get(current.get("capture_id"), {})
+        if any(dated.get(key) != current.get(key) for key in
+               ("capture_id", "finalization_id", "finalization_digest")) or dated.get("source_digest") != current_capture.get("source_digest"):
+            raise InventoryHistoryBackfillError("visible selected history identity drifted")
+        values = {scope_key: {"WB": {key: scope["wb"][key] for key in ("state", "value")},
+                  **{fid: {key: value[key] for key in ("state", "value")}
+                     for fid, value in scope["facilities"].items()}}
+                  for scope_key, scope in dated.get("scopes", {}).items()}
+        expected_values = {key: value["component_states"] for key, value in _summarize_components(item["components"]).items()}
+        date_matches = (dated.get("capture_id") == capture_id and dated.get("finalization_digest") == final["finalization_digest"])
+        if date_matches and values != expected_values:
+            raise InventoryHistoryBackfillError("visible exact operation quantities or states drifted")
+        matches = matches and date_matches
+        selected[day] = {key: dated.get(key) for key in ("capture_id", "source_digest", "finalization_id", "finalization_digest")}
+        selected[day].update(matches_operation=date_matches, values_by_scope=values)
+    return {"operation_receipt": {"status": "verified", "dates": operation},
+            "current_visible": {"status": "matches_operation" if matches else "superseded",
+                                "matches_operation": matches, "consistency": "one_operational_ro_snapshot",
+                                "target_history_digest": target["digest"], "dates": selected}}
+
+
 def _readback_manifest(
     *,
     db_path: Path,
@@ -726,6 +1102,7 @@ def _readback_manifest(
     expected_manifest_sha256: str,
     deployed_sha: str,
     deployed_sha_file: Path,
+    read_admission=None,
 ) -> dict[str, Any]:
     manifest, actual_manifest_sha256 = _load_exact_backfill_manifest(
         manifest_path=manifest_path,
@@ -742,17 +1119,13 @@ def _readback_manifest(
         raise InventoryHistoryBackfillError(
             "canonical operational generation changed before readback"
         )
-    with _query_only_connection(db_path) as conn:
+    with _query_only_connection(db_path, read_admission=read_admission) as conn:
         generation = _schema_generation(
             conn,
             deployed_sha=deployed_sha,
             storage_manifest=storage_manifest,
         )
-        watermarks = _source_watermarks(
-            conn,
-            date_from=str(scope["date_from"]),
-            date_to=str(scope["date_to"]),
-        )
+        watermarks = _manifest_source_watermarks(conn, manifest=manifest, runtime_dir=store_registry.runtime_dir, read_admission=read_admission)
         target = _target_history_state(
             conn,
             date_from=str(scope["date_from"]),
@@ -762,37 +1135,41 @@ def _readback_manifest(
             f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
             (actual_manifest_sha256,),
         ).fetchall()
+        observed_invalidation = _history_invalidation_state(conn) if manifest.get("bound_quantity_sources") else None
         total_apply_count = int(
             conn.execute(f"SELECT COUNT(*) FROM {APPLIES_TABLE}").fetchone()[0]
         )
-    if generation != dict(manifest["schema_generation"]):
-        raise InventoryHistoryBackfillError("schema/generation changed at readback")
-    if watermarks["digest"] != str(manifest["source_watermarks"]["digest"]):
-        raise InventoryHistoryBackfillError("material source CAS changed at readback")
-    if len(apply_rows) != 1:
-        raise InventoryHistoryBackfillError("exact apply receipt is missing or ambiguous")
-    reconciliation = json.loads(str(apply_rows[0][0]))
-    if str(reconciliation.get("target_digest_after") or "") != str(
-        target["digest"]
-    ):
-        raise InventoryHistoryBackfillError(
-            "target history digest does not match committed reconciliation"
+        if generation != dict(manifest["schema_generation"]):
+            raise InventoryHistoryBackfillError("schema/generation changed at readback")
+        if watermarks["digest"] != str(manifest["source_watermarks"]["digest"]):
+            raise InventoryHistoryBackfillError("material source CAS changed at readback")
+        if len(apply_rows) != 1:
+            raise InventoryHistoryBackfillError("exact apply receipt is missing or ambiguous")
+        reconciliation = json.loads(str(apply_rows[0][0]))
+        expected_effect = dict(manifest["expected_effect"])
+        if observed_invalidation is not None:
+            before_revisions = reconciliation["invalidation_revisions_before"]
+            after_revisions = reconciliation["invalidation_revisions_after"]
+            if ({key: after_revisions[key] - value for key, value in before_revisions.items()}
+                    != expected_effect["invalidation_revision_deltas"]
+                    or any(observed_invalidation[key] < value for key, value in after_revisions.items())):
+                raise InventoryHistoryBackfillError("history CAS invalidation readback mismatch")
+        for field in (
+            "inserted_capture_count",
+            "inserted_component_count",
+            "inserted_finalization_count",
+        ):
+            if int(reconciliation.get(field, -1)) != int(expected_effect[field]):
+                raise InventoryHistoryBackfillError(
+                    f"exact apply reconciliation mismatch: {field}"
+                )
+        visible = read_inventory_history_window(
+            db_path,
+            dates=list(scope["dates"]),
+            current_date="",
+            connection=conn,
         )
-    expected_effect = dict(manifest["expected_effect"])
-    for field in (
-        "inserted_capture_count",
-        "inserted_component_count",
-        "inserted_finalization_count",
-    ):
-        if int(reconciliation.get(field, -1)) != int(expected_effect[field]):
-            raise InventoryHistoryBackfillError(
-                f"exact apply reconciliation mismatch: {field}"
-            )
-    visible = read_inventory_history_window(
-        db_path,
-        dates=list(scope["dates"]),
-        current_date="",
-    )
+        outcomes = _readback_history_outcomes(manifest, target, visible)
     visible_dates = dict(visible.get("dates") or {})
     full_dates = partial_dates = unavailable_dates = 0
     for business_date in list(scope["dates"]):
@@ -817,14 +1194,15 @@ def _readback_manifest(
         "partial": partial_dates,
         "unavailable": unavailable_dates,
     }
-    if actual_quality != {key: int(expected_quality[key]) for key in actual_quality}:
+    if outcomes["current_visible"]["matches_operation"] and actual_quality != {key: int(expected_quality[key]) for key in actual_quality}:
         raise InventoryHistoryBackfillError("visible history quality partition drifted")
     if len(visible_dates) != int(scope["date_count"]):
         raise InventoryHistoryBackfillError("visible history date coverage is incomplete")
     return {
         **reconciliation,
         "mode": "query-only-readback",
-        "status": "reconciled",
+        "status": "reconciled" if outcomes["current_visible"]["matches_operation"] else "superseded",
+        **outcomes,
         "database_written": False,
         "manifest_path": str(manifest_path),
         "manifest_sha256": actual_manifest_sha256,
@@ -841,6 +1219,8 @@ def _readback_manifest(
         "visible_history_quality": actual_quality,
         "non_target_preserved": bool(reconciliation.get("non_target_preserved")),
         "query_only": True,
+        "retry_apply_allowed": False,
+        "original_apply_read_admission": manifest.get("read_admission", {}),
     }
 
 
@@ -855,6 +1235,7 @@ def _apply_manifest(
     deployed_sha_file: Path,
     approval_reference: str,
     applied_at: str,
+    read_admission=None,
 ) -> dict[str, Any]:
     manifest, actual_manifest_sha256 = _load_exact_backfill_manifest(
         manifest_path=manifest_path,
@@ -867,7 +1248,7 @@ def _apply_manifest(
         expected_deployed_sha=deployed_sha,
         deployed_sha_file=deployed_sha_file,
     )
-    with _query_only_connection(db_path) as conn:
+    with _query_only_connection(db_path, read_admission=read_admission) as conn:
         already = (
             conn.execute(
                 f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
@@ -888,7 +1269,7 @@ def _apply_manifest(
     storage_manifest = store_registry.load(require_files=True)
     if store_registry.resolve("operational", manifest=storage_manifest) != db_path:
         raise InventoryHistoryBackfillError("canonical operational generation changed after dry-run")
-    with _query_only_connection(db_path) as conn:
+    with _query_only_connection(db_path, read_admission=read_admission) as conn:
         generation = _schema_generation(
             conn,
             deployed_sha=deployed_sha,
@@ -896,11 +1277,7 @@ def _apply_manifest(
         )
         if generation != dict(manifest["schema_generation"]):
             raise InventoryHistoryBackfillError("schema/generation changed after dry-run")
-        watermarks = _source_watermarks(
-            conn,
-            date_from=str(scope["date_from"]),
-            date_to=str(scope["date_to"]),
-        )
+        watermarks = _manifest_source_watermarks(conn, manifest=manifest, runtime_dir=store_registry.runtime_dir, read_admission=read_admission)
         if watermarks["digest"] != str(manifest["source_watermarks"]["digest"]):
             raise InventoryHistoryBackfillError("source watermarks changed after dry-run")
         before = _target_history_state(
@@ -968,11 +1345,7 @@ def _apply_manifest(
             deployed_sha=deployed_sha,
             storage_manifest=transaction_storage_manifest,
         )
-        locked_watermarks = _source_watermarks(
-            conn,
-            date_from=str(scope["date_from"]),
-            date_to=str(scope["date_to"]),
-        )
+        locked_watermarks = _manifest_source_watermarks(conn, manifest=manifest, runtime_dir=store_registry.runtime_dir, read_admission=read_admission)
         locked_before = _target_history_state(
             conn,
             date_from=str(scope["date_from"]),
@@ -990,13 +1363,14 @@ def _apply_manifest(
             raise InventoryHistoryBackfillError(
                 "target history changed before the write transaction"
             )
+        invalidation_before = _history_invalidation_state(conn) if manifest.get("bound_quantity_sources") else None
         for item in manifest["captures"]:
             capture = append_inventory_history_capture(
                 conn,
                 business_date=str(item["business_date"]),
                 capture_kind="historical_backfill",
-                formula_version=FORMULA_VERSION,
-                facility_roster=manifest["facility_roster"],
+                formula_version=item.get("formula_version", FORMULA_VERSION),
+                facility_roster=item.get("facility_roster", manifest["facility_roster"]),
                 source_manifest=item["source_manifest"],
                 components=item["components"],
                 captured_at=str(manifest["created_at"]),
@@ -1013,6 +1387,7 @@ def _apply_manifest(
                 capture_id=str(capture["capture_id"]),
                 finalization_identity=str(item["finalization_identity"]),
                 finalized_at=applied_at,
+                expected_predecessor=item.get("before", {}).get("finalization_digest"),
                 provenance={
                     "manifest_sha256": actual_manifest_sha256,
                     "approval_reference": approval_reference,
@@ -1040,7 +1415,14 @@ def _apply_manifest(
             date_from=str(scope["date_from"]),
             date_to=str(scope["date_to"]),
         )
+        invalidation_after = _history_invalidation_state(conn) if invalidation_before is not None else None
+        if invalidation_before is not None:
+            deltas = {key: invalidation_after[key] - value for key, value in invalidation_before.items()}
+            if deltas != expected_effect["invalidation_revision_deltas"]:
+                raise InventoryHistoryBackfillError("history CAS invalidation delta mismatch")
         reconciliation = {
+            "invalidation_revisions_before": invalidation_before,
+            "invalidation_revisions_after": invalidation_after,
             "schema_version": SCHEMA_VERSION,
             "status": "reconciled",
             "manifest_sha256": actual_manifest_sha256,
@@ -1094,23 +1476,25 @@ def _apply_manifest(
     readback_storage_manifest = store_registry.load(require_files=True)
     if store_registry.resolve("operational", manifest=readback_storage_manifest) != db_path:
         raise InventoryHistoryBackfillError("canonical operational generation changed after apply")
-    with _query_only_connection(db_path) as readback:
-        readback_generation = _schema_generation(
-            readback,
-            deployed_sha=deployed_sha,
-            storage_manifest=readback_storage_manifest,
-        )
-        if readback_generation != dict(manifest["schema_generation"]):
-            raise InventoryHistoryBackfillError("schema/generation changed after apply")
-        audit = readback.execute(
-            f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
-            (actual_manifest_sha256,),
-        ).fetchone()
-        current_watermarks = _source_watermarks(
-            readback,
-            date_from=str(scope["date_from"]),
-            date_to=str(scope["date_to"]),
-        )
+    try:
+        with _query_only_connection(db_path, read_admission=read_admission) as readback:
+            readback_generation = _schema_generation(
+                readback,
+                deployed_sha=deployed_sha,
+                storage_manifest=readback_storage_manifest,
+            )
+            if readback_generation != dict(manifest["schema_generation"]):
+                raise InventoryHistoryBackfillError("schema/generation changed after apply")
+            audit = readback.execute(
+                f"SELECT reconciliation_json FROM {APPLIES_TABLE} WHERE manifest_hash=?",
+                (actual_manifest_sha256,),
+            ).fetchone()
+            current_watermarks = _manifest_source_watermarks(readback, manifest=manifest,
+                runtime_dir=store_registry.runtime_dir, read_admission=read_admission)
+    except Exception as exc:
+        return {**reconciliation, "mode": "apply", "status": "committed_readback_pending",
+                "database_written": True, "idempotent_noop": False, "retry_apply_allowed": False,
+                "readback_error": str(exc), "manifest_sha256": actual_manifest_sha256}
     if audit is None:
         raise InventoryHistoryBackfillError("post-commit apply audit readback is missing")
     if current_watermarks["digest"] != watermarks["digest"]:
@@ -1233,6 +1617,9 @@ def _ready_wb_history(
                 blockers.append(
                     f"ready date/header mismatch: {row['snapshot_id']}/{business_date}"
                 )
+                continue
+            if dict(plan.get("metadata") or {}).get("fbs_accounting_bindings", {}).get(business_date):
+                blockers.append(f"typed bound quantity source required: {row['snapshot_id']}/{business_date}")
                 continue
             column = header_positions[0]
             scopes: dict[str, int | None] = {}
@@ -2007,6 +2394,7 @@ def _target_history_state(
     for item in finalizations:
         by_date[str(item["business_date"])] = {
             "capture_id": str(item["capture_id"]),
+            "finalization_id": str(item["finalization_id"]),
             "finalization_digest": str(item["finalization_digest"]),
             "finalization_identity": str(item["finalization_identity"]),
             "components": by_capture.get(str(item["capture_id"]), []),
@@ -2239,7 +2627,11 @@ def _require_evidence_outside_repo(evidence_dir: Path) -> None:
 
 
 @contextmanager
-def _query_only_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
+def _query_only_connection(db_path: Path, *, read_admission=None) -> Iterator[sqlite3.Connection]:
+    if read_admission is not None:
+        with read_admission.open(db_path) as conn:
+            yield conn
+        return
     conn = sqlite3.connect(
         f"file:{db_path.resolve().as_posix()}?mode=ro",
         uri=True,
@@ -2247,6 +2639,7 @@ def _query_only_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
+    conn.execute("BEGIN")
     try:
         yield conn
     finally:
@@ -2320,6 +2713,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--date-to")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--readback", action="store_true")
+    parser.add_argument("--bound-sources", type=Path)
+    parser.add_argument("--maintenance-window-id")
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--approval-reference")
@@ -2340,6 +2735,7 @@ def main() -> int:
             date_from=args.date_from,
             date_to=args.date_to,
             manifest_path=args.manifest,
+            bound_sources_path=args.bound_sources, maintenance_window_id=args.maintenance_window_id,
             expected_manifest_sha256=args.manifest_sha256,
             approval_reference=args.approval_reference,
             readback=bool(args.readback),

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import hashlib
 from io import BytesIO
 import json
 import os
@@ -13,6 +14,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import time
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
@@ -20,6 +22,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from apps.fbs_snapshot_cost_smoke import capture  # noqa: E402
+from packages.application import fbs_accounting_runtime  # noqa: E402
+from packages.application.canonical_wb_cost_resolver import (  # noqa: E402
+    CanonicalChannelCostSnapshot,
+    resolve_channel_location_cost,
+)
+from packages.application.fbs_snapshot_cost import (  # noqa: E402
+    close_candidate_period,
+    evaluate_candidate,
+    fingerprint,
+    initialize_candidate,
+)
 from packages.application.partner_report import (  # noqa: E402
     COMMON_EXPENSE_RULE,
     OTHER_DIRECT_ALLOCATED_KEY,
@@ -30,9 +44,14 @@ from packages.application.partner_report import (  # noqa: E402
     PartnerReportError,
     _display_breakdown,
 )
+from packages.application.shared_sku_cost import build_shared_cost_day  # noqa: E402
+from packages.application.wb_finance_weekly import cost_economic_signature  # noqa: E402
 
 WEEK_ONE = date(2026, 7, 6)
 WEEK_TWO = date(2026, 7, 13)
+WEEK_THREE = date(2026, 7, 20)
+WEEK_FOUR = date(2026, 7, 27)
+FOUR_WEEKS = (WEEK_ONE, WEEK_TWO, WEEK_THREE, WEEK_FOUR)
 TARGET_NM = 101101
 OTHER_NM = 202202
 
@@ -49,11 +68,14 @@ def main() -> None:
         _seed_finance(block)
         _seed_ads(block.db_path)
         _assert_server_owned_settings(block)
+        _assert_active_shared_preview_read_path()
+        _assert_preview_missing_schema_error()
         _assert_expense_category_math(block)
         report = _assert_preview(block)
         _assert_workbook(block, report)
         _assert_only_marketing_workbook(block)
         _assert_partial_cost_surface(block)
+        _assert_cost_signature_exact_precision()
         _assert_incomplete_and_stale_states(block)
         _assert_negative_profit_and_validation(block)
         performance = _assert_indexed_performance(block)
@@ -65,6 +87,35 @@ def main() -> None:
         f"raw_scan_ms={performance['raw_scan_ms']}, indexed_preview_ms={performance['indexed_preview_ms']}, "
         f"raw_rows={performance['raw_rows']}"
     )
+
+
+def _assert_cost_signature_exact_precision() -> None:
+    """Per-row display rounding must not mask a material aggregate change."""
+
+    def rows(unit_cost: str) -> list[dict[str, object]]:
+        return [
+            {
+                "nm_id": str(TARGET_NM), "operation_date": "2026-07-07",
+                "channel": "WB", "pool": "FBO", "facility_id": "wb",
+                "fbs_order_id": 0, "source_date": "2026-07-07",
+                "source_quality": "certified", "projection_quality": "exact",
+                "selection_method": "exact", "formula_version": "v1",
+                "movement": "sale", "quantity": 1, "signed_quantity": 1,
+                "unit_cost_rub": "1.0000", "signed_cogs_rub": "1.0000",
+                "economic_unit_cost_rub": unit_cost,
+                "economic_signed_cogs_rub": unit_cost,
+            }
+            for _ in range(1000)
+        ]
+
+    _old, old_signature = cost_economic_signature(rows("1.00000"))
+    new_buckets, new_signature = cost_economic_signature(rows("1.00004"))
+    if old_signature == new_signature or new_buckets[0]["signed_cogs_rub"] != "1000.04":
+        raise AssertionError("economic signature lost an amplified sub-kopeck cost change")
+    mixed = rows("1.00000")[:1] + [{**rows("1.00000")[0], "channel": "FBS", "pool": "FBS", "fbs_order_id": 7}]
+    mixed_buckets, _mixed_signature = cost_economic_signature(mixed)
+    if {item["channel"] for item in mixed_buckets} != {"WB", "FBS"}:
+        raise AssertionError("same-day WB/FBS economics collapsed into one routing bucket")
 
 
 def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
@@ -94,6 +145,312 @@ def _assert_server_owned_settings(block: PartnerReportBlock) -> None:
         ).fetchone()[0]
     if versions != 3 or audit != 3:
         raise AssertionError("settings audit/version provenance mismatch")
+
+
+def _assert_active_shared_preview_read_path() -> None:
+    """Compare old/new reads with four weeks and a published active book."""
+
+    payload = {
+        "nm_id": str(TARGET_NM),
+        "selected_weeks": [week.isoformat() for week in FOUR_WEEKS],
+    }
+    with TemporaryDirectory(prefix="partner-report-active-book-") as raw:
+        block = PartnerReportBlock(Path(raw), seller_id="seller-1")
+        block.ensure_schema()
+        _seed_sources(block.db_path)
+        active_days = _seed_active_shared_book(block.runtime_dir)
+        _seed_finance(block, weeks=FOUR_WEEKS)
+        _seed_ads(block.db_path, weeks=FOUR_WEEKS)
+        block.save_settings(_settings(), actor="operator@example.test")
+        if active_days != 28 or fbs_accounting_runtime.load_shared(block.runtime_dir) is None:
+            raise AssertionError("active shared-cost fixture was not published")
+
+        original_load_shared = fbs_accounting_runtime.load_shared
+        legacy_load_calls = 0
+
+        def observed_legacy_load(runtime_dir: Path):
+            nonlocal legacy_load_calls
+            legacy_load_calls += 1
+            return original_load_shared(runtime_dir)
+
+        # This exactly reconstructs the old request shape: Finance schema,
+        # Partner schema, then a generic preview connection.  The fixture has
+        # an active book, so each call fully unpacks its referenced blobs.
+        legacy = PartnerReportBlock(block.runtime_dir, seller_id=block.seller_id)
+        fbs_accounting_runtime.load_shared = observed_legacy_load
+        try:
+            legacy.ensure_schema()
+            with legacy._connect() as conn:  # noqa: SLF001
+                settings = legacy._load_settings(conn, nm_id=str(TARGET_NM))  # noqa: SLF001
+                legacy_report = legacy._calculate_report(  # noqa: SLF001
+                    conn,
+                    settings=settings,
+                    selected_weeks=payload["selected_weeks"],
+                    finalization=False,
+                )[0]
+        finally:
+            fbs_accounting_runtime.load_shared = original_load_shared
+        if legacy_load_calls != 3 or legacy_report["status"] != "ready":
+            raise AssertionError(
+                f"active-book legacy baseline is invalid: loads={legacy_load_calls}, "
+                f"status={legacy_report['status']}"
+            )
+        dependencies = [
+            detail
+            for week in legacy_report["weeks"]
+            for detail in week["coverage"]["cost"]["daily_rows"]
+        ]
+        if len(dependencies) < 4:
+            raise AssertionError("four-week fixture did not expose cost dependencies")
+        legacy_resolver_builds = 0
+        original_snapshot = CanonicalChannelCostSnapshot.from_connection
+
+        def observed_legacy_snapshot(conn: sqlite3.Connection):
+            nonlocal legacy_resolver_builds
+            legacy_resolver_builds += 1
+            return original_snapshot(conn)
+
+        # Pre-fix each dependency entered the resolver without a snapshot.
+        # Replaying those same cost calls on the fixture records the actual
+        # repeated construction count without a synthetic timing delay.
+        with patch.object(
+            CanonicalChannelCostSnapshot,
+            "from_connection",
+            side_effect=observed_legacy_snapshot,
+        ), legacy._connect() as conn:  # noqa: SLF001
+            shared = legacy.finance.shared_cost_snapshot
+            for detail in dependencies:
+                resolve_channel_location_cost(
+                    conn,
+                    nm_id=str(TARGET_NM),
+                    operation_date=date.fromisoformat(str(detail["operation_date"])),
+                    operation=(
+                        {"deliveryType": "FBS"}
+                        if detail.get("channel") == "FBS"
+                        else None
+                    ),
+                    fbs_order_id=int(detail.get("fbs_order_id") or 0) or None,
+                    shared_cost_snapshot=shared,
+                )
+        if legacy_resolver_builds != len(dependencies):
+            raise AssertionError(
+                "legacy resolver replay no longer builds once per cost dependency: "
+                f"builds={legacy_resolver_builds}, dependencies={len(dependencies)}"
+            )
+
+        preview_load_calls = 0
+        preview_snapshot_calls = 0
+        statements: list[str] = []
+        original_connect = block.store_registry.connect
+        original_snapshot = CanonicalChannelCostSnapshot.from_connection
+
+        def observed_preview_load(runtime_dir: Path):
+            nonlocal preview_load_calls
+            preview_load_calls += 1
+            return original_load_shared(runtime_dir)
+
+        def observed_preview_snapshot(conn: sqlite3.Connection):
+            nonlocal preview_snapshot_calls
+            preview_snapshot_calls += 1
+            return original_snapshot(conn)
+
+        def observed_connect(logical_store: str, **kwargs):
+            if logical_store != "operational":
+                raise AssertionError(f"preview opened unexpected store: {logical_store}")
+            if kwargs.get("mode") != "ro" or kwargs.get("operation") != "partner_report_preview":
+                raise AssertionError(f"preview did not use the dedicated read path: {kwargs}")
+            conn = original_connect(logical_store, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        before = hashlib.sha256(block.db_path.read_bytes()).hexdigest()
+        fbs_accounting_runtime.load_shared = observed_preview_load
+        block.store_registry.connect = observed_connect  # type: ignore[method-assign]
+        writer = sqlite3.connect(block.db_path)
+        try:
+            with patch.object(
+                CanonicalChannelCostSnapshot,
+                "from_connection",
+                side_effect=observed_preview_snapshot,
+            ):
+                writer.execute("BEGIN IMMEDIATE")
+                preview = block.preview(payload)
+        finally:
+            writer.rollback()
+            writer.close()
+            block.store_registry.connect = original_connect  # type: ignore[method-assign]
+            fbs_accounting_runtime.load_shared = original_load_shared
+        if hashlib.sha256(block.db_path.read_bytes()).hexdigest() != before:
+            raise AssertionError("active-book preview changed the operational SQLite file")
+        if preview_load_calls != 1 or preview["status"] != "ready":
+            raise AssertionError(
+                f"active-book preview must be ready after one load, got {preview_load_calls}"
+            )
+        if preview_snapshot_calls != 1:
+            raise AssertionError(
+                "pre-effective shared preview must build one request-local canonical snapshot, "
+                f"got {preview_snapshot_calls}"
+            )
+        if (
+            preview["source_digest"] != legacy_report["source_digest"]
+            or preview["weeks"] != legacy_report["weeks"]
+            or preview["totals"] != legacy_report["totals"]
+        ):
+            raise AssertionError("read-only preview changed four-week figures or provenance")
+        _assert_read_only_statements(statements)
+
+        xlsx_load_calls = 0
+        xlsx_snapshot_calls = 0
+        xlsx_statements: list[str] = []
+
+        def observed_xlsx_load(runtime_dir: Path):
+            nonlocal xlsx_load_calls
+            xlsx_load_calls += 1
+            return original_load_shared(runtime_dir)
+
+        def observed_xlsx_snapshot(conn: sqlite3.Connection):
+            nonlocal xlsx_snapshot_calls
+            xlsx_snapshot_calls += 1
+            return original_snapshot(conn)
+
+        def observed_xlsx_connect(logical_store: str, **kwargs):
+            conn = observed_connect(logical_store, **kwargs)
+            conn.set_trace_callback(xlsx_statements.append)
+            return conn
+
+        before_xlsx = hashlib.sha256(block.db_path.read_bytes()).hexdigest()
+        fbs_accounting_runtime.load_shared = observed_xlsx_load
+        block.store_registry.connect = observed_xlsx_connect  # type: ignore[method-assign]
+        writer = sqlite3.connect(block.db_path)
+        try:
+            with patch.object(
+                CanonicalChannelCostSnapshot,
+                "from_connection",
+                side_effect=observed_xlsx_snapshot,
+            ):
+                writer.execute("BEGIN IMMEDIATE")
+                body, _filename, evidence = block.build_preview_workbook(
+                    payload,
+                    expected_source_digest=preview["source_digest"],
+                )
+        finally:
+            writer.rollback()
+            writer.close()
+            block.store_registry.connect = original_connect  # type: ignore[method-assign]
+            fbs_accounting_runtime.load_shared = original_load_shared
+        if hashlib.sha256(block.db_path.read_bytes()).hexdigest() != before_xlsx:
+            raise AssertionError("preview XLSX changed the operational SQLite file")
+        if (
+            xlsx_load_calls != 1
+            or xlsx_snapshot_calls != 1
+            or evidence["source_digest"] != preview["source_digest"]
+        ):
+            raise AssertionError("preview XLSX did not use one correct active-book snapshot")
+        if body[:2] != b"PK":
+            raise AssertionError("read-only preview XLSX is not a workbook")
+        _assert_read_only_statements(xlsx_statements)
+        _assert_pre_effective_shared_fbs_arguments(block, payload)
+
+
+def _assert_read_only_statements(statements: list[str]) -> None:
+    prohibited = ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "REPLACE")
+    if any(statement.lstrip().upper().startswith(prohibited) for statement in statements):
+        raise AssertionError(f"preview issued DDL/DML: {statements}")
+    if not any(statement.strip().upper() == "BEGIN" for statement in statements):
+        raise AssertionError(f"preview did not pin a read snapshot: {statements}")
+
+
+def _assert_pre_effective_shared_fbs_arguments(
+    block: PartnerReportBlock,
+    payload: dict[str, object],
+) -> None:
+    """The reuse path must retain FBS routing before shared cost starts."""
+
+    expected_digest_by_day: dict[str, str] = {}
+    with sqlite3.connect(block.db_path) as conn:
+        rows = conn.execute(
+            """SELECT week_start,coverage_json FROM wb_finance_weekly_sku_aggregates
+               WHERE seller_id=? AND nm_id=? ORDER BY week_start""",
+            (block.seller_id, str(TARGET_NM)),
+        ).fetchall()
+        for week_start, coverage_text in rows:
+            coverage = json.loads(str(coverage_text))
+            details = coverage["detail_rows"]
+            if str(week_start) == WEEK_ONE.isoformat():
+                details[0]["channel"] = "FBS"
+                for bucket in coverage.get("cost_economic_buckets") or []:
+                    if str(bucket.get("operation_date") or "") == str(details[0]["operation_date"]):
+                        bucket["channel"] = "FBS"
+            for detail in details:
+                expected_digest_by_day[str(detail["operation_date"])] = str(
+                    detail["source_digest"]
+                )
+            conn.execute(
+                """UPDATE wb_finance_weekly_sku_aggregates SET coverage_json=?
+                   WHERE seller_id=? AND week_start=? AND nm_id=?""",
+                (
+                    json.dumps(coverage, ensure_ascii=False, sort_keys=True),
+                    block.seller_id,
+                    str(week_start),
+                    str(TARGET_NM),
+                ),
+            )
+        conn.commit()
+    calls: list[dict[str, object]] = []
+
+    def observed_resolver(_conn: sqlite3.Connection, **kwargs: object) -> dict[str, str]:
+        calls.append(dict(kwargs))
+        operation_day = kwargs["operation_date"]
+        return {
+            "status": "resolved",
+            "source_digest": expected_digest_by_day[operation_day.isoformat()],
+            "formula_version": "canonical_our_cost_channel_location_v2",
+        }
+
+    with patch(
+        "packages.application.partner_report.resolve_channel_location_cost",
+        side_effect=observed_resolver,
+    ):
+        report = block.preview(payload)
+    if report["status"] != "ready":
+        raise AssertionError(f"pre-effective FBS routing fixture was blocked: {report}")
+    fbs_calls = [
+        call for call in calls if call.get("operation") == {"deliveryType": "FBS"}
+    ]
+    if (
+        len(fbs_calls) != 1
+        or fbs_calls[0].get("shared_cost_snapshot") is None
+        or fbs_calls[0].get("snapshot") is None
+    ):
+        raise AssertionError(f"pre-effective FBS resolver arguments regressed: {calls}")
+
+
+def _assert_preview_missing_schema_error() -> None:
+    """Read preview must fail clearly if service initialization is incomplete."""
+
+    with TemporaryDirectory(prefix="partner-report-uninitialized-") as raw:
+        block = PartnerReportBlock(Path(raw), seller_id="seller-1")
+        # Finance is initialized, while the Partner tables are intentionally
+        # absent.  This matches only a partial process startup, never a normal
+        # HTTP server request (which initializes both blocks first).
+        block.finance.ensure_schema()
+        payload = {
+            "nm_id": str(TARGET_NM),
+            "selected_weeks": [WEEK_ONE.isoformat()],
+        }
+        for operation, call in (
+            ("preview", lambda: block.preview(payload)),
+            ("preview XLSX", lambda: block.build_preview_workbook(payload)),
+        ):
+            try:
+                call()
+            except PartnerReportError as exc:
+                if exc.code != "report_unavailable":
+                    raise AssertionError(
+                        f"missing schema had wrong public {operation} error: {exc.code}"
+                    ) from exc
+            else:
+                raise AssertionError(f"missing Partner schema unexpectedly produced {operation}")
 
 
 def _assert_expense_category_math(block: PartnerReportBlock) -> None:
@@ -544,12 +901,110 @@ def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
             (TARGET_NM,),
         )
         conn.commit()
-    stale = block.preview(
+    # A legacy projection with resolver drift may only reuse target period
+    # metrics when capitalization has no global linked-layer dependency.
+    with sqlite3.connect(block.db_path) as conn:
+        stored_coverage, stored_metrics = conn.execute(
+            """SELECT coverage_json,metrics_json FROM wb_finance_weekly_sku_aggregates
+               WHERE nm_id=? AND week_start=?""",
+            (str(TARGET_NM), WEEK_ONE.isoformat()),
+        ).fetchone()
+        linked_coverage = json.loads(str(stored_coverage))
+        linked_metrics = json.loads(str(stored_metrics))
+        linked_coverage.pop("cost_economic_signature", None)
+        linked_coverage.pop("cost_economic_signature_version", None)
+        linked_coverage.pop("cost_economic_buckets", None)
+        linked_coverage["detail_rows"][0]["source_digest"] = "sha256:stale"
+        linked_metrics["capitalization_reconciliation"] = {
+            "lineage": [{"canonical_layer_id": "layer-linked", "wb_supply_id": "s", "nm_id": str(TARGET_NM)}]
+        }
+        conn.execute(
+            """UPDATE wb_finance_weekly_sku_aggregates SET coverage_json=?,metrics_json=?
+               WHERE nm_id=? AND week_start=?""",
+            (json.dumps(linked_coverage), json.dumps(linked_metrics), str(TARGET_NM), WEEK_ONE.isoformat()),
+        )
+        conn.commit()
+    linked_stale = block.preview(
         {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
     )
-    if not any(item["code"] == "finance_sku_aggregate_cost_stale" for item in stale["blockers"]):
-        raise AssertionError(f"canonical cost correction did not invalidate aggregate: {stale}")
-    block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
+    if not any(item["code"] == "finance_capitalization_projection_stale" for item in linked_stale["blockers"]):
+        raise AssertionError("legacy linked capitalization drift was not blocked")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """UPDATE wb_finance_weekly_sku_aggregates SET coverage_json=?,metrics_json=?
+               WHERE nm_id=? AND week_start=?""",
+            (stored_coverage, stored_metrics, str(TARGET_NM), WEEK_ONE.isoformat()),
+        )
+        conn.commit()
+    with sqlite3.connect(block.db_path) as conn:
+        saved_cost = conn.execute(
+            """SELECT cutover_id,quantity,wac_rub,capital_rub,quality,provenance_json,fingerprint,created_at
+               FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        ).fetchone()
+        conn.execute(
+            """DELETE FROM sheet_vitrina_v1_warehouse_wb_daily_cost
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        )
+        conn.commit()
+    missing_cost = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if not any(item["code"] == "partner_cost_coverage_incomplete" for item in missing_cost["blockers"]):
+        raise AssertionError("missing current cost was masked during legacy rehydration")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost(
+                   cutover_id,as_of_date,nm_id,quantity,wac_rub,capital_rub,quality,
+                   provenance_json,fingerprint,created_at
+               ) VALUES(?,'2026-07-07',?,?,?,?,?,?,?,?)""",
+            (saved_cost[0], TARGET_NM, *saved_cost[1:]),
+        )
+        conn.commit()
+    provenance_only = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if provenance_only["status"] != "ready":
+        raise AssertionError(
+            f"lineage-only cost fingerprint change blocked an identical economic projection: {provenance_only['blockers']}"
+        )
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+               SET wac_rub='90000',capital_rub='900000'
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        )
+        conn.commit()
+    economic_change = block.preview(
+        {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
+    )
+    if (
+        economic_change["status"] != "ready"
+        or economic_change["weeks"][0]["values"]["cogs"] != "90000.0000"
+        or economic_change["source_digest"] == provenance_only["source_digest"]
+    ):
+        raise AssertionError("cost rehydration did not replace changed economic COGS")
+    try:
+        block.build_preview_workbook(
+            {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]},
+            expected_source_digest=str(provenance_only["source_digest"]),
+        )
+    except PartnerReportError as exc:
+        if exc.code != "preview_source_digest_changed":
+            raise
+    else:
+        raise AssertionError("Excel accepted a preview before economic cost change")
+    with sqlite3.connect(block.db_path) as conn:
+        conn.execute(
+            """UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost
+               SET wac_rub='83837',capital_rub='838370'
+               WHERE as_of_date='2026-07-07' AND nm_id=?""",
+            (TARGET_NM,),
+        )
+        conn.commit()
     with sqlite3.connect(block.db_path) as conn:
         row = conn.execute(
             """SELECT coverage_json FROM wb_finance_weekly_sku_aggregates
@@ -571,13 +1026,8 @@ def _assert_incomplete_and_stale_states(block: PartnerReportBlock) -> None:
     formula_stale = block.preview(
         {"nm_id": str(TARGET_NM), "selected_weeks": [WEEK_ONE.isoformat()]}
     )
-    if not any(
-        item["code"] == "finance_sku_aggregate_cost_stale"
-        for item in formula_stale["blockers"]
-    ):
-        raise AssertionError(
-            f"old canonical cost formula remained ready: {formula_stale}"
-        )
+    if formula_stale["status"] != "ready":
+        raise AssertionError("legacy detail provenance is not an economic freshness input")
     block.finance.recalculate_week(WEEK_ONE, WEEK_ONE + timedelta(days=6))
 
 
@@ -698,6 +1148,8 @@ def _seed_sources(db_path: Path) -> None:
             INSERT INTO sheet_vitrina_v1_warehouse_wb_daily_cost VALUES
                 ('warehouse_functional_cutover_v1','2026-07-07',101101,'10','83837','838370','certified','{}','sha256:target-jul7','2026-07-07T00:00:00Z'),
                 ('warehouse_functional_cutover_v1','2026-07-14',101101,'10','100000','1000000','certified','{}','sha256:target-jul14','2026-07-14T00:00:00Z'),
+                ('warehouse_functional_cutover_v1','2026-07-21',101101,'10','100000','1000000','certified','{}','sha256:target-jul21','2026-07-21T00:00:00Z'),
+                ('warehouse_functional_cutover_v1','2026-07-28',101101,'10','100000','1000000','certified','{}','sha256:target-jul28','2026-07-28T00:00:00Z'),
                 ('warehouse_functional_cutover_v1','2026-07-14',202202,'10','50000','500000','certified','{}','sha256:other-jul14','2026-07-14T00:00:00Z');
             CREATE TABLE temporal_source_slot_snapshots(
                 source_key TEXT NOT NULL,snapshot_date TEXT NOT NULL,
@@ -710,7 +1162,11 @@ def _seed_sources(db_path: Path) -> None:
         conn.commit()
 
 
-def _seed_finance(block: PartnerReportBlock) -> None:
+def _seed_finance(
+    block: PartnerReportBlock,
+    *,
+    weeks: tuple[date, ...] = (WEEK_ONE, WEEK_TWO),
+) -> None:
     block.finance.ingest_week(
         WEEK_ONE,
         WEEK_ONE + timedelta(days=6),
@@ -732,6 +1188,21 @@ def _seed_finance(block: PartnerReportBlock) -> None:
         WEEK_TWO + timedelta(days=6),
         _week_two_finance_rows(),
     )
+    for offset, week in enumerate(weeks[2:], start=9):
+        block.finance.ingest_week(
+            week,
+            week + timedelta(days=6),
+            [
+                _sale(
+                    offset,
+                    week + timedelta(days=1),
+                    TARGET_NM,
+                    revenue="150000",
+                    for_pay="110000",
+                    acquiring="4000",
+                )
+            ],
+        )
 
 
 def _week_two_finance_rows() -> list[dict]:
@@ -756,9 +1227,16 @@ def _week_two_finance_rows() -> list[dict]:
     ]
 
 
-def _seed_ads(db_path: Path) -> None:
+def _seed_ads(
+    db_path: Path,
+    *,
+    weeks: tuple[date, ...] = (WEEK_ONE, WEEK_TWO),
+) -> None:
     with sqlite3.connect(db_path) as conn:
-        for week, total, nested in ((WEEK_ONE, Decimal("30904"), False), (WEEK_TWO, Decimal("10000"), True)):
+        for week, total, nested in (
+            (week, Decimal("30904") if index == 0 else Decimal("10000"), index == 1)
+            for index, week in enumerate(weeks)
+        ):
             for offset in range(7):
                 day = (week + timedelta(days=offset)).isoformat()
                 value = total if offset == 0 else Decimal("0")
@@ -779,6 +1257,89 @@ def _seed_ads(db_path: Path) -> None:
                     ),
                 )
         conn.commit()
+
+
+def _seed_active_shared_book(
+    runtime_dir: Path,
+    *,
+    effective_date: date = WEEK_FOUR + timedelta(days=7),
+) -> int:
+    """Publish a real four-week active book so load_shared unpacks all sections."""
+
+    days = [effective_date + timedelta(days=offset) for offset in range(28)]
+
+    def image(day: date) -> dict:
+        result = capture(day.isoformat(), quantity="10", wac="100")
+        result["quantity_snapshot"]["rows"][0]["nm_id"] = TARGET_NM
+        result["quantity_snapshot"]["digest"] = fingerprint(
+            result["quantity_snapshot"]["rows"]
+        )
+        result["baseline_costs"]["rows"][0]["nm_id"] = TARGET_NM
+        result["source_digest"] = fingerprint(result)
+        return result
+
+    state = initialize_candidate(image(days[0]))
+    periods: list[dict] = []
+    for day in days:
+        if day != days[0]:
+            state = evaluate_candidate(state, image(day))
+            state = close_candidate_period(
+                state,
+                day.isoformat(),
+                today=(day + timedelta(days=1)).isoformat(),
+            )
+        source = {
+            "contract": "shared_sku_cost_wb_source_v1",
+            "business_date": day.isoformat(),
+            "complete": True,
+            "version_id": "fixture-wb-" + day.isoformat(),
+            "rows": [
+                {
+                    "nm_id": TARGET_NM,
+                    "quantity": "10",
+                    "capital_rub": "1000",
+                }
+            ],
+        }
+        source["source_digest"] = fingerprint(source)
+        periods.append(build_shared_cost_day(state, source, day.isoformat()))
+    indexed = {str(period["business_date"]): period for period in periods}
+    book = {
+        "schema": fbs_accounting_runtime.SCHEMA,
+        "active": True,
+        "effective_date": effective_date.isoformat(),
+        "shared_days": indexed,
+        "wb_days": {
+            day: {"business_date": day, "rows": indexed[day]["rows"]}
+            for day in indexed
+        },
+        "retained_days": {
+            day: {"business_date": day, "status": indexed[day]["status"]}
+            for day in indexed
+        },
+        "presentations": {
+            day: {"business_date": day, "version_id": indexed[day]["version_id"]}
+            for day in indexed
+        },
+        "state": {
+            "baseline": {"fixture": "active-four-week-book"},
+            "periods": {
+                day: {"status": indexed[day]["status"], "rows": indexed[day]["rows"]}
+                for day in indexed
+            },
+            "observed_documents": {
+                "fixture-" + day: {"business_date": day, "affects_fbs": False}
+                for day in indexed
+            },
+        },
+    }
+    fbs_accounting_runtime._save_book(  # noqa: SLF001
+        runtime_dir,
+        book,
+        expected=None,
+        operation_id="partner-report-active-book-fixture",
+    )
+    return len(indexed)
 
 
 def _sale(

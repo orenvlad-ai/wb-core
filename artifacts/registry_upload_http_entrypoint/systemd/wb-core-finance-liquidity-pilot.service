@@ -1,0 +1,17 @@
+[Unit]
+Description=WB Core Finance Liquidity Isolated TEST Pilot
+After=network.target
+Wants=network.target
+ConditionPathExists=/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/wb-core-runtime/app
+EnvironmentFile=/opt/wb-ai/.env
+EnvironmentFile=/opt/wb-core-runtime/app/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env
+ExecStart=/usr/bin/env PYTHONUNBUFFERED=1 /usr/bin/python3 /opt/wb-core-runtime/app/apps/finance_liquidity_http.py --db /opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3 --host 127.0.0.1 --port 8767 --runtime-dir /opt/wb-core-runtime/state
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

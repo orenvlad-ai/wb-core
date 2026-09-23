@@ -1,13 +1,46 @@
 {
   "schema": "wb-core.check-map/v1",
   "command_dependencies": {
+    "ads_partial_imports": {
+      "scripts": [
+        "apps/ads_partial_adapter_smoke.py",
+        "apps/ads_partial_publication_smoke.py"
+      ],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "buyout_percent_imports": {
+      "scripts": ["apps/sheet_vitrina_v1_buyout_percent_smoke.py"],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "buyout_confirmation_recovery_imports": {
+      "scripts": [
+        "apps/sheet_vitrina_v1_buyout_confirmation_recovery.py",
+        "apps/sheet_vitrina_v1_buyout_confirmation_recovery_smoke.py"
+      ],
+      "commands": [],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "recovery_http_imports": {
       "scripts": ["apps/warehouse_recovery_policy_http_smoke.py"],
       "commands": [],
       "pip": ["playwright==1.58.0"]
     },
+    "finance_liquidity_auth_imports": {
+      "scripts": [
+        "apps/finance_liquidity_auth_smoke.py",
+        "apps/finance_liquidity_browser_smoke.py",
+        "apps/finance_liquidity_http_smoke.py",
+        "apps/finance_liquidity_integration_smoke.py"
+      ],
+      "commands": [],
+      "pip": ["apsw==3.53.4.0"]
+    },
     "playwright_chromium": {
       "scripts": [
+        "apps/finance_liquidity_browser_smoke.py",
+        "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
@@ -249,14 +282,33 @@
       ],
       "pip": ["openpyxl==3.1.5"]
     },
+    "buyout_percent": {
+      "patterns": [
+        "apps/sheet_vitrina_v1_buyout_percent_smoke.py",
+        "packages/application/sheet_vitrina_v1_buyout_percent.py"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_buyout_percent_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "buyout_confirmation_recovery": {
+      "patterns": [
+        "apps/sheet_vitrina_v1_buyout_confirmation_recovery.py",
+        "apps/sheet_vitrina_v1_buyout_confirmation_recovery_smoke.py"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_buyout_confirmation_recovery_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "supplier_source_operations": {
       "patterns": [
         "apps/supplier_confirmation_flows_smoke.py",
+        "apps/supplier_preparation_intents_smoke.py",
+        "packages/application/supplier_preparation_intents.py",
         "packages/application/supplier_shipments.py",
         "packages/application/registry_upload_db_backed_runtime.py",
         "packages/application/registry_upload_http_entrypoint.py"
       ],
       "commands": [
+        ["python3", "apps/supplier_preparation_intents_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_supplier_shipments_http_smoke.py"],
         ["python3", "apps/supplier_confirmation_flows_smoke.py"],
         ["python3", "apps/warehouse_ff_acceptance_form_smoke.py"]
@@ -449,10 +501,39 @@
         "packages/**/*finance*.py",
         "packages/**/*cost*.py"
       ],
+      "exclude_patterns": [
+        "apps/finance_liquidity*.py",
+        "packages/**/finance_liquidity*.py",
+        "packages/**/finance_liquidity/**"
+      ],
       "commands": [
         ["python3", "apps/wb_finance_weekly_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
+    },
+    "finance_liquidity": {
+      "patterns": [
+        "apps/finance_liquidity*.py",
+        "packages/contracts/finance_liquidity*.py",
+        "packages/domain/finance_liquidity/**",
+        "packages/application/finance_liquidity*.py",
+        "packages/adapters/finance_liquidity*.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html",
+        "artifacts/finance_liquidity_cash/**",
+        "docs/modules/60_MODULE__FINANCE_LIQUIDITY.md",
+        "docs/runbooks/finance_liquidity_cash_dormant_release.md"
+      ],
+      "commands": [
+        ["python3", "apps/finance_liquidity_contract_smoke.py"],
+        ["python3", "apps/finance_liquidity_auth_smoke.py"],
+        ["python3", "apps/finance_liquidity_cash_smoke.py"],
+        ["python3", "apps/finance_liquidity_http_smoke.py"],
+        ["python3", "apps/finance_liquidity_browser_smoke.py"],
+        ["python3", "apps/finance_liquidity_integration_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
     "warehouse": {
       "patterns": [

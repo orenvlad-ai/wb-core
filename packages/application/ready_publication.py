@@ -208,7 +208,8 @@ def check_build_inputs(conn, inputs):
     if inputs.get("authority") is not None:
         check_pinned_authority(conn, inputs["authority"])
     if inputs.get("conflicts"):
-        raise ReadyPublicationConflict("ready_source_changed_during_build")
+        raise ReadyPublicationConflict("ready_source_changed_during_build:" + ",".join(
+            sorted(set(inputs["conflicts"]))))
     check_material(conn, inputs["material"])
     if [list(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date")] != inputs["history"]:
         raise ReadyPublicationConflict("ready_history_changed_during_build")

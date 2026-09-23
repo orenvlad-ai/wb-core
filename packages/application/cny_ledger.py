@@ -97,6 +97,9 @@ class CnyLedgerBlock:
         documents = [self._with_download_path(item) for item in self.runtime.list_cny_documents()]
         operations = self.runtime.list_cny_ledger_operations()
         replay_state = self.runtime.load_cny_ledger_replay_state() or {}
+        from packages.application.cny_preparation_intents import read_account_request, _outcome
+        request = read_account_request(self.runtime)
+        continuation = _outcome(request) if request else {}
         return {
             "contract_name": CNY_LEDGER_CONTRACT_NAME,
             "status": "ok",
@@ -111,6 +114,7 @@ class CnyLedgerBlock:
             "ledger_operations": operations,
             "replay": replay_state,
             "diagnostics": _ledger_diagnostics(operations, replay_state),
+            "account_preparation": continuation,
             "empty_state": "Загрузите документы конвертации или задайте opening balance" if not documents else "",
         }
 
@@ -516,8 +520,20 @@ class CnyLedgerBlock:
         return document
 
     def replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
+        from packages.application.cny_preparation_intents import ensure_account_request, drain_cny_preparation_intents
+
+        try:
+            self._sync_supplier_payment_documents_from_financial_documents(now=self.timestamp_factory())
+            ensure_account_request(self.runtime)
+            return drain_cny_preparation_intents(self.runtime, block=self, reason=reason)
+        except Exception as exc:
+            # Public writers call this after the canonical document commit.
+            # A late failure cannot ask the operator to submit money again.
+            return {"status": "pending", "operation_applied": True, "durable_saved": True,
+                    "readback_confirmed": False, "error": str(exc).replace("\n", " ")[:500]}
+
+    def _replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
         now = self.timestamp_factory()
-        self._sync_supplier_payment_documents_from_financial_documents(now=now)
         from packages.application.own_product_capital import OwnProductCapitalBlock
 
         capital = OwnProductCapitalBlock(
@@ -689,6 +705,7 @@ class CnyLedgerBlock:
                 op["updated_at"] = str(existing.get("updated_at") or op.get("updated_at") or "")
             posted_operations.append(op)
 
+        self._reconcile_changed_capital_operations(existing_operations, posted_operations)
         self.runtime.replace_cny_ledger_operations(posted_operations)
         order_updates = self._build_order_updates(order_accumulator, calculated_at=now)
         self.runtime.update_supplier_shipments_cny_calculations(order_updates)
@@ -766,59 +783,10 @@ class CnyLedgerBlock:
         return result
 
     def replay_account(self, *, reason: str = "manual") -> dict[str, Any]:
-        """Replay the durable ledger and enqueue one coalesced account revision."""
-
+        """Resume the exact durable account watermark, without another money row."""
         replay = self.replay_ledger(reason=reason)
-        documents = [
-            dict(item)
-            for item in self.runtime.list_cny_documents()
-            if str(item.get("status") or "") != CNY_DOCUMENT_STATUS_EXCLUDED
-        ]
-        if documents:
-            replay_identity = dict(replay.get("durable_retry_identity") or {})
-            source_revision = str(replay_identity.get("source_revision") or "")
-            operation_dates = sorted(
-                {
-                    str(item.get("operation_date") or "")[:10]
-                    for item in documents
-                    if len(str(item.get("operation_date") or "")) >= 10
-                }
-            )
-            source = {
-                "document_id": "account_replay",
-                "document_type": "cny_account_replay",
-                "natural_key": "cny_account_replay",
-                "source_order_id": "",
-                "context_order_id": "",
-                "operation_date": operation_dates[0]
-                if operation_dates
-                else self.timestamp_factory()[:10],
-                "status": "posted",
-                "rub_amount": str(
-                    (replay.get("replay") or {}).get("balance_rub_value") or ""
-                ),
-                "cny_amount": str((replay.get("replay") or {}).get("balance_cny") or ""),
-                "bank_rate": str((replay.get("replay") or {}).get("average_rate") or ""),
-                "file_sha256": source_revision,
-                "updated_at": max(
-                    str(item.get("updated_at") or "") for item in documents
-                ),
-            }
-            queue = self._enqueue_functional_recalculation(source)
-        else:
-            queue = {
-                "status": "no_op",
-                "terminal_no_op": True,
-                "diagnostic_code": "cny_account_has_no_active_documents",
-            }
-        payload = {
-            **replay,
-            "warehouse_targeted_recalculation": queue,
-        }
         return self._with_truthful_write_outcome(
-            payload,
-            replay=replay,
-            queue=queue,
+            replay, replay=replay, queue=replay.get("warehouse_targeted_recalculation") or {},
             success_message="CNY ledger пересчитан.",
         )
 
@@ -941,9 +909,8 @@ class CnyLedgerBlock:
                 "readback_confirmed": readback_confirmed,
             }
         )
-        if not readback_confirmed:
-            raise ValueError("CNY write outcome is not readback-confirmed")
-        if not (queue_failed or replay_pending):
+        result["warehouse_targeted_recalculation"] = dict(queue)
+        if not (queue_failed or replay_pending or not readback_confirmed):
             result.setdefault("message", success_message)
             return result
 
@@ -977,7 +944,8 @@ class CnyLedgerBlock:
                 "retryable": not data_quality_blocked,
                 "pending_phase": "derived_replay",
                 "message": (
-                    "Операция CNY сохранена, ledger и баланс подтверждены. "
+                    ("Операция CNY сохранена, ledger и баланс подтверждены. "
+                     if readback_confirmed else "Операция CNY сохранена. Подтверждение ledger и баланса ожидает пересчёта. ")
                     + (
                         "Связанный пересчёт ожидает безопасного повтора."
                         if not data_quality_blocked
@@ -992,6 +960,60 @@ class CnyLedgerBlock:
             }
         )
         return result
+
+    def _reconcile_changed_capital_operations(
+        self, previous: Mapping[str, Mapping[str, Any]], operations: Iterable[Mapping[str, Any]],
+    ) -> None:
+        """Remove obsolete derived CNY layers before replacing the replay rows.
+
+        Source documents remain intact. A crash before ledger replacement sees
+        the old operation again; a crash after it retries the missing derived
+        layer. The existing allocation functions rebuild the exact new values.
+        """
+        from packages.application.own_product_capital import OwnProductCapitalBlock
+
+        current = {str(row["operation_id"]): row for row in operations}
+        capital = OwnProductCapitalBlock(runtime=self.runtime, timestamp_factory=self.timestamp_factory)
+        fields = ("source_order_id", "operation_date", "status", "cny_delta", "rub_value_delta")
+        for operation_id, old in previous.items():
+            new = current.get(operation_id)
+            if new is not None and all(str(old.get(key) or "") == str(new.get(key) or "") for key in fields):
+                continue
+            document_id = str(old["source_document_id"])
+            if old["operation_type"] == CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT:
+                capital.remove_supplier_payment(document_id, recalculate=False)
+            elif old["operation_type"] == CNY_LEDGER_OPERATION_TRANSFER_FEE:
+                self._remove_transfer_fee_layer(f"{document_id}:transfer_fee:{operation_id}")
+
+    @staticmethod
+    def _record_supplier_payment_revision(capital: Any, **evidence: Any) -> dict[str, Any]:
+        # The existing allocator owns the complete evidence fingerprint,
+        # including provenance and invoice lines. It validates the candidate
+        # before reporting a conflict. Only its exact derived-layer conflict
+        # permits compensation; unrelated validation errors remain blockers.
+        try:
+            return capital.record_supplier_payment(**evidence)
+        except ValueError as exc:
+            if str(exc) != "payment_id already exists with different financial evidence":
+                raise
+            capital.remove_supplier_payment(str(evidence["payment_id"]), recalculate=False)
+            return capital.record_supplier_payment(**evidence)
+
+    def _remove_transfer_fee_layer(self, document_id: str) -> None:
+        from packages.application.registry_upload_db_backed_runtime import _connect
+        prefix = "cost_payment:" + document_id + ":"
+        with _connect(self.runtime.db_path) as conn:
+            conn.execute("DELETE FROM sheet_vitrina_v1_own_capital_events WHERE event_type='cost_payment' AND substr(event_id,1,?)=?", (len(prefix), prefix))
+            conn.commit()
+
+    def _record_transfer_fee_revision(self, capital: Any, **evidence: Any) -> dict[str, Any]:
+        try:
+            return capital.record_order_level_cost_payment(**evidence)
+        except ValueError as exc:
+            if str(exc) != "cost payment document already materialized with different allocations":
+                raise
+            self._remove_transfer_fee_layer(str(evidence["document_id"]))
+            return capital.record_order_level_cost_payment(**evidence)
 
     def _sync_own_product_capital_payments(
         self,
@@ -1049,7 +1071,8 @@ class CnyLedgerBlock:
                     ),
                 }
                 if operation_type == CNY_LEDGER_OPERATION_SUPPLIER_PAYMENT_OUT:
-                    capital.record_supplier_payment(
+                    self._record_supplier_payment_revision(
+                        capital,
                         payment_id=document_id,
                         shipment_id=shipment_id,
                         effective_date=str(operation.get("operation_date") or ""),
@@ -1071,7 +1094,8 @@ class CnyLedgerBlock:
                         recalculate=False,
                     )
                 else:
-                    capital.record_order_level_cost_payment(
+                    self._record_transfer_fee_revision(
+                        capital,
                         document_id=f"{document_id}:transfer_fee:{operation.get('operation_id') or ''}",
                         shipment_id=shipment_id,
                         effective_date=str(operation.get("operation_date") or ""),
@@ -1261,15 +1285,6 @@ class CnyLedgerBlock:
                 "supplier_order_id": normalized_target,
                 "idempotent": True,
             }
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-
-        OwnProductCapitalBlock(
-            runtime=self.runtime,
-            timestamp_factory=self.timestamp_factory,
-        ).remove_supplier_payment(
-            str(document.get("document_id") or ""),
-            recalculate=False,
-        )
         now = self.timestamp_factory()
         moved = self.runtime.update_cny_document_context(
             document_id=str(document.get("document_id") or ""),
@@ -1298,152 +1313,17 @@ class CnyLedgerBlock:
         )
 
     def _enqueue_functional_recalculation(
-        self,
-        document: Mapping[str, Any],
-        *,
-        additional_shipment_ids: Iterable[str] = (),
+        self, document: Mapping[str, Any], *, additional_shipment_ids: Iterable[str] = (),
     ) -> dict[str, Any]:
-        """Reset affected certifications and coalesce a replay by CNY source revision."""
+        from packages.application.cny_preparation_intents import read_account_request, _outcome
 
-        from packages.application.own_product_capital import OwnProductCapitalBlock
-        from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
-
-        source_order_id = str(document.get("source_order_id") or "").strip()
-        shipment_summaries = self.runtime.list_supplier_shipments()
-        requested_ids = {
-            str(item or "").strip()
-            for item in [source_order_id, *additional_shipment_ids]
-            if str(item or "").strip()
-        }
-        # An account-level CNY document is valid accounting evidence, but it is
-        # not warehouse scope.  Empty scope must therefore stay an explicit
-        # warehouse no-op.  The former ``else True`` branch selected every
-        # shipment and could replay closed warehouse history globally.
-        affected_ids = [
-            str(item.get("shipment_id") or "")
-            for item in shipment_summaries
-            if str(item.get("shipment_id") or "")
-            and str(item.get("shipment_id") or "") in requested_ids
-        ]
-        missing_requested_ids = sorted(requested_ids - set(affected_ids))
-        nm_ids: set[int] = set()
-        now = self.timestamp_factory()
-        for shipment_id in affected_ids:
-            shipment = self.runtime.load_supplier_shipment(shipment_id) or {}
-            for line in shipment.get("lines") or []:
-                if str(line.get("line_type") or "") != "product":
-                    continue
-                nm_id = int(line.get("internal_nm_id") or 0)
-                if nm_id > 0:
-                    nm_ids.add(nm_id)
-        revision_payload = {
-            key: document.get(key)
-            for key in (
-                "document_id",
-                "document_type",
-                "natural_key",
-                "source_order_id",
-                "context_order_id",
-                "operation_date",
-                "status",
-                "rub_amount",
-                "cny_amount",
-                "bank_rate",
-                "file_sha256",
-                "updated_at",
-            )
-        }
-        revision = "sha256:" + hashlib.sha256(
-            json.dumps(revision_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        stable_source_id = f"cny_document:{document.get('document_id')}"
-        if not requested_ids:
-            return {
-                "status": "no_op",
-                "terminal_no_op": True,
-                "presentation_status": "Документ учтён без складского пересчёта",
-                "stable_source_id": stable_source_id,
-                "source_revision": revision,
-                "affected_nm_ids": [],
-                "affected_shipment_ids": [],
-                "warehouse_mutation_count": 0,
-                "functional_queue_count": 0,
-                "diagnostic_code": "cny_replay_shipment_scope_unbound",
-            }
-        if missing_requested_ids:
-            return {
-                "status": "replay_error",
-                "presentation_status": "Ошибка данных пересчёта",
-                "stable_source_id": stable_source_id,
-                "source_revision": revision,
-                "affected_nm_ids": sorted(nm_ids),
-                "error": (
-                    "CNY replay shipment scope is missing: "
-                    + ", ".join(missing_requested_ids)
-                ),
-                "diagnostic_code": "cny_replay_shipment_scope_missing",
-            }
         try:
-            if affected_ids:
-                capital = OwnProductCapitalBlock(
-                    runtime=self.runtime,
-                    timestamp_factory=self.timestamp_factory,
-                )
-                capital.set_expenses_certifications(
-                    shipment_ids=affected_ids,
-                    expenses_complete=False,
-                    recalculate=False,
-                    update_shipment_headers=True,
-                    preserve_unchanged=True,
-                )
-            if not nm_ids:
-                if affected_ids:
-                    from packages.application.warehouse_business_projection import (
-                        terminalize_supplier_certification_noop,
-                    )
-
-                    business_projection = terminalize_supplier_certification_noop(
-                        self.runtime,
-                        shipment_ids=affected_ids,
-                        finished_at=now,
-                    )
-                else:
-                    business_projection = {
-                        "status": "no_op",
-                        "request_count": 0,
-                    }
-                return {
-                    "status": "no_op",
-                    "terminal_no_op": True,
-                    "diagnostic_code": "cny_replay_has_no_mapped_sku_scope",
-                    "stable_source_id": stable_source_id,
-                    "source_revision": revision,
-                    "affected_nm_ids": [],
-                    "affected_shipment_ids": affected_ids,
-                    "business_projection": business_projection,
-                }
-            queued = enqueue_warehouse_targeted_recalculation(
-                runtime=self.runtime,
-                stable_source_id=stable_source_id,
-                source_revision=revision,
-                effective_date=str(document.get("operation_date") or now)[:10],
-                affected_nm_ids=nm_ids,
-                requested_at=now,
-            )
-            return {
-                **queued,
-                "affected_nm_ids": sorted(nm_ids),
-                "affected_shipment_ids": affected_ids,
-            }
-        except Exception as exc:  # noqa: BLE001 - source mutation remains independently durable.
-            return {
-                "status": "replay_error",
-                "presentation_status": "Ошибка пересчёта",
-                "stable_source_id": stable_source_id,
-                "source_revision": revision,
-                "affected_nm_ids": sorted(nm_ids),
-                "error": str(exc).replace("\n", " ")[:500],
-            }
+            request = read_account_request(self.runtime)
+            if request is None:
+                return {"status": "replay_error", "error": "saved CNY source has no durable account continuation"}
+            return _outcome(request)["warehouse_targeted_recalculation"]
+        except Exception as exc:
+            return {"status": "replay_error", "error": str(exc).replace("\n", " ")[:500]}
 
     def _sync_supplier_payment_documents_from_financial_documents(self, *, now: str) -> None:
         if not hasattr(self.runtime, "list_supplier_financial_documents_all"):

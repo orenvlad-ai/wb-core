@@ -163,6 +163,7 @@ class SupplierInvoiceRevisionAdapter:
 
     def apply(self, request, operation_id, preview):
         from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
+        from packages.application.supplier_preparation_intents import TABLE, begin_source_change, finish_source_change
 
         root, _ = self.context(request)
         with warehouse_functional_write_lock(root, timeout_seconds=45):
@@ -194,6 +195,7 @@ class SupplierInvoiceRevisionAdapter:
                     conn.execute("BEGIN IMMEDIATE")
                     require(self.context(request)[1] == db, "storage-generation-drift")
                     require(digest(snapshot(conn, request["shipment_id"])) == digest(before), "transaction-prestate-drift")
+                    supplier_before = begin_source_change(conn, [request["shipment_id"]])
                     conn.execute(f"CREATE TABLE IF NOT EXISTS {AUDIT}(operation_id TEXT PRIMARY KEY,shipment_id TEXT NOT NULL,created_at TEXT NOT NULL,prestate_json TEXT NOT NULL,candidate_json TEXT NOT NULL,queue_json TEXT NOT NULL)")
                     require(conn.execute(f"SELECT 1 FROM {AUDIT} WHERE operation_id=?", (operation_id,)).fetchone() is None, "operation-already-submitted")
                     update(conn, PREFIX + "supplier_shipments", "shipment_id", request["shipment_id"], {**after["header"], "updated_at": now})
@@ -201,21 +203,30 @@ class SupplierInvoiceRevisionAdapter:
                         update(conn, PREFIX + "supplier_shipment_lines", "line_id", line["line_id"], line["updates"])
                     update(conn, PREFIX + "trade_documents", "document_id", before["document"]["document_id"], {**after["document"], "updated_at": now})
                     require(snapshot(conn, request["shipment_id"])["protected"] == before["protected"], "protected-links-changed")
-                    conn.execute(f"INSERT INTO {AUDIT} VALUES(?,?,?,?,?,?)", (operation_id, request["shipment_id"], now, encoded(before).decode(), encoded(after).decode(), "{}"))
-            queue = self.enqueue(root, before, after, now)
-            with closing(connect(db, readonly=False)) as conn:
-                with conn:
-                    update(conn, AUDIT, "operation_id", operation_id, {"queue_json": encoded(queue).decode()})
+                    finish_source_change(conn, supplier_before)
+                    intent = dict(conn.execute(f"SELECT * FROM {TABLE} WHERE shipment_id=?", (request["shipment_id"],)).fetchone())
+                    pending = {"status": "pending", "shipment_id": request["shipment_id"], "preparation_revision": intent["revision"], "source_fingerprint": intent["source_fingerprint"], "operation_id": operation_id}
+                    conn.execute(f"INSERT INTO {AUDIT} VALUES(?,?,?,?,?,?)", (operation_id, request["shipment_id"], now, encoded(before).decode(), encoded(after).decode(), encoded(pending).decode()))
+            try:
+                queue = self.enqueue(root, before, after, now)
+            except Exception as exc:
+                queue = {**pending, "error": str(exc).replace("\n", " ")[:500]}
+            try:
+                with closing(connect(db, readonly=False)) as conn:
+                    with conn:
+                        update(conn, AUDIT, "operation_id", operation_id, {"queue_json": encoded(queue).decode()})
+            except Exception as exc:
+                # The atomic audit already records applied source + its durable
+                # pending identity. A late receipt failure cannot undo that fact.
+                queue = {**queue, "audit_receipt_pending": True, "receipt_error": str(exc).replace("\n", " ")[:500]}
             return {"operation_id": operation_id, "disposition": "submitted", "queue": queue}
 
     def enqueue(self, root, before, after, now):
         from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
-        from packages.application.warehouse_functional import enqueue_warehouse_targeted_recalculation
+        from packages.application.supplier_preparation_intents import resume_supplier_preparation
 
         # Include the original invoice/payment boundary when the revised document is dated later.
-        dates = [before["header"]["invoice_date"], after["header"]["invoice_date"]]
-        dates += [x.get("operation_date") for x in before["protected"]["cny_documents"]]
-        return enqueue_warehouse_targeted_recalculation(runtime=RegistryUploadDbBackedRuntime(runtime_dir=root), stable_source_id="supplier_shipment:" + before["header"]["shipment_id"], source_revision=digest(after), effective_date=min(x for x in dates if x), affected_nm_ids=[x["internal_nm_id"] for x in before["lines"] if x["line_type"] == "product"], requested_at=now)
+        return resume_supplier_preparation(RegistryUploadDbBackedRuntime(runtime_dir=root), before["header"]["shipment_id"])
 
     def readback(self, request, operation_id):
         root, db = self.context(request)

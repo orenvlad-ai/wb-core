@@ -80,6 +80,124 @@ FBS_FINANCE_FORWARD_INGRESS_DATE = FBS_FINANCE_HISTORICAL_CUTOFF + timedelta(
 )
 PROFIT_METHOD_VERSION = "wb_finance_profit_covered_revenue_v4_signed_deductions"
 COST_METHOD_VERSION = CHANNEL_LOCATION_COST_FORMULA_VERSION
+COST_ECONOMIC_SIGNATURE_VERSION = "wb_finance_cost_economic_signature_v1"
+
+
+def _signature_decimal_text(value: Any) -> str:
+    """Canonical, unrounded Decimal text for economic identity."""
+
+    decimal = _decimal(value)
+    return format(decimal.normalize(), "f") if decimal else "0"
+
+
+def _cost_economic_buckets(detail_rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return the stable economic inputs of resolved COGS movements.
+
+    Resolver provenance (blob fingerprints, timestamps and source digests) is
+    deliberately excluded.  It remains in ``cost_state_hash``/detail rows, but
+    must not make an otherwise identical historical calculation unavailable.
+    """
+
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    for detail in detail_rows:
+        raw_unit_cost = detail.get("economic_unit_cost_rub", detail.get("unit_cost_rub"))
+        if str(raw_unit_cost or "") == "":
+            continue
+        key = tuple(
+            str(detail.get(field) or "")
+            for field in (
+                "nm_id", "operation_date", "channel", "pool", "facility_id",
+                "fbs_order_id", "source_date", "source_quality",
+                "projection_quality", "selection_method", "formula_version",
+            )
+        ) + (_signature_decimal_text(raw_unit_cost),)
+        item = grouped.setdefault(
+            key,
+            {
+                "nm_id": key[0], "operation_date": key[1], "channel": key[2],
+                "pool": key[3], "facility_id": key[4], "fbs_order_id": key[5],
+                "source_date": key[6], "source_quality": key[7],
+                "projection_quality": key[8], "selection_method": key[9],
+                "formula_version": key[10],
+                "unit_cost_rub": key[11],
+                "sales_qty": 0, "returns_qty": 0, "signed_qty": 0,
+                "signed_cogs_rub": ZERO,
+            },
+        )
+        qty = int(detail.get("quantity") or 0)
+        signed_qty = int(detail.get("signed_quantity") or 0)
+        if str(detail.get("movement") or "") == "sale":
+            item["sales_qty"] += qty
+        else:
+            item["returns_qty"] += qty
+        item["signed_qty"] += signed_qty
+        item["signed_cogs_rub"] += _decimal(
+            detail.get("economic_signed_cogs_rub", detail.get("signed_cogs_rub"))
+        )
+    return [
+        {
+            **item,
+            "signed_cogs_rub": _signature_decimal_text(item["signed_cogs_rub"]),
+        }
+        for _key, item in sorted(grouped.items())
+    ]
+
+
+def cost_economic_signature(detail_rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    """Canonical cost signature used for freshness, separate from lineage."""
+
+    buckets = _cost_economic_buckets(detail_rows)
+    payload = {
+        "version": COST_ECONOMIC_SIGNATURE_VERSION,
+        "buckets": buckets,
+    }
+    return buckets, "sha256:" + hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def recalculate_cost_derived_metrics(
+    metrics: Mapping[str, Any], coverage: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Replace only COGS-dependent target metrics after a verified RO rebuild.
+
+    The caller retains stored revenue, expense and capitalization allocation.
+    Those inputs are separately pinned by the Finance week projection.
+    """
+
+    result = dict(metrics)
+    covered_net_revenue = _decimal(coverage["covered_net_revenue_rub"])
+    uncovered_net_revenue = _decimal(coverage["uncovered_net_revenue_rub"])
+    uncovered_sales_revenue = _decimal(coverage["uncovered_sales_revenue_rub"])
+    eligible = not (
+        int(coverage["unmatched_units"]) > 0
+        and int(coverage["matched_units"]) <= 0
+    )
+    before = (
+        covered_net_revenue
+        - _decimal(result.get("profit_period_expenses"))
+        + _decimal(result.get("positive_adjustments"))
+        if eligible else None
+    )
+    cogs = _decimal(coverage["partial_cogs_rub"]) if eligible else None
+    profit = before - cogs if before is not None and cogs is not None else None
+    result.update(
+        profit_revenue_covered=_money_text(covered_net_revenue),
+        profit_revenue_uncovered=_money_text(uncovered_net_revenue),
+        sales_without_cost_rub=_money_text(uncovered_sales_revenue),
+        orders_without_cost=int(coverage["uncovered_sales_order_count"]),
+        units_without_cost=int(coverage["uncovered_sales_units"]),
+        sales_cost_coverage_pct=coverage["sales_revenue_coverage_pct"],
+        profit_coverage_status=coverage["profit_coverage_status"],
+        before_cogs_profit=_money_text(before),
+        before_cogs_margin_pct=_money_text(_ratio(before, covered_net_revenue)),
+        cogs=_money_text(cogs),
+        cogs_complete=int(coverage["unmatched_units"]) == 0,
+        profit_after_cogs=_money_text(profit),
+        final_margin_pct=_money_text(_ratio(profit, covered_net_revenue)),
+        profit_semantics_complete=int(coverage["unmatched_units"]) == 0,
+    )
+    return result
 
 
 # The calculation-parameters reference is a read projection of these canonical
@@ -1657,6 +1775,9 @@ class WbFinanceWeeklyBlock:
                 week_start,
                 include_details=True,
             )
+            economic_buckets, economic_signature = cost_economic_signature(
+                coverage["detail_rows"]
+            )
             metrics, _metrics_coverage, unknown = self._aggregate_rows(
                 conn,
                 source_rows,
@@ -1697,6 +1818,9 @@ class WbFinanceWeeklyBlock:
             ).hexdigest()
             coverage_payload = {
                 **coverage,
+                "cost_economic_signature_version": COST_ECONOMIC_SIGNATURE_VERSION,
+                "cost_economic_signature": economic_signature,
+                "cost_economic_buckets": economic_buckets,
                 "row_kind": row_kind,
                 "unknown_reasons": unknown,
                 "identity_blockers": identity_blockers if row_kind == "account" else [],
@@ -3167,6 +3291,9 @@ class WbFinanceWeeklyBlock:
                         "quantity": gross_qty,
                         "signed_quantity": signed_qty,
                         "unit_cost_rub": _money_text(unit_cost),
+                        # Keep exact Decimal economics for freshness. Display
+                        # fields above remain at MONEY_QUANT by contract.
+                        "economic_unit_cost_rub": _signature_decimal_text(unit_cost),
                         "cost_source": "shared_sku_daily_cost" if shared_applies else "canonical_our_wb_cost",
                         "channel": str(resolution.get("channel") or ""),
                         "facility_id": str(resolution.get("facility_id") or ""),
@@ -3180,6 +3307,7 @@ class WbFinanceWeeklyBlock:
                         "selection_method": str(resolution["selection_method"]),
                         "formula_version": str(resolution.get("formula_version") or COST_METHOD_VERSION),
                         "signed_cogs_rub": _money_text(signed_cogs),
+                        "economic_signed_cogs_rub": _signature_decimal_text(signed_cogs),
                         "sales_revenue_rub": (
                             _money_text(revenue) if sign > 0 else "0.0000"
                         ),
@@ -4192,7 +4320,9 @@ class WbFinanceWeeklyBlock:
                     payload = {}
                 result, envelope_origin = resolve_ads_snapshot_payload(payload)
                 source_kind = str((result or {}).get("kind") or "invalid")
-                items = (result or {}).get("items") or []
+                # This legacy consumer requires full Ads coverage. Observed
+                # partial rows must not silently qualify its finance manifest.
+                items = ((result or {}).get("items") or []) if source_kind == "success" else []
                 for item in items if isinstance(items, list) else []:
                     if isinstance(item, dict):
                         value = str(item.get("nm_id", item.get("nmId", "")) or "")
