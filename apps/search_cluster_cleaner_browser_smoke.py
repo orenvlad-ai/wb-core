@@ -31,7 +31,7 @@ def run(output:Path):
         browser=p.chromium.launch()
         with running_fixture('confirmed') as f:
             page=browser.new_page(viewport={'width':1440,'height':1080});browser_login(page,f)
-            expect(page.locator('[data-kc-excluded]')).to_have_text('2')
+            expect(page.locator('[data-kc-excluded]')).to_have_text('3')
             text=page.locator('[data-keyword-cleaner]').inner_text()
             check('D_connected_confirmed_manual_and_late_visible','По решениям владельца подтверждено исключений: 1' in text and 'по решениям владельца 1' in text)
             check('D_confirmed_candidates_not_pending','Это не подтверждённые исключения' not in text)
@@ -40,6 +40,8 @@ def run(output:Path):
             check('D_history_real_late_event')
             page.screenshot(path=str(output/'confirmed.png'),full_page=True);screens.append('confirmed.png');page.close()
         with running_fixture() as f:
+            with f.cleaner.store.transaction() as c:
+                c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
             page=browser.new_page(viewport={'width':1440,'height':1080});errors=[]
             page.on('pageerror',lambda e:errors.append(str(e)))
             browser_login(page,f)
@@ -51,30 +53,14 @@ def run(output:Path):
             page.set_viewport_size({'width':390,'height':844});page.screenshot(path=str(output/'mobile.png'),full_page=True);screens.append('mobile.png')
             check('mobile_cleaner_no_horizontal_overflow',page.locator('[data-keyword-cleaner]').evaluate('(node)=>node.scrollWidth<=node.clientWidth+1'))
             page.set_viewport_size({'width':1440,'height':1080})
-            # An actual accepted POST loses its browser response. Recovery reads the
-            # original server-saved request, never resubmits or changes permissions.
-            posts=[];recovery=[]
-            page.on('request',lambda req:recovery.append(req.url) if '/requests/' in req.url else None)
-            def lose_response(route):
-                if route.request.method!='POST':return route.continue_()
-                posts.append(route.request.post_data_json)
-                response=route.fetch();assert response.status==202
-                route.abort('failed')
-            page.route('**/keyword-cleaner/settings',lose_response)
-            before=f.count('cleaner_requests');page.locator('[data-kc-time-edit]').click();page.locator('[data-kc-time]').fill('08:15');page.locator('[data-kc-time-save]').click()
-            expect(page.locator('[data-kc-time-edit]')).to_have_text('08:15')
-            expect(page.locator('[data-kc-recover]')).to_be_hidden(timeout=15000)
-            page.wait_for_function("document.querySelector('[data-kc-message]').textContent.includes('Изменения сохранены')")
-            check('lost_post_response_one_submit_then_original_request_get',len(posts)==1 and f.count('cleaner_requests')==before+1 and any(posts[0]['request_id'] in url for url in recovery))
-            page.unroute('**/keyword-cleaner/settings',lose_response)
-            # Revisions conflict through HTTP while the owner is editing an older view.
-            page.locator('[data-kc-time-edit]').click();page.locator('[data-kc-time]').fill('08:30')
-            rev=f.cleaner.summary(OWNER)['settings']['revision'];f.cleaner.update_settings(dict(request_id='browser-other-session',expected_revision=rev,schedule_time='09:00'),OWNER)
-            before=f.count('cleaner_requests');page.locator('[data-kc-time-save]').click()
-            expect(page.locator('[data-kc-message]')).to_contain_text('Данные уже изменились')
-            expect(page.locator('[data-kc-time-edit]')).to_have_text('09:00')
-            check('stale_settings_visible_no_mutation',f.count('cleaner_requests')==before)
-            page.locator('[data-kc-time-cancel]').click()
+            # Stage E presents a manual preparation only.  It deliberately has
+            # no schedule editor and refuses an incomplete exact target locally.
+            expect(page.locator('[data-kc-time]')).to_have_count(0)
+            expect(page.locator('[data-keyword-cleaner]')).to_contain_text('По расписанию выключено')
+            expect(page.locator('[data-kc-enabled]')).to_be_disabled()
+            before=f.count('cleaner_requests');page.locator('[data-kc-run]').click()
+            expect(page.locator('[data-kc-message]')).to_contain_text('Укажите точную кампанию и артикул WB.')
+            check('manual_only_ui_has_no_schedule_or_implicit_run',f.count('cleaner_requests')==before)
             # A decision is saved once even when double-clicked, and becomes history.
             before=f.count('cleaner_manual_overrides');question=page.locator('[data-kc-review]').first
             question.get_by_role('button',name='Оставить',exact=True).dblclick()
@@ -84,11 +70,10 @@ def run(output:Path):
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-page="history"]')).to_be_visible();check('history_reload_deep_link')
             page.locator('[data-kc-page="history"] [data-kc-back]').click()
             # Runs use one persistent slot, buttons do not generate duplicate jobs.
-            before=f.count('cleaner_runs');page.locator('[data-kc-run]').dblclick()
-            expect(page.locator('[data-kc-status]')).to_have_text('Проверка в очереди')
+            before=f.count('cleaner_runs');page.locator('[data-kc-manual-advert]').fill('11');page.locator('[data-kc-manual-nm]').fill('101');page.locator('[data-kc-run]').dblclick()
+            expect(page.locator('[data-kc-status]')).to_have_text('Ручная проверка подготовлена')
             check('double_click_run_one_job',f.count('cleaner_runs')==before+1)
-            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-status]')).to_have_text('Проверка в очереди');check('queued_job_survives_reload')
-            page.locator('[data-kc-enabled]').click();expect(page.locator('[data-kc-enabled-label]')).to_have_text('Авточистка выключена');check('disable_saved',not f.request('/summary')[1]['settings']['enabled'])
+            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-status]')).to_have_text('Ручная проверка подготовлена');check('queued_job_survives_reload')
             # Profile draft and explicit activation are two independently saved commands.
             page.locator('[data-kc-profiles-open]').click();page.locator('[data-kc-profile-number]').fill('102');page.locator('[data-kc-profile-find] button').click()
             expect(page.locator('[data-kc-profile-form]')).to_be_visible();page.locator('[data-kc-profile-models]').select_option(['17 pro']);page.locator('[data-kc-profile-source]').fill('Тест совместимости <img src=x onerror="window.cleanerXss=2">');page.locator('[data-kc-profile-save]').click()
@@ -111,10 +96,7 @@ def run(output:Path):
                 if mode=='failed':check('missing_counts_are_not_zero',page.locator('[data-kc-checked]').inner_text()=='—')
                 if mode=='unresolved':
                     expect(page.locator('[data-kc-reviews]')).to_contain_text('Все вопросы разобраны');expect(page.locator('[data-kc-indicator]')).to_be_visible();check('unresolved_remains_when_reviews_empty')
-                    with f.cleaner.store.transaction() as c:c.execute("UPDATE cleaner_write_operations SET state='submitted' WHERE operation_id='fixture-unresolved'")
-                    page.locator('[data-kc-refresh]').click();expect(page.locator('[data-kc-enabled]')).to_be_enabled();page.locator('[data-kc-enabled]').click();expect(page.locator('[data-kc-enabled-label]')).to_have_text('Останавливается');check('disable_inflight_stopping')
-                    with f.cleaner.store.transaction() as c:c.execute("UPDATE cleaner_write_operations SET state='unresolved' WHERE operation_id='fixture-unresolved'")
-                    page.locator('[data-kc-refresh]').click();expect(page.locator('[data-kc-enabled-label]')).to_have_text('Авточистка выключена');expect(page.locator('[data-kc-status]')).to_have_text('Проверяем результат WB');check('disabled_unresolved_not_disguised')
+                    expect(page.locator('[data-kc-enabled]')).to_be_disabled();check('manual_mode_does_not_offer_scheduler_toggle')
                 if mode=='rejected':
                     expect(page.locator('[data-kc-alerts]')).to_contain_text('Не выполнено: WB не принял исключение. Ключей: 1.')
                     expect(page.locator('[data-kc-excluded]')).to_have_text('0')
@@ -125,29 +107,26 @@ def run(output:Path):
         with running_fixture('empty') as f:
             page=browser.new_page();browser_login(page,f,'reader');expect(page.locator('[data-kc-run]')).to_be_disabled();expect(page.locator('[data-kc-alerts]')).to_contain_text('только назначенному владельцу');check('reader_view_is_read_only')
             before=f.count('cleaner_requests');response=page.request.post(f.base_url+PREFIX+'/runs',data={'request_id':'browser-reader-direct'},headers={'Origin':f.base_url,'Content-Type':'application/json','X-WB-Keyword-Cleaner-CSRF':'1'});check('browser_reader_direct_post_forbidden',response.status==403 and f.count('cleaner_requests')==before);page.close()
-        # Preserve an ambiguous command across reload, then recover by GET alone.
-        with running_fixture('empty') as f:
+        # A lost manual-run response is recovered only by GET of the original
+        # command. A hanging response observes the same one-submit invariant.
+        with running_fixture() as f:
+            with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
             page=browser.new_page();browser_login(page,f);posts=[]
             def pending_post(route):
-                posts.append(route.request.post_data_json);assert route.fetch().status==202;route.abort()
-            page.route('**/keyword-cleaner/settings',pending_post);page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
-            page.locator('[data-kc-enabled]').click();expect(page.locator('[data-kc-recover]')).to_be_visible();expect(page.locator('[data-kc-message]')).to_contain_text('Не удалось проверить сохранение')
-            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-recover]')).to_be_visible();check('uncertain_command_survives_reload')
-            page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();check('reloaded_command_recovered_without_new_post',len(posts)==1);page.close()
-        # An unresponsive POST connection is aborted after the bounded deadline.
-        with running_fixture('empty') as f:
-            page=browser.new_page();browser_login(page,f);posts=[]
-            hanging_routes=[]
+                posts.append(route.request.post_data_json);assert route.fetch().status==202;route.abort('failed')
+            page.route('**/keyword-cleaner/runs',pending_post);page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
+            page.locator('[data-kc-manual-advert]').fill('11');page.locator('[data-kc-manual-nm]').fill('101');page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-recover]')).to_be_visible();expect(page.locator('[data-kc-message]')).to_contain_text('Не удалось проверить сохранение')
+            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-recover]')).to_be_visible();check('manual_uncertain_command_survives_reload')
+            page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();check('manual_recovery_get_only_one_post',len(posts)==1);page.close()
+        with running_fixture() as f:
+            with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
+            page=browser.new_page();browser_login(page,f);posts=[];hanging=[]
             def hanging_post(route):
-                hanging_routes.append(route)
-                posts.append(route.request.post_data_json);assert route.fetch().status==202
-                # Keep browser response pending; its own deadline initiates recovery.
-            page.route('**/keyword-cleaner/settings',hanging_post)
-            start=time.monotonic();page.locator('[data-kc-enabled]').click();expect(page.locator('[data-kc-message]')).to_contain_text('Изменения сохранены',timeout=16000)
-            check('hanging_post_deadline_recovers_one_request',len(posts)==1 and 9<=time.monotonic()-start<16)
-            # Resolve the deliberately retained route before closing Playwright;
-            # the browser already recovered the original durable request.
-            for route in hanging_routes:
+                hanging.append(route);posts.append(route.request.post_data_json);assert route.fetch().status==202
+            page.route('**/keyword-cleaner/runs',hanging_post);page.locator('[data-kc-manual-advert]').fill('11');page.locator('[data-kc-manual-nm]').fill('101')
+            start=time.monotonic();page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-message]')).to_contain_text('Проверка принята',timeout=16000)
+            check('manual_hanging_post_recovers_one_request',len(posts)==1 and 9<=time.monotonic()-start<16)
+            for route in hanging:
                 try:route.abort('failed')
                 except Exception:pass
             page.unroute_all(behavior='ignoreErrors');page.close()

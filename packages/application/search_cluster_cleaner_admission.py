@@ -103,39 +103,104 @@ class AdmissionGuard:
             state=self._load();self._previous_stopped(state)
             state.update(hold=True,reason=reason);self._save(state)
 
+    def initialize_held(self, *, account, generation, evidence):
+        """Create or verify the closed external fence during explicit setup."""
+        if not isinstance(evidence,str) or not evidence.strip():
+            raise CleanerError('recovery_evidence_required','Нужно основание закрытого допуска')
+        with self._lock():
+            if self.path.exists():
+                state=self._load();self._previous_stopped(state)
+                if state['account']!=account.key or state['generation']!=generation or not state['hold']:
+                    raise CleanerError('admission_state_conflict','Внешний допуск не соответствует bootstrap',409)
+                return
+            self._save(dict(version=1,hold=True,generation=generation,account=account.key,seals={},owner=None,reason='stage_e_bootstrap',evidence=evidence))
+
+    def recover_manual_capability(self, *, account, generation, production_operation_id, terminal_operation_ids):
+        """Clear only a dead owner's fully read-back manual capability."""
+        with self._lock():
+            state=self._load()
+            if state['account']!=account.key or state['generation']!=generation or not state['hold']:
+                raise CleanerError('external_hold','Внешний допуск изменился',409)
+            self._previous_stopped(state)
+            capability=state.get('manual_capability')
+            if (not isinstance(capability,dict) or capability.get('production_operation_id')!=production_operation_id
+                    or capability.get('operation_id') not in set(terminal_operation_ids)):
+                raise CleanerError('manual_capability_lost','Ручной допуск не готов к восстановлению',409)
+            with self.store.read() as c:self._reconcile(state,c)
+            state.pop('manual_capability',None);state['owner']=None;state['reason']='manual_readback_recovered';self._save(state)
+
     @contextmanager
-    def session(self,*,account,generation):
+    def session(self,*,account,generation,manual_capability=None):
         with self._lock():
             state=self._load();self._previous_stopped(state)
-            if state['hold'] or state['generation']!=generation or state['account']!=account.key:
+            manual=manual_capability is not None
+            capability=state.get('manual_capability')
+            if (state['hold'] and not manual) or state['generation']!=generation or state['account']!=account.key:
                 raise CleanerError('external_hold','Поколение не допущено',409)
+            if manual and (not isinstance(capability,dict) or capability != manual_capability):
+                raise CleanerError('manual_capability_lost','Одноразовый ручной допуск утрачен',409)
             with self.store.read() as c:self._reconcile(state,c)
             identity=process_identity()
             if not identity:raise CleanerError('process_identity_unknown','Нет точной идентичности процесса')
             state['owner']=identity;self._save(state)
-            session=AdmissionSession(self,state,identity)
+            session=AdmissionSession(self,state,identity,manual=manual)
             try:yield session
             finally:
                 session.active=False
                 current=self._load()
                 if current.get('owner')==identity:
-                    current['owner']=None;self._save(current)
+                    current['owner']=None
+                    if manual:
+                        current.pop('manual_capability',None)
+                        current.update(hold=True,reason='manual_capability_completed')
+                    self._save(current)
+
+    @contextmanager
+    def manual_session(self,*,account,generation,capability):
+        """One exact held-mode capability. The global guard never opens.
+
+        A crash leaves the hold set and the durable seals intact.  It therefore
+        blocks another submit until an explicit readback/recovery procedure.
+        """
+        if not isinstance(capability,dict) or not capability.get('run_id') or not capability.get('scope_digest'):
+            raise CleanerError('manual_capability_invalid','Нет точного ручного допуска',422)
+        with self._lock():
+            state=self._load();self._previous_stopped(state)
+            if not state['hold'] or state['generation']!=generation or state['account']!=account.key:
+                raise CleanerError('external_hold','Ручной допуск требует закрытый внешний контур',409)
+            if state.get('manual_capability'):
+                raise CleanerError('manual_capability_stale','Предыдущий ручной допуск требует сверки',409)
+            with self.store.read() as c:self._reconcile(state,c)
+            state['manual_capability']=dict(capability)
+            state['reason']='manual_capability_active'
+            self._save(state)
+        with self.session(account=account,generation=generation,manual_capability=dict(capability)) as session:
+            yield session
 
 
 class AdmissionSession:
-    def __init__(self,guard,state,identity):
-        self.guard,self.state,self.identity=guard,state,identity;self.active=True;self.rights=set();self._sealed_here=set()
+    def __init__(self,guard,state,identity,*,manual=False):
+        self.guard,self.state,self.identity,self.manual=guard,state,identity,manual;self.active=True;self.rights=set();self._sealed_here=set()
 
     def check(self,conn,account,generation):
         current=self.guard._load()
         if (not self.active or process_identity()!=self.identity or current!=self.state
-                or current['hold'] or current['account']!=account.key or current['generation']!=generation):
+                or (current['hold'] and not self.manual) or current['account']!=account.key or current['generation']!=generation):
             raise CleanerError('external_hold','Процесс утратил внешний допуск',409)
         self.guard._reconcile(current,conn)
 
-    def seal(self,operation,target,candidate_digest):
+    def seal(self,operation,target,candidate_digest,*,run_id=None):
+        capability=self.state.get('manual_capability') if self.manual else None
+        if self.manual:
+            if (not isinstance(capability,dict) or capability.get('run_id')!=run_id
+                    or target not in capability.get('targets',[]) or capability.get('operation_id')):
+                raise CleanerError('manual_capability_lost','Ручной допуск не соответствует операции',409)
         if operation in self.state['seals']:raise CleanerError('dispatch_sealed','Допуск уже использован',409)
         self.state['seals'][operation]=dict(target=target,digest=candidate_digest)
+        if self.manual:
+            # Bind the newly minted durable operation to this one capability.
+            # The seal remains forever; only the transient capability is cleared.
+            self.state['manual_capability']=dict(capability,operation_id=operation,operation_candidate_digest=candidate_digest)
         self.guard._save(self.state)
         self._sealed_here.add(operation)
         # Not a transferable durable capability. Caller adds this only AFTER

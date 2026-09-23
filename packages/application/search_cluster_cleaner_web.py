@@ -5,12 +5,15 @@ No worker, source adapter or background work is created by the web application.
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.storage_registry import StoreRegistry
 from packages.contracts.search_cluster_cleaner import Account, CleanerError, MODEL_CATALOG, Principal, digest
+
+STAGE_E_CONFIG_PATH=Path('/var/lib/wb-core/search-cluster-cleaner-admission/stage-e-config.json')
 
 
 class CleanerWeb:
@@ -22,14 +25,20 @@ class CleanerWeb:
     @classmethod
     def from_env(cls, runtime_dir: Path) -> "CleanerWeb":
         # No implicit identity, generation or admission from an old backup.
-        seller = os.environ.get("SELLER_PORTAL_CANONICAL_SUPPLIER_ID", "").strip()
-        scope = os.environ.get("CLEANER_ACCOUNT_SCOPE", "").strip()
-        generation = os.environ.get("CLEANER_OPERATIONAL_GENERATION", "").strip()
+        values={key:os.environ.get(key,"").strip() for key in ('SELLER_PORTAL_CANONICAL_SUPPLIER_ID','CLEANER_ACCOUNT_SCOPE','CLEANER_OPERATIONAL_GENERATION','CLEANER_OWNER_USERNAME')}
+        if not all(values.values()):
+            try:
+                stored=json.loads(STAGE_E_CONFIG_PATH.read_text(encoding='utf-8'))
+                if set(stored)=={'seller_id','account_scope','generation','owner_username','approved_package_path'}:
+                    values=dict(SELLER_PORTAL_CANONICAL_SUPPLIER_ID=stored['seller_id'],CLEANER_ACCOUNT_SCOPE=stored['account_scope'],CLEANER_OPERATIONAL_GENERATION=stored['generation'],CLEANER_OWNER_USERNAME=stored['owner_username'])
+            except (OSError,ValueError,TypeError):pass
+        seller,scope,generation=(values[k] for k in ('SELLER_PORTAL_CANONICAL_SUPPLIER_ID','CLEANER_ACCOUNT_SCOPE','CLEANER_OPERATIONAL_GENERATION'))
         if not all((seller, scope, generation)):
             return cls()
         cleaner = KeywordCleaner(CleanerStore(StoreRegistry(runtime_dir)), Account(seller, scope),
-                                 owner_username=os.environ.get("CLEANER_OWNER_USERNAME", "").strip())
-        cleaner.initialize(generation=generation)  # Explicit application setup, never GET.
+                                 owner_username=values['CLEANER_OWNER_USERNAME'])
+        # Schema and baseline are installed by the governed Stage E bootstrap.
+        # A web process must never turn a GET or a restart into a migration.
         return cls(cleaner, generation=generation, origin=os.environ.get("CLEANER_WEB_ORIGIN", "").strip())
 
     def require_service(self) -> KeywordCleaner:

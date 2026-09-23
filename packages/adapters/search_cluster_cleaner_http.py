@@ -74,6 +74,7 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
             allowed |= {"expected_revision", "enabled", "schedule_time"}
             operation = lambda: cleaner.update_settings(payload, principal)
         elif path == "/runs":
+            allowed |= {"advert_id", "nm_id"}
             operation = lambda: cleaner.start_run(payload, principal)
         elif match := re.fullmatch(r"/reviews/([A-Za-z0-9-]{1,120})/decision", path):
             allowed |= {"expected_revision", "decision"}

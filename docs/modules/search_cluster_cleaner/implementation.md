@@ -334,3 +334,62 @@ production admission остаются открытыми. Классификат
 Этап E требует отдельного задания на внедрение, штатной резервной копии
 operational, проверки серверного процесса/поколения и исходной базы. Этот этап D
 не даёт разрешения на live WB, merge/deploy или включение таймера.
+# Stage E: ручной запуск
+
+Production bootstrap выполняется только через `search_cluster_cleaner_manual_v1`
+и private server-owned package. До доступа к operational SQLite runner проверяет
+права `0600`, hash package и независимого `current-card-evidence.json`,
+канонические seller/scope и generation. Bootstrap импортирует immutable baseline,
+создаёт закрытый admission и публикует только server-owned `stage-e-config.json`.
+Расписание не создаётся и не включается: после bootstrap API отклоняет включение
+авточистки и изменение времени.
+
+Оператор сначала подготавливает точную пару campaign/SKU в UI. Отдельный
+ручной production action preview/apply/readback принимает ровно одну такую
+пару. Preview сверяет текущий WB snapshot и согласованную fresh-card evidence;
+apply не повторяет отправку при любом неоднозначном ответе. Readback работает
+только с тем же production operation и его internal write operation. Existing
+exclusions не возвращаются; held, missing-kind и profile-mismatch targets не
+допускаются к записи.
+
+#### Runbook ручного Stage E
+
+До bootstrap release-owner приватно размещает только вне runtime/operational
+backup каталог `/var/lib/wb-core/search-cluster-cleaner-admission` (`root:root`,
+`0700`) и два файла `approved-baseline-v1.json` и
+`current-card-evidence.json` (`root:root`, `0600`). Он сверяет полные SHA-256
+обоих файлов с reviewed receipt. Package содержит canonical seller/account
+scope/generation, immutable baseline/profiles/provenance и exact verified
+manual-admission; evidence содержит exact current-card digest и verified_at на
+каждый допустимый nm. Эти private files и исходные WB-выгрузки не попадают в
+Git или release workflow.
+
+В server env с CAS и отдельным readback добавляются только
+`CHANGE_REGISTRY_ACCOUNT_SCOPE`, `CLEANER_BOOTSTRAP_PACKAGE_PATH` и
+`CLEANER_WEB_ORIGIN`; seller берётся из canonical server setting. Никакие
+`CLEANER_*` web-trio и timer unit до bootstrap не публикуются. Production
+Apply отправляет `mode=bootstrap` последовательно preview/apply/readback с
+одним operation id. Preview требует пустой cleaner namespace и не делает WB
+вызовов. Readback требует exact import digest baseline, exact active payload
+profiles, сохранённый package receipt/config, held admission без owner/seals,
+`enabled=false`, `restore_hold=true`, `transport_enabled=false` и отсутствие
+таймера. После этого один controlled restart web и health readback создают
+только read-only CleanerWeb projection.
+
+Partial bootstrap восстанавливается только под held admission: сверяются
+foreign SQLite schema fingerprint и отсутствие pre-existing cleaner namespace,
+удаляется/переустанавливается лишь namespace `cleaner_*` из immutable package
+и journal. Такой recovery не заменяет operational SQLite и не откатывает
+свежие business data.
+
+UI создаёт exact `scan` для campaign/SKU и показывает, что он ожидает ручного
+оператора. Stage action `mode=manual` preview/apply/readback сначала выполняет
+этот exact scan; он не пишет в WB. Для statistics-fresh `pending_exclude`
+owner запускает `mode=manual_prepare` preview/apply c exact scan run, target и
+candidate digest. Это создаёт ordinary exact `manual_apply`; затем отдельные
+`mode=manual` preview/apply/readback с новым exact operation id делают один
+submit и readback только его internal operations. Reusing the same operation
+id is readback-only. Любой ambiguity, drift или crash оставляет held admission;
+recovery закрывает только expired/dead-owner exact run and never creates a
+replacement submit. Scheduler остаётся выключен: API отклоняет `enabled=true`
+и любое изменение времени.
