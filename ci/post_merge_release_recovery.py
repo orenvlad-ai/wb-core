@@ -70,11 +70,32 @@ EXPECTED_SELECTIVE_MERGE_SHA = "b9b709805b9eb1da9d417f3b8028dd22e4ccb1d6"
 class RecoveryCase(str, Enum):
     STORAGE_TAIL = "storage-tail"
     SELECTIVE_B9_ACTIVATION = "normal-b9-activation-tail"
+    REGISTRY_PRECHECK_ACTIVATION = "normal-registry-precheck-activation-tail"
 
 
 def recovery_case(release_run_id: int) -> RecoveryCase:
-    return (RecoveryCase.SELECTIVE_B9_ACTIVATION if release_run_id == EXPECTED_SELECTIVE_RUN_ID
-            else RecoveryCase.STORAGE_TAIL)
+    if release_run_id == EXPECTED_SELECTIVE_RUN_ID:
+        return RecoveryCase.SELECTIVE_B9_ACTIVATION
+    return RecoveryCase.STORAGE_TAIL
+
+
+def normal_activation_tail_case(case: RecoveryCase) -> bool:
+    return case in {
+        RecoveryCase.SELECTIVE_B9_ACTIVATION,
+        RecoveryCase.REGISTRY_PRECHECK_ACTIVATION,
+    }
+
+
+def _registry_precheck_failure_matches(text: str, gate_run_id: int) -> bool:
+    required = (
+        "deploy_current_checkout",
+        "wb_autoanswers_activation.py prepare-deploy",
+        "registry_state_before = unit_state(registry_service)",
+        "RuntimeError: systemd quiesce service state is invalid: wb-core-registry-http.service",
+        "returned non-zero exit status 1",
+        f'--workflow-run-id "{gate_run_id}"',
+    )
+    return all(item in text for item in required)
 
 
 REMOTE_DIAGNOSTIC_CATEGORIES = frozenset(
@@ -224,6 +245,15 @@ def _prove_failed_stage(raw_log: bytes, gate_run_id: int, job_name: str, *, case
         return {"job_name": job_name, "job_log_sha256": digest(raw_log),
                 "stage": "autoanswers-prepare-deploy-drain", "exit_status": 1,
                 "unit": "wb-core-autoanswers-worker.service"}
+    if case is RecoveryCase.REGISTRY_PRECHECK_ACTIVATION:
+        if not _registry_precheck_failure_matches(text, gate_run_id):
+            raise RecoveryError("failed-stage-not-registry-precheck-exit1")
+        failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if failures != ["1"] or "exit status 255" in text:
+            raise RecoveryError("failed-stage-not-definite-single-exit1")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "autoanswers-prepare-deploy-registry-precheck", "exit_status": 1,
+                "unit": "wb-core-registry-http.service"}
     required = ("deploy_current_checkout", 'run_stage("readback", root_storage_commands["status_artifact_readback"])',
                 "apps/root_storage_policy.py", "status-readback", "returned non-zero exit status 3",
                 f'--workflow-run-id "{gate_run_id}"')
@@ -296,6 +326,10 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
     ):
         raise RecoveryError("release-deployed-job-shape-invalid")
     raw_log = client.request("GET", f"/actions/jobs/{int(deployed_job['id'])}/logs", raw=True)
+    if case is RecoveryCase.STORAGE_TAIL and _registry_precheck_failure_matches(
+        raw_log.decode("utf-8", errors="replace"), gate_id
+    ):
+        case = RecoveryCase.REGISTRY_PRECHECK_ACTIVATION
     failure = _prove_failed_stage(raw_log, gate_id, str(deployed_job["name"]), case=case)
     if exact_sha(run.get("head_sha"), "release-run-head") != original["base_sha"]:
         raise RecoveryError("release-run-trusted-source-mismatch")
@@ -867,7 +901,7 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
-    if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+    if normal_activation_tail_case(case):
         if target.service_name != "wb-core-registry-http.service" or target.restart_command != "systemctl restart wb-core-registry-http.service":
             raise RecoveryError("normal-tail-restart-contract-invalid")
         managed = hosted._build_managed_systemd_commands(target)
@@ -955,9 +989,9 @@ def _selective_previous_recovery_proof(client: release.GitHub) -> dict[str, Any]
 
 
 def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> dict[str, Any]:
-    case = recovery_case(release_run_id)
     evidence = collect_evidence(client, release_run_id)
     original = evidence["original_receipt"]
+    case = RecoveryCase(str(evidence["recovery_case"]))
     runner = prove_repo_only_descendant(client, original)
     prestate = collect_prestate(target, original["merge_sha"], require_incomplete=True, case=case)
     operation = recovery_operation_id(release_run_id, original)
@@ -984,8 +1018,8 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
-        "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if case is RecoveryCase.STORAGE_TAIL else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
-        "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if case is RecoveryCase.STORAGE_TAIL else ["merge", "rsync", "chown", "dependency-install"]),
+        "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if not normal_activation_tail_case(case) else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
+        "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if not normal_activation_tail_case(case) else ["merge", "rsync", "chown", "dependency-install"]),
     }
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
@@ -1013,6 +1047,7 @@ def existing_recovery_readback(
 
     evidence = collect_evidence(client, release_run_id)
     original = evidence["original_receipt"]
+    case = RecoveryCase(str(evidence["recovery_case"]))
     runner = prove_repo_only_descendant(client, original)
     operation = recovery_operation_id(release_run_id, original)
     pr = int(original["pull_request"])
@@ -1029,7 +1064,7 @@ def existing_recovery_readback(
             or len(claims) != 1
         ):
             raise RecoveryError("recovery-receipt-binding-invalid")
-        final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=recovery_case(release_run_id))
+        final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=case)
         return {**receipt, "fresh_final_readback": final, "runner_readback": runner}
     if not claims:
         return None
@@ -1044,13 +1079,18 @@ def existing_recovery_readback(
     ):
         raise RecoveryError("recovery-claim-binding-invalid")
     try:
-        final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=recovery_case(release_run_id))
+        final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=case)
     except RecoveryError:
-        if recovery_case(release_run_id) is RecoveryCase.SELECTIVE_B9_ACTIVATION:
+        if normal_activation_tail_case(case):
             phases = _matching_comments(client, pr, f"<!-- wb-core-release-recovery-phase operation={operation}")
+            reason = (
+                "selective-claim-incomplete-readback-only"
+                if case is RecoveryCase.SELECTIVE_B9_ACTIVATION
+                else "normal-claim-incomplete-readback-only"
+            )
             return {"schema": RECOVERY_SCHEMA, "state": "blocked", "operation_id": operation,
                     "source": claim["source"], "preview_fingerprint": claim.get("preview_fingerprint"),
-                    "reason": "selective-claim-incomplete-readback-only", "phase_evidence": phases,
+                    "reason": reason, "phase_evidence": phases,
                     "runner_readback": runner}
         return {
             "schema": RECOVERY_SCHEMA,
@@ -1123,8 +1163,10 @@ def apply_recovery(
         fresh_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(fresh_runner) != canonical_bytes(preview["runner"]):
             raise RecoveryError("trusted-main-drift-after-claim")
-        if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
-            if canonical_bytes(_selective_b9_diff_proof()) != canonical_bytes(preview["selective_b9_diff"]):
+        if normal_activation_tail_case(case):
+            if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and canonical_bytes(
+                _selective_b9_diff_proof()
+            ) != canonical_bytes(preview["selective_b9_diff"]):
                 raise RecoveryError("normal-tail-diff-drift-after-claim")
             tail = commands["normal_activation_tail"]
             phases = (("auth-preflight", tail["auth"]), ("root-storage-status", tail["storage"]), ("systemd-barrier-preflight", tail["barrier"]), ("autoanswers-prepare-deploy", tail["prepare"]), ("systemd-install", tail["install"]), ("daemon-reload", tail["daemon_reload"]), ("nginx", tail["nginx"]), ("registry-http-restart", tail["restart"]), ("systemd-reconcile", tail["reconcile"]), ("root-storage-status", tail["storage"]), ("root-storage-readback", tail["storage_readback"]), ("managed-service-status", tail["status"]), ("auth-readback", tail["auth"]))
