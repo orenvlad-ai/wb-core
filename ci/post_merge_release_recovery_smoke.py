@@ -70,6 +70,23 @@ subprocess.CalledProcessError: Command ['ssh'] returned non-zero exit status {ex
 """.encode()
 
 
+def registry_precheck_log(
+    gate_run_id: int = 35840710978, *, exit_status: int = 1, exact_stage: bool = True
+) -> bytes:
+    registry_line = (
+        "registry_state_before = unit_state(registry_service)\n"
+        "RuntimeError: systemd quiesce service state is invalid: wb-core-registry-http.service\n"
+        if exact_stage
+        else "RuntimeError: systemd quiesce service state is invalid: wb-core-autoanswers-worker.service\n"
+    )
+    return f'''python3 apps/github_release_runner.py run --workflow-run-id "{gate_run_id}" --output receipt.json
+deploy_current_checkout
+wb_autoanswers_activation.py prepare-deploy
+{registry_line}subprocess.CalledProcessError: canonical wb_autoanswers_activation.py prepare-deploy
+returned non-zero exit status {exit_status}.
+'''.encode()
+
+
 def test_failure_evidence() -> None:
     proof = recovery._prove_failed_stage(failure_log(), 77, "One-shot deployed release")
     assert proof["stage"] == "root-storage-status-artifact-readback"
@@ -398,7 +415,10 @@ def test_existing_claim_is_readback_only() -> None:
     original_collect = recovery.collect_evidence
     original_prove = recovery.prove_repo_only_descendant
     original_state = recovery.collect_prestate
-    recovery.collect_evidence = lambda *_args: {"original_receipt": original_receipt}
+    recovery.collect_evidence = lambda *_args: {
+        "original_receipt": original_receipt,
+        "recovery_case": recovery.RecoveryCase.STORAGE_TAIL.value,
+    }
     recovery.prove_repo_only_descendant = lambda *_args: value["runner"]
     recovery.collect_prestate = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         recovery.RecoveryError("target-marker-not-complete")
@@ -411,6 +431,69 @@ def test_existing_claim_is_readback_only() -> None:
         recovery.collect_prestate = original_state
     assert result["state"] == "ambiguous"
     assert len(client.values) == 1
+
+
+def test_registry_precheck_existing_claim_and_receipt_are_readback_only() -> None:
+    value = preview()
+    original_receipt = {
+        **value["source"],
+        "operation_id": value["source"]["original_operation_id"],
+    }
+    value["operation_id"] = recovery.recovery_operation_id(9, original_receipt)
+    claim = {
+        "schema": recovery.RECOVERY_SCHEMA,
+        "state": "claimed",
+        "operation_id": value["operation_id"],
+        "source": value["source"],
+        "preview_fingerprint": FINGERPRINT,
+        "target": value["target"],
+    }
+    def body(marker: str, payload: dict) -> str:
+        return marker + "\n```json\n" + recovery.json.dumps(payload, sort_keys=True) + "\n```"
+    evidence = {
+        "original_receipt": original_receipt,
+        "recovery_case": recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION.value,
+    }
+    original_collect = recovery.collect_evidence
+    original_prove = recovery.prove_repo_only_descendant
+    original_state = recovery.collect_prestate
+    recovery.collect_evidence = lambda *_args: evidence
+    recovery.prove_repo_only_descendant = lambda *_args: value["runner"]
+    calls = []
+    try:
+        incomplete = CommentsClient([body(recovery._claim_marker(value["operation_id"]), claim)])
+        recovery.collect_prestate = lambda *_args, **kwargs: (
+            calls.append(kwargs) or (_ for _ in ()).throw(recovery.RecoveryError("target-marker-not-complete"))
+        )
+        blocked = recovery.existing_recovery_readback(incomplete, 9, FINGERPRINT, object())
+        assert blocked["state"] == "blocked"
+        assert blocked["reason"] == "normal-claim-incomplete-readback-only"
+        assert calls == [{"require_incomplete": False, "case": recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION}]
+        assert len(incomplete.values) == 1
+
+        receipt = {
+            "schema": recovery.RECOVERY_SCHEMA,
+            "state": "complete",
+            "operation_id": value["operation_id"],
+            "source": value["source"],
+            "preview_fingerprint": FINGERPRINT,
+        }
+        complete = CommentsClient([
+            body(recovery._claim_marker(value["operation_id"]), claim),
+            body(recovery._receipt_marker(value["operation_id"]), receipt),
+        ])
+        calls.clear()
+        recovery.collect_prestate = lambda *_args, **kwargs: (
+            calls.append(kwargs) or {"metadata": {"deployment_complete": True}}
+        )
+        result = recovery.existing_recovery_readback(complete, 9, FINGERPRINT, object())
+        assert result["state"] == "complete"
+        assert calls == [{"require_incomplete": False, "case": recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION}]
+        assert len(complete.values) == 2
+    finally:
+        recovery.collect_evidence = original_collect
+        recovery.prove_repo_only_descendant = original_prove
+        recovery.collect_prestate = original_state
 
 
 def test_finance_pilot_prestate_contract() -> None:
@@ -740,10 +823,52 @@ subprocess.CalledProcessError: Command ["ssh"] returned non-zero exit status 1.
     route = source[source.index("def build_stage_commands"):source.index("def _run_stage")]
     for required in ("_build_autoanswers_prepare_deploy_command", "_build_managed_systemd_commands", "_build_nginx_public_routes_command", "normal_activation_tail"):
         assert required in route
-    tail = source[source.index("if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:", source.index("def apply_recovery")):source.index("activation = _run_stage", source.index("def apply_recovery"))]
+    tail = source[source.index("if normal_activation_tail_case(case):", source.index("def apply_recovery")):source.index("activation = _run_stage", source.index("def apply_recovery"))]
     for phase in ("autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback"):
         assert phase in tail
     assert "normal-tail-phase-already-recorded" in tail
+
+
+def test_registry_precheck_contract_is_log_bound() -> None:
+    assert recovery.recovery_case(35841112474) is recovery.RecoveryCase.STORAGE_TAIL
+    proof = recovery._prove_failed_stage(
+        registry_precheck_log(),
+        35840710978,
+        "One-shot deployed release",
+        case=recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION,
+    )
+    assert proof["stage"] == "autoanswers-prepare-deploy-registry-precheck"
+    assert proof["unit"] == "wb-core-registry-http.service"
+    for bad_log, reason in (
+        (registry_precheck_log(exact_stage=False), "failed-stage-not-registry-precheck-exit1"),
+        (registry_precheck_log(exit_status=2), "failed-stage-not-registry-precheck-exit1"),
+        (registry_precheck_log(gate_run_id=1), "failed-stage-not-registry-precheck-exit1"),
+        (registry_precheck_log() + b"subprocess.CalledProcessError: Command ['ssh'] returned non-zero exit status 255.", "failed-stage-not-definite-single-exit1"),
+    ):
+        expect_reason(
+            reason,
+            lambda bad_log=bad_log: recovery._prove_failed_stage(
+                bad_log,
+                35840710978,
+                "One-shot deployed release",
+                case=recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION,
+            ),
+        )
+    receipt = {
+        "schema": recovery.release.RECEIPT_SCHEMA,
+        "state": "blocked",
+        "reason": "CalledProcessError",
+        "release_kind": "live_runtime",
+        "deployed_sha": None,
+    }
+    expect_reason(
+        "original-receipt-identity-invalid",
+        lambda: recovery._validate_original_receipt(
+            receipt, case=recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION
+        ),
+    )
+    source = Path(recovery.__file__).read_text(encoding="utf-8")
+    assert "EXPECTED_REGISTRY_PRECHECK_RUN_ID" not in source
 
 
 def test_bounded_status_readback_retries_only_read() -> None:
@@ -767,13 +892,11 @@ def test_bounded_status_readback_retries_only_read() -> None:
 
 def test_normal_tail_apply_and_claim_replay() -> None:
     value = preview()
-    value["recovery_case"] = recovery.RecoveryCase.SELECTIVE_B9_ACTIVATION.value
-    value["selective_b9_diff"] = {"proof": "normal-test"}
-    value["prestate"]["selective_live_contract"] = {"stable": True}
+    value["recovery_case"] = recovery.RecoveryCase.REGISTRY_PRECHECK_ACTIVATION.value
     commands_value = commands()
     commands_value["normal_activation_tail"] = {name: [name] for name in ("prepare", "install", "daemon_reload", "nginx", "restart", "reconcile", "barrier", "storage", "storage_readback", "status", "auth")}
     calls = []
-    original = (recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._selective_b9_diff_proof)
+    original = (recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant)
     incomplete = value["prestate"]
     restarted = {**incomplete, "main_pid": 43}
     complete = {**restarted, "metadata": {**restarted["metadata"], "deployment_complete": True}, "metadata_sha256": "7" * 64}
@@ -782,7 +905,6 @@ def test_normal_tail_apply_and_claim_replay() -> None:
     recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or _completed(command, stdout=command[0]))
     recovery.collect_prestate = lambda *_args, **_kwargs: states.pop(0)
     recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: value["runner"]
-    recovery._selective_b9_diff_proof = lambda: {"proof": "normal-test"}
     client = CommentsClient()
     try:
         result = recovery.apply_recovery(client, value, FINGERPRINT, object())
@@ -794,7 +916,7 @@ def test_normal_tail_apply_and_claim_replay() -> None:
     except recovery.RecoveryError as exc:
         raise AssertionError(exc.reason) from exc
     finally:
-        (recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._selective_b9_diff_proof) = original
+        (recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant) = original
 
 def main() -> None:
     test_failure_evidence()
@@ -805,8 +927,10 @@ def main() -> None:
     test_activation_failure_never_completes()
     test_target_drift_halts_before_mutation()
     test_existing_claim_is_readback_only()
+    test_registry_precheck_existing_claim_and_receipt_are_readback_only()
     test_finance_pilot_prestate_contract()
     test_selective_b9_contract()
+    test_registry_precheck_contract_is_log_bound()
     test_normal_tail_apply_and_claim_replay()
     test_bounded_status_readback_retries_only_read()
     test_safe_remote_failure_diagnostics()
