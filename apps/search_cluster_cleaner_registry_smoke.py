@@ -27,6 +27,13 @@ def legacy_sql():
 
 
 NOW='2026-09-11T00:00:00+00:00';AFTER='2026-09-11T00:01:00+00:00'
+ORPHAN_FINANCE_VIEW='finance_raw_current_rows'
+ORPHAN_FINANCE_VIEW_SQL='CREATE VIEW finance_raw_current_rows AS SELECT * FROM finance_raw_batch_rows'
+
+
+def add_orphan_finance_view(conn):
+    conn.execute(ORPHAN_FINANCE_VIEW_SQL)
+    return conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",(ORPHAN_FINANCE_VIEW,)).fetchone()[0]
 
 
 def snapshot(conn):
@@ -42,6 +49,13 @@ def registry_objects(conn):
         FROM sqlite_master WHERE name LIKE 'change_registry_%' ORDER BY type,name""")]
 
 
+def pragma_settings(conn):
+    return tuple(
+        conn.execute(f'PRAGMA {name}').fetchone()[0]
+        for name in ('foreign_keys', 'legacy_alter_table')
+    )
+
+
 class FailingConnection(sqlite3.Connection):
     fail=False
     def execute(self,sql,*args,**kwargs):
@@ -54,7 +68,7 @@ class RegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runtime=RegistryUploadDbBackedRuntime(runtime_dir=Path(tmp)/'runtime');runtime.runtime_dir.mkdir()
             with sqlite3.connect(runtime.db_path) as conn:
-                conn.executescript(legacy_sql());conn.commit()
+                conn.executescript(legacy_sql());view_sql=add_orphan_finance_view(conn);conn.commit()
             # This is the actual registry startup path: WarehouseFunctionalBlock
             # builds CanonicalCostEngine, which calls the runtime bootstrap.
             WarehouseFunctionalBlock(runtime=runtime)
@@ -63,6 +77,9 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(len([r for r in conn.execute('PRAGMA table_info(change_registry_facts)') if r[1]=='query_hash']),1)
                 self.assertEqual(conn.execute('SELECT count(*) FROM change_registry_facts').fetchone()[0],3)
                 self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[])
+                self.assertEqual(conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",(ORPHAN_FINANCE_VIEW,)).fetchone()[0],view_sql)
+                with self.assertRaisesRegex(sqlite3.OperationalError,'no such table'):
+                    conn.execute('SELECT * FROM '+ORPHAN_FINANCE_VIEW).fetchall()
                 before=(snapshot(conn),registry_objects(conn))
             WarehouseFunctionalBlock(runtime=runtime)
             with sqlite3.connect(runtime.db_path) as conn:
@@ -82,11 +99,19 @@ class RegistryTests(unittest.TestCase):
 
     def test_populated_legacy_migration_reinitialize(self):
         conn=sqlite3.connect(':memory:');conn.row_factory=sqlite3.Row;conn.executescript(legacy_sql());conn.execute('PRAGMA foreign_keys=ON')
+        view_sql=add_orphan_finance_view(conn)
+        settings=pragma_settings(conn)
+        attempt_event_fks=[tuple(row) for row in conn.execute('PRAGMA foreign_key_list(change_registry_attempt_events)')]
         before=snapshot(conn);self.assertEqual(len(before['change_registry_facts'][1]),3)
         ensure_change_registry_schema(conn);conn.commit()
         for table,(columns,rows) in before.items():
             self.assertEqual([tuple(r) for r in conn.execute('SELECT '+','.join(columns)+' FROM '+table+' ORDER BY rowid')],rows)
         self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[]);self.assertEqual(conn.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+        self.assertEqual(pragma_settings(conn),settings)
+        self.assertEqual([tuple(row) for row in conn.execute('PRAGMA foreign_key_list(change_registry_attempt_events)')],attempt_event_fks)
+        self.assertEqual(conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",(ORPHAN_FINANCE_VIEW,)).fetchone()[0],view_sql)
+        with self.assertRaisesRegex(sqlite3.OperationalError,'no such table'):
+            conn.execute('SELECT * FROM '+ORPHAN_FINANCE_VIEW).fetchall()
         exact=conn.serialize();ensure_change_registry_schema(conn);conn.commit();self.assertEqual(conn.serialize(),exact)
         for table in ('change_registry_items','change_registry_facts'):
             self.assertTrue(all(r[0] is None for r in conn.execute('SELECT query_hash FROM '+table)))
@@ -94,10 +119,13 @@ class RegistryTests(unittest.TestCase):
 
     def test_failed_migration_rolls_back_complete_old_schema(self):
         conn=sqlite3.connect(':memory:',factory=FailingConnection);conn.row_factory=sqlite3.Row;conn.executescript(legacy_sql());conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA legacy_alter_table=ON')
+        view_sql=add_orphan_finance_view(conn);settings=pragma_settings(conn)
         old=conn.serialize();conn.fail=True
         with self.assertRaises(sqlite3.OperationalError):ensure_change_registry_schema(conn)
         self.assertEqual(conn.serialize(),old);self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[])
-        self.assertEqual(conn.execute('PRAGMA foreign_keys').fetchone()[0],1)
+        self.assertEqual(pragma_settings(conn),settings)
+        self.assertEqual(conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name=?",(ORPHAN_FINANCE_VIEW,)).fetchone()[0],view_sql)
         conn.fail=False;ensure_change_registry_schema(conn);conn.close()
 
     def test_exact_query_identity_rollback_and_repeated_evidence(self):

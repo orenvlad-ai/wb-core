@@ -32,7 +32,13 @@ def migrate_search_cluster_schema(conn, schema_sql):
         if conn.in_transaction:
             raise RuntimeError('registry migration requires explicit setup outside a business transaction')
         foreign_keys = conn.execute('PRAGMA foreign_keys').fetchone()[0]
+        legacy_alter_table = conn.execute('PRAGMA legacy_alter_table').fetchone()[0]
         conn.execute('PRAGMA foreign_keys=OFF')
+        # ALTER TABLE RENAME otherwise reparses every view in the database.
+        # Keep unrelated, pre-existing invalid views untouched during this
+        # atomic replacement of the registry tables, then restore the caller's
+        # connection setting below.
+        conn.execute('PRAGMA legacy_alter_table=ON')
         try:
             conn.execute('BEGIN IMMEDIATE')
             # Temporarily remove and restore exact trigger definitions, including
@@ -57,6 +63,7 @@ def migrate_search_cluster_schema(conn, schema_sql):
             conn.rollback()
             raise
         finally:
+            conn.execute(f'PRAGMA legacy_alter_table={int(legacy_alter_table)}')
             conn.execute(f'PRAGMA foreign_keys={int(foreign_keys)}')
     conn.executescript(f"""
         CREATE TABLE IF NOT EXISTS {DOMAIN_TABLE}(
