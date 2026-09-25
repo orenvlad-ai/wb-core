@@ -176,6 +176,105 @@ class PublicationTests(unittest.TestCase):
         for day, plan in historical.items():
             self.assertEqual(self.runtime.load_sheet_vitrina_ready_snapshot(day), plan)
 
+    def test_refresh_does_not_reuse_plan_time_for_source_capture(self):
+        save(self.runtime, make_plan(), now=NOW)
+        initial, expected = make_book(self.root, opening=True, now=NOW)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        prepared = make_book(self.root, quantity="1900", now=NOW)
+        captured = {}
+
+        def prepare(*args, **kwargs):
+            captured.update(kwargs)
+            return prepared
+
+        with clock(NOW), patch.object(book, "prepare", side_effect=prepare):
+            result = book.refresh(self.root, ready_runtime=self.runtime)
+
+        self.assertEqual(result["status"], "published")
+        self.assertNotIn("now", captured)
+
+    def test_long_ready_build_uses_fresh_source_capture_time(self):
+        from packages.application.sheet_vitrina_v1_live_plan import (
+            SheetVitrinaV1LivePlanBlock, _registry_state_fingerprint,
+        )
+        plan_time = datetime(2026, 9, 8, 14, tzinfo=timezone.utc)
+        source_time = datetime(2026, 9, 8, 14, 10, tzinfo=timezone.utc)
+        stock_time = "2026-09-08T14:05:00Z"
+        save(self.runtime, make_plan("2026-09-06", "2026-09-07"), now=plan_time)
+        initial, expected = make_book(self.root, opening=True, now=plan_time)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        phase = {"built": False}
+
+        class RefreshClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = source_time if phase["built"] else plan_time
+                return value if tz else value.replace(tzinfo=None)
+
+        class CommitClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return source_time if tz else source_time.replace(tzinfo=None)
+
+        def build_plan(*args, **kwargs):
+            current = self.runtime.load_current_state()
+            kwargs["_collection"].scope = (current.bundle_version, kwargs["as_of_date"])
+            phase["built"] = True
+            return replace(make_plan(), metadata={
+                "local_derive_registry_fingerprint": _registry_state_fingerprint(current),
+            })
+
+        def source_capture(*args, now, **kwargs):
+            image = capture(DAY, quantity="1900", docs=[document(day=DAY)], timestamp=stock_time)
+            image["captured_at"] = now.isoformat().replace("+00:00", "Z")
+            image["source_digest"] = fingerprint({key: value for key, value in image.items() if key != "source_digest"})
+            return image
+
+        def business_date(now=None):
+            return current_business_date_iso(source_time if now is None else now)
+
+        with patch.object(book, "datetime", RefreshClock), patch.object(dbmod, "datetime", CommitClock), \
+             patch("packages.business_time.current_business_date_iso", side_effect=business_date), \
+             patch.object(SheetVitrinaV1LivePlanBlock, "_build_plan", side_effect=build_plan), \
+             patch.object(book, "capture_current", side_effect=source_capture), \
+             patch.object(book, "capture_wb_component", return_value=wb(DAY)), \
+             patch.object(book, "capture_retained_stages", return_value=retained(wb(DAY))):
+            result = book.refresh(self.root, ready_runtime=self.runtime)
+
+        self.assertTrue(phase["built"])
+        self.assertEqual(result["status"], "published")
+        current = self.runtime.load_sheet_vitrina_ready_snapshot()
+        self.assertEqual(current.metadata["fbs_accounting_bindings"][DAY]["ready_target"]["as_of_date"], OUTER)
+
+    def test_rollover_after_plan_build_leaves_book_and_ready_unchanged(self):
+        plan_time = datetime(2026, 9, 8, 18, 59, tzinfo=timezone.utc)
+        capture_time = datetime(2026, 9, 8, 19, tzinfo=timezone.utc)
+        save(self.runtime, make_plan(), now=plan_time)
+        initial, expected = make_book(self.root, opening=True, now=plan_time)
+        book.save(self.root, initial, expected=expected, operation_id="opening")
+        prepared = make_book(self.root, quantity="1900", now=capture_time)
+
+        def state():
+            with publication.readonly(self.runtime.db_path) as conn, publication.readonly(book.path(self.root)) as books:
+                return list(conn.iterdump()), list(books.iterdump())
+
+        before = state()
+        class PlanClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return plan_time if tz else plan_time.replace(tzinfo=None)
+
+        class CommitClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return capture_time if tz else capture_time.replace(tzinfo=None)
+
+        with patch.object(book, "datetime", PlanClock), patch.object(dbmod, "datetime", CommitClock), \
+             patch.object(book, "prepare", return_value=prepared):
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, "current_book_target_missing_date"):
+                book.refresh(self.root, ready_runtime=self.runtime)
+        self.assertEqual(state(), before)
+
     def test_current_book_rejects_incompatible_target_before_any_write(self):
         self._check_incompatible_target(datetime(2026, 9, 12, 14, tzinfo=timezone.utc))
 

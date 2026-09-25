@@ -201,7 +201,6 @@ def _record_prepare_failure(runtime_dir, *, expected, error):
 
 
 def prepare(runtime_dir, *, now=None, opening=False):
-    now = now or datetime.now(timezone.utc)
     before, expected = load(runtime_dir)
     if opening and before is not None:
         raise ValueError("accounting_already_initialized")
@@ -213,7 +212,12 @@ def prepare(runtime_dir, *, now=None, opening=False):
     with readonly(db) as conn:
         check_pinned_authority(conn, authority)
         inputs = capture_material(conn)
-        prepared, expected = _prepare_from_snapshot(runtime_dir, db=db, conn=conn, now=now, opening=opening,
+        # ``capture_material`` performs the first read in this transaction and
+        # therefore pins its SQLite snapshot.  Choose the default capture time
+        # only afterwards: a long ready-plan build must not leave a stale wall
+        # clock before a newer official-stock generation in this same capture.
+        capture_now = now or datetime.now(timezone.utc)
+        prepared, expected = _prepare_from_snapshot(runtime_dir, db=db, conn=conn, now=capture_now, opening=opening,
                                                    before=before, expected=expected, inputs=inputs)
         prepared["publication_authority"] = authority
         return prepared, expected
@@ -292,13 +296,13 @@ def refresh(runtime_dir, *, ready_runtime=None):
     prior, prior_version = load(runtime_dir)
     if prior is None or not prior["active"]:
         return {"status": "not_active"}
-    now = datetime.now(timezone.utc)
+    plan_now = datetime.now(timezone.utc)
     build_inputs = None
     if ready_runtime is not None:
         from packages.business_time import default_business_as_of_date
         current = ready_runtime.load_current_state()
         expected_ready = ready_runtime.prepare_sheet_vitrina_ready_publication(
-            bundle_version=current.bundle_version, as_of_date=default_business_as_of_date(now))
+            bundle_version=current.bundle_version, as_of_date=default_business_as_of_date(plan_now))
         from packages.application.registry_upload_db_backed_runtime import _deserialize_sheet_vitrina_plan
         if expected_ready.exists:
             plan = _deserialize_sheet_vitrina_plan(expected_ready.plan_json)
@@ -310,14 +314,16 @@ def refresh(runtime_dir, *, ready_runtime=None):
                 SheetVitrinaV1LivePlanBlock, bind_local_derive_publication,
             )
             from packages.application.sheet_vitrina_v1_own_product_capital import OWN_PRODUCT_CAPITAL_SOURCE_KEY
-            plan = SheetVitrinaV1LivePlanBlock(ready_runtime, now_factory=lambda: now).build_plan(
+            plan = SheetVitrinaV1LivePlanBlock(ready_runtime, now_factory=lambda: plan_now).build_plan(
                 as_of_date=expected_ready.as_of_date, source_keys=(OWN_PRODUCT_CAPITAL_SOURCE_KEY,))
             current, expected_ready = bind_local_derive_publication(ready_runtime, plan, current, expected_ready)
             previous = ready_runtime.load_sheet_vitrina_ready_snapshot()
-            plan = _retain_ready_history(plan, previous, business_date=current_business_date_iso(now))
+            plan = _retain_ready_history(plan, previous, business_date=current_business_date_iso(plan_now))
             build_inputs = plan.metadata["publication_inputs"]
     try:
-        book, expected = prepare(runtime_dir, now=now)
+        # ``prepare`` timestamps its capture after pinning the source snapshot.
+        # Do not carry the pre-build plan clock into this separate capture.
+        book, expected = prepare(runtime_dir)
     except Exception as exc:
         _record_prepare_failure(runtime_dir, expected=prior_version, error=exc)
         raise

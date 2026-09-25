@@ -48,6 +48,33 @@ class RuntimeTests(unittest.TestCase):
         version = runtime.save(self.root, book, expected=expected, operation_id="activate-test")
         return book, version
 
+    def test_default_capture_time_follows_pinned_source_snapshot(self):
+        self.opening()
+        from packages.application import ready_publication
+        before = self.now
+        after = self.now.replace(minute=self.now.minute + 5)
+        phase = {"material": False}
+        original_capture_material = ready_publication.capture_material
+
+        class SnapshotClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = after if phase["material"] else before
+                return value if tz else value.replace(tzinfo=None)
+
+        def capture_material(conn):
+            result = original_capture_material(conn)
+            phase["material"] = True
+            return result
+
+        with patch.object(ready_publication, "capture_material", side_effect=capture_material), \
+             patch.object(runtime, "datetime", SnapshotClock), \
+             patch.object(runtime, "capture_current", side_effect=lambda *args, **kwargs: deepcopy(self.image)) as captured:
+            runtime.prepare(self.root)
+
+        self.assertTrue(phase["material"])
+        self.assertEqual(captured.call_args.kwargs["now"], after)
+
     def test_cutover_is_intraday_and_receipt_counted_once(self):
         book, first = self.opening()
         baseline = deepcopy(book["state"]["baseline"])
