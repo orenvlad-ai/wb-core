@@ -57,6 +57,11 @@ class CostTests(unittest.TestCase):
         self.assertEqual(value(final)["cost_mass_quantity"], "2000")
         self.assertEqual(evaluate_candidate(final, capture("2026-09-08", quantity="2000", docs=[received])), final)
 
+    def test_stock_snapshot_after_document_capture_is_rejected(self):
+        stale_capture = capture("2026-09-08", timestamp="2026-09-08T14:00:01Z")
+        with self.assertRaisesRegex(FbsSnapshotCostError, "snapshot_after_document_capture"):
+            evaluate_candidate(self.initial, stale_capture)
+
     def test_document_before_snapshot_and_sales(self):
         received = document()
         early = evaluate_candidate(self.initial, capture("2026-09-08", docs=[received]))
