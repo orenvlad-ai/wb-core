@@ -36,6 +36,14 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
                 result = web.summary(principal)
             elif path == "/targets":
                 result = web.targets(principal,refresh=query.get('refresh',['0'])[0]=='1')
+            elif path == "/manual-batches/eligibility":
+                result = web.batch_eligibility(principal,refresh=query.get('refresh',['0'])[0]=='1')
+            elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})/items/([0-9]{1,3})", path):
+                from packages.application.search_cluster_cleaner_batch import batch_item_detail
+                result = batch_item_detail(web.require_service(),match[1],int(match[2]),principal)
+            elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})", path):
+                from packages.application.search_cluster_cleaner_batch import batch_status
+                result = batch_status(web.require_service(),match[1],principal)
             elif path == "/reviews":
                 result = web.reviews(principal, cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", [50])[0]))
             elif path == "/history":
@@ -83,6 +91,9 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
         elif path == "/manual-clean":
             allowed |= {"advert_id", "nm_id"}
             operation = lambda: web.start_manual_clean(payload, principal)
+        elif path == "/manual-batches":
+            allowed |= {"selected_categories", "targets"}
+            operation = lambda: web.start_manual_batch(payload, principal)
         elif match := re.fullmatch(r"/manual-clean/([A-Za-z0-9_.:-]{8,120})/recheck", path):
             operation = lambda: cleaner.recheck_manual_job(match[1], payload, principal)
         elif match := re.fullmatch(r"/reviews/([A-Za-z0-9-]{1,120})/decision", path):

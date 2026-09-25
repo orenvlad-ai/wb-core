@@ -156,6 +156,8 @@ def main() -> None:
         with guard._lock():
             state=guard._load()
             assert state['hold'] and not state.get('owner') and not state.get('manual_capability')
+    from apps.search_cluster_cleaner_batch_smoke import main as batch_main
+    batch_main()
     print('search cluster cleaner self-service smoke: ok')
 
 

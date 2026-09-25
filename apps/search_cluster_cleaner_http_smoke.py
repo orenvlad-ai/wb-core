@@ -18,6 +18,7 @@ from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.business_data_write_barrier import acquire_barrier
 from packages.contracts.search_cluster_cleaner import Target
+from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
 from packages.domain.search_cluster_sources import union_snapshot
 
 
@@ -104,6 +105,28 @@ def run():
         acquire_barrier(f.runtime_dir,window_id='cleaner-c-fixture',window_kind='snapshot',plan_fingerprint='sha256:'+'a'*64,approval_reference='synthetic-fixture',actor='fixture',reason='HTTP barrier test')
         check('maintenance_post_423_no_mutation',f.request('/settings',dict(request_id='http-maintenance',expected_revision=f.request('/summary')[1]['settings']['revision'],enabled=False))[0]==423 and f.count('cleaner_requests')==count)
         check('maintenance_get_200',f.request('/summary')[0]==200)
+    with running_fixture() as f:
+        eligible=f.request('/manual-batches/eligibility')[1]
+        check('batch_exact_eligibility',eligible['items'][0]['eligible'] and
+              any(row['status']=='completed' and not row['eligible'] for row in eligible['items']))
+        reader=f.login('reader')
+        check('batch_reader_mutation_denied',f.request('/manual-batches',dict(request_id='http-batch-reader-0001',selected_categories=['active'],targets=[dict(advert_id=10101,nm_id=101)]),opener=reader)[0]==403)
+        check('batch_csrf_denied',f.request('/manual-batches',dict(request_id='http-batch-csrf-0001',selected_categories=['active'],targets=[dict(advert_id=10101,nm_id=101)]),headers={'Origin':'https://foreign.example'})[0]==403)
+        settings=f.request('/summary')[1]['settings']
+        f.request('/settings',dict(request_id='http-batch-settings-off',expected_revision=settings['revision'],enabled=False))
+        class ExactSource:
+            def monotonic(self):return 0.0
+            def _adverts(self,ids,deadline):return [Target(10101,101,name='Тестовая кампания 10101',contract_verified=True)]
+        command=dict(request_id='http-batch-owner-0001',selected_categories=['active'],targets=[dict(advert_id=10101,nm_id=101)])
+        with patch.object(CleanerWbSource,'from_env',return_value=ExactSource()):
+            code,batch,_=f.request('/manual-batches',command)
+            check('batch_post_saved_once',code==202 and batch['state']=='queued')
+            check('batch_duplicate_recovered',f.request('/manual-batches',command)[1]==batch)
+        detail=f.request('/manual-batches/'+batch['batch_id'])[1]
+        check('batch_owner_status',detail['selected_count']==1 and detail['items'][0]['new_checked'] is None)
+        check('batch_last_owner_summary',f.request('/summary')[1]['last_manual_batch']['batch_id']==batch['batch_id'])
+        check('batch_cross_owner_hidden',f.request('/manual-batches/'+batch['batch_id'],opener=reader)[0]==404)
+        check('batch_item_detail',f.request('/manual-batches/'+batch['batch_id']+'/items/0')[1]['job'] is None)
     with running_fixture('unready') as f:
         s=f.request('/summary')[1]
         check('no_baseline_stays_off',not s['settings']['enabled'] and f.request('/settings',dict(request_id='http-unready-on',expected_revision=1,enabled=True))[0]==409)
