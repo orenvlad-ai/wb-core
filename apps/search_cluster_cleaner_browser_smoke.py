@@ -83,7 +83,25 @@ def run(output:Path):
             expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
             expect(page.locator('[data-kc-stage-text]')).to_contain_text('Получаем ключи')
             check('double_click_run_one_job',f.count('cleaner_runs')==before+1)
+            def busy_owner_job(route):
+                payload=route.fetch().json();payload.update(manual_worker_state='busy',manual_worker_alive=True)
+                route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
+            page.route('**/keyword-cleaner/summary',busy_owner_job)
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-manual-stage]')).to_be_visible();check('manual_job_survives_reload')
+            expect(page.locator('[data-kc-manual-advert]')).to_have_value('10101')
+            expect(page.locator('[data-kc-manual-nm]')).to_have_value('101')
+            expect(page.locator('[data-kc-selected-target]')).to_contain_text('Тестовая кампания 10101')
+            expect(page.locator('[data-kc-selected-target]')).to_contain_text('Прозрачное стекло · iPhone 16 Pro Max')
+            expect(page.locator('[data-kc-enabled-label]')).to_have_text('Выполняется ручная чистка')
+            check('active_job_restores_exact_named_target_and_busy_label')
+            page.route('**/keyword-cleaner/targets*',lambda route:route.abort())
+            page.reload(wait_until='domcontentloaded')
+            expect(page.locator('[data-kc-target-note]')).to_have_text('Чистим только выбранную пару.')
+            expect(page.locator('[data-kc-selected-target]')).to_contain_text('Тестовая кампания 10101')
+            expect(page.locator('[data-kc-selected-target]')).to_contain_text('кампания 10101')
+            check('job_identity_survives_targets_error')
+            page.unroute('**/keyword-cleaner/targets*')
+            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-manual-advert]')).to_have_value('10101');expect(page.locator('[data-kc-manual-nm]')).to_have_value('101')
             check('manual_job_restores_without_second_post',f.count('cleaner_runs')==before+1)
             first=f.request('/summary')[1]['last_manual_job']['job_id']
             f.cleaner.record_manual_job(first,state='no_change',stage='finished',result='Нет новых допустимых фраз для исключения')
@@ -93,24 +111,58 @@ def run(output:Path):
             stored=page.evaluate("JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(key=>key.startsWith('wb-keyword-cleaner-manual-job:')))).job_id")
             check('server_latest_job_overrides_old_tab_storage',stored==new['job_id'])
             page.close()
+        with running_fixture('empty') as f:
+            page=browser.new_page();browser_login(page,f)
+            def late_history(route):
+                payload=dict(items=[dict(kind='self_service_requested',created_at='2026-09-25T11:58:00Z',run_id='synthetic-late',facts=dict(job_id='synthetic-job',advert_id=10101,nm_id=101)),
+                                    dict(kind='self_service_stage',created_at='2026-09-25T11:59:00Z',run_id='synthetic-late',facts=dict(job_id='synthetic-job',advert_id=10101,nm_id=101,state='running',stage='write_apply_claimed')),
+                                    dict(kind='profile_draft',created_at='2026-09-25T11:59:30Z',facts=dict(nm_id=101)),
+                                    dict(kind='run_finished',created_at='2026-09-25T12:00:00Z',run_id='synthetic-late',facts=dict(state='partial',summary=dict(dry_run=True))),
+                                    dict(kind='self_service_finished',created_at='2026-09-25T12:04:00Z',run_id='synthetic-late',facts=dict(job_id='synthetic-job',advert_id=10101,nm_id=101,state='complete',stage='finished')),
+                                    dict(kind='late_confirmation',created_at='2026-09-25T12:05:00Z',run_id='synthetic-late',facts=dict(confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=5,late=True,missing=0,state='confirmed',target='10101:101'))],next_cursor=None)
+                route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
+            def late_run(route):
+                phrases=[dict(target='10101:101',query='проверенный ключ '+str(i),state='confirmed',confirmed_at='2026-09-25T12:05:00Z',rule_id='WRONG_MODEL',reason='Другая модель') for i in range(5)]
+                payload=dict(kind='manual_apply',state='partial',effective_state='complete',targets=[],phrases=phrases,write_operations=[],settlement=dict(confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=5))
+                route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
+            page.route('**/keyword-cleaner/history*',late_history)
+            page.route('**/keyword-cleaner/runs/synthetic-late',late_run)
+            page.locator('[data-kc-history-open]').click()
+            expect(page.locator('[data-kc-history]')).to_contain_text('Ручная чистка запущена')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Этап ручной чистки')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Проверка идёт · Проверяем результат записи в WB · кампания 10101 · товар WB 101')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Итог ручной чистки')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Чистка завершена · кампания 10101 · товар WB 101')
+            check('self_service_history_has_target_and_stage_without_undefined','undefined' not in page.locator('[data-kc-history]').inner_text())
+            expect(page.locator('[data-kc-history]')).to_contain_text('при ручном запуске: 5')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Первичный итог: Выполнено частично')
+            expect(page.locator('[data-kc-history]')).not_to_contain_text('Без записи в WB')
+            page.locator('[data-kc-history] button').first.click()
+            expect(page.locator('[data-kc-run-detail]')).to_contain_text('Результат · Выполнено')
+            expect(page.locator('[data-kc-run-detail]')).to_contain_text('при ручном запуске 5')
+            check('late_confirmed_history_has_five_phrases',page.locator('[data-kc-run-detail] .kc-manual-group li').count()==5)
+            check('late_confirmed_history_has_no_fake_empty_target','Обработанных кампаний пока нет' not in page.locator('[data-kc-run-detail]').inner_text())
+            page.close()
         # The browser renders exact worker receipts without treating pending or
         # missing confirmation as an exclusion. HTTP is synthetic and local.
-        for outcome in ('complete','partial','failed'):
+        for outcome in ('complete','partial','failed','detail-missing'):
             with running_fixture() as f:
                 with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
                 page=browser.new_page();browser_login(page,f);polls=[];rechecks=[]
                 def manual_status(route):
                     polls.append(1);job_id=route.request.url.rsplit('/',1)[-1]
-                    state='running' if len(polls)==1 else outcome
+                    state='running' if len(polls)==1 else ('complete' if outcome=='detail-missing' else outcome)
                     body=dict(job_id=job_id,run_id='synthetic-scan',advert_id=10101,nm_id=101,state=state,
                               stage='classifying' if state=='running' else 'finished',updated_at='2026-09-25T12:00:0'+str(min(len(polls),9))+'Z',
-                              scan_decisions=[dict(query='стекло iphone 16 pro max',verdict='allow',state='allow',reason='Подходит товару',rule_id='MATCH'),
-                                              dict(query='лишний ключ',verdict='exclude',state='pending_exclude',reason='Другая модель',rule_id='WRONG_MODEL')])
+                              scan_decisions=[dict(query='стекло iphone 16 pro max',verdict='allow',state='allow',observed_state='active',reason='Подходит товару',rule_id='MATCH'),
+                                              dict(query='лишний ключ',verdict='exclude',state='pending_exclude',observed_state='excluded',reason='Другая модель',rule_id='WRONG_MODEL'),
+                                              dict(query='старый ключ',verdict='exclude',state='already_excluded',observed_state='excluded',reason='Был исключён раньше',rule_id='OLD')])
                     if state=='complete':body.update(result='applied',write_run_id='synthetic-write')
                     if state=='partial':body.update(result='ambiguous',write_run_id='synthetic-write',error='WB ещё не подтвердил исключение',can_recheck=True,stage='write_apply_claimed')
                     if state=='failed':body.update(error='WB не ответил; запись не подтверждена')
                     route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
                 def write_detail(route):
+                    if outcome=='detail-missing':route.abort();return
                     state='confirmed' if outcome=='complete' else 'submitted'
                     body=dict(run_id='synthetic-write',effective_state='complete' if outcome=='complete' else 'unresolved',
                               phrases=[dict(query='лишний ключ',state=state,rule_id='WRONG_MODEL',reason='Другая модель',target='10101:101',confirmed_at='2026-09-25T12:00:00Z' if state=='confirmed' else None)],write_operations=[])
@@ -129,12 +181,20 @@ def run(output:Path):
                 result_text=page.locator('[data-kc-manual-result]').inner_text()
                 if outcome=='complete':
                     check('manual_confirmed_phrase_and_reason',all(value in result_text for value in ('WB подтвердил исключение','лишний ключ','Другая модель','Оставлено')))
+                    already=page.locator('[data-kc-manual-result] .kc-manual-group').filter(has=page.get_by_role('heading',name='Уже были в исключениях'))
+                    expect(already).to_contain_text('старый ключ');expect(already).not_to_contain_text('лишний ключ')
+                    expect(page.locator('[data-kc-manual-result] .kc-manual-stat').filter(has_text='Уже были исключены').locator('strong')).to_have_text('1')
+                    check('newly_confirmed_not_counted_as_already_excluded')
                     expect(page.locator('[data-kc-summary]')).to_be_hidden()
                     expect(page.locator('[data-kc-selected-target]')).to_contain_text('Тестовая кампания 10101')
                     expect(page.locator('[data-kc-selected-target]')).to_contain_text('Прозрачное стекло · iPhone 16 Pro Max')
                     page.locator('[data-kc-manual-result] details').last.locator('summary').click()
                     check('manual_rule_id_available_in_details','WRONG_MODEL' in page.locator('[data-kc-manual-result]').inner_text())
                     page.locator('[data-kc-manual-result] details').last.locator('summary').click()
+                    page.locator('[data-kc-manual-advert]').select_option('10102');page.locator('[data-kc-manual-nm]').select_option('102')
+                    expect(page.locator('[data-kc-selected-target]')).to_contain_text('Тестовая кампания 10102')
+                    expect(page.locator('[data-kc-manual-result]')).to_contain_text('Кампания: Тестовая кампания 10101 · 10101')
+                    check('terminal_card_keeps_original_job_target')
                 if outcome=='partial':
                     check('manual_pending_is_not_confirmed','Ожидают подтверждения WB' in result_text and 'WB подтвердил исключение' not in result_text)
                     expect(page.get_by_role('button',name='Проверить результат WB')).to_be_visible()
@@ -145,6 +205,11 @@ def run(output:Path):
                     expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
                     check('recheck_uses_same_job_readback_only',len(rechecks)==1 and bool(rechecks[0].get('request_id')) and f.count('cleaner_runs')==2)
                 if outcome=='failed':check('manual_error_is_visible','Чистка не выполнена' in result_text and 'WB не ответил' in result_text)
+                if outcome=='detail-missing':
+                    expect(page.locator('[data-kc-manual-result]')).to_contain_text('Подтверждения WB ещё не удалось загрузить')
+                    expect(page.locator('[data-kc-manual-result] .kc-manual-group').filter(has=page.get_by_role('heading',name='Уже были в исключениях'))).to_have_count(0)
+                    expect(page.locator('[data-kc-manual-result] .kc-manual-stat').filter(has_text='Уже были исключены').locator('strong')).to_have_text('—')
+                    check('missing_write_detail_does_not_invent_already_excluded')
                 check('manual_result_has_no_script',page.locator('[data-kc-manual-result] script').count()==0)
                 if outcome=='complete':
                     page.screenshot(path=str(output/'manual-result.png'),full_page=True);screens.append('manual-result.png')
