@@ -23,6 +23,8 @@ ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 
 from apps.wb_fbs_warehouse_registry import _load_env_file
+from packages.adapters.wb_content import HttpBackedWbContentSource, _extract_cards, _extract_cursor
+from packages.adapters.official_api_runtime import load_runtime_config
 from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_admission import AdmissionGuard
@@ -129,6 +131,69 @@ def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) ->
         approved=admitted.get(target.key);actual=current.get(target.nm_id)
         if not approved or not actual or actual.get('state')!='verified' or actual.get('current_card_sha256')!=approved.get('card_digest') or actual.get('verified_at')!=approved.get('verified_at'):_fail('manual_target_not_reconciled')
     return [admitted[t.key] for t in targets]
+
+def fetch_current_card(nm_id:int) -> dict:
+    """Read the exact current Content card; never accept a partial search page."""
+    source=HttpBackedWbContentSource()
+    runtime=load_runtime_config(token_env_var='WB_API_TOKEN',default_base_url='https://content-api.wildberries.ru',
+                                base_url_env_var='WB_CONTENT_API_BASE_URL',default_timeout_seconds=20)
+    if runtime.base_url!='https://content-api.wildberries.ru':_fail('current_card_origin_invalid')
+    cursor={'limit':100};found=[]
+    for _ in range(3):
+        payload=source._request_json(method='POST',url=runtime.base_url+'/content/v2/get/cards/list',
+                 token=runtime.token,timeout_seconds=runtime.timeout_seconds,
+                 body={'settings':{'cursor':cursor,'filter':{'textSearch':str(nm_id),'withPhoto':-1}}})
+        cards=_extract_cards(payload)
+        found.extend(card for card in cards if str(card.get('nmID') or card.get('nmId') or card.get('nm_id') or '')==str(nm_id))
+        next_cursor=_extract_cursor(payload)
+        if int(next_cursor.get('total') or len(cards))<100:break
+        updated_at=str(next_cursor.get('updatedAt') or '')
+        next_nm=next_cursor.get('nmID') or next_cursor.get('nmId')
+        if not updated_at or not next_nm:_fail('current_card_incomplete')
+        cursor={'limit':100,'updatedAt':updated_at,'nmID':next_nm}
+    else:_fail('current_card_incomplete')
+    if len(found)!=1:_fail('current_card_missing_or_duplicate')
+    card=found[0]
+    if not isinstance(card.get('characteristics'),list):_fail('current_card_incomplete')
+    return dict(nm_id=str(nm_id),title=card.get('title'),vendor_code=card.get('vendorCode'),
+                description=card.get('description'),characteristics=card['characteristics'])
+
+def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:KeywordCleaner) -> dict:
+    """Compare current business fields with the package-bound approved card."""
+    path=admission_dir/'card-source-approved.json'
+    try:
+        if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_mode & 0o077:_fail('approved_card_source_permissions')
+        raw=path.read_bytes()
+        if 'sha256:'+hashlib.sha256(raw).hexdigest()!=package['provenance'].get('fresh_cards_sha256'):_fail('approved_card_source_mismatch')
+        source=json.loads(raw)
+        cards=source['cards']
+        approved=[row for row in cards if str(row.get('nm_id'))==str(target.nm_id)]
+        admitted=next((row for row in package['manual_admission'] if row['advert_id']==target.advert_id and row['nm_id']==target.nm_id),None)
+        if len(approved)!=1 or not admitted or approved[0].get('card_digest')!=admitted['card_digest']:_fail('approved_card_source_mismatch')
+        fresh=fetch_current_card(target.nm_id)
+    except CleanerError:raise
+    except Exception as exc:raise CleanerError('current_card_unavailable','Не удалось проверить актуальную карточку WB',409) from exc
+    def business_fields(card:dict) -> dict:
+        characteristics=card.get('characteristics')
+        if not isinstance(characteristics,list):_fail('current_card_incomplete')
+        ids=[]
+        for row in characteristics:
+            if not isinstance(row,dict) or set(row)!={'id','name','value'} or type(row['id']) is not int:_fail('current_card_incomplete')
+            ids.append(row['id'])
+        if len(ids)!=len(set(ids)):_fail('current_card_duplicate_characteristic')
+        return dict(nm_id=str(card.get('nm_id')),title=card.get('title'),vendor_code=card.get('vendor_code'),
+                    description=card.get('description'),characteristics=sorted(characteristics,key=lambda row:(row['id'],canonical(row))))
+    if canonical(business_fields(approved[0]))!=canonical(business_fields(fresh)):
+        _fail('current_card_drift')
+    approved_profile=next((Profile.parse(row) for row in package['profiles'] if row['nm_id']==target.nm_id),None)
+    with service.store.read() as c:active_profile=service._profile(c,target.nm_id)
+    if not approved_profile or not active_profile or active_profile.semantic_fingerprint!=approved_profile.semantic_fingerprint:
+        _fail('manual_profile_mismatch')
+    return dict(nm_id=target.nm_id,approved_source_sha256=package['provenance']['fresh_cards_sha256'],verified_at=service_clock())
+
+def service_clock() -> str:
+    from packages.contracts.search_cluster_cleaner import utcnow
+    return utcnow()
 
 def _schema_state(service:KeywordCleaner) -> dict:
     with service.store.read() as c:
@@ -270,8 +335,24 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     if mode=='manual_prepare':
         if not isinstance(request.get('scan_run_id'),str):_fail('request_invalid')
         targets=_targets(request)
-        admitted=_admitted_targets(_package(package_path,account,generation),targets,admission_dir.resolve())
         target=targets[0]
+        if action=='readback':
+            # The immutable preparation event is authoritative after submit.
+            # Candidate/profile/card drift must not hide its exact run ID.
+            with service.store.read() as c:
+                rows=c.execute("SELECT run_id,facts FROM cleaner_events WHERE account=? AND kind='manual_apply_prepared'",(service.key,)).fetchall()
+            for row in rows:
+                try:facts=json.loads(row['facts'])
+                except (TypeError,ValueError):continue
+                if facts.get('production_operation_id')==operation_id and facts.get('scan_run_id')==request['scan_run_id'] and facts.get('target')==target.key and re.fullmatch(r'sha256:[0-9a-f]{64}',str(facts.get('candidate_sha256') or '')):
+                    with service.store.read() as c:
+                        prepared=c.execute("SELECT kind,trigger FROM cleaner_runs WHERE account=? AND run_id=?",(service.key,row['run_id'])).fetchone()
+                    if prepared and prepared['kind']=='manual_apply' and prepared['trigger']=='manual_exact_candidates':
+                        return dict(operation_id=operation_id,state='applied',run_id=row['run_id'])
+            return dict(operation_id=operation_id,state='not_submitted')
+        package=_package(package_path,account,generation)
+        admitted=_admitted_targets(package,targets,admission_dir.resolve())
+        _verify_fresh_card(package,target,admission_dir.resolve(),service)
         preview=service.manual_apply_preview(request['scan_run_id'],target)
         # The exact card receipt is part of the caller-visible candidate even
         # though preparation itself is entirely local and has no WB write.
@@ -280,24 +361,18 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
                'recovery':dict(kind='exact_manual_prepare',scan_run_id=request['scan_run_id'],operation_id=operation_id),
                'candidate_sha256':'sha256:'+digest(dict(worker_candidate=preview['candidate_sha256'],manual_admission=admitted))}
         if action=='preview':return outer
-        if action=='readback':
-            with service.store.read() as c:
-                rows=c.execute("SELECT run_id,facts FROM cleaner_events WHERE account=? AND kind='manual_apply_prepared'",(service.key,)).fetchall()
-            for row in rows:
-                try:facts=json.loads(row['facts'])
-                except (TypeError,ValueError):continue
-                if facts.get('production_operation_id')==operation_id and facts.get('scan_run_id')==request['scan_run_id'] and facts.get('candidate_sha256')==preview['candidate_sha256']:
-                    return dict(operation_id=operation_id,state='applied',run_id=row['run_id'])
-            return dict(operation_id=operation_id,state='not_submitted')
         if action!='apply' or str(envelope.get('expected_prestate') or '')!=outer['prestate_sha256'] or str(envelope.get('expected_candidate') or '')!=outer['candidate_sha256']:_fail('manual_prepare_drift')
         prepared=service.prepare_manual_apply(request['scan_run_id'],target,preview['candidate_sha256'],operation_id,Principal(owner,authenticated=True,auth_enabled=True,ads_access=True))
         return dict(operation_id=operation_id,disposition='submitted',run_id=prepared['run_id'])
     if mode!='manual' or not isinstance(request.get('run_id'),str):_fail('request_invalid')
     targets=_targets(request)
-    admitted=_admitted_targets(_package(package_path,account,generation),targets,admission_dir.resolve())
+    package=_package(package_path,account,generation) if action!='readback' else None
+    admitted=_admitted_targets(package,targets,admission_dir.resolve()) if package else None
     source=CleanerWbSource.from_env(account)
-    worker=ManualCleanerWorker(service,source,AdmissionGuard(admission_dir.resolve(),service.store),generation=generation)
+    worker=ManualCleanerWorker(service,source,AdmissionGuard(admission_dir.resolve(),service.store),generation=generation,
+                               card_verifier=lambda target:_verify_fresh_card(package,target,admission_dir.resolve(),service)) if package else None
     def manual_preview():
+        for target in targets:_verify_fresh_card(package,target,admission_dir.resolve(),service)
         result=worker.preview(run_id=request['run_id'],targets=targets)
         # Bind preview to the current approved fresh-card receipt as well as
         # the WB target snapshot. A package/card change cannot reuse a preview.
@@ -353,6 +428,9 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
         # makes a new write right or a replacement run.
         try:
             guard=AdmissionGuard(admission_dir.resolve(),service.store)
+            try:guard.recover_empty_manual_capability(account=account,generation=generation,
+                 production_operation_id=operation_id,run_id=request['run_id'])
+            except CleanerError:pass
             with guard._lock(): state=guard._load()
             clean_guard=bool(state.get('hold') and not state.get('owner') and not state.get('manual_capability'))
             if clean_guard:
@@ -362,11 +440,21 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
         except CleanerError:
             recovered=False
     with service.store.read() as c:
-        run=c.execute('SELECT state FROM cleaner_runs WHERE account=? AND run_id=?',(service.key,request['run_id'])).fetchone()
-        ops=c.execute("SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=?",(service.key,request['run_id'])).fetchall()
+        run=c.execute('SELECT state,kind,targets FROM cleaner_runs WHERE account=? AND run_id=?',(service.key,request['run_id'])).fetchone()
+        ops=c.execute("SELECT operation_id,state,target FROM cleaner_write_operations WHERE account=? AND run_id=?",(service.key,request['run_id'])).fetchall()
+        actual={(row['target'],item['query_hash'],item['decision_id']) for row in ops for item in c.execute(
+            'SELECT query_hash,decision_id FROM cleaner_write_items WHERE operation_id=?',(row['operation_id'],))}
     if not run:return dict(operation_id=operation_id,state='not_submitted')
-    if recovered and ops and run['state']=='complete' and all(op['state']=='confirmed' for op in ops):return dict(operation_id=operation_id,state='applied')
-    if not ops and run['state']=='complete':return dict(operation_id=operation_id,state='no_change')
+    expected={(item['target'],item['query_hash'],item['decision_id']) for item in json.loads(run['targets'])} if run['kind']=='manual_apply' else set()
+    # The run's original partial summary can record an early readback lag.
+    # Once every exact write operation is confirmed, late settlement is the
+    # truthful outcome; the immutable run_finished summary stays untouched.
+    if recovered and ops and expected==actual and all(op['state']=='confirmed' for op in ops):return dict(operation_id=operation_id,state='applied')
+    if recovered and ops and any(op['state'] in {'rejected','requires_review'} for op in ops):return dict(operation_id=operation_id,state='failed')
+    if not ops and run['state']=='complete' and run['kind']=='scan':return dict(operation_id=operation_id,state='no_change')
+    if not ops and run['kind']=='manual_apply' and not recovered:return dict(operation_id=operation_id,state='ambiguous')
+    if not ops and run['state'] in {'partial','failed','stopped'}:
+        return dict(operation_id=operation_id,state='failed')
     return dict(operation_id=operation_id,state='ambiguous')
 
 def main() -> int:

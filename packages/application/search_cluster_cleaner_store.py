@@ -178,8 +178,10 @@ class CleanerStore:
             yield conn
 
     @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        with self.registry.session("operational", mode="rw", operation="cleaner_transaction", timeout_ms=1000, isolation_level=None) as conn:
+    def transaction(self, *, timeout_ms: int = 8000) -> Iterator[sqlite3.Connection]:
+        # The shared operational store has an hourly warehouse writer. SQLite's
+        # statement retry is safe here; no network call occurs in this scope.
+        with self.registry.session("operational", mode="rw", operation="cleaner_transaction", timeout_ms=timeout_ms, isolation_level=None) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn

@@ -304,6 +304,93 @@ class KeywordCleaner:
             return dict(status=202,run_id=rid,kind="scan",reused=False,manual_target=targets[0] if targets else None)
         return self._command(principal,"runs",payload,command)
 
+    def start_manual_clean(self,payload:Mapping,principal:Principal) -> dict:
+        """Persist one explicit owner intent; no worker or WB call runs here."""
+        def command(c,actor):
+            advert_id,nm_id=payload.get('advert_id'),payload.get('nm_id')
+            if type(advert_id) is not int or advert_id<=0 or type(nm_id) is not int or nm_id<=0:
+                raise CleanerError('target_invalid','Выберите точную кампанию и товар',422)
+            target=Target(advert_id,nm_id)
+            s=self._settings(c)
+            if s['enabled'] or not s['baseline_ready']:
+                raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
+            if c.execute("SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone():
+                raise CleanerError('target_held','Чистка этой кампании приостановлена до разбора',409)
+            current=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
+            if current:
+                facts=json.loads(current['facts'])
+                latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,facts['job_id'])).fetchone()
+                latest_facts=json.loads(latest['facts']) if latest else facts
+                if latest_facts.get('state') not in {'complete','partial','failed','no_change'} or latest_facts.get('can_recheck'):
+                    raise CleanerError('manual_job_active','Предыдущая ручная чистка ещё выполняется или требует сверки',409)
+            active=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running') ORDER BY created_at LIMIT 1",(self.key,)).fetchone()
+            declared=[dict(target=target.key,advert_id=advert_id,nm_id=nm_id)]
+            if active:
+                if active['state']!='queued' or active['kind']!='scan' or active['trigger']!='manual_exact' or json.loads(active['targets'])!=declared:
+                    raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
+                run_id=active['run_id'];adopted=True
+            else:
+                run_id=self._new_run(c,'scan','manual_exact',request_id=payload['request_id'],targets=declared)
+                adopted=False
+            job_id=payload['request_id']
+            self._event(c,'self_service_requested',dict(job_id=job_id,scan_run_id=run_id,advert_id=advert_id,nm_id=nm_id,actor=actor,adopted=adopted),run_id=run_id)
+            return dict(job_id=job_id,run_id=run_id,state='queued',stage='fetching',adopted=adopted)
+        return self._command(principal,'manual-clean',payload,command)
+
+    def manual_job(self,job_id:str,principal:Principal) -> dict:
+        principal.require_read()
+        with self.store.read() as c:
+            request=c.execute("SELECT actor,outcome FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",(self.key,job_id)).fetchone()
+            if not request or request['actor']!=principal.username.strip().casefold():
+                raise CleanerError('not_found','Ручная чистка не найдена',404)
+            initial=json.loads(request['outcome'])
+            events=[dict(row) for row in c.execute("SELECT kind,created_at,facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence",(self.key,job_id))]
+            latest=json.loads(events[-1]['facts']) if events else {}
+            result=dict(initial)
+            result.update(latest)
+            result.update(updated_at=events[-1]['created_at'] if events else None,
+                          state=latest.get('state','queued'),stage=latest.get('stage','fetching'))
+            result['scan_decisions']=[dict(row) for row in c.execute("""SELECT o.query,o.state,o.observed_state,
+              d.verdict,d.rule_id,d.reason,d.source FROM cleaner_observations o
+              LEFT JOIN cleaner_auto_decisions d ON d.decision_id=o.decision_id
+              WHERE o.account=? AND o.last_run_id=? AND o.target=? ORDER BY o.query""",
+              (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}"))]
+            return result
+
+    def record_manual_job(self,job_id:str,**facts) -> None:
+        with self.store.transaction(timeout_ms=30000) as c:
+            request=c.execute("SELECT outcome FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",(self.key,job_id)).fetchone()
+            if not request:raise CleanerError('manual_job_missing','Ручная команда не найдена',404)
+            initial=json.loads(request['outcome'])
+            previous=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,job_id)).fetchone()
+            value=dict(json.loads(previous['facts']) if previous else initial,**facts,job_id=job_id)
+            kind='self_service_finished' if value.get('state') in {'complete','partial','failed','no_change'} else 'self_service_stage'
+            self._event(c,kind,value,run_id=initial['run_id'])
+
+    def recheck_manual_job(self,job_id:str,payload:Mapping,principal:Principal) -> dict:
+        def command(c,actor):
+            original=c.execute("SELECT outcome FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-clean'",(self.key,actor,job_id)).fetchone()
+            if not original:raise CleanerError('not_found','Ручная чистка не найдена',404)
+            latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,job_id)).fetchone()
+            facts=json.loads(latest['facts']) if latest else {}
+            if facts.get('state')!='partial' or not facts.get('can_recheck') or not str(facts.get('stage','')).endswith('_apply_claimed'):
+                raise CleanerError('recheck_unavailable','Для этой операции повторное чтение не требуется',409)
+            value=dict(facts,state='ambiguous',can_recheck=False,readback_attempts=0,next_readback_at=0)
+            self._event(c,'self_service_stage',value,run_id=json.loads(original['outcome'])['run_id'])
+            return dict(job_id=job_id,state='ambiguous',stage=value['stage'])
+        return self._command(principal,f'manual-clean/{job_id}/recheck',payload,command)
+
+    def stop_unsubmitted_manual_run(self,run_id:str) -> bool:
+        """Release only a queued exact run with no binding or write intent."""
+        with self.store.transaction(timeout_ms=30000) as c:
+            run=c.execute("SELECT state,trigger FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
+            if not run or run['state']!='queued' or run['trigger'] not in {'manual_exact','manual_exact_candidates'}:return False
+            if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchone():return False
+            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(self.key,run_id)).fetchone():return False
+            c.execute("UPDATE cleaner_runs SET state='stopped',phase='finished',scan_finished_at=?,reason='manual_not_submitted' WHERE run_id=?",(self.clock(),run_id))
+            self._event(c,'run_finished',dict(state='stopped',reason='manual_not_submitted'),run_id=run_id)
+            return True
+
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
             s=self._settings(c);verdict=payload.get("decision")
@@ -450,7 +537,8 @@ class KeywordCleaner:
             self._event(c,"run_claimed",dict(worker_token=token,generation=generation),run_id=run["run_id"])
             return dict(c.execute("SELECT * FROM cleaner_runs WHERE run_id=?",(run["run_id"],)).fetchone())
 
-    def claim_exact_manual_run(self, *, run_id: str, targets: list[Target], generation: str, lease_seconds: int = 180) -> dict:
+    def claim_exact_manual_run(self, *, run_id: str, targets: list[Target], generation: str, lease_seconds: int = 180,
+                               production_operation_id: str = '', prestate_sha256: str = '', candidate_sha256: str = '') -> dict:
         """Claim one declared manual scope without scheduler/FIFO fallback.
 
         This is deliberately separate from ``claim_run``: the ordinary worker
@@ -478,6 +566,9 @@ class KeywordCleaner:
             token=new_id()
             c.execute("UPDATE cleaner_runs SET state='running',phase='manual_starting',worker_token=?,lease_expires_at=?,worker_generation=?,started_at=coalesce(started_at,?) WHERE run_id=? AND state='queued'",(token,plus_seconds(now,lease_seconds),generation,now,run_id))
             self._event(c,"run_claimed",dict(worker_token=token,generation=generation,manual=True),run_id=run_id)
+            if production_operation_id:
+                self._event(c,'stage_e_manual_binding',dict(operation_id=production_operation_id,targets=sorted(wanted),
+                    prestate_sha256=prestate_sha256,candidate_sha256=candidate_sha256),run_id=run_id)
             return dict(c.execute("SELECT * FROM cleaner_runs WHERE run_id=?",(run_id,)).fetchone())
 
     def _lease(self,c,run_id,token,generation,*,require_enabled=False) -> sqlite3.Row:
@@ -691,7 +782,7 @@ class KeywordCleaner:
 
     def close_manual_window(self) -> None:
         """Fail closed in one transaction, including an exception path."""
-        with self.store.transaction() as c:
+        with self.store.transaction(timeout_ms=30000) as c:
             c.execute("UPDATE cleaner_settings SET transport_enabled=0,restore_hold=1 WHERE account=?",(self.key,))
 
     def finalize_recovered_manual_run(self, *, run_id: str, production_operation_id: str, allow_no_operations: bool = False) -> str:
@@ -749,6 +840,44 @@ class KeywordCleaner:
                 facts=json.loads(event[0])
                 for field in result['settlement']:result['settlement'][field]+=facts.get(field,0)
             result["targets"]=[dict(r) for r in c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=? ORDER BY target",(run_id,))]
+            operations=[]
+            for operation in c.execute("SELECT operation_id,target,state,additions,evidence FROM cleaner_write_operations WHERE account=? AND run_id=? ORDER BY created_at,operation_id",(self.key,run_id)):
+                items=[dict(item) for item in c.execute("""SELECT i.query,i.query_hash,i.decision_id,i.state,i.confirmed_at,
+                  d.rule_id,d.reason,d.source FROM cleaner_write_items i
+                  JOIN cleaner_auto_decisions d ON d.decision_id=i.decision_id
+                  WHERE i.operation_id=? ORDER BY i.query""",(operation['operation_id'],))]
+                operations.append(dict(operation_id=operation['operation_id'],target=operation['target'],state=operation['state'],items=items))
+            result['write_operations']=operations
+            written={(operation['target'],item['query_hash'],item['decision_id']):item
+                     for operation in operations for item in operation['items']}
+            phrases=[]
+            if row['kind']=='manual_apply':
+                for candidate in json.loads(row['targets']):
+                    identity=(candidate['target'],candidate['query_hash'],candidate['decision_id'])
+                    decision=c.execute("SELECT query,rule_id,reason,source FROM cleaner_auto_decisions WHERE decision_id=?",(candidate['decision_id'],)).fetchone()
+                    if decision:
+                        item=written.get(identity)
+                        phrases.append(dict(target=candidate['target'],query=decision['query'],query_hash=candidate['query_hash'],
+                                            decision_id=candidate['decision_id'],rule_id=decision['rule_id'],
+                                            reason=decision['reason'],source=decision['source'],state=item['state'] if item else 'not_submitted',
+                                            confirmed_at=item['confirmed_at'] if item else None))
+            result['phrases']=phrases
+            # A completed run is an immutable snapshot. Late readback changes
+            # the effective outcome, not that historical run summary.
+            if operations:
+                states={operation['state'] for operation in operations}
+                actual={(operation['target'],item['query_hash'],item['decision_id']) for operation in operations for item in operation['items']}
+                expected={(candidate['target'],candidate['query_hash'],candidate['decision_id']) for candidate in json.loads(row['targets'])} if row['kind']=='manual_apply' else actual
+                if (expected and expected==actual and states=={'confirmed'}
+                        and all(item['confirmed_at'] for operation in operations for item in operation['items'])
+                        and all(v['state']=='confirmed' for v in phrases)):
+                    result['effective_state']='complete'
+                elif states & {'rejected','requires_review'}:
+                    result['effective_state']='partial'
+                else:
+                    result['effective_state']='unresolved'
+            else:
+                result['effective_state']=result['state']
             return result
 
     @staticmethod

@@ -48,10 +48,13 @@ def main():
         admission=root/'admission';admission.mkdir(mode=0o700)
         rows=[dict(advert_id=1,nm_id=101,query='baseline',decision='allow',observed_state='active',provenance={'synthetic':True})]
         evidence=dict(cards=[dict(nm_id=101,state='verified',current_card_sha256='sha256:'+'1'*64,verified_at='2026-09-23T00:00:00Z')]);evidence_raw=json.dumps(evidence).encode();(admission/'current-card-evidence.json').write_bytes(evidence_raw);os.chmod(admission/'current-card-evidence.json',0o600)
-        package=dict(schema='search_cluster_cleaner_approved_baseline/v1',seller_id='seller',account_scope='scope',generation='monolith',owner_username='owner',rows=rows,profiles=[PROFILE],provenance={'synthetic':True},source_sha256='sha256:'+'0'*64,rows_digest='sha256:'+digest(rows),card_evidence_sha256='sha256:'+hashlib.sha256(evidence_raw).hexdigest(),manual_admission=[dict(advert_id=11,nm_id=101,card_digest='sha256:'+'1'*64,verified_at='2026-09-23T00:00:00Z',state='verified')])
+        card=dict(nm_id='101',title='Синтетическое стекло',vendor_code='fixture',description='Тестовая карточка',characteristics=[])
+        card_source=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),ensure_ascii=False).encode()
+        (admission/'card-source-approved.json').write_bytes(card_source);os.chmod(admission/'card-source-approved.json',0o600)
+        package=dict(schema='search_cluster_cleaner_approved_baseline/v1',seller_id='seller',account_scope='scope',generation='monolith',owner_username='owner',rows=rows,profiles=[PROFILE],provenance={'synthetic':True,'fresh_cards_sha256':'sha256:'+hashlib.sha256(card_source).hexdigest()},source_sha256='sha256:'+'0'*64,rows_digest='sha256:'+digest(rows),card_evidence_sha256='sha256:'+hashlib.sha256(evidence_raw).hexdigest(),manual_admission=[dict(advert_id=11,nm_id=101,card_digest='sha256:'+'1'*64,verified_at='2026-09-23T00:00:00Z',state='verified')])
         package_path=admission/'approved-baseline-v1.json';package_path.write_text(json.dumps(package));os.chmod(package_path,0o600)
         env=root/'env';env.write_text('SELLER_PORTAL_CANONICAL_SUPPLIER_ID=seller\nCHANGE_REGISTRY_ACCOUNT_SCOPE=scope\nCLEANER_BOOTSTRAP_PACKAGE_PATH='+str(package_path)+'\n')
-        old_root=stage_e.ROOT;stage_e.ROOT=app_dir
+        old_root=stage_e.ROOT;old_fetch_card=stage_e.fetch_current_card;stage_e.ROOT=app_dir;stage_e.fetch_current_card=lambda nm:card
         try:
             envelope=dict(operation_id='stage-e-bootstrap-0001',request=dict(mode='bootstrap'),expected_runtime_sha=sha)
             preview=stage_e.execute(dict(envelope,action='preview'),runtime_dir=runtime,env_file=env,admission_dir=admission)
@@ -81,7 +84,7 @@ def main():
                     assert stage_e.execute(dict(action='readback',operation_id='stage-e-entry-write-0001',request=write,expected_runtime_sha=sha),runtime_dir=runtime,env_file=env,admission_dir=admission)['state']=='applied'
                     assert len(fake.writes)==1
                 finally:stage_e.CleanerWbSource.from_env=original
-        finally:stage_e.ROOT=old_root
+        finally:stage_e.ROOT=old_root;stage_e.fetch_current_card=old_fetch_card
     with fixture() as f:
         manual_state(f)
         # A disabled generic composition cannot consume the explicit UI job or

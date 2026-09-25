@@ -107,8 +107,9 @@ class CleanerWorker:
 
 class ManualCleanerWorker:
     """One explicit scope; it never invokes scheduler_tick or FIFO claim_run."""
-    def __init__(self, cleaner: KeywordCleaner, source: ReadSource, guard, *, generation: str):
+    def __init__(self, cleaner: KeywordCleaner, source: ReadSource, guard, *, generation: str, card_verifier=None):
         self.cleaner,self.source,self.guard,self.generation=cleaner,source,guard,generation
+        self.card_verifier=card_verifier
 
     @staticmethod
     def _scope(run_id, targets):
@@ -152,11 +153,10 @@ class ManualCleanerWorker:
         preview=self.preview(run_id=run_id,targets=targets)
         if preview['prestate_sha256'] != expected_prestate or preview['candidate_sha256'] != expected_candidate:
             raise CleanerError('manual_preview_drift','Свежая ручная проверка изменилась',409)
-        run=self.cleaner.claim_exact_manual_run(run_id=run_id,targets=targets,generation=self.generation)
+        run=self.cleaner.claim_exact_manual_run(run_id=run_id,targets=targets,generation=self.generation,
+            production_operation_id=production_operation_id,prestate_sha256=expected_prestate,
+            candidate_sha256=reviewed_candidate or expected_candidate)
         token=run['worker_token'];scope_digest=self._scope(run_id,targets)
-        with self.cleaner.store.transaction() as c:
-            self.cleaner._lease(c,run_id,token,self.generation)
-            self.cleaner._event(c,'stage_e_manual_binding',dict(operation_id=production_operation_id,targets=sorted(t.key for t in targets),prestate_sha256=expected_prestate,candidate_sha256=reviewed_candidate or expected_candidate),run_id=run_id)
         if run['kind']=='scan':
             try:
                 snapshots=self._read(targets)
@@ -169,15 +169,16 @@ class ManualCleanerWorker:
             except (TimeoutError,ConnectionError,OSError):
                 return self.cleaner.finish_run(run_id,token,self.generation,reason='source_temporarily_unavailable',manual_only=True)
         with self.guard.manual_session(account=self.cleaner.account,generation=self.generation,capability=dict(run_id=run_id,targets=sorted(t.key for t in targets),scope_digest=scope_digest,production_operation_id=production_operation_id,prestate_sha256=expected_prestate,candidate_sha256=reviewed_candidate or expected_candidate)) as session:
-            self.cleaner.set_manual_restore_hold(held=False,generation=self.generation)
-            self.cleaner.set_manual_transport(enabled=True,generation=self.generation)
             try:
+                self.cleaner.set_manual_restore_hold(held=False,generation=self.generation)
+                self.cleaner.set_manual_transport(enabled=True,generation=self.generation)
                 from packages.application.search_cluster_cleaner_writer import CleanerWriter, CleanerReadback
                 writer=CleanerWriter(self.cleaner,self.source,session,generation=self.generation,manual_only=True)
                 operations=[]
                 snapshots=self._read(targets)
                 if self._prestate_digest(run_id,snapshots)!=expected_prestate:raise CleanerError('manual_preview_drift','Состояние WB изменилось после допуска',409)
                 for _target,_members,snapshot in snapshots:
+                    if self.card_verifier:self.card_verifier(_target)
                     candidates=[v for v in self.cleaner.pending_candidates(run_id) if v['target']==snapshot.target.key]
                     operation=writer.apply_target(run_id,token,snapshot,candidates)
                     if operation:operations.append(operation)

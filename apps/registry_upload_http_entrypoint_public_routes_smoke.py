@@ -156,6 +156,14 @@ def main() -> None:
         manifest,
         proxy_pass_url="http://127.0.0.1:8765",
     )
+    cleaner_base='/v1/sheet-vitrina-v1/ads/keyword-cleaner'
+    for path,match in ((cleaner_base,'exact'),(cleaner_base+'/','prefix')):
+        route=next((item for item in routes if item['path']==path),None)
+        if not route or route.get('match')!=match or route.get('proxy_pass_url')!='http://127.0.0.1:8776' or set(route.get('methods') or [])!={'GET','POST'}:
+            raise AssertionError(f'cleaner route must use its independent listener: {path}')
+        nginx_location=('location = ' if match=='exact' else 'location ^~ ')+path+' {'
+        if rendered.count(nginx_location)!=1:
+            raise AssertionError(f'cleaner location missing or duplicated: {path}')
     web_vitrina_route = next(
         route for route in routes if route["path"] == "/v1/sheet-vitrina-v1/web-vitrina"
     )

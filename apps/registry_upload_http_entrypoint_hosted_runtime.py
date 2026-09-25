@@ -1050,6 +1050,7 @@ def deploy_current_checkout(
         target,
         deployment_complete=True,
     )
+    cleaner_precomplete_probe_command = _build_cleaner_release_probe_command(target, phase='before_complete')
     restart_command = _remote_shell_command(
         target,
         f"cd {shlex.quote(target.target_dir)} && {target.restart_command}",
@@ -1088,6 +1089,7 @@ def deploy_current_checkout(
             "chown_target_dir": chown_target_dir_command,
             "deploy_metadata": deploy_metadata_command,
             "deploy_completion_metadata": deploy_completion_metadata_command,
+            "cleaner_precomplete_probe": cleaner_precomplete_probe_command,
             "seller_portal_recovery_os_dependencies": seller_recovery_os_dependencies_command,
             "seller_portal_owner_runtime_os_dependencies": seller_owner_os_dependencies_command,
             "runtime_pip_install": runtime_pip_install_command,
@@ -1246,11 +1248,12 @@ def deploy_current_checkout(
             change_registry_activation_command,
             allow_transport_reconciliation=False,
         )
+    if cleaner_precomplete_probe_command:
+        run_stage("readback",cleaner_precomplete_probe_command,allow_transport_reconciliation=False)
     # The exact SHA markers are written before dependency/schema work so an
-    # interrupted rollout is observable, but only this final atomic metadata
-    # update proves that every required deploy stage completed.  A disconnect
-    # during this write remains fail-closed; the halted reconciler may accept
-    # it later only when the completed marker is actually readable.
+    # interrupted rollout is observable. The cleaner worker has proved its
+    # initialized, queue-readable armed state while this flag was still false;
+    # this final atomic update remains the last required deployment stage.
     run_stage(
         "metadata-complete",
         deploy_completion_metadata_command,
@@ -1452,6 +1455,18 @@ def _build_deploy_metadata_command(
         f"mv {shlex.quote(runtime_sha_temp)} {shlex.quote(runtime_sha_path)}"
     )
     return _remote_shell_command(target, shell)
+
+
+def _build_cleaner_release_probe_command(target: HostedRuntimeTarget, *, phase: str) -> list[str] | None:
+    """Candidate-code readback for the one live manual-cleaner contour."""
+    if target.target_id != 'wb_core_eu_hosted_runtime_active':return None
+    runtime_dir=str(target.runtime_env.get('REGISTRY_UPLOAD_RUNTIME_DIR') or '').strip()
+    if not runtime_dir:raise ValueError('cleaner release runtime directory missing')
+    commit=_git_output(['git','rev-parse','HEAD']).strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{40}',commit):raise ValueError('cleaner release SHA invalid')
+    command=(f"cd {shlex.quote(target.target_dir)} && /usr/bin/python3 apps/search_cluster_cleaner_release_probe.py "
+             f"--phase {shlex.quote(phase)} --expected-sha {shlex.quote(commit)} --runtime-dir {shlex.quote(runtime_dir)}")
+    return _remote_shell_command(target,command)
 
 
 def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]:
