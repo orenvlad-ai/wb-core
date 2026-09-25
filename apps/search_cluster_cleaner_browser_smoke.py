@@ -371,6 +371,39 @@ def run(output:Path):
             expect(page.locator('[data-kc-batch-choices] input[value="10103:101"]')).to_be_disabled()
             check('real_local_eligibility_exposes_exact_denials_without_submit',f.count('cleaner_requests')==before)
             page.close()
+        with running_fixture() as f:
+            page=browser.new_page();calls=[];retries=[]
+            categories={status:dict(selectable=status in ('active','paused'),reason='unsupported_campaign_status' if status in ('completed','archive') else None) for status in ('active','paused','completed','archive')}
+            def delayed_eligibility(route):
+                refresh='refresh=1' in route.request.url;calls.append(refresh)
+                if refresh:
+                    retries.append(True)
+                    if len(retries)==1:
+                        route.abort('failed');return
+                payload=dict(items=[],loading=not refresh and len(calls)<3,error='campaign_catalog_unavailable' if not refresh and len(calls)>=3 else None,categories=categories)
+                route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
+            page.route('**/keyword-cleaner/manual-batches/eligibility*',delayed_eligibility)
+            browser_login(page,f);before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
+            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Загружаем точный список')
+            expect(page.locator('[data-kc-batch-choices]')).not_to_contain_text('Доступных пар пока нет')
+            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные —')
+            check('batch_pending_counts_unknown_and_no_false_empty')
+            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Не удалось загрузить список кампаний. Повторите загрузку.',timeout=8000)
+            expect(page.get_by_role('button',name='Повторить загрузку')).to_be_visible()
+            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные —')
+            expect(page.locator('[data-kc-batch-start]')).to_be_disabled()
+            check('batch_error_visible_counts_unknown_and_no_false_empty','Доступных пар пока нет' not in page.locator('[data-kc-batch-choices]').inner_text())
+            failed_calls=len(calls);page.wait_for_timeout(2300)
+            check('batch_error_stops_automatic_polling',len(calls)==failed_calls and f.count('cleaner_requests')==before)
+            page.get_by_role('button',name='Повторить загрузку').click()
+            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Список кампаний сейчас недоступен')
+            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные —')
+            failed_calls=len(calls);page.wait_for_timeout(2300)
+            check('batch_network_error_after_loading_stops_polling',len(calls)==failed_calls)
+            page.get_by_role('button',name='Повторить загрузку').click()
+            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Доступных пар пока нет')
+            check('batch_explicit_retry_only_then_true_empty',calls[-1] is True and len(retries)==2 and f.count('cleaner_requests')==before)
+            page.close()
         # Each variant is rendered by the real app from isolated synthetic SQL state.
         for mode,status in [('empty','Выполнено'),('partial','Выполнено частично'),('failed','Не выполнено'),('unresolved','Проверяем результат WB'),('rejected','Не выполнено'),('profile-required','Выполнено частично')]:
             with running_fixture(mode) as f:
