@@ -129,6 +129,26 @@ class AdmissionGuard:
             with self.store.read() as c:self._reconcile(state,c)
             state.pop('manual_capability',None);state['owner']=None;state['reason']='manual_readback_recovered';self._save(state)
 
+    def recover_empty_manual_capability(self, *, account, generation, production_operation_id, run_id):
+        """Close a dead exact capability that never minted a dispatch right."""
+        with self._lock():
+            state=self._load()
+            if state['account']!=account.key or state['generation']!=generation or not state['hold']:
+                raise CleanerError('external_hold','Внешний допуск изменился',409)
+            self._previous_stopped(state)
+            capability=state.get('manual_capability')
+            if (not isinstance(capability,dict) or capability.get('production_operation_id')!=production_operation_id
+                    or capability.get('run_id')!=run_id or capability.get('operation_id')):
+                raise CleanerError('manual_capability_lost','Ручной допуск не готов к восстановлению',409)
+            with self.store.read() as c:
+                self._reconcile(state,c)
+                if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',(account.key,run_id)).fetchone():
+                    raise CleanerError('manual_operation_exists','Ручная операция требует сверки WB',409)
+                bindings=[json.loads(row[0]) for row in c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(account.key,run_id))]
+                if not any(row.get('operation_id')==production_operation_id for row in bindings):
+                    raise CleanerError('manual_binding_missing','Нет точной привязки ручного запуска',409)
+            state.pop('manual_capability',None);state['owner']=None;state['reason']='manual_no_submit_recovered';self._save(state)
+
     @contextmanager
     def session(self,*,account,generation,manual_capability=None):
         with self._lock():

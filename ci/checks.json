@@ -59,6 +59,9 @@
         "packages/domain/search_cluster_*.py",
         "packages/application/search_cluster_cleaner*.py",
         "apps/search_cluster_cleaner*.py",
+        "apps/registry_upload_http_entrypoint_live.py",
+        "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+        "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json",
         "apps/fixtures/search_cluster_cleaner_holdout.json",
         "apps/fixtures/search_cluster_cleaner_legacy_registry.json",
         "packages/adapters/search_cluster_cleaner*.py",
@@ -77,6 +80,10 @@
         ["python3", "apps/search_cluster_cleaner_write_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_registry_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_http_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_stage_e_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_self_service_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_sidecar_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_release_probe_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_browser_smoke.py", "--output", "/tmp/wbc-cleaner-browser-ci"]
       ]
     },

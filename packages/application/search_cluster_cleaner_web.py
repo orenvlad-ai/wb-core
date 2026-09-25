@@ -7,20 +7,55 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
+import threading
+import time
 
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.storage_registry import StoreRegistry
-from packages.contracts.search_cluster_cleaner import Account, CleanerError, MODEL_CATALOG, Principal, digest
+from packages.contracts.search_cluster_cleaner import Account, CleanerError, MODEL_CATALOG, Principal, Target, digest
 
 STAGE_E_CONFIG_PATH=Path('/var/lib/wb-core/search-cluster-cleaner-admission/stage-e-config.json')
 
 
 class CleanerWeb:
-    def __init__(self, cleaner: KeywordCleaner | None = None, *, generation: str = "", origin: str = ""):
+    def __init__(self, cleaner: KeywordCleaner | None = None, *, generation: str = "", origin: str = "", approved_targets: list[dict] | None = None):
         self.cleaner = cleaner
         self.generation = generation
         self.origin = origin
+        self._fixture_approved_targets = approved_targets
+        self._catalog_lock=threading.Lock()
+        self._catalog_names={}
+        self._catalog_error=None
+        self._catalog_loading=False
+        self._catalog_at=0.0
+        self.worker_alive=None
+        self.worker_status=None
+
+    def _refresh_campaign_names(self, ids: list[int]) -> None:
+        try:
+            from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
+            source=CleanerWbSource.from_env(self.require_service().account)
+            found={}
+            for offset in range(0,len(ids),50):
+                for target in source._adverts(ids[offset:offset+50],source.monotonic()+30):
+                    if target.name:found[target.key]=dict(name=target.name,unsupported_reason=target.unsupported_reason)
+            if not found:raise ValueError('No exact campaign names returned')
+            with self._catalog_lock:
+                self._catalog_names=found;self._catalog_error=None;self._catalog_at=time.monotonic()
+        except Exception:
+            with self._catalog_lock:
+                self._catalog_error='campaign_catalog_unavailable';self._catalog_at=time.monotonic()
+        finally:
+            with self._catalog_lock:self._catalog_loading=False
+
+    def _campaign_catalog(self,ids:list[int],refresh:bool=False) -> tuple[dict,str|None,bool]:
+        if self._fixture_approved_targets is not None:return {},None,False
+        with self._catalog_lock:
+            if not self._catalog_loading and (refresh or (not self._catalog_names and self._catalog_error is None)):
+                self._catalog_loading=True
+                threading.Thread(target=self._refresh_campaign_names,args=(ids,),daemon=True,name='cleaner-campaign-catalog').start()
+            return dict(self._catalog_names),self._catalog_error,self._catalog_loading
 
     @classmethod
     def from_env(cls, runtime_dir: Path) -> "CleanerWeb":
@@ -81,6 +116,14 @@ class CleanerWeb:
         if not config["owner_configured"] or not config["generation_matches"] or not result["settings"]["baseline_ready"]:
             result["settings"]["enabled"] = False
         result.update(configuration=config, profiles=self.profiles(principal), models=sorted(MODEL_CATALOG))
+        result['manual_worker_alive']=bool(self.worker_alive and self.worker_alive())
+        result['manual_worker_state']=self.worker_status() if self.worker_status else 'not_attached'
+        result['last_manual_job']=None
+        if config['can_edit']:
+            with self.cleaner.store.read() as c:
+                recent=c.execute("SELECT request_id FROM cleaner_requests WHERE account=? AND actor=? AND route='manual-clean' ORDER BY created_at DESC,rowid DESC LIMIT 1",(self.cleaner.key,principal.username.strip().casefold())).fetchone()
+            if recent:
+                result['last_manual_job']=self.cleaner.manual_job(recent['request_id'],principal)
         result["indicator"] = bool(result["indicator"] or not config["owner_configured"] or not config["generation_matches"] or not result["settings"]["baseline_ready"])
         return result
 
@@ -97,6 +140,72 @@ class CleanerWeb:
                                    ready=bool(profile), active_version=profile.version if profile else None,
                                    source=profile.source if profile else None, verified_at=profile.verified_at if profile else None))
             return result
+
+    def targets(self, principal: Principal, *, refresh: bool = False) -> dict:
+        """Present only exact pairs from the server-owned manual admission.
+
+        This is a label projection. Stage E independently verifies the private
+        package, current card, campaign, SKU and held state at execution time.
+        """
+        principal.require_read()
+        cleaner = self.require_service()
+        if self._fixture_approved_targets is not None:
+            admitted = self._fixture_approved_targets
+        else:
+            from apps.search_cluster_cleaner_stage_e import _package, _admitted_targets
+            try:
+                config = json.loads(STAGE_E_CONFIG_PATH.read_text(encoding="utf-8"))
+                if set(config) != {'seller_id','account_scope','generation','owner_username','approved_package_path'}:
+                    raise ValueError('unexpected Stage E config')
+                if (config['seller_id'] != cleaner.account.seller_id or config['account_scope'] != cleaner.account.account_scope
+                        or config['generation'] != self.generation or config['owner_username'] != cleaner.owner_username):
+                    raise ValueError('Stage E identity mismatch')
+                package_path = Path(config['approved_package_path'])
+                package = _package(package_path, cleaner.account, self.generation)
+                admitted = package['manual_admission']
+                _admitted_targets(package, [Target(row['advert_id'],row['nm_id'],contract_verified=True) for row in admitted], STAGE_E_CONFIG_PATH.parent)
+            except (OSError, ValueError, KeyError, TypeError, CleanerError):
+                return dict(items=[], error='manual_admission_unavailable')
+        ids=sorted({row['advert_id'] for row in admitted if row.get('state')=='verified'})
+        names,catalog_error,loading=self._campaign_catalog(ids,refresh=refresh)
+        result=[]
+        with cleaner.store.read() as c:
+            for row in admitted:
+                try:
+                    target=Target(row['advert_id'],row['nm_id'],contract_verified=True)
+                except (KeyError, TypeError, ValueError, CleanerError):
+                    continue
+                if row.get('state')!='verified':continue
+                profile=cleaner._profile(c,target.nm_id)
+                queued=c.execute('SELECT metadata FROM cleaner_scan_queue WHERE account=? AND target=?',(cleaner.key,target.key)).fetchone()
+                metadata=json.loads(queued['metadata']) if queued else {}
+                held=c.execute('SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?',(cleaner.key,target.key)).fetchone()
+                catalog=names.get(target.key,{})
+                result.append(dict(advert_id=target.advert_id,nm_id=target.nm_id,campaign_name=str(catalog.get('name') or metadata.get('name') or row.get('campaign_name') or ''),
+                                   product_title=profile_title(profile,target.nm_id),profile_ready=bool(profile),
+                                   held_reason=held['reason'] if held else catalog.get('unsupported_reason')))
+        return dict(items=sorted(result,key=lambda row:(row['campaign_name'].casefold(),row['advert_id'],row['nm_id'])),error=catalog_error,loading=loading)
+
+    def start_manual_clean(self, payload: dict, principal: Principal) -> dict:
+        cleaner=self.require_mutation(principal)
+        # A lost POST response is retried with the same request ID while the
+        # worker may already be busy. Let the service's durable idempotency
+        # record return the exact earlier outcome before any fresh gating.
+        request_id=payload.get('request_id') if isinstance(payload,dict) else None
+        if isinstance(request_id,str):
+            with cleaner.store.read() as c:
+                saved=c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-clean'",
+                                (cleaner.key,principal.username.strip().casefold(),request_id)).fetchone()
+            if saved:return cleaner.start_manual_clean(payload,principal)
+        if self.worker_status and self.worker_status()!='ready':
+            raise CleanerError('manual_worker_unavailable','Исполнитель ручной чистки сейчас недоступен',503)
+        listed=self.targets(principal)
+        if listed['error'] or listed['loading']:
+            raise CleanerError('manual_admission_unavailable','Не удалось проверить допуск ручной чистки',409)
+        selected=next((row for row in listed['items'] if row['advert_id']==payload.get('advert_id') and row['nm_id']==payload.get('nm_id')),None)
+        if not selected or not selected['campaign_name'] or not selected['profile_ready'] or selected['held_reason']:
+            raise CleanerError('manual_target_not_admitted','Эта пара кампании и товара недоступна для ручной чистки',409)
+        return cleaner.start_manual_clean(payload,principal)
 
     def reviews(self, principal: Principal, **params) -> dict:
         cleaner = self.require_service()

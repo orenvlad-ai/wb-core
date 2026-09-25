@@ -344,9 +344,15 @@ Production bootstrap выполняется только через `search_clus
 Расписание не создаётся и не включается: после bootstrap API отклоняет включение
 авточистки и изменение времени.
 
-Оператор сначала подготавливает точную пару campaign/SKU в UI. Отдельный
-ручной production action preview/apply/readback принимает ровно одну такую
-пару. Preview сверяет текущий WB snapshot и согласованную fresh-card evidence;
+Владелец выбирает в UI кампанию и SKU из private manual-admission и нажимает
+«Почистить ключи». UI сохраняет одну явную команду с request ID. Отдельный
+server worker исполняет её через общий Production Apply launcher и Stage E:
+exact scan → подготовка сохранённых кандидатов → один submit → readback.
+Legacy queued scan без новой команды UI никогда не исполняется сам.
+Preview сверяет текущий WB snapshot и свежую official Content API карточку с
+package-bound approved raw source по business-полям. Порядок характеристик
+нормализуется по уникальному ID; изменение title, vendor code, description,
+характеристик или semantic fingerprint активного профиля закрывает допуск.
 apply не повторяет отправку при любом неоднозначном ответе. Readback работает
 только с тем же production operation и его internal write operation. Existing
 exclusions не возвращаются; held, missing-kind и profile-mismatch targets не
@@ -357,8 +363,10 @@ exclusions не возвращаются; held, missing-kind и profile-mismatch
 До bootstrap release-owner приватно размещает только вне runtime/operational
 backup каталог `/var/lib/wb-core/search-cluster-cleaner-admission` (`root:root`,
 `0700`) и два файла `approved-baseline-v1.json` и
-`current-card-evidence.json` (`root:root`, `0600`). Он сверяет полные SHA-256
-обоих файлов с reviewed receipt. Package содержит canonical seller/account
+`current-card-evidence.json` (`root:root`, `0600`). Для self-service также
+размещается byte-identical `card-source-approved.json` (`0600`), SHA-256
+которого совпадает с package provenance `fresh_cards_sha256`. Он сверяет полные SHA-256
+файлов с reviewed receipt. Package содержит canonical seller/account
 scope/generation, immutable baseline/profiles/provenance и exact verified
 manual-admission; evidence содержит exact current-card digest и verified_at на
 каждый допустимый nm. Эти private files и исходные WB-выгрузки не попадают в
@@ -382,14 +390,24 @@ foreign SQLite schema fingerprint и отсутствие pre-existing cleaner n
 и journal. Такой recovery не заменяет operational SQLite и не откатывает
 свежие business data.
 
-UI создаёт exact `scan` для campaign/SKU и показывает, что он ожидает ручного
-оператора. Stage action `mode=manual` preview/apply/readback сначала выполняет
-этот exact scan; он не пишет в WB. Для statistics-fresh `pending_exclude`
-owner запускает `mode=manual_prepare` preview/apply c exact scan run, target и
-candidate digest. Это создаёт ordinary exact `manual_apply`; затем отдельные
+Новая UI-команда durable привязана к exact campaign/SKU; status и детали фраз
+читаются по тому же job ID после reload или потери ответа. Worker обрабатывает
+только такие команды и не имеет timer. Stage action `mode=manual`
+preview/apply/readback сначала выполняет exact scan; он не пишет в WB. Для
+statistics-fresh `pending_exclude` worker запускает `mode=manual_prepare`
+preview/apply с exact scan run, target и candidate digest. Это создаёт ordinary
+exact `manual_apply`; затем отдельные
 `mode=manual` preview/apply/readback с новым exact operation id делают один
 submit и readback только его internal operations. Reusing the same operation
-id is readback-only. Любой ambiguity, drift или crash оставляет held admission;
-recovery закрывает только expired/dead-owner exact run and never creates a
-replacement submit. Scheduler остаётся выключен: API отклоняет `enabled=true`
-и любое изменение времени.
+id is readback-only. Перед launcher invocation worker сохраняет apply claim;
+после crash этот этап только читает прежнюю операцию. Любой ambiguity, drift
+или crash оставляет held admission; recovery закрывает только expired/dead-owner
+exact run и никогда не создаёт replacement submit. Исторический partial run
+не переписывается при позднем подтверждении: UI получает `effective_state`
+из точных write items и показывает confirmed/pending с причинами. Отдельный
+loopback listener 127.0.0.1:8776 обслуживает только cleaner API, чтобы долгий
+Web Vitrina render не блокировал status; он запускается лишь при валидной private
+конфигурации. Release probe до final metadata проверяет initialized worker в
+`armed` и закрытое расписание; после выпуска отдельный read-only probe проверяет
+`ready`. Scheduler остаётся выключен: API отклоняет `enabled=true` и любое
+изменение времени.

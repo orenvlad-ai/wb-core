@@ -34,6 +34,8 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
         if handler.command == "GET":
             if path == "/summary":
                 result = web.summary(principal)
+            elif path == "/targets":
+                result = web.targets(principal,refresh=query.get('refresh',['0'])[0]=='1')
             elif path == "/reviews":
                 result = web.reviews(principal, cursor=query.get("cursor", [""])[0], limit=int(query.get("limit", [50])[0]))
             elif path == "/history":
@@ -42,6 +44,8 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
                 result = web.require_service().get_request(match[1], principal)
             elif match := re.fullmatch(r"/runs/([A-Za-z0-9-]{1,120})", path):
                 result = web.require_service().run_detail(match[1], principal)
+            elif match := re.fullmatch(r"/manual-clean/([A-Za-z0-9_.:-]{8,120})", path):
+                result = web.require_service().manual_job(match[1], principal)
             elif match := re.fullmatch(r"/profiles/([1-9][0-9]{0,15})", path):
                 result = web.require_service().get_profile(int(match[1]), principal)
             else:
@@ -76,6 +80,11 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
         elif path == "/runs":
             allowed |= {"advert_id", "nm_id"}
             operation = lambda: cleaner.start_run(payload, principal)
+        elif path == "/manual-clean":
+            allowed |= {"advert_id", "nm_id"}
+            operation = lambda: web.start_manual_clean(payload, principal)
+        elif match := re.fullmatch(r"/manual-clean/([A-Za-z0-9_.:-]{8,120})/recheck", path):
+            operation = lambda: cleaner.recheck_manual_job(match[1], payload, principal)
         elif match := re.fullmatch(r"/reviews/([A-Za-z0-9-]{1,120})/decision", path):
             allowed |= {"expected_revision", "decision"}
             operation = lambda: cleaner.decide(match[1], payload, principal)

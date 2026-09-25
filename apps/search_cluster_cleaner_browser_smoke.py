@@ -53,13 +53,12 @@ def run(output:Path):
             page.set_viewport_size({'width':390,'height':844});page.screenshot(path=str(output/'mobile.png'),full_page=True);screens.append('mobile.png')
             check('mobile_cleaner_no_horizontal_overflow',page.locator('[data-keyword-cleaner]').evaluate('(node)=>node.scrollWidth<=node.clientWidth+1'))
             page.set_viewport_size({'width':1440,'height':1080})
-            # Stage E presents a manual preparation only.  It deliberately has
-            # no schedule editor and refuses an incomplete exact target locally.
+            # A manual operation requires a named campaign and its exact SKU.
             expect(page.locator('[data-kc-time]')).to_have_count(0)
-            expect(page.locator('[data-keyword-cleaner]')).to_contain_text('По расписанию выключено')
-            expect(page.locator('[data-kc-enabled]')).to_be_disabled()
-            before=f.count('cleaner_requests');page.locator('[data-kc-run]').click()
-            expect(page.locator('[data-kc-message]')).to_contain_text('Укажите точную кампанию и артикул WB.')
+            expect(page.locator('[data-keyword-cleaner]')).to_contain_text('Расписание выключено')
+            expect(page.locator('[data-kc-enabled]')).to_have_count(0)
+            before=f.count('cleaner_requests');expect(page.locator('[data-kc-run]')).to_be_disabled()
+            expect(page.locator('[data-kc-manual-advert]')).to_contain_text('Тестовая кампания')
             check('manual_only_ui_has_no_schedule_or_implicit_run',f.count('cleaner_requests')==before)
             # A decision is saved once even when double-clicked, and becomes history.
             before=f.count('cleaner_manual_overrides');question=page.locator('[data-kc-review]').first
@@ -69,11 +68,6 @@ def run(output:Path):
             page.locator('[data-kc-history-open]').click();expect(page.locator('[data-kc-history]')).to_contain_text('Решение владельца')
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-page="history"]')).to_be_visible();check('history_reload_deep_link')
             page.locator('[data-kc-page="history"] [data-kc-back]').click()
-            # Runs use one persistent slot, buttons do not generate duplicate jobs.
-            before=f.count('cleaner_runs');page.locator('[data-kc-manual-advert]').fill('11');page.locator('[data-kc-manual-nm]').fill('101');page.locator('[data-kc-run]').dblclick()
-            expect(page.locator('[data-kc-status]')).to_have_text('Ручная проверка подготовлена')
-            check('double_click_run_one_job',f.count('cleaner_runs')==before+1)
-            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-status]')).to_have_text('Ручная проверка подготовлена');check('queued_job_survives_reload')
             # Profile draft and explicit activation are two independently saved commands.
             page.locator('[data-kc-profiles-open]').click();page.locator('[data-kc-profile-number]').fill('102');page.locator('[data-kc-profile-find] button').click()
             expect(page.locator('[data-kc-profile-form]')).to_be_visible();page.locator('[data-kc-profile-models]').select_option(['17 pro']);page.locator('[data-kc-profile-source]').fill('Тест совместимости <img src=x onerror="window.cleanerXss=2">');page.locator('[data-kc-profile-save]').click()
@@ -82,6 +76,81 @@ def run(output:Path):
             check('profile_source_xss_is_text',page.locator('[data-kc-profile-versions] img').count()==0 and page.evaluate('window.cleanerXss===undefined'))
             page.goto(f.base_url+f.url.split(f.base_url)[1].split('?')[0]+'?tab=ads',wait_until='domcontentloaded');expect(page.locator('[data-ads-panel]')).to_be_visible();expect(page.locator('[data-keyword-cleaner]')).to_be_hidden();check('old_ads_deep_link_opens_bids')
             check('no_browser_js_errors',not errors);page.close()
+        with running_fixture() as f:
+            with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
+            page=browser.new_page();browser_login(page,f)
+            before=f.count('cleaner_runs');page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').dblclick()
+            expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
+            expect(page.locator('[data-kc-stage-text]')).to_contain_text('Получаем ключи')
+            check('double_click_run_one_job',f.count('cleaner_runs')==before+1)
+            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-manual-stage]')).to_be_visible();check('manual_job_survives_reload')
+            check('manual_job_restores_without_second_post',f.count('cleaner_runs')==before+1)
+            first=f.request('/summary')[1]['last_manual_job']['job_id']
+            f.cleaner.record_manual_job(first,state='no_change',stage='finished',result='Нет новых допустимых фраз для исключения')
+            code,new,_=f.request('/manual-clean',{'request_id':'another-tab-manual-job','advert_id':10101,'nm_id':101})
+            check('second_tab_starts_new_job_after_terminal',code==202 and new['job_id']!=first)
+            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
+            stored=page.evaluate("JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(key=>key.startsWith('wb-keyword-cleaner-manual-job:')))).job_id")
+            check('server_latest_job_overrides_old_tab_storage',stored==new['job_id'])
+            page.close()
+        # The browser renders exact worker receipts without treating pending or
+        # missing confirmation as an exclusion. HTTP is synthetic and local.
+        for outcome in ('complete','partial','failed'):
+            with running_fixture() as f:
+                with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
+                page=browser.new_page();browser_login(page,f);polls=[];rechecks=[]
+                def manual_status(route):
+                    polls.append(1);job_id=route.request.url.rsplit('/',1)[-1]
+                    state='running' if len(polls)==1 else outcome
+                    body=dict(job_id=job_id,run_id='synthetic-scan',advert_id=10101,nm_id=101,state=state,
+                              stage='classifying' if state=='running' else 'finished',updated_at='2026-09-25T12:00:0'+str(min(len(polls),9))+'Z',
+                              scan_decisions=[dict(query='стекло iphone 16 pro max',verdict='allow',state='allow',reason='Подходит товару',rule_id='MATCH'),
+                                              dict(query='лишний ключ',verdict='exclude',state='pending_exclude',reason='Другая модель',rule_id='WRONG_MODEL')])
+                    if state=='complete':body.update(result='applied',write_run_id='synthetic-write')
+                    if state=='partial':body.update(result='ambiguous',write_run_id='synthetic-write',error='WB ещё не подтвердил исключение',can_recheck=True,stage='write_apply_claimed')
+                    if state=='failed':body.update(error='WB не ответил; запись не подтверждена')
+                    route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
+                def write_detail(route):
+                    state='confirmed' if outcome=='complete' else 'submitted'
+                    body=dict(run_id='synthetic-write',effective_state='complete' if outcome=='complete' else 'unresolved',
+                              phrases=[dict(query='лишний ключ',state=state,rule_id='WRONG_MODEL',reason='Другая модель',target='10101:101',confirmed_at='2026-09-25T12:00:00Z' if state=='confirmed' else None)],write_operations=[])
+                    route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
+                page.route('**/keyword-cleaner/manual-clean/*',manual_status)
+                page.route('**/keyword-cleaner/runs/synthetic-write',write_detail)
+                def recheck(route):
+                    rechecks.append(route.request.post_data_json)
+                    route.fulfill(status=202,content_type='application/json',body=json.dumps(dict(job_id=route.request.url.split('/')[-2],state='ambiguous',stage='write_apply_claimed')))
+                page.route('**/keyword-cleaner/manual-clean/*/recheck',recheck)
+                page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').click()
+                expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
+                expect(page.locator('[data-kc-stage-text]')).to_contain_text('Сверяем правила товара',timeout=7000)
+                if outcome=='complete':page.screenshot(path=str(output/'manual-running.png'),full_page=True);screens.append('manual-running.png')
+                expect(page.locator('[data-kc-manual-result]')).to_contain_text('стекло iphone 16 pro max',timeout=7000)
+                result_text=page.locator('[data-kc-manual-result]').inner_text()
+                if outcome=='complete':
+                    check('manual_confirmed_phrase_and_reason',all(value in result_text for value in ('WB подтвердил исключение','лишний ключ','Другая модель','Оставлено')))
+                    expect(page.locator('[data-kc-summary]')).to_be_hidden()
+                    expect(page.locator('[data-kc-selected-target]')).to_contain_text('Тестовая кампания 10101')
+                    expect(page.locator('[data-kc-selected-target]')).to_contain_text('Прозрачное стекло · iPhone 16 Pro Max')
+                    page.locator('[data-kc-manual-result] details').last.locator('summary').click()
+                    check('manual_rule_id_available_in_details','WRONG_MODEL' in page.locator('[data-kc-manual-result]').inner_text())
+                    page.locator('[data-kc-manual-result] details').last.locator('summary').click()
+                if outcome=='partial':
+                    check('manual_pending_is_not_confirmed','Ожидают подтверждения WB' in result_text and 'WB подтвердил исключение' not in result_text)
+                    expect(page.get_by_role('button',name='Проверить результат WB')).to_be_visible()
+                    expect(page.locator('[data-kc-run]')).to_be_disabled()
+                    check('partial_waiting_recheck_blocks_new_clean')
+                    page.get_by_role('button',name='Проверить результат WB').click()
+                    expect(page.locator('[data-kc-message]')).to_contain_text('Повторно читаем результат WB')
+                    expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
+                    check('recheck_uses_same_job_readback_only',len(rechecks)==1 and bool(rechecks[0].get('request_id')) and f.count('cleaner_runs')==2)
+                if outcome=='failed':check('manual_error_is_visible','Чистка не выполнена' in result_text and 'WB не ответил' in result_text)
+                check('manual_result_has_no_script',page.locator('[data-kc-manual-result] script').count()==0)
+                if outcome=='complete':
+                    page.screenshot(path=str(output/'manual-result.png'),full_page=True);screens.append('manual-result.png')
+                    page.set_viewport_size({'width':390,'height':844});page.screenshot(path=str(output/'manual-result-mobile.png'),full_page=True);screens.append('manual-result-mobile.png')
+                    check('manual_result_mobile_no_overflow',page.locator('[data-keyword-cleaner]').evaluate('(node)=>node.scrollWidth<=node.clientWidth+1'))
+                page.close()
         # Each variant is rendered by the real app from isolated synthetic SQL state.
         for mode,status in [('empty','Выполнено'),('partial','Выполнено частично'),('failed','Не выполнено'),('unresolved','Проверяем результат WB'),('rejected','Не выполнено'),('profile-required','Выполнено частично')]:
             with running_fixture(mode) as f:
@@ -96,7 +165,7 @@ def run(output:Path):
                 if mode=='failed':check('missing_counts_are_not_zero',page.locator('[data-kc-checked]').inner_text()=='—')
                 if mode=='unresolved':
                     expect(page.locator('[data-kc-reviews]')).to_contain_text('Все вопросы разобраны');expect(page.locator('[data-kc-indicator]')).to_be_visible();check('unresolved_remains_when_reviews_empty')
-                    expect(page.locator('[data-kc-enabled]')).to_be_disabled();check('manual_mode_does_not_offer_scheduler_toggle')
+                    expect(page.locator('[data-kc-enabled]')).to_have_count(0);check('manual_mode_does_not_offer_scheduler_toggle')
                 if mode=='rejected':
                     expect(page.locator('[data-kc-alerts]')).to_contain_text('Не выполнено: WB не принял исключение. Ключей: 1.')
                     expect(page.locator('[data-kc-excluded]')).to_have_text('0')
@@ -107,6 +176,17 @@ def run(output:Path):
         with running_fixture('empty') as f:
             page=browser.new_page();browser_login(page,f,'reader');expect(page.locator('[data-kc-run]')).to_be_disabled();expect(page.locator('[data-kc-alerts]')).to_contain_text('только назначенному владельцу');check('reader_view_is_read_only')
             before=f.count('cleaner_requests');response=page.request.post(f.base_url+PREFIX+'/runs',data={'request_id':'browser-reader-direct'},headers={'Origin':f.base_url,'Content-Type':'application/json','X-WB-Keyword-Cleaner-CSRF':'1'});check('browser_reader_direct_post_forbidden',response.status==403 and f.count('cleaner_requests')==before);page.close()
+        with running_fixture() as f:
+            with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0 WHERE account=?',(f.cleaner.key,))
+            page=browser.new_page()
+            def worker_down(route):
+                payload=route.fetch().json();payload.update(manual_worker_state='down',manual_worker_alive=False)
+                route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
+            before=f.count('cleaner_requests');page.route('**/keyword-cleaner/summary',worker_down);browser_login(page,f)
+            expect(page.locator('[data-kc-target-note]')).to_contain_text('Исполнитель ручной чистки не отвечает')
+            expect(page.locator('[data-kc-run]')).to_be_disabled()
+            check('worker_down_prevents_manual_submit',f.count('cleaner_requests')==before)
+            page.close()
         # A lost manual-run response is recovered only by GET of the original
         # command. A hanging response observes the same one-submit invariant.
         with running_fixture() as f:
@@ -114,8 +194,8 @@ def run(output:Path):
             page=browser.new_page();browser_login(page,f);posts=[]
             def pending_post(route):
                 posts.append(route.request.post_data_json);assert route.fetch().status==202;route.abort('failed')
-            page.route('**/keyword-cleaner/runs',pending_post);page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
-            page.locator('[data-kc-manual-advert]').fill('11');page.locator('[data-kc-manual-nm]').fill('101');page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-recover]')).to_be_visible();expect(page.locator('[data-kc-message]')).to_contain_text('Не удалось проверить сохранение')
+            page.route('**/keyword-cleaner/manual-clean',pending_post);page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
+            page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-recover]')).to_be_visible();expect(page.locator('[data-kc-message]')).to_contain_text('Не удалось проверить сохранение')
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-recover]')).to_be_visible();check('manual_uncertain_command_survives_reload')
             page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();check('manual_recovery_get_only_one_post',len(posts)==1);page.close()
         with running_fixture() as f:
@@ -123,8 +203,8 @@ def run(output:Path):
             page=browser.new_page();browser_login(page,f);posts=[];hanging=[]
             def hanging_post(route):
                 hanging.append(route);posts.append(route.request.post_data_json);assert route.fetch().status==202
-            page.route('**/keyword-cleaner/runs',hanging_post);page.locator('[data-kc-manual-advert]').fill('11');page.locator('[data-kc-manual-nm]').fill('101')
-            start=time.monotonic();page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-message]')).to_contain_text('Проверка принята',timeout=16000)
+            page.route('**/keyword-cleaner/manual-clean',hanging_post);page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101')
+            start=time.monotonic();page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-stage-text]')).to_contain_text('Получаем ключи',timeout=16000)
             check('manual_hanging_post_recovers_one_request',len(posts)==1 and 9<=time.monotonic()-start<16)
             for route in hanging:
                 try:route.abort('failed')

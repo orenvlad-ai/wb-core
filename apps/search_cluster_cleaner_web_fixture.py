@@ -160,7 +160,11 @@ def running_fixture(mode='normal', port=0):
         runtime = _seed_runtime(fixture.runtime_dir)
         fixture.cleaner = seed_cleaner(fixture.runtime_dir, mode)
         if mode=='confirmed':seed_confirmed(fixture.cleaner)
-        fixture.web = CleanerWeb(fixture.cleaner, generation=GENERATION)
+        fixture.web = CleanerWeb(fixture.cleaner, generation=GENERATION,
+            approved_targets=[dict(advert_id=10101,nm_id=101,state='verified',campaign_name='Тестовая кампания 10101'),
+                              dict(advert_id=10102,nm_id=102,state='verified',campaign_name='Тестовая кампания 10102')])
+        fixture.web.worker_alive=lambda:True
+        fixture.web.worker_status=lambda:'ready'
         fixture.entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=fixture.runtime_dir, runtime=runtime, now_factory=lambda: NOW, cleaner_web=fixture.web, ads_block=_build_ads_block(runtime, fixture.runtime_dir, FakePromotionSource(), write_enabled=False))
         password_hash = _password_hash(PASSWORD)
         for username, role, sections in [('reader','operator',['ads']), ('admin','admin',['ads','sku_management']), ('noads','operator',['vitrina'])]:
