@@ -209,17 +209,17 @@ class CleanerWbSource:
         if missing and strict:raise WbReadError('adverts_missing')
         return result if strict else (result,['adverts_missing:'+str(i) for i in missing])
 
-    def catalog(self):
+    def catalog(self, *, with_statuses=False):
         deadline=self.monotonic()+120
         payload=self._call('GET','/adv/v1/promotion/count',deadline=deadline)
         if not isinstance(payload,dict) or type(payload.get('all')) is not int or not isinstance(payload.get('adverts'),list):raise WbReadError('count_malformed')
-        ids=[]
+        ids=[];statuses={}
         for group in payload['adverts']:
             if (not isinstance(group,dict) or type(group.get('count')) is not int or type(group.get('status')) is not int
                     or type(group.get('type')) is not int or not isinstance(group.get('advert_list'),list) or group['count']!=len(group['advert_list'])):raise WbReadError('count_malformed')
             for item in group['advert_list']:
                 if not isinstance(item,dict) or type(item.get('advertId')) is not int or item['advertId']<=0:raise WbReadError('count_identity')
-                ids.append(item['advertId'])
+                ids.append(item['advertId']);statuses[item['advertId']]=group['status']
         if len(ids)!=len(set(ids)) or len(ids)!=payload['all']:raise WbReadError('count_incomplete')
         targets=[];errors=[]
         for offset in range(0,len(ids),50):
@@ -229,7 +229,7 @@ class CleanerWbSource:
             except WbReadError as exc:
                 if exc.code in {'unauthorized','forbidden'}:raise
                 errors.append(exc.code)
-        return targets,errors
+        return (targets,errors,statuses) if with_statuses else (targets,errors)
 
     def refresh_target(self,target):
         values=self._adverts([target.advert_id],self.monotonic()+120)

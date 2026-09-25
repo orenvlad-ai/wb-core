@@ -22,7 +22,7 @@ from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordi
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter,ManualCleanerCoordinator
 from packages.application.search_cluster_cleaner_web import CleanerWeb
-from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
+from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource,WbReadError
 from packages.adapters.search_cluster_cleaner_wb import AccountLimiter
 from packages.adapters.official_api_runtime import OfficialApiRuntimeConfig
 from packages.contracts.search_cluster_cleaner import CleanerError,Principal,Target
@@ -46,6 +46,61 @@ def rejects(action,code):
 
 
 def main():
+    # The count endpoint can include completed campaigns omitted by the detail
+    # endpoint. Their absence must not hide exact active/paused candidates.
+    with Sandbox() as box:
+        source=object.__new__(CleanerWbSource)
+        source.monotonic=time.monotonic
+        count={'all':4,'adverts':[{'status':status,'type':8,'count':1,'advert_list':[{'advertId':advert}]} for advert,status in ((11,9),(12,11),(14,7),(15,-1))]}
+        def advert(advert_id,status):
+            return dict(id=advert_id,settings=dict(payment_type='cpm',name='Campaign '+str(advert_id)),bid_type='manual',status=status,nm_settings=[dict(nm_id=101)])
+        detail_ids={11,12}
+        def read(method,path,*,deadline):
+            if path.endswith('/promotion/count'):return count
+            if detail_ids is None:raise WbReadError('rate_limited')
+            return {'adverts':[advert(aid,status) for aid,status in ((11,9),(12,11),(14,7),(15,-1)) if aid in detail_ids]}
+        source._call=read
+        targets,errors,statuses=source.catalog(with_statuses=True)
+        assert {target.advert_id for target in targets}=={11,12}
+        assert errors==['adverts_missing:14','adverts_missing:15'] and statuses=={11:9,12:11,14:7,15:-1}
+        assert len(source.catalog())==2,'default catalog contract changed'
+        web=CleanerWeb(box.service(),generation='monolith')
+        owner=Principal('owner',True,True,True)
+        with patch.object(CleanerWbSource,'from_env',return_value=source), \
+             patch('packages.application.search_cluster_cleaner_batch_eligibility.eligibility_rows',return_value=[dict(advert_id=11,nm_id=101,eligible=True),dict(advert_id=12,nm_id=101,eligible=True)]):
+            web._refresh_batch_catalog()
+            result=web.batch_eligibility(owner)
+            assert result['error'] is None and {row['advert_id'] for row in result['items']}=={11,12}
+            detail_ids={12}
+            web._refresh_batch_catalog()
+            result=web.batch_eligibility(owner)
+            assert result['error']=='campaign_catalog_unavailable' and result['items']==[]
+            detail_ids={11}
+            web._refresh_batch_catalog()
+            assert web.batch_eligibility(owner)['error']=='campaign_catalog_unavailable'
+            detail_ids=None
+            web._refresh_batch_catalog()
+            assert web.batch_eligibility(owner)['error']=='campaign_catalog_unavailable'
+    with Sandbox() as box:
+        web=CleanerWeb(box.service(),generation='monolith')
+        owner=Principal('owner',True,True,True)
+        with patch.object(CleanerWbSource,'from_env',side_effect=RuntimeError('synthetic catalog outage')) as source:
+            assert web.batch_eligibility(owner)['loading']
+            for _ in range(100):
+                result=web.batch_eligibility(owner)
+                if not result['loading']:break
+                time.sleep(0.01)
+            assert result['error']=='campaign_catalog_unavailable' and not result['items'],result
+            assert web._batch_catalog_at>0 and source.call_count==1
+            for _ in range(3):
+                assert web.batch_eligibility(owner)['error']=='campaign_catalog_unavailable'
+            assert source.call_count==1,'failed catalog was retried on every poll'
+            assert web.batch_eligibility(owner,refresh=True)['loading']
+            for _ in range(100):
+                result=web.batch_eligibility(owner)
+                if not result['loading']:break
+                time.sleep(0.01)
+            assert result['error']=='campaign_catalog_unavailable' and source.call_count==2
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
@@ -57,6 +112,9 @@ def main():
         assert [r['eligible'] for r in snapshot if r['advert_id'] in (11,12,13)]==[True,True,True]
         completed=next(r for r in snapshot if r['advert_id']==14)
         assert not completed['eligible'] and completed['status']=='completed'
+        omitted=eligibility_rows(service,'monolith',source.targets[:2],fixture_admission=admitted+[dict(advert_id=14,nm_id=101,state='verified')])
+        missing_completed=next(r for r in omitted if r['advert_id']==14)
+        assert not missing_completed['eligible'] and missing_completed['reason']=='campaign_sku_missing'
         web=CleanerWeb(service,generation='monolith',approved_targets=admitted,batch_catalog_targets=source.targets)
         web.worker_status=lambda:'ready'
         selected=[dict(advert_id=aid,nm_id=101) for aid in (11,12,13)]

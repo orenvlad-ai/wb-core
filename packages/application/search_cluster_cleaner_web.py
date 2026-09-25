@@ -220,8 +220,10 @@ class CleanerWeb:
         try:
             from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
             source=CleanerWbSource.from_env(self.require_service().account)
-            targets,errors=source.catalog()
-            if errors:raise CleanerError('campaign_catalog_incomplete','Каталог WB вернул неполные данные',409)
+            targets,errors,statuses=source.catalog(with_statuses=True)
+            if any(not (error.startswith('adverts_missing:') and error.removeprefix('adverts_missing:').isdigit()
+                        and statuses.get(int(error.removeprefix('adverts_missing:'))) in {7,-1}) for error in errors):
+                raise CleanerError('campaign_catalog_incomplete','Каталог WB вернул неполные данные',409)
             from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
             eligibility_rows(self.require_service(),self.generation,targets,fixture_admission=self._fixture_approved_targets)
             with self._catalog_lock:
@@ -232,7 +234,7 @@ class CleanerWeb:
             with self._catalog_lock:
                 self._batch_catalog_targets=None
                 self._batch_catalog_error='campaign_catalog_unavailable'
-                self._batch_catalog_at=0.0
+                self._batch_catalog_at=time.monotonic()
         finally:
             with self._catalog_lock:self._batch_catalog_loading=False
 
