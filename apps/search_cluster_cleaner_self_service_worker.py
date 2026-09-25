@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 from apps.wb_fbs_warehouse_registry import _load_env_file
 from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter,ManualCleanerCoordinator
+from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
 
 
 def deployment_ready() -> bool:
@@ -47,9 +48,11 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
         try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:return
         _load_env_file(env_file.resolve())
-        cleaner=CleanerWeb.from_env(runtime_dir).require_service()
+        web=CleanerWeb.from_env(runtime_dir)
+        cleaner=web.require_service()
         adapter=LocalStageEAdapter(runtime_dir=runtime_dir,env_file=env_file,admission_dir=admission_dir)
         coordinator=ManualCleanerCoordinator(cleaner,adapter)
+        batch_coordinator=BatchCleanerCoordinator(cleaner,generation=web.generation)
         while True:
             if not deployment_ready():
                 try:
@@ -57,14 +60,18 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     # exact initialized worker can read its durable queue,
                     # without consuming or executing any pending job.
                     coordinator.pending_jobs()
+                    batch_coordinator.pending_batches()
                     report_health(admission_dir,'armed')
                 except Exception as exc:
                     report_health(admission_dir,'storage_wait',type(exc).__name__)
             else:
                 try:
-                    if coordinator.pending_jobs():
+                    jobs=coordinator.pending_jobs()
+                    batches=batch_coordinator.pending_batches()
+                    if jobs or batches:
                         report_health(admission_dir,'busy')
-                        coordinator.tick()
+                        if jobs:coordinator.tick()
+                        if batches:batch_coordinator.tick()
                     report_health(admission_dir,'ready')
                 except Exception as exc:
                     # The exact intent stays durable. Report the failure while

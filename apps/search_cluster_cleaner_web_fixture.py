@@ -162,7 +162,10 @@ def running_fixture(mode='normal', port=0):
         if mode=='confirmed':seed_confirmed(fixture.cleaner)
         fixture.web = CleanerWeb(fixture.cleaner, generation=GENERATION,
             approved_targets=[dict(advert_id=10101,nm_id=101,state='verified',campaign_name='Тестовая кампания 10101'),
-                              dict(advert_id=10102,nm_id=102,state='verified',campaign_name='Тестовая кампания 10102')])
+                              dict(advert_id=10102,nm_id=102,state='verified',campaign_name='Тестовая кампания 10102')],
+            batch_catalog_targets=[Target(10101,101,name='Тестовая кампания 10101',contract_verified=True),
+                                   Target(10102,102,name='Тестовая кампания 10102',contract_verified=True),
+                                   Target(10103,101,status=7,name='Завершённая кампания',contract_verified=True)])
         fixture.web.worker_alive=lambda:True
         fixture.web.worker_status=lambda:'ready'
         fixture.entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=fixture.runtime_dir, runtime=runtime, now_factory=lambda: NOW, cleaner_web=fixture.web, ads_block=_build_ads_block(runtime, fixture.runtime_dir, FakePromotionSource(), write_enabled=False))

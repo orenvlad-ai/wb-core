@@ -28,6 +28,12 @@ from packages.contracts.search_cluster_cleaner import MODEL_CATALOG
 FINAL_OBSERVATION_STATES = {"allow", "confirmed", "baseline", "observed_excluded", "observed_archived", "external_state_drift", "already_excluded"}
 PENDING_WRITE_STATES = "'dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'"
 BLOCKING_WRITE_STATES = PENDING_WRITE_STATES+",'requires_review'"
+BATCH_TERMINAL_STATES = {'complete','partial','failed'}
+
+
+def batch_child_id(batch_id: str, index: int) -> str:
+    """A stable, disjoint command identity for one frozen batch position."""
+    return 'batch-'+digest([batch_id,index])[:40]
 
 
 def new_id() -> str:
@@ -67,6 +73,14 @@ class KeywordCleaner:
 
     def _event(self, c, kind: str, facts: Any, *, run_id=None, operation_id=None) -> None:
         c.execute("INSERT INTO cleaner_events(event_id,account,run_id,operation_id,kind,created_at,facts) VALUES(?,?,?,?,?,?,?)", (new_id(),self.key,run_id,operation_id,kind,self.clock(),canonical(facts)))
+
+    def _active_manual_batch(self,c) -> str|None:
+        row=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
+        if not row:return None
+        batch_id=json.loads(row['facts'])['batch_id']
+        latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,batch_id)).fetchone()
+        state=json.loads(latest['facts']).get('state','queued') if latest else 'queued'
+        return batch_id if state not in BATCH_TERMINAL_STATES else None
 
     def _command(self, principal: Principal, route: str, payload: Mapping, operation: Callable) -> dict:
         principal.require_owner(self.owner_username)
@@ -277,6 +291,8 @@ class KeywordCleaner:
 
     def start_run(self,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
+            if self._active_manual_batch(c):
+                raise CleanerError('manual_batch_active','Сначала завершите массовую ручную чистку',409)
             s=self._settings(c)
             manual_target = payload.get("advert_id"), payload.get("nm_id")
             manual = manual_target != (None, None)
@@ -304,7 +320,7 @@ class KeywordCleaner:
             return dict(status=202,run_id=rid,kind="scan",reused=False,manual_target=targets[0] if targets else None)
         return self._command(principal,"runs",payload,command)
 
-    def start_manual_clean(self,payload:Mapping,principal:Principal) -> dict:
+    def start_manual_clean(self,payload:Mapping,principal:Principal,*,batch_id:str|None=None,batch_index:int|None=None) -> dict:
         """Persist one explicit owner intent; no worker or WB call runs here."""
         def command(c,actor):
             advert_id,nm_id=payload.get('advert_id'),payload.get('nm_id')
@@ -316,6 +332,25 @@ class KeywordCleaner:
                 raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
             if c.execute("SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone():
                 raise CleanerError('target_held','Чистка этой кампании приостановлена до разбора',409)
+            latest_batch=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
+            if latest_batch:
+                batch_facts=json.loads(latest_batch['facts'])
+                batch_state=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,batch_facts['batch_id'])).fetchone()
+                state=json.loads(batch_state['facts']).get('state','queued') if batch_state else 'queued'
+                if batch_id is None and state not in BATCH_TERMINAL_STATES:
+                    raise CleanerError('manual_batch_active','Сначала завершите текущую массовую чистку',409)
+                if batch_id is not None:
+                    frozen=batch_facts.get('items',[])
+                    batch_progress=json.loads(batch_state['facts']) if batch_state else batch_facts
+                    if (batch_id!=batch_facts['batch_id'] or state in BATCH_TERMINAL_STATES
+                            or type(batch_index) is not int or batch_index<0 or batch_index>=len(frozen)
+                            or batch_progress.get('current_index',0)!=batch_index
+                            or str(batch_index) in batch_progress.get('item_updates',{})
+                            or frozen[batch_index]['advert_id']!=advert_id or frozen[batch_index]['nm_id']!=nm_id
+                            or payload.get('request_id')!=batch_child_id(batch_id,batch_index)):
+                        raise CleanerError('batch_child_invalid','Ручное задание не соответствует сохранённой группе',409)
+            elif batch_id is not None:
+                raise CleanerError('batch_child_invalid','Сохранённая группа не найдена',409)
             current=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
             if current:
                 facts=json.loads(current['facts'])
@@ -333,9 +368,85 @@ class KeywordCleaner:
                 run_id=self._new_run(c,'scan','manual_exact',request_id=payload['request_id'],targets=declared)
                 adopted=False
             job_id=payload['request_id']
-            self._event(c,'self_service_requested',dict(job_id=job_id,scan_run_id=run_id,advert_id=advert_id,nm_id=nm_id,actor=actor,adopted=adopted),run_id=run_id)
-            return dict(job_id=job_id,run_id=run_id,state='queued',stage='fetching',adopted=adopted)
+            self._event(c,'self_service_requested',dict(job_id=job_id,scan_run_id=run_id,advert_id=advert_id,nm_id=nm_id,actor=actor,adopted=adopted,
+                                                        batch_id=batch_id,batch_index=batch_index),run_id=run_id)
+            return dict(job_id=job_id,run_id=run_id,state='queued',stage='fetching',adopted=adopted,
+                        advert_id=advert_id,nm_id=nm_id,batch_id=batch_id,batch_index=batch_index)
         return self._command(principal,'manual-clean',payload,command)
+
+    def start_manual_batch(self,payload:Mapping,principal:Principal,*,snapshot:list[dict]|None=None) -> dict:
+        """Freeze only caller-selected exact pairs admitted by one fresh catalog."""
+        def command(c,actor):
+            targets=payload.get('targets');categories=payload.get('selected_categories')
+            if (not isinstance(targets,list) or not targets or len(targets)>100
+                    or not isinstance(categories,list) or categories not in (['active'],['active','paused'])):
+                raise CleanerError('batch_selection_invalid','Выберите точные пары и разрешённые статусы',422)
+            identities=[]
+            for row in targets:
+                if (not isinstance(row,dict) or set(row)!={'advert_id','nm_id'}
+                        or type(row['advert_id']) is not int or type(row['nm_id']) is not int):
+                    raise CleanerError('batch_selection_invalid','Некорректная пара кампании и товара',422)
+                identities.append(Target(row['advert_id'],row['nm_id']).key)
+            if len(identities)!=len(set(identities)):
+                raise CleanerError('batch_selection_duplicate','Пара выбрана повторно',422)
+            s=self._settings(c)
+            if s['enabled'] or not s['baseline_ready']:
+                raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
+            if snapshot is None:
+                raise CleanerError('batch_catalog_stale','Обновите список кампаний перед запуском',409)
+            indexed={f"{row['advert_id']}:{row['nm_id']}":row for row in snapshot}
+            frozen=[]
+            for identity in identities:
+                row=indexed.get(identity)
+                if not row or not row.get('eligible') or row.get('status') not in categories:
+                    raise CleanerError('batch_target_ineligible','Одна из выбранных пар больше недоступна. Обновите список',409)
+                frozen.append({key:row[key] for key in ('advert_id','nm_id','campaign_name','product_title','status','status_code')})
+            latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
+            if latest:
+                prior=json.loads(latest['facts'])['batch_id']
+                stage=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,prior)).fetchone()
+                if json.loads(stage['facts']).get('state','queued') not in BATCH_TERMINAL_STATES:
+                    raise CleanerError('manual_batch_active','Предыдущая массовая чистка не завершена',409)
+            latest_job=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
+            if latest_job:
+                previous=json.loads(latest_job['facts'])['job_id']
+                stage=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,previous)).fetchone()
+                facts=json.loads(stage['facts'])
+                if facts.get('state') not in {'complete','partial','failed','no_change'} or facts.get('can_recheck'):
+                    raise CleanerError('manual_job_active','Предыдущая ручная чистка ещё требует сверки',409)
+            if c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running')",(self.key,)).fetchone():
+                raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
+            batch_id=payload['request_id'];created_at=self.clock()
+            self._event(c,'self_service_batch_requested',dict(batch_id=batch_id,items=frozen,selected_categories=categories,actor=actor,state='queued',stage='queued',current_index=0,item_updates={}))
+            return dict(batch_id=batch_id,state='queued',selected_count=len(frozen),created_at=created_at)
+        return self._command(principal,'manual-batches',payload,command)
+
+    def manual_batch_snapshot(self,batch_id:str,principal:Principal) -> dict:
+        principal.require_read()
+        with self.store.read() as c:
+            request=c.execute("SELECT actor,outcome,created_at FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",(self.key,batch_id)).fetchone()
+            if not request or request['actor']!=principal.username.strip().casefold():
+                raise CleanerError('not_found','Массовая чистка не найдена',404)
+            rows=c.execute("SELECT kind,created_at,facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence",(self.key,batch_id)).fetchall()
+            if not rows:raise CleanerError('batch_journal_missing','Журнал массовой чистки недоступен',503)
+            original=json.loads(rows[0]['facts']);latest=json.loads(rows[-1]['facts'])
+            return dict(batch_id=batch_id,items=original['items'],selected_categories=original['selected_categories'],
+                        state=latest.get('state','queued'),stage=latest.get('stage','queued'),
+                        item_updates=latest.get('item_updates',{}),current_index=latest.get('current_index'),
+                        error=latest.get('error'),error_code=latest.get('error_code'),created_at=request['created_at'],updated_at=rows[-1]['created_at'])
+
+    def record_manual_batch(self,batch_id:str,**facts) -> None:
+        with self.store.transaction(timeout_ms=30000) as c:
+            request=c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",(self.key,batch_id)).fetchone()
+            if not request:raise CleanerError('batch_missing','Массовая команда не найдена',404)
+            previous=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,batch_id)).fetchone()
+            value=dict(json.loads(previous['facts']) if previous else {})
+            value.update(facts)
+            value['batch_id']=batch_id
+            if 'item_update' in value:
+                index,update=value.pop('item_update')
+                value['item_updates']=dict(value.get('item_updates') or {},**{str(index):update})
+            self._event(c,'self_service_batch_stage',value)
 
     def manual_job(self,job_id:str,principal:Principal) -> dict:
         principal.require_read()
@@ -393,6 +504,8 @@ class KeywordCleaner:
 
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
+            if self._active_manual_batch(c):
+                raise CleanerError('manual_batch_active','Сначала завершите массовую ручную чистку',409)
             s=self._settings(c);verdict=payload.get("decision")
             if verdict not in {"allow","exclude"}: raise CleanerError("invalid_decision","Выберите оставить или исключить")
             if verdict=="exclude" and not s["enabled"] and not s["baseline_ready"]:

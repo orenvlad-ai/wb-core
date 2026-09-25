@@ -19,7 +19,7 @@ STAGE_E_CONFIG_PATH=Path('/var/lib/wb-core/search-cluster-cleaner-admission/stag
 
 
 class CleanerWeb:
-    def __init__(self, cleaner: KeywordCleaner | None = None, *, generation: str = "", origin: str = "", approved_targets: list[dict] | None = None):
+    def __init__(self, cleaner: KeywordCleaner | None = None, *, generation: str = "", origin: str = "", approved_targets: list[dict] | None = None, batch_catalog_targets: list[Target] | None = None):
         self.cleaner = cleaner
         self.generation = generation
         self.origin = origin
@@ -29,6 +29,10 @@ class CleanerWeb:
         self._catalog_error=None
         self._catalog_loading=False
         self._catalog_at=0.0
+        self._batch_catalog_targets=batch_catalog_targets
+        self._batch_catalog_error=None
+        self._batch_catalog_loading=False
+        self._batch_catalog_at=time.monotonic() if batch_catalog_targets is not None else 0.0
         self.worker_alive=None
         self.worker_status=None
 
@@ -119,11 +123,16 @@ class CleanerWeb:
         result['manual_worker_alive']=bool(self.worker_alive and self.worker_alive())
         result['manual_worker_state']=self.worker_status() if self.worker_status else 'not_attached'
         result['last_manual_job']=None
+        result['last_manual_batch']=None
         if config['can_edit']:
             with self.cleaner.store.read() as c:
                 recent=c.execute("SELECT request_id FROM cleaner_requests WHERE account=? AND actor=? AND route='manual-clean' ORDER BY created_at DESC,rowid DESC LIMIT 1",(self.cleaner.key,principal.username.strip().casefold())).fetchone()
+                recent_batch=c.execute("SELECT request_id FROM cleaner_requests WHERE account=? AND actor=? AND route='manual-batches' ORDER BY created_at DESC,rowid DESC LIMIT 1",(self.cleaner.key,principal.username.strip().casefold())).fetchone()
             if recent:
                 result['last_manual_job']=self.cleaner.manual_job(recent['request_id'],principal)
+            if recent_batch:
+                batch=self.cleaner.manual_batch_snapshot(recent_batch['request_id'],principal)
+                result['last_manual_batch']={key:batch[key] for key in ('batch_id','state','stage','created_at','updated_at')}
         result["indicator"] = bool(result["indicator"] or not config["owner_configured"] or not config["generation_matches"] or not result["settings"]["baseline_ready"])
         return result
 
@@ -206,6 +215,74 @@ class CleanerWeb:
         if not selected or not selected['campaign_name'] or not selected['profile_ready'] or selected['held_reason']:
             raise CleanerError('manual_target_not_admitted','Эта пара кампании и товара недоступна для ручной чистки',409)
         return cleaner.start_manual_clean(payload,principal)
+
+    def _refresh_batch_catalog(self) -> None:
+        try:
+            from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
+            source=CleanerWbSource.from_env(self.require_service().account)
+            targets,errors=source.catalog()
+            if errors:raise CleanerError('campaign_catalog_incomplete','Каталог WB вернул неполные данные',409)
+            from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
+            eligibility_rows(self.require_service(),self.generation,targets,fixture_admission=self._fixture_approved_targets)
+            with self._catalog_lock:
+                self._batch_catalog_targets=targets
+                self._batch_catalog_error=None
+                self._batch_catalog_at=time.monotonic()
+        except Exception:
+            with self._catalog_lock:
+                self._batch_catalog_targets=None
+                self._batch_catalog_error='campaign_catalog_unavailable'
+                self._batch_catalog_at=0.0
+        finally:
+            with self._catalog_lock:self._batch_catalog_loading=False
+
+    def batch_eligibility(self, principal: Principal, *, refresh: bool = False) -> dict:
+        principal.require_read()
+        self.require_service()
+        from packages.application.search_cluster_cleaner_batch_eligibility import category_contract, eligibility_rows
+        with self._catalog_lock:
+            stale=time.monotonic()-self._batch_catalog_at>120
+            if not self._batch_catalog_loading and (refresh or stale) and self._fixture_approved_targets is None:
+                self._batch_catalog_loading=True
+                self._batch_catalog_targets=None
+                threading.Thread(target=self._refresh_batch_catalog,daemon=True,name='cleaner-batch-catalog').start()
+            targets=self._batch_catalog_targets
+            loading=self._batch_catalog_loading
+            error=self._batch_catalog_error
+        if loading or targets is None:
+            return dict(items=[],loading=loading,error=None if loading else error or 'campaign_catalog_unavailable',categories=category_contract())
+        try:
+            rows=eligibility_rows(self.require_service(),self.generation,targets,fixture_admission=self._fixture_approved_targets)
+        except CleanerError:
+            return dict(items=[],loading=False,error='manual_admission_unavailable',categories=category_contract())
+        return dict(items=rows,loading=False,error=None,categories=category_contract())
+
+    def start_manual_batch(self,payload:dict,principal:Principal) -> dict:
+        cleaner=self.require_mutation(principal)
+        request_id=payload.get('request_id') if isinstance(payload,dict) else None
+        if isinstance(request_id,str):
+            with cleaner.store.read() as c:
+                saved=c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-batches'",(cleaner.key,principal.username.strip().casefold(),request_id)).fetchone()
+            if saved:return cleaner.start_manual_batch(payload,principal)
+        if self.worker_status and self.worker_status()!='ready':
+            raise CleanerError('manual_worker_unavailable','Исполнитель ручной чистки сейчас недоступен',503)
+        from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
+        from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
+        try:
+            targets=payload.get('targets')
+            if not isinstance(targets,list) or not targets or len(targets)>100:
+                raise CleanerError('batch_selection_invalid','Выберите точные пары кампании и товара',422)
+            ids=sorted({row['advert_id'] for row in targets if isinstance(row,dict) and type(row.get('advert_id')) is int})
+            if not ids or len(ids)>100:raise CleanerError('batch_selection_invalid','Выберите точные пары кампании и товара',422)
+            source=CleanerWbSource.from_env(cleaner.account)
+            deadline=source.monotonic()+120
+            catalog=[]
+            for offset in range(0,len(ids),50):catalog.extend(source._adverts(ids[offset:offset+50],deadline))
+            snapshot=eligibility_rows(cleaner,self.generation,catalog,fixture_admission=self._fixture_approved_targets)
+        except CleanerError:raise
+        except Exception as exc:
+            raise CleanerError('campaign_catalog_unavailable','Не удалось проверить текущие кампании WB',409) from exc
+        return cleaner.start_manual_batch(payload,principal,snapshot=snapshot)
 
     def reviews(self, principal: Principal, **params) -> dict:
         cleaner = self.require_service()
