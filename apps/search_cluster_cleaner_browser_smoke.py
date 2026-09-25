@@ -114,7 +114,11 @@ def run(output:Path):
         with running_fixture('empty') as f:
             page=browser.new_page();browser_login(page,f)
             def late_history(route):
-                payload=dict(items=[dict(kind='run_finished',created_at='2026-09-25T12:00:00Z',run_id='synthetic-late',facts=dict(state='partial',summary=dict(dry_run=True))),
+                payload=dict(items=[dict(kind='self_service_requested',created_at='2026-09-25T11:58:00Z',run_id='synthetic-late',facts=dict(job_id='synthetic-job',advert_id=10101,nm_id=101)),
+                                    dict(kind='self_service_stage',created_at='2026-09-25T11:59:00Z',run_id='synthetic-late',facts=dict(job_id='synthetic-job',advert_id=10101,nm_id=101,state='running',stage='write_apply_claimed')),
+                                    dict(kind='profile_draft',created_at='2026-09-25T11:59:30Z',facts=dict(nm_id=101)),
+                                    dict(kind='run_finished',created_at='2026-09-25T12:00:00Z',run_id='synthetic-late',facts=dict(state='partial',summary=dict(dry_run=True))),
+                                    dict(kind='self_service_finished',created_at='2026-09-25T12:04:00Z',run_id='synthetic-late',facts=dict(job_id='synthetic-job',advert_id=10101,nm_id=101,state='complete',stage='finished')),
                                     dict(kind='late_confirmation',created_at='2026-09-25T12:05:00Z',run_id='synthetic-late',facts=dict(confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=5,late=True,missing=0,state='confirmed',target='10101:101'))],next_cursor=None)
                 route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
             def late_run(route):
@@ -124,6 +128,12 @@ def run(output:Path):
             page.route('**/keyword-cleaner/history*',late_history)
             page.route('**/keyword-cleaner/runs/synthetic-late',late_run)
             page.locator('[data-kc-history-open]').click()
+            expect(page.locator('[data-kc-history]')).to_contain_text('Ручная чистка запущена')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Этап ручной чистки')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Проверка идёт · Проверяем результат записи в WB · кампания 10101 · товар WB 101')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Итог ручной чистки')
+            expect(page.locator('[data-kc-history]')).to_contain_text('Чистка завершена · кампания 10101 · товар WB 101')
+            check('self_service_history_has_target_and_stage_without_undefined','undefined' not in page.locator('[data-kc-history]').inner_text())
             expect(page.locator('[data-kc-history]')).to_contain_text('при ручном запуске: 5')
             expect(page.locator('[data-kc-history]')).to_contain_text('Первичный итог: Выполнено частично')
             expect(page.locator('[data-kc-history]')).not_to_contain_text('Без записи в WB')
