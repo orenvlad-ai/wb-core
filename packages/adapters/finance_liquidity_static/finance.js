@@ -8,8 +8,8 @@
   const operationReadbackDeadlineMs = 5000;
   const app = document.querySelector("[data-finance-app]");
   const $ = (selector, root = document) => root.querySelector(selector);
-  const state = { capabilities: null, accounts: [], categories: [], counterparties: [], documents: [], reconciliations: [], csrf: "", inFlight: new Map() };
-  const ui = { accounts: $("[data-accounts]"), accountsEmpty: $("[data-accounts-empty]"), history: $("[data-history]"), historyEmpty: $("[data-history-empty]"), reconciliations: $("[data-reconciliations]"), attention: $("[data-attention]"), settings: $("[data-settings]"), notice: $("[data-notice]"), error: $("[data-error]"), session: $("[data-session-state]"), dialog: $("[data-dialog]"), dialogTitle: $("[data-dialog-title]"), dialogKicker: $("[data-dialog-kicker]"), dialogContent: $("[data-dialog-content]"), dialogSubmit: $("[data-dialog-submit]"), dialogSaveDraft: $("[data-dialog-save-draft]") };
+  const state = { capabilities: null, accounts: [], categories: [], counterparties: [], documents: [], reconciliations: [], auditEvents: [], csrf: "", inFlight: new Map() };
+  const ui = { accounts: $("[data-accounts]"), accountsEmpty: $("[data-accounts-empty]"), history: $("[data-history]"), historyEmpty: $("[data-history-empty]"), reconciliations: $("[data-reconciliations]"), attention: $("[data-attention]"), settings: $("[data-settings]"), audit: $("[data-settings-audit]"), notice: $("[data-notice]"), error: $("[data-error]"), session: $("[data-session-state]"), dialog: $("[data-dialog]"), dialogTitle: $("[data-dialog-title]"), dialogKicker: $("[data-dialog-kicker]"), dialogContent: $("[data-dialog-content]"), dialogSubmit: $("[data-dialog-submit]"), dialogSaveDraft: $("[data-dialog-save-draft]") };
   const has = (grant) => Boolean(state.capabilities?.capabilities?.includes?.(grant) || state.capabilities?.grants?.includes?.(grant) || state.capabilities?.[grant]);
   const canRead = () => has("finance") || has("finance_operate") || has("finance_admin");
   const canOperate = () => has("finance_operate") || has("finance_admin");
@@ -162,9 +162,23 @@
         container.append(row);
       }
     }
+    clear(ui.audit);
+    if (!state.auditEvents.length) ui.audit.append(element("p", "readonly", "Изменений пока нет."));
+    for (const event of state.auditEvents) {
+      const [kind, action] = String(event.event_type || "").split(".");
+      const noun = {account:"Касса",accounts:"Касса",category:"Статья",categories:"Статья",counterparty:"Контрагент",counterparties:"Контрагент"}[kind] || "Запись";
+      const change = {seeded:"Начальное добавление",created:"Добавление",rename:"Переименование",archive:"Перенос в архив",restore:"Восстановление",delete:"Удаление"}[action] || "Изменение";
+      let details = {}; try { details = JSON.parse(event.payload_json || "{}"); } catch { /* A legacy digest-only event remains readable by type and time. */ }
+      const oldName = String(details.old_name || details.name || "").trim();
+      const newName = String(details.new_name || "").trim();
+      const label = action === "rename" && oldName && newName ? `${noun}: «${oldName}» → «${newName}»` : `${noun}: ${change}${oldName ? ` «${oldName}»` : ""}`;
+      const row = element("div", "audit-entry");
+      row.append(element("strong", "", label), element("span", "history-meta", `${businessDateTime(event.created_at)} · ${event.actor === "system" ? "Система" : event.actor || "Пользователь"}`));
+      ui.audit.append(row);
+    }
   }
   async function loadAll() { error(); notice(); ui.session.textContent = "Обновляем данные…"; try { const caps = await request("/capabilities"); state.capabilities = caps; state.csrf = caps.csrf_token || ""; if (!canRead()) { ui.session.textContent = "Нет доступа к финансам"; error("Доступ к разделу не выдан. Обратитесь к администратору."); renderActionAccess(); return; }
-      const [accounts, categories, counterparties, docs, reconciliations] = await Promise.all([request("/accounts"), request("/categories"), request("/counterparties"), request("/documents"), request("/cash-reconciliations")]); state.accounts = dataList(accounts, "accounts").map(normalizeAccount); state.categories = dataList(categories, "categories").map(normalizeCategory); state.counterparties = dataList(counterparties, "counterparties").map(normalizeCounterparty); state.documents = dataList(docs, "documents").map(normalizeDocument); state.reconciliations = dataList(reconciliations, "reconciliations").map(normalizeReconciliation); ui.session.textContent = canOperate() ? "Операции доступны" : "Только просмотр"; renderAccounts(); renderHistory(); renderReconciliations(); renderAttention(); renderSettings(); }
+      const [accounts, categories, counterparties, docs, reconciliations, audit] = await Promise.all([request("/accounts"), request("/categories"), request("/counterparties"), request("/documents"), request("/cash-reconciliations"), canAdmin() ? request("/audit?scope=directories") : Promise.resolve({events:[]})]); state.accounts = dataList(accounts, "accounts").map(normalizeAccount); state.categories = dataList(categories, "categories").map(normalizeCategory); state.counterparties = dataList(counterparties, "counterparties").map(normalizeCounterparty); state.documents = dataList(docs, "documents").map(normalizeDocument); state.reconciliations = dataList(reconciliations, "reconciliations").map(normalizeReconciliation); state.auditEvents = dataList(audit, "events"); ui.session.textContent = canOperate() ? "Операции доступны" : "Только просмотр"; renderAccounts(); renderHistory(); renderReconciliations(); renderAttention(); renderSettings(); }
     catch (caught) { ui.session.textContent = "Данные недоступны"; error(caught.code === "finance_capability_denied" ? "Доступ к разделу не выдан." : caught.message); renderActionAccess(); }
   }
   function field(label, name, options = {}) {

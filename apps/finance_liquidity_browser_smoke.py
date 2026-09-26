@@ -544,6 +544,10 @@ def main() -> None:
                 page.get_by_role("button", name="Отмена").click()
                 expect(page.locator("[data-dialog]")).to_be_hidden()
                 page.screenshot(path=evidence_dir / "cash-desktop.png", full_page=True)
+                page.locator("[data-settings-link]").click()
+                expect(page.locator("[data-settings-audit]")).to_contain_text("Начальное добавление")
+                expect(page.locator("[data-settings-audit]")).not_to_contain_text("audit_seed_")
+                page.screenshot(path=evidence_dir / "cash-settings-audit.png", full_page=True)
                 mobile_context = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="dark", timezone_id="Pacific/Honolulu")
                 mobile = mobile_context.new_page()
                 mobile.context.add_cookies(

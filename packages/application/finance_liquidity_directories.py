@@ -79,7 +79,7 @@ V3_ALTERS = (
     "ALTER TABLE finance_liquidity_accounts ADD COLUMN code TEXT",
     "ALTER TABLE finance_liquidity_accounts ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN(0,1))",
     "ALTER TABLE finance_liquidity_categories ADD COLUMN code TEXT",
-    "ALTER TABLE finance_liquidity_categories ADD COLUMN analytic_class TEXT NOT NULL DEFAULT 'operating_expense'",
+    "ALTER TABLE finance_liquidity_categories ADD COLUMN analytic_class TEXT NOT NULL DEFAULT 'legacy_expense_unclassified'",
     "ALTER TABLE finance_liquidity_categories ADD COLUMN requires_comment INTEGER NOT NULL DEFAULT 0 CHECK(requires_comment IN(0,1))",
     "ALTER TABLE finance_liquidity_categories ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE finance_liquidity_categories ADD COLUMN updated_at TEXT",
@@ -96,6 +96,7 @@ V3_ALTERS = (
 COUNTERPARTY_SCHEMA = "CREATE TABLE finance_liquidity_counterparties(counterparty_id TEXT PRIMARY KEY,name TEXT NOT NULL CHECK(length(trim(name))>0),is_active INTEGER NOT NULL CHECK(is_active IN(0,1)),is_deleted INTEGER NOT NULL CHECK(is_deleted IN(0,1)),revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
 
 V3_EXTRA_SCHEMA = """
+CREATE TABLE finance_liquidity_v2_directory_snapshots(document_id TEXT PRIMARY KEY REFERENCES finance_liquidity_documents(document_id),category_name_at_migration TEXT,category_direction_at_migration TEXT,category_posting_class_at_migration TEXT,captured_at TEXT NOT NULL);
 CREATE UNIQUE INDEX finance_accounts_code ON finance_liquidity_accounts(code) WHERE code IS NOT NULL;
 CREATE UNIQUE INDEX finance_categories_code ON finance_liquidity_categories(code) WHERE code IS NOT NULL;
 CREATE TRIGGER finance_counterparty_delete_guard BEFORE DELETE ON finance_liquidity_counterparties WHEN EXISTS(SELECT 1 FROM finance_liquidity_documents WHERE counterparty_id=OLD.counterparty_id) BEGIN SELECT RAISE(ABORT,'counterparty in use'); END;
@@ -105,6 +106,8 @@ CREATE TRIGGER finance_category_semantics_guard BEFORE UPDATE OF analytic_class,
 CREATE TRIGGER finance_account_identity_guard BEFORE UPDATE OF account_type,currency,currency_exponent,responsible_name,code ON finance_liquidity_accounts WHEN NEW.account_type IS NOT OLD.account_type OR NEW.currency IS NOT OLD.currency OR NEW.currency_exponent IS NOT OLD.currency_exponent OR NEW.responsible_name IS NOT OLD.responsible_name OR NEW.code IS NOT OLD.code BEGIN SELECT RAISE(ABORT,'account identity immutable'); END;
 CREATE TRIGGER finance_counterparty_document_guard BEFORE UPDATE OF counterparty_id,category_name_snapshot,analytic_class_snapshot,requires_comment_snapshot,counterparty_name_snapshot ON finance_liquidity_documents WHEN OLD.status IN('posted','reversed') BEGIN SELECT RAISE(ABORT,'posted document immutable'); END;
 CREATE TRIGGER finance_funding_document_guard BEFORE UPDATE OF funding_kind ON finance_liquidity_documents WHEN OLD.status IN('posted','reversed') BEGIN SELECT RAISE(ABORT,'posted document immutable'); END;
+CREATE TRIGGER finance_v2_snapshot_immutable_update BEFORE UPDATE ON finance_liquidity_v2_directory_snapshots BEGIN SELECT RAISE(ABORT,'migration snapshot immutable'); END;
+CREATE TRIGGER finance_v2_snapshot_immutable_delete BEFORE DELETE ON finance_liquidity_v2_directory_snapshots BEGIN SELECT RAISE(ABORT,'migration snapshot immutable'); END;
 """
 
 
@@ -112,9 +115,24 @@ def install_v3_extension(conn: sqlite3.Connection, now: str) -> None:
     conn.execute(COUNTERPARTY_SCHEMA)
     for statement in V3_ALTERS:
         conn.execute(statement)
+    # A v2 income article is known to be an inflow, not an operating expense.
+    # v2 expense articles lack enough evidence for a finer analytic class.
+    conn.execute(
+        "UPDATE finance_liquidity_categories SET analytic_class='external_inflow_unclassified' WHERE direction='income'"
+    )
     conn.execute("DROP TRIGGER finance_account_immutable_update")
     conn.execute("DROP TRIGGER finance_account_immutable_delete")
     for statement in V3_EXTRA_SCHEMA.splitlines():
         if statement.strip():
             conn.execute(statement)
+    # v2 had no analytic class or counterparty field. Capture only the category
+    # facts actually known at migration, without updating immutable posted rows.
+    conn.execute(
+        "INSERT INTO finance_liquidity_v2_directory_snapshots"
+        "(document_id,category_name_at_migration,category_direction_at_migration,category_posting_class_at_migration,captured_at) "
+        "SELECT d.document_id,c.name,c.direction,c.posting_class,? "
+        "FROM finance_liquidity_documents d JOIN finance_liquidity_categories c ON c.category_id=d.category_id "
+        "WHERE d.status IN('posted','reversed')",
+        (now,),
+    )
     seed_directories(conn, now)

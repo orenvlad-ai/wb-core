@@ -1731,10 +1731,13 @@ class FinanceCashService:
         with self._connect() as conn:
             self._assert_ledger_integrity(conn)
             sql = (
-                "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency "
+                "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency, "
+                "m.category_name_at_migration,m.category_direction_at_migration,"
+                "m.category_posting_class_at_migration,m.captured_at AS directory_snapshot_migrated_at "
                 "FROM finance_liquidity_documents d "
                 "LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id "
-                "LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id"
+                "LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id "
+                "LEFT JOIN finance_liquidity_v2_directory_snapshots m ON m.document_id=d.document_id"
             )
             args: list[Any] = []
             if account_id:
@@ -1981,7 +1984,7 @@ class FinanceCashService:
 
     def _document(self, conn: sqlite3.Connection, document_id: str) -> sqlite3.Row:
         row = conn.execute(
-            "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency FROM finance_liquidity_documents d LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id WHERE d.document_id=?",
+            "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency, m.category_name_at_migration,m.category_direction_at_migration,m.category_posting_class_at_migration,m.captured_at AS directory_snapshot_migrated_at FROM finance_liquidity_documents d LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id LEFT JOIN finance_liquidity_v2_directory_snapshots m ON m.document_id=d.document_id WHERE d.document_id=?",
             (document_id,),
         ).fetchone()
         if row is None:
@@ -1990,6 +1993,13 @@ class FinanceCashService:
 
     def _document_view(self, document: sqlite3.Row) -> dict[str, Any]:
         result = _row(document) or {}
+        if result.get("category_name_at_migration") is not None:
+            result["category_name_snapshot"] = result["category_name_at_migration"]
+            result["directory_snapshot_origin"] = "v2_migration"
+        elif result.get("category_name_snapshot") is not None:
+            result["directory_snapshot_origin"] = "posting"
+        for field in ("category_name_at_migration", "category_direction_at_migration", "category_posting_class_at_migration"):
+            result.pop(field, None)
         currency = str(document["currency"])
         result["currency"] = currency
         amount_minor = document["amount_minor"]
@@ -2486,10 +2496,13 @@ class FinanceCashService:
             (_id("flae"), actor, event, object_id, _digest(payload), _canon(payload), _now()),
         )
 
-    def list_audit_events(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_audit_events(self, limit: int = 100, *, directory_only: bool = False) -> list[dict[str, Any]]:
         with self._connect() as conn:
+            where = ("WHERE event_type LIKE 'account.%' OR event_type LIKE 'accounts.%' "
+                     "OR event_type LIKE 'category.%' OR event_type LIKE 'categories.%' "
+                     "OR event_type LIKE 'counterparty.%' OR event_type LIKE 'counterparties.%'") if directory_only else ""
             return [_row(row) for row in conn.execute(
-                "SELECT event_id,actor,event_type,object_id,payload_json,created_at FROM finance_liquidity_audit_events ORDER BY created_at DESC,event_id DESC LIMIT ?",
+                f"SELECT event_id,actor,event_type,object_id,payload_json,created_at FROM finance_liquidity_audit_events {where} ORDER BY created_at DESC,event_id DESC LIMIT ?",
                 (max(1, min(limit, 200)),),
             )]
 

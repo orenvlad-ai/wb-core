@@ -216,7 +216,7 @@ def build_finance_http_server(
                     return
                 if suffix == "/audit":
                     need("finance_admin")
-                    self._ok({"events": app.service.list_audit_events()})
+                    self._ok({"events": app.service.list_audit_events(directory_only=(query.get("scope") == ["directories"]))})
                     return
                 if suffix == "/documents":
                     self._ok(

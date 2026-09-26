@@ -153,6 +153,7 @@ def run_checks() -> None:
         assert service.get_document(debt["document_id"])["document"]["analytic_class_snapshot"] == "debt_service_unallocated"
         assert service.get_account("cash_vladislav")["balance"] == "127.00"
         assert any(event["event_type"] == "categories.rename" and '"old_name":"Прочие расходы"' in event["payload_json"] and '"new_name":"Иные расходы"' in event["payload_json"] for event in service.list_audit_events())
+        assert all(event["event_type"].split(".")[0] in {"account", "accounts", "category", "categories", "counterparty", "counterparties"} for event in service.list_audit_events(directory_only=True))
         service.update_directory("categories", misc, {"action": "archive", "base_revision": 2}, "fixture", *op())
         service.update_directory("categories", misc, {"action": "restore", "base_revision": 3}, "fixture", *op())
         with sqlite3.connect(path) as conn:
@@ -185,14 +186,47 @@ def run_checks() -> None:
             transactions = [{"transaction_id": "legacy-tx", "document_id": "legacy-opening", "phase": "primary", "effective_at": WHEN}]
             conn.execute("INSERT INTO finance_liquidity_effect_set_seals(operation_id,root_document_id,transaction_count,transactions_digest,sealed_at) VALUES('legacy-post','legacy-opening',1,?,?)", (_digest(transactions), WHEN))
             conn.execute("INSERT INTO finance_liquidity_opening_anchors(anchor_id,account_id,opening_document_id,is_active,cutover_at,created_at) VALUES('legacy-anchor','legacy-cash','legacy-opening',1,?,?)", (WHEN, WHEN))
+            conn.execute("INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at) VALUES('legacy-category','Старое имя','expense','external_outflow',1,?)", (WHEN,))
+            conn.execute("INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at) VALUES('legacy-income-category','Старое поступление','income',NULL,1,?)", (WHEN,))
+            conn.execute("INSERT INTO finance_liquidity_documents(document_id,document_type,status,source_account_id,category_id,amount_minor,occurred_at,purpose,revision,created_at,updated_at,posted_at,semantic_digest,actor) VALUES('legacy-expense','expense','posted','legacy-cash','legacy-category',100,?,'Legacy',2,?,?,?,?,?)", (WHEN, WHEN, WHEN, WHEN, "legacy-expense-semantic", "fixture"))
+            expense_receipt = {"document_id": "legacy-expense", "ledger_transaction_ids": ["legacy-expense-tx"], "operation_id": "legacy-expense-post", "receipt_id": "legacy-expense-receipt"}
+            conn.execute("INSERT INTO finance_liquidity_operations(operation_id,scope,idempotency_key,request_digest,actor,effect_root_document_id,result_json,created_at) VALUES('legacy-expense-post','document.post:legacy-expense','legacy-expense-key','legacy-expense-request','fixture','legacy-expense',?,?)", (_canon(expense_receipt), WHEN))
+            conn.execute("INSERT INTO finance_liquidity_ledger_transactions(transaction_id,document_id,origin_operation_id,phase,effective_at) VALUES('legacy-expense-tx','legacy-expense','legacy-expense-post','primary',?)", (WHEN,))
+            expense_entries = [
+                {"line_no": 1, "ledger_account_id": "system:external_outflow:RUB", "side": "debit", "amount_minor": 100},
+                {"line_no": 2, "ledger_account_id": "asset:legacy-cash", "side": "credit", "amount_minor": 100},
+            ]
+            for entry in expense_entries:
+                conn.execute("INSERT INTO finance_liquidity_ledger_entries(entry_id,transaction_id,line_no,ledger_account_id,side,amount_minor) VALUES(?,?,?,?,?,?)", (f"legacy-expense-entry-{entry['line_no']}", "legacy-expense-tx", entry["line_no"], entry["ledger_account_id"], entry["side"], entry["amount_minor"]))
+            conn.execute("INSERT INTO finance_liquidity_ledger_transaction_seals(transaction_id,entry_count,entries_digest,sealed_at) VALUES('legacy-expense-tx',2,?,?)", (_digest(expense_entries), WHEN))
+            expense_transactions = [{"transaction_id": "legacy-expense-tx", "document_id": "legacy-expense", "phase": "primary", "effective_at": WHEN}]
+            conn.execute("INSERT INTO finance_liquidity_effect_set_seals(operation_id,root_document_id,transaction_count,transactions_digest,sealed_at) VALUES('legacy-expense-post','legacy-expense',1,?,?)", (_digest(expense_transactions), WHEN))
         backup = Path(directory) / "backup-v2.sqlite3"
         migrate_finance_cash_store_v2(old, backup)
         assert sqlite3.connect(backup).execute("SELECT schema_version FROM finance_liquidity_schema_meta").fetchone()[0] == 2
         migrated = FinanceCashService(old)
         assert len(migrated.list_accounts()) == 4
-        assert len(migrated.list_categories()) == 23
-        assert migrated.get_account("legacy-cash")["balance"] == "10.00"
+        assert len(migrated.list_categories()) == 25
+        legacy_categories = {item["category_id"]: item for item in migrated.list_categories()}
+        assert legacy_categories["legacy-category"]["analytic_class"] == "legacy_expense_unclassified"
+        assert legacy_categories["legacy-income-category"]["analytic_class"] == "external_inflow_unclassified"
+        assert migrated.get_account("legacy-cash")["balance"] == "9.00"
         assert migrated.get_document("legacy-opening")["document"]["status"] == "posted"
+        legacy_before = migrated.get_document("legacy-expense")["document"]
+        assert legacy_before["category_name_snapshot"] == "Старое имя"
+        assert legacy_before["analytic_class_snapshot"] is None
+        assert legacy_before["directory_snapshot_origin"] == "v2_migration"
+        migrated.update_directory("categories", "legacy-category", {"action": "rename", "name": "Новое имя", "base_revision": 1}, "fixture", "legacy-rename", "legacy-rename-key")
+        legacy_after = migrated.get_document("legacy-expense")["document"]
+        assert legacy_after["category_name_snapshot"] == "Старое имя"
+        assert migrated.get_account("legacy-cash")["balance"] == "9.00"
+        with sqlite3.connect(old) as conn:
+            assert conn.execute("SELECT category_name_snapshot FROM finance_liquidity_documents WHERE document_id='legacy-expense'").fetchone()[0] is None
+            assert conn.execute("SELECT category_name_at_migration FROM finance_liquidity_v2_directory_snapshots WHERE document_id='legacy-expense'").fetchone()[0] == "Старое имя"
+        legacy_income = migrated.create_document({"document_type": "income", "target_account_id": "legacy-cash", "category_id": "legacy-income-category", "amount": "3.00", "occurred_at": WHEN}, "fixture", *op())
+        migrated.post_document(legacy_income["document_id"], {"base_revision": 1}, "fixture", *op())
+        assert migrated.get_document(legacy_income["document_id"])["document"]["analytic_class_snapshot"] == "external_inflow_unclassified"
+        assert migrated.get_account("legacy-cash")["balance"] == "12.00"
         try:
             migrate_finance_cash_store_v2(old, Path(directory) / "second-backup.sqlite3")
         except FinanceCashError as error:

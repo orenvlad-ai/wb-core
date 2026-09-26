@@ -22,9 +22,11 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     WEB_AUTH_ROLE_ADMIN,
     WEB_AUTH_ROLE_SUPPLIER,
     _authenticated_web_user,
+    _allowed_unified_tabs_for_user,
     _build_session_cookie,
     _finance_navigation_is_available,
     _render_sheet_vitrina_web_vitrina_ui,
+    _user_allowed_sections,
     _web_auth_config,
 )
 
@@ -234,7 +236,7 @@ def _dormant_lifecycle_checks() -> None:
         assert not absent_store.parent.exists()
 
 
-def _render(*, role: str, grants: list[str], enabled: bool, read_enabled: bool) -> str:
+def _render(*, role: str, grants: list[str], enabled: bool, read_enabled: bool, explicit_grants: list[str] | None = None) -> str:
     flags = {
         "FINANCE_LIQUIDITY_ENABLED": "1" if enabled else "0",
         "FINANCE_LIQUIDITY_READ_ENABLED": "1" if read_enabled else "0",
@@ -247,6 +249,7 @@ def _render(*, role: str, grants: list[str], enabled: bool, read_enabled: bool) 
             job_path="/v1/sheet-vitrina-v1/job",
             role=role,
             allowed_sections=grants,
+            finance_explicit_sections=explicit_grants,
         )
 
 
@@ -330,6 +333,8 @@ def _navigation_checks() -> None:
             ).split(";", 1)[0]
             signed_owner = _authenticated_web_user(owner_handler, config)  # type: ignore[arg-type]
             assert signed_owner is not None
+            assert "settings" in _user_allowed_sections(signed_owner)
+            assert "finance" in _allowed_unified_tabs_for_user(signed_owner)
             assert list(signed_owner["allowed_sections"])[-3:] == [
                 "finance",
                 "finance_operate",
@@ -348,14 +353,18 @@ def _navigation_checks() -> None:
             assert not {"finance", "finance_operate", "finance_admin"}.intersection(revoked)
             revoked_owner = _authenticated_web_user(owner_handler, revoked_config)  # type: ignore[arg-type]
             assert revoked_owner is not None
+            assert "settings" in _user_allowed_sections(revoked_owner)
+            assert "finance" in _user_allowed_sections(revoked_owner)  # 1314 owner policy is unchanged.
+            assert "finance" not in _allowed_unified_tabs_for_user(revoked_owner)
             assert not {"finance", "finance_operate", "finance_admin"}.intersection(
                 revoked_owner["allowed_sections"]
             )
             assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' not in _render(
                 role=WEB_AUTH_ROLE_ADMIN,
-                grants=revoked,
+                grants=_user_allowed_sections(revoked_owner),
                 enabled=True,
                 read_enabled=True,
+                explicit_grants=revoked,
             )
             access_path.write_text("{broken", encoding="utf-8")
             malformed = list(_web_auth_config()["operator"]["allowed_sections"])

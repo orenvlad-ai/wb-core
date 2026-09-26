@@ -81,6 +81,10 @@ seeded RUB cashboxes with uninitialized balances, 23 seeded articles, zero
 seeded counterparties, unchanged existing document/ledger counts and balances,
 `integrity_check`, `foreign_key_check`, and read-only Finance API results. The
 seed keeps edited labels and deleted tombstones.
+For pre-v3 posted documents, also verify the append-only migration snapshot of
+each referenced article name: it is the name known *at migration time*, not a
+reconstructed historical name. Existing expense/income articles receive
+neutral legacy analytic classes; no posted document row is updated.
 
 If migration fails before v3 writes, keep the sidecar stopped; the transaction
 rolls back and the v2 backup remains. Return to v2 after successful migration
