@@ -122,7 +122,7 @@ def _deployment_quiesce() -> Any:
             "InvocationID",
         ]
         if not is_timer:
-            properties.extend(("MainPID", "ExecMainStatus"))
+            properties.extend(("MainPID", "ExecMainCode", "ExecMainStatus"))
         result = subprocess.run(
             [
                 "systemctl",
@@ -154,6 +154,7 @@ def _deployment_quiesce() -> Any:
             "sub_state": values["SubState"],
             "result": values["Result"],
             "main_pid": None if is_timer else values["MainPID"],
+            "exec_main_code": None if is_timer else values["ExecMainCode"],
             "exec_main_status": None if is_timer else values["ExecMainStatus"],
             "invocation_id": values["InvocationID"],
         }
@@ -174,21 +175,32 @@ def _deployment_quiesce() -> Any:
             return state
         try:
             main_pid = int(str(state["main_pid"]))
+            exec_main_code = int(str(state["exec_main_code"]))
             exec_main_status = int(str(state["exec_main_status"]))
         except ValueError as error:
             raise RuntimeError(
                 f"systemd quiesce service process state is invalid: {unit}"
             ) from error
+        # systemd reports waitid si_code: 1=CLD_EXITED, 2=CLD_KILLED.
+        # Zero means no completed invocation yet. Only HTTP may have been
+        # deliberately stopped early; a killed provider job is never drained.
+        zero_exit = exec_main_code in {0, 1} and exec_main_status == 0
+        http_sigterm = (
+            unit == registry_service
+            and state["result"] == "success"
+            and exec_main_code == 2
+            and exec_main_status == 15
+        )
         healthy_service = (
             active_state in {"active", "activating"}
             and sub_state in {"running", "start"}
             and main_pid > 0
-            and exec_main_status == 0
+            and zero_exit
         ) or (
             active_state == "inactive"
             and sub_state == "dead"
             and main_pid == 0
-            and exec_main_status == 0
+            and (zero_exit or http_sigterm)
         )
         if not healthy_service:
             raise RuntimeError(f"systemd quiesce service state is invalid: {unit}")
@@ -251,6 +263,7 @@ def _deployment_quiesce() -> Any:
             "applied": True,
             "units": stopped,
             "registry_was_active": registry_was_active,
+            "registry_state_before": registry_state_before,
             "active_timers": active_timers,
             "timer_states_before": timer_states_before,
             "service_states_before": service_states_before,

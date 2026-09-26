@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.storage_registry import StoreRegistry
 
 
 CONTRACT_NAME = "warehouse_recovery_policy_v1"
@@ -1969,12 +1970,40 @@ class WarehouseRecoveryRegistry:
             raise RecoveryPolicyError("rolled-back T2 operation disappeared")
         return result
 
+    def _retention_target_identity(self) -> dict[str, Any]:
+        """Bind destructive retention to the currently selected operational inode."""
+        stores = StoreRegistry(self.runtime_dir)
+        manifest = stores.load()
+        selected = stores.resolve("operational", manifest=manifest)
+        if selected != self.db_path:
+            raise RecoveryPolicyError("retention target is not the selected operational store")
+        with stores.session(
+            "operational", mode="ro", operation="retention_target_identity", manifest=manifest
+        ):
+            stat = selected.stat()
+        return {
+            "path": str(selected),
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+            "manifest_sha256": manifest.manifest_sha256,
+            "generation_id": manifest.operational.generation_id,
+            "generation_epoch": manifest.operational.generation_epoch,
+        }
+
     def plan_retention(self) -> dict[str, Any]:
         """Build one stable exact plan over age, count and retained bytes."""
 
         now = self.clock()
         now_text = _timestamp(now)
-        operations = self.list_operations(limit=1000)
+        target_identity = (
+            self._retention_target_identity() if self.db_path.is_file() else None
+        )
+        operations = self.list_operations(limit=None)
+        if (
+            target_identity is not None
+            and self._retention_target_identity() != target_identity
+        ):
+            raise RecoveryPolicyError("retention target identity drifted during planning")
         eligible = [
             item
             for item in operations
@@ -2061,6 +2090,7 @@ class WarehouseRecoveryRegistry:
             "contract_name": CONTRACT_NAME,
             "schema_version": REGISTRY_SCHEMA_VERSION,
             "action": "bounded_retention",
+            "target_identity": target_identity,
             "policy": {
                 "t2_min_count": T2_RETENTION_MIN_COUNT,
                 "t2_max_count": T2_RETENTION_MAX_COUNT,
@@ -2119,15 +2149,16 @@ class WarehouseRecoveryRegistry:
         approved = str(plan_fingerprint or "").strip()
         if not approved:
             raise RecoveryPolicyError("exact retention plan fingerprint is required")
-        self.ensure_schema()
-        with _connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM sheet_vitrina_v1_recovery_retention_runs
-                WHERE plan_fingerprint=?
-                """,
-                (approved,),
-            ).fetchone()
+        target_identity = self._retention_target_identity()
+        with _connect_readonly(self.db_path) as conn:
+            row = (
+                conn.execute(
+                    """SELECT * FROM sheet_vitrina_v1_recovery_retention_runs
+                       WHERE plan_fingerprint=?""", (approved,),
+                ).fetchone()
+                if _table_exists(conn, "sheet_vitrina_v1_recovery_retention_runs")
+                else None
+            )
         stored_removed_paths: list[str] = []
         stored_removed_bytes = 0
         if row is None:
@@ -2141,6 +2172,9 @@ class WarehouseRecoveryRegistry:
                 + approved.removeprefix("sha256:")[:24]
             )
             now = self._now()
+            if self._retention_target_identity() != target_identity:
+                raise RecoveryPolicyError("retention target identity drifted")
+            self.ensure_schema()
             with _connect(self.db_path) as conn:
                 conn.execute(
                     """
@@ -2175,6 +2209,8 @@ class WarehouseRecoveryRegistry:
             stored_removed_bytes = int(stored.get("removed_bytes") or 0)
             retention_run_id = str(stored["retention_run_id"])
             plan = _json_object(stored["plan_json"])
+            if plan.get("target_identity") != target_identity:
+                raise RecoveryPolicyError("retention audit target identity drifted")
             if str(plan.get("fingerprint") or "") != approved:
                 raise RecoveryPolicyError("retention audit plan fingerprint drifted")
             if str(stored.get("status") or "") == "applied":
@@ -3237,10 +3273,12 @@ class WarehouseRecoveryRegistry:
             "tiers": registered_policy_table(),
         }
 
-    def list_operations(self, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_operations(self, *, limit: int | None = 50) -> list[dict[str, Any]]:
         if not self.db_path.is_file():
             return []
         with _connect_readonly(self.db_path) as conn:
+            # One read snapshot for operations, artifacts and supersession proofs.
+            conn.execute("BEGIN")
             if not _table_exists(conn, "sheet_vitrina_v1_recovery_operations"):
                 return []
             rows = [
@@ -3261,26 +3299,25 @@ class WarehouseRecoveryRegistry:
                       updated_at DESC,operation_id
                     LIMIT ?
                     """,
-                    (max(1, min(int(limit), 1000)),),
+                    (-1 if limit is None else max(1, min(int(limit), 1000)),),
                 )
             ]
             artifacts_by_operation: dict[str, list[dict[str, Any]]] = {}
-            for artifact in conn.execute(
-                """
-                SELECT * FROM sheet_vitrina_v1_recovery_artifacts
-                WHERE operation_id IN(
-                    SELECT operation_id FROM sheet_vitrina_v1_recovery_operations
-                    ORDER BY updated_at DESC LIMIT ?
-                )
-                ORDER BY operation_id,artifact_kind,artifact_id
-                """,
-                (max(1, min(int(limit), 1000)),),
-            ):
-                item = dict(artifact)
-                item["metadata"] = _json_object(item.pop("metadata_json", "{}"))
-                artifacts_by_operation.setdefault(
-                    str(item["operation_id"]), []
-                ).append(item)
+            # Fetch artifacts for these exact IDs in bounded batches, never an
+            # independently ordered/limited subquery with a different membership.
+            for offset in range(0, len(rows), 500):
+                ids = [str(row["operation_id"]) for row in rows[offset:offset + 500]]
+                placeholders = ",".join("?" for _ in ids)
+                for artifact in conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_recovery_artifacts "
+                    f"WHERE operation_id IN ({placeholders}) "
+                    "ORDER BY operation_id,artifact_kind,artifact_id", ids,
+                ):
+                    item = dict(artifact)
+                    item["metadata"] = _json_object(item.pop("metadata_json", "{}"))
+                    artifacts_by_operation.setdefault(
+                        str(item["operation_id"]), []
+                    ).append(item)
             supersessions_by_operation: dict[str, dict[str, Any]] = {}
             if _table_exists(
                 conn, "sheet_vitrina_v1_recovery_supersessions"

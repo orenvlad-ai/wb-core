@@ -23,9 +23,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
-    DB_FILENAME,
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.storage_registry import StoreRegistry  # noqa: E402
 
 
 CONTRACT = "supplier_financial_source_migration_v1"
@@ -34,6 +34,8 @@ ORPHAN_LIFECYCLE_FILENAME = "supplier_financial_orphan_lifecycle_latest.json"
 ORPHAN_MIN_AGE_SECONDS = 24 * 60 * 60
 ORPHAN_QUARANTINE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 ORPHAN_SCAN_LIMIT = 5_000
+# Diagnostic read budget only; never a storage admission or deletion threshold.
+ORPHAN_HASH_READ_LIMIT_BYTES = 16 * 1024 * 1024
 
 
 def _now() -> str:
@@ -78,14 +80,16 @@ def _resolve_owned_path(runtime_dir: Path, value: str) -> Path:
 
 
 def build_plan(runtime_dir: Path) -> dict[str, Any]:
-    database = runtime_dir / DB_FILENAME
-    if not database.is_file():
+    stores = StoreRegistry(runtime_dir)
+    manifest = stores.load()
+    if manifest.implicit and not stores.resolve("operational", manifest=manifest).is_file():
         semantic = {"contract_name": CONTRACT, "groups": []}
-        return {**semantic, "plan_fingerprint": _fingerprint(semantic)}
-    uri = f"file:{database.resolve()}?mode=ro"
-    with sqlite3.connect(uri, uri=True, timeout=30) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
+        return {**semantic, "plan_fingerprint": _fingerprint(semantic),
+                "source_store_status": "unavailable"}
+    with stores.session(
+        "operational", mode="ro", operation="supplier_source_migration_plan", manifest=manifest,
+    ) as conn:
+        conn.execute("BEGIN")
         table = conn.execute(
             """
             SELECT 1 FROM sqlite_master
@@ -195,11 +199,14 @@ def _migration_lock(runtime_dir: Path) -> Any:
 def apply(runtime_dir: Path) -> dict[str, Any]:
     manifest_path = runtime_dir / MANIFEST_FILENAME
     existing_manifest: dict[str, Any] = {}
+    current = build_plan(runtime_dir)
+    if current.get("source_store_status") == "unavailable":
+        return {"contract_name": CONTRACT, "status": "held_source_store_unavailable",
+                "orphan_lifecycle": _run_orphan_lifecycle(runtime_dir)}
     if manifest_path.is_file():
         existing_manifest = dict(
             json.loads(manifest_path.read_text(encoding="utf-8"))
         )
-        current = build_plan(runtime_dir)
         if (
             existing_manifest.get("contract_name") == CONTRACT
             and existing_manifest.get("status") == "applied"
@@ -233,7 +240,7 @@ def apply(runtime_dir: Path) -> dict[str, Any]:
         ):
             raise ValueError("prepared financial source migration plan changed")
     else:
-        plan = build_plan(runtime_dir)
+        plan = current
     prepared: list[dict[str, Any]] = []
     for group in plan["groups"]:
         source = _resolve_owned_path(runtime_dir, str(group["source_path"]))
@@ -327,107 +334,160 @@ def apply(runtime_dir: Path) -> dict[str, Any]:
     return result
 
 
+def _orphan_reference_readback(runtime_dir: Path) -> dict[str, Any]:
+    """Positive references only; no claim of complete external-reader coverage."""
+    stores = StoreRegistry(runtime_dir)
+    manifest = stores.load()
+    database = stores.resolve("operational", manifest=manifest)
+    paths: set[str] = set()
+    hashes: set[str] = set()
+    tables: list[str] = []
+    path_columns = {"stored_file_path", "source_file_path", "source_path", "target_path"}
+    hash_columns = {"file_sha256", "source_file_sha256", "source_sha256", "sha256"}
+
+    def add_value(key: str, raw: Any) -> None:
+        value = str(raw or "").strip()
+        if not value:
+            return
+        if key in path_columns:
+            # Only this owned family can be moved/deleted by this lifecycle.
+            try:
+                path = _resolve_owned_path(runtime_dir, value)
+            except ValueError:
+                return
+            paths.add(str(path))
+        if key in hash_columns and len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+            hashes.add(value.lower())
+
+    with stores.session(
+        "operational", mode="ro", operation="supplier_orphan_reference_readback", manifest=manifest,
+    ) as conn:
+        conn.execute("BEGIN")
+        required = {
+            "sheet_vitrina_v1_supplier_financial_documents": {"stored_file_path", "file_sha256"},
+            "sheet_vitrina_v1_cny_documents": {"stored_file_path", "file_sha256"},
+            "sheet_vitrina_v1_supplier_financial_sources": {"stored_file_path", "source_sha256"},
+        }
+        for table in required:
+            quoted = '"' + table.replace('"', '""') + '"'
+            columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({quoted})")}
+            if not columns:
+                raise ValueError(f"orphan reference table is missing: {table}")
+            if not required[table].issubset(columns):
+                raise ValueError(f"orphan reference schema is incomplete: {table}")
+            selected = sorted(required[table])
+            tables.append(table)
+            projection = ",".join('"' + column + '"' for column in selected)
+            for row in conn.execute(f"SELECT {projection} FROM {quoted}"):
+                for key, value in zip(selected, row):
+                    add_value(key, value)
+    if stores.load().manifest_sha256 != manifest.manifest_sha256:
+        raise ValueError("orphan reference manifest drifted")
+
+    def read_manifest(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                add_value(str(key), item) if not isinstance(item, (Mapping, list)) else read_manifest(item)
+        elif isinstance(value, list):
+            for item in value:
+                read_manifest(item)
+
+    migration = runtime_dir / MANIFEST_FILENAME
+    if migration.is_file():
+        read_manifest(json.loads(migration.read_text(encoding="utf-8")))
+    return {"database": str(database), "manifest_sha256": manifest.manifest_sha256,
+            "tables": tables, "paths": paths, "hashes": hashes}
+
+
+def _orphan_sha256(path: Path, *, remaining_bytes: int) -> tuple[str | None, int]:
+    """Hash only a stable complete file that fits the remaining read budget."""
+    if remaining_bytes <= 0 or path.stat().st_size > remaining_bytes:
+        return None, 0
+    read_bytes = 0
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        before = os.fstat(handle.fileno())
+        if before.st_size > remaining_bytes:
+            return None, 0
+        while read_bytes < remaining_bytes:
+            chunk = handle.read(min(1024 * 1024, remaining_bytes - read_bytes))
+            if not chunk:
+                break
+            read_bytes += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+    identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    if identity(before) != identity(after) or read_bytes != after.st_size:
+        return None, read_bytes
+    return digest.hexdigest(), read_bytes
+
+
 def _run_orphan_lifecycle(runtime_dir: Path) -> dict[str, Any]:
-    now_epoch = time.time()
-    files_root = (
-        runtime_dir / "supplier_financial_documents" / "files"
-    ).resolve()
-    quarantine_root = (
-        runtime_dir / "supplier_financial_orphan_quarantine"
-    ).resolve()
-    referenced: set[str] = set()
-    database = runtime_dir / DB_FILENAME
-    if database.is_file():
-        uri = f"file:{database.resolve()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=30) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            table = conn.execute(
-                """
-                SELECT 1 FROM sqlite_master
-                WHERE type='table'
-                  AND name='sheet_vitrina_v1_supplier_financial_documents'
-                """
-            ).fetchone()
-            if table:
-                referenced = {
-                    str(row[0] or "").strip()
-                    for row in conn.execute(
-                        """
-                        SELECT stored_file_path
-                        FROM sheet_vitrina_v1_supplier_financial_documents
-                        WHERE stored_file_path IS NOT NULL
-                          AND stored_file_path <> ''
-                        """
-                    ).fetchall()
-                    if str(row[0] or "").strip()
-                }
-    quarantined: list[dict[str, Any]] = []
+    # Three known owner tables and the manifest prove positive references,
+    # but other tables, previews, the confirmation store and embedded payload readers
+    # have no complete shared reachability contract yet. Absence from these sets
+    # therefore cannot authorize a move or unlink, even after 30 days.
+    reference_error = ""
+    try:
+        references = _orphan_reference_readback(runtime_dir)
+    except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
+        references = {"paths": set(), "hashes": set(), "tables": []}
+        reference_error = type(exc).__name__ + ": " + str(exc)
+    paths = references["paths"]
+    hashes = references["hashes"]
+    held: list[dict[str, Any]] = []
     scanned = 0
-    if files_root.is_dir():
-        for candidate in sorted(files_root.rglob("*")):
+    hash_read_bytes = 0
+    skipped_hash_count = 0
+    files_root = (runtime_dir / "supplier_financial_documents" / "files").resolve()
+    quarantine_root = (runtime_dir / "supplier_financial_orphan_quarantine").resolve()
+    now_epoch = time.time()
+    for root, age in ((files_root, ORPHAN_MIN_AGE_SECONDS),
+                      (quarantine_root, ORPHAN_QUARANTINE_RETENTION_SECONDS)):
+        if not root.is_dir():
+            continue
+        for candidate in sorted(root.rglob("*")):
             if scanned >= ORPHAN_SCAN_LIMIT:
                 break
             if candidate.is_symlink() or not candidate.is_file():
                 continue
             scanned += 1
-            relative_runtime = str(
-                candidate.resolve().relative_to(runtime_dir.resolve())
-            )
-            if relative_runtime in referenced:
-                continue
             stat = candidate.stat()
-            if now_epoch - stat.st_mtime < ORPHAN_MIN_AGE_SECONDS:
+            if now_epoch - stat.st_mtime < age:
                 continue
-            relative_files = candidate.resolve().relative_to(files_root)
-            target = quarantine_root / relative_files
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if target.exists():
-                target = target.with_name(
-                    f"{target.name}.{uuid4().hex}"
-                )
-            source_sha256 = _sha256(candidate)
-            os.replace(candidate, target)
-            _fsync_directory(target.parent)
-            os.utime(target, (now_epoch, now_epoch))
-            if _sha256(target) != source_sha256:
-                raise ValueError("supplier financial orphan quarantine readback failed")
-            quarantined.append(
-                {
-                    "source_path": relative_runtime,
-                    "quarantine_path": str(
-                        target.relative_to(runtime_dir.resolve())
-                    ),
-                    "sha256": source_sha256,
-                    "size_bytes": int(stat.st_size),
-                }
+            digest, consumed = _orphan_sha256(
+                candidate, remaining_bytes=ORPHAN_HASH_READ_LIMIT_BYTES - hash_read_bytes,
             )
-            _remove_empty_parents(candidate.parent, stop=files_root)
-    expired_deleted: list[dict[str, Any]] = []
-    if quarantine_root.is_dir():
-        for candidate in sorted(quarantine_root.rglob("*"))[:ORPHAN_SCAN_LIMIT]:
-            if candidate.is_symlink() or not candidate.is_file():
-                continue
-            stat = candidate.stat()
-            if now_epoch - stat.st_mtime < ORPHAN_QUARANTINE_RETENTION_SECONDS:
-                continue
-            evidence = {
-                "quarantine_path": str(
-                    candidate.resolve().relative_to(runtime_dir.resolve())
-                ),
-                "sha256": _sha256(candidate),
-                "size_bytes": int(stat.st_size),
-            }
-            candidate.unlink()
-            expired_deleted.append(evidence)
-            _remove_empty_parents(candidate.parent, stop=quarantine_root)
+            hash_read_bytes += consumed
+            if digest is None:
+                skipped_hash_count += 1
+            original = files_root / candidate.relative_to(quarantine_root) if root == quarantine_root else candidate
+            referenced = digest is not None and (str(candidate.resolve()) in paths
+                          or str(original.resolve()) in paths or digest in hashes)
+            held.append({"path": str(candidate.relative_to(runtime_dir.resolve())),
+                         "sha256": digest, "size_bytes": stat.st_size,
+                         "hash_status": "verified" if digest is not None else "skipped_budget_or_drift",
+                         "reason": "referenced_source" if referenced else "unknown_reference_coverage"})
     result = {
         "contract_name": "supplier_financial_orphan_lifecycle_v1",
+        "status": "held_unknown_reference_coverage",
         "checked_at": _now(),
         "scan_limit": ORPHAN_SCAN_LIMIT,
         "scanned_file_count": scanned,
-        "referenced_path_count": len(referenced),
-        "quarantined": quarantined,
-        "expired_deleted": expired_deleted,
+        "hash_read_limit_bytes": ORPHAN_HASH_READ_LIMIT_BYTES,
+        "hash_read_bytes": hash_read_bytes,
+        "skipped_hash_count": skipped_hash_count,
+        "referenced_path_count": len(paths),
+        "referenced_sha256_count": len(hashes),
+        "reference_tables": references["tables"],
+        "reference_database": references.get("database"),
+        "reference_manifest_sha256": references.get("manifest_sha256"),
+        "reference_error": reference_error,
+        "coverage_complete": False,
+        "coverage_gap": "other table readers, external previews, confirmation store and embedded payload readers lack a complete reachability contract",
+        "held": held,
+        "quarantined": [],
+        "expired_deleted": [],
         "quarantine_retention_seconds": ORPHAN_QUARANTINE_RETENTION_SECONDS,
     }
     _write_private_json(runtime_dir / ORPHAN_LIFECYCLE_FILENAME, result)
