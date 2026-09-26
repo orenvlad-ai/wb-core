@@ -129,7 +129,9 @@ def main():
 
     with Sandbox() as box:
         approved_card=dict(nm_id='102',title='Approved glass',vendor_code='approved-102',description='Approved card',characteristics=[])
-        source_bytes=json.dumps(dict(cards=[dict(approved_card,card_digest='sha256:'+'2'*64)]),sort_keys=True).encode()
+        source_bytes=json.dumps(dict(cards=[dict(nm_id='101',title='Approved baseline',vendor_code='approved-101',
+                                                description='Approved card',characteristics=[],card_digest='sha256:'+'1'*64),
+                                           dict(approved_card,card_digest='sha256:'+'2'*64)]),sort_keys=True).encode()
         source_path=box.admission/'card-source-approved.json';source_path.write_bytes(source_bytes);source_path.chmod(0o600)
         profile=dict(box.package['profiles'][0],nm_id=102)
         box.package['profiles'].append(profile)
