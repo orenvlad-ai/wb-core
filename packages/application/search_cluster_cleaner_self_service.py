@@ -49,10 +49,32 @@ class LocalStageEAdapter:
 
 
 class ManualCleanerCoordinator:
-    def __init__(self, cleaner:KeywordCleaner, adapter:LocalStageEAdapter):
+    def __init__(self, cleaner:KeywordCleaner, adapter:LocalStageEAdapter, *, bootstrap_owner_username:str=''):
         self.cleaner=cleaner
         self.adapter=adapter
+        self.bootstrap_owner_username=bootstrap_owner_username.strip().casefold()
         self.owner=Principal(cleaner.owner_username,True,True,True)
+
+    def _actor_for_job(self,job_id:str) -> Principal:
+        with self.cleaner.store.read() as c:
+            request=c.execute("SELECT actor FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",
+                              (self.cleaner.key,job_id)).fetchone()
+            initial=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' AND json_extract(facts,'$.job_id')=? ORDER BY sequence LIMIT 1",
+                              (self.cleaner.key,job_id)).fetchone()
+            settings=self.cleaner._settings(c)
+        if not request or not initial:raise CleanerError('manual_job_authority_missing','Владелец ручной команды не подтверждён',409)
+        facts=json.loads(initial['facts']);actor=request['actor']
+        if (facts.get('actor')!=actor or facts.get('account_key',self.cleaner.key)!=self.cleaner.key
+                or facts.get('generation',settings['generation'])!=settings['generation']):
+            raise CleanerError('manual_job_authority_mismatch','Владелец ручной команды изменился',409)
+        authority=facts.get('actor_authority','configured_owner')
+        if authority=='bootstrap_operator':
+            if not self.bootstrap_owner_username or actor!=self.bootstrap_owner_username:
+                raise CleanerError('manual_job_authority_mismatch','Владелец ручной команды изменился',409)
+            return Principal(actor,True,True,True,site_owner=True)
+        if authority!='configured_owner' or actor!=self.cleaner.owner_username.strip().casefold():
+            raise CleanerError('manual_job_authority_mismatch','Владелец ручной команды изменился',409)
+        return Principal(actor,True,True,True)
 
     @staticmethod
     def operation_id(job_id:str,phase:str) -> str:
@@ -68,6 +90,7 @@ class ManualCleanerCoordinator:
         self.cleaner.record_manual_job(job_id,**facts)
 
     def _job(self,job_id:str) -> dict:
+        self.owner=self._actor_for_job(job_id)
         return self.cleaner.manual_job(job_id,self.owner)
 
     def pending_jobs(self) -> list[str]:

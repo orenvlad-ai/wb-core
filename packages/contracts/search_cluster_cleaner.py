@@ -60,14 +60,15 @@ class Principal:
     authenticated: bool = False
     auth_enabled: bool = False
     ads_access: bool = False
+    site_owner: bool = False
 
     def require_read(self) -> None:
-        if not self.authenticated or not self.auth_enabled or not self.ads_access:
+        if not self.authenticated or not self.auth_enabled or not (self.ads_access or self.site_owner):
             raise CleanerError("forbidden", "Нет доступа к рекламе", 403)
 
     def require_owner(self, owner_username: str) -> None:
         self.require_read()
-        if not owner_username.strip() or self.username.strip().casefold() != owner_username.strip().casefold():
+        if not owner_username.strip() or not (self.site_owner or self.username.strip().casefold() == owner_username.strip().casefold()):
             raise CleanerError("owner_required", "Изменения доступны владельцу", 403)
 
 

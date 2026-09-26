@@ -31,6 +31,7 @@ from packages.contracts.search_cluster_cleaner import CleanerError,Principal,Tar
 class Source:
     def __init__(self,targets):self.targets=targets;self.calls=[]
     def monotonic(self):return 0.0
+    def count_statuses(self,deadline):return {row.advert_id:row.status for row in self.targets}
     def _adverts(self,ids,deadline,*,strict=True):
         self.calls.append(tuple(ids))
         values=[row for row in self.targets if row.advert_id in ids]
@@ -67,7 +68,9 @@ def main():
         web=CleanerWeb(box.service(),generation='monolith')
         owner=Principal('owner',True,True,True)
         with patch.object(CleanerWbSource,'from_env',return_value=source), \
-             patch('packages.application.search_cluster_cleaner_batch_eligibility.eligibility_rows',return_value=[dict(advert_id=11,nm_id=101,eligible=True),dict(advert_id=12,nm_id=101,eligible=True)]):
+             patch('packages.application.search_cluster_cleaner_batch_eligibility.eligibility_rows',return_value=[
+                 dict(advert_id=11,nm_id=101,eligible=True,status='active',campaign_name='One',reason=None),
+                 dict(advert_id=12,nm_id=101,eligible=True,status='paused',campaign_name='Two',reason=None)]):
             web._refresh_batch_catalog()
             result=web.batch_eligibility(owner)
             assert result['error'] is None and {row['advert_id'] for row in result['items']}=={11,12}
@@ -113,8 +116,7 @@ def main():
         completed=next(r for r in snapshot if r['advert_id']==14)
         assert not completed['eligible'] and completed['status']=='completed'
         omitted=eligibility_rows(service,'monolith',source.targets[:2],fixture_admission=admitted+[dict(advert_id=14,nm_id=101,state='verified')])
-        missing_completed=next(r for r in omitted if r['advert_id']==14)
-        assert not missing_completed['eligible'] and missing_completed['reason']=='campaign_sku_missing'
+        assert not any(r['advert_id']==14 for r in omitted),'unknown payment type is never counted as CPM'
         web=CleanerWeb(service,generation='monolith',approved_targets=admitted,batch_catalog_targets=source.targets)
         web.worker_status=lambda:'ready'
         selected=[dict(advert_id=aid,nm_id=101) for aid in (11,12,13)]

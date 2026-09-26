@@ -112,11 +112,14 @@ def _targets(request:Mapping[str,Any]) -> list[Target]:
     if len({t.key for t in targets})!=len(targets):_fail('manual_targets_invalid')
     return targets
 
-def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) -> list[dict]:
+def _approved_card_receipts(package:dict, admission_dir:Path) -> dict[int,dict]:
+    """Package-bound SKU evidence; legacy pair receipts remain integrity checks."""
     admitted={}
     for row in package['manual_admission']:
         if not isinstance(row,dict) or set(row)!={'advert_id','nm_id','card_digest','verified_at','state'} or row.get('state')!='verified' or not isinstance(row.get('card_digest'),str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',row['card_digest']) or not isinstance(row.get('verified_at'),str):_fail('manual_admission_invalid')
-        admitted[f"{row['advert_id']}:{row['nm_id']}"]=dict(row)
+        key=f"{row['advert_id']}:{row['nm_id']}"
+        if key in admitted:_fail('manual_admission_invalid')
+        admitted[key]=dict(row)
     try:
         evidence_path=admission_dir/'current-card-evidence.json'
         if not stat.S_ISREG(evidence_path.stat().st_mode) or evidence_path.stat().st_mode & 0o077:_fail('current_card_evidence_permissions')
@@ -126,11 +129,49 @@ def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) ->
     if 'sha256:'+hashlib.sha256(raw).hexdigest()!=package['card_evidence_sha256'] or not isinstance(evidence,dict) or not isinstance(evidence.get('cards'),list):_fail('current_card_evidence_mismatch')
     current={}
     for row in evidence['cards']:
-        if isinstance(row,dict) and isinstance(row.get('nm_id'),int):current[row['nm_id']]=row
+        if not isinstance(row,dict) or type(row.get('nm_id')) is not int or row['nm_id'] in current or row.get('state')!='verified' or not re.fullmatch(r'sha256:[0-9a-f]{64}',str(row.get('current_card_sha256'))) or not isinstance(row.get('verified_at'),str):_fail('current_card_evidence_mismatch')
+        current[row['nm_id']]=row
+    for row in admitted.values():
+        actual=current.get(row['nm_id'])
+        if not actual or actual['current_card_sha256']!=row['card_digest'] or actual['verified_at']!=row['verified_at']:_fail('manual_target_not_reconciled')
+    return current
+
+
+def _approved_card_source(package:dict, admission_dir:Path) -> dict[int,dict]:
+    """Load only business cards whose exact source bytes are package-bound."""
+    path=admission_dir/'card-source-approved.json'
+    try:
+        if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_mode & 0o077:_fail('approved_card_source_permissions')
+        raw=path.read_bytes()
+        if 'sha256:'+hashlib.sha256(raw).hexdigest()!=package['provenance'].get('fresh_cards_sha256'):_fail('approved_card_source_mismatch')
+        source=json.loads(raw)
+        if not isinstance(source,dict) or not isinstance(source.get('cards'),list):_fail('approved_card_source_mismatch')
+    except (OSError,ValueError,KeyError,TypeError):_fail('approved_card_source_unavailable')
+    cards={}
+    for row in source['cards']:
+        try:
+            nm=int(row['nm_id'])
+            if (str(nm)!=str(row['nm_id']) or nm in cards or not re.fullmatch(r'sha256:[0-9a-f]{64}',str(row.get('card_digest')))
+                    or not isinstance(row.get('characteristics'),list)):_fail('approved_card_source_mismatch')
+        except (KeyError,TypeError,ValueError):_fail('approved_card_source_mismatch')
+        cards[nm]=row
+    return cards
+
+
+def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) -> list[dict]:
+    current=_approved_card_receipts(package,admission_dir)
+    source=_approved_card_source(package,admission_dir) if any(t.nm_id not in current for t in targets) else {}
+    approved_profiles={row['nm_id'] for row in package['profiles']}
+    receipts=[]
     for target in targets:
-        approved=admitted.get(target.key);actual=current.get(target.nm_id)
-        if not approved or not actual or actual.get('state')!='verified' or actual.get('current_card_sha256')!=approved.get('card_digest') or actual.get('verified_at')!=approved.get('verified_at'):_fail('manual_target_not_reconciled')
-    return [admitted[t.key] for t in targets]
+        actual=current.get(target.nm_id)
+        approved=source.get(target.nm_id) if not actual else None
+        if target.nm_id not in approved_profiles or (not actual and not approved):_fail('manual_target_not_reconciled')
+        receipts.append(dict(advert_id=target.advert_id,nm_id=target.nm_id,
+                             card_digest=actual['current_card_sha256'] if actual else approved['card_digest'],
+                             verified_at=actual['verified_at'] if actual else None,state='verified',
+                             basis='current_card_evidence' if actual else 'package_bound_source_fresh_check_required'))
+    return receipts
 
 def fetch_current_card(nm_id:int) -> dict:
     """Read the exact current Content card; never accept a partial search page."""
@@ -160,16 +201,11 @@ def fetch_current_card(nm_id:int) -> dict:
 
 def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:KeywordCleaner) -> dict:
     """Compare current business fields with the package-bound approved card."""
-    path=admission_dir/'card-source-approved.json'
     try:
-        if not stat.S_ISREG(path.stat().st_mode) or path.stat().st_mode & 0o077:_fail('approved_card_source_permissions')
-        raw=path.read_bytes()
-        if 'sha256:'+hashlib.sha256(raw).hexdigest()!=package['provenance'].get('fresh_cards_sha256'):_fail('approved_card_source_mismatch')
-        source=json.loads(raw)
-        cards=source['cards']
-        approved=[row for row in cards if str(row.get('nm_id'))==str(target.nm_id)]
-        admitted=next((row for row in package['manual_admission'] if row['advert_id']==target.advert_id and row['nm_id']==target.nm_id),None)
-        if len(approved)!=1 or not admitted or approved[0].get('card_digest')!=admitted['card_digest']:_fail('approved_card_source_mismatch')
+        source=_approved_card_source(package,admission_dir)
+        approved=source.get(target.nm_id)
+        admitted=_admitted_targets(package,[target],admission_dir)[0]
+        if not approved or approved.get('card_digest')!=admitted['card_digest']:_fail('approved_card_source_mismatch')
         fresh=fetch_current_card(target.nm_id)
     except CleanerError:raise
     except Exception as exc:raise CleanerError('current_card_unavailable','Не удалось проверить актуальную карточку WB',409) from exc
@@ -183,7 +219,7 @@ def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:Key
         if len(ids)!=len(set(ids)):_fail('current_card_duplicate_characteristic')
         return dict(nm_id=str(card.get('nm_id')),title=card.get('title'),vendor_code=card.get('vendor_code'),
                     description=card.get('description'),characteristics=sorted(characteristics,key=lambda row:(row['id'],canonical(row))))
-    if canonical(business_fields(approved[0]))!=canonical(business_fields(fresh)):
+    if canonical(business_fields(approved))!=canonical(business_fields(fresh)):
         _fail('current_card_drift')
     approved_profile=next((Profile.parse(row) for row in package['profiles'] if row['nm_id']==target.nm_id),None)
     with service.store.read() as c:active_profile=service._profile(c,target.nm_id)
@@ -351,6 +387,9 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
                         return dict(operation_id=operation_id,state='applied',run_id=row['run_id'])
             return dict(operation_id=operation_id,state='not_submitted')
         package=_package(package_path,account,generation)
+        # Preparation has no Worker.preview; verify exact live CPM membership
+        # before the new SKU-based admission can create its write run.
+        CleanerWbSource.from_env(account).refresh_target(target)
         admitted=_admitted_targets(package,targets,admission_dir.resolve())
         _verify_fresh_card(package,target,admission_dir.resolve(),service)
         preview=service.manual_apply_preview(request['scan_run_id'],target)

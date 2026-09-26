@@ -89,14 +89,20 @@ class KeywordCleaner:
             raise CleanerError("request_id_required", "Нужен идентификатор команды")
         actor = principal.username.strip().casefold()
         fingerprint = digest([route,dict(payload)])
-        with self.store.transaction() as c:
-            previous = c.execute("SELECT * FROM cleaner_requests WHERE account=? AND actor=? AND request_id=?",(self.key,actor,request_id)).fetchone()
-            if previous:
-                if previous["digest"] != fingerprint: raise CleanerError("request_conflict", "Идентификатор уже использован другой командой",409)
-                return json.loads(previous["outcome"])
-            outcome = operation(c,actor)
-            c.execute("INSERT INTO cleaner_requests VALUES(?,?,?,?,?,?,?)",(self.key,actor,request_id,route,fingerprint,canonical(outcome),self.clock()))
-            return outcome
+        from packages.application.search_cluster_cleaner_store import CleanerTransactionRolledBack
+        try:
+            with self.store.transaction() as c:
+                previous = c.execute("SELECT * FROM cleaner_requests WHERE account=? AND actor=? AND request_id=?",(self.key,actor,request_id)).fetchone()
+                if previous:
+                    if previous["digest"] != fingerprint: raise CleanerError("request_conflict", "Идентификатор уже использован другой командой",409)
+                    return json.loads(previous["outcome"])
+                outcome = operation(c,actor)
+                c.execute("INSERT INTO cleaner_requests VALUES(?,?,?,?,?,?,?)",(self.key,actor,request_id,route,fingerprint,canonical(outcome),self.clock()))
+                return outcome
+        except CleanerTransactionRolledBack as exc:
+            if route == 'manual-batches':
+                raise CleanerError('storage_rolled_back','Команда не сохранилась из-за занятости хранилища',503) from exc
+            raise
 
     def get_request(self, request_id: str, principal: Principal) -> dict:
         principal.require_read()
@@ -349,6 +355,10 @@ class KeywordCleaner:
                             or frozen[batch_index]['advert_id']!=advert_id or frozen[batch_index]['nm_id']!=nm_id
                             or payload.get('request_id')!=batch_child_id(batch_id,batch_index)):
                         raise CleanerError('batch_child_invalid','Ручное задание не соответствует сохранённой группе',409)
+                    if (batch_facts.get('actor')!=actor or batch_facts.get('account_key')!=self.key
+                            or batch_facts.get('generation')!=s['generation']
+                            or batch_facts.get('actor_authority')!=('bootstrap_operator' if principal.site_owner else 'configured_owner')):
+                        raise CleanerError('batch_child_authority_mismatch','Владелец группы изменился',409)
             elif batch_id is not None:
                 raise CleanerError('batch_child_invalid','Сохранённая группа не найдена',409)
             current=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
@@ -369,7 +379,8 @@ class KeywordCleaner:
                 adopted=False
             job_id=payload['request_id']
             self._event(c,'self_service_requested',dict(job_id=job_id,scan_run_id=run_id,advert_id=advert_id,nm_id=nm_id,actor=actor,adopted=adopted,
-                                                        batch_id=batch_id,batch_index=batch_index),run_id=run_id)
+                                                        actor_authority='bootstrap_operator' if principal.site_owner else 'configured_owner',
+                                                        account_key=self.key,generation=s['generation'],batch_id=batch_id,batch_index=batch_index),run_id=run_id)
             return dict(job_id=job_id,run_id=run_id,state='queued',stage='fetching',adopted=adopted,
                         advert_id=advert_id,nm_id=nm_id,batch_id=batch_id,batch_index=batch_index)
         return self._command(principal,'manual-clean',payload,command)
@@ -378,7 +389,7 @@ class KeywordCleaner:
         """Freeze only caller-selected exact pairs admitted by one fresh catalog."""
         def command(c,actor):
             targets=payload.get('targets');categories=payload.get('selected_categories')
-            if (not isinstance(targets,list) or not targets or len(targets)>100
+            if (not isinstance(targets,list) or not targets
                     or not isinstance(categories,list) or categories not in (['active'],['active','paused'])):
                 raise CleanerError('batch_selection_invalid','Выберите точные пары и разрешённые статусы',422)
             identities=[]
@@ -417,7 +428,9 @@ class KeywordCleaner:
             if c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running')",(self.key,)).fetchone():
                 raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
             batch_id=payload['request_id'];created_at=self.clock()
-            self._event(c,'self_service_batch_requested',dict(batch_id=batch_id,items=frozen,selected_categories=categories,actor=actor,state='queued',stage='queued',current_index=0,item_updates={}))
+            self._event(c,'self_service_batch_requested',dict(batch_id=batch_id,items=frozen,selected_categories=categories,actor=actor,
+                         actor_authority='bootstrap_operator' if principal.site_owner else 'configured_owner',
+                         account_key=self.key,generation=s['generation'],state='queued',stage='queued',current_index=0,item_updates={}))
             return dict(batch_id=batch_id,state='queued',selected_count=len(frozen),created_at=created_at)
         return self._command(principal,'manual-batches',payload,command)
 

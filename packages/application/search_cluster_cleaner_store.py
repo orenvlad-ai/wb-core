@@ -9,7 +9,12 @@ from contextlib import contextmanager
 import sqlite3
 from typing import Iterator
 
+from packages.application.sqlite_contention import is_sqlite_contention_error
 from packages.application.storage_registry import StoreRegistry
+
+
+class CleanerTransactionRolledBack(sqlite3.OperationalError):
+    """A BUSY transaction was provably not committed; the same ID may recover."""
 
 SCHEMA_VERSION = 2
 SCHEMA = """
@@ -182,10 +187,26 @@ class CleanerStore:
         # The shared operational store has an hourly warehouse writer. SQLite's
         # statement retry is safe here; no network call occurs in this scope.
         with self.registry.session("operational", mode="rw", operation="cleaner_transaction", timeout_ms=timeout_ms, isolation_level=None) as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
+                if is_sqlite_contention_error(exc) and not conn.in_transaction:
+                    raise CleanerTransactionRolledBack('begin_not_accepted') from exc
+                raise
             try:
                 yield conn
                 conn.commit()
+            except sqlite3.Error as exc:
+                # SQLite BUSY at COMMIT leaves the transaction active. Only a
+                # successful rollback proves that this command was not saved.
+                if is_sqlite_contention_error(exc) and conn.in_transaction:
+                    conn.rollback()
+                    if not conn.in_transaction:
+                        raise CleanerTransactionRolledBack('commit_rolled_back') from exc
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
             except BaseException:
-                conn.rollback()
+                if conn.in_transaction:
+                    conn.rollback()
                 raise

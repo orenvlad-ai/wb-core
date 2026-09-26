@@ -209,8 +209,8 @@ class CleanerWbSource:
         if missing and strict:raise WbReadError('adverts_missing')
         return result if strict else (result,['adverts_missing:'+str(i) for i in missing])
 
-    def catalog(self, *, with_statuses=False):
-        deadline=self.monotonic()+120
+    def count_statuses(self,deadline):
+        """Validate the complete official campaign-ID set before exact detail reads."""
         payload=self._call('GET','/adv/v1/promotion/count',deadline=deadline)
         if not isinstance(payload,dict) or type(payload.get('all')) is not int or not isinstance(payload.get('adverts'),list):raise WbReadError('count_malformed')
         ids=[];statuses={}
@@ -221,6 +221,12 @@ class CleanerWbSource:
                 if not isinstance(item,dict) or type(item.get('advertId')) is not int or item['advertId']<=0:raise WbReadError('count_identity')
                 ids.append(item['advertId']);statuses[item['advertId']]=group['status']
         if len(ids)!=len(set(ids)) or len(ids)!=payload['all']:raise WbReadError('count_incomplete')
+        return statuses
+
+    def catalog(self, *, with_statuses=False):
+        deadline=self.monotonic()+120
+        statuses=self.count_statuses(deadline)
+        ids=sorted(statuses)
         targets=[];errors=[]
         for offset in range(0,len(ids),50):
             try:

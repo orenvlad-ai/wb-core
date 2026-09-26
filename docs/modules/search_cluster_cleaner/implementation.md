@@ -344,8 +344,13 @@ Production bootstrap выполняется только через `search_clus
 Расписание не создаётся и не включается: после bootstrap API отклоняет включение
 авточистки и изменение времени.
 
-Владелец выбирает в UI кампанию и SKU из private manual-admission и нажимает
-«Почистить ключи». UI сохраняет одну явную команду с request ID. Отдельный
+Владелец выбирает в UI точную CPM-кампанию и SKU с утверждённым профилем и
+нажимает «Почистить ключи». Старый список `manual_admission` остаётся
+проверяемым историческим receipt пилота, но не ограничивает новые CPM-кампании
+для тех же утверждённых SKU. Допуск опирается на immutable package profiles,
+SHA-bound approved raw card source, активный semantic fingerprint и свежий
+официальный WB detail точной пары; CPC полностью исключён из списка и счётчиков.
+UI сохраняет одну явную команду с request ID. Отдельный
 server worker исполняет её через общий Production Apply launcher и Stage E:
 exact scan → подготовка сохранённых кандидатов → один submit → readback.
 Legacy queued scan без новой команды UI никогда не исполняется сам.
@@ -371,6 +376,26 @@ scope/generation, immutable baseline/profiles/provenance и exact verified
 manual-admission; evidence содержит exact current-card digest и verified_at на
 каждый допустимый nm. Эти private files и исходные WB-выгрузки не попадают в
 Git или release workflow.
+
+Там, где старый `current-card-evidence.json` не содержит SKU, Stage E берёт
+package-bound approved source как исходный бизнес-эталон и **обязательно**
+сверяет его с новой official Content карточкой перед prepare и каждым write.
+Старый evidence и private package не изменяются. Любой drift карточки,
+неподтверждённый профиль, не ручной CPM contract, изменившийся статус/SKU или
+held target закрывают выполнение. Completed/archive видны как недоступные,
+расписание всегда выключено.
+
+Массовая команда замораживает выбранные точные пары и статусы одной записью;
+worker проходит их последовательно через тот же одноцелевой Stage E guard.
+Authenticated bootstrap owner получает доступ к cleaner через server-auth
+маркер, без подмены configured cleaner owner или `actor`: batch и child журналы
+сохраняют реального инициатора и account/generation binding.
+Кампания проверяется по fresh official count и detail, detail читается
+порциями до 50 ID с общим deadline. Размер HTTP body ограничен; лимита в
+100 пар для пользователя нет. Если COMMIT SQLite вернул BUSY, только успешный
+rollback даёт ответ `storage_rolled_back`: UI сверяет тот же request ID и
+может повторить идентичную команду. Потеря ответа и любой иной неизвестный
+исход разрешают только readback того же ID до доказанного результата.
 
 В server env с CAS и отдельным readback добавляются только
 `CHANGE_REGISTRY_ACCOUNT_SCOPE`, `CLEANER_BOOTSTRAP_PACKAGE_PATH` и

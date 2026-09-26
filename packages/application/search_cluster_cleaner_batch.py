@@ -96,12 +96,33 @@ def batch_item_detail(cleaner,batch_id:str,index:int,principal:Principal) -> dic
 
 
 class BatchCleanerCoordinator:
-    def __init__(self,cleaner,*,generation:str,source_factory=None,fixture_admission=None):
+    def __init__(self,cleaner,*,generation:str,source_factory=None,fixture_admission=None,bootstrap_owner_username:str=''):
         self.cleaner=cleaner
         self.generation=generation
         self.source_factory=source_factory
         self.fixture_admission=fixture_admission
+        self.bootstrap_owner_username=bootstrap_owner_username.strip().casefold()
         self.owner=Principal(cleaner.owner_username,True,True,True)
+
+    def _actor_for_batch(self,batch_id:str) -> Principal:
+        with self.cleaner.store.read() as c:
+            request=c.execute("SELECT actor FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",
+                              (self.cleaner.key,batch_id)).fetchone()
+            initial=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence LIMIT 1",
+                              (self.cleaner.key,batch_id)).fetchone()
+        if not request or not initial:raise CleanerError('batch_authority_missing','Владелец группы не подтверждён',409)
+        facts=json.loads(initial['facts']);actor=request['actor']
+        if (facts.get('actor')!=actor or facts.get('account_key',self.cleaner.key)!=self.cleaner.key
+                or facts.get('generation',self.generation)!=self.generation):
+            raise CleanerError('batch_authority_mismatch','Владелец группы изменился',409)
+        authority=facts.get('actor_authority','configured_owner')
+        if authority=='bootstrap_operator':
+            if not self.bootstrap_owner_username or actor!=self.bootstrap_owner_username:
+                raise CleanerError('batch_authority_mismatch','Владелец группы изменился',409)
+            return Principal(actor,True,True,True,site_owner=True)
+        if authority!='configured_owner' or actor!=self.cleaner.owner_username.strip().casefold():
+            raise CleanerError('batch_authority_mismatch','Владелец группы изменился',409)
+        return Principal(actor,True,True,True)
 
     def pending_batches(self) -> list[str]:
         with self.cleaner.store.read() as c:
@@ -137,6 +158,7 @@ class BatchCleanerCoordinator:
     def tick(self) -> dict|None:
         ids=self.pending_batches()
         if not ids:return None
+        self.owner=self._actor_for_batch(ids[0])
         batch=self.cleaner.manual_batch_snapshot(ids[0],self.owner)
         index=batch['current_index'] if type(batch['current_index']) is int else 0
         if index>=len(batch['items']):

@@ -12,6 +12,7 @@ from packages.contracts.search_cluster_cleaner import CleanerError, Principal
 
 PREFIX = "/v1/sheet-vitrina-v1/ads/keyword-cleaner"
 MAX_BODY = 65536
+MAX_BATCH_BODY = 262144  # The exact selection is bounded; WB reads remain 50 IDs per call.
 
 
 def handles(path: str) -> bool:
@@ -23,13 +24,14 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
     def respond(status, payload):
         write_json(handler, HTTPStatus(status), payload, extra_headers={"Cache-Control": "private, no-store"})
 
+    path = parsed.path[len(PREFIX):]
+    payload = {}
     try:
         config = auth_config()
         user = authenticated_user(handler, config) if config["enabled"] else None
         principal = Principal(str((user or {}).get("username") or ""), bool(user), bool(config["enabled"]),
-                              bool(user and has_ads(user)))
+                              bool(user and has_ads(user)), bool(user and user.get('trusted_bootstrap_owner') is True))
         principal.require_read()
-        path = parsed.path[len(PREFIX):]
         query = parse_qs(parsed.query, keep_blank_values=True)
         if handler.command == "GET":
             if path == "/summary":
@@ -38,7 +40,7 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
                 result = web.targets(principal,refresh=query.get('refresh',['0'])[0]=='1')
             elif path == "/manual-batches/eligibility":
                 result = web.batch_eligibility(principal,refresh=query.get('refresh',['0'])[0]=='1')
-            elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})/items/([0-9]{1,3})", path):
+            elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})/items/([0-9]{1,5})", path):
                 from packages.application.search_cluster_cleaner_batch import batch_item_detail
                 result = batch_item_detail(web.require_service(),match[1],int(match[2]),principal)
             elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})", path):
@@ -76,8 +78,9 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
             raise CleanerError("csrf_failed", "Не удалось проверить источник команды. Обновите страницу", 403)
         cleaner = web.require_mutation(principal)
         length = int(handler.headers.get("Content-Length", "0"))
-        if length <= 0 or length > MAX_BODY or handler.headers.get("Transfer-Encoding"):
-            raise CleanerError("invalid_body", "Некорректный размер команды", 413 if length > MAX_BODY else 400)
+        body_limit = MAX_BATCH_BODY if path == '/manual-batches' else MAX_BODY
+        if length <= 0 or length > body_limit or handler.headers.get("Transfer-Encoding"):
+            raise CleanerError("invalid_body", "Некорректный размер команды", 413 if length > body_limit else 400)
         payload = json.loads(handler.rfile.read(length).decode("utf-8"))
         if not isinstance(payload, dict):
             raise CleanerError("invalid_body", "Команда должна быть объектом", 400)
@@ -112,7 +115,10 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
                 raise CleanerError("not_ready", "Включение доступно после сверки исходной базы и восстановления", 409)
         respond(202, operation())
     except CleanerError as exc:
-        respond(exc.http_status, {"code": exc.code, "error": str(exc)})
+        response={"code": exc.code, "error": str(exc)}
+        if path == '/manual-batches' and exc.code == 'storage_rolled_back':
+            response.update(request_id=payload.get('request_id'),definitively_not_accepted=True,retry_after_ms=1000)
+        respond(exc.http_status, response)
     except (ValueError, TypeError, UnicodeError):
         respond(400, {"code": "invalid_request", "error": "Не удалось прочитать команду"})
     except (sqlite3.Error, OSError):

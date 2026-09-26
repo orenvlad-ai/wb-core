@@ -116,6 +116,7 @@ def run():
         f.request('/settings',dict(request_id='http-batch-settings-off',expected_revision=settings['revision'],enabled=False))
         class ExactSource:
             def monotonic(self):return 0.0
+            def count_statuses(self,deadline):return {10101:9}
             def _adverts(self,ids,deadline):return [Target(10101,101,name='Тестовая кампания 10101',contract_verified=True)]
         command=dict(request_id='http-batch-owner-0001',selected_categories=['active'],targets=[dict(advert_id=10101,nm_id=101)])
         with patch.object(CleanerWbSource,'from_env',return_value=ExactSource()):

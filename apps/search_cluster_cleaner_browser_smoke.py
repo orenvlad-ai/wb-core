@@ -226,9 +226,9 @@ def run(output:Path):
             candidates=[]
             for i in range(24):
                 status='active' if i<16 else 'paused' if i<20 else 'completed' if i<22 else 'archive'
-                candidates.append(dict(advert_id=10100+i,nm_id=20100+i,campaign_name=f'Кампания Стекло {i+1}',product_title=f'Защитное стекло iPhone 16 Pro Max · цвет {i+1}',status=status,status_code={'active':9,'paused':11,'completed':7,'archive':-1}[status],eligible=i<20,reason=None if i<20 else 'unsupported_campaign_status',admitted=True,profile_ready=True))
+                candidates.append(dict(advert_id=10100+i,nm_id=20100+i,campaign_name=f'Кампания Стекло {i+1}',product_title=f'Защитное стекло iPhone 16 Pro Max · цвет {i+1}',status=status,status_code={'active':9,'paused':11,'completed':7,'archive':-1}[status],payment_type='cpm',eligible=i<20,reason=None if i<20 else 'unsupported_campaign_status',admitted=True,profile_ready=True))
             categories={name:dict(selectable=name in ('active','paused'),reason=None if name in ('active','paused') else 'unsupported_campaign_status') for name in ('active','paused','completed','archive')}
-            def eligibility(route):route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(items=candidates,loading=False,error=None,categories=categories),ensure_ascii=False))
+            def eligibility(route):route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(items=candidates,loading=False,error=None,categories=categories,counts=dict(total=24,eligible=20,profile_required=0,ineligible=4,unknown=0,selectable_active=16,selectable_paused=4)),ensure_ascii=False))
             def summary_with_batch(route):
                 payload=route.fetch().json()
                 if posts:
@@ -275,14 +275,17 @@ def run(output:Path):
             browser_login(page,f)
             page.locator('[data-kc-batch-open]').click();expect(page.locator('[data-kc-batch-dialog]')).to_be_visible()
             expect(page.locator('[data-kc-batch-count]')).to_contain_text('Выбрано пар: 16')
+            expect(page.locator('[data-kc-batch-overview]')).to_have_text('CPM-пары: всего 24 · готовы 20 · требуют настройки 0')
+            check('batch_overview_counts_exact_cpm_pairs_only')
             expect(page.locator('[data-kc-batch-category="active"]')).to_be_checked()
             expect(page.locator('[data-kc-batch-category="paused"]')).not_to_be_checked()
             expect(page.locator('[data-kc-batch-category="completed"]')).to_be_disabled()
             expect(page.locator('[data-kc-batch-category="archive"]')).to_be_disabled()
-            check('batch_category_controls_visible_with_exact_counts','Активные 16/16' in page.locator('[data-kc-batch-categories]').inner_text() and 'Приостановленные 0/4' in page.locator('[data-kc-batch-categories]').inner_text())
+            category_text=page.locator('[data-kc-batch-categories]').inner_text()
+            check('batch_category_controls_visible_with_exact_counts',all(value in category_text for value in ('Активные · всего 16','Готовы 16 · выбрано 16','Приостановленные · всего 4','Готовы 4 · выбрано 0')))
             expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
             check('batch_final_button_visible_without_dialog_scroll',page.locator('[data-kc-batch-start]').evaluate('(node)=>{const r=node.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight}'))
-            check('batch_active_default_paused_optional_and_no_autostart',len(posts)==0 and page.locator('[data-kc-batch-choices] input:disabled').count()==4)
+            check('batch_active_default_paused_optional_and_no_autostart',len(posts)==0 and page.locator('[data-kc-batch-choices] input').count()==20 and 'Кампания Стекло 21' not in page.locator('[data-kc-batch-choices]').inner_text())
             page.screenshot(path=str(output/'batch-selection.png'),full_page=True);screens.append('batch-selection.png')
             page.set_viewport_size({'width':390,'height':844});page.screenshot(path=str(output/'batch-selection-mobile.png'),full_page=True);screens.append('batch-selection-mobile.png')
             check('batch_modal_mobile_fits_viewport',page.locator('[data-kc-batch-start]').evaluate('(button)=>{const b=button.getBoundingClientRect(),d=button.closest("dialog").getBoundingClientRect(),inner=button.closest(".kc-batch-dialog-inner").getBoundingClientRect();return d.left>=0&&d.right<=innerWidth+1&&b.top>=d.top&&b.bottom<=d.bottom-4&&b.bottom<=inner.bottom&&b.bottom<=innerHeight}'))
@@ -343,8 +346,8 @@ def run(output:Path):
         with running_fixture() as f:
             with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
             page=browser.new_page();posts=[]
-            only=dict(advert_id=10101,nm_id=101,campaign_name='Тестовая кампания 10101',product_title='Стекло iPhone 16 Pro Max',status='active',status_code=9,eligible=True,reason=None)
-            eligible=dict(items=[only],loading=False,error=None,categories={status:dict(selectable=status in ('active','paused'),reason='unsupported_campaign_status' if status in ('completed','archive') else None) for status in ('active','paused','completed','archive')})
+            only=dict(advert_id=10101,nm_id=101,campaign_name='Тестовая кампания 10101',product_title='Стекло iPhone 16 Pro Max',status='active',status_code=9,eligible=True,reason=None,payment_type='cpm')
+            eligible=dict(items=[only],loading=False,error=None,counts=dict(total=1,eligible=1,profile_required=0,ineligible=0,unknown=0,selectable_active=1,selectable_paused=0),categories={status:dict(selectable=status in ('active','paused'),reason='unsupported_campaign_status' if status in ('completed','archive') else None) for status in ('active','paused','completed','archive')})
             page.route('**/keyword-cleaner/manual-batches/eligibility*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(eligible,ensure_ascii=False)))
             def lost_batch_post(route):posts.append(route.request.post_data_json);route.abort('failed')
             page.route('**/keyword-cleaner/manual-batches',lost_batch_post)
@@ -356,7 +359,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/manual-batches/lost-batch',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='lost-batch',state='complete',stage='finished',selected_count=1,done_count=1,confirmed_count=0,no_change_count=1,partial_count=0,failed_count=0,skipped_count=0,created_at='2026-09-25T14:00:00Z',updated_at='2026-09-25T14:01:00Z',items=[dict(index=0,**only,selected_status='active',state='no_change',new_checked=0,confirmed_excluded=0,allowed=0,review_count=0,pending_count=0,already_excluded=0)]))))
             page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
             browser_login(page,f);page.locator('[data-kc-batch-open]').click();expect(page.locator('[data-kc-batch-start]')).to_be_enabled();page.locator('[data-kc-batch-start]').click()
-            expect(page.locator('[data-kc-recover]')).to_be_visible();check('batch_lost_reply_keeps_one_durable_request',len(posts)==1)
+            expect(page.locator('[data-kc-recover]')).to_be_visible(timeout=18000);check('batch_lost_reply_keeps_one_durable_request',len(posts)==1)
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-batch-result]')).to_contain_text('Массовая чистка · Выполнено',timeout=8000)
             page.unroute('**/keyword-cleaner/requests/*')
             page.route('**/keyword-cleaner/requests/*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='lost-batch',state='complete',selected_count=1,created_at='2026-09-25T14:00:00Z'))))
@@ -368,8 +371,51 @@ def run(output:Path):
             before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
             expect(page.locator('[data-kc-batch-choices] input[value="10101:101"]')).to_be_checked()
             expect(page.locator('[data-kc-batch-choices] input[value="10102:102"]')).to_be_disabled()
-            expect(page.locator('[data-kc-batch-choices] input[value="10103:101"]')).to_be_disabled()
+            expect(page.locator('[data-kc-batch-choices] input[value="10103:101"]')).to_have_count(0)
+            expect(page.locator('[data-kc-batch-categories] input[data-kc-batch-category="completed"]')).to_be_disabled()
             check('real_local_eligibility_exposes_exact_denials_without_submit',f.count('cleaner_requests')==before)
+            page.close()
+        with running_fixture() as f:
+            page=browser.new_page()
+            rows=[dict(advert_id=aid,nm_id=101,campaign_name=name,product_title='Стекло Pro Max',status=status,payment_type='cpm',eligible=eligible,reason=reason,admitted=True,profile_ready=eligible) for aid,name,status,eligible,reason in (
+                (201,'Готовая активная','active',True,None),(202,'Нужна настройка','active',False,'profile_required'),
+                (203,'Готовая пауза','paused',True,None),(204,'Старый архив','archive',False,'unsupported_campaign_status'))]
+            rows.append(dict(advert_id=205,nm_id=101,campaign_name='CPC не участвует',product_title='Стекло',status='active',payment_type='cpc',eligible=True,reason=None,admitted=True,profile_ready=True))
+            with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
+            categories={status:dict(selectable=status in ('active','paused'),reason='unsupported_campaign_status' if status in ('completed','archive') else None) for status in ('active','paused','completed','archive')}
+            payload=dict(items=rows,counts=dict(total=4,eligible=2,selectable_active=1,selectable_paused=1,profile_required=1,ineligible=1,unknown=None),loading=False,error=None,categories=categories)
+            page.route('**/keyword-cleaner/manual-batches/eligibility*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False)))
+            browser_login(page,f);before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
+            expect(page.locator('[data-kc-batch-overview]')).to_have_text('CPM-пары: получено 4 · готовы 2 · требуют настройки 1 · без подтверждения —')
+            names=page.locator('[data-kc-batch-choices] strong').all_text_contents()
+            check('batch_cpm_counts_eligible_first_archive_compact',names==['Готовая активная','Готовая пауза','Нужна настройка'] and f.count('cleaner_requests')==before)
+            expect(page.locator('[data-kc-batch-choices] input[value="205:101"]')).to_have_count(0)
+            expect(page.locator('[data-kc-batch-choices] input[value="201:101"]')).to_be_checked()
+            expect(page.locator('[data-kc-batch-choices] input[value="203:101"]')).not_to_be_checked()
+            expect(page.locator('[data-kc-batch-choices] input[value="202:101"]')).to_be_disabled()
+            page.locator('[data-kc-batch-choices] input[value="203:101"]').check()
+            expect(page.locator('[data-kc-batch-count]')).to_contain_text('Выбрано пар: 2')
+            check('batch_paused_explicit_and_profile_required_not_selected',f.count('cleaner_requests')==before)
+            page.screenshot(path=str(output/'batch-cpm-overview.png'),full_page=True);screens.append('batch-cpm-overview.png')
+            page.close()
+        with running_fixture() as f:
+            page=browser.new_page();posts=[]
+            large=[dict(advert_id=30000+i,nm_id=40000+i,campaign_name=f'CPM {i+1}',product_title='Стекло',status='active',payment_type='cpm',eligible=True,reason=None,admitted=True,profile_ready=True) for i in range(130)]
+            with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
+            categories={status:dict(selectable=status in ('active','paused'),reason='unsupported_campaign_status' if status in ('completed','archive') else None) for status in ('active','paused','completed','archive')}
+            payload=dict(items=large,counts=dict(total=130,eligible=130,selectable_active=130,selectable_paused=0,profile_required=0,ineligible=0,unknown=0),loading=False,error=None,categories=categories)
+            page.route('**/keyword-cleaner/manual-batches/eligibility*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False)))
+            def large_post(route):
+                posts.append(route.request.post_data_json)
+                route.fulfill(status=202,content_type='application/json',body=json.dumps(dict(batch_id='synthetic-large',state='queued',selected_count=130,created_at='2026-09-26T00:00:00Z')))
+            page.route('**/keyword-cleaner/manual-batches',large_post)
+            page.route('**/keyword-cleaner/manual-batches/synthetic-large',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='synthetic-large',state='complete',selected_count=130,done_count=130,confirmed_count=0,no_change_count=130,partial_count=0,failed_count=0,skipped_count=0,updated_at='2026-09-26T00:01:00Z',items=[]))))
+            browser_login(page,f);before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
+            expect(page.locator('[data-kc-batch-count]')).to_contain_text('Выбрано пар: 130')
+            expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
+            page.locator('[data-kc-batch-start]').click()
+            expect(page.locator('[data-kc-batch-stage]')).to_be_visible()
+            check('batch_large_selection_one_explicit_intent_no_ui_cap',len(posts)==1 and len(posts[0]['targets'])==130 and bool(posts[0]['request_id']) and f.count('cleaner_requests')==before)
             page.close()
         with running_fixture() as f:
             page=browser.new_page();calls=[];retries=[]
@@ -380,28 +426,30 @@ def run(output:Path):
                     retries.append(True)
                     if len(retries)==1:
                         route.abort('failed');return
-                payload=dict(items=[],loading=not refresh and len(calls)<3,error='campaign_catalog_unavailable' if not refresh and len(calls)>=3 else None,categories=categories)
+                payload=dict(items=[],loading=not refresh and len(calls)<3,error='campaign_catalog_unavailable' if not refresh and len(calls)>=3 else None,categories=categories,counts={key:(0 if refresh else None) for key in ('total','eligible','profile_required','ineligible','unknown','selectable_active','selectable_paused')})
                 route.fulfill(status=200,content_type='application/json',body=json.dumps(payload,ensure_ascii=False))
             page.route('**/keyword-cleaner/manual-batches/eligibility*',delayed_eligibility)
             browser_login(page,f);before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
             expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Загружаем точный список')
             expect(page.locator('[data-kc-batch-choices]')).not_to_contain_text('Доступных пар пока нет')
-            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные —')
+            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные · всего —')
+            expect(page.locator('[data-kc-batch-overview]')).to_contain_text('всего — · готовы — · требуют настройки —')
             check('batch_pending_counts_unknown_and_no_false_empty')
             expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Не удалось загрузить список кампаний. Повторите загрузку.',timeout=8000)
             expect(page.get_by_role('button',name='Повторить загрузку')).to_be_visible()
-            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные —')
+            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные · всего —')
+            expect(page.locator('[data-kc-batch-overview]')).to_contain_text('всего — · готовы — · требуют настройки —')
             expect(page.locator('[data-kc-batch-start]')).to_be_disabled()
             check('batch_error_visible_counts_unknown_and_no_false_empty','Доступных пар пока нет' not in page.locator('[data-kc-batch-choices]').inner_text())
             failed_calls=len(calls);page.wait_for_timeout(2300)
             check('batch_error_stops_automatic_polling',len(calls)==failed_calls and f.count('cleaner_requests')==before)
             page.get_by_role('button',name='Повторить загрузку').click()
             expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Список кампаний сейчас недоступен')
-            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные —')
+            expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные · всего —')
             failed_calls=len(calls);page.wait_for_timeout(2300)
             check('batch_network_error_after_loading_stops_polling',len(calls)==failed_calls)
             page.get_by_role('button',name='Повторить загрузку').click()
-            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Доступных пар пока нет')
+            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('Активных и приостановленных CPM-пар пока нет')
             check('batch_explicit_retry_only_then_true_empty',calls[-1] is True and len(retries)==2 and f.count('cleaner_requests')==before)
             page.close()
         # Each variant is rendered by the real app from isolated synthetic SQL state.
@@ -464,6 +512,9 @@ def run(output:Path):
                 except Exception:pass
             page.unroute_all(behavior='ignoreErrors');page.close()
         browser.close()
+    from apps.search_cluster_cleaner_batch_recovery_browser_smoke import run as run_batch_recovery
+    recovery = run_batch_recovery(output/'batch-recovery')
+    checks.extend('batch_recovery_'+name for name in recovery['checks'])
     return dict(passed=len(checks),checks=checks,screenshots=[str(output/name) for name in screens],wb_writes=0,synthetic_wb_posts=2)
 
 if __name__=='__main__':
