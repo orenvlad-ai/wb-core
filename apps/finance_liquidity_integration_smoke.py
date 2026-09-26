@@ -131,9 +131,15 @@ def _dormant_lifecycle_checks() -> None:
         with sqlite3.connect(canonical_store) as connection:
             assert connection.execute(
                 "SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1"
-            ).fetchone()[0] == 2
+            ).fetchone()[0] == 3
             assert connection.execute(
                 "SELECT COUNT(*) FROM finance_liquidity_accounts"
+            ).fetchone()[0] == 3
+            assert connection.execute(
+                "SELECT COUNT(*) FROM finance_liquidity_categories"
+            ).fetchone()[0] == 23
+            assert connection.execute(
+                "SELECT COUNT(*) FROM finance_liquidity_documents"
             ).fetchone()[0] == 0
 
         # The ordinary launcher path fails at the master feature flag before
@@ -245,25 +251,25 @@ def _render(*, role: str, grants: list[str], enabled: bool, read_enabled: bool) 
 
 
 def _navigation_checks() -> None:
-    assert 'href="/finance/">Финансы</a>' not in _render(
+    assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' not in _render(
         role=WEB_AUTH_ROLE_ADMIN,
         grants=[],
         enabled=True,
         read_enabled=True,
     )
-    assert 'href="/finance/">Финансы</a>' not in _render(
+    assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' not in _render(
         role=WEB_AUTH_ROLE_ADMIN,
         grants=["finance"],
         enabled=False,
         read_enabled=True,
     )
-    assert 'href="/finance/">Финансы</a>' not in _render(
+    assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' not in _render(
         role=WEB_AUTH_ROLE_ADMIN,
         grants=["finance"],
         enabled=True,
         read_enabled=False,
     )
-    assert 'href="/finance/">Финансы</a>' not in _render(
+    assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' not in _render(
         role=WEB_AUTH_ROLE_SUPPLIER,
         grants=["finance_admin"],
         enabled=True,
@@ -275,7 +281,7 @@ def _navigation_checks() -> None:
         enabled=True,
         read_enabled=True,
     )
-    assert 'href="/finance/">Финансы</a>' in available
+    assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' in available
     with patch.dict(
         os.environ,
         {"FINANCE_LIQUIDITY_ENABLED": "1", "FINANCE_LIQUIDITY_READ_ENABLED": "1"},
@@ -329,7 +335,7 @@ def _navigation_checks() -> None:
                 "finance_operate",
                 "finance_admin",
             ]
-            assert 'href="/finance/">Финансы</a>' in _render(
+            assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' in _render(
                 role=WEB_AUTH_ROLE_ADMIN,
                 grants=granted,
                 enabled=True,
@@ -345,7 +351,7 @@ def _navigation_checks() -> None:
             assert not {"finance", "finance_operate", "finance_admin"}.intersection(
                 revoked_owner["allowed_sections"]
             )
-            assert 'href="/finance/">Финансы</a>' not in _render(
+            assert 'data-unified-tab-button="finance" aria-selected="false">Финансы</button>' not in _render(
                 role=WEB_AUTH_ROLE_ADMIN,
                 grants=revoked,
                 enabled=True,

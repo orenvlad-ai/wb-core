@@ -125,6 +125,12 @@
 
     button.shell-logout-link { font-family: inherit; }
 
+    .shell-logout-link.is-active {
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+
     .shell-logout-link:hover {
       border-color: var(--border-strong);
       color: var(--text);
@@ -7032,6 +7038,9 @@
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="settings" hidden>
       <iframe class="operator-embed-frame settings-embed-frame" title="Настройки" data-settings-embed-frame scrolling="auto"></iframe>
     </section>
+    <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="finance" hidden>
+      <iframe class="operator-embed-frame settings-embed-frame" title="Финансы" data-finance-embed-frame scrolling="auto"></iframe>
+    </section>
     <section class="unified-tab-panel operator-embed-panel" data-unified-tab-panel="instructions" hidden>
       <iframe class="operator-embed-frame" title="Инструкции" data-instructions-embed-frame data-operator-embed-frame="instructions" scrolling="auto"></iframe>
     </section>
@@ -7206,6 +7215,7 @@
     const unifiedTabPanels = Array.from(document.querySelectorAll("[data-unified-tab-panel]"));
     const operatorEmbedFrames = Array.from(document.querySelectorAll("[data-operator-embed-frame]"));
     const settingsEmbedFrame = document.querySelector("[data-settings-embed-frame]");
+    const financeEmbedFrame = document.querySelector("[data-finance-embed-frame]");
     const instructionsEmbedFrame = document.querySelector("[data-instructions-embed-frame]");
     const warehousesPanelNode = document.querySelector("[data-warehouses-panel]");
     const warehouseSwitcherNode = document.querySelector("[data-warehouse-switcher]");
@@ -7818,8 +7828,9 @@
     const RESEARCH_UNIFIED_TAB = "research";
     const INSTRUCTIONS_UNIFIED_TAB = "instructions";
     const SETTINGS_UNIFIED_TAB = "settings";
+    const FINANCE_UNIFIED_TAB = "finance";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", WAREHOUSES_UNIFIED_TAB, "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", WAREHOUSES_UNIFIED_TAB, "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB, FINANCE_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -9620,6 +9631,9 @@
       if (activeTab === SETTINGS_UNIFIED_TAB) {
         ensureSettingsEmbed();
       }
+      if (activeTab === FINANCE_UNIFIED_TAB) {
+        ensureFinanceEmbed();
+      }
       if (activeTab === INSTRUCTIONS_UNIFIED_TAB) {
         ensureInstructionsEmbed();
       }
@@ -11387,6 +11401,15 @@
       const url = new URL(WEB_VITRINA_CONFIG.settings_path || "/sheet-vitrina-v1/settings", window.location.origin);
       url.searchParams.set("embedded", "1");
       settingsEmbedFrame.setAttribute("src", url.toString());
+    }
+
+    function ensureFinanceEmbed() {
+      if (!financeEmbedFrame || financeEmbedFrame.getAttribute("src")) {
+        return;
+      }
+      const url = new URL("/finance/", window.location.origin);
+      url.searchParams.set("embedded", "1");
+      financeEmbedFrame.setAttribute("src", url.toString());
     }
 
     function ensureInstructionsEmbed() {

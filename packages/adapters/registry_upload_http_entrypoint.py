@@ -9461,7 +9461,11 @@ def _user_can_manage_users(user: Mapping[str, Any]) -> bool:
 
 
 def _allowed_unified_tabs_for_user(user: Mapping[str, Any]) -> list[str]:
-    return _allowed_unified_tabs_for_sections(_user_allowed_sections(user))
+    sections = _user_allowed_sections(user)
+    tabs = _allowed_unified_tabs_for_sections(sections)
+    if _finance_navigation_is_available(role=str(user.get("role") or ""), allowed_sections=sections):
+        tabs.append("finance")
+    return tabs
 
 
 def _allowed_unified_tabs_for_sections(allowed_sections: Sequence[str]) -> list[str]:
@@ -10424,12 +10428,14 @@ def _render_sheet_vitrina_web_vitrina_ui(
         if allowed_sections is not None
         else _default_allowed_sections_for_role(normalized_role)
     )
-    allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
-    initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_sections(normalized_sections)
     finance_navigation_available = _finance_navigation_is_available(
         role=normalized_role,
         allowed_sections=normalized_sections,
     )
+    allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
+    if finance_navigation_available:
+        allowed_tabs.append("finance")
+    initial_tab = active_tab if active_tab in allowed_tabs else (allowed_tabs[0] if allowed_tabs else "vitrina")
     config_payload = {
         "page_title": "Web-витрина",
         "current_role": normalized_role,
@@ -10542,7 +10548,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
         .replace(
             "__SHEET_VITRINA_V1_FINANCE_NAVIGATION_LINK__",
-            '<a class="shell-logout-link" href="/finance/">Финансы</a>'
+            '<button class="shell-logout-link" type="button" data-unified-tab-button="finance" aria-selected="false">Финансы</button>'
             if finance_navigation_available
             else "",
         )

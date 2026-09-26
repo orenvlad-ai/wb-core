@@ -921,11 +921,11 @@ def test_review_007_regressions(db_path: Path) -> None:
             raise AssertionError(f"category guard accepted: {statement}")
 
         rejected(
-            "INSERT INTO finance_liquidity_categories VALUES(?,?,?,?,?,?)",
+            "INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at) VALUES(?,?,?,?,?,?)",
             ("invalid-income", "Invalid", "income", "external_outflow", 1, OPENING_AT),
         )
         rejected(
-            "INSERT INTO finance_liquidity_categories VALUES(?,?,?,?,?,?)",
+            "INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at) VALUES(?,?,?,?,?,?)",
             ("invalid-expense", "Invalid", "expense", None, 1, OPENING_AT),
         )
         rejected(
@@ -1454,7 +1454,10 @@ def test_cash_ledger(db_path: Path) -> None:
 
 
 def main() -> None:
+    from apps.finance_liquidity_directories_smoke import run_checks as run_directory_checks
+
     test_money_boundaries()
+    run_directory_checks()
     run_readiness_checks()
     with TemporaryDirectory() as directory:
         test_review_007_regressions(

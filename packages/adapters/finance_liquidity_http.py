@@ -211,6 +211,13 @@ def build_finance_http_server(
                 if suffix == "/categories":
                     self._ok({"categories": app.service.list_categories()})
                     return
+                if suffix == "/counterparties":
+                    self._ok({"counterparties": app.service.list_counterparties()})
+                    return
+                if suffix == "/audit":
+                    need("finance_admin")
+                    self._ok({"events": app.service.list_audit_events()})
+                    return
                 if suffix == "/documents":
                     self._ok(
                         {
@@ -247,10 +254,23 @@ def build_finance_http_server(
                 )
                 return
             if suffix == "/categories":
-                need("finance_operate")
+                need("finance_admin")
                 self._ok(
                     app.service.create_category(payload, actor, operation_id, key), 201
                 )
+                return
+            if suffix == "/counterparties":
+                need("finance_operate")
+                self._ok(app.service.create_counterparty(payload, actor, operation_id, key), 201)
+                return
+            if suffix == "/openings/common-draft":
+                need("finance_operate")
+                self._ok(app.service.prepare_common_openings(payload, actor, operation_id, key), 201)
+                return
+            parts = suffix.strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "directories" and self.command == "POST":
+                need("finance_admin")
+                self._ok(app.service.update_directory(parts[1], parts[2], payload, actor, operation_id, key))
                 return
             if suffix == "/documents":
                 need("finance_operate")
@@ -258,7 +278,6 @@ def build_finance_http_server(
                     app.service.create_document(payload, actor, operation_id, key), 201
                 )
                 return
-            parts = suffix.strip("/").split("/")
             if len(parts) >= 2 and parts[0] == "documents":
                 document_id = parts[1]
                 if len(parts) == 2 and self.command == "PATCH":

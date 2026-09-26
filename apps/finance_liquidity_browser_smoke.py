@@ -10,6 +10,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
+from unittest.mock import patch
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -167,12 +168,12 @@ def main() -> None:
                 page.context.add_cookies(
                     [{"name": "finance_fixture_session", "value": "fixture-admin", "url": base_url}]
                 )
-                page.goto(f"{base_url}/finance/", wait_until="networkidle")
+                page.goto(f"{base_url}/finance/?embedded=1", wait_until="networkidle")
                 expect(page.locator("main > [data-instance-label]")).to_have_text(
                     "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ"
                 )
-                expect(page.locator("[data-session-state]")).to_contain_text("операциям")
-                expect(page.get_by_text("Пока нет счетов")).to_be_visible()
+                expect(page.locator("[data-session-state]")).to_contain_text("Операции доступны")
+                expect(page.locator("[data-accounts] .account-card")).to_have_count(3)
 
                 _create_cash(page, "Тестовая касса A", "Тестовый оператор")
                 _opening(page, "Тестовая касса A · Тестовый оператор", "1000,00", "Пересчитано с ответственным")
@@ -512,6 +513,30 @@ def main() -> None:
                 if before_reconciliation != after_reconciliation:
                     raise AssertionError("reconciliation changed money")
 
+                _open(page, "funding")
+                _field(page, "target_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
+                _field(page, "occurred_at").fill("2026-09-21T14:00")
+                _field(page, "amount").fill("10,00")
+                _submit(page)
+                funding_doc = next(item for item in service.list_documents() if item["funding_kind"] == "owner_funding")
+                funding_entries = service.get_document(funding_doc["document_id"])["transactions"][0]["entries"]
+                assert {entry["ledger_account_id"] for entry in funding_entries} == {
+                    f"asset:{funding_doc['target_account_id']}", "system:owner_funding:RUB"
+                }
+                expect(page.locator("[data-history]")).to_contain_text("Пополнение собственными средствами")
+
+                _open(page, "expense")
+                _field(page, "source_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
+                _field(page, "category_id").select_option(label="Прочие расходы")
+                _field(page, "occurred_at").fill("2026-09-21T14:05")
+                _field(page, "amount").fill("1,00")
+                _field(page, "purpose").fill("   ")
+                page.locator("[data-dialog-submit]").click()
+                expect(page.locator("[data-error]")).to_contain_text("напишите комментарий")
+                expect(page.locator("[data-dialog]")).to_be_visible()
+                page.get_by_role("button", name="Отмена").click()
+                expect(page.locator("[data-dialog]")).to_be_hidden()
+
                 expect(page.locator("[data-history]")).not_to_contain_text("Нет данных")
                 _open(page, "transfer")
                 expect(_field(page, "transfer_mode")).to_have_value("instant")
@@ -524,11 +549,67 @@ def main() -> None:
                 mobile.context.add_cookies(
                     [{"name": "finance_fixture_session", "value": "fixture-admin", "url": base_url}]
                 )
-                mobile.goto(f"{base_url}/finance/", wait_until="networkidle")
+                mobile.goto(f"{base_url}/finance/?embedded=1", wait_until="networkidle")
                 expect(mobile.locator("[data-accounts]")).to_contain_text("Тестовая касса A")
                 mobile.screenshot(path=evidence_dir / "cash-mobile.png", full_page=True)
                 mobile.close()
                 mobile_context.close()
+
+                from packages.adapters.registry_upload_http_entrypoint import _render_sheet_vitrina_web_vitrina_ui
+
+                def shell_html(grants: list[str]) -> str:
+                    with patch.dict(os.environ, {"FINANCE_LIQUIDITY_ENABLED": "1", "FINANCE_LIQUIDITY_READ_ENABLED": "1"}, clear=False):
+                        return _render_sheet_vitrina_web_vitrina_ui(
+                            read_path="/v1/sheet-vitrina-v1/web-vitrina",
+                            operator_path="/sheet-vitrina-v1/operator",
+                            refresh_path="/v1/sheet-vitrina-v1/refresh",
+                            job_path="/v1/sheet-vitrina-v1/job",
+                            role="admin", allowed_sections=grants,
+                        )
+
+                allowed_shell = shell_html(["vitrina", "settings", "finance_admin"])
+                denied_shell = shell_html(["vitrina", "settings"])
+
+                def shell_route(route: object) -> None:
+                    url = route.request.url
+                    body = denied_shell if "denied=1" in url else allowed_shell
+                    route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
+
+                shell = context.new_page()
+                shell.route("**/sheet-vitrina-v1/vitrina*", shell_route)
+                shell.route("**/sheet-vitrina-v1/settings*", lambda route: route.fulfill(status=200, content_type="text/html", body="<h1>Настройки</h1>"))
+                shell.goto(f"{base_url}/sheet-vitrina-v1/vitrina", wait_until="domcontentloaded")
+                finance_button = shell.locator('[data-unified-tab-button="finance"]')
+                expect(finance_button).to_be_visible()
+                finance_button.click()
+                expect(finance_button).to_have_attribute("aria-selected", "true")
+                expect(shell.locator('[data-unified-tab-panel="finance"]')).to_be_visible()
+                finance_frame = shell.frame_locator('[data-finance-embed-frame]')
+                expect(finance_frame.locator("[data-instance-label]").first).to_have_text("ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ")
+                expect(shell.locator('.shell-header [data-unified-tab-button="settings"]')).to_be_visible()
+                shell.screenshot(path=evidence_dir / "cash-shell-finance.png", full_page=True)
+                shell.locator('.shell-header [data-unified-tab-button="settings"]').click()
+                expect(shell.locator('[data-unified-tab-panel="settings"]')).to_be_visible()
+                expect(shell.frame_locator('[data-settings-embed-frame]').get_by_role("heading", name="Настройки")).to_be_visible()
+                shell.screenshot(path=evidence_dir / "cash-shell-navigation.png", full_page=True)
+                shell.goto(f"{base_url}/finance/", wait_until="domcontentloaded")
+                expect(shell).to_have_url(f"{base_url}/sheet-vitrina-v1/vitrina?tab=finance")
+                expect(shell.locator('[data-unified-tab-button="finance"]')).to_have_attribute("aria-selected", "true")
+                shell.goto(f"{base_url}/sheet-vitrina-v1/vitrina?denied=1", wait_until="domcontentloaded")
+                expect(shell.locator('[data-unified-tab-button="finance"]')).to_have_count(0)
+                expect(shell.locator('[data-finance-embed-frame]')).not_to_have_attribute("src", "/finance/?embedded=1")
+                shell.close()
+
+                mobile_shell_context = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="dark")
+                mobile_shell = mobile_shell_context.new_page()
+                mobile_shell_context.add_cookies([{"name": "finance_fixture_session", "value": "fixture-admin", "url": base_url}])
+                mobile_shell.route("**/sheet-vitrina-v1/vitrina*", shell_route)
+                mobile_shell.goto(f"{base_url}/sheet-vitrina-v1/vitrina?tab=finance", wait_until="domcontentloaded")
+                expect(mobile_shell.locator('[data-unified-tab-button="finance"]')).to_have_attribute("aria-selected", "true")
+                expect(mobile_shell.frame_locator('[data-finance-embed-frame]').locator("[data-finance-app]")).to_be_visible()
+                assert mobile_shell.locator('[data-unified-tab-panel="finance"]').bounding_box()["width"] <= 390
+                mobile_shell.screenshot(path=evidence_dir / "cash-shell-mobile.png", full_page=True)
+                mobile_shell_context.close()
                 context.close()
                 browser.close()
                 if console_errors:
