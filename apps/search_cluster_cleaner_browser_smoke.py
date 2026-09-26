@@ -110,7 +110,7 @@ def run(output:Path):
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
             stored=page.evaluate("JSON.parse(sessionStorage.getItem(Object.keys(sessionStorage).find(key=>key.startsWith('wb-keyword-cleaner-manual-job:')))).job_id")
             check('server_latest_job_overrides_old_tab_storage',stored==new['job_id'])
-            page.close()
+            page.unroute_all(behavior='wait');page.close()
         with running_fixture('empty') as f:
             page=browser.new_page();browser_login(page,f)
             def late_history(route):
@@ -342,7 +342,7 @@ def run(output:Path):
             page.screenshot(path=str(output/'batch-result.png'),full_page=True);screens.append('batch-result.png')
             page.set_viewport_size({'width':390,'height':844});page.screenshot(path=str(output/'batch-result-mobile.png'),full_page=True);screens.append('batch-result-mobile.png')
             check('batch_mobile_no_page_overflow',page.locator('[data-keyword-cleaner]').evaluate('(node)=>node.scrollWidth<=node.clientWidth+1'))
-            page.close()
+            page.unroute_all(behavior='wait');page.close()
         with running_fixture() as f:
             with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
             page=browser.new_page();posts=[]
@@ -365,7 +365,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/requests/*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='lost-batch',state='complete',selected_count=1,created_at='2026-09-25T14:00:00Z'))))
             page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden()
             check('batch_lost_reply_recovered_by_get_without_repost',len(posts)==1 and posts[0]['targets']==[dict(advert_id=10101,nm_id=101)])
-            page.close()
+            page.unroute_all(behavior='wait');page.close()
         with running_fixture() as f:
             page=browser.new_page();browser_login(page,f)
             before=f.count('cleaner_requests');page.locator('[data-kc-batch-open]').click()
@@ -487,7 +487,7 @@ def run(output:Path):
             expect(page.locator('[data-kc-target-note]')).to_contain_text('Исполнитель ручной чистки не отвечает')
             expect(page.locator('[data-kc-run]')).to_be_disabled()
             check('worker_down_prevents_manual_submit',f.count('cleaner_requests')==before)
-            page.close()
+            page.unroute_all(behavior='wait');page.close()
         # A lost manual-run response is recovered only by GET of the original
         # command. A hanging response observes the same one-submit invariant.
         with running_fixture() as f:
@@ -498,7 +498,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/manual-clean',pending_post);page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
             page.locator('[data-kc-manual-advert]').select_option('10101');page.locator('[data-kc-manual-nm]').select_option('101');page.locator('[data-kc-run]').click();expect(page.locator('[data-kc-recover]')).to_be_visible();expect(page.locator('[data-kc-message]')).to_contain_text('Не удалось проверить сохранение')
             page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-recover]')).to_be_visible();check('manual_uncertain_command_survives_reload')
-            page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();check('manual_recovery_get_only_one_post',len(posts)==1);page.close()
+            page.unroute('**/keyword-cleaner/requests/*');page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden();check('manual_recovery_get_only_one_post',len(posts)==1);page.unroute_all(behavior='wait');page.close()
         with running_fixture() as f:
             with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
             page=browser.new_page();browser_login(page,f);posts=[];hanging=[]
