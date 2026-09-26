@@ -45,7 +45,7 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
                  result=update.get('result') or (job.get('result') if job else None),
                  can_recheck=bool(job and job.get('can_recheck')),
                  new_checked=None,confirmed_excluded=None,allowed=None,review_count=None,
-                 pending_count=None,already_excluded=None)
+                 pending_count=None,not_sent_count=None,delivery_state='unknown',already_excluded=None)
         if job:
             with cleaner.store.read() as c:
                 scan=c.execute("SELECT state,summary FROM cleaner_runs WHERE account=? AND run_id=?",(cleaner.key,job['scan_run_id'])).fetchone()
@@ -59,15 +59,29 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
             if job.get('write_run_id'):
                 run=cleaner.run_detail(job['write_run_id'],principal)
                 phrases=run['phrases']
+                active=[op for op in run['write_operations'] if op['state']!='cancelled_before_send']
                 written_queries={p['query'] for p in phrases}
                 if row['already_excluded'] is not None:
                     row['already_excluded']=sum(1 for d in job.get('scan_decisions',[])
                                                 if d['state'] in {'already_excluded','observed_excluded'} and d['query'] not in written_queries)
                 row['confirmed_excluded']=sum(1 for p in phrases if p['state']=='confirmed' and p['confirmed_at'])
-                row['pending_count']=sum(1 for p in phrases if not (p['state']=='confirmed' and p['confirmed_at']) and p['state']!='rejected')
+                unresolved=sum(1 for p in phrases if p['state'] not in {'confirmed','rejected'} or
+                               (p['state']=='confirmed' and not p['confirmed_at']))
+                if any(op['state'] in {'dispatching','submitted','unresolved','validation_rejected','rate_limited',
+                                      'unauthorized','forbidden','transport_ambiguous','http_error','requires_review'} for op in active):
+                    row['delivery_state']='wb_pending';row['pending_count']=unresolved;row['not_sent_count']=0
+                elif active and all(op['state']=='confirmed' for op in active) and not unresolved:
+                    row['delivery_state']='confirmed';row['pending_count']=0;row['not_sent_count']=0
+                elif active and all(op['state']=='prepared' for op in active):
+                    # SQLite has no committed dispatch right. An external seal
+                    # still needs recovery proof before claiming no WB send.
+                    row['delivery_state']='local_prepared';row['pending_count']=0;row['not_sent_count']=unresolved
+                elif not active and unresolved and any(op['state']=='cancelled_before_send' for op in run['write_operations']):
+                    row['delivery_state']='not_sent';row['pending_count']=0;row['not_sent_count']=unresolved
             elif job['state'] in {'no_change','complete'}:
                 row['confirmed_excluded']=0
                 row['pending_count']=0
+                row['not_sent_count']=0
         items.append(row)
     done={'complete','no_change','partial','failed','skipped'}
     counts={name:sum(item['state']==name for item in items) for name in done}
@@ -175,7 +189,7 @@ class BatchCleanerCoordinator:
             if child['state']=='partial' and child.get('can_recheck'):
                 if batch['state']!='attention_required':
                     self.cleaner.record_manual_batch(batch['batch_id'],state='attention_required',stage='readback',current_index=index,
-                                                     error_code='readback_unresolved',error='Уточните результат этой операции WB')
+                                                     error_code='readback_unresolved',error='Уточните состояние текущей пары и продолжите группу')
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if child['state'] in {'complete','no_change'}:
                 self.cleaner.record_manual_batch(batch['batch_id'],state='running',stage='next_target',current_index=index+1,error=None,error_code=None,

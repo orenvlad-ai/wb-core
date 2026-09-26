@@ -162,6 +162,8 @@ def main() -> None:
     reliability_main()
     from apps.search_cluster_cleaner_held_evidence_smoke import main as held_evidence_main
     held_evidence_main()
+    from apps.search_cluster_cleaner_write_recovery_smoke import main as write_recovery_main
+    write_recovery_main()
     print('search cluster cleaner self-service smoke: ok')
 
 

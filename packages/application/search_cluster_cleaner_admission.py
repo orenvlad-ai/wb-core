@@ -149,6 +149,90 @@ class AdmissionGuard:
                     raise CleanerError('manual_binding_missing','Нет точной привязки ручного запуска',409)
             state.pop('manual_capability',None);state['owner']=None;state['reason']='manual_no_submit_recovered';self._save(state)
 
+    def recover_unsubmitted_manual_run(self, *, cleaner, generation, production_operation_id, run_id):
+        """Requeue an expired exact run only when no WB dispatch right existed.
+
+        The external lock fences a new manual session while the operational
+        rollback and capability cleanup are reconciled. Prior seals remain
+        immutable and are all checked against SQLite before any change.
+        """
+        from packages.application.search_cluster_cleaner import timestamp
+        account=cleaner.account
+        with self._lock():
+            state=self._load()
+            if state['account']!=account.key or state['generation']!=generation or not state['hold']:
+                raise CleanerError('external_hold','Внешний допуск изменился',409)
+            self._previous_stopped(state)
+            capability=state.get('manual_capability')
+            if capability and (not isinstance(capability,dict) or capability.get('run_id')!=run_id
+                    or capability.get('production_operation_id')!=production_operation_id or capability.get('operation_id')):
+                raise CleanerError('manual_capability_lost','Ручной допуск требует отдельной сверки',409)
+            with cleaner.store.transaction() as c:
+                self._reconcile(state,c)
+                settings=cleaner._settings(c)
+                run=c.execute('SELECT * FROM cleaner_runs WHERE account=? AND run_id=?',(account.key,run_id)).fetchone()
+                if not run or settings['generation']!=generation or settings['enabled'] or run['trigger'] not in {'manual_exact','manual_exact_candidates'}:
+                    raise CleanerError('manual_recovery_scope_mismatch','Ручное задание изменилось',409)
+                bindings=[json.loads(row[0]) for row in c.execute(
+                    "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
+                    (account.key,run_id))]
+                declared={str(row.get('target') or '') for row in json.loads(run['targets'])}
+                if (not bindings or len(declared)!=1 or any(row.get('operation_id')!=production_operation_id
+                        or set(row.get('targets') or [])!=declared for row in bindings)):
+                    raise CleanerError('manual_binding_missing','Точная привязка запуска не подтверждена',409)
+                operations=c.execute('SELECT operation_id,target,state,dispatch_count,worker_token,worker_generation FROM cleaner_write_operations WHERE account=? AND run_id=?',
+                                     (account.key,run_id)).fetchall()
+                if (any(row['operation_id'] in state['seals'] or row['dispatch_count']!=0
+                        or row['target'] not in declared or row['state'] not in {'prepared','cancelled_before_send'} for row in operations)
+                        or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
+                    raise CleanerError('manual_dispatch_uncertain','Отправка требует чтения результата WB',409)
+                recovery=[json.loads(row[0]) for row in c.execute(
+                    "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
+                    (account.key,run_id))]
+                matching_recovery=[event for event in recovery if event.get('production_operation_id')==production_operation_id]
+                recovered_ids={op for event in matching_recovery
+                               for op in event.get('cancelled_operations',[])}
+                if any(row['state']=='cancelled_before_send' and row['operation_id'] not in recovered_ids for row in operations):
+                    raise CleanerError('manual_recovery_scope_mismatch','История подготовленной записи не подтверждена',409)
+                if any(c.execute("SELECT 1 FROM cleaner_write_items WHERE operation_id=? AND (state!='cancelled_before_send' OR confirmed_at IS NOT NULL OR registry_item_id IS NOT NULL)",
+                                 (row['operation_id'],)).fetchone() for row in operations if row['state']=='cancelled_before_send'):
+                    raise CleanerError('manual_recovery_scope_mismatch','История фраз подготовленной записи не подтверждена',409)
+                prepared=[row for row in operations if row['state']=='prepared']
+                if (run['state']=='queued' and matching_recovery and not prepared and not run['worker_token']
+                        and not run['started_at'] and not run['lease_expires_at'] and run['worker_generation'] is None):
+                    pass  # DB committed before an interrupted guard cleanup.
+                elif (run['state']=='running' and run['lease_expires_at']
+                      and run['worker_token'] and run['worker_generation']==generation
+                      and timestamp(run['lease_expires_at'])<=timestamp(cleaner.clock())
+                      and (run['kind']!='scan' or not c.execute('SELECT 1 FROM cleaner_run_targets WHERE run_id=?',(run_id,)).fetchone())):
+                    if any(row['worker_token']!=run['worker_token'] or row['worker_generation']!=generation for row in prepared):
+                        raise CleanerError('manual_recovery_scope_mismatch','Подготовленная запись изменилась',409)
+                    if run['kind']=='manual_apply' and prepared:
+                        wanted={(row['target'],row['query_hash'],row['decision_id']) for row in json.loads(run['targets'])}
+                        items=[(op,item) for op in prepared for item in c.execute(
+                            'SELECT query_hash,decision_id,state,confirmed_at,registry_item_id FROM cleaner_write_items WHERE operation_id=?',
+                            (op['operation_id'],))]
+                        if (len(prepared)!=1 or len(items)!=len(wanted) or
+                                any(item['state']!='prepared' or item['confirmed_at'] or item['registry_item_id'] for _,item in items) or
+                                {(op['target'],item['query_hash'],item['decision_id']) for op,item in items}!=wanted):
+                            raise CleanerError('manual_recovery_scope_mismatch','Состав подготовленных фраз изменился',409)
+                    elif prepared:
+                        raise CleanerError('manual_recovery_scope_mismatch','В проверке появились подготовленные записи',409)
+                    for row in prepared:
+                        c.execute("UPDATE cleaner_write_items SET state='cancelled_before_send' WHERE operation_id=?",(row['operation_id'],))
+                        c.execute("UPDATE cleaner_write_operations SET state='cancelled_before_send',updated_at=? WHERE operation_id=? AND state='prepared' AND dispatch_count=0",
+                                  (cleaner.clock(),row['operation_id']))
+                    c.execute("UPDATE cleaner_runs SET state='queued',phase='queued',worker_token=NULL,worker_generation=NULL,lease_expires_at=NULL,started_at=NULL,transport_enabled=0 WHERE run_id=? AND state='running'",
+                              (run_id,))
+                    c.execute('UPDATE cleaner_settings SET restore_hold=1,transport_enabled=0 WHERE account=?',(account.key,))
+                    cleaner._event(c,'stage_e_unsent_recovered',dict(production_operation_id=production_operation_id,
+                                  cancelled_operations=[row['operation_id'] for row in prepared],kind=run['kind']),run_id=run_id)
+                else:
+                    raise CleanerError('manual_recovery_not_ready','Право исполнения ещё не истекло',409)
+            if capability or state.get('owner'):
+                state.pop('manual_capability',None);state['owner']=None;state['reason']='manual_unsent_recovered';self._save(state)
+            return True
+
     @contextmanager
     def session(self,*,account,generation,manual_capability=None):
         with self._lock():
