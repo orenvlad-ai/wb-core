@@ -8,7 +8,6 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import marshal
 from pathlib import Path
 import re
 import sqlite3
@@ -22,8 +21,7 @@ from packages.contracts.search_cluster_cleaner import (
     Snapshot, Target, canonical, digest, query_hash, utcnow,
 )
 from packages.domain.search_cluster_classifier import classify
-from packages.domain import search_cluster_classifier as rules_package
-from packages.contracts.search_cluster_cleaner import MODEL_CATALOG
+from packages.application.search_cluster_cleaner_rules_identity import executable_rules_digest
 
 FINAL_OBSERVATION_STATES = {"allow", "confirmed", "baseline", "observed_excluded", "observed_archived", "external_state_drift", "already_excluded"}
 PENDING_WRITE_STATES = "'dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'"
@@ -54,10 +52,9 @@ class KeywordCleaner:
         self.key = account.key
         self.rules_version,self.classifier=rules_version,classifier
         self.rules_source_digest=hashlib.sha256(Path(classify.__code__.co_filename).read_bytes()).hexdigest()
-        # Hash loaded executable code, vocabulary and profile validator, not only
-        # a mutable path on disk or a caller-supplied version label.
-        executable=(self.classifier.__code__,rules_package.norm.__code__,rules_package.models.__code__,Profile.parse.__func__.__code__,query_hash.__code__,rules_package.BRANDS,rules_package.PRODUCT,rules_package.VOCAB,rules_package.BROAD_WORDS,tuple(sorted(MODEL_CATALOG)))
-        self.rules_digest=hashlib.sha256(marshal.dumps(executable)).hexdigest()
+        # Loaded bytecode and vocabulary remain guarded, while source/.pyc
+        # import order and absolute checkout paths cannot change the digest.
+        self.rules_digest=executable_rules_digest(self.classifier)
 
     def initialize(self, *, generation: str) -> None:
         if not generation: raise CleanerError("generation_required", "Не указано поколение operational")
@@ -73,6 +70,19 @@ class KeywordCleaner:
 
     def _event(self, c, kind: str, facts: Any, *, run_id=None, operation_id=None) -> None:
         c.execute("INSERT INTO cleaner_events(event_id,account,run_id,operation_id,kind,created_at,facts) VALUES(?,?,?,?,?,?,?)", (new_id(),self.key,run_id,operation_id,kind,self.clock(),canonical(facts)))
+
+    def record_manual_stage_failure(self, *, run_id: str, operation_id: str, code: str, error_type: str) -> None:
+        """Persist only a bounded diagnostic, never exception text or WB data."""
+        safe=lambda value: re.sub(r'[^A-Za-z0-9_.:-]', '_', str(value))[:80]
+        with self.store.transaction() as c:
+            run=c.execute("SELECT kind,phase FROM cleaner_runs WHERE account=? AND run_id=?",
+                          (self.key,run_id)).fetchone()
+            if not run or run['kind']!='manual_apply':return
+            facts=dict(failed_stage='manual_write_'+safe(run['phase']),code=safe(code),error_type=safe(error_type))
+            previous=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND operation_id=? AND kind='stage_e_manual_failure' ORDER BY sequence DESC LIMIT 1",
+                               (self.key,run_id,operation_id)).fetchone()
+            if not previous or json.loads(previous[0])!=facts:
+                self._event(c,'stage_e_manual_failure',facts,run_id=run_id,operation_id=operation_id)
 
     def _active_manual_batch(self,c) -> str|None:
         row=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()

@@ -6,6 +6,7 @@ are outside SQLite. A crash after that commit grants successors readback only.
 from __future__ import annotations
 from dataclasses import asdict
 import json
+import re
 from packages.application.search_cluster_cleaner import new_id, timestamp, plus_seconds
 from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.business_data_write_barrier import barrier_status
@@ -33,11 +34,90 @@ class CleanerWriter:
         if self.manual_only and s['enabled']:raise CleanerError('manual_mode_changed','Авточистка включена',409)
         if s['restore_hold'] or not s['baseline_ready']:raise CleanerError('restore_hold','Исходная база не допущена',409)
         if s['rules_version']!=self.app.rules_version:raise CleanerError('rules_changed','Версия правил изменилась',409)
-        if json.loads(run['captured_versions']).get('rules_hash')!=self.app.rules_digest:
-            raise CleanerError('rules_changed','Исполняемые правила изменились',409)
+        captured=json.loads(run['captured_versions'])
+        if captured.get('rules_hash')!=self.app.rules_digest:
+            self._revalidate_recovered_rules(c,run,captured)
         if barrier_status(self.app.store.registry.runtime_dir)['active']:raise CleanerError('maintenance','Обслуживание блокирует новые записи',423)
         self.session.check(c,self.app.account,self.generation)
         return s,run
+
+    def _revalidate_recovered_rules(self,c,run,captured):
+        """Admit only a proven-unsent old manual run under current exact rules.
+
+        A former marshal hash can differ across source/.pyc imports despite an
+        unchanged classifier file.  This never rewrites captured_versions and
+        never accepts a generic hash mismatch: the same run must have an
+        immutable unsent-recovery event, and every exact decision is checked
+        again against the loaded classifier, profile and owner override.
+        """
+        app=self.app
+        if (run['kind']!='manual_apply' or run['trigger']!='manual_exact_candidates'
+                or not captured.get('rules_hash')
+                or captured.get('classifier_source_sha256')!=app.rules_source_digest
+                or captured.get('rules')!=app.rules_version):
+            raise CleanerError('rules_changed','Исполняемые правила изменились',409)
+        recovered=[json.loads(row[0]) for row in c.execute(
+            "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
+            (app.key,run['run_id']))]
+        bindings=[json.loads(row[0]) for row in c.execute(
+            "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
+            (app.key,run['run_id']))]
+        bound={item['operation_id'] for item in bindings if item.get('operation_id')}
+        if not recovered or not bound or not any(event.get('production_operation_id') in bound for event in recovered):
+            raise CleanerError('rules_changed','Нет доказанного восстановления старого задания',409)
+        operations=c.execute(
+            'SELECT operation_id,state,dispatch_count FROM cleaner_write_operations WHERE account=? AND run_id=?',
+            (app.key,run['run_id'])).fetchall()
+        cancelled={op for event in recovered if event.get('production_operation_id') in bound
+                   for op in event.get('cancelled_operations',[])}
+        if (not cancelled or not any(op['operation_id'] in cancelled for op in operations)
+                or any(op['dispatch_count']!=0 or (op['state']=='cancelled_before_send' and op['operation_id'] not in cancelled)
+                       or op['state'] not in {'cancelled_before_send','prepared'} for op in operations)):
+            raise CleanerError('rules_changed','Нельзя доказать отсутствие отправки старого задания',409)
+        targets=json.loads(run['targets'])
+        identities=[(item.get('target'),item.get('query_hash'),item.get('decision_id')) for item in targets]
+        if not identities or len(set(identities))!=len(identities):
+            raise CleanerError('rules_changed','Состав старого задания изменился',409)
+        decision_hashes=[]
+        for target,query_identity,decision_id in identities:
+            observation=c.execute(
+                'SELECT * FROM cleaner_observations WHERE account=? AND target=? AND query_hash=? AND decision_id=?',
+                (app.key,target,query_identity,decision_id)).fetchone()
+            decision=c.execute('SELECT * FROM cleaner_auto_decisions WHERE account=? AND decision_id=?',
+                               (app.key,decision_id)).fetchone()
+            if (not observation or not decision or decision['target']!=target or decision['query_hash']!=query_identity
+                    or decision['verdict']!='exclude' or decision['query']!=observation['query']):
+                raise CleanerError('rules_changed','Точное решение старого задания изменилось',409)
+            current=self._current(c,dict(observation))
+            if (current['decision_id']!=decision_id or current['query_hash']!=query_identity
+                    or current['target']!=target):
+                raise CleanerError('rules_changed','Точное решение старого задания изменилось',409)
+            stored=json.loads(decision['facts'])
+            # Older source/.pyc imports could give the run and its decisions
+            # different marshal hashes. Keep both immutable identities, but
+            # require the same source plus a full fresh decision comparison.
+            legacy_hash=stored.pop('rules_hash',None)
+            if (not isinstance(legacy_hash,str) or not re.fullmatch(r'[0-9a-f]{64}',legacy_hash)
+                    or stored.pop('classifier_source_sha256',None)!=captured['classifier_source_sha256']):
+                raise CleanerError('rules_changed','Происхождение решения не совпало',409)
+            decision_hashes.append(dict(decision_id=decision_id,rules_hash=legacy_hash))
+            if decision['source']=='rules':
+                profile=app._profile(c,observation['nm_id'])
+                result=app.classifier(observation['query'],profile)
+                if (canonical(result)!=canonical(stored) or result.get('verdict')!='exclude'
+                        or result.get('rule')!=decision['rule_id'] or result.get('reason')!=decision['reason']):
+                    raise CleanerError('rules_changed','Классификация точной фразы изменилась',409)
+            elif decision['source']=='owner_decision':
+                if (stored.get('verdict')!='exclude' or stored.get('rule')!='OWNER_EXACT'
+                        or decision['rule_id']!='OWNER_EXACT' or stored.get('reason')!=decision['reason']):
+                    raise CleanerError('rules_changed','Решение владельца изменилось',409)
+            else:
+                raise CleanerError('rules_changed','Источник старого решения не поддержан',409)
+        if not c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='rules_semantic_revalidated' AND json_extract(facts,'$.current_rules_digest')=?",
+                         (app.key,run['run_id'],app.rules_digest)).fetchone():
+            app._event(c,'rules_semantic_revalidated',dict(previous_rules_hash=captured['rules_hash'],
+                current_rules_digest=app.rules_digest,classifier_source_sha256=app.rules_source_digest,
+                decisions=len(identities),decision_rules_hashes=sorted(decision_hashes,key=lambda item:item['decision_id'])),run_id=run['run_id'])
 
     def _current(self,c,row):
         app=self.app
@@ -69,6 +149,7 @@ class CleanerWriter:
             if previous:
                 if previous['state']!='prepared':raise CleanerError('target_unresolved','Предыдущая операция не разрешена',409)
                 c.execute("UPDATE cleaner_write_operations SET state='cancelled_before_send',updated_at=? WHERE operation_id=?",(app.clock(),previous['operation_id']))
+                c.execute("UPDATE cleaner_write_items SET state='cancelled_before_send' WHERE operation_id=? AND state='prepared'",(previous['operation_id'],))
                 app._event(c,'candidate_cancelled',dict(reason='fresh_preparation'),run_id=previous['run_id'],operation_id=previous['operation_id'])
             exact=[];scope={(r['target'],r['query_hash'],r['decision_id']) for r in json.loads(run['targets'])} if run['kind']=='manual_apply' else None
             for row in candidates:
@@ -105,6 +186,7 @@ class CleanerWriter:
             row=c.execute('SELECT * FROM cleaner_write_operations WHERE operation_id=?',(operation,)).fetchone()
             if row and row['state']=='prepared':
                 c.execute("UPDATE cleaner_write_operations SET state='cancelled_before_send',updated_at=? WHERE operation_id=?",(self.app.clock(),operation))
+                c.execute("UPDATE cleaner_write_items SET state='cancelled_before_send' WHERE operation_id=? AND state='prepared'",(operation,))
                 self.app._event(c,'candidate_cancelled',dict(reason=reason),run_id=row['run_id'],operation_id=operation)
 
     def admit(self,operation,run_id,token,fresh,membership):
