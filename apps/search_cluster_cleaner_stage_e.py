@@ -442,14 +442,28 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     if action=='apply':
         outer=manual_preview()
         if outer['prestate_sha256']!=str(envelope.get('expected_prestate') or '') or outer['candidate_sha256']!=str(envelope.get('expected_candidate') or ''):_fail('manual_preview_drift')
-        worker.execute(run_id=request['run_id'],targets=targets,expected_prestate=outer['_worker_prestate_sha256'],expected_candidate=outer['_worker_candidate_sha256'],production_operation_id=operation_id,reviewed_candidate=outer['candidate_sha256'])
+        try:
+            worker.execute(run_id=request['run_id'],targets=targets,expected_prestate=outer['_worker_prestate_sha256'],expected_candidate=outer['_worker_candidate_sha256'],production_operation_id=operation_id,reviewed_candidate=outer['candidate_sha256'])
+        except Exception as exc:
+            try:
+                service.record_manual_stage_failure(run_id=request['run_id'],operation_id=operation_id,
+                    code=exc.code if isinstance(exc,CleanerError) else type(exc).__name__,error_type=type(exc).__name__)
+            except Exception as journal_exc:
+                # A contended diagnostic transaction cannot replace the
+                # original guarded failure. Keep a bounded, secret-free
+                # fallback in the service log instead of silently dropping it.
+                safe_code=re.sub(r'[^A-Za-z0-9_.:-]','_',str(exc.code if isinstance(exc,CleanerError) else type(exc).__name__))[:80]
+                print(json.dumps(dict(event='stage_e_manual_failure_journal_unavailable',
+                    failed_stage='manual_write',code=safe_code,
+                    error_type=type(exc).__name__,journal_type=type(journal_exc).__name__),sort_keys=True),file=sys.stderr)
+            raise
         return dict(operation_id=operation_id,disposition='submitted')
     # Readback is the only allowed replay path after an ambiguous submit or a
     # consumed exact run. It cannot claim a run or send set-minus.
     with service.store.read() as c:
         bindings=[json.loads(row[0]) for row in c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(service.key,request['run_id']))]
         binding=next((v for v in bindings if v.get('operation_id')==operation_id),None)
-        operations=[row[0] for row in c.execute("SELECT operation_id FROM cleaner_write_operations WHERE account=? AND run_id=?",(service.key,request['run_id']))]
+        operations=[row[0] for row in c.execute("SELECT operation_id FROM cleaner_write_operations WHERE account=? AND run_id=? AND state!='cancelled_before_send'",(service.key,request['run_id']))]
     if not binding:return dict(operation_id=operation_id,state='not_submitted')
     from packages.application.search_cluster_cleaner_writer import CleanerReadback
     for internal_operation_id in operations:CleanerReadback(service,source,generation=generation).tick(operation_id=internal_operation_id)
@@ -457,6 +471,17 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     # capability is deliberately retained when a crashed owner is still
     # unresolved; it cannot grant another submit while the guard stays held.
     service.close_manual_window()
+    # A crashed manual worker may leave a bound run with a prepared operation
+    # but no dispatch right. The held external guard checks every prior seal,
+    # fences the dead owner, and atomically cancels only the exact unsent work.
+    # Returning not_submitted is safe only after its capability is also closed.
+    try:
+        guard=AdmissionGuard(admission_dir.resolve(),service.store)
+        if guard.recover_unsubmitted_manual_run(cleaner=service,generation=generation,
+                production_operation_id=operation_id,run_id=request['run_id']):
+            return dict(operation_id=operation_id,state='not_submitted')
+    except CleanerError:
+        pass
     with service.store.read() as c:
         terminal=[row[0] for row in c.execute("SELECT operation_id FROM cleaner_write_operations WHERE account=? AND run_id=? AND state IN ('confirmed','rejected','requires_review')",(service.key,request['run_id']))]
     recovered=False
@@ -498,7 +523,7 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
             recovered=False
     with service.store.read() as c:
         run=c.execute('SELECT state,kind,targets FROM cleaner_runs WHERE account=? AND run_id=?',(service.key,request['run_id'])).fetchone()
-        ops=c.execute("SELECT operation_id,state,target FROM cleaner_write_operations WHERE account=? AND run_id=?",(service.key,request['run_id'])).fetchall()
+        ops=c.execute("SELECT operation_id,state,target FROM cleaner_write_operations WHERE account=? AND run_id=? AND state!='cancelled_before_send'",(service.key,request['run_id'])).fetchall()
         actual={(row['target'],item['query_hash'],item['decision_id']) for row in ops for item in c.execute(
             'SELECT query_hash,decision_id FROM cleaner_write_items WHERE operation_id=?',(row['operation_id'],))}
     if not run:return dict(operation_id=operation_id,state='not_submitted')

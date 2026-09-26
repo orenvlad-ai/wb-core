@@ -208,7 +208,7 @@ class ManualCleanerCoordinator:
         if float(job.get('next_readback_at') or 0)>time.time():return
         if int(job.get('readback_attempts') or 0)>=20:
             self._save(job_id,state='partial',stage=phase+'_apply_claimed',can_recheck=True,
-                       error_code='readback_unresolved',error='Результат WB не подтверждён. Доступна повторная проверка той же операции.')
+                       error_code='readback_unresolved',error='Состояние точной операции не подтверждено. Доступна повторная проверка той же операции.')
             return
         receipt=self._launch('readback',operation_id,request)
         self._settle(job_id,phase,receipt['state'],receipt)
@@ -216,7 +216,7 @@ class ManualCleanerCoordinator:
     def _settle(self,job_id:str,phase:str,state:str,receipt:dict) -> None:
         if state=='ambiguous':
             attempts=int(self._job(job_id).get('readback_attempts') or 0)+1
-            self._save(job_id,state='ambiguous',stage=phase+'_apply_claimed',result='Ожидаем подтверждения WB',
+            self._save(job_id,state='ambiguous',stage=phase+'_apply_claimed',result='Уточняем состояние точной операции',
                        readback_attempts=attempts,next_readback_at=time.time()+min(30,2**min(attempts,5)))
             return
         if state=='not_submitted':

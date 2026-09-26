@@ -15,6 +15,8 @@ on:
         options:
           - preview
           - apply
+          - completion-preview
+          - completion-apply
       preview_fingerprint:
         description: Exact fingerprint printed by a prior preview; required for apply
         required: false
@@ -64,11 +66,20 @@ jobs:
             --release-run-id "$RELEASE_RUN_ID"
             --output "$RUNNER_TEMP/recovery-receipt.json"
           )
-          if [ "$RECOVERY_MODE" = apply ]; then
+          if [ "$RECOVERY_MODE" = apply ] || [ "$RECOVERY_MODE" = completion-apply ]; then
             test -n "$PREVIEW_FINGERPRINT"
             args+=(--preview-fingerprint "$PREVIEW_FINGERPRINT")
           fi
-          python3 ci/post_merge_release_recovery.py "${args[@]}"
+          if [ "$RECOVERY_MODE" = completion-preview ] || [ "$RECOVERY_MODE" = completion-apply ]; then
+            test "$RELEASE_RUN_ID" = 36242191181
+            completion_args=("$RECOVERY_MODE" --output "$RUNNER_TEMP/recovery-receipt.json")
+            if [ "$RECOVERY_MODE" = completion-apply ]; then
+              completion_args+=(--preview-fingerprint "$PREVIEW_FINGERPRINT")
+            fi
+            python3 ci/post_merge_completion_recovery.py "${completion_args[@]}"
+          else
+            python3 ci/post_merge_release_recovery.py "${args[@]}"
+          fi
 
       - name: Upload immutable recovery preview or receipt
         if: always()

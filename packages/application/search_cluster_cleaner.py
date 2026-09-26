@@ -8,7 +8,6 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import marshal
 from pathlib import Path
 import re
 import sqlite3
@@ -22,8 +21,7 @@ from packages.contracts.search_cluster_cleaner import (
     Snapshot, Target, canonical, digest, query_hash, utcnow,
 )
 from packages.domain.search_cluster_classifier import classify
-from packages.domain import search_cluster_classifier as rules_package
-from packages.contracts.search_cluster_cleaner import MODEL_CATALOG
+from packages.application.search_cluster_cleaner_rules_identity import executable_rules_digest
 
 FINAL_OBSERVATION_STATES = {"allow", "confirmed", "baseline", "observed_excluded", "observed_archived", "external_state_drift", "already_excluded"}
 PENDING_WRITE_STATES = "'dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error'"
@@ -54,10 +52,9 @@ class KeywordCleaner:
         self.key = account.key
         self.rules_version,self.classifier=rules_version,classifier
         self.rules_source_digest=hashlib.sha256(Path(classify.__code__.co_filename).read_bytes()).hexdigest()
-        # Hash loaded executable code, vocabulary and profile validator, not only
-        # a mutable path on disk or a caller-supplied version label.
-        executable=(self.classifier.__code__,rules_package.norm.__code__,rules_package.models.__code__,Profile.parse.__func__.__code__,query_hash.__code__,rules_package.BRANDS,rules_package.PRODUCT,rules_package.VOCAB,rules_package.BROAD_WORDS,tuple(sorted(MODEL_CATALOG)))
-        self.rules_digest=hashlib.sha256(marshal.dumps(executable)).hexdigest()
+        # Loaded bytecode and vocabulary remain guarded, while source/.pyc
+        # import order and absolute checkout paths cannot change the digest.
+        self.rules_digest=executable_rules_digest(self.classifier)
 
     def initialize(self, *, generation: str) -> None:
         if not generation: raise CleanerError("generation_required", "Не указано поколение operational")
@@ -73,6 +70,19 @@ class KeywordCleaner:
 
     def _event(self, c, kind: str, facts: Any, *, run_id=None, operation_id=None) -> None:
         c.execute("INSERT INTO cleaner_events(event_id,account,run_id,operation_id,kind,created_at,facts) VALUES(?,?,?,?,?,?,?)", (new_id(),self.key,run_id,operation_id,kind,self.clock(),canonical(facts)))
+
+    def record_manual_stage_failure(self, *, run_id: str, operation_id: str, code: str, error_type: str) -> None:
+        """Persist only a bounded diagnostic, never exception text or WB data."""
+        safe=lambda value: re.sub(r'[^A-Za-z0-9_.:-]', '_', str(value))[:80]
+        with self.store.transaction() as c:
+            run=c.execute("SELECT kind,phase FROM cleaner_runs WHERE account=? AND run_id=?",
+                          (self.key,run_id)).fetchone()
+            if not run or run['kind']!='manual_apply':return
+            facts=dict(failed_stage='manual_write_'+safe(run['phase']),code=safe(code),error_type=safe(error_type))
+            previous=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND operation_id=? AND kind='stage_e_manual_failure' ORDER BY sequence DESC LIMIT 1",
+                               (self.key,run_id,operation_id)).fetchone()
+            if not previous or json.loads(previous[0])!=facts:
+                self._event(c,'stage_e_manual_failure',facts,run_id=run_id,operation_id=operation_id)
 
     def _active_manual_batch(self,c) -> str|None:
         row=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
@@ -461,6 +471,29 @@ class KeywordCleaner:
                 value['item_updates']=dict(value.get('item_updates') or {},**{str(index):update})
             self._event(c,'self_service_batch_stage',value)
 
+    def resume_drift_batch(self,batch_id:str,payload:Mapping,principal:Principal) -> dict:
+        """Explicitly continue the frozen tail after one proven scan-only drift.
+
+        The old terminal event and held target remain immutable. This command
+        changes only the parent cursor; each later pair still receives its own
+        fresh WB/admission checks and deterministic child identity.
+        """
+        def command(c,actor):
+            from packages.application.search_cluster_cleaner_batch import _terminal_drift_resume_plan,_drift_item_update
+            plan=_terminal_drift_resume_plan(c,self,batch_id,actor,
+                'bootstrap_operator' if principal.site_owner else 'configured_owner')
+            if not plan:raise CleanerError('batch_resume_unavailable','Эту группу нельзя безопасно продолжить',409)
+            previous=plan['previous'];index=plan['index']
+            updates={key:value for key,value in previous['item_updates'].items() if int(key)<index}
+            updates[str(index)]=_drift_item_update(plan['job'],plan['proof'])
+            value=dict(previous,state='running',stage='next_target',current_index=index+1,
+                       item_updates=updates,error=None,error_code=None,
+                       resumed_from_index=index,resume_request_id=payload['request_id'])
+            self._event(c,'self_service_batch_resumed',value)
+            return dict(batch_id=batch_id,state='running',current_index=index+1,
+                        review_required_target=plan['proof']['target'])
+        return self._command(principal,f'manual-batches/{batch_id}/resume',payload,command)
+
     def manual_job(self,job_id:str,principal:Principal) -> dict:
         principal.require_read()
         with self.store.read() as c:
@@ -520,8 +553,9 @@ class KeywordCleaner:
         """Prove that a saved apply claim never gained dispatch rights.
 
         The run claim and Stage E binding commit in one transaction before any
-        guarded WB call. A queued exact run without either binding or write
-        intent can safely repeat its fresh preview with the same operation ID.
+        guarded WB call. A queued run may repeat a fresh preview with the same
+        operation ID either before that claim or after the held guard has
+        immutably cancelled every proven-unsent preparation.
         """
         with self.store.read() as c:
             run=c.execute("SELECT state,trigger,targets,worker_token,started_at FROM cleaner_runs WHERE account=? AND run_id=?",
@@ -530,13 +564,24 @@ class KeywordCleaner:
                     or run['worker_token'] or run['started_at']):return False
             declared={str(row.get('target') or '') for row in json.loads(run['targets'])}
             if declared!={target.key}:return False
-            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
-                         (self.key,run_id)).fetchone():return False
-            if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',
-                         (self.key,run_id)).fetchone():return False
-            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
-                         (self.key,operation_id)).fetchone():return False
-            return True
+            bindings=[json.loads(row[0]) for row in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
+                (self.key,run_id))]
+            operations=c.execute('SELECT operation_id,state,dispatch_count FROM cleaner_write_operations WHERE account=? AND run_id=?',
+                                 (self.key,run_id)).fetchall()
+            if not bindings and not operations:
+                return not c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
+                                     (self.key,operation_id)).fetchone()
+            if (not bindings or any(row.get('operation_id')!=operation_id or set(row.get('targets') or [])!=declared for row in bindings)
+                    or any(row['state']!='cancelled_before_send' or row['dispatch_count']!=0 for row in operations)
+                    or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
+                return False
+            events=[json.loads(event[0]) for event in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
+                (self.key,run_id))]
+            recovered={op for event in events if event.get('production_operation_id')==operation_id
+                       for op in event.get('cancelled_operations',[])}
+            return bool(events) and all(row['operation_id'] in recovered for row in operations)
 
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
@@ -943,16 +988,31 @@ class KeywordCleaner:
             if not run or run['state'] not in {'running','accepted'}: return run['state'] if run else 'missing'
             bindings=[json.loads(row[0]) for row in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='stage_e_manual_binding'",(run_id,))]
             if not any(v.get('operation_id')==production_operation_id for v in bindings): raise CleanerError('manual_binding_missing','Нет точной привязки ручного запуска',409)
-            operations=c.execute('SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchall()
+            operations=c.execute("SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=? AND state!='cancelled_before_send'",(self.key,run_id)).fetchall()
             if not operations:
                 if not allow_no_operations or not run['lease_expires_at'] or timestamp(run['lease_expires_at'])>timestamp(self.clock()):
                     raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
                 state='partial'
+                summary=dict(recovered_manual=True,confirmed_pilot=0)
+                if run['kind']=='scan':
+                    targets=c.execute('SELECT target,state,complete,reason,counters FROM cleaner_run_targets WHERE run_id=?',(run_id,)).fetchall()
+                    declared={str(item.get('target') or '') for item in json.loads(run['targets'])}
+                    if {item['target'] for item in targets}==declared and targets:
+                        summary.update(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,
+                                       excluded_not_executed=0,confirmed_automatic=0,confirmed_manual=0,
+                                       unresolved_operations=0,requires_review_operations=0,rejected_not_executed=0,
+                                       dry_run=True,pairs=len(targets),campaigns=len({item['target'].split(':')[0] for item in targets}))
+                        for target in targets:
+                            for key,value in json.loads(target['counters']).items():
+                                if key in summary:summary[key]+=value
+                        if (all(item['state']=='done' and item['complete'] and not item['reason'] for item in targets)
+                                and not summary['excluded_not_executed'] and not run['reason']):
+                            state='complete'
             elif any(row['state'] not in {'confirmed','rejected','requires_review'} for row in operations):
                 raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
             else:
                 state='complete' if all(row['state']=='confirmed' for row in operations) else 'partial'
-            summary=dict(recovered_manual=True,confirmed_pilot=c.execute("SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id) WHERE o.run_id=? AND i.confirmed_at IS NOT NULL",(run_id,)).fetchone()[0])
+                summary=dict(recovered_manual=True,confirmed_pilot=c.execute("SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id) WHERE o.run_id=? AND i.confirmed_at IS NOT NULL",(run_id,)).fetchone()[0])
             c.execute("UPDATE cleaner_runs SET state=?,phase='finished',scan_finished_at=coalesce(scan_finished_at,?),summary=?,worker_token=NULL,lease_expires_at=NULL WHERE run_id=?",(state,self.clock(),canonical(summary),run_id))
             self._event(c,'run_finished',dict(state=state,summary=summary,recovered=True),run_id=run_id)
             return state
@@ -997,8 +1057,9 @@ class KeywordCleaner:
                   WHERE i.operation_id=? ORDER BY i.query""",(operation['operation_id'],))]
                 operations.append(dict(operation_id=operation['operation_id'],target=operation['target'],state=operation['state'],items=items))
             result['write_operations']=operations
+            effective_operations=[operation for operation in operations if operation['state']!='cancelled_before_send']
             written={(operation['target'],item['query_hash'],item['decision_id']):item
-                     for operation in operations for item in operation['items']}
+                     for operation in effective_operations for item in operation['items']}
             phrases=[]
             if row['kind']=='manual_apply':
                 for candidate in json.loads(row['targets']):
@@ -1013,12 +1074,12 @@ class KeywordCleaner:
             result['phrases']=phrases
             # A completed run is an immutable snapshot. Late readback changes
             # the effective outcome, not that historical run summary.
-            if operations:
-                states={operation['state'] for operation in operations}
-                actual={(operation['target'],item['query_hash'],item['decision_id']) for operation in operations for item in operation['items']}
+            if effective_operations:
+                states={operation['state'] for operation in effective_operations}
+                actual={(operation['target'],item['query_hash'],item['decision_id']) for operation in effective_operations for item in operation['items']}
                 expected={(candidate['target'],candidate['query_hash'],candidate['decision_id']) for candidate in json.loads(row['targets'])} if row['kind']=='manual_apply' else actual
                 if (expected and expected==actual and states=={'confirmed'}
-                        and all(item['confirmed_at'] for operation in operations for item in operation['items'])
+                        and all(item['confirmed_at'] for operation in effective_operations for item in operation['items'])
                         and all(v['state']=='confirmed' for v in phrases)):
                     result['effective_state']='complete'
                 elif states & {'rejected','requires_review'}:
