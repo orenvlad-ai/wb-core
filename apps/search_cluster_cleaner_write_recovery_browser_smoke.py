@@ -25,6 +25,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from apps import search_cluster_cleaner_stage_e as stage_e
 from apps import search_cluster_cleaner_stage_e_recovery_smoke as recovery_smoke
+from packages.application import search_cluster_cleaner_self_service as self_service
 from apps.registry_upload_http_entrypoint_auth_smoke import _password_hash
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
 from apps.search_cluster_cleaner_write_fixture import Clock, FakeWB
@@ -101,31 +102,34 @@ def _login(page, server):
         raise AssertionError('batch disabled: ' + page.locator('[data-keyword-cleaner]').inner_text()[:2500] + '\n' + page.request.get(server.base_url + '/v1/sheet-vitrina-v1/ads/keyword-cleaner/summary').text())
 
 
-def _advance(parent, child, service, batch_id, owner, stop_index, *, max_ticks=1500):
+def _advance(parent, child, service, batch_id, owner, stop_index, clock, *, max_ticks=1500):
     """Drive saved coordinators, without browser API stubs or a background timer."""
     for _ in range(max_ticks):
-        result = batch_status(service, batch_id, owner)
-        if result['current_index'] >= stop_index or result['state'] in {'complete', 'partial', 'failed'}:
-            return result
-        if parent.pending_batches():
-            parent.tick()
-        if child.pending_jobs():
+        saved = service.manual_batch_snapshot(batch_id, owner)
+        if saved['current_index'] >= stop_index or saved['state'] in {'complete', 'partial', 'failed'}:
+            return batch_status(service, batch_id, owner)
+        # The child owns its stage transitions. The parent needs a tick only
+        # to dispatch the next child or to record a terminal child outcome.
+        # Recomputing the full 26-row projection on every child stage is only
+        # a test-driver cost, not a required worker schedule.
+        pending = child.pending_jobs()
+        if pending:
             child.tick()
-        result = batch_status(service, batch_id, owner)
-        current = result['current_target']
-        if current:
-            job_id = result['items'][result['current_index']]['job_id']
-            if job_id:
-                job = service.manual_job(job_id, owner)
-                delay = float(job.get('next_readback_at') or 0) - time.time()
-                if delay > 0:
-                    time.sleep(min(delay, 2.1))
-    raise AssertionError('worker did not reach selected pair: ' + repr(result))
+            job = service.manual_job(pending[0], owner)
+            delay = float(job.get('next_readback_at') or 0) - (clock.base.timestamp() + clock.seconds)
+            if delay > 0:
+                # Only the synthetic coordinator's retry clock advances.
+                # Browser, HTTP authentication and fake WB remain real.
+                clock.advance(delay + 0.001)
+        else:
+            parent.tick()
+    raise AssertionError('worker did not reach selected pair: ' + repr(service.manual_batch_snapshot(batch_id, owner)))
 
 
 def run(output: Path):
     output.mkdir(parents=True, exist_ok=True)
     checks = []
+    started = time.monotonic()
     with Sandbox() as box, patch.object(recovery_smoke, 'ACCOUNT', Account('seller', CHANGE_REGISTRY_ACCOUNT_SCOPE)):
         box.package['account_scope'] = CHANGE_REGISTRY_ACCOUNT_SCOPE
         box.env.write_text(box.env.read_text().replace('CHANGE_REGISTRY_ACCOUNT_SCOPE=scope',
@@ -156,7 +160,8 @@ def run(output: Path):
                 limiter=AccountLimiter(monotonic=clock.monotonic, sleep=clock.advance),
             )
             original_cleaner = stage_e.KeywordCleaner
-            with patch.object(CleanerWbSource, 'from_env', return_value=source), \
+            with patch.object(self_service, 'time', SimpleNamespace(time=lambda: clock.base.timestamp() + clock.seconds)), \
+                 patch.object(CleanerWbSource, 'from_env', return_value=source), \
                  patch.object(stage_e, 'fetch_current_card', side_effect=lambda nm_id: dict(card)), \
                  patch.object(stage_e, 'KeywordCleaner', side_effect=lambda *args, **kwargs: original_cleaner(*args, clock=clock, **kwargs)):
                 web = CleanerWeb(service, generation='monolith', approved_targets=admitted,
@@ -183,7 +188,7 @@ def run(output: Path):
                         parent = BatchCleanerCoordinator(service, generation='monolith', source_factory=lambda: source,
                                                          fixture_admission=admitted, bootstrap_owner_username='owner')
                         child = ManualCleanerCoordinator(service, adapter, bootstrap_owner_username='owner')
-                        before = _advance(parent, child, service, batch_id, owner, 10)
+                        before = _advance(parent, child, service, batch_id, owner, 10, clock)
                         assert before['current_index'] == 10 and before['done_count'] == 10
                         assert len(fake.writes) == 10
                         checks.append('first_ten_pairs_use_real_coordinators_and_fake_wb')
@@ -255,7 +260,7 @@ def run(output: Path):
                         child = ManualCleanerCoordinator(service, adapter, bootstrap_owner_username='owner')
                         parent = BatchCleanerCoordinator(service, generation='monolith', source_factory=lambda: source,
                                                          fixture_admission=admitted, bootstrap_owner_username='owner')
-                        final = _advance(parent, child, service, batch_id, owner, len(IDS))
+                        final = _advance(parent, child, service, batch_id, owner, len(IDS), clock)
                         if final['state'] not in {'complete', 'partial', 'failed'}:
                             final = parent.tick()
                         assert final['state'] == 'complete', final
@@ -272,7 +277,8 @@ def run(output: Path):
                     server.server.shutdown()
                     server.server.server_close()
                     server.thread.join(timeout=5)
-    receipt = dict(passed=len(checks), checks=checks, fake_wb_writes=len(fake.writes), production_wb_writes=0)
+    receipt = dict(passed=len(checks), checks=checks, fake_wb_writes=len(fake.writes), production_wb_writes=0,
+                   elapsed_seconds=round(time.monotonic() - started, 1))
     (output / 'receipt.json').write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n')
     return receipt
 
