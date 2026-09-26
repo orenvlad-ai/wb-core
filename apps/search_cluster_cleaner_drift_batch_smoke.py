@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
-from apps.search_cluster_cleaner_batch_smoke import Source, rejects
+from apps.search_cluster_cleaner_batch_smoke import Source, ready_service, rejects
 from packages.application.search_cluster_cleaner import batch_child_id
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator, batch_status, _drift_only_scan
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
@@ -24,7 +24,7 @@ def main():
         box.write_package()
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True);other=Principal('other',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True);other=Principal('other',True,True,True)
         ids=list(range(100,126));targets=[Target(i,101,name='Campaign '+str(i),contract_verified=True) for i in ids]
         admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in ids]
         source=Source(targets)
@@ -121,7 +121,7 @@ def main():
         box.write_package()
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         targets=[Target(i,101,name='Campaign '+str(i),contract_verified=True) for i in (11,12)]
         source=Source(targets);admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
         frozen=eligibility_rows(service,'monolith',source.targets,fixture_admission=admitted)
@@ -145,7 +145,7 @@ def main():
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         target=Target(11,101,name='Incomplete',contract_verified=True)
         child=service.start_manual_clean(dict(request_id='synthetic-unrelated-partial-0001',advert_id=11,nm_id=101),owner)
         run=service.claim_exact_manual_run(run_id=child['run_id'],targets=[target],generation='monolith',production_operation_id='synthetic-other-scan-op')
