@@ -156,11 +156,13 @@ def run_checks() -> None:
         assert all(event["event_type"].split(".")[0] in {"account", "accounts", "category", "categories", "counterparty", "counterparties"} for event in service.list_audit_events(directory_only=True))
         service.update_directory("categories", misc, {"action": "archive", "base_revision": 2}, "fixture", *op())
         service.update_directory("categories", misc, {"action": "restore", "base_revision": 3}, "fixture", *op())
+        service.update_directory("categories", "category_rent", {"action": "delete", "base_revision": 1}, "fixture", *op())
         with sqlite3.connect(path) as conn:
             conn.row_factory = sqlite3.Row
             seed_directories(conn, WHEN)
             assert conn.execute("SELECT name FROM finance_liquidity_categories WHERE category_id=?", (misc,)).fetchone()[0] == "Иные расходы"
             assert conn.execute("SELECT name FROM finance_liquidity_accounts WHERE account_id='cash_vladislav'").fetchone()[0] == "Касса Владислав (новое имя)"
+            assert conn.execute("SELECT is_deleted FROM finance_liquidity_categories WHERE category_id='category_rent'").fetchone()[0] == 1
             assert conn.execute("SELECT COUNT(*) FROM finance_liquidity_audit_events WHERE event_type LIKE '%rename' OR event_type='document.posted'").fetchone()[0] >= 3
         unused = service.create_counterparty({"name": "Удаляемый"}, "fixture", *op())
         service.update_directory("counterparties", unused["counterparty_id"], {"action": "delete", "base_revision": 1}, "fixture", *op())
