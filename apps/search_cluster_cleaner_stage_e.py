@@ -112,11 +112,15 @@ def _targets(request:Mapping[str,Any]) -> list[Target]:
     if len({t.key for t in targets})!=len(targets):_fail('manual_targets_invalid')
     return targets
 
-def _approved_card_receipts(package:dict, admission_dir:Path) -> dict[int,dict]:
-    """Package-bound SKU evidence; legacy pair receipts remain integrity checks."""
+def _card_evidence_rows(package:dict, admission_dir:Path) -> dict[int,dict]:
+    """Validate every immutable row, including historical holds (not receipts)."""
     admitted={}
     for row in package['manual_admission']:
-        if not isinstance(row,dict) or set(row)!={'advert_id','nm_id','card_digest','verified_at','state'} or row.get('state')!='verified' or not isinstance(row.get('card_digest'),str) or not re.fullmatch(r'sha256:[0-9a-f]{64}',row['card_digest']) or not isinstance(row.get('verified_at'),str):_fail('manual_admission_invalid')
+        if (not isinstance(row,dict) or set(row)!={'advert_id','nm_id','card_digest','verified_at','state'}
+                or type(row['advert_id']) is not int or row['advert_id']<=0 or type(row['nm_id']) is not int or row['nm_id']<=0
+                or row.get('state')!='verified' or not isinstance(row.get('card_digest'),str)
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}',row['card_digest'])
+                or not isinstance(row.get('verified_at'),str) or not row['verified_at']):_fail('manual_admission_invalid')
         key=f"{row['advert_id']}:{row['nm_id']}"
         if key in admitted:_fail('manual_admission_invalid')
         admitted[key]=dict(row)
@@ -129,12 +133,22 @@ def _approved_card_receipts(package:dict, admission_dir:Path) -> dict[int,dict]:
     if 'sha256:'+hashlib.sha256(raw).hexdigest()!=package['card_evidence_sha256'] or not isinstance(evidence,dict) or not isinstance(evidence.get('cards'),list):_fail('current_card_evidence_mismatch')
     current={}
     for row in evidence['cards']:
-        if not isinstance(row,dict) or type(row.get('nm_id')) is not int or row['nm_id'] in current or row.get('state')!='verified' or not re.fullmatch(r'sha256:[0-9a-f]{64}',str(row.get('current_card_sha256'))) or not isinstance(row.get('verified_at'),str):_fail('current_card_evidence_mismatch')
+        if (not isinstance(row,dict) or set(row)!={'nm_id','state','current_card_sha256','verified_at'}
+                or type(row['nm_id']) is not int or row['nm_id']<=0 or row['nm_id'] in current
+                or row['state'] not in {'verified','held_missing_kind','held_profile_mismatch'}
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}',str(row['current_card_sha256']))
+                or (row['state']=='verified' and (not isinstance(row['verified_at'],str) or not row['verified_at']))
+                or (row['state']!='verified' and row['verified_at'] is not None)):_fail('current_card_evidence_mismatch')
         current[row['nm_id']]=row
     for row in admitted.values():
         actual=current.get(row['nm_id'])
-        if not actual or actual['current_card_sha256']!=row['card_digest'] or actual['verified_at']!=row['verified_at']:_fail('manual_target_not_reconciled')
+        if not actual or actual['state']!='verified' or actual['current_card_sha256']!=row['card_digest'] or actual['verified_at']!=row['verified_at']:_fail('manual_target_not_reconciled')
     return current
+
+
+def _approved_card_receipts(package:dict, admission_dir:Path) -> dict[int,dict]:
+    """Only previously verified SKU evidence is a historical receipt."""
+    return {nm:row for nm,row in _card_evidence_rows(package,admission_dir).items() if row['state']=='verified'}
 
 
 def _approved_card_source(package:dict, admission_dir:Path) -> dict[int,dict]:
@@ -159,7 +173,8 @@ def _approved_card_source(package:dict, admission_dir:Path) -> dict[int,dict]:
 
 
 def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) -> list[dict]:
-    current=_approved_card_receipts(package,admission_dir)
+    evidence=_card_evidence_rows(package,admission_dir)
+    current={nm:row for nm,row in evidence.items() if row['state']=='verified'}
     source=_approved_card_source(package,admission_dir) if any(t.nm_id not in current for t in targets) else {}
     approved_profiles={row['nm_id'] for row in package['profiles']}
     receipts=[]
@@ -167,9 +182,12 @@ def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) ->
         actual=current.get(target.nm_id)
         approved=source.get(target.nm_id) if not actual else None
         if target.nm_id not in approved_profiles or (not actual and not approved):_fail('manual_target_not_reconciled')
+        historical=evidence.get(target.nm_id)
+        if approved and historical and approved['card_digest']!=historical['current_card_sha256']:_fail('approved_card_source_mismatch')
         receipts.append(dict(advert_id=target.advert_id,nm_id=target.nm_id,
                              card_digest=actual['current_card_sha256'] if actual else approved['card_digest'],
-                             verified_at=actual['verified_at'] if actual else None,state='verified',
+                             verified_at=actual['verified_at'] if actual else None,
+                             state='verified' if actual else 'fresh_verification_required',
                              basis='current_card_evidence' if actual else 'package_bound_source_fresh_check_required'))
     return receipts
 

@@ -16,7 +16,7 @@ def approved_context(cleaner, generation: str, *, fixture_admission=None, config
         admitted = {(row['advert_id'], row['nm_id']) for row in fixture_admission if row.get('state') == 'verified'}
         return admitted, {}, set()
     else:
-        from apps.search_cluster_cleaner_stage_e import _package, _approved_card_receipts, _approved_card_source
+        from apps.search_cluster_cleaner_stage_e import _package, _card_evidence_rows, _approved_card_source
         try:
             config = json.loads(config_path.read_text(encoding='utf-8'))
             if set(config) != {'seller_id', 'account_scope', 'generation', 'owner_username', 'approved_package_path'}:
@@ -25,10 +25,10 @@ def approved_context(cleaner, generation: str, *, fixture_admission=None, config
                     or config['generation'] != generation or config['owner_username'] != cleaner.owner_username):
                 raise ValueError('Stage E identity mismatch')
             package = _package(Path(config['approved_package_path']), cleaner.account, generation)
-            evidence = _approved_card_receipts(package, config_path.parent)
+            evidence = _card_evidence_rows(package, config_path.parent)
             source = _approved_card_source(package, config_path.parent)
             for nm_id, row in evidence.items():
-                if nm_id in source and row['current_card_sha256'] != source[nm_id]['card_digest']:
+                if nm_id not in source or row['current_card_sha256'] != source[nm_id]['card_digest']:
                     raise ValueError('card source and evidence disagree')
             approved_profiles = {p.nm_id: p for p in (Profile.parse(row) for row in package['profiles'])}
         except (OSError, ValueError, TypeError, KeyError, CleanerError) as exc:
