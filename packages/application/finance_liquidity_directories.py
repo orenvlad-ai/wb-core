@@ -111,7 +111,7 @@ CREATE TRIGGER finance_v2_snapshot_immutable_delete BEFORE DELETE ON finance_liq
 """
 
 
-def install_v3_extension(conn: sqlite3.Connection, now: str) -> None:
+def install_v3_extension(conn: sqlite3.Connection, now: str, *, capture_legacy_snapshots: bool = False) -> None:
     conn.execute(COUNTERPARTY_SCHEMA)
     for statement in V3_ALTERS:
         conn.execute(statement)
@@ -125,14 +125,22 @@ def install_v3_extension(conn: sqlite3.Connection, now: str) -> None:
     for statement in V3_EXTRA_SCHEMA.splitlines():
         if statement.strip():
             conn.execute(statement)
-    # v2 had no analytic class or counterparty field. Capture only the category
-    # facts actually known at migration, without updating immutable posted rows.
+    if capture_legacy_snapshots:
+        # Only the explicit offline migration may capture v2-known facts; no
+        # posted document row is updated and no history before v2 is inferred.
+        conn.execute(
+            "INSERT INTO finance_liquidity_v2_directory_snapshots"
+            "(document_id,category_name_at_migration,category_direction_at_migration,category_posting_class_at_migration,captured_at) "
+            "SELECT d.document_id,c.name,c.direction,c.posting_class,? "
+            "FROM finance_liquidity_documents d JOIN finance_liquidity_categories c ON c.category_id=d.category_id "
+            "WHERE d.status IN('posted','reversed')",
+            (now,),
+        )
+    # This trigger is installed in the same transaction as the one allowed
+    # migration capture. Fresh v3 stores close insertion before first use.
     conn.execute(
-        "INSERT INTO finance_liquidity_v2_directory_snapshots"
-        "(document_id,category_name_at_migration,category_direction_at_migration,category_posting_class_at_migration,captured_at) "
-        "SELECT d.document_id,c.name,c.direction,c.posting_class,? "
-        "FROM finance_liquidity_documents d JOIN finance_liquidity_categories c ON c.category_id=d.category_id "
-        "WHERE d.status IN('posted','reversed')",
-        (now,),
+        "CREATE TRIGGER finance_v2_snapshot_immutable_insert BEFORE INSERT ON "
+        "finance_liquidity_v2_directory_snapshots BEGIN "
+        "SELECT RAISE(ABORT,'migration snapshot immutable'); END"
     )
     seed_directories(conn, now)

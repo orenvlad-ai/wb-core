@@ -175,7 +175,7 @@ def migrate_finance_cash_store_v2(path: Path, backup_path: Path) -> None:
         current = conn.execute("SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1").fetchone()
         if current is None or current[0] != 2:
             raise FinanceCashError("invalid_migration_source", "Source changed before migration", 409)
-        install_v3_extension(conn, _now())
+        install_v3_extension(conn, _now(), capture_legacy_snapshots=True)
         conn.execute("UPDATE finance_liquidity_schema_meta SET schema_version=3 WHERE singleton=1")
         if conn.execute("PRAGMA foreign_key_check").fetchone():
             raise FinanceCashError("invalid_migration_result", "Migration has foreign-key errors", 500)
@@ -1993,7 +1993,7 @@ class FinanceCashService:
 
     def _document_view(self, document: sqlite3.Row) -> dict[str, Any]:
         result = _row(document) or {}
-        if result.get("category_name_at_migration") is not None:
+        if result.get("category_name_snapshot") is None and result.get("category_name_at_migration") is not None and result.get("status") in {"posted", "reversed"}:
             result["category_name_snapshot"] = result["category_name_at_migration"]
             result["directory_snapshot_origin"] = "v2_migration"
         elif result.get("category_name_snapshot") is not None:

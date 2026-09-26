@@ -142,6 +142,23 @@ def run_checks() -> None:
         assert before["category_name_snapshot"] == after["category_name_snapshot"] == "Прочие расходы"
         assert before["counterparty_name_snapshot"] == after["counterparty_name_snapshot"] == "Тестовый поставщик"
         assert before["analytic_class_snapshot"] == after["analytic_class_snapshot"] == "operating_expense"
+        snapshot_insert = (
+            "INSERT INTO finance_liquidity_v2_directory_snapshots"
+            "(document_id,category_name_at_migration,captured_at) VALUES(?,?,?)"
+        )
+        with sqlite3.connect(path) as conn:
+            try:
+                conn.execute(snapshot_insert, (draft["document_id"], "Подмена имени", WHEN))
+            except sqlite3.IntegrityError as error:
+                assert "migration snapshot immutable" in str(error)
+            else:
+                raise AssertionError("Fresh v3 store accepted a late migration snapshot")
+        forged_path = Path(directory) / "forged-v3.sqlite3"
+        with sqlite3.connect(path) as source, sqlite3.connect(forged_path) as forged:
+            source.backup(forged)
+            forged.execute("DROP TRIGGER finance_v2_snapshot_immutable_insert")
+            forged.execute(snapshot_insert, (draft["document_id"], "Подмена имени", WHEN))
+        assert FinanceCashService(forged_path).get_document(draft["document_id"])["document"]["category_name_snapshot"] == "Прочие расходы"
         assert service.get_account("cash_vladislav")["balance"] == "129.00"
         service.update_directory("accounts", "cash_vladislav", {"action": "rename", "name": "Касса Владислав (новое имя)", "base_revision": 1}, "fixture", *op())
         assert service.get_account("cash_vladislav")["balance"] == "129.00"
@@ -225,6 +242,12 @@ def run_checks() -> None:
         with sqlite3.connect(old) as conn:
             assert conn.execute("SELECT category_name_snapshot FROM finance_liquidity_documents WHERE document_id='legacy-expense'").fetchone()[0] is None
             assert conn.execute("SELECT category_name_at_migration FROM finance_liquidity_v2_directory_snapshots WHERE document_id='legacy-expense'").fetchone()[0] == "Старое имя"
+            try:
+                conn.execute(snapshot_insert, ("legacy-opening", "Поздняя вставка", WHEN))
+            except sqlite3.IntegrityError as error:
+                assert "migration snapshot immutable" in str(error)
+            else:
+                raise AssertionError("Migrated v2 store accepted a late migration snapshot")
         legacy_income = migrated.create_document({"document_type": "income", "target_account_id": "legacy-cash", "category_id": "legacy-income-category", "amount": "3.00", "occurred_at": WHEN}, "fixture", *op())
         migrated.post_document(legacy_income["document_id"], {"base_revision": 1}, "fixture", *op())
         assert migrated.get_document(legacy_income["document_id"])["document"]["analytic_class_snapshot"] == "external_inflow_unclassified"
