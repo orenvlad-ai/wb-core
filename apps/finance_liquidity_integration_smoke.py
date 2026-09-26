@@ -335,6 +335,9 @@ def _navigation_checks() -> None:
             assert signed_owner is not None
             assert "settings" in _user_allowed_sections(signed_owner)
             assert "finance" in _allowed_unified_tabs_for_user(signed_owner)
+            assert "finance" in _allowed_unified_tabs_for_user({"role": WEB_AUTH_ROLE_ADMIN, "allowed_sections": ["settings", "finance"]})
+            with patch.dict(os.environ, {"FINANCE_LIQUIDITY_READ_ENABLED": "0"}, clear=False):
+                assert "finance" not in _allowed_unified_tabs_for_user(signed_owner)
             assert list(signed_owner["allowed_sections"])[-3:] == [
                 "finance",
                 "finance_operate",

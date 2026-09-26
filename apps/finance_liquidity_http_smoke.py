@@ -121,6 +121,8 @@ def main() -> None:
             assert status == 200 and counterparties["data"]["counterparties"] == []  # type: ignore[index]
             status, audit = request(base, "/v1/finance/audit")
             assert status == 200 and len(audit["data"]["events"]) == 26  # type: ignore[index]
+            status, directory_audit = request(base, "/v1/finance/audit?scope=directories")
+            assert status == 200 and len(directory_audit["data"]["events"]) == 26  # type: ignore[index]
             status, viewer_caps = request(base, "/v1/finance/capabilities", actor="viewer")
             viewer_csrf = str(viewer_caps["data"]["csrf_token"])  # type: ignore[index]
             status, denied = request(base, "/v1/finance/audit", actor="viewer")
