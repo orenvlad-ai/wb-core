@@ -285,39 +285,32 @@ def main() -> int:
         )
         export_rows = read_first_sheet_rows(export_bytes)
         assert export_name.endswith(".xlsx")
-        assert "Режим истории" in export_rows[0]
-        assert "Последние N дней" in export_rows[0]
-        assert "Включённые даты" in export_rows[0]
-        assert "Исключённые даты" in export_rows[0]
-        assert "Итоговый demand basis, шт/день" in export_rows[0]
-        assert "Целевой фулфилмент" in export_rows[0]
-        assert "Охват заказов фабрике" in export_rows[0]
-        assert any("custom_period" in [str(cell) for cell in row] for row in export_rows)
-        assert any("false" in [str(cell).lower() for cell in row] for row in export_rows)
+        assert export_rows[0] == [
+            "nmId", "SKU description", "Barcode", "Recommended order quantity"
+        ]
+        assert [row[0] for row in export_rows[1:1 + len(active_nm_ids)]] == [
+            str(item.nm_id) for item in custom.rows
+        ]
+        assert [row[3] for row in export_rows[1:1 + len(active_nm_ids)]] == [
+            item.recommended_order_qty for item in custom.rows
+        ]
+        assert export_rows[-3:] == [
+            ["Total quantity", None, None, custom.summary.total_qty],
+            ["Estimated weight, kg", None, None, custom.summary.estimated_weight],
+            ["Estimated volume, m³", None, None, custom.summary.estimated_volume],
+        ]
         all_export_bytes, _, _ = runtime.load_supply_calculation_registry_export(
             all_active.calculation_id
         )
         with zipfile.ZipFile(io.BytesIO(all_export_bytes), "r") as archive:
             assert archive.testzip() is None
-            assert 'name="Заказ на ФФ"' in archive.read(
+            assert 'name="Recommendation"' in archive.read(
                 "xl/workbook.xml"
             ).decode("utf-8")
         all_export_rows = read_first_sheet_rows(all_export_bytes)
-        assert sum(
-            1
-            for row in all_export_rows[1:]
-            if row and isinstance(row[0], int)
-        ) == len(active_nm_ids)
-        assert any(
-            "Все активные заказы фабрике" in [str(cell) for cell in row]
-            for row in all_export_rows
-        )
-        assert any(
-            row
-            and row[0] == "Учтено активных входящих, шт"
-            and float(row[2]) == 535
-            for row in all_export_rows
-        )
+        assert len(all_export_rows[1:1 + len(active_nm_ids)]) == len(active_nm_ids)
+        assert all_export_rows[-3][3] == all_active.summary.total_qty
+        assert all_record["payload"]["inbound_coverage"]["total_quantity"] == 535
 
     print("fbs_fulfillment_order_supply_smoke: ok")
     return 0

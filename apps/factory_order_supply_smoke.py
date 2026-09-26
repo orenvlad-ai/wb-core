@@ -755,11 +755,13 @@ def main() -> None:
 
         recommendation_bytes, _ = block.download_recommendation()
         recommendation_rows = read_first_sheet_rows(recommendation_bytes)
-        if recommendation_rows[0] != ["nmId", "Комментарий SKU", "Рекомендовано к заказу"]:
-            raise AssertionError("recommendation workbook must use Russian headers")
+        if recommendation_rows[0] != ["nmId", "SKU description", "Barcode", "Recommended order quantity"]:
+            raise AssertionError("recommendation workbook must use the compact English export")
         summary_rows = recommendation_rows[-3:]
-        if summary_rows[0][0] != "Общее количество" or summary_rows[1][0] != "Расчётный вес":
-            raise AssertionError("recommendation workbook summary must stay operator-facing and Russian")
+        if [row[0] for row in summary_rows] != ["Total quantity", "Estimated weight, kg", "Estimated volume, m³"]:
+            raise AssertionError("recommendation workbook must retain quantity, weight and volume totals")
+        if summary_rows[0][3] != result_with_inbound.summary.total_qty:
+            raise AssertionError("recommendation workbook total must equal the saved result")
 
         # Scenario 4: delete inbound files and verify recalculation falls back to zero.
         delete_inbound_factory = block.delete_dataset(DATASET_INBOUND_FACTORY_TO_FF)

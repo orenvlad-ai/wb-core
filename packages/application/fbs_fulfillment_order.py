@@ -15,10 +15,12 @@ from packages.application.factory_order_sales_history import (
     FactoryOrderAuthoritativeSalesHistory,
 )
 from packages.application.official_fbs_stock_read import current_official_fbs_facilities
+from packages.application.factory_order_recommendation_export import (
+    build_factory_order_recommendation,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.application.sales_funnel_history_block import SalesFunnelHistoryBlock
-from packages.application.simple_xlsx import build_single_sheet_workbook_bytes
 from packages.application.supply_calculation_registry import (
     build_fbs_fulfillment_order_calculation_evidence,
 )
@@ -525,89 +527,23 @@ class FbsFulfillmentOrderBlock:
         self,
         result: FbsFulfillmentOrderResult,
     ) -> tuple[bytes, str]:
-        rows: list[list[Any]] = [
-            [
-                "nmId",
-                "SKU",
-                "Рекомендованный заказ, шт",
-                "Национальный спрос, шт/день",
-                "Target, шт",
-                "Остаток FBS по WB, шт",
-                "Активные входящие, шт",
-                "Coverage, шт",
-                "Режим истории",
-                "Последние N дней",
-                "Период с",
-                "Период по",
-                "Календарных дней",
-                "Использовано торговых дней",
-                "Включённые даты",
-                "Исключённые даты",
-                "Baseline продаж, шт/день",
-                "Порог валидного дня, шт",
-                "Спрос до очистки, шт/день",
-                "Итоговый demand basis, шт/день",
-                "WB stock used",
-                "Целевой фулфилмент",
-                "Охват заказов фабрике",
-            ]
-        ]
-        for item in result.rows:
-            rows.append(
-                [
-                    item.nm_id,
-                    item.sku_comment,
-                    item.recommended_order_qty,
-                    round(item.national_daily_demand, 6),
-                    round(item.target_qty, 6),
-                    item.selected_facility_available_fbs,
-                    round(item.remaining_active_inbound_qty, 6),
-                    round(item.coverage_qty, 6),
-                    item.sales_history_mode,
-                    item.sales_avg_period_days,
-                    item.sales_date_from,
-                    item.sales_date_to,
-                    item.sales_calendar_day_count,
-                    item.used_trading_day_count,
-                    ",".join(item.included_sales_dates),
-                    ",".join(item.excluded_sales_dates),
-                    round(item.baseline_daily_sales, 6),
-                    round(item.valid_day_threshold, 6),
-                    round(item.raw_window_daily_demand, 6),
-                    round(item.national_daily_demand, 6),
-                    "false",
-                    f"{result.target_facility_name} ({result.target_facility_id})",
-                    result.inbound_coverage.get("scope_label", ""),
-                ]
-            )
-        rows.extend(
-            [
-                [],
-                ["Общее количество", "", result.summary.total_qty],
-                ["Горизонт, дней", "", result.horizon_days],
-                ["Остатки на складах WB (FBO) учитываются", "", "Нет"],
-                ["Источник остатков", "", "Официальный снимок FBS WB"],
-                ["Дата остатков", "", result.facility_readiness["stock_source"].get("date")],
-                ["Время снимка", "", result.facility_readiness["stock_source"].get("captured_at")],
-                ["Поколение источника", "", result.facility_readiness["stock_source"].get("generation_id")],
-                ["Область спроса", "", NATIONAL_DEMAND_SCOPE],
-                [
-                    "Охват заказов фабрике",
-                    "",
-                    result.inbound_coverage.get("scope_label", ""),
-                ],
-                [
-                    "Учтено активных входящих, шт",
-                    "",
-                    result.inbound_coverage.get("total_quantity", 0),
-                ],
-            ]
-        )
         filename = (
             "sheet-vitrina-v1-fbs-fulfillment-order-"
             f"{result.target_facility_id}-{result.report_date}.xlsx"
         )
-        return build_single_sheet_workbook_bytes("Заказ на ФФ", rows), filename
+        return (
+            build_factory_order_recommendation(
+                rows=(
+                    (item.nm_id, item.sku_comment, item.recommended_order_qty)
+                    for item in result.rows
+                ),
+                total_quantity=result.summary.total_qty,
+                estimated_weight=result.summary.estimated_weight,
+                estimated_volume=result.summary.estimated_volume,
+                nomenclature_items=self.runtime.list_nomenclature_items(active_only=True),
+            ),
+            filename,
+        )
 
 
 def _parse_settings(payload: Mapping[str, Any]) -> FbsFulfillmentOrderSettings:
