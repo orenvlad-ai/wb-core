@@ -471,6 +471,29 @@ class KeywordCleaner:
                 value['item_updates']=dict(value.get('item_updates') or {},**{str(index):update})
             self._event(c,'self_service_batch_stage',value)
 
+    def resume_drift_batch(self,batch_id:str,payload:Mapping,principal:Principal) -> dict:
+        """Explicitly continue the frozen tail after one proven scan-only drift.
+
+        The old terminal event and held target remain immutable. This command
+        changes only the parent cursor; each later pair still receives its own
+        fresh WB/admission checks and deterministic child identity.
+        """
+        def command(c,actor):
+            from packages.application.search_cluster_cleaner_batch import _terminal_drift_resume_plan,_drift_item_update
+            plan=_terminal_drift_resume_plan(c,self,batch_id,actor,
+                'bootstrap_operator' if principal.site_owner else 'configured_owner')
+            if not plan:raise CleanerError('batch_resume_unavailable','Эту группу нельзя безопасно продолжить',409)
+            previous=plan['previous'];index=plan['index']
+            updates={key:value for key,value in previous['item_updates'].items() if int(key)<index}
+            updates[str(index)]=_drift_item_update(plan['job'],plan['proof'])
+            value=dict(previous,state='running',stage='next_target',current_index=index+1,
+                       item_updates=updates,error=None,error_code=None,
+                       resumed_from_index=index,resume_request_id=payload['request_id'])
+            self._event(c,'self_service_batch_resumed',value)
+            return dict(batch_id=batch_id,state='running',current_index=index+1,
+                        review_required_target=plan['proof']['target'])
+        return self._command(principal,f'manual-batches/{batch_id}/resume',payload,command)
+
     def manual_job(self,job_id:str,principal:Principal) -> dict:
         principal.require_read()
         with self.store.read() as c:

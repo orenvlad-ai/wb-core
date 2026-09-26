@@ -8,6 +8,129 @@ from packages.application.search_cluster_cleaner_batch_eligibility import eligib
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal
 
 
+def _drift_only_scan(c, cleaner, job:dict, frozen:dict) -> dict|None:
+    """Prove that this child only observed external drift and never wrote WB.
+
+    A complete scan can still be partial because a previously excluded phrase
+    disappeared from WB minus. Its target hold remains in place. This proof is
+    for advancing an unrelated batch pair, never for clearing that hold.
+    """
+    if (job.get('state')!='failed' or job.get('stage')!='finished' or job.get('can_recheck')
+            or job.get('write_run_id') or job.get('advert_id')!=frozen['advert_id']
+            or job.get('nm_id')!=frozen['nm_id']):return None
+    run_id=job.get('scan_run_id')
+    if not run_id:return None
+    target=f"{frozen['advert_id']}:{frozen['nm_id']}"
+    run=c.execute('SELECT * FROM cleaner_runs WHERE account=? AND run_id=?',(cleaner.key,run_id)).fetchone()
+    if (not run or run['kind']!='scan' or run['trigger']!='manual_exact' or run['state']!='partial'
+            or run['phase']!='finished' or not run['scan_finished_at'] or run['reason']
+            or json.loads(run['targets'])!=[dict(target=target,advert_id=frozen['advert_id'],nm_id=frozen['nm_id'])]):return None
+    rows=c.execute('SELECT target,state,complete,reason FROM cleaner_run_targets WHERE run_id=?',(run_id,)).fetchall()
+    if (len(rows)!=1 or rows[0]['target']!=target or rows[0]['state']!='partial'
+            or rows[0]['complete']!=1 or rows[0]['reason']!='external_state_drift'):return None
+    summary=json.loads(run['summary'])
+    if (summary.get('pairs')!=1 or not summary.get('dry_run')
+            or any(summary.get(field)!=0 for field in ('profile_required','excluded_not_executed',
+                'unresolved_operations','requires_review_operations','rejected_not_executed'))):return None
+    hold=c.execute('SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?',(cleaner.key,target)).fetchone()
+    if not hold or hold['reason']!='external_state_drift':return None
+    if (c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',(cleaner.key,run_id)).fetchone()
+            or c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='manual_apply_prepared' AND json_extract(facts,'$.scan_run_id')=?",(cleaner.key,run_id)).fetchone()):return None
+    events=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='external_state_drift' ORDER BY sequence",
+                     (cleaner.key,run_id)).fetchall()
+    if not events:return None
+    phrases=[];seen=set()
+    for event in events:
+        facts=json.loads(event['facts']);query_identity=facts.get('query_hash')
+        if facts.get('target')!=target or not isinstance(query_identity,str):return None
+        if query_identity in seen:continue  # Both drift detectors may report one exact phrase.
+        seen.add(query_identity)
+        observed=c.execute('''SELECT o.query,o.state,o.query_hash,d.verdict,d.rule_id,d.reason,d.source
+            FROM cleaner_observations o LEFT JOIN cleaner_auto_decisions d ON d.decision_id=o.decision_id
+            WHERE o.account=? AND o.target=? AND o.query_hash=?''',(cleaner.key,target,query_identity)).fetchone()
+        if not observed or observed['state']!='external_state_drift':return None
+        phrases.append(dict(observed))
+    return dict(target=target,queries=phrases,scan_run_id=run_id)
+
+
+def _drift_item_update(job:dict,proof:dict) -> dict:
+    return dict(state='skipped',stage='finished',job_id=job['job_id'],
+                error_code='external_state_drift',
+                error='Список исключений WB изменился; эта пара оставлена на разборе без новой отправки',
+                review_required=True,drift_queries=proof['queries'])
+
+
+def _terminal_drift_resume_plan(c,cleaner,batch_id:str,actor:str,actor_authority:str|None=None) -> dict|None:
+    """Read-only CAS precondition for resuming one exact terminal batch tail."""
+    request=c.execute("SELECT actor FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-batches'",
+                      (cleaner.key,batch_id)).fetchone()
+    if not request or request['actor']!=actor:return None
+    rows=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence",
+                   (cleaner.key,batch_id)).fetchall()
+    if not rows:return None
+    original=json.loads(rows[0]['facts']);latest=json.loads(rows[-1]['facts'])
+    items=original.get('items');updates=latest.get('item_updates')
+    if (not isinstance(items,list) or not items or not isinstance(updates,dict)
+            or latest.get('state') not in {'partial','failed'} or latest.get('stage')!='finished'
+            or latest.get('current_index')!=len(items)):return None
+    newest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",
+                     (cleaner.key,)).fetchone()
+    settings=cleaner._settings(c)
+    if (not newest or json.loads(newest['facts']).get('batch_id')!=batch_id
+            or original.get('actor')!=actor or original.get('account_key')!=cleaner.key
+            or (actor_authority is not None and original.get('actor_authority','configured_owner')!=actor_authority)
+            or original.get('generation')!=settings['generation'] or settings['enabled'] or not settings['baseline_ready']
+            or c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running')",(cleaner.key,)).fetchone()):return None
+    failed=[index for index in range(len(items)) if updates.get(str(index),{}).get('state')=='failed']
+    if len(failed)!=1:return None
+    index=failed[0]
+    if (any(updates.get(str(i),{}).get('state') not in {'complete','no_change','skipped'}
+            or updates[str(i)].get('error_code')=='not_started_after_failure' for i in range(index))
+            or any(updates.get(str(i),{})!={'state':'skipped','stage':'not_started',
+                     'error_code':'not_started_after_failure','error':'Предыдущая пара не завершилась'}
+                   for i in range(index+1,len(items)))):return None
+    latest_job=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence DESC LIMIT 1",
+                         (cleaner.key,)).fetchone()
+    if not latest_job or json.loads(latest_job['facts']).get('job_id')!=batch_child_id(batch_id,index):return None
+    for earlier in range(index):
+        earlier_id=batch_child_id(batch_id,earlier)
+        prior=c.execute("SELECT outcome FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-clean'",
+                        (cleaner.key,actor,earlier_id)).fetchone()
+        update=updates[str(earlier)]
+        if update['state']=='skipped':
+            if prior:return None
+            continue
+        if not prior:return None
+        outcome=json.loads(prior['outcome'])
+        if (outcome.get('batch_id')!=batch_id or outcome.get('batch_index')!=earlier
+                or outcome.get('advert_id')!=items[earlier]['advert_id']
+                or outcome.get('nm_id')!=items[earlier]['nm_id']):return None
+        prior_event=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",
+                              (cleaner.key,earlier_id)).fetchone()
+        if not prior_event:return None
+        prior_facts=json.loads(prior_event['facts'])
+        if prior_facts.get('state')!=update['state'] or prior_facts.get('can_recheck'):return None
+    job_id=batch_child_id(batch_id,index)
+    child_request=c.execute("SELECT outcome FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-clean'",
+                            (cleaner.key,actor,job_id)).fetchone()
+    if not child_request:return None
+    outcome=json.loads(child_request['outcome'])
+    if (outcome.get('batch_id')!=batch_id or outcome.get('batch_index')!=index
+            or outcome.get('advert_id')!=items[index]['advert_id'] or outcome.get('nm_id')!=items[index]['nm_id']):return None
+    child_event=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",
+                          (cleaner.key,job_id)).fetchone()
+    if not child_event:return None
+    job=dict(outcome,**json.loads(child_event['facts']))
+    if job.get('job_id')!=job_id or job.get('batch_id')!=batch_id or job.get('batch_index')!=index:return None
+    proof=_drift_only_scan(c,cleaner,job,items[index])
+    if not proof:return None
+    for later in range(index+1,len(items)):
+        child_id=batch_child_id(batch_id,later)
+        if c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",
+                     (cleaner.key,child_id)).fetchone():return None
+    return dict(index=index,job=job,proof=proof,previous=latest)
+
+
 def _child(cleaner, owner, batch_id: str, index: int, frozen:dict):
     job_id=batch_child_id(batch_id,index)
     with cleaner.store.read() as c:
@@ -35,21 +158,26 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
             if exc.code!='batch_child_collision':raise
             job=None
             update=dict(update,state='failed',stage='finished',error_code=exc.code,error=str(exc))
+        proof=None
+        if job and job['state']=='failed':
+            with cleaner.store.read() as c:proof=_drift_only_scan(c,cleaner,job,frozen)
         state=update.get('state') or (job['state'] if job else 'queued')
         row=dict(index=index,**frozen,selected_status=frozen['status'],state=state,
                  stage=update.get('stage') or (job.get('stage') if job else 'queued'),
                  job_id=job.get('job_id') if job else None,
                  write_run_id=job.get('write_run_id') if job else None,
-                 error=update.get('error') or (job.get('error') if job else None),
-                 error_code=update.get('error_code') or (job.get('error_code') if job else None),
+                 error=(_drift_item_update(job,proof)['error'] if proof else update.get('error') or (job.get('error') if job else None)),
+                 error_code=('external_state_drift' if proof else update.get('error_code') or (job.get('error_code') if job else None)),
                  result=update.get('result') or (job.get('result') if job else None),
                  can_recheck=bool(job and job.get('can_recheck')),
+                 review_required=bool(update.get('review_required') or proof),
+                 drift_queries=update.get('drift_queries') or (proof['queries'] if proof else []),
                  new_checked=None,confirmed_excluded=None,allowed=None,review_count=None,
                  pending_count=None,not_sent_count=None,delivery_state='unknown',already_excluded=None)
         if job:
             with cleaner.store.read() as c:
                 scan=c.execute("SELECT state,summary FROM cleaner_runs WHERE account=? AND run_id=?",(cleaner.key,job['scan_run_id'])).fetchone()
-            if scan and scan['state']=='complete':
+            if scan and (scan['state']=='complete' or proof):
                 counts=json.loads(scan['summary'])
                 row['new_checked']=counts.get('new_checked')
                 row['allowed']=counts.get('allow')
@@ -84,14 +212,25 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
                 row['not_sent_count']=0
         items.append(row)
     done={'complete','no_change','partial','failed','skipped'}
-    counts={name:sum(item['state']==name for item in items) for name in done}
+    not_started=lambda item:item['stage']=='not_started' or item['error_code']=='not_started_after_failure'
+    counts={name:sum(item['state']==name and not not_started(item) and not item['review_required'] for item in items)
+            for name in done}
+    not_started_count=sum(not_started(item) for item in items)
+    try:
+        principal.require_owner(cleaner.owner_username)
+        with cleaner.store.read() as c:resume=_terminal_drift_resume_plan(c,cleaner,batch_id,principal.username.strip().casefold(),
+            'bootstrap_operator' if principal.site_owner else 'configured_owner')
+    except CleanerError:resume=None
     current_index=saved['current_index']
     current=items[current_index] if type(current_index) is int and 0<=current_index<len(items) and saved['state'] not in BATCH_TERMINAL_STATES else None
     return dict(batch_id=batch_id,state=saved['state'],stage=saved['stage'],
                 selected_categories=saved['selected_categories'],selected_count=len(items),
-                done_count=sum(item['state'] in done and not item['can_recheck'] for item in items),confirmed_count=counts['complete'],
+                done_count=sum(item['state'] in done and not item['can_recheck'] and not not_started(item) for item in items),confirmed_count=counts['complete'],
+                completed_count=counts['complete']+counts['no_change'],
                 no_change_count=counts['no_change'],partial_count=counts['partial'],failed_count=counts['failed'],
-                skipped_count=counts['skipped'],current_index=current_index,
+                skipped_count=counts['skipped'],not_started_count=not_started_count,
+                held_count=sum(item['review_required'] for item in items),
+                can_resume=bool(resume),resume_index=resume['index'] if resume else None,current_index=current_index,
                 current_target={k:current[k] for k in ('advert_id','nm_id','campaign_name','product_title')} if current else None,
                 created_at=saved['created_at'],updated_at=saved['updated_at'],
                 error=saved['error'],error_code=saved['error_code'],items=items)
@@ -196,6 +335,11 @@ class BatchCleanerCoordinator:
                                                  item_update=(index,dict(state=child['state'],stage='finished',job_id=child['job_id'])))
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if child['state'] in {'failed','partial'}:
+                with self.cleaner.store.read() as c:drift=_drift_only_scan(c,self.cleaner,child,item)
+                if drift:
+                    self.cleaner.record_manual_batch(batch['batch_id'],state='running',stage='next_target',current_index=index+1,
+                        error=None,error_code=None,item_update=(index,_drift_item_update(child,drift)))
+                    return batch_status(self.cleaner,batch['batch_id'],self.owner)
                 self._stop(batch,index,code=child.get('error_code') or 'child_failed',message=child.get('error') or 'Проверка пары не завершилась')
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if batch['state']!='running' or batch['stage']!=child['stage']:

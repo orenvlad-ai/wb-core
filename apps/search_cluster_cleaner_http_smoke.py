@@ -43,6 +43,11 @@ def run():
         check('reader_read_allowed',f.request('/summary',opener=reader)[0]==200)
         check('reader_direct_mutation_denied',f.request('/settings',command,opener=reader)[0]==403)
         check('admin_not_owner_denied',f.request('/settings',command,opener=admin)[0]==403)
+        resume_path='/manual-batches/nonexistent-batch/resume'
+        resume_command=dict(request_id='http-drift-resume-0001')
+        check('drift_resume_owner_only',f.request(resume_path,resume_command,opener=reader)[0]==403)
+        check('drift_resume_same_origin_csrf',f.request(resume_path,resume_command,headers={'X-WB-Keyword-Cleaner-CSRF':None})[0]==403)
+        check('drift_resume_exact_terminal_proof_required',f.request(resume_path,resume_command)[0]==409)
         check('ads_permission_required',f.request('/summary',opener=noads)[0]==403)
         cases=[{'Origin':None},{'Origin':'https://foreign.example'},{'Sec-Fetch-Site':'cross-site'},{'Sec-Fetch-Site':'same-site'},{'X-WB-Keyword-Cleaner-CSRF':None},{'Content-Type':'text/plain'},{'Origin':'https://spoof.example','X-Forwarded-Host':'spoof.example','X-Forwarded-Proto':'https','Host':'spoof.example'}]
         for i,headers in enumerate(cases):
