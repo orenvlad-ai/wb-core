@@ -37,8 +37,13 @@ def run():
         check('D_late_manual_history',any(e['kind']=='late_confirmation' and e['facts']['confirmed_manual']==1 for e in history))
     with running_fixture() as f:
         s=f.request('/summary')[1]
-        check('ordinary_saved_summary',s['pending_count']==0 and s['last_scan']['state']=='complete' and
-              s['last_scan']['summary']['controversial']==3)
+        # The fixture deliberately persists three questions from the old
+        # manual-review policy *after* its completed scan. Current ambiguous
+        # decisions are auto-allowed and journaled as controversial; only a
+        # subsequent fresh scan resolves those historical review rows.
+        check('ordinary_saved_summary_with_legacy_questions',s['pending_count']==3 and
+              len(f.request('/reviews')[1]['items'])==3 and s['last_scan']['state']=='complete' and
+              s['last_scan']['summary']['review']==0 and s['last_scan']['summary']['controversial']==3)
         check('private_no_store',f.request('/summary')[2].get('Cache-Control')=='private, no-store')
         count=f.count('cleaner_requests');reader=f.login('reader');admin=f.login('admin');noads=f.login('noads')
         command=dict(request_id='http-read-only-user',expected_revision=s['settings']['revision'],schedule_time='08:00')
