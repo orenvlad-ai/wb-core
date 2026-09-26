@@ -32,12 +32,14 @@
       <section class="notice notice-error is-hidden" data-error role="alert"></section>
 
       <nav class="action-bar" aria-label="Действия со счетами">
-        <button class="button primary" type="button" data-action="new-cash">Новая касса</button>
         <button class="button" type="button" data-action="opening">Начальный остаток</button>
+        <button class="button" type="button" data-action="common-opening">Общий старт трёх касс</button>
+        <button class="button primary" type="button" data-action="funding">Пополнить кассу</button>
         <button class="button" type="button" data-action="income">Поступление</button>
         <button class="button" type="button" data-action="expense">Расход</button>
         <button class="button" type="button" data-action="transfer">Перевод</button>
         <button class="button" type="button" data-action="reconcile">Сверка</button>
+        <a class="button quiet" href="#finance-settings" data-settings-link>Настройки</a>
       </nav>
 
       <section class="overview" aria-labelledby="accounts-title">
@@ -76,6 +78,15 @@
           <div data-attention></div>
           <p class="side-note">Сверка фиксирует расхождение, но сама не меняет остаток.</p>
         </aside>
+      </section>
+      <section class="panel finance-settings is-hidden" id="finance-settings" data-settings aria-labelledby="settings-title">
+        <div class="section-heading"><div><h2 id="settings-title">Настройки</h2><p>Кассы, статьи расходов и контрагенты.</p></div></div>
+        <div class="settings-grid">
+          <section><div class="section-heading"><h3>Кассы</h3><button class="button" type="button" data-action="new-cash">Добавить кассу</button></div><div data-settings-accounts></div></section>
+          <section><div class="section-heading"><h3>Статьи расходов</h3><button class="button" type="button" data-action="new-category">Добавить статью</button></div><div data-settings-categories></div></section>
+          <section><div class="section-heading"><h3>Контрагенты</h3><button class="button" type="button" data-action="new-counterparty">Добавить контрагента</button></div><div data-settings-counterparties></div></section>
+        </div>
+        <section class="settings-audit" aria-labelledby="settings-audit-title"><div class="section-heading"><h3 id="settings-audit-title">История изменений</h3></div><div data-settings-audit></div></section>
       </section>
     </main>
 
