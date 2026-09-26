@@ -442,7 +442,21 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     if action=='apply':
         outer=manual_preview()
         if outer['prestate_sha256']!=str(envelope.get('expected_prestate') or '') or outer['candidate_sha256']!=str(envelope.get('expected_candidate') or ''):_fail('manual_preview_drift')
-        worker.execute(run_id=request['run_id'],targets=targets,expected_prestate=outer['_worker_prestate_sha256'],expected_candidate=outer['_worker_candidate_sha256'],production_operation_id=operation_id,reviewed_candidate=outer['candidate_sha256'])
+        try:
+            worker.execute(run_id=request['run_id'],targets=targets,expected_prestate=outer['_worker_prestate_sha256'],expected_candidate=outer['_worker_candidate_sha256'],production_operation_id=operation_id,reviewed_candidate=outer['candidate_sha256'])
+        except Exception as exc:
+            try:
+                service.record_manual_stage_failure(run_id=request['run_id'],operation_id=operation_id,
+                    code=exc.code if isinstance(exc,CleanerError) else type(exc).__name__,error_type=type(exc).__name__)
+            except Exception as journal_exc:
+                # A contended diagnostic transaction cannot replace the
+                # original guarded failure. Keep a bounded, secret-free
+                # fallback in the service log instead of silently dropping it.
+                safe_code=re.sub(r'[^A-Za-z0-9_.:-]','_',str(exc.code if isinstance(exc,CleanerError) else type(exc).__name__))[:80]
+                print(json.dumps(dict(event='stage_e_manual_failure_journal_unavailable',
+                    failed_stage='manual_write',code=safe_code,
+                    error_type=type(exc).__name__,journal_type=type(journal_exc).__name__),sort_keys=True),file=sys.stderr)
+            raise
         return dict(operation_id=operation_id,disposition='submitted')
     # Readback is the only allowed replay path after an ambiguous submit or a
     # consumed exact run. It cannot claim a run or send set-minus.

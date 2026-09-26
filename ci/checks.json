@@ -82,6 +82,7 @@
         ["python3", "apps/search_cluster_cleaner_http_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_stage_e_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_self_service_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_rules_identity_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_sidecar_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_release_probe_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_browser_smoke.py", "--output", "/tmp/wbc-cleaner-browser-ci"]

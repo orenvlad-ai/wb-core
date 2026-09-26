@@ -186,17 +186,40 @@ class AdmissionGuard:
                         or row['target'] not in declared or row['state'] not in {'prepared','cancelled_before_send'} for row in operations)
                         or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
                     raise CleanerError('manual_dispatch_uncertain','Отправка требует чтения результата WB',409)
-                recovery=[json.loads(row[0]) for row in c.execute(
-                    "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
+                recovery=[(row['sequence'],json.loads(row['facts'])) for row in c.execute(
+                    "SELECT sequence,facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
                     (account.key,run_id))]
-                matching_recovery=[event for event in recovery if event.get('production_operation_id')==production_operation_id]
-                recovered_ids={op for event in matching_recovery
+                matching_recovery=[(sequence,event) for sequence,event in recovery
+                                   if event.get('production_operation_id')==production_operation_id]
+                recovered_ids={op for _,event in matching_recovery
                                for op in event.get('cancelled_operations',[])}
-                if any(row['state']=='cancelled_before_send' and row['operation_id'] not in recovered_ids for row in operations):
+                latest_recovery=max((sequence for sequence,_ in matching_recovery),default=0)
+                newly_cancelled=[]
+                for row in operations:
+                    if row['state']!='cancelled_before_send' or row['operation_id'] in recovered_ids:continue
+                    # A later failed fresh preflight can cancel a replacement
+                    # operation. Accept it only when both local preparation and
+                    # cancellation were durably recorded after the prior exact
+                    # recovery. The seal/readback/dispatch checks above still
+                    # apply to every operation in this run.
+                    events=c.execute("SELECT sequence,kind FROM cleaner_events WHERE account=? AND run_id=? AND operation_id=? AND kind IN('candidate_prepared','candidate_cancelled') ORDER BY sequence",
+                                     (account.key,run_id,row['operation_id'])).fetchall()
+                    prepared=next((event['sequence'] for event in events if event['kind']=='candidate_prepared' and event['sequence']>latest_recovery),None)
+                    cancelled=next((event['sequence'] for event in events if event['kind']=='candidate_cancelled' and prepared and event['sequence']>prepared),None)
+                    if not matching_recovery or not prepared or not cancelled:
+                        raise CleanerError('manual_recovery_scope_mismatch','История подготовленной записи не подтверждена',409)
+                    newly_cancelled.append(row['operation_id'])
+                certified_ids=recovered_ids|set(newly_cancelled)
+                if any(row['state']=='cancelled_before_send' and row['operation_id'] not in certified_ids for row in operations):
                     raise CleanerError('manual_recovery_scope_mismatch','История подготовленной записи не подтверждена',409)
                 if any(c.execute("SELECT 1 FROM cleaner_write_items WHERE operation_id=? AND (state!='cancelled_before_send' OR confirmed_at IS NOT NULL OR registry_item_id IS NOT NULL)",
-                                 (row['operation_id'],)).fetchone() for row in operations if row['state']=='cancelled_before_send'):
+                                 (row['operation_id'],)).fetchone() for row in operations if row['state']=='cancelled_before_send' and row['operation_id'] in recovered_ids):
                     raise CleanerError('manual_recovery_scope_mismatch','История фраз подготовленной записи не подтверждена',409)
+                if any(c.execute("SELECT 1 FROM cleaner_write_items WHERE operation_id=? AND (state NOT IN('prepared','cancelled_before_send') OR confirmed_at IS NOT NULL OR registry_item_id IS NOT NULL)",
+                                 (operation_id,)).fetchone() for operation_id in newly_cancelled):
+                    raise CleanerError('manual_recovery_scope_mismatch','История фраз новой подготовки не подтверждена',409)
+                for operation_id in newly_cancelled:
+                    c.execute("UPDATE cleaner_write_items SET state='cancelled_before_send' WHERE operation_id=? AND state='prepared'",(operation_id,))
                 prepared=[row for row in operations if row['state']=='prepared']
                 if (run['state']=='queued' and matching_recovery and not prepared and not run['worker_token']
                         and not run['started_at'] and not run['lease_expires_at'] and run['worker_generation'] is None):
@@ -226,7 +249,8 @@ class AdmissionGuard:
                               (run_id,))
                     c.execute('UPDATE cleaner_settings SET restore_hold=1,transport_enabled=0 WHERE account=?',(account.key,))
                     cleaner._event(c,'stage_e_unsent_recovered',dict(production_operation_id=production_operation_id,
-                                  cancelled_operations=[row['operation_id'] for row in prepared],kind=run['kind']),run_id=run_id)
+                                  cancelled_operations=[row['operation_id'] for row in prepared]+newly_cancelled,
+                                  kind=run['kind']),run_id=run_id)
                 else:
                     raise CleanerError('manual_recovery_not_ready','Право исполнения ещё не истекло',409)
             if capability or state.get('owner'):
