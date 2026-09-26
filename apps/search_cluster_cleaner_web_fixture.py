@@ -146,7 +146,7 @@ class Fixture:
 
 
 @contextmanager
-def running_fixture(mode='normal', port=0):
+def running_fixture(mode='normal', port=0, *, cleaner_owner_username='owner'):
     env = {key: os.environ[key] for key in ('PATH','HOME','TMPDIR','LANG','PYTHONPATH','PLAYWRIGHT_BROWSERS_PATH') if key in os.environ}
     env.update(WB_CORE_WEB_AUTH_REQUIRED='1', WB_CORE_WEB_AUTH_USERNAME='owner', WB_CORE_WEB_AUTH_PASSWORD_HASH=_password_hash(PASSWORD), WB_CORE_WEB_AUTH_SESSION_SECRET='synthetic-stage-c-auth-secret')
     original_urlopen = urllib.request.urlopen
@@ -160,6 +160,7 @@ def running_fixture(mode='normal', port=0):
         runtime = _seed_runtime(fixture.runtime_dir)
         fixture.cleaner = seed_cleaner(fixture.runtime_dir, mode)
         if mode=='confirmed':seed_confirmed(fixture.cleaner)
+        fixture.cleaner.owner_username=cleaner_owner_username
         fixture.web = CleanerWeb(fixture.cleaner, generation=GENERATION,
             approved_targets=[dict(advert_id=10101,nm_id=101,state='verified',campaign_name='Тестовая кампания 10101'),
                               dict(advert_id=10102,nm_id=102,state='verified',campaign_name='Тестовая кампания 10102')],

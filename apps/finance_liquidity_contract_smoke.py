@@ -129,7 +129,7 @@ def main() -> None:
     )
     if len(bootstrap) != 1 or bootstrap[0]["role"] != WEB_AUTH_ROLE_ADMIN:
         raise AssertionError(bootstrap)
-    if FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES.intersection(
+    if not FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES.issubset(
         bootstrap[0]["allowed_sections"]
     ):
         raise AssertionError(bootstrap)
@@ -176,6 +176,8 @@ def main() -> None:
         ):
             raise AssertionError("explicit finance_admin must grant its hierarchy")
 
+    from apps.registry_upload_http_entrypoint_owner_acl_smoke import main as owner_acl_smoke
+    owner_acl_smoke()
     print("finance_liquidity_contract_smoke: ok")
 
 

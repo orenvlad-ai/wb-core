@@ -24,12 +24,18 @@ class CleanerWeb:
         self.generation = generation
         self.origin = origin
         self._fixture_approved_targets = approved_targets
+        if approved_targets is not None and batch_catalog_targets is None:
+            # Existing synthetic fixtures supply exact approved pairs but no
+            # network catalogue. Production always reads official WB detail.
+            batch_catalog_targets=[Target(row['advert_id'],row['nm_id'],name=str(row.get('campaign_name') or ''),contract_verified=True)
+                                   for row in approved_targets if row.get('state')=='verified']
         self._catalog_lock=threading.Lock()
         self._catalog_names={}
         self._catalog_error=None
         self._catalog_loading=False
         self._catalog_at=0.0
         self._batch_catalog_targets=batch_catalog_targets
+        self._batch_catalog_unknown=False
         self._batch_catalog_error=None
         self._batch_catalog_loading=False
         self._batch_catalog_at=time.monotonic() if batch_catalog_targets is not None else 0.0
@@ -89,7 +95,7 @@ class CleanerWeb:
         principal.require_read()
         cleaner = self.cleaner
         owner = bool(cleaner and cleaner.owner_username.strip())
-        can_edit = owner and principal.username.strip().casefold() == cleaner.owner_username.strip().casefold()
+        can_edit = owner and (principal.site_owner or principal.username.strip().casefold() == cleaner.owner_username.strip().casefold())
         generation_matches = False
         if cleaner:
             with cleaner.store.read() as c:
@@ -151,49 +157,13 @@ class CleanerWeb:
             return result
 
     def targets(self, principal: Principal, *, refresh: bool = False) -> dict:
-        """Present only exact pairs from the server-owned manual admission.
-
-        This is a label projection. Stage E independently verifies the private
-        package, current card, campaign, SKU and held state at execution time.
-        """
-        principal.require_read()
-        cleaner = self.require_service()
-        if self._fixture_approved_targets is not None:
-            admitted = self._fixture_approved_targets
-        else:
-            from apps.search_cluster_cleaner_stage_e import _package, _admitted_targets
-            try:
-                config = json.loads(STAGE_E_CONFIG_PATH.read_text(encoding="utf-8"))
-                if set(config) != {'seller_id','account_scope','generation','owner_username','approved_package_path'}:
-                    raise ValueError('unexpected Stage E config')
-                if (config['seller_id'] != cleaner.account.seller_id or config['account_scope'] != cleaner.account.account_scope
-                        or config['generation'] != self.generation or config['owner_username'] != cleaner.owner_username):
-                    raise ValueError('Stage E identity mismatch')
-                package_path = Path(config['approved_package_path'])
-                package = _package(package_path, cleaner.account, self.generation)
-                admitted = package['manual_admission']
-                _admitted_targets(package, [Target(row['advert_id'],row['nm_id'],contract_verified=True) for row in admitted], STAGE_E_CONFIG_PATH.parent)
-            except (OSError, ValueError, KeyError, TypeError, CleanerError):
-                return dict(items=[], error='manual_admission_unavailable')
-        ids=sorted({row['advert_id'] for row in admitted if row.get('state')=='verified'})
-        names,catalog_error,loading=self._campaign_catalog(ids,refresh=refresh)
-        result=[]
-        with cleaner.store.read() as c:
-            for row in admitted:
-                try:
-                    target=Target(row['advert_id'],row['nm_id'],contract_verified=True)
-                except (KeyError, TypeError, ValueError, CleanerError):
-                    continue
-                if row.get('state')!='verified':continue
-                profile=cleaner._profile(c,target.nm_id)
-                queued=c.execute('SELECT metadata FROM cleaner_scan_queue WHERE account=? AND target=?',(cleaner.key,target.key)).fetchone()
-                metadata=json.loads(queued['metadata']) if queued else {}
-                held=c.execute('SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?',(cleaner.key,target.key)).fetchone()
-                catalog=names.get(target.key,{})
-                result.append(dict(advert_id=target.advert_id,nm_id=target.nm_id,campaign_name=str(catalog.get('name') or metadata.get('name') or row.get('campaign_name') or ''),
-                                   product_title=profile_title(profile,target.nm_id),profile_ready=bool(profile),
-                                   held_reason=held['reason'] if held else catalog.get('unsupported_reason')))
-        return dict(items=sorted(result,key=lambda row:(row['campaign_name'].casefold(),row['advert_id'],row['nm_id'])),error=catalog_error,loading=loading)
+        """Reuse the exact CPM catalog proof for individual and batch UI."""
+        projection=self.batch_eligibility(principal,refresh=refresh)
+        items=[dict(advert_id=row['advert_id'],nm_id=row['nm_id'],campaign_name=row['campaign_name'],
+                    product_title=row['product_title'],profile_ready=row['profile_ready'],
+                    held_reason=row['reason'],eligible=row['eligible'],status=row['status'])
+               for row in projection['items']]
+        return dict(items=items,error=projection['error'],loading=projection['loading'])
 
     def start_manual_clean(self, payload: dict, principal: Principal) -> dict:
         cleaner=self.require_mutation(principal)
@@ -228,11 +198,13 @@ class CleanerWeb:
             eligibility_rows(self.require_service(),self.generation,targets,fixture_admission=self._fixture_approved_targets)
             with self._catalog_lock:
                 self._batch_catalog_targets=targets
+                self._batch_catalog_unknown=bool(errors)
                 self._batch_catalog_error=None
                 self._batch_catalog_at=time.monotonic()
         except Exception:
             with self._catalog_lock:
                 self._batch_catalog_targets=None
+                self._batch_catalog_unknown=True
                 self._batch_catalog_error='campaign_catalog_unavailable'
                 self._batch_catalog_at=time.monotonic()
         finally:
@@ -249,15 +221,26 @@ class CleanerWeb:
                 self._batch_catalog_targets=None
                 threading.Thread(target=self._refresh_batch_catalog,daemon=True,name='cleaner-batch-catalog').start()
             targets=self._batch_catalog_targets
+            unknown=self._batch_catalog_unknown
             loading=self._batch_catalog_loading
             error=self._batch_catalog_error
+        empty_counts=dict(total=None,eligible=None,selectable_active=None,selectable_paused=None,
+                          profile_required=None,ineligible=None,unknown=None)
         if loading or targets is None:
-            return dict(items=[],loading=loading,error=None if loading else error or 'campaign_catalog_unavailable',categories=category_contract())
+            return dict(items=[],counts=empty_counts,loading=loading,error=None if loading else error or 'campaign_catalog_unavailable',categories=category_contract())
         try:
             rows=eligibility_rows(self.require_service(),self.generation,targets,fixture_admission=self._fixture_approved_targets)
         except CleanerError:
-            return dict(items=[],loading=False,error='manual_admission_unavailable',categories=category_contract())
-        return dict(items=rows,loading=False,error=None,categories=category_contract())
+            return dict(items=[],counts=empty_counts,loading=False,error='manual_admission_unavailable',categories=category_contract())
+        rows.sort(key=lambda row:({'active':0,'paused':1,'completed':2,'archive':3}.get(row['status'],4),
+                                  row['campaign_name'].casefold(),row['advert_id'],row['nm_id']))
+        counts=dict(total=len(rows),eligible=sum(row['eligible'] for row in rows),
+                    selectable_active=sum(row['eligible'] and row['status']=='active' for row in rows),
+                    selectable_paused=sum(row['eligible'] and row['status']=='paused' for row in rows),
+                    profile_required=sum(row['reason']=='profile_required' for row in rows),
+                    ineligible=sum(not row['eligible'] and row['reason']!='profile_required' for row in rows),
+                    unknown=None if unknown else 0)
+        return dict(items=rows,counts=counts,loading=False,error=None,categories=category_contract())
 
     def start_manual_batch(self,payload:dict,principal:Principal) -> dict:
         cleaner=self.require_mutation(principal)
@@ -272,12 +255,24 @@ class CleanerWeb:
         from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
         try:
             targets=payload.get('targets')
-            if not isinstance(targets,list) or not targets or len(targets)>100:
+            if not isinstance(targets,list) or not targets:
                 raise CleanerError('batch_selection_invalid','Выберите точные пары кампании и товара',422)
-            ids=sorted({row['advert_id'] for row in targets if isinstance(row,dict) and type(row.get('advert_id')) is int})
-            if not ids or len(ids)>100:raise CleanerError('batch_selection_invalid','Выберите точные пары кампании и товара',422)
+            identities=[]
+            for row in targets:
+                if (not isinstance(row,dict) or set(row)!={'advert_id','nm_id'}
+                        or type(row['advert_id']) is not int or type(row['nm_id']) is not int
+                        or row['advert_id']<=0 or row['nm_id']<=0):
+                    raise CleanerError('batch_selection_invalid','Некорректная пара кампании и товара',422)
+                identities.append((row['advert_id'],row['nm_id']))
+            if len(identities)!=len(set(identities)):
+                raise CleanerError('batch_selection_duplicate','Пара выбрана повторно',422)
+            ids=sorted({advert_id for advert_id,_ in identities})
             source=CleanerWbSource.from_env(cleaner.account)
             deadline=source.monotonic()+120
+            statuses=source.count_statuses(deadline)
+            allowed_ids={advert_id for advert_id,status in statuses.items() if status in {9,11}}
+            if not set(ids)<=allowed_ids:
+                raise CleanerError('batch_target_ineligible','Выбранной кампании нет среди действующих или приостановленных WB',409)
             catalog=[]
             for offset in range(0,len(ids),50):catalog.extend(source._adverts(ids[offset:offset+50],deadline))
             snapshot=eligibility_rows(cleaner,self.generation,catalog,fixture_admission=self._fixture_approved_targets)

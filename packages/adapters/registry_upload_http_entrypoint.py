@@ -8849,10 +8849,7 @@ def _env_principal_user_records(config: Mapping[str, Any]) -> list[dict[str, Any
                 "username": operator_username,
                 "display_name": str(operator.get("display_name") or operator_username),
                 "role": WEB_AUTH_ROLE_ADMIN,
-                "allowed_sections": list(
-                    operator.get("allowed_sections")
-                    or _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
-                ),
+                "allowed_sections": list(WEB_AUTH_SECTION_IDS),
                 "manage_users": True,
                 "is_active": True,
                 "created_at": "",
@@ -9215,6 +9212,7 @@ def _match_web_auth_principal(
         return {
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
+            "trusted_bootstrap_owner": True,
             "display_name": str(operator.get("display_name") or username),
             "allowed_sections": list(
                 operator.get("allowed_sections")
@@ -9286,6 +9284,7 @@ def _authenticated_web_user(handler: BaseHTTPRequestHandler, config: Mapping[str
         return {
             "username": str(operator.get("username") or username),
             "role": WEB_AUTH_ROLE_ADMIN,
+            "trusted_bootstrap_owner": True,
             "display_name": str(payload.get("d") or operator.get("display_name") or username),
             "allowed_sections": list(
                 operator.get("allowed_sections")
@@ -9446,6 +9445,8 @@ def _role_has_supply_operator_access(role: str) -> bool:
 
 
 def _user_allowed_sections(user: Mapping[str, Any]) -> list[str]:
+    if user.get("trusted_bootstrap_owner") is True and str(user.get("role") or "").strip() == WEB_AUTH_ROLE_ADMIN:
+        return list(WEB_AUTH_SECTION_IDS)
     return _normalize_public_allowed_sections(user.get("allowed_sections"), role=str(user.get("role") or ""))
 
 
