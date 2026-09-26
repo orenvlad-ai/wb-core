@@ -95,7 +95,7 @@ def main() -> int:
             assert html_status == 200
             for token in (
                 "Заказ на фулфилмент (FBS)",
-                "Остатки WB не учитываются",
+                "Остатки на складах WB (FBO) не учитываются.",
                 "Последние N дней",
                 "Произвольный период",
                 "Целевой фулфилмент",
@@ -194,15 +194,11 @@ def main() -> int:
             assert export_code == 200
             assert "spreadsheetml.sheet" in export_headers.get("Content-Type", "")
             export_rows = read_first_sheet_rows(export_body)
-            assert "WB stock used" in export_rows[0]
-            assert "Включённые даты" in export_rows[0]
-            assert "Итоговый demand basis, шт/день" in export_rows[0]
-            assert "Целевой фулфилмент" in export_rows[0]
-            assert "Охват заказов фабрике" in export_rows[0]
-            assert any(
-                "Все активные заказы фабрике" in [str(cell) for cell in row]
-                for row in export_rows
-            )
+            assert export_rows[0] == [
+                "nmId", "SKU description", "Barcode", "Recommended order quantity"
+            ]
+            assert export_rows[-3][3] == all_result["summary"]["total_qty"]
+            assert all_result["inbound_coverage"]["scope"] == "all_active"
 
             legacy_code, legacy = _get_json(base + DEFAULT_FACTORY_ORDER_STATUS_PATH)
             assert legacy_code == 200

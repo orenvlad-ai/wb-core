@@ -19,6 +19,9 @@ from packages.application.demand_estimation import (
     sales_lookup_days as _sales_lookup_days,
 )
 from packages.application.factory_order_sales_history import FactoryOrderAuthoritativeSalesHistory
+from packages.application.factory_order_recommendation_export import (
+    build_factory_order_recommendation,
+)
 from packages.application.ff_stock_ledger import resolve_ff_stock_ledger_rows
 from packages.application.inventory_planning_read_model import InventoryPlanningReadModel
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -127,7 +130,6 @@ _TEMPLATE_HEADERS = {
     ],
 }
 _LEGACY_INBOUND_FACTORY_HEADERS = _TEMPLATE_HEADERS[DATASET_INBOUND_FACTORY_TO_FF][:-1]
-_RESULT_HEADERS = ["nmId", "Комментарий SKU", "Рекомендовано к заказу"]
 _WEIGHT_COEFFICIENT = 0.08593
 _VOLUME_DIVISOR = 204.38
 _DEFAULT_CYCLE_ORDER_DAYS = 14
@@ -738,21 +740,18 @@ class FactoryOrderSupplyBlock:
         self,
         result: FactoryOrderCalculationResult,
     ) -> tuple[bytes, str]:
-        workbook_rows: list[list[Any]] = [_RESULT_HEADERS]
-        workbook_rows.extend(
-            [[item.nm_id, item.sku_comment, item.recommended_order_qty] for item in result.rows]
-        )
-        workbook_rows.append([])
-        workbook_rows.extend(
-            [
-                ["Общее количество", "", result.summary.total_qty],
-                ["Расчётный вес", "", _format_decimal(result.summary.estimated_weight)],
-                ["Расчётный объём", "", _format_decimal(result.summary.estimated_volume)],
-            ]
-        )
         filename = f"sheet-vitrina-v1-factory-order-recommendation-{result.report_date}.xlsx"
         return (
-            build_single_sheet_workbook_bytes("Рекомендация", workbook_rows),
+            build_factory_order_recommendation(
+                rows=(
+                    (item.nm_id, item.sku_comment, item.recommended_order_qty)
+                    for item in result.rows
+                ),
+                total_quantity=result.summary.total_qty,
+                estimated_weight=result.summary.estimated_weight,
+                estimated_volume=result.summary.estimated_volume,
+                nomenclature_items=self.runtime.list_nomenclature_items(active_only=True),
+            ),
             filename,
         )
 
@@ -1790,7 +1789,3 @@ def _is_iso_date(value: str) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _format_decimal(value: float) -> str:
-    return f"{float(value):.2f}"
