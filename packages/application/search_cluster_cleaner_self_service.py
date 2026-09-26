@@ -49,6 +49,7 @@ class LocalStageEAdapter:
 
 
 class ManualCleanerCoordinator:
+    LOCAL_RETRY_LIMIT=8
     def __init__(self, cleaner:KeywordCleaner, adapter:LocalStageEAdapter, *, bootstrap_owner_username:str=''):
         self.cleaner=cleaner
         self.adapter=adapter
@@ -141,11 +142,13 @@ class ManualCleanerCoordinator:
         scan_op=self.operation_id(job_id,'scan')
         stage=job['stage']
         if stage=='fetching':
+            if float(job.get('next_readback_at') or 0)>time.time():return
             preview=self._launch('preview',scan_op,scan)
             self._save(job_id,state='running',stage='scan_ready',scan_prestate=preview['prestate_sha256'],scan_candidate=preview['candidate_sha256'])
             return
         if stage=='scan_ready':
-            self._save(job_id,state='running',stage='scan_apply_claimed')
+            if float(job.get('next_readback_at') or 0)>time.time():return
+            self._save(job_id,state='running',stage='scan_apply_claimed',next_readback_at=0,error_code=None,error=None)
             self._apply_claimed(job_id,scan_op,scan,'scan')
             return
         if stage=='scan_apply_claimed':
@@ -163,23 +166,27 @@ class ManualCleanerCoordinator:
         prepare=dict(mode='manual_prepare',scan_run_id=job['scan_run_id'],targets=targets)
         prepare_op=self.operation_id(job_id,'prepare')
         if stage=='prepare_ready':
+            if float(job.get('next_readback_at') or 0)>time.time():return
             preview=self._launch('preview',prepare_op,prepare)
             self._save(job_id,state='running',stage='prepare_previewed',prepare_prestate=preview['prestate_sha256'],prepare_candidate=preview['candidate_sha256'])
             return
         if stage=='prepare_previewed':
-            self._save(job_id,state='running',stage='prepare_apply_claimed')
+            if float(job.get('next_readback_at') or 0)>time.time():return
+            self._save(job_id,state='running',stage='prepare_apply_claimed',next_readback_at=0,error_code=None,error=None)
             self._apply_claimed(job_id,prepare_op,prepare,'prepare')
             return
         if stage=='prepare_apply_claimed':
             self._readback_claimed(job_id,prepare_op,prepare,'prepare')
             return
         if stage=='write_previewing':
+            if float(job.get('next_readback_at') or 0)>time.time():return
             write=dict(mode='manual',run_id=job['write_run_id'],targets=targets)
             preview=self._launch('preview',self.operation_id(job_id,'write'),write)
             self._save(job_id,state='running',stage='write_ready',write_prestate=preview['prestate_sha256'],write_candidate=preview['candidate_sha256'])
             return
         if stage=='write_ready':
-            self._save(job_id,state='running',stage='write_apply_claimed')
+            if float(job.get('next_readback_at') or 0)>time.time():return
+            self._save(job_id,state='running',stage='write_apply_claimed',next_readback_at=0,error_code=None,error=None)
             write=dict(mode='manual',run_id=job['write_run_id'],targets=targets)
             self._apply_claimed(job_id,self.operation_id(job_id,'write'),write,'write')
             return
@@ -213,6 +220,7 @@ class ManualCleanerCoordinator:
                        readback_attempts=attempts,next_readback_at=time.time()+min(30,2**min(attempts,5)))
             return
         if state=='not_submitted':
+            if self._retry_unclaimed(job_id,phase,receipt):return
             self._release_unsubmitted(self._job(job_id))
             self._save(job_id,state='failed',stage='finished',error_code=phase+'_not_submitted',error='Запуск не подтверждён; повторная отправка заблокирована')
             return
@@ -238,3 +246,33 @@ class ManualCleanerCoordinator:
             detail=self.cleaner.run_detail(self._job(job_id)['write_run_id'],self.owner)
             final='complete' if state=='applied' and detail['effective_state']=='complete' else 'partial'
             self._save(job_id,state=final,stage='finished',result=state,write_run_id=detail['run_id'])
+
+    def _retry_unclaimed(self,job_id:str,phase:str,receipt:dict) -> bool:
+        """Resume only an exact operation whose local claim never committed."""
+        if receipt.get('state')!='not_submitted':return False
+        job=self._job(job_id)
+        if phase=='prepare':
+            # manual_prepare only creates a local exact run. Its Stage E
+            # readback searches the immutable prepared event by operation ID;
+            # no WB write is possible in this phase.
+            preview_stage='prepare_ready'
+        elif phase in {'scan','write'}:
+            run_id=job['scan_run_id'] if phase=='scan' else job.get('write_run_id')
+            if not run_id or not self.cleaner.exact_manual_run_unclaimed(
+                    run_id,self.operation_id(job_id,phase),stage_e.Target(job['advert_id'],job['nm_id'])):
+                return False
+            preview_stage='fetching' if phase=='scan' else 'write_previewing'
+        else:return False
+        attempts=(int(job.get('local_retry_attempts') or 0) if job.get('local_retry_phase')==phase else 0)+1
+        if attempts>=self.LOCAL_RETRY_LIMIT:
+            self._save(job_id,state='partial',stage=phase+'_apply_claimed',can_recheck=True,
+                       local_retry_phase=phase,local_retry_attempts=attempts,
+                       error_code='local_retry_exhausted',
+                       error='Локальный запуск не подтверждён. Уточните ту же операцию для продолжения.')
+            return True
+        self._save(job_id,state='running',stage=preview_stage,can_recheck=False,readback_attempts=0,
+                   local_retry_phase=phase,local_retry_attempts=attempts,
+                   next_readback_at=time.time()+min(15,2**(attempts-1)),
+                   error_code='local_not_submitted_retry',
+                   error='Повторяем свежую проверку той же операции; отправки в WB не было')
+        return True

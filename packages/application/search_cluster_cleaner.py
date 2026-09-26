@@ -499,7 +499,8 @@ class KeywordCleaner:
             facts=json.loads(latest['facts']) if latest else {}
             if facts.get('state')!='partial' or not facts.get('can_recheck') or not str(facts.get('stage','')).endswith('_apply_claimed'):
                 raise CleanerError('recheck_unavailable','Для этой операции повторное чтение не требуется',409)
-            value=dict(facts,state='ambiguous',can_recheck=False,readback_attempts=0,next_readback_at=0)
+            value=dict(facts,state='ambiguous',can_recheck=False,readback_attempts=0,next_readback_at=0,
+                       local_retry_attempts=0)
             self._event(c,'self_service_stage',value,run_id=json.loads(original['outcome'])['run_id'])
             return dict(job_id=job_id,state='ambiguous',stage=value['stage'])
         return self._command(principal,f'manual-clean/{job_id}/recheck',payload,command)
@@ -513,6 +514,28 @@ class KeywordCleaner:
             if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(self.key,run_id)).fetchone():return False
             c.execute("UPDATE cleaner_runs SET state='stopped',phase='finished',scan_finished_at=?,reason='manual_not_submitted' WHERE run_id=?",(self.clock(),run_id))
             self._event(c,'run_finished',dict(state='stopped',reason='manual_not_submitted'),run_id=run_id)
+            return True
+
+    def exact_manual_run_unclaimed(self,run_id:str,operation_id:str,target:Target) -> bool:
+        """Prove that a saved apply claim never gained dispatch rights.
+
+        The run claim and Stage E binding commit in one transaction before any
+        guarded WB call. A queued exact run without either binding or write
+        intent can safely repeat its fresh preview with the same operation ID.
+        """
+        with self.store.read() as c:
+            run=c.execute("SELECT state,trigger,targets,worker_token,started_at FROM cleaner_runs WHERE account=? AND run_id=?",
+                          (self.key,run_id)).fetchone()
+            if (not run or run['state']!='queued' or run['trigger'] not in {'manual_exact','manual_exact_candidates'}
+                    or run['worker_token'] or run['started_at']):return False
+            declared={str(row.get('target') or '') for row in json.loads(run['targets'])}
+            if declared!={target.key}:return False
+            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
+                         (self.key,run_id)).fetchone():return False
+            if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',
+                         (self.key,run_id)).fetchone():return False
+            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
+                         (self.key,operation_id)).fetchone():return False
             return True
 
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
