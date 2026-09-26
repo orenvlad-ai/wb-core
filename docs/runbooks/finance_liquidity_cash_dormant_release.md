@@ -58,9 +58,41 @@ or money is entered:
   pathname and generation identity revalidation. Missing APSW, unsupported
   file-control, descriptor movement or identity drift fails closed.
 - An isolated cash store must report the exact current Finance schema version.
-  This candidate requires schema version 2. Bootstrap is only for a verified
-  absent target; any existing earlier schema is refused and needs a separately
-  accepted migration rather than in-place use.
+  The directory candidate requires schema version 3. Bootstrap is only for a
+  verified absent target; GET and service start never seed or migrate. An
+  existing v2 TEST store needs the explicit offline procedure below before v3
+  code is released. No REAL store is created or activated by this change.
+
+## Explicit v2 TEST migration gate for directory code
+
+This code change does not run the migration. Freeze the exact candidate and
+obtain normal owner approval before changing the existing TEST store. Stop TEST
+writes and sidecar; verify its exact canonical database path, v2 schema,
+`PRAGMA integrity_check`, `PRAGMA foreign_key_check`, balances, document count
+and ledger receipts. Rehearse on an isolated copy first. For the actual stopped
+TEST store, provide a new, absent backup pathname on the protected volume:
+
+`apps/finance_liquidity_http.py --db <exact verified TEST sqlite path> --migrate-v2 --backup <new protected backup sqlite path>`
+
+The CLI writes an SQLite backup before one transactional schema change. It
+refuses a non-v2 source, existing backup, symlink source, or second run. Retain
+backup and evidence. Before starting v3 code, read back schema v3, the three
+seeded RUB cashboxes with uninitialized balances, 23 seeded articles, zero
+seeded counterparties, unchanged existing document/ledger counts and balances,
+`integrity_check`, `foreign_key_check`, and read-only Finance API results. The
+seed keeps edited labels and deleted tombstones.
+For pre-v3 posted documents, also verify the append-only migration snapshot of
+each referenced article name: it is the name known *at migration time*, not a
+reconstructed historical name. Existing expense/income articles receive
+neutral legacy analytic classes; no posted document row is updated.
+
+If migration fails before v3 writes, keep the sidecar stopped; the transaction
+rolls back and the v2 backup remains. Return to v2 after successful migration
+only before any v3 document or directory write: stop the service, verify this
+condition, restore the retained backup by a separately reviewed file
+replacement, and read back schema v2 and original balances. After v3 writes,
+do not restore an older backup over new facts; use a reviewed forward repair.
+This runbook does not itself authorize TEST or REAL migration.
 
 Before activation, rerun the synthetic cash, auth, HTTP and browser checks and
 verify the sanctioned live signed session, explicit grants, supplier denial
@@ -83,7 +115,8 @@ shared flags file, unit, hosted target and route manifest.
    `apps/finance_liquidity_http.py --db /opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3 --bootstrap`.
    Bootstrap is never part of GET, import, service start or the unit. If the
    command result is ambiguous, do not send it again: read the same path and
-   schema. Require schema version 2, empty business tables, canonical resolved
+   schema. Require schema version 3, three uninitialized seed cashboxes, 23
+   seed articles, no counterparties or monetary documents, canonical resolved
    path, and an unchanged absent production cash path.
 3. Run the ordinary release for the independently accepted SHA. It installs the
    pilot unit and the shared flags file as the final EnvironmentFile for both

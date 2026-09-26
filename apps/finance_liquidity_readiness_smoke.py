@@ -142,7 +142,7 @@ def test_cardinality_and_terminal_receipts(db_path: Path) -> dict[str, Any]:
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
             "SELECT schema_version FROM finance_liquidity_schema_meta"
-        ).fetchone()[0] == FINANCE_CASH_SCHEMA_VERSION == 2
+        ).fetchone()[0] == FINANCE_CASH_SCHEMA_VERSION == 3
 
     source, source_opening = create_account(service, "Readiness source", "500.00")
     target, target_opening = create_account(service, "Readiness target", "0.00")

@@ -3150,6 +3150,7 @@ def _build_handler(
                         user_config_key=_current_web_user_config_key(self),
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
+                        finance_explicit_sections=_current_web_user_explicit_sections(self),
                     ),
                 )
                 return
@@ -3205,6 +3206,7 @@ def _build_handler(
                         active_tab="settings",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
+                        finance_explicit_sections=_current_web_user_explicit_sections(self),
                     ),
                 )
                 return
@@ -3245,6 +3247,7 @@ def _build_handler(
                         active_tab="instructions",
                         role=_current_web_user_role(self),
                         allowed_sections=_current_web_user_allowed_sections(self),
+                        finance_explicit_sections=_current_web_user_explicit_sections(self),
                     ),
                 )
                 return
@@ -3349,6 +3352,7 @@ def _build_handler(
                             user_config_key=_current_web_user_config_key(self),
                             role=_current_web_user_role(self),
                             allowed_sections=_current_web_user_allowed_sections(self),
+                            finance_explicit_sections=_current_web_user_explicit_sections(self),
                         ),
                     )
                     return
@@ -8416,6 +8420,15 @@ def _current_web_user_allowed_sections(handler: BaseHTTPRequestHandler) -> list[
     return _user_allowed_sections(user)
 
 
+def _current_web_user_explicit_sections(handler: BaseHTTPRequestHandler) -> list[str]:
+    """Raw verified grants, before the bootstrap owner's ordinary all-sections policy."""
+    config = _web_auth_config()
+    if not config["enabled"]:
+        return _default_allowed_sections_for_role(WEB_AUTH_ROLE_ADMIN)
+    user = _authenticated_web_user(handler, config) or {}
+    return _normalize_public_allowed_sections(user.get("allowed_sections"), role=str(user.get("role") or ""))
+
+
 def _current_web_user_can_manage_users(handler: BaseHTTPRequestHandler) -> bool:
     config = _web_auth_config()
     if not config["enabled"]:
@@ -9461,7 +9474,12 @@ def _user_can_manage_users(user: Mapping[str, Any]) -> bool:
 
 
 def _allowed_unified_tabs_for_user(user: Mapping[str, Any]) -> list[str]:
-    return _allowed_unified_tabs_for_sections(_user_allowed_sections(user))
+    sections = _user_allowed_sections(user)
+    tabs = _allowed_unified_tabs_for_sections(sections)
+    explicit_sections = _normalize_public_allowed_sections(user.get("allowed_sections"), role=str(user.get("role") or ""))
+    if _finance_navigation_is_available(role=str(user.get("role") or ""), allowed_sections=explicit_sections):
+        tabs.append("finance")
+    return tabs
 
 
 def _allowed_unified_tabs_for_sections(allowed_sections: Sequence[str]) -> list[str]:
@@ -10415,6 +10433,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     job_path: str,
     role: str = WEB_AUTH_ROLE_ADMIN,
     allowed_sections: Sequence[str] | None = None,
+    finance_explicit_sections: Sequence[str] | None = None,
     active_tab: str = "",
     user_config_key: str = "local_operator",
 ) -> str:
@@ -10424,12 +10443,14 @@ def _render_sheet_vitrina_web_vitrina_ui(
         if allowed_sections is not None
         else _default_allowed_sections_for_role(normalized_role)
     )
-    allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
-    initial_tab = active_tab if active_tab in allowed_tabs else _default_unified_tab_for_sections(normalized_sections)
     finance_navigation_available = _finance_navigation_is_available(
         role=normalized_role,
-        allowed_sections=normalized_sections,
+        allowed_sections=(finance_explicit_sections if finance_explicit_sections is not None else normalized_sections),
     )
+    allowed_tabs = _allowed_unified_tabs_for_sections(normalized_sections)
+    if finance_navigation_available:
+        allowed_tabs.append("finance")
+    initial_tab = active_tab if active_tab in allowed_tabs else (allowed_tabs[0] if allowed_tabs else "vitrina")
     config_payload = {
         "page_title": "Web-витрина",
         "current_role": normalized_role,
@@ -10542,7 +10563,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         .replace("__SHEET_VITRINA_V1_WEB_VITRINA_CONFIG_JSON__", json.dumps(config_payload, ensure_ascii=False))
         .replace(
             "__SHEET_VITRINA_V1_FINANCE_NAVIGATION_LINK__",
-            '<a class="shell-logout-link" href="/finance/">Финансы</a>'
+            '<button class="shell-logout-link" type="button" data-unified-tab-button="finance" aria-selected="false">Финансы</button>'
             if finance_navigation_available
             else "",
         )

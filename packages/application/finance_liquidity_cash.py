@@ -28,6 +28,7 @@ from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
 )
 from packages.contracts.finance_liquidity_cash import FINANCE_CASH_SCHEMA_VERSION
+from packages.application.finance_liquidity_directories import SEED_ACCOUNTS, install_v3_extension, seed_directories
 
 
 class FinanceCashError(ValueError):
@@ -138,11 +139,51 @@ def bootstrap_finance_cash_store(path: Path) -> None:
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
+        install_v3_extension(conn, _now())
         conn.execute(
             "INSERT INTO finance_liquidity_schema_meta(singleton, schema_version, created_at) VALUES(1, ?, ?)",
             (FINANCE_CASH_SCHEMA_VERSION, _now()),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def migrate_finance_cash_store_v2(path: Path, backup_path: Path) -> None:
+    """Explicit offline migration; preserves a separately named SQLite backup."""
+    source, backup = Path(path), Path(backup_path)
+    if not source.is_file() or source.is_symlink() or backup.exists() or backup.is_symlink():
+        raise FinanceCashError("invalid_migration_target", "Exact source and absent backup are required", 409)
+    if source.resolve() == backup.resolve():
+        raise FinanceCashError("invalid_migration_target", "Backup must differ from source", 409)
+    conn = sqlite3.connect(f"file:{source.resolve()}?mode=rw", uri=True, isolation_level=None, timeout=5)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        version = conn.execute("SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1").fetchone()
+        if version is None or version[0] != 2 or conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise FinanceCashError("invalid_migration_source", "Valid schema v2 store required", 409)
+        data_version = conn.execute("PRAGMA data_version").fetchone()[0]
+        descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        with sqlite3.connect(backup) as backup_conn:
+            conn.backup(backup_conn)
+            if backup_conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or backup_conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise FinanceCashError("invalid_migration_backup", "Backup validation failed", 500)
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA data_version").fetchone()[0] != data_version:
+            raise FinanceCashError("migration_source_changed", "Source changed during backup", 409)
+        current = conn.execute("SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1").fetchone()
+        if current is None or current[0] != 2:
+            raise FinanceCashError("invalid_migration_source", "Source changed before migration", 409)
+        install_v3_extension(conn, _now(), capture_legacy_snapshots=True)
+        conn.execute("UPDATE finance_liquidity_schema_meta SET schema_version=3 WHERE singleton=1")
+        if conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise FinanceCashError("invalid_migration_result", "Migration has foreign-key errors", 500)
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -204,7 +245,7 @@ class FinanceCashService:
         row = conn.execute(
             "SELECT * FROM finance_liquidity_accounts WHERE account_id=?", (account_id,)
         ).fetchone()
-        if row is None:
+        if row is None or row["is_deleted"]:
             raise FinanceCashError("account_not_found", "Account not found", 404)
         if active and not row["is_active"]:
             raise FinanceCashError("account_archived", "Account is archived", 422)
@@ -524,7 +565,7 @@ class FinanceCashService:
             return [
                 self._account_view(conn, account)
                 for account in conn.execute(
-                    "SELECT * FROM finance_liquidity_accounts ORDER BY name COLLATE NOCASE, account_id"
+                    "SELECT * FROM finance_liquidity_accounts WHERE is_deleted=0 ORDER BY name COLLATE NOCASE, account_id"
                 )
             ]
 
@@ -608,6 +649,8 @@ class FinanceCashService:
             str(payload.get("direction") or "").strip(),
         )
         posting_class = str(payload.get("posting_class") or "external_outflow").strip()
+        analytic_class = str(payload.get("analytic_class") or ("external_inflow_unclassified" if direction == "income" else "operating_expense")).strip()
+        requires_comment = 1 if payload.get("requires_comment") is True else 0
         if (
             not name
             or direction not in {"income", "expense"}
@@ -615,6 +658,8 @@ class FinanceCashService:
                 direction == "expense"
                 and posting_class not in {"external_outflow", "fee"}
             )
+            or (direction == "income" and analytic_class != "external_inflow_unclassified")
+            or (direction == "expense" and analytic_class not in {"operating_expense", "owner_draw", "profit_distribution", "debt_service_unallocated"})
         ):
             raise FinanceCashError("invalid_category", "Category is invalid")
         return self._command(
@@ -624,7 +669,7 @@ class FinanceCashService:
             actor,
             payload,
             lambda conn: self._create_category_tx(
-                conn, name, direction, posting_class, actor
+                conn, name, direction, posting_class, analytic_class, requires_comment, actor
             ),
         )
 
@@ -634,16 +679,21 @@ class FinanceCashService:
         name: str,
         direction: str,
         posting_class: str,
+        analytic_class: str,
+        requires_comment: int,
         actor: str,
     ) -> dict[str, Any]:
         category_id, now = _id("flc"), _now()
         conn.execute(
-            "INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at) VALUES(?,?,?,?,1,?)",
+            "INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at,analytic_class,requires_comment,revision,updated_at,is_deleted) VALUES(?,?,?,?,1,?,?,?,1,?,0)",
             (
                 category_id,
                 name,
                 direction,
                 posting_class if direction == "expense" else None,
+                now,
+                analytic_class,
+                requires_comment,
                 now,
             ),
         )
@@ -655,9 +705,95 @@ class FinanceCashService:
             return [
                 _row(row)
                 for row in conn.execute(
-                    "SELECT * FROM finance_liquidity_categories WHERE is_active=1 ORDER BY name COLLATE NOCASE"
+                    "SELECT * FROM finance_liquidity_categories WHERE is_deleted=0 ORDER BY name COLLATE NOCASE"
                 )
             ]
+
+    def list_counterparties(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return [_row(row) for row in conn.execute(
+                "SELECT * FROM finance_liquidity_counterparties WHERE is_deleted=0 ORDER BY name COLLATE NOCASE,counterparty_id"
+            )]
+
+    def prepare_common_openings(self, payload: Mapping[str, Any], actor: str, operation_id: str, key: str) -> dict[str, Any]:
+        occurred = _utc_timestamp(payload.get("occurred_at"), "occurred_at")
+        amounts = payload.get("amounts")
+        seed_ids = {item[0] for item in SEED_ACCOUNTS}
+        if not isinstance(amounts, dict) or set(amounts) != seed_ids or any(value in (None, "") for value in amounts.values()):
+            raise FinanceCashError("invalid_common_opening", "Explicit amounts for all three cashboxes are required")
+        evidence_ref = str(payload.get("opening_evidence_ref") or "").strip() or None
+        def action(conn: sqlite3.Connection) -> dict[str, Any]:
+            created = []
+            for account_id in sorted(seed_ids):
+                account = self._account(conn, account_id)
+                if account["account_type"] != "cash" or account["currency"] != "RUB":
+                    raise FinanceCashError("invalid_common_opening", "Three RUB cashboxes are required")
+                if conn.execute("SELECT 1 FROM finance_liquidity_opening_anchors WHERE account_id=?", (account_id,)).fetchone() or conn.execute("SELECT 1 FROM finance_liquidity_documents WHERE document_type='opening' AND status='draft' AND target_account_id=?", (account_id,)).fetchone():
+                    raise FinanceCashError("opening_already_exists", "Cashbox already has an opening or opening draft", 409)
+                created.append(self._create_document_tx(conn, "opening", {
+                    "document_type": "opening", "target_account_id": account_id,
+                    "occurred_at": occurred, "amount": amounts[account_id],
+                    "opening_evidence_type": "manual_confirmation",
+                    "opening_evidence_ref": evidence_ref,
+                }, actor))
+            self._audit(conn, actor, "opening.common_prepared", operation_id, {"document_ids": [item["document_id"] for item in created], "occurred_at": occurred})
+            return {"documents": created, "occurred_at": occurred, "status": "draft"}
+        return self._command("opening.common.prepare", key, operation_id, actor, payload, action)
+
+    def create_counterparty(self, payload: Mapping[str, Any], actor: str, operation_id: str, key: str) -> dict[str, Any]:
+        name = str(payload.get("name") or "").strip()
+        if not name or len(name) > 160:
+            raise FinanceCashError("invalid_counterparty", "Counterparty name is required")
+        def action(conn: sqlite3.Connection) -> dict[str, Any]:
+            existing = conn.execute("SELECT counterparty_id,is_active,revision FROM finance_liquidity_counterparties WHERE name=? COLLATE NOCASE AND is_deleted=0", (name,)).fetchone()
+            if existing:
+                if not existing["is_active"]:
+                    raise FinanceCashError("counterparty_archived", "Restore the archived counterparty before use", 409)
+                return {"counterparty_id": existing["counterparty_id"], "revision": existing["revision"]}
+            ident, now = _id("flp"), _now()
+            conn.execute("INSERT INTO finance_liquidity_counterparties(counterparty_id,name,is_active,is_deleted,revision,created_at,updated_at) VALUES(?,?,1,0,1,?,?)", (ident, name, now, now))
+            self._audit(conn, actor, "counterparty.created", ident, {"name": name})
+            return {"counterparty_id": ident, "revision": 1}
+        return self._command("counterparty.create", key, operation_id, actor, payload, action)
+
+    def update_directory(self, kind: str, ident: str, payload: Mapping[str, Any], actor: str, operation_id: str, key: str) -> dict[str, Any]:
+        tables = {
+            "accounts": ("finance_liquidity_accounts", "account_id"),
+            "categories": ("finance_liquidity_categories", "category_id"),
+            "counterparties": ("finance_liquidity_counterparties", "counterparty_id"),
+        }
+        if kind not in tables:
+            raise FinanceCashError("not_found", "Directory not found", 404)
+        action_name = str(payload.get("action") or "").strip()
+        if action_name not in {"rename", "archive", "restore", "delete"}:
+            raise FinanceCashError("invalid_directory_action", "Directory action is invalid")
+        name = str(payload.get("name") or "").strip()
+        if action_name == "rename" and (not name or len(name) > 160):
+            raise FinanceCashError("invalid_directory_name", "Name is required")
+        table, id_column = tables[kind]
+        def action(conn: sqlite3.Connection) -> dict[str, Any]:
+            row = conn.execute(f"SELECT * FROM {table} WHERE {id_column}=? AND is_deleted=0", (ident,)).fetchone()
+            if row is None:
+                raise FinanceCashError("not_found", "Directory entry not found", 404)
+            if int(payload.get("base_revision", -1)) != int(row["revision"]):
+                raise FinanceCashError("version_conflict", "Directory entry changed", 409, data={"current_revision": row["revision"]})
+            if action_name == "delete":
+                checks = {
+                    "accounts": ("SELECT 1 FROM finance_liquidity_documents WHERE source_account_id=? OR target_account_id=?", (ident, ident)),
+                    "categories": ("SELECT 1 FROM finance_liquidity_documents WHERE category_id=?", (ident,)),
+                    "counterparties": ("SELECT 1 FROM finance_liquidity_documents WHERE counterparty_id=?", (ident,)),
+                }
+                sql, args = checks[kind]
+                if conn.execute(sql, args).fetchone() or (kind == "accounts" and (conn.execute("SELECT 1 FROM finance_liquidity_cash_reconciliations WHERE account_id=?", (ident,)).fetchone() or conn.execute("SELECT 1 FROM finance_liquidity_opening_anchors WHERE account_id=?", (ident,)).fetchone())):
+                    raise FinanceCashError("directory_in_use", "Entry is used by a document or reconciliation", 409)
+                conn.execute(f"UPDATE {table} SET is_deleted=1,is_active=0,revision=revision+1,updated_at=? WHERE {id_column}=?", (_now(), ident))
+            elif action_name == "rename":
+                conn.execute(f"UPDATE {table} SET name=?,revision=revision+1,updated_at=? WHERE {id_column}=?", (name, _now(), ident))
+            else:
+                conn.execute(f"UPDATE {table} SET is_active=?,revision=revision+1,updated_at=? WHERE {id_column}=?", (1 if action_name == "restore" else 0, _now(), ident))
+            self._audit(conn, actor, f"{kind}.{action_name}", ident, {"old_name": row["name"], "new_name": name if action_name == "rename" else row["name"]})
+            return {id_column: ident, "revision": int(row["revision"]) + 1, "action": action_name}
+        return self._command(f"{kind}.{action_name}:{ident}", key, operation_id, actor, payload, action)
 
     def create_document(
         self, payload: Mapping[str, Any], actor: str, operation_id: str, key: str
@@ -688,6 +824,7 @@ class FinanceCashService:
             draft=True,
             currency=self._document_currency(conn, document_type, payload),
         )
+        self._validate_draft_references(conn, document_type, stored)
         if (
             document_type == "opening"
             and stored["opening_evidence_type"] == "manual_confirmation"
@@ -704,7 +841,7 @@ class FinanceCashService:
                 }
             )
         conn.execute(
-            """INSERT INTO finance_liquidity_documents(document_id,document_type,status,transfer_mode,transfer_state,source_account_id,target_account_id,category_id,amount_minor,occurred_at,purpose,negative_balance_explanation,opening_evidence_type,opening_evidence_digest,opening_evidence_ref,revision,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO finance_liquidity_documents(document_id,document_type,status,transfer_mode,transfer_state,source_account_id,target_account_id,category_id,amount_minor,occurred_at,purpose,negative_balance_explanation,opening_evidence_type,opening_evidence_digest,opening_evidence_ref,counterparty_id,funding_kind,revision,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 document_id,
                 document_type,
@@ -721,6 +858,8 @@ class FinanceCashService:
                 stored["opening_evidence_type"],
                 stored["opening_evidence_digest"],
                 stored["opening_evidence_ref"],
+                stored["counterparty_id"],
+                stored["funding_kind"],
                 1,
                 now,
                 now,
@@ -792,6 +931,7 @@ class FinanceCashService:
             draft=True,
             currency=currency,
         )
+        self._validate_draft_references(conn, doc["document_type"], stored)
         if (
             doc["document_type"] == "opening"
             and stored["opening_evidence_type"] == "manual_confirmation"
@@ -808,7 +948,7 @@ class FinanceCashService:
                 }
             )
         cursor = conn.execute(
-            """UPDATE finance_liquidity_documents SET transfer_mode=?,source_account_id=?,target_account_id=?,category_id=?,amount_minor=?,occurred_at=?,purpose=?,negative_balance_explanation=?,opening_evidence_type=?,opening_evidence_digest=?,opening_evidence_ref=?,revision=revision+1,updated_at=? WHERE document_id=? AND revision=? AND status='draft'""",
+            """UPDATE finance_liquidity_documents SET transfer_mode=?,source_account_id=?,target_account_id=?,category_id=?,amount_minor=?,occurred_at=?,purpose=?,negative_balance_explanation=?,opening_evidence_type=?,opening_evidence_digest=?,opening_evidence_ref=?,counterparty_id=?,funding_kind=?,revision=revision+1,updated_at=? WHERE document_id=? AND revision=? AND status='draft'""",
             (
                 stored["transfer_mode"],
                 stored["source_account_id"],
@@ -821,6 +961,8 @@ class FinanceCashService:
                 stored["opening_evidence_type"],
                 stored["opening_evidence_digest"],
                 stored["opening_evidence_ref"],
+                stored["counterparty_id"],
+                stored["funding_kind"],
                 _now(),
                 document_id,
                 doc["revision"],
@@ -913,6 +1055,16 @@ class FinanceCashService:
                 "duplicate_confirmation_token": duplicate_token,
                 "candidates": candidates,
             }
+        if doc["category_id"]:
+            category = conn.execute("SELECT name,analytic_class,requires_comment FROM finance_liquidity_categories WHERE category_id=?", (doc["category_id"],)).fetchone()
+            category_name, analytic_class, requires_comment = category["name"], category["analytic_class"], category["requires_comment"]
+        else:
+            category_name, analytic_class, requires_comment = None, ("owner_funding" if doc["funding_kind"] == "owner_funding" else None), None
+        counterparty_name = None
+        if doc["counterparty_id"]:
+            counterparty_name = conn.execute("SELECT name FROM finance_liquidity_counterparties WHERE counterparty_id=?", (doc["counterparty_id"],)).fetchone()[0]
+        conn.execute("UPDATE finance_liquidity_documents SET category_name_snapshot=?,analytic_class_snapshot=?,requires_comment_snapshot=?,counterparty_name_snapshot=? WHERE document_id=? AND status='draft'", (category_name, analytic_class, requires_comment, counterparty_name, document_id))
+        doc = self._document(conn, document_id)
         if doc["document_type"] == "opening":
             active = conn.execute(
                 "SELECT 1 FROM finance_liquidity_opening_anchors WHERE account_id=? AND is_active=1",
@@ -1112,7 +1264,7 @@ class FinanceCashService:
             )
         reversal_id, now = _id("fld"), _now()
         conn.execute(
-            """INSERT INTO finance_liquidity_documents(document_id,document_type,status,source_account_id,target_account_id,category_id,amount_minor,occurred_at,purpose,reversal_of_document_id,revision,created_at,updated_at,posted_at,semantic_digest,actor) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)""",
+            """INSERT INTO finance_liquidity_documents(document_id,document_type,status,source_account_id,target_account_id,category_id,amount_minor,occurred_at,purpose,reversal_of_document_id,counterparty_id,counterparty_name_snapshot,category_name_snapshot,analytic_class_snapshot,requires_comment_snapshot,funding_kind,revision,created_at,updated_at,posted_at,semantic_digest,actor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)""",
             (
                 reversal_id,
                 original["document_type"],
@@ -1124,6 +1276,12 @@ class FinanceCashService:
                 occurred_at,
                 f"Reversal: {reason}",
                 document_id,
+                original["counterparty_id"],
+                original["counterparty_name_snapshot"],
+                original["category_name_snapshot"],
+                original["analytic_class_snapshot"],
+                original["requires_comment_snapshot"],
+                original["funding_kind"],
                 now,
                 now,
                 now,
@@ -1573,10 +1731,13 @@ class FinanceCashService:
         with self._connect() as conn:
             self._assert_ledger_integrity(conn)
             sql = (
-                "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency "
+                "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency, "
+                "m.category_name_at_migration,m.category_direction_at_migration,"
+                "m.category_posting_class_at_migration,m.captured_at AS directory_snapshot_migrated_at "
                 "FROM finance_liquidity_documents d "
                 "LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id "
-                "LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id"
+                "LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id "
+                "LEFT JOIN finance_liquidity_v2_directory_snapshots m ON m.document_id=d.document_id"
             )
             args: list[Any] = []
             if account_id:
@@ -1823,7 +1984,7 @@ class FinanceCashService:
 
     def _document(self, conn: sqlite3.Connection, document_id: str) -> sqlite3.Row:
         row = conn.execute(
-            "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency FROM finance_liquidity_documents d LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id WHERE d.document_id=?",
+            "SELECT d.*, COALESCE(a.currency,b.currency,'RUB') AS currency, m.category_name_at_migration,m.category_direction_at_migration,m.category_posting_class_at_migration,m.captured_at AS directory_snapshot_migrated_at FROM finance_liquidity_documents d LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id LEFT JOIN finance_liquidity_v2_directory_snapshots m ON m.document_id=d.document_id WHERE d.document_id=?",
             (document_id,),
         ).fetchone()
         if row is None:
@@ -1832,6 +1993,13 @@ class FinanceCashService:
 
     def _document_view(self, document: sqlite3.Row) -> dict[str, Any]:
         result = _row(document) or {}
+        if result.get("category_name_snapshot") is None and result.get("category_name_at_migration") is not None and result.get("status") in {"posted", "reversed"}:
+            result["category_name_snapshot"] = result["category_name_at_migration"]
+            result["directory_snapshot_origin"] = "v2_migration"
+        elif result.get("category_name_snapshot") is not None:
+            result["directory_snapshot_origin"] = "posting"
+        for field in ("category_name_at_migration", "category_direction_at_migration", "category_posting_class_at_migration"):
+            result.pop(field, None)
         currency = str(document["currency"])
         result["currency"] = currency
         amount_minor = document["amount_minor"]
@@ -1919,6 +2087,12 @@ class FinanceCashService:
         source = str(payload.get("source_account_id") or "").strip() or None
         target = str(payload.get("target_account_id") or "").strip() or None
         category = str(payload.get("category_id") or "").strip() or None
+        counterparty = str(payload.get("counterparty_id") or "").strip() or None
+        funding = str(payload.get("funding_kind") or "").strip() or None
+        if funding not in {None, "owner_funding"} or (funding and (kind != "income" or category)):
+            raise FinanceCashError("invalid_funding", "Own funding must be an uncategorized receipt")
+        if counterparty and kind not in {"income", "expense"}:
+            raise FinanceCashError("invalid_counterparty", "Counterparty applies to receipts and expenses")
         amount = payload.get("amount")
         minor = None
         occurred = str(payload.get("occurred_at") or "").strip()
@@ -1950,7 +2124,25 @@ class FinanceCashService:
             ).strip()
             or None,
             "transfer_mode": str(payload.get("transfer_mode") or "instant").strip(),
+            "counterparty_id": counterparty,
+            "funding_kind": funding,
         }
+
+    def _validate_draft_references(self, conn: sqlite3.Connection, kind: str, fields: Mapping[str, Any]) -> None:
+        if fields["counterparty_id"] and not conn.execute(
+            "SELECT 1 FROM finance_liquidity_counterparties WHERE counterparty_id=? AND is_active=1 AND is_deleted=0",
+            (fields["counterparty_id"],),
+        ).fetchone():
+            raise FinanceCashError("invalid_counterparty", "Active counterparty is required")
+        if fields["category_id"]:
+            category = conn.execute(
+                "SELECT direction,requires_comment FROM finance_liquidity_categories WHERE category_id=? AND is_active=1 AND is_deleted=0",
+                (fields["category_id"],),
+            ).fetchone()
+            if category is None or category["direction"] != kind:
+                raise FinanceCashError("invalid_category", "Active article for this operation is required")
+            if category["requires_comment"] and not str(fields["purpose"] or "").strip():
+                raise FinanceCashError("comment_required", "This article requires a comment")
 
     def _validate_posting(self, conn: sqlite3.Connection, doc: sqlite3.Row) -> None:
         kind, amount, occurred = (
@@ -1982,10 +2174,12 @@ class FinanceCashService:
                 else doc["source_account_id"]
             )
             account = self._account(conn, account_id or "")
-            if int(amount) <= 0 or not doc["purpose"]:
+            if int(amount) <= 0:
                 raise FinanceCashError(
-                    "invalid_document", "Amount and purpose are required"
+                    "invalid_document", "Positive amount is required"
                 )
+            if doc["funding_kind"] not in {None, "owner_funding"} or (doc["funding_kind"] and kind != "income"):
+                raise FinanceCashError("invalid_funding", "Funding classification is invalid")
             category = (
                 conn.execute(
                     "SELECT * FROM finance_liquidity_categories WHERE category_id=? AND is_active=1",
@@ -1994,10 +2188,16 @@ class FinanceCashService:
                 if doc["category_id"]
                 else None
             )
-            if category is None or category["direction"] != kind:
+            if not doc["funding_kind"] and (category is None or category["direction"] != kind):
                 raise FinanceCashError(
                     "invalid_category", "Active category direction is required"
                 )
+            if doc["funding_kind"] and doc["category_id"]:
+                raise FinanceCashError("invalid_funding", "Own funding has no income article")
+            if category is not None and category["requires_comment"] and not str(doc["purpose"] or "").strip():
+                raise FinanceCashError("comment_required", "This article requires a comment")
+            if doc["counterparty_id"] and not conn.execute("SELECT 1 FROM finance_liquidity_counterparties WHERE counterparty_id=? AND is_active=1 AND is_deleted=0", (doc["counterparty_id"],)).fetchone():
+                raise FinanceCashError("invalid_counterparty", "Active counterparty is required")
             anchor = conn.execute(
                 "SELECT cutover_at FROM finance_liquidity_opening_anchors WHERE account_id=? AND is_active=1",
                 (account_id,),
@@ -2083,7 +2283,7 @@ class FinanceCashService:
             return (
                 [
                     (f"asset:{doc['target_account_id']}", "debit", amount),
-                    (f"system:external_inflow:{currency}", "credit", amount),
+                    (f"system:{'owner_funding' if doc['funding_kind'] == 'owner_funding' else 'external_inflow'}:{currency}", "credit", amount),
                 ],
                 "primary",
                 None,
@@ -2277,6 +2477,8 @@ class FinanceCashService:
                     "occurred_at",
                     "purpose",
                     "transfer_mode",
+                    "counterparty_id",
+                    "funding_kind",
                 )
             }
         )
@@ -2290,9 +2492,19 @@ class FinanceCashService:
         payload: Mapping[str, Any],
     ) -> None:
         conn.execute(
-            "INSERT INTO finance_liquidity_audit_events(event_id,actor,event_type,object_id,payload_digest,created_at) VALUES(?,?,?,?,?,?)",
-            (_id("flae"), actor, event, object_id, _digest(payload), _now()),
+            "INSERT INTO finance_liquidity_audit_events(event_id,actor,event_type,object_id,payload_digest,payload_json,created_at) VALUES(?,?,?,?,?,?,?)",
+            (_id("flae"), actor, event, object_id, _digest(payload), _canon(payload), _now()),
         )
+
+    def list_audit_events(self, limit: int = 100, *, directory_only: bool = False) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            where = ("WHERE event_type LIKE 'account.%' OR event_type LIKE 'accounts.%' "
+                     "OR event_type LIKE 'category.%' OR event_type LIKE 'categories.%' "
+                     "OR event_type LIKE 'counterparty.%' OR event_type LIKE 'counterparties.%'") if directory_only else ""
+            return [_row(row) for row in conn.execute(
+                f"SELECT event_id,actor,event_type,object_id,payload_json,created_at FROM finance_liquidity_audit_events {where} ORDER BY created_at DESC,event_id DESC LIMIT ?",
+                (max(1, min(limit, 200)),),
+            )]
 
     def _posted_response(
         self,
