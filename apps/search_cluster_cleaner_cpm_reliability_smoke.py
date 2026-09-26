@@ -15,6 +15,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps import search_cluster_cleaner_stage_e as stage_e
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
 from apps.search_cluster_cleaner_web_fixture import running_fixture
+from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
@@ -43,6 +44,9 @@ def reject(code,fn):
 def boot(box):
     preview=box.execute('preview')
     box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+    # The runtime upgrade is deliberately separate from Stage E bootstrap.
+    # These admission/recovery fixtures exercise the post-upgrade manual path.
+    ChangeRegistryRepository(box.runtime).initialize_schema()
 
 
 def main():

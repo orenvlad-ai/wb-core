@@ -27,6 +27,7 @@ from packages.adapters.finance_liquidity_http import (
 from packages.application.finance_liquidity_cash import (
     FinanceCashService,
     bootstrap_finance_cash_store,
+    migrate_finance_cash_store_v2,
 )
 from packages.contracts.finance_liquidity_cash import FINANCE_CASH_DEFAULT_PORT
 
@@ -39,11 +40,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, type=Path)
     parser.add_argument("--bootstrap", action="store_true")
+    parser.add_argument("--migrate-v2", action="store_true")
+    parser.add_argument("--backup", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=FINANCE_CASH_DEFAULT_PORT)
     parser.add_argument("--runtime-dir", type=Path)
     parser.add_argument("--auth-fixture", type=Path)
     args = parser.parse_args()
+    if args.migrate_v2 and (args.bootstrap or args.backup is None):
+        raise SystemExit("--migrate-v2 requires --backup and excludes --bootstrap")
+    if args.backup is not None and not args.migrate_v2:
+        raise SystemExit("--backup is only valid with --migrate-v2")
     try:
         bootstrap_access = load_finance_bootstrap_access()
     except FinanceBootstrapAccessUnavailable as exc:
@@ -57,6 +64,9 @@ def main() -> None:
             )
         except FinanceBootstrapAccessUnavailable as exc:
             raise SystemExit(str(exc)) from exc
+    if args.migrate_v2:
+        migrate_finance_cash_store_v2(args.db, args.backup)
+        return
     if args.bootstrap:
         bootstrap_finance_cash_store(args.db)
         return

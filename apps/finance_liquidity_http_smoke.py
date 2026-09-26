@@ -34,8 +34,9 @@ def request(
     *,
     payload: dict[str, object] | None = None,
     csrf: str = "",
+    actor: str = "admin",
 ) -> tuple[int, dict[str, object]]:
-    headers = {"Cookie": "finance_fixture_session=admin"}
+    headers = {"Cookie": f"finance_fixture_session={actor}"}
     body = None
     method = "GET"
     if payload is not None:
@@ -73,7 +74,8 @@ def main() -> None:
                             "username": "fixture-admin",
                             "role": "operator",
                             "capabilities": ["finance_admin"],
-                        }
+                        },
+                        "viewer": {"username": "fixture-viewer", "role": "operator", "capabilities": ["finance"]},
                     }
                 }
             ),
@@ -113,6 +115,22 @@ def main() -> None:
             assert "ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ" in html
             assert "{{FINANCE_INSTANCE_BANNER}}" not in html
             csrf = str(capabilities["data"]["csrf_token"])  # type: ignore[index]
+            status, categories = request(base, "/v1/finance/categories")
+            assert status == 200 and len(categories["data"]["categories"]) == 23  # type: ignore[index]
+            status, counterparties = request(base, "/v1/finance/counterparties")
+            assert status == 200 and counterparties["data"]["counterparties"] == []  # type: ignore[index]
+            status, audit = request(base, "/v1/finance/audit")
+            assert status == 200 and len(audit["data"]["events"]) == 26  # type: ignore[index]
+            status, directory_audit = request(base, "/v1/finance/audit?scope=directories")
+            assert status == 200 and len(directory_audit["data"]["events"]) == 26  # type: ignore[index]
+            status, viewer_caps = request(base, "/v1/finance/capabilities", actor="viewer")
+            viewer_csrf = str(viewer_caps["data"]["csrf_token"])  # type: ignore[index]
+            status, denied = request(base, "/v1/finance/audit", actor="viewer")
+            assert status == 403 and denied["error"]["code"] == "finance_capability_denied"  # type: ignore[index]
+            status, denied = request(base, "/v1/finance/counterparties", payload={"name": "Denied"}, csrf=viewer_csrf, actor="viewer")
+            assert status == 403 and denied["error"]["code"] == "finance_capability_denied"  # type: ignore[index]
+            status, counterparty = request(base, "/v1/finance/counterparties", payload={"name": "HTTP fixture counterparty"}, csrf=csrf)
+            assert status == 201 and counterparty["data"]["counterparty_id"]  # type: ignore[index]
             status, account = request(
                 base,
                 "/v1/finance/accounts",
