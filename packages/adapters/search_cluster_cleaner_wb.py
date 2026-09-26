@@ -280,6 +280,8 @@ class CleanerWbSource:
     def set_minus_once(self,target,queries,slot):
         if slot is None or slot is not self._slot:raise CleanerError('write_slot_missing','Нет выделенного сетевого слота')
         self._slot=None
-        if not queries or len(queries)>1000 or len(queries)!=len(set(queries)):raise CleanerError('invalid_full_set','Неверный полный список')
+        # The official full-set endpoint accepts [] to remove the final minus
+        # phrase. The guarded writer still requires at least one proven change.
+        if len(queries)>1000 or len(queries)!=len(set(queries)):raise CleanerError('invalid_full_set','Неверный полный список')
         for query in queries:query_hash(query)
         return self._call('POST','/adv/v0/normquery/set-minus',{'advert_id':target.advert_id,'nm_id':target.nm_id,'norm_queries':list(queries)},deadline=self.monotonic()+self.timeout,write=True)

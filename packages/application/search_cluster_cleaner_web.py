@@ -112,10 +112,21 @@ class CleanerWeb:
             raise CleanerError("generation_mismatch", "Работа приостановлена до проверки восстановления", 409)
         return cleaner
 
+    def _registry_ready(self) -> bool:
+        """Read-only cutover gate for the explicit excluded 1→0 upgrade."""
+        if not self.cleaner:return False
+        from packages.application.change_registry_search_cluster import bidirectional_ready
+        with self.cleaner.store.read() as c:
+            return bidirectional_ready(c)
+
+    def _require_registry_ready(self) -> None:
+        if not self._registry_ready():
+            raise CleanerError('registry_upgrade_required','Ручная чистка ожидает проверенного обновления реестра',503)
+
     def summary(self, principal: Principal) -> dict:
         config = self.configuration(principal)
         if not self.cleaner:
-            return dict(configuration=config, settings=dict(enabled=False, revision=None,
+            return dict(configuration=config, registry_ready=False, settings=dict(enabled=False, revision=None,
                         schedule_time="07:00", timezone="Asia/Yekaterinburg", baseline_ready=False, restore_hold=True),
                         last_scan=None, current_work=None, queued=[], pending_count=None, unresolved_count=None,
                         profile_required_count=None, target_holds=None, errors=["not_initialized"], indicator=True,
@@ -125,7 +136,8 @@ class CleanerWeb:
             result["inflight_count"] = c.execute("SELECT count(*) FROM cleaner_write_operations WHERE account=? AND state IN ('dispatching','submitted')", (self.cleaner.key,)).fetchone()[0]
         if not config["owner_configured"] or not config["generation_matches"] or not result["settings"]["baseline_ready"]:
             result["settings"]["enabled"] = False
-        result.update(configuration=config, profiles=self.profiles(principal), models=sorted(MODEL_CATALOG))
+        result.update(configuration=config, registry_ready=self._registry_ready(),
+                      profiles=self.profiles(principal), models=sorted(MODEL_CATALOG))
         result['manual_worker_alive']=bool(self.worker_alive and self.worker_alive())
         result['manual_worker_state']=self.worker_status() if self.worker_status else 'not_attached'
         result['last_manual_job']=None
@@ -176,6 +188,7 @@ class CleanerWeb:
                 saved=c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-clean'",
                                 (cleaner.key,principal.username.strip().casefold(),request_id)).fetchone()
             if saved:return cleaner.start_manual_clean(payload,principal)
+        self._require_registry_ready()
         if self.worker_status and self.worker_status()!='ready':
             raise CleanerError('manual_worker_unavailable','Исполнитель ручной чистки сейчас недоступен',503)
         listed=self.targets(principal)
@@ -214,6 +227,10 @@ class CleanerWeb:
         principal.require_read()
         self.require_service()
         from packages.application.search_cluster_cleaner_batch_eligibility import category_contract, eligibility_rows
+        if not self._registry_ready():
+            empty_counts=dict(total=None,eligible=None,selectable_active=None,selectable_paused=None,
+                              profile_required=None,ineligible=None,unknown=None)
+            return dict(items=[],counts=empty_counts,loading=False,error='registry_upgrade_required',categories=category_contract())
         with self._catalog_lock:
             stale=time.monotonic()-self._batch_catalog_at>120
             if not self._batch_catalog_loading and (refresh or stale) and self._fixture_approved_targets is None:
@@ -249,6 +266,7 @@ class CleanerWeb:
             with cleaner.store.read() as c:
                 saved=c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-batches'",(cleaner.key,principal.username.strip().casefold(),request_id)).fetchone()
             if saved:return cleaner.start_manual_batch(payload,principal)
+        self._require_registry_ready()
         if self.worker_status and self.worker_status()!='ready':
             raise CleanerError('manual_worker_unavailable','Исполнитель ручной чистки сейчас недоступен',503)
         from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource

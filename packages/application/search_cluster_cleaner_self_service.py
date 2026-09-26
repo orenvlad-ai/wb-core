@@ -96,6 +96,8 @@ class ManualCleanerCoordinator:
 
     def pending_jobs(self) -> list[str]:
         with self.cleaner.store.read() as c:
+            from packages.application.change_registry_search_cluster import bidirectional_ready
+            if not bidirectional_ready(c):return []
             rows=c.execute("SELECT json_extract(facts,'$.job_id') AS job_id FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence",(self.cleaner.key,)).fetchall()
             pending=[]
             for row in rows:

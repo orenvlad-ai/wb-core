@@ -19,6 +19,7 @@ from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.business_data_write_barrier import acquire_barrier
 from packages.contracts.search_cluster_cleaner import Target
 from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
+from packages.adapters.search_cluster_cleaner_http import PREFIX
 from packages.domain.search_cluster_sources import union_snapshot
 
 
@@ -29,18 +30,27 @@ def run():
         checks.append(name)
     with running_fixture('confirmed') as f:
         summary=f.request('/summary')[1]
-        check('D_connected_transport_and_counts',summary['transport_enabled'] and summary['confirmed']==dict(automatic=2,manual=1,late_automatic=0,late_manual=1))
+        check('D_connected_transport_and_counts',summary['transport_enabled'] and
+              all(summary['confirmed'][key]==value for key,value in dict(automatic=2,manual=1,late_automatic=0,late_manual=1,returned=0).items()))
         check('D_original_scan_unchanged',summary['last_scan']['summary']['confirmed_automatic']==2 and summary['last_scan']['summary']['confirmed_manual']==0)
         history=f.request('/history')[1]['items']
         check('D_late_manual_history',any(e['kind']=='late_confirmation' and e['facts']['confirmed_manual']==1 for e in history))
     with running_fixture() as f:
         s=f.request('/summary')[1]
-        check('ordinary_saved_summary',s['pending_count']==3 and s['last_scan']['state']=='complete')
+        check('ordinary_saved_summary',s['pending_count']==0 and s['last_scan']['state']=='complete' and
+              s['last_scan']['summary']['controversial']==3)
         check('private_no_store',f.request('/summary')[2].get('Cache-Control')=='private, no-store')
         count=f.count('cleaner_requests');reader=f.login('reader');admin=f.login('admin');noads=f.login('noads')
         command=dict(request_id='http-read-only-user',expected_revision=s['settings']['revision'],schedule_time='08:00')
         check('unauthenticated_denied',f.request('/summary',opener=urllib.request.build_opener())[0]==401)
         check('reader_read_allowed',f.request('/summary',opener=reader)[0]==200)
+        check('controversial_export_owner_only',f.request('/controversial.csv',opener=reader)[0]==403)
+        with f.owner.open(urllib.request.Request(f.base_url+PREFIX+'/controversial.csv',headers={'Accept':'text/csv'}),timeout=10) as export:
+            csv_body=export.read().decode('utf-8-sig')
+            check('controversial_export_csv_attachment',export.status==200 and
+                  'attachment' in export.headers.get('Content-Disposition','') and
+                  export.headers.get('Cache-Control')=='private, no-store' and
+                  csv_body.startswith('target,query,before,desired,actual,confirmed'))
         check('reader_direct_mutation_denied',f.request('/settings',command,opener=reader)[0]==403)
         check('admin_not_owner_denied',f.request('/settings',command,opener=admin)[0]==403)
         resume_path='/manual-batches/nonexistent-batch/resume'
@@ -62,13 +72,24 @@ def run():
         check('stale_revision_409',f.request('/settings',dict(command,request_id='http-stale-revision'))[0]==409)
         check('request_recovery_owner',f.request('/requests/'+command['request_id'])[1]==result)
         check('request_recovery_other_actor_hidden',f.request('/requests/'+command['request_id'],opener=reader)[0]==404)
+        # Preserve the legacy human-decision route as an explicit old-review
+        # fixture. Fresh semantic ambiguity now resolves automatically.
+        with f.cleaner.store.transaction() as c:
+            observation=c.execute("SELECT * FROM cleaner_observations WHERE account=? AND target='10101:101' ORDER BY query LIMIT 1",
+                                  (f.cleaner.key,)).fetchone()
+            f.cleaner._review(c,dict(observation),'Старый вопрос владельцу')
+            f.cleaner._sync_reviews(c)
         item=f.request('/reviews')[1]['items'][0]
         before=f.count('cleaner_manual_overrides')
         decision=dict(request_id='http-decision-0001',decision='allow',expected_revision=item['revision'])
         with f.cleaner.store.transaction() as c:
             c.execute("UPDATE cleaner_observations SET observed_state='excluded' WHERE review_id=?",(item['review_id'],))
         code,result,_=f.request('/reviews/'+item['review_id']+'/decision',decision)
-        check('historically_excluded_allow_never_returns',code==202 and bool(result['already_excluded']) and f.count('cleaner_write_operations')==0)
+        check('historically_excluded_allow_queues_return_without_http_post',code==202 and bool(result['run_id']) and
+              not result['already_excluded'] and f.count('cleaner_write_operations')==0)
+        claimed=f.cleaner.claim_run(generation=GENERATION)
+        check('synthetic_return_is_dry_run_without_wb',claimed['run_id']==result['run_id'] and
+              f.cleaner.finish_run(claimed['run_id'],claimed['worker_token'],GENERATION)['state']=='complete')
         check('decision_saved_once',f.request('/reviews/'+item['review_id']+'/decision',decision)[0]==202 and f.count('cleaner_manual_overrides')==before+1)
         check('stale_review_409',f.request('/reviews/'+item['review_id']+'/decision',dict(decision,request_id='http-stale-review'))[0]==409)
         new_profile={k:v for k,v in PROFILE.items() if k not in {'nm_id','version'}}

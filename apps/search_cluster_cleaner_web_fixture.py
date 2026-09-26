@@ -66,6 +66,16 @@ def seed_cleaner(runtime_dir: Path, mode='normal'):
         snap = union_snapshot(t, list_entry=dict(active=queries, excluded=[], archived=[]), stats_queries=queries, minus_queries=[], observed_at=FIXTURE_NOW, source_times={s: FIXTURE_NOW for s in ('list', 'statistics', 'minus')})
         cleaner.record_snapshot(run_id, run['worker_token'], GENERATION, snap)
     cleaner.finish_run(run_id, run['worker_token'], GENERATION)
+    if mode in {'normal','partial','profile-required'}:
+        # Historic fixture questions model an older pending review left to be
+        # reconciled by the next full scan under the current policy.
+        with cleaner.store.transaction() as c:
+            for query in QUERIES:
+                old=c.execute('SELECT * FROM cleaner_observations WHERE account=? AND target=? AND query=?',
+                              (cleaner.key,target.key,query)).fetchone()
+                assert old is not None
+                cleaner._review(c,dict(old),'Отрицание требует отдельного разбора')
+            cleaner._sync_reviews(c)
     if mode == 'failed':
         # Deliberately synthetic state projection, not a live worker failure claim.
         with cleaner.store.transaction() as c:
@@ -103,6 +113,14 @@ def seed_confirmed(cleaner):
             clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
         cleaner.start_run(dict(request_id='fixture-D-scan'),OWNER)
         product_tick(cleaner,source,guard,generation=GENERATION,monotonic=clock.monotonic)
+        # Reproduce a question left open by the previous policy. The current
+        # classifier resolves this phrase automatically during a fresh scan.
+        with cleaner.store.transaction() as c:
+            old=c.execute('SELECT * FROM cleaner_observations WHERE account=? AND query=?',
+                          (cleaner.key,QUERIES[0])).fetchone()
+            assert old is not None
+            cleaner._review(c,dict(old),'Старый вопрос владельцу')
+            cleaner._sync_reviews(c)
         review=cleaner.reviews(OWNER)['items'][0]
         cleaner.decide(review['review_id'],dict(request_id='fixture-D-manual',expected_revision=review['revision'],decision='exclude'),OWNER)
         fake.mode='noop'

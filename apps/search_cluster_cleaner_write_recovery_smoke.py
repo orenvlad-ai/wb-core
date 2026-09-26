@@ -118,6 +118,60 @@ def scan_finish_cases():
                     assert not fake.writes
 
 
+def return_only_finish_case():
+    """A rolled-back final COMMIT must not count a confirmed 1→0 as an addition."""
+    with Sandbox() as box:
+        card=prepared_fixture(box)
+        fake=FakeWB()
+        fake.targets[11]['stats']=[]
+        fake.targets[11]['minus']=['стекло iphone 16 pro max']
+        clock=Clock();clock.base=datetime.now(timezone.utc)+timedelta(seconds=1)
+        with fake.server() as url:
+            source=CleanerWbSource(account=box.service().account,
+                runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
+                clock=clock,monotonic=clock.monotonic,
+                limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
+            original_cleaner=stage_e.KeywordCleaner
+            with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card)), \
+                 patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
+                service=box.service();owner=Principal('owner',True,True,True)
+                job_id='synthetic-return-finish-0001'
+                job=service.start_manual_clean(dict(request_id=job_id,advert_id=11,nm_id=101),owner)
+                adapter=LocalStageEAdapter(runtime_dir=box.runtime,env_file=box.env,admission_dir=box.admission)
+                child=ManualCleanerCoordinator(service,adapter)
+                for _ in range(16):
+                    current=service.manual_job(job_id,owner)
+                    if current['stage']=='write_ready':break
+                    child.tick()
+                else:raise AssertionError('return-only manual run did not reach write preview')
+                write_run=current['write_run_id']
+                original_finish=KeywordCleaner.finish_run
+                blocked=[]
+                def blocked_finish(self,run_id,*args,**kwargs):
+                    if run_id==write_run and not blocked:
+                        blocked.append(True)
+                        return held_commit(box.runtime/'registry_upload_runtime.sqlite3',
+                                           lambda:original_finish(self,run_id,*args,**kwargs))
+                    return original_finish(self,run_id,*args,**kwargs)
+                with patch.object(KeywordCleaner,'finish_run',blocked_finish):child.tick()
+                assert blocked and fake.writes==[dict(advert_id=11,nm_id=101,norm_queries=[])],fake.writes
+                with service.store.read() as c:
+                    run=c.execute('SELECT state FROM cleaner_runs WHERE run_id=?',(write_run,)).fetchone()
+                    op=c.execute('SELECT state,dispatch_count FROM cleaner_write_operations WHERE run_id=?',(write_run,)).fetchone()
+                    assert run['state']=='complete' and op['state']=='confirmed' and op['dispatch_count']==1,(dict(run),dict(op))
+                receipt=stage_e.execute(dict(action='readback',operation_id=child.operation_id(job_id,'write'),
+                    request=dict(mode='manual',run_id=write_run,targets=[dict(advert_id=11,nm_id=101)]),
+                    expected_runtime_sha=adapter.runtime_sha),runtime_dir=box.runtime,env_file=box.env,
+                    admission_dir=box.admission)
+                assert receipt['state']=='applied',receipt
+                detail=service.run_detail(write_run,owner)
+                assert detail['summary']['recovered_manual'] and detail['summary']['returned']==1,detail
+                assert detail['summary']['confirmed_pilot']==0,detail
+                assert detail['phrases'][0]['action']=='return' and detail['phrases'][0]['confirmed_state']=='allowed'
+                assert len(fake.writes)==1
+
+
 def main():
     with Sandbox() as box:
         card=prepared_fixture(box)
@@ -281,6 +335,7 @@ def main():
                 assert not parent.pending_batches() and not child.pending_jobs()
                 assert len(fake.writes)==2
     scan_finish_cases()
+    return_only_finish_case()
     print('search cluster cleaner write recovery smoke: ok')
 
 
