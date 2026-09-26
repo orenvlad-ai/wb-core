@@ -481,6 +481,8 @@
       "commands": [
         ["python3", "ci/select_checks_smoke.py"],
         ["python3", "apps/github_release_runner_smoke.py"],
+        ["python3", "ci/post_merge_release_recovery_smoke.py"],
+        ["python3", "ci/post_merge_completion_recovery_smoke.py"],
         ["python3", "apps/production_apply_adapters_smoke.py"],
         ["python3", "apps/production_apply_launcher_smoke.py"]
       ],
