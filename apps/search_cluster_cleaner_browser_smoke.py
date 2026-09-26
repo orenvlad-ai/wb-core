@@ -515,6 +515,9 @@ def run(output:Path):
     from apps.search_cluster_cleaner_batch_recovery_browser_smoke import run as run_batch_recovery
     recovery = run_batch_recovery(output/'batch-recovery')
     checks.extend('batch_recovery_'+name for name in recovery['checks'])
+    from apps.search_cluster_cleaner_drift_batch_browser_smoke import main as drift_batch_browser_main
+    drift_batch_browser_main()
+    checks.append('drift_batch_explicit_resume_reload_and_final_counts')
     return dict(passed=len(checks),checks=checks,screenshots=[str(output/name) for name in screens],wb_writes=0,synthetic_wb_posts=2)
 
 if __name__=='__main__':

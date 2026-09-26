@@ -158,6 +158,8 @@ def main() -> None:
             assert state['hold'] and not state.get('owner') and not state.get('manual_capability')
     from apps.search_cluster_cleaner_batch_smoke import main as batch_main
     batch_main()
+    from apps.search_cluster_cleaner_drift_batch_smoke import main as drift_batch_main
+    drift_batch_main()
     from apps.search_cluster_cleaner_cpm_reliability_smoke import main as reliability_main
     reliability_main()
     from apps.search_cluster_cleaner_held_evidence_smoke import main as held_evidence_main
