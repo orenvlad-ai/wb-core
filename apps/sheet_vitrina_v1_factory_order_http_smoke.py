@@ -577,7 +577,9 @@ def main() -> None:
             if "attachment" not in recommendation_disposition or "factory-order-recommendation-2026-04-18.xlsx" not in recommendation_disposition:
                 raise AssertionError("recommendation route must return an attachment filename matching the calculated result")
             recommendation_rows = read_first_sheet_rows(recommendation_bytes)
-            if recommendation_rows[-3][0] != "Общее количество":
+            if recommendation_rows[0] != ["nmId", "SKU description", "Barcode", "Recommended order quantity"]:
+                raise AssertionError("recommendation workbook must expose the compact English columns")
+            if recommendation_rows[-3][0] != "Total quantity" or recommendation_rows[-3][3] != calc_with_inbound_payload["summary"]["total_qty"]:
                 raise AssertionError("recommendation workbook summary must stay aligned with UI summary")
             registry_status, registry_payload = _get_json(
                 f"{base_url}{DEFAULT_SUPPLY_CALCULATIONS_PATH}"
