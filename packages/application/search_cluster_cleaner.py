@@ -520,8 +520,9 @@ class KeywordCleaner:
         """Prove that a saved apply claim never gained dispatch rights.
 
         The run claim and Stage E binding commit in one transaction before any
-        guarded WB call. A queued exact run without either binding or write
-        intent can safely repeat its fresh preview with the same operation ID.
+        guarded WB call. A queued run may repeat a fresh preview with the same
+        operation ID either before that claim or after the held guard has
+        immutably cancelled every proven-unsent preparation.
         """
         with self.store.read() as c:
             run=c.execute("SELECT state,trigger,targets,worker_token,started_at FROM cleaner_runs WHERE account=? AND run_id=?",
@@ -530,13 +531,24 @@ class KeywordCleaner:
                     or run['worker_token'] or run['started_at']):return False
             declared={str(row.get('target') or '') for row in json.loads(run['targets'])}
             if declared!={target.key}:return False
-            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
-                         (self.key,run_id)).fetchone():return False
-            if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=?',
-                         (self.key,run_id)).fetchone():return False
-            if c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
-                         (self.key,operation_id)).fetchone():return False
-            return True
+            bindings=[json.loads(row[0]) for row in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",
+                (self.key,run_id))]
+            operations=c.execute('SELECT operation_id,state,dispatch_count FROM cleaner_write_operations WHERE account=? AND run_id=?',
+                                 (self.key,run_id)).fetchall()
+            if not bindings and not operations:
+                return not c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",
+                                     (self.key,operation_id)).fetchone()
+            if (not bindings or any(row.get('operation_id')!=operation_id or set(row.get('targets') or [])!=declared for row in bindings)
+                    or any(row['state']!='cancelled_before_send' or row['dispatch_count']!=0 for row in operations)
+                    or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
+                return False
+            events=[json.loads(event[0]) for event in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",
+                (self.key,run_id))]
+            recovered={op for event in events if event.get('production_operation_id')==operation_id
+                       for op in event.get('cancelled_operations',[])}
+            return bool(events) and all(row['operation_id'] in recovered for row in operations)
 
     def decide(self,review_id:str,payload:Mapping,principal:Principal) -> dict:
         def command(c,actor):
@@ -943,16 +955,31 @@ class KeywordCleaner:
             if not run or run['state'] not in {'running','accepted'}: return run['state'] if run else 'missing'
             bindings=[json.loads(row[0]) for row in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='stage_e_manual_binding'",(run_id,))]
             if not any(v.get('operation_id')==production_operation_id for v in bindings): raise CleanerError('manual_binding_missing','Нет точной привязки ручного запуска',409)
-            operations=c.execute('SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchall()
+            operations=c.execute("SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=? AND state!='cancelled_before_send'",(self.key,run_id)).fetchall()
             if not operations:
                 if not allow_no_operations or not run['lease_expires_at'] or timestamp(run['lease_expires_at'])>timestamp(self.clock()):
                     raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
                 state='partial'
+                summary=dict(recovered_manual=True,confirmed_pilot=0)
+                if run['kind']=='scan':
+                    targets=c.execute('SELECT target,state,complete,reason,counters FROM cleaner_run_targets WHERE run_id=?',(run_id,)).fetchall()
+                    declared={str(item.get('target') or '') for item in json.loads(run['targets'])}
+                    if {item['target'] for item in targets}==declared and targets:
+                        summary.update(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,
+                                       excluded_not_executed=0,confirmed_automatic=0,confirmed_manual=0,
+                                       unresolved_operations=0,requires_review_operations=0,rejected_not_executed=0,
+                                       dry_run=True,pairs=len(targets),campaigns=len({item['target'].split(':')[0] for item in targets}))
+                        for target in targets:
+                            for key,value in json.loads(target['counters']).items():
+                                if key in summary:summary[key]+=value
+                        if (all(item['state']=='done' and item['complete'] and not item['reason'] for item in targets)
+                                and not summary['excluded_not_executed'] and not run['reason']):
+                            state='complete'
             elif any(row['state'] not in {'confirmed','rejected','requires_review'} for row in operations):
                 raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
             else:
                 state='complete' if all(row['state']=='confirmed' for row in operations) else 'partial'
-            summary=dict(recovered_manual=True,confirmed_pilot=c.execute("SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id) WHERE o.run_id=? AND i.confirmed_at IS NOT NULL",(run_id,)).fetchone()[0])
+                summary=dict(recovered_manual=True,confirmed_pilot=c.execute("SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id) WHERE o.run_id=? AND i.confirmed_at IS NOT NULL",(run_id,)).fetchone()[0])
             c.execute("UPDATE cleaner_runs SET state=?,phase='finished',scan_finished_at=coalesce(scan_finished_at,?),summary=?,worker_token=NULL,lease_expires_at=NULL WHERE run_id=?",(state,self.clock(),canonical(summary),run_id))
             self._event(c,'run_finished',dict(state=state,summary=summary,recovered=True),run_id=run_id)
             return state
@@ -997,8 +1024,9 @@ class KeywordCleaner:
                   WHERE i.operation_id=? ORDER BY i.query""",(operation['operation_id'],))]
                 operations.append(dict(operation_id=operation['operation_id'],target=operation['target'],state=operation['state'],items=items))
             result['write_operations']=operations
+            effective_operations=[operation for operation in operations if operation['state']!='cancelled_before_send']
             written={(operation['target'],item['query_hash'],item['decision_id']):item
-                     for operation in operations for item in operation['items']}
+                     for operation in effective_operations for item in operation['items']}
             phrases=[]
             if row['kind']=='manual_apply':
                 for candidate in json.loads(row['targets']):
@@ -1013,12 +1041,12 @@ class KeywordCleaner:
             result['phrases']=phrases
             # A completed run is an immutable snapshot. Late readback changes
             # the effective outcome, not that historical run summary.
-            if operations:
-                states={operation['state'] for operation in operations}
-                actual={(operation['target'],item['query_hash'],item['decision_id']) for operation in operations for item in operation['items']}
+            if effective_operations:
+                states={operation['state'] for operation in effective_operations}
+                actual={(operation['target'],item['query_hash'],item['decision_id']) for operation in effective_operations for item in operation['items']}
                 expected={(candidate['target'],candidate['query_hash'],candidate['decision_id']) for candidate in json.loads(row['targets'])} if row['kind']=='manual_apply' else actual
                 if (expected and expected==actual and states=={'confirmed'}
-                        and all(item['confirmed_at'] for operation in operations for item in operation['items'])
+                        and all(item['confirmed_at'] for operation in effective_operations for item in operation['items'])
                         and all(v['state']=='confirmed' for v in phrases)):
                     result['effective_state']='complete'
                 elif states & {'rejected','requires_review'}:
