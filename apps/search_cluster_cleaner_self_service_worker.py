@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Run only explicit saved UI cleaner jobs on the trusted server.
+"""Run saved cleaner jobs and owner-enabled daily slots on the trusted server.
 
-No scheduler is called. The process owns one flock and can recover a saved
+The process owns one flock and can recover a saved
 apply claim only by readback of that exact Production Apply operation.
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ from apps.wb_fbs_warehouse_registry import _load_env_file
 from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter,ManualCleanerCoordinator
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
+from packages.application.search_cluster_cleaner_daily import DailyCleanerScheduler
 
 
 def deployment_ready() -> bool:
@@ -40,6 +42,24 @@ def report_health(admission_dir:Path,state:str,reason:str='') -> None:
     os.replace(temporary,path)
 
 
+def heartbeat_while_busy(admission_dir:Path, stop:threading.Event) -> None:
+    # One guarded batch can take longer than the release probe's freshness
+    # window. The live worker keeps its busy receipt fresh until it finishes.
+    while not stop.wait(2):
+        report_health(admission_dir,'busy')
+
+
+def ready_cycle(coordinator, batch_coordinator, daily) -> bool:
+    """Record due intent even while the shared manual queue is busy."""
+    jobs=coordinator.pending_jobs()
+    batches=batch_coordinator.pending_batches()
+    due=daily.tick()
+    if jobs:coordinator.tick()
+    if batches:batch_coordinator.tick()
+    daily.reconcile_finished()
+    return bool(jobs or batches or due and due.get('state') not in {'skipped','missed','no_targets'})
+
+
 def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2.0) -> None:
     admission_dir=admission_dir.resolve()
     lock_path=admission_dir/'self-service-worker.lock'
@@ -54,6 +74,7 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
         bootstrap_owner_username=os.environ.get('WB_CORE_WEB_AUTH_USERNAME','')
         coordinator=ManualCleanerCoordinator(cleaner,adapter,bootstrap_owner_username=bootstrap_owner_username)
         batch_coordinator=BatchCleanerCoordinator(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username)
+        daily=DailyCleanerScheduler(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username)
         while True:
             if not deployment_ready():
                 try:
@@ -67,13 +88,15 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     report_health(admission_dir,'storage_wait',type(exc).__name__)
             else:
                 try:
-                    jobs=coordinator.pending_jobs()
-                    batches=batch_coordinator.pending_batches()
-                    if jobs or batches:
-                        report_health(admission_dir,'busy')
-                        if jobs:coordinator.tick()
-                        if batches:batch_coordinator.tick()
-                    report_health(admission_dir,'ready')
+                    report_health(admission_dir,'busy')
+                    stop=threading.Event()
+                    heartbeat=threading.Thread(target=heartbeat_while_busy,args=(admission_dir,stop),daemon=True)
+                    heartbeat.start()
+                    try:busy=ready_cycle(coordinator,batch_coordinator,daily)
+                    finally:
+                        stop.set()
+                        heartbeat.join()
+                    report_health(admission_dir,'busy' if busy else 'ready')
                 except Exception as exc:
                     # The exact intent stays durable. Report the failure while
                     # the supervisor keeps this process available for recovery.

@@ -16,7 +16,7 @@ from packages.application.storage_registry import StoreRegistry
 class CleanerTransactionRolledBack(sqlite3.OperationalError):
     """A BUSY transaction was provably not committed; the same ID may recover."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleaner_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
 INSERT OR IGNORE INTO cleaner_schema VALUES(1,1);
@@ -90,6 +90,19 @@ CREATE TABLE IF NOT EXISTS cleaner_schedule_dates(
  account TEXT NOT NULL,local_date TEXT NOT NULL,run_id TEXT NOT NULL,due_at TEXT NOT NULL,
  PRIMARY KEY(account,local_date),FOREIGN KEY(run_id) REFERENCES cleaner_runs(run_id)
 );
+CREATE TABLE IF NOT EXISTS cleaner_daily_schedules(
+ account TEXT NOT NULL, schedule_id TEXT NOT NULL, local_time TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN(0,1)),
+ owner TEXT NOT NULL, actor_authority TEXT NOT NULL, generation TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(account,schedule_id)
+);
+CREATE TABLE IF NOT EXISTS cleaner_daily_occurrences(
+ account TEXT NOT NULL, schedule_id TEXT NOT NULL, local_date TEXT NOT NULL,
+ due_at TEXT NOT NULL, state TEXT NOT NULL, batch_id TEXT NOT NULL,
+ discovered_count INTEGER, checked_campaign_count INTEGER, details TEXT NOT NULL DEFAULT '{}',
+ reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(account,schedule_id,local_date), UNIQUE(account,batch_id)
+);
 CREATE TABLE IF NOT EXISTS cleaner_scan_queue(
  account TEXT NOT NULL,target TEXT NOT NULL,advert_id INTEGER NOT NULL,nm_id INTEGER NOT NULL,
  scan_order INTEGER NOT NULL,metadata TEXT NOT NULL,available INTEGER NOT NULL DEFAULT 1,
@@ -154,6 +167,9 @@ def install_schema(conn: sqlite3.Connection) -> None:
         conn.execute("DROP INDEX cleaner_unresolved_target")
         conn.execute("""CREATE UNIQUE INDEX cleaner_unresolved_target ON cleaner_write_operations(account,target)
           WHERE state IN('prepared','dispatching','submitted','unresolved','validation_rejected','rate_limited','unauthorized','forbidden','transport_ambiguous','http_error','requires_review')""")
+        conn.execute("UPDATE cleaner_schema SET version=2 WHERE singleton=1")
+        version=2
+    if version==2:
         conn.execute("UPDATE cleaner_schema SET version=? WHERE singleton=1",(SCHEMA_VERSION,))
         version=SCHEMA_VERSION
     if version != SCHEMA_VERSION:

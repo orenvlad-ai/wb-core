@@ -554,6 +554,12 @@
         </div>
         <p id="autoUpdatesMessage" class="message">Читаем автообновления...</p>
         <div id="autoUpdatesRows" class="auto-updates-grid"></div>
+        <article class="auto-update-card" style="margin-top:14px" aria-labelledby="cleanerDailyTitle">
+          <div class="auto-update-card-header"><div><h3 id="cleanerDailyTitle">Чистка ключей · ежедневно</h3><p class="muted">Активные CPM-кампании · Asia/Yekaterinburg. Общая пауза автообновлений действует и здесь.</p></div></div>
+          <p id="cleanerDailyStatus" class="message">Читаем расписание…</p>
+          <div id="cleanerDailyRows"></div>
+          <div class="compact-actions"><button type="button" id="cleanerDailyAdd">Добавить время</button><button class="primary" type="button" id="cleanerDailySave">Сохранить расписание</button></div>
+        </article>
         <details style="margin-top: 14px;">
           <summary>Технические детали owner policy</summary>
           <pre id="autoUpdatesTechnicalDetails" class="calculation-diff"></pre>
@@ -962,6 +968,7 @@
         if (requested === "auto-updates") {
           loadAutoUpdates();
           loadVitrinaSchedules();
+          loadCleanerDaily();
         }
         if (requested === "sources-sessions") {
           loadSourcesSessions({refreshStale: true});
@@ -3180,6 +3187,83 @@
         }
       }
 
+      const cleanerDailyBase = "/v1/sheet-vitrina-v1/ads/keyword-cleaner/daily-schedules";
+      let cleanerDailyState = null;
+      let cleanerDailyPending = false;
+      const cleanerDailyRows = document.getElementById("cleanerDailyRows");
+      const cleanerDailyStatus = document.getElementById("cleanerDailyStatus");
+      const cleanerDailyAdd = document.getElementById("cleanerDailyAdd");
+      const cleanerDailySave = document.getElementById("cleanerDailySave");
+      function renderCleanerDaily() {
+        const state = cleanerDailyState;
+        if (!state) return;
+        cleanerDailyRows.replaceChildren();
+        for (const row of state.schedules) {
+          const line = document.createElement("div");
+          line.className = "compact-actions";
+          const toggle = document.createElement("input");
+          toggle.type = "checkbox"; toggle.checked = !!row.enabled;
+          toggle.setAttribute("aria-label", "Включить время " + row.time);
+          toggle.disabled = !state.can_edit || cleanerDailyPending;
+          toggle.addEventListener("change", () => { row.enabled = toggle.checked; });
+          const time = document.createElement("input");
+          time.type = "time"; time.value = row.time;
+          time.setAttribute("aria-label", "Время запуска");
+          time.disabled = !state.can_edit || cleanerDailyPending;
+          time.addEventListener("change", () => { row.time = time.value; });
+          const remove = document.createElement("button");
+          remove.type = "button"; remove.textContent = "Удалить";
+          remove.disabled = !state.can_edit || cleanerDailyPending;
+          remove.addEventListener("click", () => { state.schedules = state.schedules.filter(item => item.id !== row.id); renderCleanerDaily(); });
+          line.append(toggle, time, remove);
+          cleanerDailyRows.append(line);
+        }
+        cleanerDailyAdd.disabled = !state.can_edit || cleanerDailyPending || state.schedules.length >= 12;
+        cleanerDailySave.disabled = !state.can_edit || cleanerDailyPending;
+        cleanerDailySave.textContent = cleanerDailyPending ? "Сохраняем…" : "Сохранить расписание";
+        cleanerDailyStatus.textContent = state.pause_reason || (state.schedules.some(row => row.enabled) ? "Расписание включено. Запуск ежедневно в выбранное время." : "Расписание выключено.");
+      }
+      async function loadCleanerDaily() {
+        if (cleanerDailyPending) return;
+        try {
+          cleanerDailyState = await fetchJson(cleanerDailyBase, {headers: {Accept: "application/json"}});
+          renderCleanerDaily();
+          return true;
+        } catch (error) {
+          cleanerDailyStatus.textContent = error.message;
+          cleanerDailyStatus.className = "message error";
+          return false;
+        }
+      }
+      cleanerDailyAdd.addEventListener("click", () => {
+        if (!cleanerDailyState || !cleanerDailyState.can_edit) return;
+        cleanerDailyState.schedules.push({id: "slot_" + crypto.randomUUID().replaceAll("-", "").slice(0,16), time: "03:45", enabled: false});
+        renderCleanerDaily();
+      });
+      cleanerDailySave.addEventListener("click", async () => {
+        if (!cleanerDailyState || cleanerDailyPending || !cleanerDailyState.can_edit) return;
+        const expected = cleanerDailyState.schedules.map(row => ({id: row.id, time: row.time, enabled: !!row.enabled}));
+        let finalMessage = "", finalClass = "message";
+        cleanerDailyPending = true; renderCleanerDaily();
+        const requestId = crypto.randomUUID();
+        try {
+          await fetchJson(cleanerDailyBase, {method: "POST", credentials: "same-origin", headers: {
+            Accept: "application/json", "Content-Type": "application/json", "X-WB-Keyword-Cleaner-CSRF": "1"
+          }, body: JSON.stringify({request_id: requestId, expected_revision: cleanerDailyState.revision,
+            schedules: expected})});
+          cleanerDailyPending = false;
+          if (!await loadCleanerDaily()) throw new Error("Не удалось перечитать сохранённое расписание");
+          finalMessage = "Расписание сохранено и перечитано.";
+          finalClass = "message success";
+        } catch (error) {
+          cleanerDailyPending = false;
+          const readback = await loadCleanerDaily();
+          const confirmed = readback && JSON.stringify(cleanerDailyState.schedules.map(row => ({id: row.id, time: row.time, enabled: !!row.enabled}))) === JSON.stringify(expected);
+          finalMessage = confirmed ? "Сохранение подтверждено повторным чтением." : "Ответ не подтверждён: " + error.message + ". Обновите статус перед новой командой.";
+          finalClass = confirmed ? "message success" : "message error";
+        } finally { cleanerDailyPending = false; renderCleanerDaily(); cleanerDailyStatus.textContent = finalMessage; cleanerDailyStatus.className = finalClass; }
+      });
+
       async function updateAutoUpdates(body) {
         if (!autoUpdatesState || !autoUpdatesState.revision) return;
         body.expected_revision = autoUpdatesState.revision;
@@ -3544,6 +3628,7 @@
       reloadAutoUpdatesButton.addEventListener("click", () => {
         loadAutoUpdates();
         loadVitrinaSchedules();
+        loadCleanerDaily();
       });
       reloadSourcesSessionsButton.addEventListener("click", () => loadSourcesSessions({refreshStale: false}));
       reloadWarehousesButton.addEventListener("click", loadWarehouses);

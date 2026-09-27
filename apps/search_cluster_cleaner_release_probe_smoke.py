@@ -38,6 +38,18 @@ def main():
             write_health('armed')
             (box.app/'.wb-core-deploy.json').write_text(json.dumps(dict(commit=RUNTIME_SHA,deployment_complete=False)))
             assert probe.check(phase='before_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=1)['worker']=='armed'
+            write_health('busy')
+            try:probe.check(phase='before_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=0)
+            except RuntimeError as exc:assert 'not ready' in str(exc)
+            else:raise AssertionError('busy worker was admitted before deployment completed')
+            write_health('armed')
+            # A staged release may load new code while the explicit daily
+            # schema upgrade has not run. The manual contour stays healthy.
+            with box.service().store.transaction() as c:
+                c.execute('DROP TABLE cleaner_daily_occurrences')
+                c.execute('DROP TABLE cleaner_daily_schedules')
+                c.execute('UPDATE cleaner_schema SET version=2 WHERE singleton=1')
+            assert probe.check(phase='before_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=1)['schedule']=='off'
             Handler.allow_auth=True
             try:probe.check(phase='before_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=1)
             except RuntimeError as exc:assert 'auth boundary' in str(exc)
@@ -47,6 +59,8 @@ def main():
             completed=dict(commit=RUNTIME_SHA,deployment_complete=True,deployed_at='synthetic',schema_version='wb_core_deploy_metadata_v2')
             (box.app/'.wb-core-deploy.json').write_text(json.dumps(completed))
             assert probe.check(phase='after_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=1)['worker']=='ready'
+            write_health('busy')
+            assert probe.check(phase='after_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=1)['worker']=='busy'
             with box.service().store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=1 WHERE account=?',(box.service().key,))
             try:probe.check(phase='after_complete',expected_sha=RUNTIME_SHA,runtime_dir=box.runtime,admission_dir=box.admission,app_dir=box.app,timeout_seconds=1)
             except RuntimeError as exc:assert 'setting mismatch' in str(exc)

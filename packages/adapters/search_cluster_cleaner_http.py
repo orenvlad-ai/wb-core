@@ -50,6 +50,12 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
                 result = web.targets(principal,refresh=query.get('refresh',['0'])[0]=='1')
             elif path == "/manual-batches/eligibility":
                 result = web.batch_eligibility(principal,refresh=query.get('refresh',['0'])[0]=='1')
+            elif path == '/daily-schedules':
+                from packages.application.search_cluster_cleaner_daily import schedules
+                result = schedules(web.require_service(),principal,web.generation)
+            elif path == '/daily-schedules/history':
+                from packages.application.search_cluster_cleaner_daily import history
+                result = history(web.require_service(),principal)
             elif match := re.fullmatch(r"/manual-batches/([A-Za-z0-9_.:-]{8,120})/items/([0-9]{1,5})", path):
                 from packages.application.search_cluster_cleaner_batch import batch_item_detail
                 result = batch_item_detail(web.require_service(),match[1],int(match[2]),principal)
@@ -98,6 +104,10 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
         if path == "/settings":
             allowed |= {"expected_revision", "enabled", "schedule_time"}
             operation = lambda: cleaner.update_settings(payload, principal)
+        elif path == '/daily-schedules':
+            allowed |= {'expected_revision','schedules'}
+            from packages.application.search_cluster_cleaner_daily import save_schedules
+            operation = lambda: save_schedules(cleaner,principal,web.generation,payload)
         elif path == "/runs":
             allowed |= {"advert_id", "nm_id"}
             operation = lambda: cleaner.start_run(payload, principal)

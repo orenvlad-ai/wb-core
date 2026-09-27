@@ -37,6 +37,20 @@ class CleanerWriter:
         captured=json.loads(run['captured_versions'])
         if captured.get('rules_hash')!=self.app.rules_digest:
             self._revalidate_recovered_rules(c,run,captured)
+        if run['kind']=='manual_apply' and run['trigger']=='manual_exact_candidates':
+            binding=c.execute("SELECT json_extract(facts,'$.scan_run_id') AS scan_run_id FROM cleaner_events WHERE account=? AND run_id=? AND kind='manual_apply_prepared' LIMIT 1",
+                              (self.app.key,run_id)).fetchone()
+            if binding:
+                scan=c.execute('SELECT request_id FROM cleaner_runs WHERE account=? AND run_id=?',
+                               (self.app.key,binding['scan_run_id'])).fetchone()
+                if scan and scan['request_id']:
+                    job=c.execute("SELECT json_extract(facts,'$.batch_id') AS batch_id FROM cleaner_events WHERE account=? AND kind='self_service_requested' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",
+                                  (self.app.key,scan['request_id'])).fetchone()
+                    daily_table=c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cleaner_daily_occurrences'").fetchone()
+                    if daily_table and job and job['batch_id'] and c.execute('SELECT 1 FROM cleaner_daily_occurrences WHERE account=? AND batch_id=?',(self.app.key,job['batch_id'])).fetchone():
+                        from packages.application.search_cluster_cleaner_daily import policy_ready
+                        permitted,reason=policy_ready(self.app.store.registry.runtime_dir)
+                        if not permitted:raise CleanerError('schedule_paused',reason,423)
         if barrier_status(self.app.store.registry.runtime_dir)['active']:raise CleanerError('maintenance','Обслуживание блокирует новые записи',423)
         self.session.check(c,self.app.account,self.generation)
         return s,run
