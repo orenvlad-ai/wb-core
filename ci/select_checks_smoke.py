@@ -287,6 +287,7 @@ def command_dependency_checks():
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
+        "apps/sheet_vitrina_v1_settings_sources_sessions_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
         "apps/sku_inventory_balance_browser_smoke.py",
