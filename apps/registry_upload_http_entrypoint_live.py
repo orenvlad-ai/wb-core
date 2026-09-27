@@ -18,6 +18,10 @@ if str(ROOT) not in sys.path:
 from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_SHEET_JOB_PATH,
     DEFAULT_SHEET_LOAD_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_START_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
+    DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+    DEFAULT_WB_BUYER_VIEWER_AUTH_PATH,
     build_registry_upload_http_server,
     load_registry_upload_http_entrypoint_config,
     RegistryUploadHttpServer,
@@ -26,6 +30,42 @@ from packages.adapters.search_cluster_cleaner_http import handles as cleaner_han
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint
 from packages.application.storage_registry import StoreRegistry
 from packages.application.search_cluster_cleaner_web import STAGE_E_CONFIG_PATH
+
+
+BUYER_LOGIN_HTTP_PORT = 8777
+BUYER_LOGIN_GET_PATHS = frozenset({DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH, DEFAULT_WB_BUYER_VIEWER_AUTH_PATH})
+BUYER_LOGIN_POST_PATHS = frozenset({DEFAULT_WB_BUYER_RECOVERY_START_PATH, DEFAULT_WB_BUYER_RECOVERY_STOP_PATH})
+
+
+def start_buyer_login_contour(server, *, port: int = BUYER_LOGIN_HTTP_PORT):
+    """Serve only buyer login control/auth while the legacy listener runs long reads.
+
+    The existing request handler and WebCore account checks remain authoritative.
+    This second loopback listener is serial, so no shared entrypoint write/cache
+    state is exposed to general concurrent HTTP requests.
+    """
+    primary_handler = server.RequestHandlerClass
+
+    class BuyerLoginOnlyHandler(primary_handler):
+        def do_DELETE(self):  # noqa: N802
+            self.send_error(404)
+
+        def do_GET(self):  # noqa: N802
+            if urlsplit(self.path).path not in BUYER_LOGIN_GET_PATHS:
+                self.send_error(404)
+                return
+            super().do_GET()
+
+        def do_POST(self):  # noqa: N802
+            if urlsplit(self.path).path not in BUYER_LOGIN_POST_PATHS:
+                self.send_error(404)
+                return
+            super().do_POST()
+
+    buyer_server = RegistryUploadHttpServer(('127.0.0.1', port), BuyerLoginOnlyHandler)
+    buyer_thread = threading.Thread(target=buyer_server.serve_forever, name='buyer-login-http', daemon=True)
+    buyer_thread.start()
+    return buyer_server, buyer_thread
 
 
 class CleanerWorkerSupervisor:
@@ -194,6 +234,8 @@ def main() -> None:
     cleaner_server = None
     cleaner_thread = None
     cleaner_worker = None
+    buyer_server = None
+    buyer_thread = None
     try:
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=config.runtime_dir,
@@ -208,6 +250,7 @@ def main() -> None:
             config,
             entrypoint=entrypoint,
         )
+        buyer_server, buyer_thread = start_buyer_login_contour(server)
         # The legacy 8765 listener remains independent of this opt-in contour.
         cleaner_server,cleaner_thread,cleaner_worker=start_cleaner_contour(server,entrypoint,config.runtime_dir)
         host, port = server.server_address
@@ -228,6 +271,11 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if buyer_server is not None:
+            buyer_server.shutdown()
+            buyer_server.server_close()
+        if buyer_thread is not None:
+            buyer_thread.join(timeout=5)
         if cleaner_worker is not None:
             cleaner_worker.close()
         if cleaner_server is not None:

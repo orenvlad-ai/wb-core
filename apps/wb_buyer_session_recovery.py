@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from packages.adapters.wb_buyer_session import (  # noqa: E402
     CHALLENGE_MARKERS,
@@ -374,8 +374,19 @@ def _capture_login(
             try:
                 adapter.migrate_legacy_storage_state(context)
                 page = context.pages[0] if getattr(context, "pages", None) else context.new_page()
-                page.goto(config.session.buyer_url, wait_until="domcontentloaded")
-                page.wait_for_timeout(max(500, int(config.session.settle_timeout_ms)))
+                # Expose the login screen after the first navigation response;
+                # waiting for every WB script can consume most of the human window.
+                try:
+                    page.goto(
+                        config.session.buyer_url,
+                        wait_until="commit",
+                        timeout=min(15_000, config.session.navigation_timeout_ms),
+                    )
+                except PlaywrightTimeoutError:
+                    # The browser still belongs to this run. The normal unknown
+                    # screen fallback will show the real page for manual action.
+                    pass
+                page.wait_for_timeout(min(1000, max(500, int(config.session.settle_timeout_ms))))
                 _write_status(
                     config,
                     {
@@ -390,8 +401,11 @@ def _capture_login(
                 human_window_started = False
                 proof_attempts = 0
                 unknown_attempts = 0
+                challenge_retry_at = 0.0
                 while time.monotonic() < deadline:
                     surface = _inspect_login_surface(page)
+                    if surface.get("state") == "authenticated" and time.monotonic() < challenge_retry_at:
+                        surface = {"state": "human", "reason": "buyer_security_challenge"}
                     if surface.get("state") != "unknown":
                         unknown_attempts = 0
                     if surface.get("state") == "authenticated":
@@ -420,6 +434,13 @@ def _capture_login(
                         if last_session.get("status") == "wrong_account":
                             page.goto(config.session.buyer_url, wait_until="domcontentloaded")
                             surface = {"state": "human", "reason": "buyer_account_fingerprint_mismatch"}
+                        elif last_session.get("status") in {"security_challenge", "login_redirect", "missing", "expired"}:
+                            # WB can leave /lk in the address bar while an
+                            # iframe asks for SMS/captcha. A failed proof is
+                            # then a human step, never a terminal auth error.
+                            proof_attempts = 0
+                            challenge_retry_at = time.monotonic() + max(0.1, min(20.0, config.poll_sec * 5))
+                            surface = {"state": "human", "reason": str(last_session.get("reason") or "buyer_security_challenge")}
                         elif proof_attempts >= 2:
                             _write_status(
                                 config,

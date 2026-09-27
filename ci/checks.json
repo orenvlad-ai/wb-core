@@ -629,6 +629,8 @@
       "patterns": [
         "apps/wb_buyer_session_recovery.py",
         "apps/wb_buyer_viewer_auth_smoke.py",
+        "apps/wb_buyer_viewer_ui_smoke.py",
+        "apps/registry_upload_http_entrypoint_live.py",
         "packages/adapters/wb_buyer_session.py",
         "packages/application/wb_buyer_session.py",
         "packages/application/registry_upload_http_entrypoint.py",

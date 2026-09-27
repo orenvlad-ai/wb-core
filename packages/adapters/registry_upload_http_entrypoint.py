@@ -2089,8 +2089,10 @@ def _build_handler(
                     )
                     return
                 run_id = str(result.get("run_id") or "")
-                extra = {"Set-Cookie": _buyer_viewer_run_cookie(self, run_id)} if run_id and _buyer_viewer_run_matches(self, run_id) else {}
-                _write_json_response(self, HTTPStatus.OK, result, extra_headers=extra)
+                if not run_id or not _buyer_viewer_run_matches(self, run_id):
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "buyer recovery is controlled by another operator"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Set-Cookie": _buyer_viewer_run_cookie(self, run_id)})
                 return
 
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_STOP_PATH:
@@ -2120,6 +2122,9 @@ def _build_handler(
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": "buyer session recovery stop failed"},
                     )
+                    return
+                if result.get("reason") == "buyer_recovery_run_not_current" or (result.get("status") == "error" and result.get("running")):
+                    _write_json_response(self, HTTPStatus.CONFLICT, result)
                     return
                 _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Set-Cookie": _buyer_viewer_run_cookie(self, "")})
                 return
@@ -3706,7 +3711,11 @@ def _build_handler(
                         },
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                current_run_id = str(payload.get("run_id") or "")
+                viewer_available = bool(current_run_id and payload.get("running") and _buyer_viewer_run_matches(self, current_run_id))
+                payload = {**payload, "viewer_available": viewer_available}
+                extra_headers = {"Set-Cookie": _buyer_viewer_run_cookie(self, current_run_id)} if viewer_available else {}
+                _write_json_response(self, HTTPStatus.OK, payload, extra_headers=extra_headers)
                 return
 
             if parsed.path == DEFAULT_WB_BUYER_VIEWER_AUTH_PATH:
@@ -8547,7 +8556,7 @@ def _buyer_viewer_auth_allowed(handler: BaseHTTPRequestHandler) -> bool:
         origin = str(handler.headers.get("X-Original-Origin", "") or "").rstrip("/")
         upgrade = str(handler.headers.get("X-Original-Upgrade", "") or "").lower()
         return upgrade == "websocket" and bool(origin) and hmac.compare_digest(origin, _request_origin(handler).rstrip("/"))
-    return suffix == "vnc.html" or suffix.startswith(("app/", "core/", "vendor/", "images/", "utils/"))
+    return suffix in {"vnc.html", "package.json"} or suffix.startswith(("app/", "core/", "vendor/", "images/", "utils/"))
 
 
 def _current_web_user_allowed_sections(handler: BaseHTTPRequestHandler) -> list[str]:

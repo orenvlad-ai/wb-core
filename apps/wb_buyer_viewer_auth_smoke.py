@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import wb_buyer_session_recovery as recovery  # noqa: E402
+from apps.registry_upload_http_entrypoint_live import start_buyer_login_contour  # noqa: E402
 from packages.adapters import registry_upload_http_entrypoint as http  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import RegistryUploadHttpEntrypointConfig  # noqa: E402
@@ -56,8 +57,8 @@ def _get(url: str, headers: dict[str, str] | None = None, opener=None) -> int:
         return exc.code
 
 
-def _post(url: str, headers: dict[str, str]) -> tuple[int, str]:
-    req = request.Request(url, data=b"{}", headers={"Accept": "application/json", "Content-Type": "application/json", **headers}, method="POST")
+def _post(url: str, headers: dict[str, str], payload: dict[str, str] | None = None) -> tuple[int, str]:
+    req = request.Request(url, data=json.dumps(payload or {}).encode(), headers={"Accept": "application/json", "Content-Type": "application/json", **headers}, method="POST")
     try:
         with request.urlopen(req, timeout=5) as response:
             response.read()
@@ -89,6 +90,8 @@ def main() -> None:
         }):
             entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
             server = http.build_registry_upload_http_server(config, entrypoint)
+            buyer_server, buyer_thread = start_buyer_login_contour(server, port=_port())
+            buyer_base = f"http://127.0.0.1:{buyer_server.server_port}"
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             old_status = http._buyer_viewer_raw_status
@@ -101,13 +104,19 @@ def main() -> None:
                 "viewer_owner": "",
             }
             http._buyer_viewer_raw_status = lambda: dict(status)
-            recovery.stop_recovery = lambda *_args, **_kwargs: status.update(status="stopped", running=False) or dict(status)
+            def fake_stop(_config, *, requested_run_id=None, **_kwargs):
+                if requested_run_id and requested_run_id != run_id:
+                    return {**status, "status": "error", "reason": "buyer_recovery_run_not_current"}
+                status.update(status="stopped", running=False)
+                return dict(status)
+            recovery.stop_recovery = fake_stop
             entrypoint.handle_wb_buyer_session_recovery_start_request = lambda **_kwargs: {"run_id": run_id, "status": "awaiting_human", "running": True}
             try:
-                auth_url = base + http.DEFAULT_WB_BUYER_VIEWER_AUTH_PATH
+                auth_url = buyer_base + http.DEFAULT_WB_BUYER_VIEWER_AUTH_PATH
                 viewer = http.DEFAULT_WB_BUYER_VIEWER_PREFIX
                 ws_uri = viewer + "websockify?run_id=" + run_id
-                headers = {"X-Original-URI": ws_uri, "X-Original-Upgrade": "websocket", "X-Original-Origin": base}
+                public_host = {"Host": f"127.0.0.1:{port}", "X-Forwarded-Proto": "http"}
+                headers = {**public_host, "X-Original-URI": ws_uri, "X-Original-Upgrade": "websocket", "X-Original-Origin": base}
                 if _get(auth_url, headers) != 401:
                     raise AssertionError("anonymous forged nginx headers must be denied")
 
@@ -121,8 +130,8 @@ def main() -> None:
                 session = next(cookie.value for cookie in jar if cookie.name == http.WEB_AUTH_COOKIE_NAME)
                 status["viewer_owner"] = hashlib.sha256(session.encode()).hexdigest()
                 cookies = {"Cookie": f"{http.WEB_AUTH_COOKIE_NAME}={session}; {http.WB_BUYER_VIEWER_COOKIE_NAME}={run_id}"}
-                start_url = base + http.DEFAULT_WB_BUYER_RECOVERY_START_PATH
-                start_headers = {**cookies, "Origin": base, "X-WB-Buyer-Viewer-CSRF": "1"}
+                start_url = buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_START_PATH
+                start_headers = {**public_host, **cookies, "Origin": base, "X-WB-Buyer-Viewer-CSRF": "1"}
                 if _post(start_url, {**start_headers, "X-WB-Buyer-Viewer-CSRF": ""})[0] != 403:
                     raise AssertionError("buyer start without CSRF marker must be denied")
                 if _post(start_url, {**start_headers, "Origin": "https://other.example"})[0] != 403:
@@ -142,12 +151,82 @@ def main() -> None:
                 expect(403, {"Cookie": f"{http.WEB_AUTH_COOKIE_NAME}={session}; {http.WB_BUYER_VIEWER_COOKIE_NAME}=other-run"}, "foreign run cookie")
                 expect(403, {"Sec-Fetch-Site": "cross-site"}, "cross-site")
                 expect(403, {"X-Original-URI": viewer + "../secret"}, "path traversal")
+                stop_code, stop_cookie = _post(
+                    buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+                    start_headers,
+                    {"run_id": "other-run"},
+                )
+                if stop_code != 409 or stop_cookie:
+                    raise AssertionError("stale stop must not clear the current viewer cookie")
+                if _get(buyer_base + http.DEFAULT_SOURCES_SESSIONS_PATH, cookies) != 404:
+                    raise AssertionError("buyer lane must reject ordinary business GET")
+                delete = request.Request(buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH, headers=cookies, method="DELETE")
+                try:
+                    request.urlopen(delete, timeout=5)
+                    raise AssertionError("buyer lane must reject inherited business DELETE")
+                except error.HTTPError as exc:
+                    if exc.code != 404:
+                        raise AssertionError(f"unexpected buyer lane DELETE result: {exc.code}") from exc
+                    exc.read()
+
+                # Hold the one-threaded business listener. Buyer auth/status/start
+                # must still respond through the separate loopback contour.
+                slow_entered = threading.Event()
+                slow_release = threading.Event()
+                slow_calls: list[int] = []
+                old_sources = entrypoint.handle_sources_sessions_status_request
+                old_recovery_status = entrypoint.handle_wb_buyer_session_recovery_status_request
+                def slow_sources(**_kwargs):
+                    slow_calls.append(len(slow_calls) + 1)
+                    slow_entered.set()
+                    slow_release.wait(timeout=5)
+                    return {"contract_name": "test_sources"}
+                entrypoint.handle_sources_sessions_status_request = slow_sources
+                entrypoint.handle_wb_buyer_session_recovery_status_request = lambda **_kwargs: {"run_id": run_id, "status": "awaiting_human", "running": True}
+                ordinary_results: list[int] = []
+                def ordinary_get():
+                    ordinary_results.append(_get(base + http.DEFAULT_SOURCES_SESSIONS_PATH, cookies))
+                first = threading.Thread(target=ordinary_get, daemon=True)
+                second = threading.Thread(target=ordinary_get, daemon=True)
+                try:
+                    first.start()
+                    if not slow_entered.wait(timeout=2):
+                        raise AssertionError("slow business request did not enter")
+                    second.start()
+                    readback_request = request.Request(
+                        buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH + "?probe=false",
+                        headers={**public_host, **cookies},
+                    )
+                    with request.urlopen(readback_request, timeout=5) as response:
+                        readback = json.loads(response.read())
+                        readback_cookie = response.headers.get("Set-Cookie", "")
+                    if not readback.get("viewer_available") or http.WB_BUYER_VIEWER_COOKIE_NAME not in readback_cookie:
+                        raise AssertionError("owned status readback must restore viewer cookie during slow business request")
+                    expect(200, {}, "viewer auth during slow business request")
+                    if _post(start_url, start_headers)[0] != 200:
+                        raise AssertionError("buyer start must bypass slow business request")
+                    if len(slow_calls) != 1:
+                        raise AssertionError("ordinary business requests must remain serial")
+                finally:
+                    slow_release.set()
+                    first.join(timeout=5)
+                    second.join(timeout=5)
+                    entrypoint.handle_sources_sessions_status_request = old_sources
+                    entrypoint.handle_wb_buyer_session_recovery_status_request = old_recovery_status
+                if ordinary_results != [200, 200] or len(slow_calls) != 2:
+                    raise AssertionError(f"serial business listener did not drain: {ordinary_results} {slow_calls}")
                 owner = status["viewer_owner"]
                 status["viewer_owner"] = "0" * 64
                 expect(403, {}, "foreign operator")
                 if _post(start_url, start_headers)[0] != 409:
                     raise AssertionError("foreign operator must not join active run")
                 status["viewer_owner"] = owner
+                entrypoint.handle_wb_buyer_session_recovery_start_request = lambda **_kwargs: status.update(viewer_owner="0" * 64) or {"run_id": run_id, "status": "awaiting_human", "running": True}
+                raced_code, raced_cookie = _post(start_url, start_headers)
+                if raced_code != 409 or raced_cookie:
+                    raise AssertionError("owner change during start must not return a usable viewer cookie")
+                status["viewer_owner"] = owner
+                entrypoint.handle_wb_buyer_session_recovery_start_request = lambda **_kwargs: {"run_id": run_id, "status": "awaiting_human", "running": True}
                 status["deadline_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
                 expect(403, {}, "expired run")
                 status["deadline_at"] = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
@@ -159,6 +238,9 @@ def main() -> None:
                 http._buyer_viewer_raw_status = old_status
                 recovery.stop_recovery = old_stop
                 entrypoint.handle_wb_buyer_session_recovery_start_request = old_start
+                buyer_server.shutdown()
+                buyer_server.server_close()
+                buyer_thread.join(timeout=5)
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)

@@ -445,19 +445,22 @@
       "name": "sheet_vitrina_wb_buyer_recovery_status",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status",
-      "methods": ["GET"]
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8777"
     },
     {
       "name": "sheet_vitrina_wb_buyer_recovery_start",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start",
-      "methods": ["POST"]
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8777"
     },
     {
       "name": "sheet_vitrina_wb_buyer_recovery_stop",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop",
-      "methods": ["POST"]
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8777"
     },
     {
       "name": "sheet_vitrina_wb_buyer_recovery_launcher",
@@ -469,7 +472,8 @@
       "name": "sheet_vitrina_wb_buyer_viewer_auth",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth",
-      "methods": ["GET"]
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8777"
     },
     {
       "name": "sheet_vitrina_wb_buyer_viewer",
