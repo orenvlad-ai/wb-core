@@ -625,6 +625,28 @@
         "openpyxl==3.1.5"
       ]
     },
+    "wb_buyer_viewer": {
+      "patterns": [
+        "apps/wb_buyer_session_recovery.py",
+        "apps/wb_buyer_viewer_auth_smoke.py",
+        "packages/adapters/wb_buyer_session.py",
+        "packages/application/wb_buyer_session.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/adapters/templates/sheet_vitrina_v1_settings.html",
+        "apps/registry_upload_http_entrypoint_hosted_runtime.py",
+        "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json"
+      ],
+      "commands": [
+        ["python3", "apps/wb_buyer_session_smoke.py"],
+        ["python3", "apps/wb_buyer_viewer_auth_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_settings_sources_sessions_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_settings_sources_sessions_browser_smoke.py"],
+        ["python3", "apps/wb_buyer_viewer_ui_smoke.py", "/tmp/wbc0081-buyer-ui-ci"],
+        ["python3", "apps/registry_upload_http_entrypoint_public_routes_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
+    },
     "change_registry_writer": {
       "patterns": [
         "packages/application/change_registry_writer.py",

@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Mapping
 from urllib import parse as urllib_parse
@@ -147,7 +148,7 @@ def main() -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dict[str, Any]:
+def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False, viewer_owner: str = "", viewer_expires_at: int | None = None) -> dict[str, Any]:
     _ensure_state_dir(config)
     with _recovery_start_lock(config):
         current = read_recovery_status(config, with_probe=False)
@@ -163,7 +164,11 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False) -> dic
                 "status": "starting",
                 "reason": "buyer_recovery_starting",
                 "started_at": _now_text(),
-                "deadline_at": (_now() + timedelta(seconds=config.timeout_sec)).isoformat(),
+                "deadline_at": min(
+                    _now() + timedelta(seconds=config.timeout_sec),
+                    datetime.fromtimestamp(viewer_expires_at, UTC) if viewer_expires_at else _now() + timedelta(seconds=config.timeout_sec),
+                ).isoformat(),
+                "viewer_owner": viewer_owner,
                 "session": {
                     "status": "recovery_running",
                     "valid": False,
@@ -272,6 +277,21 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
     adapter = WbBuyerSessionAdapter(config=config.session)
     completion: dict[str, Any] | None = None
     result = 1
+    deadline_guard = threading.Event()
+    raw_deadline = str(_read_status(config.status_path).get("deadline_at") or "")
+    try:
+        guard_delay = max(0.0, (datetime.fromisoformat(raw_deadline) - _now()).total_seconds())
+    except (TypeError, ValueError):
+        guard_delay = config.timeout_sec
+    if os.getpgrp() == os.getpid():
+        def end_expired_run() -> None:
+            if not deadline_guard.wait(guard_delay):
+                _write_status(config, {
+                    **_read_status(config.status_path),
+                    "status": "timeout", "reason": "buyer_login_timeout", "finished_at": _now_text(),
+                })
+                os.killpg(os.getpgrp(), signal.SIGTERM)
+        threading.Thread(target=end_expired_run, name="buyer-recovery-deadline", daemon=True).start()
     try:
         with adapter.session_lock(
             blocking=True,
@@ -329,6 +349,7 @@ def supervise_recovery(config: BuyerRecoveryConfig) -> int:
         _write_status(config, {**_read_status(config.status_path), "status": "error", "reason": "buyer_recovery_runtime_error", "finished_at": _now_text()})
         return 1
     finally:
+        deadline_guard.set()
         for process in reversed(processes):
             _terminate(process)
         if _supervisor_identity_matches(config, _read_supervisor_identity(config), run_id):
@@ -340,7 +361,11 @@ def _capture_login(
     adapter: WbBuyerSessionAdapter,
     processes: list[subprocess.Popen[Any]],
 ) -> int:
-    deadline = time.monotonic() + config.timeout_sec
+    try:
+        remaining = (datetime.fromisoformat(str(_read_status(config.status_path).get("deadline_at"))) - _now()).total_seconds()
+    except (TypeError, ValueError):
+        remaining = config.timeout_sec
+    deadline = time.monotonic() + max(0.0, min(config.timeout_sec, remaining))
     old_display = os.environ.get("DISPLAY")
     os.environ["DISPLAY"] = config.display
     try:
@@ -370,15 +395,24 @@ def _capture_login(
                     if surface.get("state") != "unknown":
                         unknown_attempts = 0
                     if surface.get("state") == "authenticated":
+                        if human_window_started:
+                            _stop_human_window(processes)
+                            human_window_started = False
+                        _write_status(config, {
+                            **_read_status(config.status_path),
+                            "status": "validating_session",
+                            "reason": "buyer_session_validating",
+                        })
                         _settle_after_login_action(config, page)
                         operation = adapter.probe_persistent_context(
                             context,
                             nm_id=config.session.validation_nm_id,
                             page=page,
                         )
-                        proof = adapter.validate_persistent_proof(operation, require_price=True)
+                        proof = adapter.validate_persistent_proof(operation, require_price=False)
                         last_session = proof.get("session") if isinstance(proof.get("session"), Mapping) else {}
                         if proof.get("valid"):
+                            _record_proof(config, proof)
                             context.close()
                             context = None
                             return _verify_persistent_profile(playwright, config, adapter)
@@ -437,17 +471,15 @@ def _capture_login(
                     else:
                         unknown_attempts += 1
                         if unknown_attempts >= 3:
-                            _write_status(
-                                config,
-                                {
-                                    **_read_status(config.status_path),
-                                    "status": "error",
-                                    "reason": str(surface.get("reason") or "buyer_login_surface_unrecognized"),
-                                    "finished_at": _now_text(),
-                                    "session": last_session,
-                                },
-                            )
-                            return 1
+                            if not human_window_started:
+                                _start_human_window(config, processes)
+                                human_window_started = True
+                            _write_status(config, {
+                                **_read_status(config.status_path),
+                                "status": "awaiting_human",
+                                "reason": "buyer_login_surface_unrecognized",
+                                "session": last_session,
+                            })
                     page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
                 _write_status(
                     config,
@@ -503,11 +535,12 @@ def _verify_persistent_profile(
             nm_id=config.session.validation_nm_id,
             page=page,
         )
-        proof = adapter.validate_persistent_proof(operation, require_price=True)
+        proof = adapter.validate_persistent_proof(operation, require_price=False)
     finally:
         second_context.close()
         os.chmod(config.session.persistent_profile_dir, 0o700)
     session = proof.get("session") if isinstance(proof.get("session"), Mapping) else {}
+    _record_proof(config, proof)
     if not proof.get("valid"):
         _write_status(
             config,
@@ -527,13 +560,27 @@ def _verify_persistent_profile(
             "status": "validating_session",
             "reason": "buyer_persistent_profile_restart_validated",
             "session": session,
-            "authenticated_price_read": {
-                "status": "ok",
-                "nm_id": config.session.validation_nm_id,
-            },
         },
     )
     return 0
+
+
+def _record_proof(config: BuyerRecoveryConfig, proof: Mapping[str, Any]) -> None:
+    """Publish account and control-price evidence from this run, without another browser launch."""
+    session = proof.get("session") if isinstance(proof.get("session"), Mapping) else {}
+    price = proof.get("price") if isinstance(proof.get("price"), Mapping) else {}
+    raw = _read_status(config.status_path)
+    _write_status(config, {
+        **raw,
+        "session": dict(session),
+        "price": {
+            "status": str(price.get("status") or "price_missing")[:80],
+            "reason": str(price.get("reason") or "authenticated_price_unavailable")[:100],
+            "nm_id": config.session.validation_nm_id,
+            "authenticated_buyer_price": price.get("authenticated_buyer_price") if isinstance(price.get("authenticated_buyer_price"), (int, float)) else None,
+            "measured_at": str(price.get("measured_at") or "")[:100],
+        },
+    })
 
 
 def _inspect_login_surface(page: Any) -> dict[str, Any]:
@@ -688,7 +735,6 @@ def _start_human_window(config: BuyerRecoveryConfig, processes: list[subprocess.
             "-display",
             config.display,
             "-localhost",
-            "-shared",
             "-forever",
             "-nopw",
             "-noxdamage",
@@ -711,6 +757,13 @@ def _start_human_window(config: BuyerRecoveryConfig, processes: list[subprocess.
     )
     processes.append(websockify)
     _wait_port(config.web_port)
+
+
+def _stop_human_window(processes: list[subprocess.Popen[Any]]) -> None:
+    """Revoke control before automated account and price proof touches the page."""
+    for _ in range(2):
+        if processes:
+            _terminate(processes.pop())
 
 
 def build_macos_launcher_archive(
@@ -788,7 +841,7 @@ def _write_status(config: BuyerRecoveryConfig, payload: Mapping[str, Any]) -> No
     safe = {
         key: value
         for key, value in payload.items()
-        if key in {"run_id", "status", "reason", "started_at", "finished_at", "deadline_at", "session"}
+        if key in {"run_id", "status", "reason", "started_at", "finished_at", "deadline_at", "session", "price", "viewer_owner"}
     }
     staged = config.session.state_dir / f".recovery-status-{uuid4().hex}.tmp"
     staged.write_text(json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")

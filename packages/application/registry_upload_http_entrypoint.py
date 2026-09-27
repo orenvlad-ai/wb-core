@@ -2336,20 +2336,9 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
         payload = self.buyer_session_block.check_spp_capability()
-        checked_at = str(
-            (payload.get("price") or {}).get("measured_at")
-            if isinstance(payload.get("price"), Mapping)
-            else ""
-        ) or str(payload.get("checked_at") or "") or self.activated_at_factory()
-        try:
-            checked_at = (
-                _timestamp_as_utc(checked_at)
-                .replace(microsecond=0)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
-        except (TypeError, ValueError):
-            checked_at = self.activated_at_factory()
+        # Completion time is comparable with recovery.finished_at, including
+        # checks that end in the same second or fail before a price timestamp.
+        checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         cached = self.runtime.save_source_health_status(
             "wb_buyer_spp_capability",
             payload={
@@ -2367,6 +2356,7 @@ class RegistryUploadHttpEntrypoint:
                 "probe_retry_attempted": bool(payload.get("probe_retry_attempted")),
                 "validation_nm_id": payload.get("validation_nm_id"),
                 "account_confirmed": bool(payload.get("account_confirmed")),
+                "authenticated_buyer_price": (payload.get("price") or {}).get("authenticated_buyer_price") if isinstance(payload.get("price"), Mapping) else None,
             },
             checked_at=checked_at,
         )
@@ -2390,10 +2380,14 @@ class RegistryUploadHttpEntrypoint:
         *,
         launcher_download_path: str,
         replace: bool = True,
+        viewer_owner: str = "",
+        viewer_expires_at: int | None = None,
     ) -> dict[str, Any]:
         return self.buyer_session_recovery.start(
             replace=replace,
             launcher_download_path=launcher_download_path,
+            viewer_owner=viewer_owner,
+            viewer_expires_at=viewer_expires_at,
         )
 
     def handle_wb_buyer_session_recovery_stop_request(
@@ -3517,6 +3511,47 @@ class RegistryUploadHttpEntrypoint:
         buyer_capability = self.runtime.load_source_health_status(
             "wb_buyer_spp_capability"
         ) or {}
+        # A completed recovery contains the fresh account and price evidence from
+        # its own persistent Chromium operation. Cached pre-recovery failures are stale.
+        recovery_finished = str(buyer.get("finished_at") or "")
+        cached_checked = str(buyer_capability.get("checked_at") or "")
+        try:
+            cached_is_newer = bool(cached_checked and recovery_finished and _timestamp_as_utc(cached_checked) > _timestamp_as_utc(recovery_finished))
+        except (TypeError, ValueError):
+            cached_is_newer = bool(cached_checked)
+        if buyer.get("running"):
+            buyer_capability = {
+                "status": "recovery_running", "valid": False,
+                "session_valid": False, "account_confirmed": False,
+                "checked_at": str(buyer.get("started_at") or ""),
+                "reason": "buyer_recovery_in_progress",
+            }
+        elif buyer.get("status") == "completed" and (buyer.get("session") or {}).get("valid") and not cached_is_newer:
+            price = buyer.get("price") or {}
+            buyer_capability = {
+                "status": "available" if price.get("status") == "ok" else "price_unavailable",
+                "valid": price.get("status") == "ok",
+                "session_valid": True,
+                "account_confirmed": bool((buyer.get("session") or {}).get("account_confirmed")),
+                "session_fingerprint": (buyer.get("session") or {}).get("session_fingerprint", ""),
+                "checked_at": price.get("measured_at") or (buyer.get("session") or {}).get("checked_at", ""),
+                "reason": "" if price.get("status") == "ok" else price.get("reason", "authenticated_price_unavailable"),
+                "validation_nm_id": price.get("nm_id"),
+                "authenticated_buyer_price": price.get("authenticated_buyer_price"),
+            }
+        elif cached_is_newer and buyer.get("status") == "completed":
+            session_status = str(buyer_capability.get("session_status") or "probe_error")
+            buyer = {
+                **buyer,
+                "session": {
+                    **(buyer.get("session") or {}),
+                    "status": session_status,
+                    "status_label": str(buyer_capability.get("session_status_label") or session_status),
+                    "valid": bool(buyer_capability.get("session_valid")),
+                    "account_confirmed": bool(buyer_capability.get("account_confirmed")),
+                    "checked_at": cached_checked,
+                },
+            }
         latest_outcome: dict[str, Any] = {}
         refreshed_at = ""
         try:

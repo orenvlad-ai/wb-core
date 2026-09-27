@@ -466,6 +466,19 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_wb_buyer_viewer_auth",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth",
+      "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_wb_buyer_viewer",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer/",
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:46090/"
+    },
+    {
       "name": "sheet_vitrina_supply_factory_order",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/supply/factory-order/",

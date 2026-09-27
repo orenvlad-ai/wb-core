@@ -240,6 +240,9 @@ DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/bu
 DEFAULT_WB_BUYER_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start"
 DEFAULT_WB_BUYER_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop"
 DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
+DEFAULT_WB_BUYER_VIEWER_PREFIX = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer/"
+DEFAULT_WB_BUYER_VIEWER_AUTH_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth"
+WB_BUYER_VIEWER_COOKIE_NAME = "wb_buyer_viewer_run"
 DEFAULT_SKU_MANAGEMENT_PATH = "/v1/sheet-vitrina-v1/sku-management"
 DEFAULT_SKU_MANAGEMENT_SKU_PREFIX = f"{DEFAULT_SKU_MANAGEMENT_PATH}/sku"
 DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH = f"{DEFAULT_SKU_MANAGEMENT_PATH}/settings"
@@ -2056,12 +2059,24 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_START_PATH:
+                viewer_owner = _buyer_viewer_owner(self)
+                viewer_expires_at = _buyer_viewer_session_expiry(self)
+                if not viewer_owner or not viewer_expires_at:
+                    _write_auth_forbidden(self, parsed.path)
+                    return
+                if not _ensure_buyer_viewer_same_origin(self):
+                    return
+                if _buyer_viewer_run_owned_by_other(self):
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "buyer recovery is controlled by another operator"})
+                    return
                 try:
                     payload = _load_optional_request_payload(self)
                     replace = _resolve_replace_requested(payload, default=False)
                     result = entrypoint.handle_wb_buyer_session_recovery_start_request(
                         launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
                         replace=replace,
+                        viewer_owner=viewer_owner,
+                        viewer_expires_at=viewer_expires_at,
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -2073,10 +2088,20 @@ def _build_handler(
                         {"error": "buyer session recovery start failed"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                run_id = str(result.get("run_id") or "")
+                extra = {"Set-Cookie": _buyer_viewer_run_cookie(self, run_id)} if run_id and _buyer_viewer_run_matches(self, run_id) else {}
+                _write_json_response(self, HTTPStatus.OK, result, extra_headers=extra)
                 return
 
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_STOP_PATH:
+                if not _buyer_viewer_owner(self):
+                    _write_auth_forbidden(self, parsed.path)
+                    return
+                if not _ensure_buyer_viewer_same_origin(self):
+                    return
+                if _buyer_viewer_run_owned_by_other(self):
+                    _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "buyer recovery belongs to another operator"})
+                    return
                 try:
                     payload = _load_optional_request_payload(self)
                     raw_run_id = payload.get("run_id")
@@ -2096,7 +2121,7 @@ def _build_handler(
                         {"error": "buyer session recovery stop failed"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, result)
+                _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Set-Cookie": _buyer_viewer_run_cookie(self, "")})
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH:
@@ -3660,7 +3685,7 @@ def _build_handler(
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH:
                 try:
                     run_id = _resolve_single_query_param(parsed.query, "run_id")
-                    with_probe = _resolve_query_bool_default_true(parsed.query, "probe")
+                    with_probe = bool(_resolve_single_query_param(parsed.query, "probe")) and _resolve_query_bool_default_true(parsed.query, "probe")
                     payload = entrypoint.handle_wb_buyer_session_recovery_status_request(
                         launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
                         run_id=run_id or None,
@@ -3682,6 +3707,13 @@ def _build_handler(
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_VIEWER_AUTH_PATH:
+                if _buyer_viewer_auth_allowed(self):
+                    _write_json_response(self, HTTPStatus.OK, {"authorized": True}, extra_headers={"Cache-Control": "private, no-store"})
+                else:
+                    _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "viewer access denied"}, extra_headers={"Cache-Control": "private, no-store"})
                 return
 
             if parsed.path == DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH:
@@ -8412,6 +8444,112 @@ def _current_web_user_actor(handler: BaseHTTPRequestHandler) -> str:
     return username or role or "web_operator"
 
 
+def _buyer_viewer_owner(handler: BaseHTTPRequestHandler) -> str:
+    """Bind a recovery run to one authenticated WebCore login, never to a public URL."""
+    config = _web_auth_config()
+    user = _authenticated_web_user(handler, config) if config["enabled"] else None
+    if not user or not _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS):
+        return ""
+    cookie = _request_cookie(handler, WEB_AUTH_COOKIE_NAME)
+    return hashlib.sha256(cookie.encode("utf-8")).hexdigest() if cookie else ""
+
+
+def _buyer_viewer_session_expiry(handler: BaseHTTPRequestHandler) -> int | None:
+    """The already verified WebCore cookie bounds the life of the VNC process."""
+    if not _buyer_viewer_owner(handler):
+        return None
+    try:
+        encoded = _request_cookie(handler, WEB_AUTH_COOKIE_NAME).split(".", 1)[0]
+        payload = json.loads(_base64url_decode(encoded).decode("utf-8"))
+        expires = int(payload.get("exp") or 0)
+        return expires if expires > int(time.time()) else None
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _buyer_viewer_raw_status() -> dict[str, Any]:
+    from apps import wb_buyer_session_recovery as recovery
+
+    config = recovery.load_recovery_config_from_env()
+    return recovery.read_recovery_status(config, with_probe=False)
+
+
+def _buyer_viewer_run_owned_by_other(handler: BaseHTTPRequestHandler) -> bool:
+    status = _buyer_viewer_raw_status()
+    owner = str(status.get("viewer_owner") or "")
+    return bool(status.get("running") and (not owner or not hmac.compare_digest(owner, _buyer_viewer_owner(handler))))
+
+
+def _buyer_viewer_run_matches(handler: BaseHTTPRequestHandler, run_id: str) -> bool:
+    status = _buyer_viewer_raw_status()
+    owner = str(status.get("viewer_owner") or "")
+    current = str(status.get("run_id") or "")
+    return bool(owner and current and hmac.compare_digest(current, run_id) and hmac.compare_digest(owner, _buyer_viewer_owner(handler)))
+
+
+def _buyer_viewer_run_cookie(handler: BaseHTTPRequestHandler, run_id: str) -> str:
+    from apps.wb_buyer_session_recovery import DEFAULT_TIMEOUT_SEC
+
+    safe_run = run_id if re.fullmatch(r"buyer-recovery-[A-Za-z0-9T-]+", run_id) else ""
+    parts = [
+        f"{WB_BUYER_VIEWER_COOKIE_NAME}={safe_run}",
+        f"Path={DEFAULT_WB_BUYER_VIEWER_PREFIX}",
+        "HttpOnly", "SameSite=Strict",
+        f"Max-Age={DEFAULT_TIMEOUT_SEC if safe_run else 0}",
+    ]
+    if _request_origin(handler).startswith("https://"):
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def _ensure_buyer_viewer_same_origin(handler: BaseHTTPRequestHandler) -> bool:
+    marker = str(handler.headers.get("X-WB-Buyer-Viewer-CSRF", "") or "")
+    origin = str(handler.headers.get("Origin", "") or "").rstrip("/")
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").lower()
+    content_type = str(handler.headers.get("Content-Type", "") or "").split(";", 1)[0].lower()
+    if marker == "1" and content_type == "application/json" and origin and hmac.compare_digest(origin, _request_origin(handler).rstrip("/")) and fetch_site not in {"cross-site", "same-site"}:
+        return True
+    _write_json_response(handler, HTTPStatus.FORBIDDEN, {"error": "buyer viewer CSRF validation failed"})
+    return False
+
+
+def _buyer_viewer_auth_allowed(handler: BaseHTTPRequestHandler) -> bool:
+    """Authorize each nginx auth_request before noVNC asset or WS access."""
+    owner = _buyer_viewer_owner(handler)
+    if not owner:
+        return False
+    original_uri = str(handler.headers.get("X-Original-URI", "") or "")
+    if not original_uri.startswith(DEFAULT_WB_BUYER_VIEWER_PREFIX):
+        return False
+    suffix = urllib_parse.urlsplit(original_uri).path.removeprefix(DEFAULT_WB_BUYER_VIEWER_PREFIX)
+    if not suffix or ".." in suffix or "\\" in suffix or "%" in suffix:
+        return False
+    run_id = _request_cookie(handler, WB_BUYER_VIEWER_COOKIE_NAME)
+    if suffix in {"vnc.html", "websockify"}:
+        requested_run = urllib_parse.parse_qs(urllib_parse.urlsplit(original_uri).query).get("run_id", [])
+        if len(requested_run) != 1 or not hmac.compare_digest(requested_run[0], run_id):
+            return False
+    status = _buyer_viewer_raw_status()
+    if not run_id or not _buyer_viewer_run_matches(handler, run_id):
+        return False
+    if not status.get("running") or status.get("status") != "awaiting_human":
+        return False
+    try:
+        deadline = datetime.fromisoformat(str(status.get("deadline_at") or ""))
+        if deadline.tzinfo is None or datetime.now(timezone.utc) >= deadline:
+            return False
+    except ValueError:
+        return False
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").lower()
+    if fetch_site in {"cross-site", "same-site"}:
+        return False
+    if suffix == "websockify":
+        origin = str(handler.headers.get("X-Original-Origin", "") or "").rstrip("/")
+        upgrade = str(handler.headers.get("X-Original-Upgrade", "") or "").lower()
+        return upgrade == "websocket" and bool(origin) and hmac.compare_digest(origin, _request_origin(handler).rstrip("/"))
+    return suffix == "vnc.html" or suffix.startswith(("app/", "core/", "vendor/", "images/", "utils/"))
+
+
 def _current_web_user_allowed_sections(handler: BaseHTTPRequestHandler) -> list[str]:
     config = _web_auth_config()
     if not config["enabled"]:
@@ -8485,6 +8623,18 @@ def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
 
 
 def _handle_web_auth_logout(handler: BaseHTTPRequestHandler) -> None:
+    # Logout revokes an active viewer at the source by ending its owned run.
+    try:
+        status = _buyer_viewer_raw_status()
+        owner = _buyer_viewer_owner(handler)
+        if owner and status.get("running") and hmac.compare_digest(str(status.get("viewer_owner") or ""), owner):
+            from apps import wb_buyer_session_recovery as recovery
+            stopped = recovery.stop_recovery(recovery.load_recovery_config_from_env(), requested_run_id=str(status.get("run_id") or ""))
+            if stopped.get("running"):
+                raise RuntimeError("buyer viewer did not stop")
+    except Exception:
+        _write_json_response(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "buyer viewer could not be revoked"})
+        return
     _write_redirect_response(
         handler,
         HTTPStatus.SEE_OTHER,
@@ -9625,9 +9775,10 @@ def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = ""
         DEFAULT_WB_BUYER_RECOVERY_START_PATH,
         DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
         DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+        DEFAULT_WB_BUYER_VIEWER_AUTH_PATH,
     }:
-        return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) or _user_has_section_access(
-            user, WEB_AUTH_SECTION_PRICES
+        return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) if normalized == DEFAULT_WB_BUYER_VIEWER_AUTH_PATH else (
+            _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) or _user_has_section_access(user, WEB_AUTH_SECTION_PRICES)
         )
     if normalized in {
         DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
@@ -10183,6 +10334,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "wb_buyer_recovery_start_path": DEFAULT_WB_BUYER_RECOVERY_START_PATH,
         "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
         "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+        "wb_buyer_recovery_viewer_path": DEFAULT_WB_BUYER_VIEWER_PREFIX,
         "wb_supplies_transit_cost_check_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
         "wb_supplies_transit_cost_status_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH,
         "auto_schedules_path": DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_PATH,
@@ -10519,6 +10671,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "wb_buyer_recovery_start_path": DEFAULT_WB_BUYER_RECOVERY_START_PATH,
         "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
         "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+        "wb_buyer_recovery_viewer_path": DEFAULT_WB_BUYER_VIEWER_PREFIX,
         "sku_management_path": DEFAULT_SKU_MANAGEMENT_PATH,
         "sku_management_sku_path": DEFAULT_SKU_MANAGEMENT_SKU_PREFIX,
         "sku_management_settings_path": DEFAULT_SKU_MANAGEMENT_SETTINGS_PATH,
