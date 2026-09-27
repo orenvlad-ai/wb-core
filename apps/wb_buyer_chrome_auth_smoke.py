@@ -175,12 +175,52 @@ def _stop_latches_against_late_proof() -> None:
                 unit_command.assert_not_called()
 
 
+def _chrome_cleanup_counts_only_owned_executables() -> None:
+    with TemporaryDirectory() as directory:
+        base = Path(directory)
+        proc = base / "proc"
+        proc.mkdir()
+        chrome = base / "chrome"
+        python = base / "python3"
+        other_chrome = base / "other-chrome"
+        for executable in (chrome, python, other_chrome):
+            executable.touch()
+        (proc / "self").mkdir()
+        own_cgroup = b"0::/system.slice/wbc-owned-run.service\n"
+        (proc / "self" / "cgroup").write_bytes(own_cgroup)
+
+        def process(pid: int, executable: Path, cgroup: bytes, command: bytes) -> None:
+            folder = proc / str(pid)
+            folder.mkdir()
+            (folder / "exe").symlink_to(executable)
+            (folder / "cgroup").write_bytes(cgroup)
+            (folder / "cmdline").write_bytes(command)
+
+        # The supervisor carries --chrome PATH in argv, but executes Python.
+        process(100, python, own_cgroup, b"python3\0supervise\0--chrome\0" + os.fsencode(chrome))
+        process(101, chrome, own_cgroup, os.fsencode(chrome) + b"\0--type=renderer")
+        process(102, chrome, b"0::/system.slice/another-run.service\n", os.fsencode(chrome))
+        process(103, other_chrome, own_cgroup, os.fsencode(other_chrome))
+        with patch.object(runtime, "CHROME", chrome):
+            assert auth._owned_chrome_pids(proc) == [101]
+            (proc / "101" / "exe").unlink()
+            assert auth._owned_chrome_pids(proc) == []
+        with patch.object(auth, "_owned_chrome_pids", return_value=[101]), patch.object(auth.time, "monotonic", side_effect=[0, 16]):
+            try:
+                auth._stop_chrome(None)
+            except RuntimeError as error:
+                assert str(error) == "Chrome descendants did not exit"
+            else:
+                raise AssertionError("An owned Chrome process did not block cleanup")
+
+
 def main() -> None:
     _fast_start_and_private_boundary()
     _english_login_and_account_surface()
     _foreground_target_is_not_ambiguous()
     _pinned_package_and_deploy_contract()
     _stop_latches_against_late_proof()
+    _chrome_cleanup_counts_only_owned_executables()
     print("wb_buyer_chrome_auth_smoke: OK")
 
 
