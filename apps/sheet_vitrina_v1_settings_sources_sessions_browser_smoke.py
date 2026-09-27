@@ -8,12 +8,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
 from urllib.parse import urlparse
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,10 +184,26 @@ def _reserve_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _launch_chromium(playwright):
+    try:
+        return playwright.chromium.launch()
+    except PlaywrightError as exc:
+        if "BrowserType.launch: Executable doesn't exist at " not in str(exc):
+            raise
+        # The PR plan uses the base check map, which can predate this smoke's
+        # browser dependency. Install only the missing bundled browser.
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+            check=True,
+            timeout=600,
+        )
+        return playwright.chromium.launch()
+
+
 def main() -> None:
     with _SettingsServer() as server, TemporaryDirectory(prefix="sources-sessions-ui-") as tmp:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+            browser = _launch_chromium(playwright)
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             page_errors: list[str] = []
             console_errors: list[str] = []
