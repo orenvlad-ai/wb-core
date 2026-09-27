@@ -87,6 +87,22 @@ returned non-zero exit status {exit_status}.
 '''.encode()
 
 
+def worker_health_precheck_log(
+    gate_run_id: int = 36274008618, *, exit_status: int = 1, exact_stage: bool = True
+) -> bytes:
+    worker_line = (
+        "service_states_before = [unit_state(unit) for unit in services]\n"
+        "RuntimeError: systemd quiesce unit is unhealthy: wb-core-autoanswers-worker.service\n"
+        if exact_stage else
+        "RuntimeError: systemd quiesce unit is unhealthy: wb-core-autoanswers-worker.service\n"
+    )
+    return f'''python3 apps/github_release_runner.py run --workflow-run-id "{gate_run_id}" --output receipt.json
+deploy_current_checkout
+wb_autoanswers_activation.py prepare-deploy
+{worker_line}subprocess.CalledProcessError: Command ['ssh', 'wb_autoanswers_activation.py prepare-deploy'] returned non-zero exit status {exit_status}.
+'''.encode()
+
+
 def test_failure_evidence() -> None:
     proof = recovery._prove_failed_stage(failure_log(), 77, "One-shot deployed release")
     assert proof["stage"] == "root-storage-status-artifact-readback"
@@ -270,6 +286,8 @@ def preview() -> dict:
             "health": {"https://example/login": 200},
             "finance_pilot": {
                 "flags": {},
+                "write_mode": "write_enabled",
+                "readonly_guard": None,
                 "unit_active": True,
                 "environment_bound": True,
                 "store_present": True,
@@ -287,6 +305,7 @@ def preview() -> dict:
             "final-runtime-services-health-finance-pilot-readback",
         ],
         "forbidden_stages": ["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"],
+        "finance_acceptance": "write_enabled",
     }
     value["preview_fingerprint"] = FINGERPRINT
     return value
@@ -540,7 +559,26 @@ def test_finance_pilot_prestate_contract() -> None:
         name: {"main_process": "1", "pilot_process": "1", "pilot_source": "1"}
         for name in recovery.FINANCE_FLAGS
     }
-    validate(exact_flags, 0, pilot_active, 0, legacy_absent)
+    assert validate(exact_flags, 0, pilot_active, 0, legacy_absent) == "write_enabled"
+    readonly_flags = {name: dict(values) for name, values in exact_flags.items()}
+    readonly_flags["FINANCE_LIQUIDITY_WRITE_ENABLED"]["pilot_process"] = "0"
+    guard = {"verified": True, "env_sha256": recovery.FINANCE_READONLY_ENV_SHA256,
+             "dropin_sha256": recovery.FINANCE_READONLY_DROPIN_SHA256,
+             "schema_version": 3, "store_mode": "isolated_test"}
+    assert validate(readonly_flags, 0, pilot_active, 0, legacy_absent, guard) == "readonly_intermediate"
+    for bad_flags, bad_guard in (
+        (readonly_flags, None),
+        (readonly_flags, {**guard, "verified": False}),
+        (exact_flags, guard),
+        ({**readonly_flags, "FINANCE_LIQUIDITY_READ_ENABLED": {"main_process": "1", "pilot_process": "0", "pilot_source": "1"}}, guard),
+        ({**readonly_flags, "FINANCE_LIQUIDITY_WRITE_ENABLED": {"main_process": "0", "pilot_process": "0", "pilot_source": "1"}}, guard),
+    ):
+        try:
+            validate(bad_flags, 0, pilot_active, 0, legacy_absent, bad_guard)
+        except SystemExit as exc:
+            assert exc.code == 23
+        else:
+            raise AssertionError("Unproven Finance readonly state accepted")
     for bad_flags in (
         {name: {"main_process": "0", "pilot_process": "1", "pilot_source": "1"} for name in recovery.FINANCE_FLAGS},
         {name: {"main_process": "1", "pilot_process": "0", "pilot_source": "1"} for name in recovery.FINANCE_FLAGS},
@@ -576,6 +614,13 @@ def test_finance_pilot_prestate_contract() -> None:
     else:
         raise AssertionError("Legacy Finance unit accepted")
     assert validator_source.strip() in script
+    for guard_contract in (
+        recovery.FINANCE_READONLY_ENV, recovery.FINANCE_READONLY_DROPIN,
+        recovery.FINANCE_READONLY_ENV_SHA256, recovery.FINANCE_READONLY_DROPIN_SHA256,
+        "DropInPaths", "EnvironmentFiles", "sqlite3.connect", "mode=ro",
+        "PRAGMA query_only=ON", "isolated_test", "readonly_intermediate",
+    ):
+        assert guard_contract in script
     finance_unit_line = next(
         line
         for line in script.splitlines()
@@ -871,6 +916,46 @@ def test_registry_precheck_contract_is_log_bound() -> None:
     assert "EXPECTED_REGISTRY_PRECHECK_RUN_ID" not in source
 
 
+def test_worker_health_precheck_is_log_bound_and_normal_tail() -> None:
+    log = worker_health_precheck_log()
+    assert recovery.recovery_case(36274218397) is recovery.RecoveryCase.STORAGE_TAIL
+    case = recovery._activation_case_from_log(log, 36274008618)
+    assert case is recovery.RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION
+    assert recovery.normal_activation_tail_case(case)
+    proof = recovery._prove_failed_stage(log, 36274008618, "One-shot deployed release", case=case)
+    assert proof["stage"] == "autoanswers-prepare-deploy-worker-health-precheck"
+    assert proof["unit"] == "wb-core-autoanswers-worker.service"
+    assert proof["exit_status"] == 1 and proof["job_log_sha256"] == recovery.digest(log)
+    for bad_log, reason in (
+        (worker_health_precheck_log(exact_stage=False), "failed-stage-not-worker-health-precheck-exit1"),
+        (worker_health_precheck_log(exit_status=2), "failed-stage-not-worker-health-precheck-exit1"),
+        (worker_health_precheck_log(gate_run_id=1), "failed-stage-not-worker-health-precheck-exit1"),
+        (log + b"subprocess.CalledProcessError: Command ['ssh'] returned non-zero exit status 255.", "failed-stage-not-definite-single-exit1"),
+        (log + b"subprocess.CalledProcessError: Command ['ssh'] returned non-zero exit status 1.", "failed-stage-not-definite-single-exit1"),
+    ):
+        expect_reason(
+            reason,
+            lambda bad_log=bad_log: recovery._prove_failed_stage(
+                bad_log, 36274008618, "One-shot deployed release",
+                case=recovery.RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION,
+            ),
+        )
+    expect_reason(
+        "failed-stage-ambiguous-activation-precheck",
+        lambda: recovery._activation_case_from_log(log + registry_precheck_log(36274008618), 36274008618),
+    )
+    expect_reason(
+        "failed-stage-ambiguous-activation-precheck",
+        lambda: recovery._activation_case_from_log(
+            log + b'run_stage("readback", root_storage_commands["status_artifact_readback"])',
+            36274008618,
+        ),
+    )
+    assert recovery._activation_case_from_log(worker_health_precheck_log(gate_run_id=1), 36274008618) is recovery.RecoveryCase.STORAGE_TAIL
+    source = Path(recovery.__file__).read_text(encoding="utf-8")
+    assert "EXPECTED_WORKER_HEALTH_PRECHECK_RUN_ID" not in source
+
+
 def test_bounded_status_readback_retries_only_read() -> None:
     original = recovery._run_stage
     calls, sleeps = [], []
@@ -931,6 +1016,7 @@ def main() -> None:
     test_finance_pilot_prestate_contract()
     test_selective_b9_contract()
     test_registry_precheck_contract_is_log_bound()
+    test_worker_health_precheck_is_log_bound_and_normal_tail()
     test_normal_tail_apply_and_claim_replay()
     test_bounded_status_readback_retries_only_read()
     test_safe_remote_failure_diagnostics()

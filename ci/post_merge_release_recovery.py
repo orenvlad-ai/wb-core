@@ -55,6 +55,12 @@ FINANCE_FLAGS = (
     "FINANCE_LIQUIDITY_READ_ENABLED",
     "FINANCE_LIQUIDITY_WRITE_ENABLED",
 )
+FINANCE_READONLY_ENV = "/etc/wb-core-finance-pilot-wbc0033-readonly.env"
+FINANCE_READONLY_DROPIN = (
+    "/etc/systemd/system/wb-core-finance-liquidity-pilot.service.d/99-wbc0033-readonly.conf"
+)
+FINANCE_READONLY_ENV_SHA256 = "c764d040dfe1cb9fd2d234ba692378af0c04c4cecfcf1981b415ce7221072d0a"
+FINANCE_READONLY_DROPIN_SHA256 = "cab631429bc23e80d3dbc25a2eb4d6102fb7383db42f97e7ab4c07971a4701e6"
 REMOTE_DIAGNOSTIC_SCHEMA = "wb-core.release-recovery-remote-diagnostic/v1"
 REMOTE_DIAGNOSTIC_STAGES = frozenset(
     {"metadata", "services", "health", "process-env", "pilot-env", "finance", "nginx", "ss"}
@@ -71,6 +77,7 @@ class RecoveryCase(str, Enum):
     STORAGE_TAIL = "storage-tail"
     SELECTIVE_B9_ACTIVATION = "normal-b9-activation-tail"
     REGISTRY_PRECHECK_ACTIVATION = "normal-registry-precheck-activation-tail"
+    WORKER_HEALTH_PRECHECK_ACTIVATION = "normal-worker-health-precheck-activation-tail"
 
 
 def recovery_case(release_run_id: int) -> RecoveryCase:
@@ -83,6 +90,7 @@ def normal_activation_tail_case(case: RecoveryCase) -> bool:
     return case in {
         RecoveryCase.SELECTIVE_B9_ACTIVATION,
         RecoveryCase.REGISTRY_PRECHECK_ACTIVATION,
+        RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION,
     }
 
 
@@ -96,6 +104,33 @@ def _registry_precheck_failure_matches(text: str, gate_run_id: int) -> bool:
         f'--workflow-run-id "{gate_run_id}"',
     )
     return all(item in text for item in required)
+
+
+def _worker_health_precheck_failure_matches(text: str, gate_run_id: int) -> bool:
+    required = (
+        "deploy_current_checkout",
+        "wb_autoanswers_activation.py prepare-deploy",
+        "service_states_before = [unit_state(unit) for unit in services]",
+        "RuntimeError: systemd quiesce unit is unhealthy: wb-core-autoanswers-worker.service",
+        "subprocess.CalledProcessError: Command",
+        "returned non-zero exit status 1",
+        f'--workflow-run-id "{gate_run_id}"',
+    )
+    return all(item in text for item in required)
+
+
+def _activation_case_from_log(raw_log: bytes, gate_run_id: int) -> RecoveryCase:
+    text = raw_log.decode("utf-8", errors="replace")
+    registry = _registry_precheck_failure_matches(text, gate_run_id)
+    worker = _worker_health_precheck_failure_matches(text, gate_run_id)
+    storage = 'run_stage("readback", root_storage_commands["status_artifact_readback"])' in text
+    if (registry or worker) and (registry and worker or storage):
+        raise RecoveryError("failed-stage-ambiguous-activation-precheck")
+    if registry:
+        return RecoveryCase.REGISTRY_PRECHECK_ACTIVATION
+    if worker:
+        return RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION
+    return RecoveryCase.STORAGE_TAIL
 
 
 REMOTE_DIAGNOSTIC_CATEGORIES = frozenset(
@@ -254,6 +289,15 @@ def _prove_failed_stage(raw_log: bytes, gate_run_id: int, job_name: str, *, case
         return {"job_name": job_name, "job_log_sha256": digest(raw_log),
                 "stage": "autoanswers-prepare-deploy-registry-precheck", "exit_status": 1,
                 "unit": "wb-core-registry-http.service"}
+    if case is RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION:
+        if not _worker_health_precheck_failure_matches(text, gate_run_id):
+            raise RecoveryError("failed-stage-not-worker-health-precheck-exit1")
+        failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if failures != ["1"] or "exit status 255" in text:
+            raise RecoveryError("failed-stage-not-definite-single-exit1")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "autoanswers-prepare-deploy-worker-health-precheck", "exit_status": 1,
+                "unit": "wb-core-autoanswers-worker.service"}
     required = ("deploy_current_checkout", 'run_stage("readback", root_storage_commands["status_artifact_readback"])',
                 "apps/root_storage_policy.py", "status-readback", "returned non-zero exit status 3",
                 f'--workflow-run-id "{gate_run_id}"')
@@ -326,10 +370,8 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
     ):
         raise RecoveryError("release-deployed-job-shape-invalid")
     raw_log = client.request("GET", f"/actions/jobs/{int(deployed_job['id'])}/logs", raw=True)
-    if case is RecoveryCase.STORAGE_TAIL and _registry_precheck_failure_matches(
-        raw_log.decode("utf-8", errors="replace"), gate_id
-    ):
-        case = RecoveryCase.REGISTRY_PRECHECK_ACTIVATION
+    if case is RecoveryCase.STORAGE_TAIL:
+        case = _activation_case_from_log(raw_log, gate_id)
     failure = _prove_failed_stage(raw_log, gate_id, str(deployed_job["name"]), case=case)
     if exact_sha(run.get("head_sha"), "release-run-head") != original["base_sha"]:
         raise RecoveryError("release-run-trusted-source-mismatch")
@@ -556,8 +598,17 @@ def _finance_pilot_validator_source() -> str:
     """Return the exact validator embedded in the remote prestate program."""
 
     return """
-def require_finance_pilot(flags, pilot_returncode, pilot_stdout, legacy_returncode, legacy_stdout):
-    if any(
+def require_finance_pilot(flags, pilot_returncode, pilot_stdout, legacy_returncode, legacy_stdout, readonly_guard=None):
+    expected = {name: {'main_process': '1', 'pilot_process': '1', 'pilot_source': '1'} for name in ('FINANCE_LIQUIDITY_ENABLED', 'FINANCE_LIQUIDITY_READ_ENABLED', 'FINANCE_LIQUIDITY_WRITE_ENABLED')}
+    readonly = {name: dict(values) for name, values in expected.items()}
+    readonly['FINANCE_LIQUIDITY_WRITE_ENABLED']['pilot_process'] = '0'
+    if flags == expected and readonly_guard is None:
+        write_mode = 'write_enabled'
+    elif flags == readonly and readonly_guard is not None and readonly_guard.get('verified') is True:
+        write_mode = 'readonly_intermediate'
+    else:
+        raise SystemExit(23)
+    if write_mode == 'write_enabled' and any(
         str(values.get(source) or '').strip().strip('\"\\\'') != '1'
         for values in flags.values()
         for source in ('main_process', 'pilot_process', 'pilot_source')
@@ -579,6 +630,7 @@ def require_finance_pilot(flags, pilot_returncode, pilot_stdout, legacy_returnco
     legacy = properties(legacy_returncode, legacy_stdout, 30)
     if legacy != {'LoadState': 'not-found', 'ActiveState': 'inactive', 'SubState': 'dead'}:
         raise SystemExit(30)
+    return write_mode
 """
 
 
@@ -618,6 +670,10 @@ def _prestate_script(target: Any, merge: str) -> str:
             "FINANCE_LIQUIDITY_ACCESS_CONFIG": pilot_env.rsplit("/", 1)[0]
             + "/finance-liquidity-pilot-access.json",
         },
+        "readonly_env": FINANCE_READONLY_ENV,
+        "readonly_dropin": FINANCE_READONLY_DROPIN,
+        "readonly_env_sha256": FINANCE_READONLY_ENV_SHA256,
+        "readonly_dropin_sha256": FINANCE_READONLY_DROPIN_SHA256,
     }
     finance_validator = _finance_pilot_validator_source()
     body = f"""
@@ -665,7 +721,6 @@ stage = 'finance'
 flags = {{name: {{'main_process': main_proc_env.get(name), 'pilot_process': pilot_proc_env.get(name), 'pilot_source': pilot_source.get(name)}} for name in e['finance_flags']}}
 pilot_unit = subprocess.run(['systemctl','show','--property=LoadState','--property=UnitFileState','--property=ActiveState','--property=SubState',e['pilot_unit']], text=True, capture_output=True)
 legacy_unit = subprocess.run(['systemctl','show','--property=LoadState','--property=ActiveState','--property=SubState',e['legacy_unit']], text=True, capture_output=True)
-require_finance_pilot(flags, pilot_unit.returncode, pilot_unit.stdout, legacy_unit.returncode, legacy_unit.stdout)
 def unit_environment_files(unit):
     unit_text = subprocess.run(['systemctl','cat',unit], check=True, text=True, capture_output=True).stdout
     return [line.strip().split('=', 1)[1].strip().lstrip('-') for line in unit_text.splitlines() if line.strip().startswith('EnvironmentFile=')]
@@ -677,6 +732,43 @@ if (pilot_store.is_symlink() or not pilot_store.is_file() or pilot_store.resolve
     raise SystemExit(25)
 if Path(e['legacy_store']).exists() or Path(e['legacy_dir']).exists():
     raise SystemExit(28)
+readonly_guard = None
+if flags['FINANCE_LIQUIDITY_WRITE_ENABLED']['pilot_process'] == '0':
+    guard_paths = ((Path(e['readonly_env']), e['readonly_env_sha256'], 0o600), (Path(e['readonly_dropin']), e['readonly_dropin_sha256'], 0o644))
+    for guard_path, expected_sha, expected_mode in guard_paths:
+        if guard_path.is_symlink() or not guard_path.is_file() or guard_path.resolve() != guard_path:
+            raise SystemExit(32)
+        guard_stat = guard_path.stat()
+        if guard_stat.st_uid != 0 or guard_stat.st_gid != 0 or stat.S_IMODE(guard_stat.st_mode) != expected_mode:
+            raise SystemExit(32)
+        if hashlib.sha256(guard_path.read_bytes()).hexdigest() != expected_sha:
+            raise SystemExit(32)
+    expected_files = ['/opt/wb-ai/.env', e['pilot_env'], e['readonly_env']]
+    if unit_environment_files(e['pilot_unit']) != expected_files:
+        raise SystemExit(32)
+    dropins = subprocess.run(['systemctl','show','--property=DropInPaths','--value',e['pilot_unit']], check=True, text=True, capture_output=True).stdout.strip()
+    if dropins != e['readonly_dropin']:
+        raise SystemExit(32)
+    effective_files = subprocess.run(['systemctl','show','--property=EnvironmentFiles','--value',e['pilot_unit']], check=True, text=True, capture_output=True).stdout.splitlines()
+    if [line.split(' (ignore_errors=', 1)[0] for line in effective_files] != expected_files:
+        raise SystemExit(32)
+    access_path = Path(e['pilot_env_values']['FINANCE_LIQUIDITY_ACCESS_CONFIG'])
+    if access_path.is_symlink() or not access_path.is_file() or access_path.resolve() != access_path:
+        raise SystemExit(32)
+    expected_access = {{'contract_version':'finance_liquidity_bootstrap_access_v1','enabled':True,'username':'owner','capability':'finance_admin','instance_label':'ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ','store_id':'finance-liquidity-pilot','store_path':e['pilot_store'],'mode':'isolated_test'}}
+    if json.loads(access_path.read_text(encoding='utf-8')) != expected_access:
+        raise SystemExit(32)
+    database = sqlite3.connect('file:' + urllib.parse.quote(str(pilot_store), safe='/') + '?mode=ro', uri=True)
+    try:
+        database.execute('PRAGMA query_only=ON')
+        if database.execute('PRAGMA query_only').fetchone() != (1,) or database.execute('SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1').fetchone() != (3,):
+            raise SystemExit(32)
+    finally:
+        database.close()
+    readonly_guard = {{'verified':True,'env_sha256':e['readonly_env_sha256'],'dropin_sha256':e['readonly_dropin_sha256'],'schema_version':3,'store_mode':'isolated_test'}}
+elif Path(e['readonly_env']).exists() or Path(e['readonly_dropin']).exists():
+    raise SystemExit(32)
+write_mode = require_finance_pilot(flags, pilot_unit.returncode, pilot_unit.stdout, legacy_unit.returncode, legacy_unit.stdout, readonly_guard)
 stage = 'nginx'
 nginx = subprocess.run(['nginx','-T'], text=True, capture_output=True)
 if nginx.returncode != 0:
@@ -698,11 +790,11 @@ print(json.dumps({{
   'pilot_pid':int(pilot_pid),
   'services':e['services'],
   'health':health,
-  'finance_pilot':{{'flags':flags,'unit_active':True,'environment_bound':True,'store_present':True,'routes_bound':True,'loopback_listener':True,'legacy_unisolated_absent':True}},
+  'finance_pilot':{{'flags':flags,'write_mode':write_mode,'readonly_guard':readonly_guard,'unit_active':True,'environment_bound':True,'store_present':True,'routes_bound':True,'loopback_listener':True,'legacy_unisolated_absent':True}},
 }}, sort_keys=True))
 """
     return f"""
-import hashlib, json, os, re, subprocess, sys, urllib.error, urllib.request
+import hashlib, json, os, re, sqlite3, stat, subprocess, sys, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 {finance_validator}
 e = {expected!r}
@@ -833,6 +925,7 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
         "selective_b9_diff": payload.get("selective_b9_diff"),
         "selective_previous_recovery": payload.get("selective_previous_recovery"),
         "prestate": payload["prestate"],
+        "finance_acceptance": payload.get("finance_acceptance"),
         "stages": payload["stages"],
         "forbidden_stages": payload["forbidden_stages"],
     }
@@ -1018,6 +1111,7 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
+        "finance_acceptance": prestate["finance_pilot"]["write_mode"],
         "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if not normal_activation_tail_case(case) else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
         "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if not normal_activation_tail_case(case) else ["merge", "rsync", "chown", "dependency-install"]),
     }
@@ -1108,6 +1202,7 @@ def existing_recovery_readback(
         "source": claim["source"],
         "preview_fingerprint": claim.get("preview_fingerprint"),
         "final_readback": final,
+        "finance_acceptance": final["finance_pilot"]["write_mode"],
         "recovered_from_existing_claim": True,
     }
     _publish_once(client, pr, _receipt_marker(operation), completed)
@@ -1231,6 +1326,7 @@ def apply_recovery(
         "preview_fingerprint": expected_fingerprint,
         "completed_stages": stages,
         "final_readback": final,
+        "finance_acceptance": final["finance_pilot"]["write_mode"],
         "recovered_from_existing_claim": False,
     }
     _publish_once(client, pr, receipt_marker, completed)
