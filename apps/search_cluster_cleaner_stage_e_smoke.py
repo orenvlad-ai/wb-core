@@ -17,6 +17,7 @@ from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource, Account
 from packages.adapters.official_api_runtime import OfficialApiRuntimeConfig
 from apps.search_cluster_cleaner_write_fixture import PROFILE
 from apps import search_cluster_cleaner_stage_e as stage_e
+from apps.search_cluster_cleaner_registry_upgrade import plan as registry_upgrade_plan, main as registry_upgrade_main
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import main as recovery_main
 from packages.contracts.search_cluster_cleaner import digest
 
@@ -64,7 +65,18 @@ def main():
             # entrypoint, including config fallback after bootstrap.
             store=CleanerStore(stage_e.StoreRegistry(runtime));service=KeywordCleaner(store,Account('seller','scope'),owner_username='owner')
             ChangeRegistryRepository(runtime).initialize_schema()
+            # The reviewed offline registry CHECK upgrade changes the foreign
+            # schema after the historical bootstrap. Its immutable receipt is
+            # not rewritten; manual Stage E must still use the new registry.
+            with store.registry.session('operational',mode='ro',operation='stage_e_upgrade_plan') as conn:
+                upgrade=registry_upgrade_plan(conn,store.registry)
+            if upgrade['needed']:
+                registry_upgrade_main(['--runtime-dir',str(runtime),'--apply',
+                    '--expected-plan-sha256',upgrade['plan_sha256'],
+                    '--journal-path',str(root/'registry-upgrade-journal.json')])
+                assert stage_e.execute(dict(envelope,action='readback'),runtime_dir=runtime,env_file=env,admission_dir=admission)['state']=='not_submitted'
             fake=FakeWB()
+            fake.targets[11]['minus'].append('стекло iphone 16 pro max')
             with fake.server() as url:
                 source=CleanerWbSource(account=service.account,runtime=OfficialApiRuntimeConfig('synthetic-not-a-token',url,2),limiter=AccountLimiter(),fixture=True)
                 original=stage_e.CleanerWbSource.from_env;stage_e.CleanerWbSource.from_env=lambda account: source
@@ -83,6 +95,12 @@ def main():
                     stage_e.execute(dict(action='apply',operation_id='stage-e-entry-write-0001',request=write,expected_runtime_sha=sha,expected_prestate=write_preview['prestate_sha256'],expected_candidate=write_preview['candidate_sha256']),runtime_dir=runtime,env_file=env,admission_dir=admission)
                     assert stage_e.execute(dict(action='readback',operation_id='stage-e-entry-write-0001',request=write,expected_runtime_sha=sha),runtime_dir=runtime,env_file=env,admission_dir=admission)['state']=='applied'
                     assert len(fake.writes)==1
+                    assert 'стекло iphone 16 pro max' not in fake.writes[0]['norm_queries']
+                    with store.read() as c:
+                        facts=[tuple(row) for row in c.execute("""SELECT before_value_integer,after_value_integer
+                            FROM change_registry_facts WHERE target_kind='search_cluster'
+                            ORDER BY before_value_integer,after_value_integer""")]
+                    assert facts==[(0,1),(0,1),(1,0)],facts
                 finally:stage_e.CleanerWbSource.from_env=original
         finally:stage_e.ROOT=old_root;stage_e.fetch_current_card=old_fetch_card
     with fixture() as f:

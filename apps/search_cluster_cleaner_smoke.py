@@ -2,6 +2,8 @@
 """Offline contract/restart/concurrency tests. Synthetic data only."""
 from __future__ import annotations
 import concurrent.futures
+import csv
+import io
 from datetime import datetime,timedelta,timezone
 import json
 from pathlib import Path
@@ -16,7 +18,7 @@ from packages.application.storage_registry import StoreRegistry
 from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_worker import CleanerWorker
-from packages.contracts.search_cluster_cleaner import Account,Principal,Profile,Target,CleanerError,digest
+from packages.contracts.search_cluster_cleaner import Account,Principal,Profile,Target,CleanerError,digest,query_hash
 from packages.domain.search_cluster_sources import union_snapshot
 from packages.domain.search_cluster_classifier import classify
 
@@ -56,6 +58,13 @@ class CleanerTests(unittest.TestCase):
         run,rid=self.start();self.app.sync_catalog(rid,run["worker_token"],"g1",[self.t],[])
         self.app.record_snapshot(rid,run["worker_token"],"g1",snap)
         return run,rid
+    def seed_legacy_review(self,query):
+        with self.store.transaction() as c:
+            row=c.execute("SELECT * FROM cleaner_observations WHERE account=? AND target=? AND query_hash=?",
+                          (self.app.key,self.t.key,query_hash(query))).fetchone()
+            self.assertIsNotNone(row)
+            self.app._review(c,dict(row),'Старый вопрос владельцу')
+            self.app._sync_reviews(c)
     def test_schema_and_baseline_pin(self):
         with self.store.read() as c:
             self.assertEqual(c.execute("PRAGMA query_only").fetchone()[0],1)
@@ -69,13 +78,50 @@ class CleanerTests(unittest.TestCase):
         self.assertFalse(m.complete)
         n=union_snapshot(self.t,list_entry=dict(active=None,excluded=[],archived=[]),stats_queries=[],minus_queries=[],observed_at=self.clock(),source_times={s:self.clock() for s in ("list","statistics","minus")})
         self.assertFalse(n.complete)
-    def test_excluded_is_not_semantic_label(self):
+    def test_controversial_export_deduplicates_and_escapes_formula(self):
+        q='стекло iphone 16 pro max непонятное'
+        self.app.classifier=lambda query,profile:dict(verdict='review',rule='VOCAB_UNKNOWN',reason='=HYPERLINK("unsafe")')
+        run,rid=self.record(self.snapshot([q]))
+        self.clock.advance(10)
+        self.app.record_snapshot(rid,run['worker_token'],'g1',self.snapshot([q]))
+        with self.store.transaction() as c:
+            event=c.execute("SELECT facts FROM cleaner_events WHERE kind='controversial_decision' ORDER BY sequence DESC LIMIT 1").fetchone()
+            injected=json.loads(event['facts']);injected['reason']='=HYPERLINK("unsafe")'
+            self.app._event(c,'controversial_decision',injected,run_id=rid)
+        with self.assertRaises(CleanerError) as denied:self.app.controversial_csv(READER)
+        self.assertEqual(denied.exception.http_status,403)
+        data=self.app.controversial_csv(OWNER).decode('utf-8-sig')
+        rows=list(csv.DictReader(io.StringIO(data)))
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['query'],q)
+        self.assertEqual(rows[0]['desired'],'allowed')
+        self.assertEqual(rows[0]['confirmed'],'unknown')
+        self.assertTrue(rows[0]['reason'].startswith("'=HYPERLINK"))
+        self.assertNotEqual(rows[0]['first_seen'],rows[0]['last_seen'])
+    def test_existing_minus_is_reclassified_against_approved_allow(self):
         run,rid=self.record(self.snapshot([],minus=["стекло iphone 16 pro max"]))
         with self.store.read() as c:
             row=c.execute("SELECT state,decision_id FROM cleaner_observations WHERE target='2:101'").fetchone()
-            self.assertEqual(tuple(row),("observed_excluded",None))
-        self.assertEqual(self.app.pending_candidates(rid),[])
-    def test_stats_only_and_known_not_reclassified(self):
+            self.assertEqual(row['state'],'pending_return')
+            self.assertTrue(row['decision_id'])
+        self.assertEqual([r['query'] for r in self.app.pending_candidates(rid)],["стекло iphone 16 pro max"])
+    def test_legacy_business_review_resolves_on_fresh_ambiguous_allow(self):
+        q='стекло iphone 16 pro max непонятное'
+        run,rid=self.record(self.snapshot([q]))
+        self.seed_legacy_review(q)
+        self.assertEqual(len(self.app.reviews(OWNER)['items']),1)
+        self.clock.advance(1)
+        self.app.record_snapshot(rid,run['worker_token'],'g1',self.snapshot([q]))
+        self.assertEqual(self.app.reviews(OWNER)['items'],[])
+        with self.store.read() as c:
+            row=c.execute("""SELECT o.state,d.verdict,d.source,d.reason FROM cleaner_observations o
+                JOIN cleaner_auto_decisions d ON d.decision_id=o.decision_id
+                WHERE o.account=? AND o.target=? AND o.query_hash=?""",
+                (self.app.key,self.t.key,query_hash(q))).fetchone()
+            self.assertEqual(tuple(row[:3]),('allow','allow','rules_ambiguous'))
+            self.assertIn('Автоматически оставлено',row['reason'])
+            self.assertEqual(c.execute("SELECT count(*) FROM cleaner_events WHERE kind='review_auto_resolved'").fetchone()[0],1)
+    def test_stats_only_candidate_and_known_baseline_identity(self):
         q="стекло iphone 15 pro max"
         run,rid=self.record(self.snapshot([],statistics=[q]))
         candidates=self.app.pending_candidates(rid);self.assertEqual(len(candidates),1)
@@ -106,7 +152,9 @@ class CleanerTests(unittest.TestCase):
         self.assertNotEqual(new["worker_token"],old["worker_token"])
         with self.assertRaises(CleanerError):self.app.renew_lease(old["run_id"],old["worker_token"],"g1",phase="reading")
     def test_review_concurrent_decision_and_manual_job(self):
-        run,rid=self.record(self.snapshot(["стекло iphone 16 ultra"]))
+        q="стекло iphone 16 ultra"
+        run,rid=self.record(self.snapshot([q]))
+        self.seed_legacy_review(q)
         self.app.finish_run(rid,run["worker_token"],"g1")
         review=self.app.reviews(OWNER)["items"][0]
         def decide(value):
@@ -154,9 +202,11 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(self.app.pending_candidates(rid),[])
     def test_review_membership_cas_and_disappeared_question(self):
         q="стекло iphone 16 ultra"
-        run,rid=self.record(self.snapshot([q]));old=self.app.reviews(OWNER)["items"][0]
+        run,rid=self.record(self.snapshot([q]));self.seed_legacy_review(q)
+        old=self.app.reviews(OWNER)["items"][0]
         self.t=Target(3,101,contract_verified=True)
         self.app.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([q]))
+        self.seed_legacy_review(q)
         new=self.app.reviews(OWNER)["items"][0]
         self.assertEqual(new["campaign_count"],2);self.assertGreater(new["revision"],old["revision"])
         with self.assertRaises(CleanerError) as e:self.app.decide(old["review_id"],dict(decision="exclude",expected_revision=old["revision"],request_id="stale-decision-01"),OWNER)
@@ -165,20 +215,26 @@ class CleanerTests(unittest.TestCase):
             self.t=Target(cid,101,contract_verified=True)
             self.app.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([],minus=[q]))
         self.assertEqual(self.app.reviews(OWNER)["items"],[])
+        with self.store.read() as c:
+            states={r[0] for r in c.execute("SELECT state FROM cleaner_observations WHERE query=?",(q,))}
+        self.assertEqual(states,{'pending_return'})
     def test_due_retry_error_preserves_checked_counts(self):
         run,rid=self.record(self.snapshot(["стекло iphone 16 pro max"]))
         self.clock.advance(61);self.app.scheduler_tick()
         self.app.record_target_error(rid,run["worker_token"],"g1",self.t,"timeout")
         result=self.app.finish_run(rid,run["worker_token"],"g1")
         self.assertEqual(result["summary"]["new_checked"],1);self.assertEqual(result["state"],"partial")
-    def test_missing_minus_with_only_statistics_holds_target(self):
+    def test_missing_from_complete_union_holds_but_statistics_reconciles(self):
         q="стекло iphone 16 pro max"
         run,rid=self.record(self.snapshot([],minus=[q]))
-        self.app.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([],statistics=[q]))
+        self.app.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([],statistics=[]))
         self.assertEqual(self.app.summary(OWNER)["target_holds"],1)
+        self.app.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([],statistics=[q]))
+        self.assertEqual(self.app.summary(OWNER)["target_holds"],0)
     def test_semantic_profile_changes_invalidate_pending_override(self):
         q="стекло iphone 16 ultra"
-        run,rid=self.record(self.snapshot([q]));review=self.app.reviews(OWNER)["items"][0]
+        run,rid=self.record(self.snapshot([q]));self.seed_legacy_review(q)
+        review=self.app.reviews(OWNER)["items"][0]
         result=self.app.decide(review["review_id"],dict(decision="exclude",expected_revision=review["revision"],request_id="decision-override-01"),OWNER)
         self.assertEqual(len(self.app.pending_candidates(result["run_id"])),1)
         self.app.create_profile(101,dict(profile=dict(P,kind="anti"),expected_revision=1,request_id="new-semantic-01"),OWNER)
@@ -187,7 +243,8 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(len(self.app.reviews(OWNER)["items"]),1)
     def test_exact_override_reused_only_in_new_same_sku(self):
         q="стекло iphone 16 ultra"
-        run,rid=self.record(self.snapshot([q]));review=self.app.reviews(OWNER)["items"][0]
+        run,rid=self.record(self.snapshot([q]));self.seed_legacy_review(q)
+        review=self.app.reviews(OWNER)["items"][0]
         self.app.decide(review["review_id"],dict(decision="allow",expected_revision=review["revision"],request_id="decision-reuse-01"),OWNER)
         self.t=Target(3,101,contract_verified=True)
         self.app.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([q]))
@@ -202,7 +259,7 @@ class CleanerTests(unittest.TestCase):
         app2=KeywordCleaner(self.store,self.app.account,owner_username="owner",clock=self.clock,rules_version="synthetic-r2",classifier=lambda q,p:dict(verdict="review",rule="SYNTHETIC",reason="fixture changed rule"))
         app2.activate_rules(expected_revision=2,provenance="synthetic rule activation")
         app2.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([q]))
-        with self.store.read() as c:self.assertEqual(c.execute("SELECT decision_id FROM cleaner_observations WHERE target='2:101'").fetchone()[0],old)
+        with self.store.read() as c:self.assertNotEqual(c.execute("SELECT decision_id FROM cleaner_observations WHERE target='2:101'").fetchone()[0],old)
         self.t=Target(3,101,contract_verified=True);app2.record_snapshot(rid,run["worker_token"],"g1",self.snapshot([q]))
         with self.store.read() as c:self.assertEqual(c.execute("SELECT d.rules_version FROM cleaner_observations o JOIN cleaner_auto_decisions d USING(decision_id) WHERE o.target='3:101'").fetchone()[0],"synthetic-r2")
     def test_disabled_preserves_pending_and_generation_fences(self):
@@ -229,6 +286,19 @@ class CleanerTests(unittest.TestCase):
         print(json.dumps(dict(summary_gets=100,p95_ms=round(sorted(timings)[94]*1000,3),source_wait_seconds=30,network_calls=0)))
 
 class ClassifierDevelopmentTests(unittest.TestCase):
+    def test_decisive_bans_precede_unknown_vocabulary_but_negation_does_not(self):
+        cases={
+            'стекло iphone 15 pro max неопознанное':('exclude','MODEL_WRONG'),
+            'стекло iphone 16 pro max nillkin неопознанное':('exclude','BRAND'),
+            'стекло iphone 16 pro max антишпион неопознанное':('exclude','COATING'),
+            'стекло не для iphone 15 pro max':('review','NEGATION'),
+            'стекло iphone 16 pro max без антишпион':('review','NEGATION'),
+            'стекло iphone 16 pro max неопознанное':('review','VOCAB_UNKNOWN'),
+        }
+        for query,expected in cases.items():
+            with self.subTest(query=query):
+                result=classify(query,P)
+                self.assertEqual((result['verdict'],result['rule']),expected)
     def test_project_edges(self):
         cases={
           "стекло iphone 16 pro max не remax":"review",

@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
-from apps.search_cluster_cleaner_batch_smoke import Source, rejects
+from apps.search_cluster_cleaner_batch_smoke import Source, ready_service, rejects
 from packages.application.search_cluster_cleaner import batch_child_id
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator, batch_status, _drift_only_scan
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
@@ -24,7 +24,7 @@ def main():
         box.write_package()
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True);other=Principal('other',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True);other=Principal('other',True,True,True)
         ids=list(range(100,126));targets=[Target(i,101,name='Campaign '+str(i),contract_verified=True) for i in ids]
         admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in ids]
         source=Source(targets)
@@ -43,7 +43,7 @@ def main():
         item=parent.tick()['items'][14];child=service.manual_job(item['job_id'],owner)
         run=service.claim_exact_manual_run(run_id=child['scan_run_id'],targets=[targets[14]],generation='monolith',production_operation_id='synthetic-drift-scan-op')
         now=service.clock()
-        snapshot=union_snapshot(targets[14],list_entry=dict(active=[query],excluded=[],archived=[]),stats_queries=[query],minus_queries=[],observed_at=now,source_times={name:now for name in ('list','statistics','minus')})
+        snapshot=union_snapshot(targets[14],list_entry=dict(active=[],excluded=[],archived=[]),stats_queries=[],minus_queries=[],observed_at=now,source_times={name:now for name in ('list','statistics','minus')})
         assert snapshot.complete
         service.record_snapshot(run['run_id'],run['worker_token'],'monolith',snapshot,manual_only=True)
         ended=service.finish_run(run['run_id'],run['worker_token'],'monolith',manual_only=True)
@@ -54,7 +54,7 @@ def main():
             proof=_drift_only_scan(c,service,failed,frozen[14])
             assert proof and len(proof['queries'])==1,proof
             assert proof['queries'][0]['verdict']=='allow' and proof['queries'][0]['rule_id']=='APPROVED_BASELINE',proof
-            assert c.execute("SELECT count(*) FROM cleaner_events WHERE run_id=? AND kind='external_state_drift'",(run['run_id'],)).fetchone()[0]==2
+            assert c.execute("SELECT count(*) FROM cleaner_events WHERE run_id=? AND kind='external_state_drift'",(run['run_id'],)).fetchone()[0]==1
             assert not c.execute('SELECT 1 FROM cleaner_write_operations WHERE run_id=?',(run['run_id'],)).fetchone()
             assert _drift_only_scan(c,service,dict(failed,write_run_id='dispatched-op'),frozen[14]) is None
         # Old release marked the entire untouched tail skipped. Preserve this
@@ -99,6 +99,20 @@ def main():
         assert final['failed_count']==0 and final['skipped_count']==0
         assert not final['can_resume'] and final['items'][14]['review_required']
         assert not parent.pending_batches()
+        # A later complete current WB union containing the approved allow
+        # resolves this historical hold as aligned, without an exclusion POST.
+        follow=service.start_run(dict(request_id='synthetic-drift-reconcile-scan-0001',advert_id=114,nm_id=101),owner)
+        fresh=service.claim_exact_manual_run(run_id=follow['run_id'],targets=[targets[14]],generation='monolith',
+            production_operation_id='synthetic-reconcile-scan-op')
+        reconciled=union_snapshot(targets[14],list_entry=dict(active=[query],excluded=[],archived=[]),
+            stats_queries=[query],minus_queries=[],observed_at=service.clock(),
+            source_times={name:service.clock() for name in ('list','statistics','minus')})
+        service.record_snapshot(follow['run_id'],fresh['worker_token'],'monolith',reconciled,manual_only=True)
+        assert service.finish_run(follow['run_id'],fresh['worker_token'],'monolith',manual_only=True)['state']=='complete'
+        with service.store.read() as c:
+            assert not c.execute("SELECT 1 FROM cleaner_target_holds WHERE target='114:101'").fetchone()
+            assert c.execute("SELECT state FROM cleaner_observations WHERE target='114:101' AND query=?",(query,)).fetchone()[0]=='allow'
+            assert not c.execute("SELECT 1 FROM cleaner_write_operations WHERE target='114:101'").fetchone()
     with Sandbox() as box:
         # New incidents advance past only a certified scan-only drift; they
         # never need an explicit repair of the old terminal journal.
@@ -107,7 +121,7 @@ def main():
         box.write_package()
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         targets=[Target(i,101,name='Campaign '+str(i),contract_verified=True) for i in (11,12)]
         source=Source(targets);admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
         frozen=eligibility_rows(service,'monolith',source.targets,fixture_admission=admitted)
@@ -117,7 +131,7 @@ def main():
         child=service.manual_job(parent.tick()['items'][0]['job_id'],owner)
         run=service.claim_exact_manual_run(run_id=child['scan_run_id'],targets=[targets[0]],generation='monolith',production_operation_id='synthetic-future-drift-op')
         now=service.clock()
-        active=union_snapshot(targets[0],list_entry=dict(active=[query],excluded=[],archived=[]),stats_queries=[query],minus_queries=[],observed_at=now,source_times={name:now for name in ('list','statistics','minus')})
+        active=union_snapshot(targets[0],list_entry=dict(active=[],excluded=[],archived=[]),stats_queries=[],minus_queries=[],observed_at=now,source_times={name:now for name in ('list','statistics','minus')})
         service.record_snapshot(run['run_id'],run['worker_token'],'monolith',active,manual_only=True)
         assert service.finish_run(run['run_id'],run['worker_token'],'monolith',manual_only=True)['state']=='partial'
         service.record_manual_job(child['job_id'],state='failed',stage='finished',error_code='scan_partial',can_recheck=False)
@@ -131,7 +145,7 @@ def main():
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         target=Target(11,101,name='Incomplete',contract_verified=True)
         child=service.start_manual_clean(dict(request_id='synthetic-unrelated-partial-0001',advert_id=11,nm_id=101),owner)
         run=service.claim_exact_manual_run(run_id=child['run_id'],targets=[target],generation='monolith',production_operation_id='synthetic-other-scan-op')

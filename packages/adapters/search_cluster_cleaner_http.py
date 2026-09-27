@@ -34,6 +34,16 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
         principal.require_read()
         query = parse_qs(parsed.query, keep_blank_values=True)
         if handler.command == "GET":
+            if path == '/controversial.csv':
+                data=web.require_service().controversial_csv(principal)
+                handler.send_response(200)
+                handler.send_header('Content-Type','text/csv; charset=utf-8')
+                handler.send_header('Content-Disposition','attachment; filename="keyword-cleaner-controversial.csv"')
+                handler.send_header('Content-Length',str(len(data)))
+                handler.send_header('Cache-Control','private, no-store')
+                handler.send_header('X-Content-Type-Options','nosniff')
+                handler.end_headers();handler.wfile.write(data)
+                return
             if path == "/summary":
                 result = web.summary(principal)
             elif path == "/targets":

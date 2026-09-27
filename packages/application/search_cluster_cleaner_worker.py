@@ -17,7 +17,7 @@ class CleanerWorker:
 
     def _apply(self,run,token,snapshot):
         if not self.writer:return
-        candidates=[r for r in self.cleaner.pending_candidates(run) if r['target']==snapshot.target.key]
+        candidates=[r for r in self.cleaner.pending_candidates(run) if r['target']==snapshot.target.key and r['execution_eligibility']!='list_only']
         self.writer.apply_target(run,token,snapshot,candidates)
         if self.readback:self._readback()
 
@@ -41,7 +41,7 @@ class CleanerWorker:
         start=self.monotonic();attempted=0;reason='';remaining=[]
         try:
             if run['kind']=='manual_apply':
-                candidates=app.pending_candidates(rid)
+                candidates=[r for r in app.pending_candidates(rid) if r['execution_eligibility']!='list_only']
                 if not self.writer:
                     with app.store.transaction() as c:
                         app._lease(c,rid,token,self.generation)

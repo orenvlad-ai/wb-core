@@ -27,6 +27,7 @@ from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource,WbReadEr
 from packages.adapters.search_cluster_cleaner_wb import AccountLimiter
 from packages.adapters.official_api_runtime import OfficialApiRuntimeConfig
 from packages.contracts.search_cluster_cleaner import CleanerError,Principal,Target
+from packages.domain.search_cluster_sources import union_snapshot
 
 
 class Source:
@@ -41,13 +42,117 @@ class Source:
         return values,missing
 
 
+def ready_service(box):
+    service=box.service()
+    if not getattr(box,'_batch_registry_ready',False):
+        ChangeRegistryRepository(service.store.registry.runtime_dir).initialize_schema()
+        box._batch_registry_ready=True
+    return service
+
+
 def rejects(action,code):
     try:action()
     except CleanerError as exc:assert exc.code==code,(exc.code,code)
     else:raise AssertionError('expected '+code)
 
 
+def technical_deferred_path():
+    """One list-only action is logged, while other pairs remain runnable."""
+    with Sandbox() as box:
+        preview=box.execute('preview')
+        box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        service=ready_service(box);owner=Principal('owner',True,True,True)
+        targets=[Target(i,101,name='CPM '+str(i),contract_verified=True) for i in (11,12)]
+        admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
+        source=Source(targets)
+        frozen=eligibility_rows(service,'monolith',targets,fixture_admission=admitted)
+        batch_id='synthetic-deferred-batch-0001'
+        service.start_manual_batch(dict(request_id=batch_id,selected_categories=['active'],
+            targets=[dict(advert_id=i,nm_id=101) for i in (11,12)]),owner,snapshot=frozen)
+        parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
+        for index,(active,stats) in enumerate(((['стекло iphone 15 pro max','Стекло iphone 14 pro max','стекло iphone 16 pro max'],['Стекло iphone 14 pro max','стекло iphone 16 pro max']),
+                                                (['стекло iphone 15 pro max'],[]))):
+            child=service.manual_job(parent.tick()['items'][index]['job_id'],owner)
+            run=service.claim_exact_manual_run(run_id=child['scan_run_id'],targets=[targets[index]],
+                generation='monolith',production_operation_id='synthetic-deferred-scan-'+str(index))
+            now=service.clock();snapshot=union_snapshot(targets[index],list_entry=dict(active=active,excluded=[],archived=[]),
+                stats_queries=stats,minus_queries=[],observed_at=now,source_times={name:now for name in ('list','statistics','minus')})
+            service.record_snapshot(run['run_id'],run['worker_token'],'monolith',snapshot,manual_only=True)
+            ended=service.finish_run(run['run_id'],run['worker_token'],'monolith',manual_only=True)
+            assert ended['state']=='complete' and ended['summary']['excluded_not_executed']==1,ended
+            if index==0:
+                candidate=service.manual_apply_preview(run['run_id'],targets[index])
+                assert len(candidate['candidates'])==1 and len(candidate['deferred'])==1,candidate
+                service.record_manual_job(child['job_id'],state='complete',stage='finished')
+            else:
+                rejects(lambda:service.manual_apply_preview(run['run_id'],targets[index]),'manual_candidate_incomplete')
+                service.record_manual_job(child['job_id'],state='failed',stage='finished',error_code='manual_candidate_incomplete')
+            state=parent.tick()
+            assert state['current_index']==index+1 and state['items'][index]['state']=='partial',state
+            assert state['items'][index]['deferred_count']==1,state
+            assert state['items'][index]['unchanged']==(1 if index==0 else 0),state
+        final=parent.tick()
+        assert final['state']=='partial' and final['not_started_count']==0 and final['partial_count']==2,final
+
+
+def incomplete_scan_does_not_abort_other_pair():
+    with Sandbox() as box:
+        preview=box.execute('preview')
+        box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        service=ready_service(box);owner=Principal('owner',True,True,True)
+        targets=[Target(i,101,name='CPM '+str(i),contract_verified=True) for i in (11,12)]
+        admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
+        batch_id='synthetic-incomplete-scan-0001'
+        frozen=eligibility_rows(service,'monolith',targets,fixture_admission=admitted)
+        service.start_manual_batch(dict(request_id=batch_id,selected_categories=['active'],
+            targets=[dict(advert_id=i,nm_id=101) for i in (11,12)]),owner,snapshot=frozen)
+        parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:Source(targets),fixture_admission=admitted)
+        for index in range(2):
+            child=service.manual_job(parent.tick()['items'][index]['job_id'],owner)
+            run=service.claim_exact_manual_run(run_id=child['scan_run_id'],targets=[targets[index]],
+                generation='monolith',production_operation_id='synthetic-incomplete-scan-'+str(index))
+            now=service.clock()
+            snapshot=union_snapshot(targets[index],
+                list_entry=(None if index==0 else dict(active=['стекло iphone 16 pro max'],excluded=[],archived=[])),
+                stats_queries=[] if index==0 else ['стекло iphone 16 pro max'],minus_queries=[],observed_at=now,
+                source_times={} if index==0 else {name:now for name in ('list','statistics','minus')})
+            service.record_snapshot(run['run_id'],run['worker_token'],'monolith',snapshot,manual_only=True)
+            ended=service.finish_run(run['run_id'],run['worker_token'],'monolith',manual_only=True)
+            service.record_manual_job(child['job_id'],state='failed' if index==0 else 'no_change',stage='finished',
+                                      error_code='scan_partial' if index==0 else None)
+            state=parent.tick()
+            assert state['current_index']==index+1,state
+            assert state['items'][index]['state']==('partial' if index==0 else 'no_change'),state
+            assert ended['state']==('partial' if index==0 else 'complete'),ended
+        final=parent.tick()
+        assert final['state']=='partial' and final['partial_count']==1 and final['no_change_count']==1,final
+        assert final['not_started_count']==0,final
+
+
+def drift_scan_admission():
+    with Sandbox() as box:
+        preview=box.execute('preview')
+        box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        service=ready_service(box);owner=Principal('owner',True,True,True)
+        targets=[Target(i,101,contract_verified=True) for i in (11,12)]
+        admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
+        with service.store.transaction() as db:
+            for target,reason in zip(targets,('external_state_drift','technical_uncertainty')):
+                db.execute('INSERT INTO cleaner_target_holds VALUES(?,?,?,?)',(service.key,target.key,reason,service.clock()))
+        rows=eligibility_rows(service,'monolith',targets,fixture_admission=admitted)
+        assert rows[0]['eligible'] and not rows[1]['eligible'] and rows[1]['reason']=='target_held',rows
+        rejects(lambda:service.start_manual_clean(dict(request_id='held-technical-start',advert_id=12,nm_id=101),owner),'target_held')
+        job=service.start_manual_clean(dict(request_id='held-drift-rescan',advert_id=11,nm_id=101),owner)
+        assert job['run_id']
+        with service.store.read() as db:
+            assert db.execute('SELECT count(*) FROM cleaner_target_holds').fetchone()[0]==2
+            assert db.execute('SELECT count(*) FROM cleaner_write_operations').fetchone()[0]==0
+
+
 def main():
+    drift_scan_admission()
+    technical_deferred_path()
+    incomplete_scan_does_not_abort_other_pair()
     # The count endpoint can include completed campaigns omitted by the detail
     # endpoint. Their absence must not hide exact active/paused candidates.
     with Sandbox() as box:
@@ -66,7 +171,7 @@ def main():
         assert {target.advert_id for target in targets}=={11,12}
         assert errors==['adverts_missing:14','adverts_missing:15'] and statuses=={11:9,12:11,14:7,15:-1}
         assert len(source.catalog())==2,'default catalog contract changed'
-        web=CleanerWeb(box.service(),generation='monolith')
+        web=CleanerWeb(ready_service(box),generation='monolith')
         owner=Principal('owner',True,True,True)
         with patch.object(CleanerWbSource,'from_env',return_value=source), \
              patch('packages.application.search_cluster_cleaner_batch_eligibility.eligibility_rows',return_value=[
@@ -86,7 +191,7 @@ def main():
             web._refresh_batch_catalog()
             assert web.batch_eligibility(owner)['error']=='campaign_catalog_unavailable'
     with Sandbox() as box:
-        web=CleanerWeb(box.service(),generation='monolith')
+        web=CleanerWeb(ready_service(box),generation='monolith')
         owner=Principal('owner',True,True,True)
         with patch.object(CleanerWbSource,'from_env',side_effect=RuntimeError('synthetic catalog outage')) as source:
             assert web.batch_eligibility(owner)['loading']
@@ -108,7 +213,7 @@ def main():
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True);other=Principal('other',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True);other=Principal('other',True,True,True)
         admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12,13)]
         source=Source([Target(11,101,name='One',contract_verified=True),Target(12,101,name='Two',contract_verified=True),
                        Target(13,101,name='Three',contract_verified=True),Target(14,101,status=7,name='Completed',contract_verified=True)])
@@ -185,7 +290,7 @@ def main():
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12)]
         source=Source([Target(11,101,name='One',contract_verified=True),Target(12,101,name='Two',contract_verified=True)])
         snapshot=eligibility_rows(service,'monolith',source.targets,fixture_admission=admitted)
@@ -226,7 +331,7 @@ def main():
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12)]
         source=Source([Target(11,101,name='One',contract_verified=True),Target(12,101,name='Two',contract_verified=True)])
         snapshot=eligibility_rows(service,'monolith',source.targets,fixture_admission=admitted)
@@ -253,7 +358,7 @@ def main():
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
-        service=box.service();owner=Principal('owner',True,True,True)
+        service=ready_service(box);owner=Principal('owner',True,True,True)
         batch_id='synthetic-batch-collision-0001'
         preempt=service.start_manual_clean(dict(request_id=batch_child_id(batch_id,0),advert_id=99,nm_id=101),owner)
         assert service.stop_unsubmitted_manual_run(preempt['run_id'])
@@ -284,13 +389,13 @@ def main():
         fake=FakeWB();fake.targets[12]=copy.deepcopy(fake.targets[11]);fake.write_modes[11]='timeout'
         clock=Clock();clock.base=datetime.now(timezone.utc)+timedelta(seconds=1)
         with fake.server() as url:
-            source=CleanerWbSource(account=box.service().account,runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
+            source=CleanerWbSource(account=ready_service(box).account,runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
                 clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
             original_cleaner=stage_e.KeywordCleaner
             with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
                  patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,characteristics=list(reversed(characteristics)))), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=lambda *args,**kwargs:original_cleaner(*args,clock=clock,**kwargs)):
-                service=box.service();owner=Principal('owner',True,True,True)
+                service=ready_service(box);owner=Principal('owner',True,True,True)
                 admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12)]
                 catalog=source._adverts([11,12],source.monotonic()+120)
                 snapshot=eligibility_rows(service,'monolith',catalog,fixture_admission=admitted)

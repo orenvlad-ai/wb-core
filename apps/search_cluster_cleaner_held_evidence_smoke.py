@@ -76,6 +76,11 @@ def main():
             c.execute('INSERT INTO cleaner_target_holds VALUES(?,?,?,?)',
                       (box.service().key,held.key,'external_state_drift','2026-09-23T00:00:00Z'))
         rows=eligibility_rows(box.service(),'monolith',catalog,config_path=box.admission/'stage-e-config.json')
+        assert next(row for row in rows if (row['advert_id'],row['nm_id'])==(held.advert_id,held.nm_id))['eligible']
+        with box.service().store.transaction() as c:
+            assert c.execute('SELECT reason FROM cleaner_target_holds WHERE target=?',(held.key,)).fetchone()[0]=='external_state_drift'
+            c.execute('UPDATE cleaner_target_holds SET reason=? WHERE target=?',('readback_inconclusive',held.key))
+        rows=eligibility_rows(box.service(),'monolith',catalog,config_path=box.admission/'stage-e-config.json')
         assert next(row for row in rows if (row['advert_id'],row['nm_id'])==(held.advert_id,held.nm_id))['reason']=='target_held'
 
         # A newly SHA-bound source still cannot disagree with historical held evidence.

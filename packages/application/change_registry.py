@@ -231,7 +231,8 @@ def target_identity(
     )
 
 
-def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
+def ensure_change_registry_schema(conn: sqlite3.Connection, *, upgrade_bidirectional: bool = False,
+                                  reviewed_bidirectional_plan: dict | None = None) -> None:
     """Install the empty additive foundation in the selected operational DB."""
 
     value_check_before = _value_storage_check("before_value")
@@ -247,6 +248,8 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
         "('submitted','failed','rejected','cancelled','ambiguous')"
         not in str(attempt_trigger[0] or "")
     ):
+        if reviewed_bidirectional_plan is not None:
+            raise RuntimeError("reviewed registry schema differs from the open database")
         conn.execute("DROP TRIGGER change_registry_attempt_lifecycle")
     schema_sql = f"""
         CREATE TABLE IF NOT EXISTS {OPERATIONS_TABLE}(
@@ -313,6 +316,7 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
             CHECK({value_check_requested}),
             CHECK({_field_value_check('before_value', requested=False)}),
             CHECK({_field_value_check('requested_value', requested=True)}),
+            CHECK(parameter_field<>'excluded' OR before_value_integer<>requested_value_integer),
             UNIQUE(operation_id,target_kind,nm_id,advert_id,placement,parameter_field,query_hash)
         );
         CREATE UNIQUE INDEX IF NOT EXISTS change_registry_items_legacy_identity
@@ -1078,7 +1082,8 @@ def ensure_change_registry_schema(conn: sqlite3.Connection) -> None:
         END;
         """
     from packages.application.change_registry_search_cluster import migrate_search_cluster_schema
-    migrate_search_cluster_schema(conn, schema_sql)
+    migrate_search_cluster_schema(conn, schema_sql, upgrade_bidirectional=upgrade_bidirectional,
+                                  reviewed_plan=reviewed_bidirectional_plan)
     for trigger in ('change_registry_fact_link_exact_scope','change_registry_manual_pending_lifecycle'):
         row=conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(trigger,)).fetchone()
         if row and 'query_hash' not in row[0]: conn.execute(f'DROP TRIGGER {trigger}')
@@ -3764,11 +3769,11 @@ def _target_storage_check() -> str:
 
 
 def _field_value_check(prefix: str, *, requested: bool) -> str:
-    boolean_value = 1 if requested else 0
+    boolean_value = 'IN (0,1)'
     numeric_kinds = "('integer')" if requested else "('missing','null','integer')"
     text_kinds = "('text')" if requested else "('missing','null','text')"
     return f"""(parameter_field='excluded' AND {prefix}_kind='boolean'
-                 AND {prefix}_integer={boolean_value} AND {prefix}_text IS NULL) OR (
+                 AND {prefix}_integer {boolean_value} AND {prefix}_text IS NULL) OR (
             parameter_field IN
                 ('original_price_minor','discount_bps','seller_price_minor','bid_minor')
             AND {prefix}_kind IN {numeric_kinds}

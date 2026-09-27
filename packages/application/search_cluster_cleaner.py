@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
+import csv
+import io
 import json
 from pathlib import Path
 import re
@@ -250,7 +252,7 @@ class KeywordCleaner:
         c.execute("INSERT INTO cleaner_auto_decisions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(decision_id,self.key,target,query_hash(q),q,result["verdict"],result["rule"],result["reason"],canonical(dict(result.get("facts",result),rules_hash=self.rules_digest,classifier_source_sha256=self.rules_source_digest)),self.rules_version,p.version if p else None,p.semantic_fingerprint if p else None,source,override_revision,self.clock()))
         return decision_id
 
-    def _review(self,c,obs:Mapping,reason:str) -> str:
+    def _review(self,c,obs:Mapping,reason:str,*,mark:bool=True) -> str:
         now=self.clock()
         row=c.execute("SELECT * FROM cleaner_reviews WHERE account=? AND nm_id=? AND query_hash=?",(self.key,obs["nm_id"],obs["query_hash"])).fetchone()
         if row:
@@ -261,17 +263,21 @@ class KeywordCleaner:
                 c.execute("UPDATE cleaner_reviews SET reason=?,updated_at=?,revision=revision+1 WHERE review_id=?",(reason,now,rid))
         else:
             rid=new_id();c.execute("INSERT INTO cleaner_reviews(review_id,account,nm_id,query_hash,query,revision,reason,state,created_at,updated_at) VALUES(?,?,?,?,?,1,?,'open',?,?)",(rid,self.key,obs["nm_id"],obs["query_hash"],obs["query"],reason,now,now))
-        c.execute("UPDATE cleaner_observations SET review_id=?,state='review' WHERE account=? AND target=? AND query_hash=?",(rid,self.key,obs["target"],obs["query_hash"]))
+        if mark:
+            c.execute("UPDATE cleaner_observations SET review_id=?,state='review' WHERE account=? AND target=? AND query_hash=?",(rid,self.key,obs["target"],obs["query_hash"]))
+        else:
+            c.execute("UPDATE cleaner_observations SET review_id=? WHERE account=? AND target=? AND query_hash=?",(rid,self.key,obs["target"],obs["query_hash"]))
         return rid
 
     def _sync_reviews(self,c) -> None:
         # Revision covers the exact campaigns/states shown with a question.
         # It invalidates a stale browser decision when a new occurrence arrives.
         for row in c.execute("SELECT * FROM cleaner_reviews WHERE account=? AND state='open'",(self.key,)).fetchall():
-            members=[tuple(r) for r in c.execute("SELECT target,observed_state FROM cleaner_observations WHERE account=? AND review_id=? AND state IN('review','profile_required','pending_exclude') ORDER BY target",(self.key,row["review_id"]))]
+            members=[tuple(r) for r in c.execute("SELECT target,observed_state FROM cleaner_observations WHERE account=? AND review_id=? AND state IN('review','profile_required') ORDER BY target",(self.key,row["review_id"]))]
             fp=digest(members)
             if not members:
                 c.execute("UPDATE cleaner_reviews SET state='resolved',revision=revision+1,scope_digest=?,updated_at=? WHERE review_id=?",(fp,self.clock(),row["review_id"]))
+                self._event(c,'review_auto_resolved',dict(review_id=row['review_id'],nm_id=row['nm_id'],query_hash=row['query_hash'],reason='current_decision_available'))
             elif row["scope_digest"]!=fp:
                 c.execute("UPDATE cleaner_reviews SET revision=revision+?,scope_digest=?,updated_at=? WHERE review_id=?",(int(bool(row["scope_digest"])),fp,self.clock(),row["review_id"]))
 
@@ -285,17 +291,43 @@ class KeywordCleaner:
         source="rules";revision=None
         if override:
             if override["fingerprint"]!=p.semantic_fingerprint or override["needs_revalidation"]:
-                result=dict(verdict="review",rule="OVERRIDE_REVALIDATION",reason="Проверьте решение после изменения товара")
+                c.execute("UPDATE cleaner_observations SET state='profile_required' WHERE account=? AND target=? AND query_hash=?",(self.key,obs['target'],obs['query_hash']))
+                return 'profile_required'
             else:
                 source="owner_decision";revision=override["revision"]
                 result=dict(verdict=override["verdict"],rule="OWNER_EXACT",reason="Точное решение владельца для этого товара")
         else:
             if self._settings(c)["rules_version"]!=self.rules_version: raise CleanerError("rules_version_mismatch","Worker использует другую версию правил",409)
-            result=self.classifier(obs["query"],p)
+            baseline=c.execute('''SELECT b.query,d.verdict,d.fingerprint FROM cleaner_baselines b
+                JOIN cleaner_auto_decisions d ON d.decision_id=b.decision_id
+                WHERE b.account=? AND b.target=? AND b.query_hash=?''',(self.key,obs['target'],obs['query_hash'])).fetchone()
+            if baseline:
+                if baseline['query']!=obs['query'] or baseline['fingerprint']!=p.semantic_fingerprint:
+                    c.execute("UPDATE cleaner_observations SET state='profile_required' WHERE account=? AND target=? AND query_hash=?",(self.key,obs['target'],obs['query_hash']))
+                    return 'profile_required'
+                source='baseline'
+                result=dict(verdict=baseline['verdict'],rule='APPROVED_BASELINE',reason='Согласованная исходная база')
+            else:
+                result=self.classifier(obs["query"],p)
+                if result['verdict']=='review':
+                    if result['rule'] in {'PROFILE','invalid_query'}:
+                        c.execute("UPDATE cleaner_observations SET state='profile_required' WHERE account=? AND target=? AND query_hash=?",(self.key,obs['target'],obs['query_hash']))
+                        return 'profile_required'
+                    source='rules_ambiguous'
+                    reason=('Отрицание само по себе не подтверждает запрет; оставлено как спорное'
+                            if result['rule']=='NEGATION' else
+                            'Автоматически оставлено как спорное: '+result['reason'])
+                    result=dict(result,verdict='allow',reason=reason,
+                                facts=dict(classifier_result=result,controversial=True))
         decision_id=self._decision(c,obs["target"],obs["query"],result,p,source,revision)
-        state={"allow":"allow","exclude":"pending_exclude","review":"review"}[result["verdict"]]
+        excluded=obs.get('observed_state')=='excluded'
+        state=('pending_return' if excluded else 'allow') if result['verdict']=='allow' else ('already_excluded' if excluded else 'pending_exclude')
         c.execute("UPDATE cleaner_observations SET decision_id=?,state=?,last_run_id=? WHERE account=? AND target=? AND query_hash=?",(decision_id,state,run_id,self.key,obs["target"],obs["query_hash"]))
-        if state=="review": self._review(c,obs,result["reason"])
+        if source=='rules_ambiguous':
+            self._event(c,'controversial_decision',dict(target=obs['target'],query_hash=obs['query_hash'],
+                decision_id=decision_id,rule=result['rule'],reason=result['reason'],
+                before='excluded' if excluded else 'allowed',desired='allowed',rules_version=self.rules_version,
+                rules_digest=self.rules_digest),run_id=run_id)
         return result["verdict"]
 
     def _new_run(self,c,kind,trigger,*,request_id=None,targets=(),review_id=None,override_revision=None,apply_group_id=None,continuation_number=0) -> str:
@@ -346,7 +378,8 @@ class KeywordCleaner:
             s=self._settings(c)
             if s['enabled'] or not s['baseline_ready']:
                 raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
-            if c.execute("SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone():
+            held=c.execute("SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone()
+            if held and held['reason']!='external_state_drift':
                 raise CleanerError('target_held','Чистка этой кампании приостановлена до разбора',409)
             latest_batch=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
             if latest_batch:
@@ -507,8 +540,13 @@ class KeywordCleaner:
             result.update(latest)
             result.update(updated_at=events[-1]['created_at'] if events else None,
                           state=latest.get('state','queued'),stage=latest.get('stage','fetching'))
-            result['scan_decisions']=[dict(row) for row in c.execute("""SELECT o.query,o.state,o.observed_state,
-              d.verdict,d.rule_id,d.reason,d.source FROM cleaner_observations o
+            result['scan_decisions']=[dict(row,controversial=row['source']=='rules_ambiguous',
+                                           before='excluded' if row['observed_state']=='excluded' else 'allowed',
+                                           desired='excluded' if row['verdict']=='exclude' else 'allowed' if row['verdict']=='allow' else None,
+                                           technical_reason=('profile_required' if row['state']=='profile_required' else
+                                                             'statistics_missing' if row['state']=='pending_exclude' and 'statistics' not in json.loads(row['sources']) else None))
+                                      for row in c.execute("""SELECT o.query,o.state,o.observed_state,
+              o.sources,d.verdict,d.rule_id,d.reason,d.source FROM cleaner_observations o
               LEFT JOIN cleaner_auto_decisions d ON d.decision_id=o.decision_id
               WHERE o.account=? AND o.last_run_id=? AND o.target=? ORDER BY o.query""",
               (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}"))]
@@ -600,14 +638,16 @@ class KeywordCleaner:
             revision=(h[0] if h else 0)+1
             c.execute("INSERT INTO cleaner_manual_overrides VALUES(?,?,?,?,?,?,?,?,?)",(self.key,r["nm_id"],r["query_hash"],r["query"],revision,verdict,p.semantic_fingerprint,actor,self.clock()))
             c.execute("INSERT INTO cleaner_override_heads VALUES(?,?,?,?,0) ON CONFLICT(account,nm_id,query_hash) DO UPDATE SET revision=excluded.revision,needs_revalidation=0",(self.key,r["nm_id"],r["query_hash"],revision))
-            observations=c.execute("SELECT * FROM cleaner_observations WHERE account=? AND review_id=? AND state IN('review','profile_required','pending_exclude')",(self.key,review_id)).fetchall()
+            observations=c.execute("SELECT * FROM cleaner_observations WHERE account=? AND review_id=? AND state IN('review','profile_required','pending_exclude','pending_return','allow','returned')",(self.key,review_id)).fetchall()
             targets=[];already_excluded=[];execution_blocked=[]
             for obs in observations:
                 did=self._decision(c,obs["target"],obs["query"],dict(verdict=verdict,rule="OWNER_EXACT",reason="Решение владельца"),p,"owner_decision",revision)
                 excluded=obs["observed_state"]=="excluded"
-                state="already_excluded" if excluded else ("allow" if verdict=="allow" else "pending_exclude")
+                state=('pending_return' if excluded else 'allow') if verdict=='allow' else ('already_excluded' if excluded else 'pending_exclude')
                 c.execute("UPDATE cleaner_observations SET state=?,decision_id=? WHERE account=? AND target=? AND query_hash=?",(state,did,self.key,obs["target"],obs["query_hash"]))
-                if excluded: already_excluded.append(obs["target"])
+                if excluded and verdict=='exclude':already_excluded.append(obs["target"])
+                elif excluded and verdict=='allow':
+                    targets.append(dict(target=obs['target'],query_hash=obs['query_hash'],decision_id=did))
                 elif verdict=="exclude":
                     # list.active is coverage only.  A saved owner decision is
                     # retained, but it is not eligible for set-minus until the
@@ -642,19 +682,25 @@ class KeywordCleaner:
             raise CleanerError('manual_scan_incomplete','Нет полного свежего снимка кампании',409)
         rows=c.execute("""SELECT o.*,d.rules_version,d.profile_version,d.fingerprint,d.override_revision,d.source
           FROM cleaner_observations o JOIN cleaner_auto_decisions d ON o.decision_id=d.decision_id
-          WHERE o.account=? AND o.last_run_id=? AND o.target=? AND o.state='pending_exclude'""",(self.key,scan_run_id,target.key)).fetchall()
-        candidates=[]
+          WHERE o.account=? AND o.last_run_id=? AND o.target=? AND o.state IN('pending_exclude','pending_return')""",(self.key,scan_run_id,target.key)).fetchall()
+        candidates=[];deferred=[]
         for row in rows:
-            if 'statistics' not in json.loads(row['sources']): continue
+            if row['state']=='pending_exclude' and 'statistics' not in json.loads(row['sources']):
+                deferred.append(dict(target=row['target'],query_hash=row['query_hash'],decision_id=row['decision_id'],reason='statistics_missing'))
+                continue
             if c.execute("SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone(): continue
             if c.execute(f"SELECT 1 FROM cleaner_write_operations WHERE account=? AND target=? AND state IN({BLOCKING_WRITE_STATES})",(self.key,target.key)).fetchone(): continue
             p=self._profile(c,row['nm_id'])
             if not p or p.version!=row['profile_version'] or p.semantic_fingerprint!=row['fingerprint'] or row['rules_version']!=self._settings(c)['rules_version']: continue
             candidates.append(dict(row))
         rows=[dict(target=v['target'],query_hash=v['query_hash'],decision_id=v['decision_id']) for v in candidates]
-        if not rows: raise CleanerError('manual_candidates_empty','Нет подтверждённых свежей статистикой исключений',409)
-        basis=dict(scan_run_id=scan_run_id,target=target.key,candidates=sorted(rows,key=lambda v:(v['query_hash'],v['decision_id'])))
+        if not rows:
+            if deferred:raise CleanerError('manual_candidate_incomplete','Для этой пары нет точной статистики ключей; запись в WB отложена',409)
+            raise CleanerError('manual_candidates_empty','Нет изменений полного списка исключений',409)
+        basis=dict(scan_run_id=scan_run_id,target=target.key,candidates=sorted(rows,key=lambda v:(v['query_hash'],v['decision_id'])),
+                   deferred=sorted(deferred,key=lambda v:(v['query_hash'],v['decision_id'])))
         return dict(scan_run_id=scan_run_id,target=target.key,candidates=rows,
+                    deferred=deferred,
                     prestate_sha256='sha256:'+digest(dict(run_id=scan_run_id,target=target.key,state=run['state'],checked=bool(checked['complete']))),
                     candidate_sha256='sha256:'+digest(basis))
 
@@ -812,25 +858,31 @@ class KeywordCleaner:
             return None
 
     def record_snapshot(self,run_id:str,token:str,generation:str,snapshot:Snapshot,*,manual_only:bool=False) -> dict:
-        t=snapshot.target;counts=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,excluded_not_executed=0)
+        t=snapshot.target;counts=dict(new_checked=0,checked_total=0,allow=0,would_exclude=0,would_return=0,
+                                      controversial=0,review=0,profile_required=0,excluded_not_executed=0)
         with self.store.transaction() as c:
             self._lease(c,run_id,token,generation)
             if manual_only and self._settings(c)["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
-            old_result=c.execute("SELECT counters FROM cleaner_run_targets WHERE run_id=? AND target=?",(run_id,t.key)).fetchone()
-            if old_result: counts.update(json.loads(old_result[0]))
             reason=t.unsupported_reason or "; ".join(snapshot.reasons)
             if not snapshot.complete or reason:
                 self._record_target(c,run_id,t,"partial",False,reason or "incomplete_snapshot",snapshot.observed_at,counts,snapshot.source_times)
                 return counts
             if len(snapshot.minus)!=len(set(snapshot.minus)) or any(q not in snapshot.queries or snapshot.queries[q]!="excluded" for q in snapshot.minus):
                 raise CleanerError("invalid_snapshot","Некорректный полный список исключений")
-            now=self.clock()
-            previous_minus=c.execute("SELECT query_hash,query FROM cleaner_observations WHERE account=? AND target=? AND observed_state='excluded'",(self.key,t.key)).fetchall()
-            for prior in previous_minus:
-                if prior["query"] not in snapshot.minus:
-                    c.execute("INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)",(self.key,t.key,"external_state_drift",now))
-                    c.execute("UPDATE cleaner_observations SET state='external_state_drift' WHERE account=? AND target=? AND query_hash=?",(self.key,t.key,prior["query_hash"]))
-                    self._event(c,"external_state_drift",dict(target=t.key,query_hash=prior["query_hash"]),run_id=run_id)
+            # A complete current WB union is the authority for all available
+            # keys, including known minus phrases.  Prior business drift alone
+            # cannot freeze a target once every affected key can be classified.
+            disappeared=c.execute("SELECT query_hash,query FROM cleaner_observations WHERE account=? AND target=? AND observed_state='excluded'",(self.key,t.key)).fetchall()
+            unexplained=[prior for prior in disappeared if prior['query'] not in snapshot.queries]
+            if not unexplained:
+                cleared=c.execute("DELETE FROM cleaner_target_holds WHERE account=? AND target=? AND reason='external_state_drift'",(self.key,t.key)).rowcount
+                if cleared:self._event(c,'external_drift_reconciled',dict(target=t.key,source='complete_current_snapshot'),run_id=run_id)
+            else:
+                c.execute("INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)",(self.key,t.key,'external_state_drift',self.clock()))
+                for prior in unexplained:
+                    c.execute("UPDATE cleaner_observations SET state='external_state_drift',last_run_id=? WHERE account=? AND target=? AND query_hash=?",
+                              (run_id,self.key,t.key,prior['query_hash']))
+                    self._event(c,'external_state_drift',dict(target=t.key,query_hash=prior['query_hash'],reason='missing_from_complete_union'),run_id=run_id)
             for q,observed in sorted(snapshot.queries.items()):
                 if observed not in {"active","excluded","archived","statistics"}: raise CleanerError("invalid_snapshot","Неизвестное состояние кластера")
                 qh=query_hash(q)
@@ -838,28 +890,26 @@ class KeywordCleaner:
                 if old and old["query"]!=q: raise CleanerError("query_collision","Нарушена точная идентичность запроса",409)
                 if old:
                     c.execute("UPDATE cleaner_observations SET last_seen=?,observed_state=?,sources=?,source_times=? WHERE account=? AND target=? AND query_hash=?",(snapshot.observed_at,observed,canonical(snapshot.sources.get(q,())),canonical(snapshot.source_times),self.key,t.key,qh))
-                    if old["observed_state"]=="excluded" and observed in {"active","statistics"}:
-                        c.execute("INSERT OR IGNORE INTO cleaner_target_holds VALUES(?,?,?,?)",(self.key,t.key,"external_state_drift",now))
-                        c.execute("UPDATE cleaner_observations SET state='external_state_drift' WHERE account=? AND target=? AND query_hash=?",(self.key,t.key,qh))
-                        self._event(c,"external_state_drift",dict(target=t.key,query_hash=qh),run_id=run_id)
-                        continue
-                    if old["state"] in FINAL_OBSERVATION_STATES: continue
                 else:
                     c.execute("INSERT INTO cleaner_observations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(self.key,t.key,t.advert_id,t.nm_id,qh,q,snapshot.observed_at,snapshot.observed_at,observed,canonical(snapshot.sources.get(q,())),canonical(snapshot.source_times),"new",None,None,run_id))
-                obs=dict(account=self.key,target=t.key,nm_id=t.nm_id,query_hash=qh,query=q)
-                if observed in {"excluded","archived"}:
-                    state="observed_excluded" if observed=="excluded" else "observed_archived"
-                    c.execute("UPDATE cleaner_observations SET state=? WHERE account=? AND target=? AND query_hash=?",(state,self.key,t.key,qh))
+                obs=dict(account=self.key,target=t.key,nm_id=t.nm_id,query_hash=qh,query=q,observed_state=observed)
+                if observed=='archived':
+                    c.execute("UPDATE cleaner_observations SET state='observed_archived',last_run_id=? WHERE account=? AND target=? AND query_hash=?",(run_id,self.key,t.key,qh))
                     continue
-                # Until dispatch a decision is a candidate, so a changed rule or
-                # semantic profile may be recalculated. Final prior decisions pin.
                 verdict=self._classify_observation(c,obs,run_id)
+                counts['checked_total']+=1
                 if old is None or old["decision_id"] is None:
                     if verdict=="profile_required": counts["profile_required"]+=1
                     else:
                         counts["new_checked"]+=1
-                        counts[{"allow":"allow","exclude":"would_exclude","review":"review"}[verdict]]+=1
-                if verdict=='exclude' and 'statistics' not in snapshot.sources.get(q,()):
+                if verdict=='profile_required':counts['profile_required']+=int(old is not None and old['decision_id'] is not None)
+                elif verdict=='allow':
+                    counts['allow']+=1
+                    counts['would_return']+=int(q in snapshot.minus)
+                else:counts['would_exclude']+=int(q not in snapshot.minus)
+                decision=c.execute('SELECT source FROM cleaner_auto_decisions WHERE decision_id=(SELECT decision_id FROM cleaner_observations WHERE account=? AND target=? AND query_hash=?)',(self.key,t.key,qh)).fetchone()
+                if decision and decision['source']=='rules_ambiguous':counts['controversial']+=1
+                if verdict=='exclude' and q not in snapshot.minus and 'statistics' not in snapshot.sources.get(q,()):
                     counts['excluded_not_executed']+=1
                     self._event(c,'execution_blocked',dict(target=t.key,query_hash=qh,reason='list_only'),run_id=run_id)
             self._sync_reviews(c)
@@ -893,7 +943,7 @@ class KeywordCleaner:
             scope=json.loads(run["targets"])
             rows=c.execute("""SELECT o.*,d.rules_version,d.profile_version,d.fingerprint,d.override_revision,d.source FROM cleaner_observations o
               JOIN cleaner_auto_decisions d ON o.decision_id=d.decision_id
-              WHERE o.account=? AND o.state='pending_exclude'""",(self.key,)).fetchall()
+              WHERE o.account=? AND o.state IN('pending_exclude','pending_return')""",(self.key,)).fetchall()
             allowed={(v["target"],v["query_hash"],v["decision_id"]) for v in scope} if run["kind"]=="manual_apply" else None
             results=[]
             for row in rows:
@@ -907,7 +957,7 @@ class KeywordCleaner:
                 if override and (override["needs_revalidation"] or row["override_revision"]!=override["revision"]): continue
                 if not override and row["override_revision"] is not None: continue
                 item=dict(row)
-                item['execution_eligibility']='statistics_fresh' if 'statistics' in json.loads(row['sources']) else 'list_only'
+                item['execution_eligibility']='minus_confirmed' if row['state']=='pending_return' else ('statistics_fresh' if 'statistics' in json.loads(row['sources']) else 'list_only')
                 results.append(item)
             return results
 
@@ -917,18 +967,21 @@ class KeywordCleaner:
             s=self._settings(c);state="complete"
             if manual_only and s["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
             targets=c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=?",(run_id,)).fetchall()
-            summary=dict(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,excluded_not_executed=0,confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=0,pairs=len(targets),campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=not bool(run["transport_enabled"]))
+            summary=dict(new_checked=0,checked_total=0,allow=0,would_exclude=0,would_return=0,controversial=0,
+                         review=0,profile_required=0,excluded_not_executed=0,confirmed_automatic=0,
+                         confirmed_manual=0,confirmed_pilot=0,returned=0,pairs=len(targets),
+                         campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=not bool(run["transport_enabled"]))
             for t in targets:
                 for k,v in json.loads(t["counters"]).items():
                     if k in summary: summary[k]+=v
             for event in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='readback_result'",(run_id,)):
                 counts=json.loads(event[0])
-                for field in ('confirmed_automatic','confirmed_manual','confirmed_pilot'): summary[field]+=counts.get(field,0)
+                for field in ('confirmed_automatic','confirmed_manual','confirmed_pilot','returned'): summary[field]+=counts.get(field,0)
             summary['unresolved_operations']=c.execute(f"SELECT count(*) FROM cleaner_write_operations WHERE run_id=? AND state IN({PENDING_WRITE_STATES})",(run_id,)).fetchone()[0]
             summary['requires_review_operations']=c.execute("SELECT count(*) FROM cleaner_write_operations WHERE run_id=? AND state='requires_review'",(run_id,)).fetchone()[0]
             summary['rejected_not_executed']=c.execute("""SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id)
                 WHERE o.run_id=? AND o.state='rejected' AND i.confirmed_at IS NULL""",(run_id,)).fetchone()[0]
-            if summary['unresolved_operations'] or summary['requires_review_operations'] or summary['rejected_not_executed'] or summary['excluded_not_executed']: state='partial'
+            if summary['unresolved_operations'] or summary['requires_review_operations'] or summary['rejected_not_executed']: state='partial'
             if any(t["state"]!="done" for t in targets) or reason or run["reason"]: state="partial"
             if not s["enabled"] and not manual_only: state="stopped"
             if run["kind"]=="scan" and run["trigger"]!="manual_exact":
@@ -988,12 +1041,12 @@ class KeywordCleaner:
             if not run or run['state'] not in {'running','accepted'}: return run['state'] if run else 'missing'
             bindings=[json.loads(row[0]) for row in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='stage_e_manual_binding'",(run_id,))]
             if not any(v.get('operation_id')==production_operation_id for v in bindings): raise CleanerError('manual_binding_missing','Нет точной привязки ручного запуска',409)
-            operations=c.execute("SELECT state FROM cleaner_write_operations WHERE account=? AND run_id=? AND state!='cancelled_before_send'",(self.key,run_id)).fetchall()
+            operations=c.execute("SELECT operation_id,state,versions FROM cleaner_write_operations WHERE account=? AND run_id=? AND state!='cancelled_before_send'",(self.key,run_id)).fetchall()
             if not operations:
                 if not allow_no_operations or not run['lease_expires_at'] or timestamp(run['lease_expires_at'])>timestamp(self.clock()):
                     raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
                 state='partial'
-                summary=dict(recovered_manual=True,confirmed_pilot=0)
+                summary=dict(recovered_manual=True,confirmed_pilot=0,returned=0)
                 if run['kind']=='scan':
                     targets=c.execute('SELECT target,state,complete,reason,counters FROM cleaner_run_targets WHERE run_id=?',(run_id,)).fetchall()
                     declared={str(item.get('target') or '') for item in json.loads(run['targets'])}
@@ -1006,13 +1059,19 @@ class KeywordCleaner:
                             for key,value in json.loads(target['counters']).items():
                                 if key in summary:summary[key]+=value
                         if (all(item['state']=='done' and item['complete'] and not item['reason'] for item in targets)
-                                and not summary['excluded_not_executed'] and not run['reason']):
+                                and not run['reason']):
                             state='complete'
             elif any(row['state'] not in {'confirmed','rejected','requires_review'} for row in operations):
                 raise CleanerError('manual_readback_pending','Результат WB ещё не завершён',409)
             else:
                 state='complete' if all(row['state']=='confirmed' for row in operations) else 'partial'
-                summary=dict(recovered_manual=True,confirmed_pilot=c.execute("SELECT count(*) FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id) WHERE o.run_id=? AND i.confirmed_at IS NOT NULL",(run_id,)).fetchone()[0])
+                confirmed_pilot=returned=0
+                for operation in operations:
+                    actions={item['query_hash']:item.get('action','exclude') for item in json.loads(operation['versions']).get('items',[])}
+                    for item in c.execute("SELECT query_hash FROM cleaner_write_items WHERE operation_id=? AND confirmed_at IS NOT NULL",(operation['operation_id'],)):
+                        if actions.get(item['query_hash'],'exclude')=='return':returned+=1
+                        else:confirmed_pilot+=1
+                summary=dict(recovered_manual=True,confirmed_pilot=confirmed_pilot,returned=returned)
             c.execute("UPDATE cleaner_runs SET state=?,phase='finished',scan_finished_at=coalesce(scan_finished_at,?),summary=?,worker_token=NULL,lease_expires_at=NULL WHERE run_id=?",(state,self.clock(),canonical(summary),run_id))
             self._event(c,'run_finished',dict(state=state,summary=summary,recovered=True),run_id=run_id)
             return state
@@ -1044,17 +1103,25 @@ class KeywordCleaner:
             row=c.execute("SELECT * FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
             if row is None: raise CleanerError("not_found","Запуск не найден",404)
             result=self._run_payload(row)
-            result["settlement"]=dict(confirmed_automatic=0,confirmed_manual=0)
+            result["settlement"]=dict(confirmed_automatic=0,confirmed_manual=0,confirmed_pilot=0,returned=0)
             for event in c.execute("SELECT facts FROM cleaner_events WHERE run_id=? AND kind='late_confirmation'",(run_id,)):
                 facts=json.loads(event[0])
                 for field in result['settlement']:result['settlement'][field]+=facts.get(field,0)
             result["targets"]=[dict(r) for r in c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=? ORDER BY target",(run_id,))]
             operations=[]
-            for operation in c.execute("SELECT operation_id,target,state,additions,evidence FROM cleaner_write_operations WHERE account=? AND run_id=? ORDER BY created_at,operation_id",(self.key,run_id)):
+            for operation in c.execute("SELECT operation_id,target,state,additions,before_json,versions,evidence FROM cleaner_write_operations WHERE account=? AND run_id=? ORDER BY created_at,operation_id",(self.key,run_id)):
+                actions={item['query_hash']:item['action'] for item in json.loads(operation['versions']).get('items',[]) if item.get('action')}
+                before={query_hash(q) for q in json.loads(operation['before_json'])}
                 items=[dict(item) for item in c.execute("""SELECT i.query,i.query_hash,i.decision_id,i.state,i.confirmed_at,
                   d.rule_id,d.reason,d.source FROM cleaner_write_items i
                   JOIN cleaner_auto_decisions d ON d.decision_id=i.decision_id
                   WHERE i.operation_id=? ORDER BY i.query""",(operation['operation_id'],))]
+                for item in items:
+                    item['action']=actions.get(item['query_hash'],'exclude')
+                    item['before']='excluded' if item['query_hash'] in before else 'allowed'
+                    item['desired']='allowed' if item['action']=='return' else 'excluded'
+                    item['confirmed_state']=item['desired'] if item['state']=='confirmed' and item['confirmed_at'] else None
+                    item['controversial']=item['source']=='rules_ambiguous'
                 operations.append(dict(operation_id=operation['operation_id'],target=operation['target'],state=operation['state'],items=items))
             result['write_operations']=operations
             effective_operations=[operation for operation in operations if operation['state']!='cancelled_before_send']
@@ -1070,6 +1137,9 @@ class KeywordCleaner:
                         phrases.append(dict(target=candidate['target'],query=decision['query'],query_hash=candidate['query_hash'],
                                             decision_id=candidate['decision_id'],rule_id=decision['rule_id'],
                                             reason=decision['reason'],source=decision['source'],state=item['state'] if item else 'not_submitted',
+                                            action=item['action'] if item else None,before=item['before'] if item else None,
+                                            desired=item['desired'] if item else None,confirmed_state=item['confirmed_state'] if item else None,
+                                            controversial=decision['source']=='rules_ambiguous',
                                             confirmed_at=item['confirmed_at'] if item else None))
             result['phrases']=phrases
             # A completed run is an immutable snapshot. Late readback changes
@@ -1104,7 +1174,7 @@ class KeywordCleaner:
             items=[]
             for r in rows[:limit]:
                 item=dict(r)
-                item["targets"]=[dict(o) for o in c.execute("SELECT target,advert_id,nm_id,observed_state,state FROM cleaner_observations WHERE account=? AND review_id=? AND state IN('review','profile_required','pending_exclude') ORDER BY target",(self.key,r["review_id"]))]
+                item["targets"]=[dict(o) for o in c.execute("SELECT target,advert_id,nm_id,observed_state,state FROM cleaner_observations WHERE account=? AND review_id=? AND state IN('review','profile_required','pending_exclude','allow','pending_return','returned') ORDER BY target",(self.key,r["review_id"]))]
                 item["campaign_count"]=len({t["advert_id"] for t in item["targets"]})
                 items.append(item)
             return dict(items=items,next_cursor=items[-1]["review_id"] if len(rows)>limit else None)
@@ -1116,8 +1186,67 @@ class KeywordCleaner:
             items=[dict(r,facts=json.loads(r["facts"])) for r in rows[:limit]]
             return dict(items=items,next_cursor=items[-1]["sequence"] if len(rows)>limit else None)
 
+    def controversial_csv(self,principal:Principal) -> bytes:
+        """One account-scoped row per exact target/query/rule version.
+
+        Journal events remain immutable; the export is a read-only projection.
+        Unknown external outcomes remain explicitly unknown.
+        """
+        principal.require_owner(self.owner_username)
+        with self.store.read() as c:
+            rows=c.execute("""SELECT e.created_at,e.facts,d.query FROM cleaner_events e
+                JOIN cleaner_auto_decisions d ON d.decision_id=json_extract(e.facts,'$.decision_id')
+                WHERE e.account=? AND e.kind='controversial_decision'
+                ORDER BY e.sequence""",(self.key,))
+            groups={}
+            for row in rows:
+                facts=json.loads(row['facts'])
+                key=(facts['target'],facts['query_hash'],facts['rules_version'],facts['rules_digest'])
+                if key not in groups and len(groups)>=100000:
+                    raise CleanerError('export_too_large','Реестр слишком велик для одного безопасного файла',413)
+                entry=groups.setdefault(key,dict(facts,query=row['query'],first_seen=row['created_at'],last_seen=row['created_at'],decision_ids=[]))
+                entry['last_seen']=row['created_at'];entry['before']=facts['before'];entry['desired']=facts['desired']
+                entry['rule']=facts['rule'];entry['reason']=facts['reason'];entry['decision_ids'].append(facts['decision_id'])
+            for entry in groups.values():
+                item=None
+                for decision_id in reversed(entry['decision_ids']):
+                    item=c.execute("""SELECT i.state,i.confirmed_at,o.operation_id,o.state AS operation_state,
+                        o.evidence FROM cleaner_write_items i JOIN cleaner_write_operations o USING(operation_id)
+                        WHERE o.account=? AND o.target=? AND i.query_hash=? AND i.decision_id=?
+                        ORDER BY o.created_at DESC,o.operation_id DESC LIMIT 1""",
+                        (self.key,entry['target'],entry['query_hash'],decision_id)).fetchone()
+                    if item:break
+                entry['confirmed']='unknown';entry['confirmed_at']='';entry['operation_id']='';entry['actual']='unknown'
+                if item:
+                    entry['operation_id']=item['operation_id']
+                    if item['state']=='confirmed' and item['confirmed_at'] and item['operation_state']=='confirmed':
+                        entry['confirmed']='allowed';entry['confirmed_at']=item['confirmed_at'];entry['actual']='not_excluded'
+                    else:
+                        try:
+                            evidence=json.loads(item['evidence']).get('readback',{})
+                            if evidence.get('status')=='read':
+                                entry['actual']='excluded' if entry['query'] in evidence.get('minus',[]) else 'not_excluded'
+                        except (ValueError,TypeError):pass
+                else:
+                    observation=c.execute("SELECT observed_state,last_seen FROM cleaner_observations WHERE account=? AND target=? AND query_hash=?",
+                                          (self.key,entry['target'],entry['query_hash'])).fetchone()
+                    if observation and observation['last_seen']>=entry['last_seen']:
+                        entry['actual']='excluded' if observation['observed_state']=='excluded' else 'not_excluded'
+        def safe(value):
+            value=str(value if value is not None else '')
+            leading=value.lstrip(' \t')
+            return "'"+value if value[:1] in {'\t','\r','\n'} or leading[:1] in {'=','+','-','@'} else value
+        output=io.StringIO(newline='')
+        writer=csv.writer(output)
+        fields=('target','query','before','desired','actual','confirmed','confirmed_at','reason','rule','rules_version',
+                'rules_digest','first_seen','last_seen','operation_id')
+        writer.writerow(fields)
+        for key in sorted(groups):
+            entry=groups[key];writer.writerow([safe(entry.get(field,'')) for field in fields])
+        return ('\ufeff'+output.getvalue()).encode('utf-8')
+
     def _confirmation_totals(self,c):
-        result=dict(automatic=0,manual=0,late_automatic=0,late_manual=0)
+        result=dict(automatic=0,manual=0,returned=0,late_automatic=0,late_manual=0,late_returned=0)
         for row in c.execute("SELECT kind,facts FROM cleaner_events WHERE account=? AND kind IN('readback_result','late_confirmation')",(self.key,)):
             facts=json.loads(row['facts'])
             for field in ('automatic','manual'):
@@ -1126,6 +1255,8 @@ class KeywordCleaner:
             if facts.get('confirmed_pilot',0):
                 result['pilot']=result.get('pilot',0)+facts['confirmed_pilot']
                 if row['kind']=='late_confirmation':result['late_pilot']=result.get('late_pilot',0)+facts['confirmed_pilot']
+            result['returned']+=facts.get('returned',0)
+            if row['kind']=='late_confirmation':result['late_returned']+=facts.get('returned',0)
         return result
 
     def summary(self,principal:Principal) -> dict:

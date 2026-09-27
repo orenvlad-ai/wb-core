@@ -46,6 +46,27 @@ def classify(query,profile):
  def result(verdict,rule,reason):return dict(verdict=verdict,rule=rule,reason=reason,**facts)
  if not compatible or profile.get('category')!='phone_screen_glass':return result('review','PROFILE','Нет поддержанного профиля совместимости')
  product=bool(re.search(PRODUCT,q));accessories=bool(re.search(r'аксессуар',q))
+ def negated_at(start):
+  return bool(re.search(r'\b(?:не|без|кроме)\s+(?:для\s+)?(?:iphone\s+)?$',q[:start]))
+ def asserted(pattern):
+  # A negated attribute is not affirmative evidence of incompatibility.
+  # Only the word immediately governing the match (optionally through "для")
+  # is considered; unrelated negation elsewhere cannot hide a clear ban.
+  for match in re.finditer(pattern,q):
+   if not negated_at(match.start()):return True
+  return False
+ # Decisive, positively asserted incompatibilities take precedence over an
+ # unrelated unknown word or property.  A true negation remains ambiguous.
+ if asserted(BRANDS):return result('exclude','BRAND','Явно назван запрещённый чужой бренд')
+ positive_models=set()
+ for start,end in spans:
+  if negated_at(start):continue
+  positive_models.update(models(q[start:end])[0])
+ if positive_models and not positive_models&compatible and not re.search(r'\b(?:ultra|ультра|pr|prom|pm|pmax|mx|maxx|пм)\b',q):
+  return result('exclude','MODEL_WRONG','Все явно распознанные модели несовместимы')
+ if asserted(r'антишпион') and profile['kind']!='anti':return result('exclude','COATING','Явно запрошен антишпион для другого покрытия')
+ if asserted(r'матов[а-я]*') and profile['kind']!='matte':return result('exclude','COATING','Явно запрошено матовое стекло для другого покрытия')
+ if asserted(r'прозрачн[а-я]*|глянцев[а-я]*') and profile['kind']!='clean':return result('exclude','COATING','Явно запрошено прозрачное/глянцевое стекло для другого покрытия')
  # A bare device or positively requested case remains a different object even
  # when its suffix/properties are unknown. Negated object-only phrases abstain.
  if not product and not accessories and not re.search(r'\b(?:только\s+)?не\s+(?:чехол|стекл)',q):

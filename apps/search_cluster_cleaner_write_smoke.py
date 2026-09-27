@@ -26,7 +26,58 @@ from packages.contracts.search_cluster_cleaner import CleanerError,canonical,que
 class Crash(BaseException):pass
 
 
+def seed_legacy_review(f,query):
+    with f.store.transaction() as c:
+        rows=c.execute("SELECT * FROM cleaner_observations WHERE account=? AND query_hash=?",
+                       (f.app.key,query_hash(query))).fetchall()
+        assert rows
+        for row in rows:f.app._review(c,dict(row),'Старый вопрос владельцу')
+        f.app._sync_reviews(c)
+
+
 class WriteTests(unittest.TestCase):
+    def test_mixed_add_return_one_full_set_and_second_scan_no_change(self):
+        with fixture() as f:
+            ambiguous='стекло iphone 16 pro max непонятное'
+            f.fake.targets[11]['minus'].append(ambiguous)
+            before=list(f.fake.targets[11]['minus']);rid=f.start()
+            with f.worker() as (worker,_,__):result=worker.tick()
+            self.assertEqual(len(f.fake.writes),1)
+            self.assertEqual(f.fake.writes[0]['norm_queries'],sorted((set(before)-{ambiguous})|{Q1,Q2}))
+            self.assertEqual(result['summary']['returned'],1)
+            self.assertEqual(result['summary']['confirmed_automatic'],2)
+            self.assertEqual(result['summary']['controversial'],1)
+            self.assertEqual(f.count('change_registry_facts'),3)
+            with f.store.read() as c:
+                changes=[tuple(row) for row in c.execute("SELECT before_value_integer,after_value_integer FROM change_registry_facts WHERE target_kind='search_cluster' ORDER BY before_value_integer,after_value_integer")]
+                self.assertEqual(changes,[(0,1),(0,1),(1,0)])
+                self.assertEqual(c.execute("SELECT count(*) FROM cleaner_target_holds").fetchone()[0],0)
+            f.clock.advance(30);f.start()
+            with f.worker() as (worker,_,__):second=worker.tick()
+            self.assertEqual(len(f.fake.writes),1)
+            self.assertEqual(second['summary']['would_return'],0)
+            self.assertEqual(second['summary']['would_exclude'],0)
+
+    def test_return_only_empty_full_set_lost_response_is_readback_only(self):
+        with fixture() as f:
+            f.fake.targets[11]['minus']=['стекло iphone 16 pro max']
+            f.fake.targets[11]['stats']=[]
+            f.fake.mode='timeout'
+            f.start()
+            with f.worker() as (worker,_,__):result=worker.tick()
+            self.assertEqual(result['summary']['returned'],1)
+            self.assertEqual(f.fake.writes,[dict(advert_id=11,nm_id=101,norm_queries=[])])
+            self.assertEqual(f.fake.targets[11]['minus'],[])
+            self.assertEqual(f.rows('cleaner_write_operations')[0]['dispatch_count'],1)
+            with f.store.read() as c:
+                self.assertEqual([tuple(row) for row in c.execute(
+                    "SELECT before_value_integer,after_value_integer FROM change_registry_facts WHERE target_kind='search_cluster'"
+                )],[(1,0)])
+            f.clock.advance(400);f.start()
+            with f.worker() as (worker,_,__):again=worker.tick()
+            self.assertEqual(again['summary']['would_return'],0)
+            self.assertEqual(len(f.fake.writes),1)
+
     def test_connected_stats_only_exact_full_set(self):
         with fixture() as f:
             original=list(f.fake.targets[11]['minus']);rid=f.start()
@@ -168,7 +219,7 @@ class WriteTests(unittest.TestCase):
             summary=f.app.summary(OWNER)
             self.assertEqual(summary['execution_blocked_count'],1);self.assertEqual(summary['rejected_item_count'],0)
 
-    def test_list_only_does_not_block_statistics_fresh_addition_in_same_target(self):
+    def test_list_only_defers_only_unproven_action_and_preserves_full_set(self):
         with fixture() as f:
             before=list(f.fake.targets[11]['minus'])
             f.fake.targets[11]['active']=[Q1];f.fake.targets[11]['stats']=[Q2];f.start()
@@ -177,6 +228,8 @@ class WriteTests(unittest.TestCase):
             self.assertEqual(f.fake.writes[0]['norm_queries'],sorted(before+[Q2]))
             self.assertEqual(result['summary']['confirmed_automatic'],1)
             self.assertEqual(result['summary']['excluded_not_executed'],1)
+            self.assertEqual(result['state'],'complete')
+            self.assertEqual(f.count('change_registry_facts'),1)
             self.assertEqual(f.app.summary(OWNER)['execution_blocked_count'],1)
 
     def test_statistics_window_is_seven_calendar_days(self):
@@ -318,6 +371,33 @@ class WriteTests(unittest.TestCase):
             self.assertEqual(f.app.summary(OWNER)['confirmed']['late_automatic'],1)
             self.assertEqual(f.app.summary(OWNER)['unresolved_count'],0);self.assertEqual(len(f.fake.writes),1)
 
+    def test_late_return_settlement_keeps_immutable_summary(self):
+        with fixture() as f:
+            f.fake.targets[11]['stats']=[]
+            f.fake.targets[11]['minus']=['стекло iphone 16 pro max']
+            f.fake.mode='noop'
+            rid=f.start()
+            with f.worker() as (worker,_,readback):
+                first=worker.tick()
+                self.assertEqual(first['state'],'partial')
+                original=f.app.run_detail(rid,OWNER)['summary']
+                self.assertEqual(original['returned'],0)
+                self.assertEqual(len(f.fake.writes),1)
+                # The first WB response showed the old exclusion. A later
+                # read-only observation confirms its removal, without POST.
+                f.fake.targets[11]['minus']=[]
+                f.clock.advance(25)
+                result=readback.tick()
+            self.assertTrue(result['late'])
+            detail=f.app.run_detail(rid,OWNER)
+            self.assertEqual(detail['summary'],original)
+            self.assertEqual(detail['settlement']['returned'],1)
+            self.assertEqual(detail['settlement']['confirmed_pilot'],0)
+            self.assertEqual(detail['settlement']['confirmed_automatic'],0)
+            self.assertEqual(f.app.summary(OWNER)['confirmed']['late_returned'],1)
+            self.assertEqual(f.count('change_registry_facts'),1)
+            self.assertEqual(len(f.fake.writes),1)
+
     def test_unresolved_a_does_not_hold_b(self):
         with fixture() as f:
             f.fake.mode='noop';f.start()
@@ -332,6 +412,7 @@ class WriteTests(unittest.TestCase):
             f.fake.targets[11]['stats']=['стекло iphone 16 pro max без салфетки'];f.fake.targets[12]=copy.deepcopy(f.fake.targets[11]);f.start()
             # Completed scan with an unresolved semantic question, no writer yet.
             result=CleanerWorker(f.app,f.source,generation='g1',monotonic=f.clock.monotonic).tick()
+            seed_legacy_review(f,'стекло iphone 16 pro max без салфетки')
             review=f.app.reviews(OWNER)['items'][0]
             command=dict(request_id='manual-exclude-001',expected_revision=review['revision'],decision='exclude')
             accepted=f.app.decide(review['review_id'],command,OWNER)
@@ -347,7 +428,9 @@ class WriteTests(unittest.TestCase):
     def test_manual_disable_requeues_only_undispatched(self):
         with fixture() as f:
             f.fake.targets[11]['stats']=['стекло iphone 16 pro max без салфетки'];f.fake.targets[12]=copy.deepcopy(f.fake.targets[11]);f.start()
-            CleanerWorker(f.app,f.source,generation='g1',monotonic=f.clock.monotonic).tick();review=f.app.reviews(OWNER)['items'][0]
+            CleanerWorker(f.app,f.source,generation='g1',monotonic=f.clock.monotonic).tick()
+            seed_legacy_review(f,'стекло iphone 16 pro max без салфетки')
+            review=f.app.reviews(OWNER)['items'][0]
             f.app.decide(review['review_id'],dict(request_id='manual-disable-001',expected_revision=review['revision'],decision='exclude'),OWNER)
             fired=[]
             def hook(stage,op):
@@ -432,7 +515,9 @@ class WriteTests(unittest.TestCase):
     def test_manual_account_error_retains_undispatched_tail(self):
         with fixture() as f:
             f.fake.targets[11]['stats']=['стекло iphone 16 pro max без салфетки'];f.fake.targets[12]=copy.deepcopy(f.fake.targets[11]);f.start()
-            CleanerWorker(f.app,f.source,generation='g1',monotonic=f.clock.monotonic).tick();review=f.app.reviews(OWNER)['items'][0]
+            CleanerWorker(f.app,f.source,generation='g1',monotonic=f.clock.monotonic).tick()
+            seed_legacy_review(f,'стекло iphone 16 pro max без салфетки')
+            review=f.app.reviews(OWNER)['items'][0]
             f.app.decide(review['review_id'],dict(request_id='manual-auth-001',expected_revision=review['revision'],decision='exclude'),OWNER)
             f.fake.mode='401'
             with f.worker() as (worker,_,__):result=worker.tick()

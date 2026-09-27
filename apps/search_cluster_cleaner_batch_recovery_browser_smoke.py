@@ -87,10 +87,11 @@ def run(output: Path):
             expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Активные · всего 2')
             expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Готовы 1 · выбрано 1 · требуют настройки 1')
             expect(page.locator('[data-kc-batch-choices] input[value="205:101"]')).to_have_count(0)
-            expect(page.locator('[data-kc-batch-choices] input[value="204:101"]')).to_have_count(0)
+            expect(page.locator('[data-kc-batch-choices] input[value="204:101"]')).to_be_disabled()
+            expect(page.locator('[data-kc-batch-choices]')).to_contain_text('CPM архив')
             expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
             page.locator('[data-kc-batch-choices] input[value="203:101"]').check()
-            expect(page.locator('[data-kc-batch-count]')).to_contain_text('Выбрано пар: 2')
+            expect(page.locator('[data-kc-batch-count]')).to_contain_text('Выбрано доступных пар: 2')
             expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Приостановленные · всего 1')
             expect(page.locator('[data-kc-batch-categories]')).to_contain_text('Готовы 1 · выбрано 1')
             assert fixture.count('cleaner_requests') == before
