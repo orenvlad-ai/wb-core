@@ -470,12 +470,41 @@ def _owned_chrome_pids(proc_root: Path = Path("/proc")) -> list[int]:
         try:
             if item.stat().st_uid != os.geteuid() or (item / "cgroup").read_bytes() != own_cgroup:
                 continue
-            executable = (item / "exe").stat()
         except (FileNotFoundError, ProcessLookupError):
             continue  # The process exited during the scan.
+        try:
+            executable = (item / "exe").stat()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError as error:
+            # The setuid sandbox makes its live children non-dumpable on Linux,
+            # so /proc/PID/exe denies even the owner. Within this exact unit,
+            # count known Chrome process names as still active. An unfamiliar
+            # inaccessible process remains an error, never proof of cleanup.
+            try:
+                comm = (item / "comm").read_text(encoding="ascii").strip()
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # The sandbox child exited after the exe check.
+            except OSError:
+                raise RuntimeError("Chrome process identity unavailable") from error
+            if comm not in {"chrome", "chrome-sandbox"}:
+                raise RuntimeError("Chrome process identity unavailable") from error
+            matches.append(int(item.name))
+            continue
         if (executable.st_dev, executable.st_ino) == chrome_identity:
             matches.append(int(item.name))
     return matches
+
+
+def _report_failure(stage: str, error: Exception) -> None:
+    # Never log exception text: browser errors can contain OAuth URLs or state.
+    errno = getattr(error, "errno", None)
+    print(
+        f"buyer_chrome_diagnostic stage={stage} class={type(error).__name__} "
+        f"errno={errno if isinstance(errno, int) else 'none'}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def supervise(run_id: str, chrome_path: Path) -> int:
@@ -560,28 +589,33 @@ def supervise(run_id: str, chrome_path: Path) -> int:
             break
         else:
             final_status, final_reason = "stopped", "buyer_recovery_stopped"
-    except Exception:
+    except Exception as error:
+        _report_failure("supervise", error)
         final_status, final_reason = "error", "buyer_chrome_runtime_error"
     finally:
         # Revoke the live viewer first, but keep X alive while Chrome flushes.
         cleanup_ok = True
         try:
             _stop_process(web)
-        except Exception:
+        except Exception as error:
+            _report_failure("viewer_stop", error)
             cleanup_ok = False
         try:
             _stop_chrome(chrome)
-        except Exception:
+        except Exception as error:
+            _report_failure("chrome_stop", error)
             cleanup_ok = False
         if pipe is not None:
             try:
                 pipe.close()
-            except Exception:
+            except Exception as error:
+                _report_failure("pipe_close", error)
                 cleanup_ok = False
-        for process in (vnc, openbox, xvfb):
+        for stage, process in (("vnc_stop", vnc), ("openbox_stop", openbox), ("xvfb_stop", xvfb)):
             try:
                 _stop_process(process)
-            except Exception:
+            except Exception as error:
+                _report_failure(stage, error)
                 cleanup_ok = False
         if not cleanup_ok:
             final_status, final_reason = "error", "buyer_chrome_cleanup_failed"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stderr
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 import os
 import pwd
@@ -189,15 +190,16 @@ def _chrome_cleanup_counts_only_owned_executables() -> None:
         own_cgroup = b"0::/system.slice/wbc-owned-run.service\n"
         (proc / "self" / "cgroup").write_bytes(own_cgroup)
 
-        def process(pid: int, executable: Path, cgroup: bytes, command: bytes) -> None:
+        def process(pid: int, executable: Path, cgroup: bytes, command: bytes, comm: str = "chrome") -> None:
             folder = proc / str(pid)
             folder.mkdir()
             (folder / "exe").symlink_to(executable)
             (folder / "cgroup").write_bytes(cgroup)
             (folder / "cmdline").write_bytes(command)
+            (folder / "comm").write_text(comm)
 
         # The supervisor carries --chrome PATH in argv, but executes Python.
-        process(100, python, own_cgroup, b"python3\0supervise\0--chrome\0" + os.fsencode(chrome))
+        process(100, python, own_cgroup, b"python3\0supervise\0--chrome\0" + os.fsencode(chrome), "python3")
         process(101, chrome, own_cgroup, os.fsencode(chrome) + b"\0--type=renderer")
         process(102, chrome, b"0::/system.slice/another-run.service\n", os.fsencode(chrome))
         process(103, other_chrome, own_cgroup, os.fsencode(other_chrome))
@@ -205,6 +207,27 @@ def _chrome_cleanup_counts_only_owned_executables() -> None:
             assert auth._owned_chrome_pids(proc) == [101]
             (proc / "101" / "exe").unlink()
             assert auth._owned_chrome_pids(proc) == []
+            process(104, chrome, own_cgroup, b"chrome renderer", "chrome")
+            process(105, other_chrome, own_cgroup, b"chrome-sandbox", "chrome-sandbox")
+            process(107, chrome, own_cgroup, b"chrome exited", "chrome")
+            (proc / "107" / "comm").unlink()
+            denied = {proc / str(pid) / "exe" for pid in (104, 105, 106, 107)}
+            original_stat = Path.stat
+
+            def sandboxed_stat(path, *args, **kwargs):
+                if path in denied:
+                    raise PermissionError(13, "sandboxed executable")
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(Path, "stat", new=sandboxed_stat):
+                assert auth._owned_chrome_pids(proc) == [104, 105]
+                process(106, other_chrome, own_cgroup, b"other", "other")
+                try:
+                    auth._owned_chrome_pids(proc)
+                except RuntimeError as error:
+                    assert str(error) == "Chrome process identity unavailable"
+                else:
+                    raise AssertionError("An ambiguous owned process was declared clean")
         with patch.object(auth, "_owned_chrome_pids", return_value=[101]), patch.object(auth.time, "monotonic", side_effect=[0, 16]):
             try:
                 auth._stop_chrome(None)
@@ -212,6 +235,10 @@ def _chrome_cleanup_counts_only_owned_executables() -> None:
                 assert str(error) == "Chrome descendants did not exit"
             else:
                 raise AssertionError("An owned Chrome process did not block cleanup")
+        diagnostic = StringIO()
+        with redirect_stderr(diagnostic):
+            auth._report_failure("chrome_stop", PermissionError(13, "private OAuth state"))
+        assert diagnostic.getvalue().strip() == "buyer_chrome_diagnostic stage=chrome_stop class=PermissionError errno=13"
 
 
 def main() -> None:
