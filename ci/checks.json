@@ -66,6 +66,7 @@
         "apps/fixtures/search_cluster_cleaner_legacy_registry.json",
         "packages/adapters/search_cluster_cleaner*.py",
         "packages/adapters/templates/sheet_vitrina_v1_keyword_cleaner.*",
+        "packages/adapters/templates/sheet_vitrina_v1_settings.html",
         "packages/application/change_registry_search_cluster.py"
       ],
       "commands": [
@@ -85,6 +86,7 @@
         ["python3", "apps/search_cluster_cleaner_rules_identity_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_sidecar_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_release_probe_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_daily_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_browser_smoke.py", "--output", "/tmp/wbc-cleaner-browser-ci"]
       ]
     },

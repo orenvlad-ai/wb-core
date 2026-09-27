@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only release readiness check for the manual cleaner contour."""
+"""Read-only release readiness check for the guarded cleaner contour."""
 from __future__ import annotations
 
 import argparse
@@ -41,9 +41,11 @@ def check(*,phase:str,expected_sha:str,runtime_dir:Path,admission_dir:Path=ADMIS
     with StoreRegistry(runtime_dir).session('operational',mode='ro',operation='cleaner_release_probe') as conn:
         conn.execute('PRAGMA query_only=ON')
         row=conn.execute('SELECT enabled,baseline_ready,restore_hold,transport_enabled FROM cleaner_settings WHERE account=?',(account,)).fetchone()
+        schedule_table=conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cleaner_daily_schedules'").fetchone()
+        scheduled=conn.execute('SELECT count(*) FROM cleaner_daily_schedules WHERE account=? AND enabled=1',(account,)).fetchone()[0] if schedule_table else 0
     if not row or row['enabled']!=0 or row['baseline_ready']!=1 or row['restore_hold']!=1 or row['transport_enabled']!=0:
         raise RuntimeError('manual-only cleaner setting mismatch')
-    required='ready' if phase=='after_complete' else 'armed'
+    accepted={'ready','busy'} if phase=='after_complete' else {'armed'}
     deadline=time.monotonic()+timeout_seconds
     while True:
         try:
@@ -51,8 +53,9 @@ def check(*,phase:str,expected_sha:str,runtime_dir:Path,admission_dir:Path=ADMIS
             pid=health.get('pid')
             if isinstance(pid,int) and pid>0:os.kill(pid,0)
             else:raise ValueError('worker PID unavailable')
-            if health.get('state')==required and time.time()-float(health.get('updated_at') or 0)<10:
-                return dict(ok=True,phase=phase,sha=expected_sha,listener='auth_protected',worker=required,schedule='off')
+            if health.get('state') in accepted and time.time()-float(health.get('updated_at') or 0)<10:
+                return dict(ok=True,phase=phase,sha=expected_sha,listener='auth_protected',worker=health['state'],
+                            daily_enabled_count=scheduled,schedule='configured' if scheduled else 'off')
         except (OSError,ValueError,TypeError):pass
         if time.monotonic()>=deadline:raise RuntimeError('cleaner worker not ready for '+phase)
         sleep(0.5)

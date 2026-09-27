@@ -64,6 +64,9 @@ class KeywordCleaner:
         with self.store.transaction() as c:
             c.execute("""INSERT OR IGNORE INTO cleaner_settings(account,seller_id,account_scope,rules_version,generation,created_at)
               VALUES(?,?,?,?,?,?)""", (self.key,self.account.seller_id,self.account.account_scope,self.rules_version,generation,self.clock()))
+            c.execute("""INSERT OR IGNORE INTO cleaner_daily_schedules
+              (account,schedule_id,local_time,enabled,owner,actor_authority,generation,created_at)
+              VALUES(?,?,?,?,?,?,?,?)""",(self.key,'default','03:45',0,self.owner_username.strip().casefold(),'configured_owner',generation,self.clock()))
 
     def _settings(self, c) -> sqlite3.Row:
         row = c.execute("SELECT * FROM cleaner_settings WHERE account=?", (self.key,)).fetchone()
@@ -428,7 +431,8 @@ class KeywordCleaner:
                         advert_id=advert_id,nm_id=nm_id,batch_id=batch_id,batch_index=batch_index)
         return self._command(principal,'manual-clean',payload,command)
 
-    def start_manual_batch(self,payload:Mapping,principal:Principal,*,snapshot:list[dict]|None=None) -> dict:
+    def start_manual_batch(self,payload:Mapping,principal:Principal,*,snapshot:list[dict]|None=None,
+                           daily_occurrence:tuple[str,str]|None=None) -> dict:
         """Freeze only caller-selected exact pairs admitted by one fresh catalog."""
         def command(c,actor):
             targets=payload.get('targets');categories=payload.get('selected_categories')
@@ -444,6 +448,17 @@ class KeywordCleaner:
             if len(identities)!=len(set(identities)):
                 raise CleanerError('batch_selection_duplicate','Пара выбрана повторно',422)
             s=self._settings(c)
+            if daily_occurrence is not None:
+                sid,local_date=daily_occurrence
+                schedule=c.execute('SELECT enabled,owner,actor_authority,generation FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',
+                                   (self.key,sid)).fetchone()
+                occurrence=c.execute('SELECT state,batch_id FROM cleaner_daily_occurrences WHERE account=? AND schedule_id=? AND local_date=?',
+                                     (self.key,sid,local_date)).fetchone()
+                if (not schedule or not schedule['enabled'] or schedule['owner']!=actor
+                        or schedule['actor_authority']!=('bootstrap_operator' if principal.site_owner else 'configured_owner')
+                        or schedule['generation']!=s['generation'] or not occurrence
+                        or occurrence['state'] not in {'pending','catalog_wait'} or occurrence['batch_id']!=payload.get('request_id')):
+                    raise CleanerError('schedule_changed','Расписание изменилось до запуска',409)
             if s['enabled'] or not s['baseline_ready']:
                 raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
             if snapshot is None:
@@ -473,7 +488,8 @@ class KeywordCleaner:
             batch_id=payload['request_id'];created_at=self.clock()
             self._event(c,'self_service_batch_requested',dict(batch_id=batch_id,items=frozen,selected_categories=categories,actor=actor,
                          actor_authority='bootstrap_operator' if principal.site_owner else 'configured_owner',
-                         account_key=self.key,generation=s['generation'],state='queued',stage='queued',current_index=0,item_updates={}))
+                         account_key=self.key,generation=s['generation'],state='queued',stage='queued',current_index=0,item_updates={},
+                         daily_occurrence=dict(schedule_id=daily_occurrence[0],local_date=daily_occurrence[1]) if daily_occurrence else None))
             return dict(batch_id=batch_id,state='queued',selected_count=len(frozen),created_at=created_at)
         return self._command(principal,'manual-batches',payload,command)
 
