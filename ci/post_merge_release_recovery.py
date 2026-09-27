@@ -631,6 +631,12 @@ def require_finance_pilot(flags, pilot_returncode, pilot_stdout, legacy_returnco
     if legacy != {'LoadState': 'not-found', 'ActiveState': 'inactive', 'SubState': 'dead'}:
         raise SystemExit(30)
     return write_mode
+
+def require_readonly_process_binding(cmdline, expected_cmdline, cwd, expected_cwd, process_env, expected_env):
+    if cmdline != expected_cmdline or cwd != expected_cwd:
+        raise SystemExit(32)
+    if any(process_env.get(name) != expected_env[name] for name in ('FINANCE_LIQUIDITY_ORIGIN', 'FINANCE_LIQUIDITY_ACCESS_CONFIG')):
+        raise SystemExit(32)
 """
 
 
@@ -656,6 +662,12 @@ def _prestate_script(target: Any, merge: str) -> str:
         "pilot_store": "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3",
         "pilot_dir": "/opt/wb-core-runtime/state/finance-liquidity-pilot",
         "pilot_unit": "wb-core-finance-liquidity-pilot.service",
+        "pilot_cmdline": [
+            "/usr/bin/python3", target.target_dir.rstrip("/") + "/apps/finance_liquidity_http.py",
+            "--db", "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3",
+            "--host", "127.0.0.1", "--port", "8767",
+            "--runtime-dir", "/opt/wb-core-runtime/state",
+        ],
         "pilot_env": pilot_env,
         "legacy_store": "/opt/wb-core-runtime/state/finance-liquidity/finance-liquidity.sqlite3",
         "legacy_dir": "/opt/wb-core-runtime/state/finance-liquidity",
@@ -703,7 +715,7 @@ def finance_process_env(process_pid):
         if b'=' in item:
             key, value = item.split(b'=', 1)
             decoded_key = key.decode(errors='replace')
-            if decoded_key in e['finance_flags']:
+            if decoded_key in e['finance_flags'] or decoded_key in ('FINANCE_LIQUIDITY_ORIGIN', 'FINANCE_LIQUIDITY_ACCESS_CONFIG'):
                 values[decoded_key] = value.decode(errors='replace')
     return values
 main_proc_env = finance_process_env(pid)
@@ -734,6 +746,8 @@ if Path(e['legacy_store']).exists() or Path(e['legacy_dir']).exists():
     raise SystemExit(28)
 readonly_guard = None
 if flags['FINANCE_LIQUIDITY_WRITE_ENABLED']['pilot_process'] == '0':
+    cmdline = [part.decode(errors='replace') for part in Path('/proc/' + pilot_pid + '/cmdline').read_bytes().split(b'\\0') if part]
+    require_readonly_process_binding(cmdline, e['pilot_cmdline'], str(Path('/proc/' + pilot_pid + '/cwd').resolve()), e['target_dir'], pilot_proc_env, e['pilot_env_values'])
     guard_paths = ((Path(e['readonly_env']), e['readonly_env_sha256'], 0o600), (Path(e['readonly_dropin']), e['readonly_dropin_sha256'], 0o644))
     for guard_path, expected_sha, expected_mode in guard_paths:
         if guard_path.is_symlink() or not guard_path.is_file() or guard_path.resolve() != guard_path:

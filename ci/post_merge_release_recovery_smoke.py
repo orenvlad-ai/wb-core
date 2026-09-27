@@ -553,6 +553,30 @@ def test_finance_pilot_prestate_contract() -> None:
     validator_source = recovery._finance_pilot_validator_source()
     exec(validator_source, namespace)
     validate = namespace["require_finance_pilot"]
+    bind_process = namespace["require_readonly_process_binding"]
+    expected_cmdline = [
+        "/usr/bin/python3", "/runtime/apps/finance_liquidity_http.py", "--db",
+        "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3",
+        "--host", "127.0.0.1", "--port", "8767", "--runtime-dir", "/opt/wb-core-runtime/state",
+    ]
+    expected_env = {
+        "FINANCE_LIQUIDITY_ORIGIN": "https://api.selleros.pro",
+        "FINANCE_LIQUIDITY_ACCESS_CONFIG": "/runtime/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot-access.json",
+    }
+    bind_process(expected_cmdline, expected_cmdline, "/runtime", "/runtime", expected_env, expected_env)
+    for bad_cmdline, bad_cwd, bad_env in (
+        (expected_cmdline[:3] + ["/tmp/other.sqlite3"] + expected_cmdline[4:], "/runtime", expected_env),
+        (expected_cmdline[:-1] + ["/tmp/other-runtime"], "/runtime", expected_env),
+        (expected_cmdline, "/tmp/other-app", expected_env),
+        (expected_cmdline, "/runtime", {**expected_env, "FINANCE_LIQUIDITY_ACCESS_CONFIG": "/tmp/other-access.json"}),
+        (expected_cmdline, "/runtime", {**expected_env, "FINANCE_LIQUIDITY_ORIGIN": "https://other.invalid"}),
+    ):
+        try:
+            bind_process(bad_cmdline, expected_cmdline, bad_cwd, "/runtime", bad_env, expected_env)
+        except SystemExit as exc:
+            assert exc.code == 32
+        else:
+            raise AssertionError("Alternate TEST process binding accepted")
     pilot_active = "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\nSubState=running\n"
     legacy_absent = "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
     exact_flags = {
