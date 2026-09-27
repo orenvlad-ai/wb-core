@@ -55,6 +55,7 @@ def main() -> None:
     _run_recovery_persistent_e2e()
     _run_recovery_persistent_e2e(price_available=False)
     _run_recovery_persistent_e2e(unknown_surface=True)
+    _run_recovery_persistent_e2e(sticky_saved_account=True)
     _run_recovery_persistent_e2e(already_valid=True)
     _run_recovery_persistent_e2e(already_valid=True, challenge_proofs=3)
     _run_recovery_persistent_e2e(generic_probe_failures=3)
@@ -294,6 +295,52 @@ def _run_security_challenge_classification_smoke() -> None:
     if account_surface.get("state") != "authenticated":
         raise AssertionError(f"visible account markers must still trigger proof: {account_surface}")
 
+    class Control:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        def inner_text(self, **_kwargs: Any) -> str:
+            return self.label
+
+        def get_attribute(self, _name: str) -> None:
+            return None
+
+        def is_visible(self) -> bool:
+            return True
+
+        def is_enabled(self) -> bool:
+            return True
+
+    class Controls:
+        def __init__(self, labels: tuple[str, ...]) -> None:
+            self.items = [Control(label) for label in labels]
+
+        def count(self) -> int:
+            return len(self.items)
+
+        def nth(self, index: int) -> Control:
+            return self.items[index]
+
+    class ControlsPage(Page):
+        def __init__(self, body: str, labels: tuple[str, ...]) -> None:
+            self.body = body
+            self.controls = Controls(labels)
+
+        def locator(self, selector: str) -> Any:
+            return Control(self.body) if selector == "body" else self.controls
+
+    for body, labels in (("Неизвестная страница", ("Продолжить",)), ("Войти в аккаунт", ("Войти",))):
+        generic = _inspect_login_surface(ControlsPage(body, labels))
+        if generic.get("state") != "unknown":
+            raise AssertionError(f"generic page control must not be clicked automatically: {generic}")
+    for body, labels in (("Сохранённый аккаунт", ("Войти",)), ("Сохраненный аккаунт", ("",))):
+        saved = _inspect_login_surface(ControlsPage(body, labels))
+        if saved.get("state") != "automatic_login" or saved.get("candidate") is None:
+            raise AssertionError(f"explicit saved-account card must remain eligible: {saved}")
+    opened_with_button = _inspect_login_surface(ControlsPage("Мои заказы · Способы оплаты · Сохранённый аккаунт", ("Войти",)))
+    if opened_with_button.get("state") != "authenticated":
+        raise AssertionError(f"visible authenticated account must win over saved-account controls: {opened_with_button}")
+
     transient = recovery_tool._transient_human_probe_failure
     if not transient({"status": "probe_error", "diagnostics": {"failure_category": "navigation_no_response"}}):
         raise AssertionError("temporary no-response during human action must keep the viewer")
@@ -463,7 +510,7 @@ def _run_price_extraction_smoke() -> None:
         raise AssertionError(f"authenticated response price extraction failed: {extracted}")
 
 
-def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, already_valid: bool = False, challenge_proofs: int = 0, generic_probe_failures: int = 0, timeout_probe_failures: int = 0) -> None:
+def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, sticky_saved_account: bool = False, already_valid: bool = False, challenge_proofs: int = 0, generic_probe_failures: int = 0, timeout_probe_failures: int = 0) -> None:
     with TemporaryDirectory(prefix="wb-buyer-recovery-e2e-") as tmp:
         state_dir = Path(tmp)
         session = WbBuyerSessionConfig(
@@ -486,7 +533,7 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
         events: list[str] = []
         statuses: list[str] = []
         reasons: list[str] = []
-        fake_playwright = _FakePlaywright(events, unknown_surface=unknown_surface, already_valid=already_valid)
+        fake_playwright = _FakePlaywright(events, unknown_surface=unknown_surface, sticky_saved_account=sticky_saved_account, already_valid=already_valid)
         delegate = WbBuyerSessionAdapter(config=session)
 
         class FixtureAdapter:
@@ -599,8 +646,10 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
             raise AssertionError(f"missing control price must preserve authenticated session: {terminal}")
         if not price_available and (terminal.get("price") or {}).get("status") != "price_missing":
             raise AssertionError(f"missing control price must be reported separately: {terminal}")
-        if unknown_surface and "buyer_login_surface_unrecognized" not in reasons:
-            raise AssertionError(f"unknown screen must fall back to human viewer: {statuses} {reasons}")
+        if (unknown_surface or sticky_saved_account) and "buyer_login_surface_unrecognized" not in reasons:
+            raise AssertionError(f"unknown or stalled saved-account screen must fall back to human viewer: {statuses} {reasons}")
+        if sticky_saved_account and (events.count("saved_account_click") != 1 or "timeout" in statuses):
+            raise AssertionError(f"persistent saved-account control must be clicked once, then show viewer before deadline: {statuses} {events}")
         if already_valid and not challenge_proofs:
             if "awaiting_human" in statuses or "spawn:x11vnc" in events or "spawn:websockify" in events:
                 raise AssertionError(f"already-valid session must complete without viewer: {statuses} {events}")
@@ -837,21 +886,24 @@ class _MigrationContext:
 
 
 class _SavedAccountButton:
-    def __init__(self, page: "_FakePage", events: list[str]) -> None:
+    def __init__(self, page: "_FakePage", events: list[str], *, sticky: bool = False) -> None:
         self.page = page
         self.events = events
+        self.sticky = sticky
 
     def click(self, **_kwargs: Any) -> None:
         self.events.append("saved_account_click")
-        self.page.surface = {"state": "human", "reason": "buyer_sms_required"}
+        if not self.sticky:
+            self.page.surface = {"state": "human", "reason": "buyer_sms_required"}
 
 
 class _FakePage:
-    def __init__(self, process_number: int, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
+    def __init__(self, process_number: int, events: list[str], *, unknown_surface: bool = False, sticky_saved_account: bool = False, already_valid: bool = False) -> None:
         self.process_number = process_number
         self.events = events
         self.url = "https://www.wildberries.ru/lk"
         self.human_waits = 0
+        self.sticky_saved_account = sticky_saved_account
         self.surface: dict[str, Any]
         if process_number == 1 and already_valid:
             self.surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
@@ -859,7 +911,7 @@ class _FakePage:
             self.surface = {"state": "unknown", "reason": "buyer_login_surface_unrecognized"}
         elif process_number == 1:
             self.surface = {"state": "automatic_login", "reason": "buyer_saved_account_available"}
-            self.surface["candidate"] = _SavedAccountButton(self, events)
+            self.surface["candidate"] = _SavedAccountButton(self, events, sticky=sticky_saved_account)
         else:
             self.surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
 
@@ -874,23 +926,24 @@ class _FakePage:
         return None
 
     def wait_for_timeout(self, _milliseconds: int) -> None:
-        if self.surface.get("state") in {"human", "unknown"} and "spawn:x11vnc" in self.events:
+        if (self.surface.get("state") in {"human", "unknown"} or self.sticky_saved_account) and "spawn:x11vnc" in self.events:
             self.human_waits += 1
             if self.human_waits >= 1:
                 self.surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
 
 
 class _FakeContext:
-    def __init__(self, process_number: int, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
+    def __init__(self, process_number: int, events: list[str], *, unknown_surface: bool = False, sticky_saved_account: bool = False, already_valid: bool = False) -> None:
         self.process_number = process_number
         self.events = events
         self.unknown_surface = unknown_surface
+        self.sticky_saved_account = sticky_saved_account
         self.already_valid = already_valid
-        self.pages = [_FakePage(process_number, events, unknown_surface=unknown_surface, already_valid=already_valid)]
+        self.pages = [_FakePage(process_number, events, unknown_surface=unknown_surface, sticky_saved_account=sticky_saved_account, already_valid=already_valid)]
         self.closed = False
 
     def new_page(self) -> _FakePage:
-        page = _FakePage(self.process_number, self.events, unknown_surface=self.unknown_surface, already_valid=self.already_valid)
+        page = _FakePage(self.process_number, self.events, unknown_surface=self.unknown_surface, sticky_saved_account=self.sticky_saved_account, already_valid=self.already_valid)
         self.pages.append(page)
         return page
 
@@ -901,9 +954,10 @@ class _FakeContext:
 
 
 class _FakeChromium:
-    def __init__(self, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
+    def __init__(self, events: list[str], *, unknown_surface: bool = False, sticky_saved_account: bool = False, already_valid: bool = False) -> None:
         self.events = events
         self.unknown_surface = unknown_surface
+        self.sticky_saved_account = sticky_saved_account
         self.already_valid = already_valid
         self.user_data_dirs: list[str] = []
 
@@ -911,12 +965,12 @@ class _FakeChromium:
         self.user_data_dirs.append(user_data_dir)
         process_number = len(self.user_data_dirs)
         self.events.append(f"launch_context:{process_number}")
-        return _FakeContext(process_number, self.events, unknown_surface=self.unknown_surface, already_valid=self.already_valid)
+        return _FakeContext(process_number, self.events, unknown_surface=self.unknown_surface, sticky_saved_account=self.sticky_saved_account, already_valid=self.already_valid)
 
 
 class _FakePlaywright:
-    def __init__(self, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
-        self.chromium = _FakeChromium(events, unknown_surface=unknown_surface, already_valid=already_valid)
+    def __init__(self, events: list[str], *, unknown_surface: bool = False, sticky_saved_account: bool = False, already_valid: bool = False) -> None:
+        self.chromium = _FakeChromium(events, unknown_surface=unknown_surface, sticky_saved_account=sticky_saved_account, already_valid=already_valid)
 
     def __enter__(self) -> "_FakePlaywright":
         return self

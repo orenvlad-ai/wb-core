@@ -407,6 +407,8 @@ def _capture_login(
                     surface = _inspect_login_surface(page)
                     if surface.get("state") == "authenticated" and time.monotonic() < challenge_retry_at:
                         surface = {"state": "human", "reason": "buyer_security_challenge"}
+                    if surface.get("state") == "automatic_login" and automatic_login_attempted:
+                        surface = {"state": "unknown", "reason": "buyer_saved_account_login_not_completed"}
                     if surface.get("state") != "unknown":
                         unknown_attempts = 0
                     if surface.get("state") == "authenticated":
@@ -497,8 +499,6 @@ def _capture_login(
                             continue
                         surface = {"state": "unknown", "reason": "buyer_saved_account_login_unavailable"}
 
-                    if surface.get("state") == "automatic_login":
-                        surface = {"state": "unknown", "reason": "buyer_saved_account_login_not_completed"}
                     if surface.get("state") == "human":
                         last_human_reason = str(surface.get("reason") or "buyer_human_action_required")
                         if not human_window_started:
@@ -644,15 +644,15 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
         return {"state": "human", "reason": "buyer_captcha_required"}
     if any(marker in body for marker in ("подтвердите вход", "подтверждение безопасности", "это вы")):
         return {"state": "human", "reason": "buyer_security_confirmation_required"}
+    if _visible_login_completed(page, body=body) and not any(
+        marker in body for marker in ("войти или зарегистрироваться", "войдите в аккаунт", "получить код")
+    ):
+        return {"state": "authenticated", "reason": "buyer_visible_account_opened"}
     candidates = _saved_account_login_candidates(page, body=body)
     if len(candidates) == 1:
         return {"state": "automatic_login", "reason": "buyer_saved_account_available", "candidate": candidates[0]}
     if len(candidates) > 1 or any(marker in body for marker in ("выберите аккаунт", "другой аккаунт")):
         return {"state": "human", "reason": "buyer_account_selection_required"}
-    if _visible_login_completed(page, body=body) and not any(
-        marker in body for marker in ("войти или зарегистрироваться", "войдите в аккаунт", "получить код")
-    ):
-        return {"state": "authenticated", "reason": "buyer_visible_account_opened"}
     return {"state": "unknown", "reason": "buyer_login_surface_unrecognized"}
 
 
@@ -702,8 +702,8 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
         "этим аккаунтом",
         "продолжить как",
         "войти как",
-        "аккаунт",
-        "профиль",
+        "выберите аккаунт",
+        "другой аккаунт",
     )
     body_has_account_marker = any(marker in body.lower() for marker in account_markers)
     for index in range(count):
@@ -717,30 +717,25 @@ def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
             enabled = bool(item.is_enabled())
         except Exception:
             continue
-        is_saved_account_action = action_text in {"войти", "продолжить", "далее"} or (
-            body_has_account_marker and any(token in action_text for token in ("войти", "продолж", "далее", "аккаунт"))
-        ) or any(
+        is_saved_account_action = any(
             marker in action_text
             for marker in (
                 "войти под этим аккаунтом",
                 "продолжить как",
                 "войти как",
-                "войти через аккаунт",
-                "войти в аккаунт",
-                "войти в личный кабинет",
-                "продолжить вход",
                 "выбрать аккаунт",
             )
+        ) or (
+            body_has_account_marker
+            and any(token in action_text for token in ("войти", "продолж", "далее", "аккаунт"))
         )
-        if action_text in {"продолжить", "далее"} and not body_has_account_marker:
-            is_saved_account_action = False
         if visible and enabled and is_saved_account_action:
             result.append(item)
     # WB has shipped saved-account cards whose continuation control is an
     # icon/link without accessible text.  Only accept this fallback when the
     # login surface advertises an account and there is exactly one visible
     # enabled control; human markers are handled before this function.
-    if not result:
+    if body_has_account_marker and not result:
         visible_controls: list[Any] = []
         for index in range(count):
             item = locator.nth(index)
