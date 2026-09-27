@@ -7663,6 +7663,10 @@
       "row_last_updated_at"
     ]);
     const DEFAULT_UNIFIED_TAB = "vitrina";
+    let vitrinaRuntimeReady = false;
+    let vitrinaRuntimeStarted = false;
+    let vitrinaCompositionLoading = false;
+    let vitrinaDeferredTableSkipped = false;
     const WAREHOUSES_UNIFIED_TAB = "warehouses";
     const DEFAULT_WAREHOUSE_KEY = "production";
     const VALID_WAREHOUSE_KEYS = new Set(["production", "china_to_ff", "ff", "ff_to_wb", "wb", "wb_acceptance_discrepancy", "update"]);
@@ -9596,6 +9600,7 @@
     function activateUnifiedTab(tabName, options) {
       const requestedTab=normalizeUnifiedTab(tabName);
       const activeTab=[ADS_UNIFIED_TAB,PRICES_UNIFIED_TAB].includes(requestedTab)?SKU_MANAGEMENT_UNIFIED_TAB:requestedTab;
+      const wasVitrinaActive = isVitrinaTabActive();
       closeAllFloatingControls();
       unifiedTabButtons.forEach(function(button) {
         const selected = button.getAttribute("data-unified-tab-button") === activeTab;
@@ -9651,7 +9656,48 @@
         window.history.replaceState({}, "", url.toString());
         persistUnifiedTab(activeTab);
       }
+      if (activeTab === DEFAULT_UNIFIED_TAB) {
+        ensureVitrinaRuntimeActive(wasVitrinaActive);
+      } else if (wasVitrinaActive) {
+        pauseBusinessProjectionMonitoring();
+      }
       return activeTab;
+    }
+
+    function isVitrinaTabActive() {
+      return unifiedTabPanels.some(function(panel) {
+        return panel.getAttribute("data-unified-tab-panel") === DEFAULT_UNIFIED_TAB && !panel.hidden;
+      });
+    }
+
+    function ensureVitrinaRuntimeActive(wasVitrinaActive) {
+      if (!vitrinaRuntimeReady || !isVitrinaTabActive()) {
+        return;
+      }
+      if (!vitrinaRuntimeStarted) {
+        vitrinaRuntimeStarted = true;
+        loadInitialVitrinaComposition();
+        initializeBusinessProjectionMonitoring();
+      } else if (!wasVitrinaActive) {
+        if (!state.composition || vitrinaDeferredTableSkipped) loadInitialVitrinaComposition();
+        pollBusinessProjectionRevision();
+      }
+    }
+
+    function loadInitialVitrinaComposition() {
+      if (vitrinaCompositionLoading) return;
+      vitrinaCompositionLoading = true;
+      vitrinaDeferredTableSkipped = false;
+      void loadPageComposition({activeTabOnly: true}).finally(function() {
+        vitrinaCompositionLoading = false;
+      });
+    }
+
+    function pauseBusinessProjectionMonitoring() {
+      if (state.businessProjection.pollTimer) {
+        window.clearTimeout(state.businessProjection.pollTimer);
+        state.businessProjection.pollTimer = null;
+      }
     }
 
     function unifiedTabStorageKey() {
@@ -23096,7 +23142,7 @@
 
     async function reloadBusinessProjectionTable(statusPayload) {
       const previousPayload = state.composition;
-      if (!previousPayload) {
+      if (!previousPayload || !isVitrinaTabActive()) {
         return;
       }
       const scrollTop = tableScrollNode ? tableScrollNode.scrollTop : 0;
@@ -23116,6 +23162,7 @@
           cache: "no-store"
         }
       );
+      if (!isVitrinaTabActive()) return;
       const payload = await readJsonResponse(
         response,
         "non-json business projection table response"
@@ -23130,6 +23177,7 @@
       if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
         throw new Error("unexpected business projection table payload");
       }
+      if (!isVitrinaTabActive()) return;
       const tableSurface = payload.table_surface || {};
       if (String(tableSurface.table_data_state || "included") !== "included") {
         throw new Error("business projection table payload did not include rows");
@@ -23181,9 +23229,8 @@
     }
 
     function scheduleBusinessProjectionPoll(delayMs) {
-      if (state.businessProjection.pollTimer) {
-        window.clearTimeout(state.businessProjection.pollTimer);
-      }
+      pauseBusinessProjectionMonitoring();
+      if (!isVitrinaTabActive()) return;
       state.businessProjection.pollTimer = window.setTimeout(
         pollBusinessProjectionRevision,
         Number(delayMs) || 12000
@@ -23191,6 +23238,7 @@
     }
 
     async function pollBusinessProjectionRevision() {
+      if (!isVitrinaTabActive()) return;
       if (
         state.businessProjection.polling
         || document.visibilityState !== "visible"
@@ -23219,6 +23267,7 @@
               : "business projection status returned " + response.status
           );
         }
+        if (!isVitrinaTabActive()) return;
         if (payload.updating) {
           setBusinessProjectionStatus(
             "Обновляется",
@@ -23287,9 +23336,14 @@
       requestId,
       shellPayload,
       performanceMetrics,
-      shellPaintPromise
+      shellPaintPromise,
+      activeTabOnly
     ) {
       try {
+        if (activeTabOnly && !isVitrinaTabActive()) {
+          vitrinaDeferredTableSkipped = true;
+          return;
+        }
         const tableRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
@@ -23300,6 +23354,10 @@
             headers: {"Accept": "application/json"}
           }
         );
+        if (activeTabOnly && !isVitrinaTabActive()) {
+          vitrinaDeferredTableSkipped = true;
+          return;
+        }
         const payload = performanceMetrics
           ? await readMeasuredJsonResponse(
               response,
@@ -23310,6 +23368,10 @@
             )
           : await readJsonResponse(response, "non-json response from table data route");
         if (requestId !== state.requestSequence) {
+          return;
+        }
+        if (activeTabOnly && !isVitrinaTabActive()) {
+          vitrinaDeferredTableSkipped = true;
           return;
         }
         if (!response.ok) {
@@ -23344,6 +23406,10 @@
         }
       } catch (error) {
         if (requestId !== state.requestSequence) {
+          return;
+        }
+        if (activeTabOnly && !isVitrinaTabActive()) {
+          vitrinaDeferredTableSkipped = true;
           return;
         }
         const message = String(error && error.message ? error.message : error);
@@ -23419,6 +23485,7 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected page composition payload");
         }
+        if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") === "deferred") {
@@ -23443,7 +23510,8 @@
             requestId,
             payload,
             performanceMetrics,
-            shellPaintPromise
+            shellPaintPromise,
+            !!normalizedOptions.activeTabOnly
           );
         } else {
           const tableRenderStartedAt = window.performance.now();
@@ -23472,6 +23540,7 @@
         if (requestId !== state.requestSequence) {
           return;
         }
+        if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         const message = String(error && error.message ? error.message : error);
         if (hasDisplayedCachedTableForRequest(requestKey)) {
           state.tableSnapshot.freshLoading = false;
@@ -26235,10 +26304,8 @@
     applyUnifiedTabAccess();
     activateUnifiedTab(initialUnifiedTab(), {persist: false});
     purgeObsoleteHistoryStorage();
-    if (ALLOWED_UNIFIED_TABS.has(DEFAULT_UNIFIED_TAB)) {
-      loadPageComposition();
-      initializeBusinessProjectionMonitoring();
-    }
+    vitrinaRuntimeReady = true;
+    ensureVitrinaRuntimeActive(false);
   </script>
   <script>
   (function () {

@@ -57,6 +57,8 @@ def main() -> None:
     _run_recovery_persistent_e2e(unknown_surface=True)
     _run_recovery_persistent_e2e(already_valid=True)
     _run_recovery_persistent_e2e(already_valid=True, challenge_proofs=3)
+    _run_recovery_persistent_e2e(generic_probe_failures=3)
+    _run_recovery_persistent_e2e(timeout_probe_failures=3)
     _run_single_flight_start_smoke()
     _run_stop_and_launcher_smoke()
     print("wb_buyer_session_smoke: OK")
@@ -258,6 +260,55 @@ def _run_security_challenge_classification_smoke() -> None:
     if surface != {"state": "human", "reason": "buyer_security_challenge"}:
         raise AssertionError(f"central recovery must keep the challenge window alive: {surface}")
 
+    class EmptyBody:
+        def inner_text(self, **_kwargs: Any) -> str:
+            return ""
+
+    class EmptyPage(Page):
+        def locator(self, _selector: str) -> EmptyBody:
+            return EmptyBody()
+
+    empty_surface = _inspect_login_surface(EmptyPage())
+    if empty_surface.get("state") != "unknown":
+        raise AssertionError(f"/lk with a transient empty body is not authenticated: {empty_surface}")
+
+    class ChallengeFrame:
+        url = "https://www.wildberries.ru/__wbaas/challenges/antibot"
+
+    class FramedPage(EmptyPage):
+        frames = [ChallengeFrame()]
+
+    framed_surface = _inspect_login_surface(FramedPage())
+    if framed_surface != {"state": "human", "reason": "buyer_security_challenge"}:
+        raise AssertionError(f"known challenge iframe must keep the human window open: {framed_surface}")
+
+    class AccountBody:
+        def inner_text(self, **_kwargs: Any) -> str:
+            return "Мои заказы · Способы оплаты"
+
+    class AccountPage(Page):
+        def locator(self, _selector: str) -> AccountBody:
+            return AccountBody()
+
+    account_surface = _inspect_login_surface(AccountPage())
+    if account_surface.get("state") != "authenticated":
+        raise AssertionError(f"visible account markers must still trigger proof: {account_surface}")
+
+    transient = recovery_tool._transient_human_probe_failure
+    if not transient({"status": "probe_error", "diagnostics": {"failure_category": "navigation_no_response"}}):
+        raise AssertionError("temporary no-response during human action must keep the viewer")
+    if not transient({"status": "probe_error", "diagnostics": {"failure_category": "navigation_timeout"}}):
+        raise AssertionError("temporary navigation timeout during human action must keep the viewer")
+    if not transient({"status": "probe_error", "diagnostics": {"failure_category": "http_status", "http_status": 498}}):
+        raise AssertionError("WB challenge HTTP 498 during human action must keep the viewer")
+    for nontransient in (
+        {"status": "wrong_account"},
+        {"status": "probe_error", "diagnostics": {"failure_category": "chromium_failure"}},
+        {"status": "probe_error", "diagnostics": {"failure_category": "http_status", "http_status": 400}},
+    ):
+        if transient(nontransient):
+            raise AssertionError(f"nontransient failure must not be hidden: {nontransient}")
+
 
 def _run_capability_retry_smoke() -> None:
     class SequenceAdapter:
@@ -412,7 +463,7 @@ def _run_price_extraction_smoke() -> None:
         raise AssertionError(f"authenticated response price extraction failed: {extracted}")
 
 
-def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, already_valid: bool = False, challenge_proofs: int = 0) -> None:
+def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, already_valid: bool = False, challenge_proofs: int = 0, generic_probe_failures: int = 0, timeout_probe_failures: int = 0) -> None:
     with TemporaryDirectory(prefix="wb-buyer-recovery-e2e-") as tmp:
         state_dir = Path(tmp)
         session = WbBuyerSessionConfig(
@@ -454,6 +505,17 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
                 events.append(f"proof:{context.process_number}:{nm_id}")
                 if context.process_number == 1 and challenge_proofs and events.count(f"proof:1:{nm_id}") <= challenge_proofs:
                     return {"session": {"status": "security_challenge", "reason": "buyer_security_challenge"}, "price": {}}
+                if context.process_number == 1 and generic_probe_failures and events.count(f"proof:1:{nm_id}") <= generic_probe_failures:
+                    return {
+                        "session": {
+                            "status": "probe_error",
+                            "reason": "buyer_session_probe_failed",
+                            "diagnostics": {"failure_category": "navigation_no_response"},
+                        },
+                        "price": {},
+                    }
+                if context.process_number == 1 and timeout_probe_failures and events.count(f"proof:1:{nm_id}") <= timeout_probe_failures:
+                    raise recovery_tool.PlaywrightTimeoutError("fixture navigation timeout")
                 if page.url != session.buyer_url:
                     page.goto(session.buyer_url, wait_until="domcontentloaded")
                 return {
@@ -548,8 +610,10 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
             raise AssertionError(f"the first persistent context must close before restart validation: {events}")
         if "proof:1:210183919" not in events or "proof:2:210183919" not in events:
             raise AssertionError(f"both processes must prove /lk plus authenticated price read: {events}")
-        if challenge_proofs and (events.count(f"proof:1:{NM_ID}") <= 2 or "error" in statuses or "timeout" in statuses):
-            raise AssertionError(f"repeated challenge must stay human until solved: {statuses} {events}")
+        if (challenge_proofs or generic_probe_failures or timeout_probe_failures) and (
+            events.count(f"proof:1:{NM_ID}") <= 2 or "error" in statuses or "timeout" in statuses
+        ):
+            raise AssertionError(f"transient challenge/probe failure must stay human until solved: {statuses} {events}")
         for process_name in (("Xvfb",) if already_valid and not challenge_proofs else ("Xvfb", "x11vnc", "websockify")):
             if f"terminate:{process_name}" not in events:
                 raise AssertionError(f"terminal cleanup did not terminate {process_name}: {events}")

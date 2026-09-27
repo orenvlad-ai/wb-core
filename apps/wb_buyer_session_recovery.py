@@ -402,6 +402,7 @@ def _capture_login(
                 proof_attempts = 0
                 unknown_attempts = 0
                 challenge_retry_at = 0.0
+                last_human_reason = "buyer_human_action_required"
                 while time.monotonic() < deadline:
                     surface = _inspect_login_surface(page)
                     if surface.get("state") == "authenticated" and time.monotonic() < challenge_retry_at:
@@ -409,6 +410,7 @@ def _capture_login(
                     if surface.get("state") != "unknown":
                         unknown_attempts = 0
                     if surface.get("state") == "authenticated":
+                        was_human_window_started = human_window_started
                         if human_window_started:
                             _stop_human_window(processes)
                             human_window_started = False
@@ -418,12 +420,26 @@ def _capture_login(
                             "reason": "buyer_session_validating",
                         })
                         _settle_after_login_action(config, page)
-                        operation = adapter.probe_persistent_context(
-                            context,
-                            nm_id=config.session.validation_nm_id,
-                            page=page,
-                        )
-                        proof = adapter.validate_persistent_proof(operation, require_price=False)
+                        try:
+                            operation = adapter.probe_persistent_context(
+                                context,
+                                nm_id=config.session.validation_nm_id,
+                                page=page,
+                            )
+                        except PlaywrightTimeoutError:
+                            if not was_human_window_started:
+                                raise
+                            proof = {
+                                "valid": False,
+                                "reason": "buyer_session_probe_failed",
+                                "session": {
+                                    "status": "probe_error",
+                                    "reason": "buyer_session_probe_failed",
+                                    "diagnostics": {"failure_category": "navigation_timeout"},
+                                },
+                            }
+                        else:
+                            proof = adapter.validate_persistent_proof(operation, require_price=False)
                         last_session = proof.get("session") if isinstance(proof.get("session"), Mapping) else {}
                         if proof.get("valid"):
                             _record_proof(config, proof)
@@ -441,6 +457,13 @@ def _capture_login(
                             proof_attempts = 0
                             challenge_retry_at = time.monotonic() + max(0.1, min(20.0, config.poll_sec * 5))
                             surface = {"state": "human", "reason": str(last_session.get("reason") or "buyer_security_challenge")}
+                        elif was_human_window_started and _transient_human_probe_failure(last_session):
+                            # A challenge can auto-reload while the operator is
+                            # watching it. A failed read during that transition
+                            # is not evidence that the run or account failed.
+                            proof_attempts = 0
+                            challenge_retry_at = time.monotonic() + max(0.1, min(20.0, config.poll_sec * 5))
+                            surface = {"state": "human", "reason": last_human_reason}
                         elif proof_attempts >= 2:
                             _write_status(
                                 config,
@@ -477,6 +500,7 @@ def _capture_login(
                     if surface.get("state") == "automatic_login":
                         surface = {"state": "unknown", "reason": "buyer_saved_account_login_not_completed"}
                     if surface.get("state") == "human":
+                        last_human_reason = str(surface.get("reason") or "buyer_human_action_required")
                         if not human_window_started:
                             _start_human_window(config, processes)
                             human_window_started = True
@@ -501,6 +525,7 @@ def _capture_login(
                                 "reason": "buyer_login_surface_unrecognized",
                                 "session": last_session,
                             })
+                            last_human_reason = "buyer_login_surface_unrecognized"
                     page.wait_for_timeout(max(500, int(config.poll_sec * 1000)))
                 _write_status(
                     config,
@@ -609,7 +634,7 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
     if isinstance(injected, Mapping):
         return dict(injected)
     body = _safe_body_text(page).lower()
-    if any(marker in body for marker in CHALLENGE_MARKERS):
+    if any(marker in body for marker in CHALLENGE_MARKERS) or _challenge_in_frames(page):
         return {"state": "human", "reason": "buyer_security_challenge"}
     if any(marker in body for marker in ("код из смс", "введите код", "код подтверждения", "отправили код", "sms code", "verification code", "otp")):
         return {"state": "human", "reason": "buyer_sms_required"}
@@ -624,11 +649,44 @@ def _inspect_login_surface(page: Any) -> dict[str, Any]:
         return {"state": "automatic_login", "reason": "buyer_saved_account_available", "candidate": candidates[0]}
     if len(candidates) > 1 or any(marker in body for marker in ("выберите аккаунт", "другой аккаунт")):
         return {"state": "human", "reason": "buyer_account_selection_required"}
-    if _visible_login_completed(page) and not any(
+    if _visible_login_completed(page, body=body) and not any(
         marker in body for marker in ("войти или зарегистрироваться", "войдите в аккаунт", "получить код")
     ):
         return {"state": "authenticated", "reason": "buyer_visible_account_opened"}
     return {"state": "unknown", "reason": "buyer_login_surface_unrecognized"}
+
+
+def _challenge_in_frames(page: Any) -> bool:
+    try:
+        frames = list(getattr(page, "frames", ()) or ())[:8]
+    except Exception:
+        return False
+    for frame in frames:
+        try:
+            frame_url = str(getattr(frame, "url", "") or "").lower()
+            if any(marker in frame_url for marker in CHALLENGE_MARKERS):
+                return True
+            if any(marker in _safe_body_text(frame, timeout_ms=300).lower() for marker in CHALLENGE_MARKERS):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _transient_human_probe_failure(session: Mapping[str, Any]) -> bool:
+    if session.get("status") != "probe_error":
+        return False
+    diagnostics = session.get("diagnostics") if isinstance(session.get("diagnostics"), Mapping) else {}
+    category = str(diagnostics.get("failure_category") or "")
+    if category in {"navigation_no_response", "navigation_timeout"}:
+        return True
+    if category == "http_status":
+        try:
+            status = int(diagnostics.get("http_status") or 0)
+        except (TypeError, ValueError):
+            return False
+        return status in {408, 429, 498} or 500 <= status <= 599
+    return False
 
 
 def _saved_account_login_candidates(page: Any, *, body: str = "") -> list[Any]:
@@ -730,22 +788,33 @@ def _settle_after_login_action(config: BuyerRecoveryConfig, page: Any) -> None:
         page.wait_for_timeout(500)
 
 
-def _safe_body_text(page: Any) -> str:
+def _safe_body_text(page: Any, *, timeout_ms: int = 2_000) -> str:
     try:
-        return str(page.locator("body").inner_text(timeout=2_000) or "")[:30_000]
+        return str(page.locator("body").inner_text(timeout=timeout_ms) or "")[:30_000]
     except Exception:
         return ""
 
 
-def _visible_login_completed(page: Any) -> bool:
+def _visible_login_completed(page: Any, *, body: str) -> bool:
     try:
         parsed = urllib_parse.urlparse(str(page.url or ""))
     except Exception:
         return False
     host = str(parsed.hostname or "").lower()
     path = str(parsed.path or "").rstrip("/").lower()
-    return (host == "wildberries.ru" or host.endswith(".wildberries.ru")) and (
-        path == "/lk" or path.startswith("/lk/")
+    account_markers = (
+        "мои заказы",
+        "мои покупки",
+        "история покупок",
+        "личные данные",
+        "мои адреса",
+        "способы оплаты",
+        "выйти из аккаунта",
+    )
+    return (
+        (host == "wildberries.ru" or host.endswith(".wildberries.ru"))
+        and (path == "/lk" or path.startswith("/lk/"))
+        and any(marker in body for marker in account_markers)
     )
 
 
