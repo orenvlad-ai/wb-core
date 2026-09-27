@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -39,7 +40,7 @@ from packages.adapters.wb_buyer_session import (  # noqa: E402
     extract_authenticated_price_from_network_payload,
 )
 from packages.application.wb_spp_tester import _stable_authenticated_price  # noqa: E402
-from packages.application.wb_buyer_session import WbBuyerSessionBlock  # noqa: E402
+from packages.application.wb_buyer_session import WbBuyerSessionBlock, _public_recovery_payload  # noqa: E402
 
 
 NM_ID = 210183919
@@ -52,6 +53,9 @@ def main() -> None:
     _run_security_challenge_classification_smoke()
     _run_price_extraction_smoke()
     _run_recovery_persistent_e2e()
+    _run_recovery_persistent_e2e(price_available=False)
+    _run_recovery_persistent_e2e(unknown_surface=True)
+    _run_recovery_persistent_e2e(already_valid=True)
     _run_single_flight_start_smoke()
     _run_stop_and_launcher_smoke()
     print("wb_buyer_session_smoke: OK")
@@ -76,6 +80,9 @@ def _run_architecture_guard() -> None:
         raise AssertionError("all buyer browser paths must be persistent-profile launches")
     if "_ephemeral_headful_display" not in source:
         raise AssertionError("authenticated buyer-price probes must have an isolated headed display")
+    public = _public_recovery_payload({"run_id": "fixture", "status": "awaiting_human", "running": True}, launcher_download_path="/old-launcher.zip")
+    if public.get("launcher_ready") or public.get("launcher_download_path"):
+        raise AssertionError("in-site buyer entry must never advertise ZIP launcher")
 
 
 def _run_profile_adapter_smoke() -> None:
@@ -404,7 +411,7 @@ def _run_price_extraction_smoke() -> None:
         raise AssertionError(f"authenticated response price extraction failed: {extracted}")
 
 
-def _run_recovery_persistent_e2e() -> None:
+def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, already_valid: bool = False) -> None:
     with TemporaryDirectory(prefix="wb-buyer-recovery-e2e-") as tmp:
         state_dir = Path(tmp)
         session = WbBuyerSessionConfig(
@@ -426,7 +433,8 @@ def _run_recovery_persistent_e2e() -> None:
         )
         events: list[str] = []
         statuses: list[str] = []
-        fake_playwright = _FakePlaywright(events)
+        reasons: list[str] = []
+        fake_playwright = _FakePlaywright(events, unknown_surface=unknown_surface, already_valid=already_valid)
         delegate = WbBuyerSessionAdapter(config=session)
 
         class FixtureAdapter:
@@ -447,7 +455,7 @@ def _run_recovery_persistent_e2e() -> None:
                     page.goto(session.buyer_url, wait_until="domcontentloaded")
                 return {
                     "session": {"status": "valid", "reason": "buyer_session_valid"},
-                    "price": _ok_price(nm_id),
+                    "price": _ok_price(nm_id) if price_available else {"status": "price_missing", "reason": "authenticated_network_price_missing"},
                 }
 
             def validate_persistent_proof(self, operation: Mapping[str, Any], *, require_price: bool) -> Mapping[str, Any]:
@@ -487,6 +495,7 @@ def _run_recovery_persistent_e2e() -> None:
 
         def record_status(fixture_config: BuyerRecoveryConfig, payload: Mapping[str, Any]) -> None:
             statuses.append(str(payload.get("status") or ""))
+            reasons.append(str(payload.get("reason") or ""))
             original_write(fixture_config, payload)
 
         def fake_spawn(args: list[str], _log_path: Path, **_kwargs: Any) -> FakeProcess:
@@ -519,15 +528,24 @@ def _run_recovery_persistent_e2e() -> None:
             raise AssertionError(f"persistent recovery must complete: {terminal} {events}")
         if fake_playwright.chromium.user_data_dirs != [str(session.persistent_profile_dir)] * 2:
             raise AssertionError(f"both Chromium processes must use one persistent profile: {events}")
-        if events.count("saved_account_click") != 1:
-            raise AssertionError(f"exactly one saved-account control must be clicked: {events}")
-        if "awaiting_human" not in statuses or "spawn:x11vnc" not in events or "spawn:websockify" not in events:
-            raise AssertionError(f"SMS challenge must pause automation and start noVNC only then: {statuses} {events}")
+        if events.count("saved_account_click") != (0 if unknown_surface or already_valid else 1):
+            raise AssertionError(f"saved-account control mismatch: {events}")
+        if not price_available and (terminal.get("session") or {}).get("status") != "valid":
+            raise AssertionError(f"missing control price must preserve authenticated session: {terminal}")
+        if not price_available and (terminal.get("price") or {}).get("status") != "price_missing":
+            raise AssertionError(f"missing control price must be reported separately: {terminal}")
+        if unknown_surface and "buyer_login_surface_unrecognized" not in reasons:
+            raise AssertionError(f"unknown screen must fall back to human viewer: {statuses} {reasons}")
+        if already_valid:
+            if "awaiting_human" in statuses or "spawn:x11vnc" in events or "spawn:websockify" in events:
+                raise AssertionError(f"already-valid session must complete without viewer: {statuses} {events}")
+        elif "awaiting_human" not in statuses or "spawn:x11vnc" not in events or "spawn:websockify" not in events:
+            raise AssertionError(f"human action must open viewer: {statuses} {events}")
         if events.index("close_context:1") > events.index("launch_context:2"):
             raise AssertionError(f"the first persistent context must close before restart validation: {events}")
         if "proof:1:210183919" not in events or "proof:2:210183919" not in events:
             raise AssertionError(f"both processes must prove /lk plus authenticated price read: {events}")
-        for process_name in ("Xvfb", "x11vnc", "websockify"):
+        for process_name in (("Xvfb",) if already_valid else ("Xvfb", "x11vnc", "websockify")):
             if f"terminate:{process_name}" not in events:
                 raise AssertionError(f"terminal cleanup did not terminate {process_name}: {events}")
         if session.lock_owner_path.exists():
@@ -558,12 +576,15 @@ def _run_single_flight_start_smoke() -> None:
         original_command = recovery_tool._supervisor_command
         recovery_tool._supervisor_command = fixture_command
         try:
-            first = recovery_tool.start_recovery(config, replace=False)
+            session_expiry = int(time.time()) + 3
+            first = recovery_tool.start_recovery(config, replace=False, viewer_owner="f" * 64, viewer_expires_at=session_expiry)
             second = recovery_tool.start_recovery(config, replace=False)
         finally:
             recovery_tool._supervisor_command = original_command
         if first.get("run_id") != second.get("run_id") or len(commands) != 1:
             raise AssertionError(f"double start must join one exact run: {first} {second} {commands}")
+        if first.get("viewer_owner") != "f" * 64 or datetime.fromisoformat(str(first.get("deadline_at"))).timestamp() > session_expiry:
+            raise AssertionError(f"viewer owner and WebCore session expiry must bind exact run: {first}")
         guarded = WbBuyerSessionAdapter(
             config=session,
             operation_probe=lambda *_args: (_ for _ in ()).throw(
@@ -647,12 +668,16 @@ def _run_stop_and_launcher_smoke() -> None:
             start_new_session=True,
         )
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not child_pid_path.exists():
+        child_pid_text = ""
+        while time.monotonic() < deadline:
+            child_pid_text = child_pid_path.read_text(encoding="utf-8") if child_pid_path.exists() else ""
+            if child_pid_text.isdigit():
+                break
             time.sleep(0.02)
-        if not child_pid_path.exists():
+        if not child_pid_text.isdigit():
             parent.kill()
             raise AssertionError("canonical stop fixture did not start")
-        nested_pid = int(child_pid_path.read_text(encoding="utf-8"))
+        nested_pid = int(child_pid_text)
         _write_supervisor_identity(config, pid=parent.pid, run_id="stop-run")
         session.lock_owner_path.write_text(json.dumps({"run_id": "stop-run", "pid": parent.pid}), encoding="utf-8")
         os.chmod(session.lock_owner_path, 0o600)
@@ -753,13 +778,17 @@ class _SavedAccountButton:
 
 
 class _FakePage:
-    def __init__(self, process_number: int, events: list[str]) -> None:
+    def __init__(self, process_number: int, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
         self.process_number = process_number
         self.events = events
         self.url = "https://www.wildberries.ru/lk"
         self.human_waits = 0
         self.surface: dict[str, Any]
-        if process_number == 1:
+        if process_number == 1 and already_valid:
+            self.surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
+        elif process_number == 1 and unknown_surface:
+            self.surface = {"state": "unknown", "reason": "buyer_login_surface_unrecognized"}
+        elif process_number == 1:
             self.surface = {"state": "automatic_login", "reason": "buyer_saved_account_available"}
             self.surface["candidate"] = _SavedAccountButton(self, events)
         else:
@@ -776,21 +805,23 @@ class _FakePage:
         return None
 
     def wait_for_timeout(self, _milliseconds: int) -> None:
-        if self.surface.get("state") == "human" and "spawn:x11vnc" in self.events:
+        if self.surface.get("state") in {"human", "unknown"} and "spawn:x11vnc" in self.events:
             self.human_waits += 1
             if self.human_waits >= 1:
                 self.surface = {"state": "authenticated", "reason": "buyer_visible_account_opened"}
 
 
 class _FakeContext:
-    def __init__(self, process_number: int, events: list[str]) -> None:
+    def __init__(self, process_number: int, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
         self.process_number = process_number
         self.events = events
-        self.pages = [_FakePage(process_number, events)]
+        self.unknown_surface = unknown_surface
+        self.already_valid = already_valid
+        self.pages = [_FakePage(process_number, events, unknown_surface=unknown_surface, already_valid=already_valid)]
         self.closed = False
 
     def new_page(self) -> _FakePage:
-        page = _FakePage(self.process_number, self.events)
+        page = _FakePage(self.process_number, self.events, unknown_surface=self.unknown_surface, already_valid=self.already_valid)
         self.pages.append(page)
         return page
 
@@ -801,20 +832,22 @@ class _FakeContext:
 
 
 class _FakeChromium:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
         self.events = events
+        self.unknown_surface = unknown_surface
+        self.already_valid = already_valid
         self.user_data_dirs: list[str] = []
 
     def launch_persistent_context(self, *, user_data_dir: str, **_kwargs: Any) -> _FakeContext:
         self.user_data_dirs.append(user_data_dir)
         process_number = len(self.user_data_dirs)
         self.events.append(f"launch_context:{process_number}")
-        return _FakeContext(process_number, self.events)
+        return _FakeContext(process_number, self.events, unknown_surface=self.unknown_surface, already_valid=self.already_valid)
 
 
 class _FakePlaywright:
-    def __init__(self, events: list[str]) -> None:
-        self.chromium = _FakeChromium(events)
+    def __init__(self, events: list[str], *, unknown_surface: bool = False, already_valid: bool = False) -> None:
+        self.chromium = _FakeChromium(events, unknown_surface=unknown_surface, already_valid=already_valid)
 
     def __enter__(self) -> "_FakePlaywright":
         return self

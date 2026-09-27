@@ -1710,6 +1710,25 @@ def render_nginx_public_route_block(
             f"        proxy_read_timeout {read_timeout};",
             f"        proxy_send_timeout {send_timeout};",
         ]
+        if route["name"] == "sheet_vitrina_wb_buyer_viewer_auth":
+            route_lines.extend([
+                "        internal;",
+                "        proxy_pass_request_body off;",
+                '        proxy_set_header Content-Length "";',
+                "        proxy_set_header X-Original-URI $request_uri;",
+                "        proxy_set_header X-Original-Origin $http_origin;",
+                "        proxy_set_header X-Original-Upgrade $http_upgrade;",
+            ])
+        if route["name"] == "sheet_vitrina_wb_buyer_viewer":
+            route_lines.extend([
+                "        auth_request /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth;",
+                "        proxy_http_version 1.1;",
+                "        proxy_set_header Upgrade $http_upgrade;",
+                '        proxy_set_header Connection "upgrade";',
+                "        proxy_buffering off;",
+                '        add_header X-Frame-Options "SAMEORIGIN" always;',
+                '        add_header Cache-Control "private, no-store" always;',
+            ])
         if route.get("response_compression"):
             route_lines.extend(
                 [

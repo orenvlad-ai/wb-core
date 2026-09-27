@@ -65,6 +65,7 @@ def main() -> None:
     if DEFAULT_SETTINGS_UI_PATH != "/sheet-vitrina-v1/settings":
         raise AssertionError("settings route changed unexpectedly")
     _check_cached_status_composition()
+    _check_buyer_recovery_freshness()
     print("sheet_vitrina_v1_settings_sources_sessions_smoke: OK")
 
 
@@ -116,6 +117,70 @@ def _check_cached_status_composition() -> None:
         or payload.get("seller_portal", {}).get("transit_cost", {}).get("coverage", {}).get("confirmed") != 3
     ):
         raise AssertionError(f"centralized source/session payload lost layered status truth: {payload}")
+
+
+def _check_buyer_recovery_freshness() -> None:
+    class Runtime:
+        capability: dict[str, object] = {}
+
+        def load_source_health_status(self, source_key: str):
+            return dict(self.capability) if source_key == "wb_buyer_spp_capability" else {}
+
+        def load_sheet_vitrina_refresh_status(self):
+            raise ValueError("fixture has no Vitrina status")
+
+    class Supplies:
+        def get_transit_cost_enrichment_status(self, _params):
+            return {}
+
+    entrypoint = object.__new__(RegistryUploadHttpEntrypoint)
+    entrypoint.runtime = Runtime()
+    entrypoint.wb_supplies_block = Supplies()
+    entrypoint.activated_at_factory = lambda: "2026-09-27T12:00:00Z"
+    entrypoint.handle_seller_portal_recovery_status_request = lambda **_kwargs: {}
+    entrypoint.handle_wb_buyer_session_recovery_status_request = lambda **_kwargs: {
+        "status": "completed", "finished_at": "2026-09-27T12:00:00Z",
+        "session": {"status": "valid", "valid": True, "account_confirmed": True, "checked_at": "2026-09-27T11:59:59Z"},
+        "price": {"status": "ok", "authenticated_buyer_price": 386, "nm_id": 210183919, "measured_at": "2026-09-27T11:59:59Z"},
+    }
+    def read():
+        return entrypoint.handle_sources_sessions_status_request(
+            seller_launcher_download_path="/seller.zip", buyer_launcher_download_path="/buyer.zip",
+        )["wb_buyer"]
+
+    entrypoint.runtime.capability = {"checked_at": "2026-09-27T11:58:00Z", "status": "security_challenge", "valid": False, "reason": "buyer_security_challenge"}
+    recovered = read()
+    if recovered["capability"]["status"] != "available" or recovered["capability"]["reason"]:
+        raise AssertionError(f"fresh recovery must clear stale challenge: {recovered}")
+    entrypoint.runtime.capability = {"checked_at": "2026-09-27T12:01:00Z", "status": "session_expired", "valid": False, "session_status": "expired", "session_valid": False, "account_confirmed": False}
+    newer = read()
+    if newer["capability"]["status"] != "session_expired" or newer["authorization"]["session"]["valid"]:
+        raise AssertionError(f"later logout check must supersede older recovery: {newer}")
+    entrypoint.runtime.capability["checked_at"] = "2026-09-27T12:00:00.900000Z"
+    entrypoint.handle_wb_buyer_session_recovery_status_request = lambda **_kwargs: {
+        "status": "completed", "finished_at": "2026-09-27T12:00:00.500000Z",
+        "session": {"status": "valid", "valid": True, "account_confirmed": True},
+        "price": {"status": "ok", "authenticated_buyer_price": 386},
+    }
+    same_second = read()
+    if same_second["capability"]["status"] != "session_expired" or same_second["authorization"]["session"]["valid"]:
+        raise AssertionError(f"same-second later logout must supersede recovery: {same_second}")
+    entrypoint.runtime.capability["checked_at"] = "2026-09-27T12:00:00.100000Z"
+    earlier_same_second = read()
+    if earlier_same_second["capability"]["status"] != "available":
+        raise AssertionError(f"same-second earlier cache must yield to recovery: {earlier_same_second}")
+    entrypoint.runtime.capability = {"checked_at": "2026-09-27T12:01:00Z", "status": "price_missing", "valid": False, "session_status": "valid", "session_valid": True, "account_confirmed": True}
+    newer_price = read()
+    if newer_price["capability"]["status"] != "price_missing" or not newer_price["authorization"]["session"]["valid"]:
+        raise AssertionError(f"later missing price must retain valid account: {newer_price}")
+    entrypoint.runtime.capability = {"checked_at": "2026-09-27T12:02:00Z", "status": "available", "valid": True, "session_valid": True, "account_confirmed": True, "authenticated_buyer_price": 999}
+    entrypoint.handle_wb_buyer_session_recovery_status_request = lambda **_kwargs: {
+        "status": "awaiting_human", "running": True, "started_at": "2026-09-27T12:03:00Z",
+        "session": {"status": "missing", "valid": False, "account_confirmed": False},
+    }
+    active = read()
+    if active["capability"]["status"] != "recovery_running" or active["capability"]["valid"] or active["capability"].get("authenticated_buyer_price") is not None:
+        raise AssertionError(f"active recovery must suppress stale green capability: {active}")
 
 
 if __name__ == "__main__":

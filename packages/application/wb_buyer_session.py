@@ -269,12 +269,12 @@ class WbBuyerSessionRecoveryController:
         )
         return _public_recovery_payload(raw, launcher_download_path=launcher_download_path)
 
-    def start(self, *, replace: bool, launcher_download_path: str) -> dict[str, Any]:
+    def start(self, *, replace: bool, launcher_download_path: str, viewer_owner: str = "", viewer_expires_at: int | None = None) -> dict[str, Any]:
         config = self._config()
         raw = dict(
             self._start_runner(config, replace)
             if self._start_runner is not None
-            else self._tool().start_recovery(config, replace=replace)
+            else self._tool().start_recovery(config, replace=replace, viewer_owner=viewer_owner, viewer_expires_at=viewer_expires_at)
         )
         return _public_recovery_payload(raw, launcher_download_path=launcher_download_path)
 
@@ -351,8 +351,10 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
 def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: str) -> dict[str, Any]:
     status = str(raw.get("status") or "idle")
     running = bool(raw.get("running"))
-    launcher_ready = running and status == "awaiting_human"
+    # The browser is now opened inside WebCore; never advertise the old ZIP path.
+    launcher_ready = False
     session = raw.get("session") if isinstance(raw.get("session"), Mapping) else {}
+    price = raw.get("price") if isinstance(raw.get("price"), Mapping) else {}
     session_status = str(session.get("status") or ("valid" if status == "completed" else "missing"))
     return {
         "contract_name": "wb_buyer_session_recovery_v1",
@@ -371,7 +373,7 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
         "human_action": _human_action(_safe_reason(raw.get("reason") or raw.get("message"))) if status == "awaiting_human" else "",
         "launcher_ready": launcher_ready,
         "can_download_launcher": launcher_ready,
-        "launcher_download_path": launcher_download_path if launcher_ready else "",
+        "launcher_download_path": "",
         "session": {
             "status": session_status,
             "status_label": BUYER_STATUS_LABELS.get(session_status, "Неизвестно"),
@@ -379,6 +381,13 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
             "checked_at": str(session.get("checked_at") or ""),
             "session_fingerprint": _safe_fingerprint(session.get("session_fingerprint")),
             "account_confirmed": bool(session.get("account_confirmed")),
+        },
+        "price": {
+            "status": str(price.get("status") or "not_checked")[:80],
+            "reason": _safe_reason(price.get("reason")),
+            "nm_id": _int_or_none(price.get("nm_id")),
+            "authenticated_buyer_price": _number_or_none(price.get("authenticated_buyer_price")),
+            "measured_at": str(price.get("measured_at") or "")[:100],
         },
     }
 

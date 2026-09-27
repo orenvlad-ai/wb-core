@@ -40,6 +40,7 @@
     button.primary { background: linear-gradient(135deg, #7c3aed, #2563eb); border-color: transparent; }
     button.danger { border-color: rgba(251, 113, 133, 0.55); color: var(--danger); }
     button:disabled { opacity: .5; cursor: not-allowed; }
+    [hidden] { display: none !important; }
     .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .message { min-height: 20px; margin: 0; font-size: 13px; }
     .message.error { color: var(--danger); }
@@ -195,6 +196,7 @@
     .sources-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
     .source-card { display: grid; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: rgba(16, 19, 27, .48); }
     .source-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .source-card-header .pill { flex-shrink: 0; white-space: nowrap; }
     .source-card h3 { margin: 0; font-size: 17px; }
     .source-card-copy { color: var(--muted); font-size: 12px; line-height: 1.45; }
     .source-health { display: grid; grid-template-columns: minmax(120px, .75fr) minmax(0, 1.25fr); gap: 6px 10px; margin: 0; font-size: 12px; }
@@ -205,6 +207,9 @@
     .recovery-step.is-active { border-color: var(--warning); color: var(--warning); background: rgba(250, 204, 21, .08); }
     .recovery-step.is-done { border-color: var(--success); color: var(--success); background: rgba(52, 211, 153, .08); }
     .source-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+    .buyer-viewer-dialog { width: min(96vw, 1600px); max-width: none; max-height: 96vh; padding: 16px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--panel); }
+    .buyer-viewer-dialog::backdrop { background: rgba(0, 0, 0, .78); }
+    .buyer-viewer-dialog iframe { display: block; width: 100%; height: min(76vh, 900px); margin-top: 12px; border: 1px solid var(--border); background: #fff; }
     @media (max-width: 760px) {
       .warehouse-form { grid-template-columns: 1fr; }
       main { padding: 16px; }
@@ -584,10 +589,10 @@
             <p id="sellerSourceError" class="source-error"></p>
           </article>
           <article id="buyerSourceCard" class="source-card" data-source-card="buyer">
-            <div class="source-card-header"><div><h3>WB Buyer</h3><p class="source-card-copy">Отдельный persistent profile для аутентифицированной проверки СПП.</p></div><span id="buyerSourceBadge" class="pill warning">Неизвестно</span></div>
+            <div class="source-card-header"><div><h3>WB Buyer</h3><p class="source-card-copy">Аккаунт покупателя для проверки цены и СПП.</p></div><span id="buyerSourceBadge" class="pill warning">Неизвестно</span></div>
             <dl id="buyerSourceHealth" class="source-health"></dl>
             <div id="buyerRecoverySteps" class="recovery-steps"></div>
-            <div class="compact-actions"><button type="button" data-source-check="buyer">Проверить</button><button class="primary" type="button" data-source-recover="buyer">Восстановить</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
+            <div class="compact-actions"><button type="button" data-source-check="buyer">Проверить цену</button><button class="primary" type="button" data-source-recover="buyer">Войти в Wildberries</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
             <p id="buyerSourceError" class="source-error"></p>
           </article>
           <article id="publicSourceCard" class="source-card" data-source-card="public">
@@ -597,6 +602,10 @@
             <p id="publicSourceError" class="source-error"></p>
           </article>
         </div>
+        <dialog id="buyerViewerDialog" class="buyer-viewer-dialog" aria-labelledby="buyerViewerTitle">
+          <div class="toolbar" style="justify-content: space-between;"><div><h2 id="buyerViewerTitle">Вход в Wildberries</h2><p id="buyerViewerStatus">Открываем браузер Wildberries…</p></div><div class="compact-actions"><button id="buyerViewerReconnect" type="button" hidden>Переподключить экран</button><button id="buyerViewerCancel" class="danger" type="button">Отменить вход</button><button id="buyerViewerClose" type="button">Закрыть окно</button></div></div>
+          <iframe id="buyerViewerFrame" title="Настоящая страница Wildberries в серверном браузере" referrerpolicy="same-origin" hidden></iframe>
+        </dialog>
       </section>
 
       <section id="usersGroupPanel" class="block settings-group-panel" data-settings-group-panel="users" aria-labelledby="usersTitle" hidden>
@@ -701,7 +710,8 @@
           status: config.wb_buyer_recovery_status_path,
           start: config.wb_buyer_recovery_start_path,
           stop: config.wb_buyer_recovery_stop_path,
-          launcher: config.wb_buyer_recovery_launcher_path
+          launcher: config.wb_buyer_recovery_launcher_path,
+          viewer: config.wb_buyer_recovery_viewer_path
         },
         public: {check: config.spp_proxy_source_check_path},
         transit: {
@@ -1190,17 +1200,39 @@
       }
 
       function renderRecoverySteps(source, recovery) {
-        const labels = ["Проверка", "Автовход", "Человек", "Валидация", "Готово"];
+        const labels = source === "buyer" ? ["Проверка", "Автовход", "Вход вручную", "Сохранение и проверка", "Готово"] : ["Проверка", "Автовход", "Человек", "Валидация", "Готово"];
         const index = recoveryStepIndex(source, recovery && (recovery.run_status || recovery.status));
         document.getElementById(source + "RecoverySteps").innerHTML = labels.map((label, step) => {
-          const className = index === -2 ? (step === 0 ? " is-active" : "") : step < index ? " is-done" : step === index ? " is-active" : "";
+          const className = index === -2 ? (step === 0 ? " is-active" : "") : source === "buyer" && index === 4 ? " is-done" : step < index ? " is-done" : step === index ? " is-active" : "";
           return '<div class="recovery-step' + className + '">' + escapeHtml(label) + "</div>";
         }).join("");
         const launcher = document.getElementById(source + "LauncherLink");
         const route = sourceRoutes[source] || {};
-        const ready = Boolean(recovery && (recovery.can_download_launcher || recovery.launcher_ready));
+        const ready = source !== "buyer" && Boolean(recovery && (recovery.can_download_launcher || recovery.launcher_ready));
         launcher.hidden = !ready;
         launcher.href = ready ? (recovery.launcher_download_path || recovery.launcher_url || route.launcher || "") : "";
+        if (source === "buyer") {
+          const button = document.querySelector('[data-source-recover="buyer"]');
+          button.textContent = recovery && recovery.running ? "Продолжить вход" : "Войти в Wildberries";
+          const dialog = document.getElementById("buyerViewerDialog");
+          const frame = document.getElementById("buyerViewerFrame");
+          const viewerReady = Boolean(recovery && recovery.running && recovery.status === "awaiting_human");
+          if (dialog.open) {
+            document.getElementById("buyerViewerStatus").textContent = viewerReady
+              ? (recovery.human_action || "Завершите вход на странице Wildberries.")
+              : recovery && recovery.running ? "Проверяем аккаунт и контрольную цену…" : "Вход завершён.";
+            document.getElementById("buyerViewerReconnect").hidden = !viewerReady;
+            if (viewerReady && frame.hidden) {
+              const runId = encodeURIComponent(String(recovery.run_id || ""));
+              frame.src = route.viewer + "vnc.html?run_id=" + runId + "&autoconnect=1&resize=remote&reconnect=1&path=" + encodeURIComponent(route.viewer + "websockify?run_id=" + runId);
+              frame.hidden = false;
+            } else if (!viewerReady) {
+              frame.hidden = true;
+              frame.removeAttribute("src");
+            }
+            if (recovery && recovery.run_is_final) dialog.close();
+          }
+        }
       }
 
       function renderSourcesSessions(payload) {
@@ -1227,19 +1259,25 @@
         const buyerAuth = buyer.authorization || {};
         const buyerSession = buyerAuth.session || {};
         const buyerCapability = buyer.capability || {};
-        const buyerAuthOk = (buyerSession.status === "valid" && buyerSession.account_confirmed === true)
-          || (buyerCapability.session_valid === true && buyerCapability.account_confirmed === true);
+        const buyerAuthOk = !buyerAuth.running && ((buyerSession.status === "valid" && buyerSession.account_confirmed === true)
+          || (buyerCapability.session_valid === true && buyerCapability.account_confirmed === true));
         const buyerHealthy = buyerAuthOk && buyerCapability.valid === true;
         const buyerFingerprint = String(buyerSession.session_fingerprint || buyerCapability.session_fingerprint || "");
-        setSourceBadge("buyer", buyerHealthy ? "Готово" : buyerAuthOk ? "Маршрут не проверен" : "Нужен вход", buyerHealthy ? "success" : buyerAuthOk ? "warning" : "danger");
+        setSourceBadge("buyer", buyerAuth.running ? "Вход выполняется" : buyerHealthy ? "Готов к сбору цен" : buyerAuthOk ? "Вход выполнен · цена недоступна" : buyerAuth.status === "stopped" ? "Вход отменён" : "Нужен вход", buyerHealthy ? "success" : buyerAuth.running || buyerAuthOk || buyerAuth.status === "stopped" ? "warning" : "danger");
         renderHealthRows("buyerSourceHealth", [
-          ["Авторизация", buyerSession.status_label || buyerSession.status || buyerCapability.session_status_label || buyerCapability.session_status || "Не проверена"],
+          ["Авторизация", buyerAuth.running ? (buyerAuth.status === "awaiting_human" ? "Ждём подтверждение" : "Проверяем") : buyerAuthOk ? "Вход выполнен" : "Требуется вход"],
           ["Аккаунт", buyerAuthOk ? "Подтверждён" + (buyerFingerprint ? " · " + buyerFingerprint.slice(0, 12) : "") : "Не подтверждён"],
-          ["Capability", buyerCapability.status || "not_checked"],
+          ["Контрольная цена", buyerAuth.running ? "Проверим после входа" : buyerCapability.valid ? (buyerCapability.authenticated_buyer_price == null ? "Получена" : String(buyerCapability.authenticated_buyer_price) + " ₽") : buyerAuthOk ? "Недоступна" : "Не проверена"],
           ["Последняя проверка", formatSourceTime(buyerCapability.checked_at || buyerSession.checked_at)],
           ["Сборщики", (buyer.collectors || []).join(", ")]
         ]);
-        document.getElementById("buyerSourceError").textContent = buyerCapability.reason || buyerAuth.reason || "";
+        document.getElementById("buyerSourceError").textContent = buyerAuth.running
+          ? (buyerAuth.human_action || "Вход выполняется. Откройте окно Wildberries для продолжения.")
+          : buyerAuth.status === "stopped" ? "Вход отменён. Вы можете начать заново."
+          : buyerAuth.status === "timeout" ? "Время входа истекло. Повторите попытку."
+          : buyerAuth.status === "error" ? "Не удалось завершить вход. Повторите попытку."
+          : buyerAuthOk && !buyerCapability.valid ? "Аккаунт подтверждён. Контрольную цену можно проверить повторно без SMS."
+          : "";
         renderRecoverySteps("buyer", buyerAuth);
 
         const publicSource = payload.spp_proxy || {};
@@ -1350,13 +1388,35 @@
         const route = sourceRoutes[source] || {};
         if (!route.start) return;
         const errorTarget = document.getElementById(source + "SourceError");
+        if (source === "buyer") {
+          const dialog = document.getElementById("buyerViewerDialog");
+          if (!dialog.open) dialog.showModal();
+        }
         try {
-          const payload = await fetchJson(route.start, {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: JSON.stringify({replace: false})});
+          const headers = {Accept: "application/json", "Content-Type": "application/json"};
+          if (source === "buyer") headers["X-WB-Buyer-Viewer-CSRF"] = "1";
+          const payload = await fetchJson(route.start, {method: "POST", headers, body: JSON.stringify({replace: false})});
           renderRecoverySteps(source, payload);
           scheduleRecoveryPoll(source, true);
           await loadSourcesSessions({refreshStale: false});
         } catch (error) {
           errorTarget.textContent = error.message || String(error);
+          if (source === "buyer") document.getElementById("buyerViewerStatus").textContent = error.message || "Не удалось открыть вход.";
+        }
+      }
+
+      async function cancelBuyerRecovery() {
+        const auth = ((sourcesSessionsState || {}).wb_buyer || {}).authorization || {};
+        try {
+          const payload = await fetchJson(sourceRoutes.buyer.stop, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json", "X-WB-Buyer-Viewer-CSRF": "1"},
+            body: JSON.stringify({run_id: auth.run_id || ""})
+          });
+          renderRecoverySteps("buyer", payload);
+          await loadSourcesSessions({refreshStale: false});
+        } catch (error) {
+          document.getElementById("buyerViewerStatus").textContent = error.message || "Не удалось отменить вход.";
         }
       }
 
@@ -3638,6 +3698,17 @@
       });
       Array.from(document.querySelectorAll("[data-source-recover]")).forEach((button) => {
         button.addEventListener("click", () => startRecovery(button.dataset.sourceRecover || ""));
+      });
+      document.getElementById("buyerViewerClose").addEventListener("click", () => document.getElementById("buyerViewerDialog").close());
+      document.getElementById("buyerViewerCancel").addEventListener("click", cancelBuyerRecovery);
+      document.getElementById("buyerViewerReconnect").addEventListener("click", () => {
+        const frame = document.getElementById("buyerViewerFrame");
+        if (frame.src) frame.src = frame.src;
+      });
+      document.getElementById("buyerViewerDialog").addEventListener("close", () => {
+        const frame = document.getElementById("buyerViewerFrame");
+        frame.hidden = true;
+        frame.removeAttribute("src");
       });
       autoUpdatesMasterButton.addEventListener("click", updateAutoUpdatesMaster);
       document.addEventListener("click", () => closeAccessPickers());
