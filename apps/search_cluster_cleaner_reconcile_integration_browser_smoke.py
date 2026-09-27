@@ -26,6 +26,8 @@ def main():
         expect(page.locator('[data-kc-reviews]')).to_contain_text(LEGACY_QUERY)
         expect(page.locator('[data-kc-reviews]')).to_contain_text('Старый вопрос владельцу')
         assert fake.writes==[]
+        with fixture.cleaner.store.read() as db:
+            assert db.execute('SELECT reason FROM cleaner_target_holds WHERE target=?',('11:101',)).fetchone()[0]=='external_state_drift'
         page.locator('[data-kc-batch-open]').click()
         expect(page.locator('[data-kc-batch-count]')).to_contain_text('Выбрано доступных пар: 1',timeout=12000)
         expect(page.locator('[data-kc-batch-start]')).to_be_enabled()
@@ -39,6 +41,9 @@ def main():
             print('UI_MESSAGE',page.locator('[data-kc-message]').inner_text(),flush=True)
             raise
         assert len(fake.writes)==1,fake.writes
+        with fixture.cleaner.store.read() as db:
+            assert not db.execute('SELECT 1 FROM cleaner_target_holds WHERE target=?',('11:101',)).fetchone()
+            assert db.execute("SELECT 1 FROM cleaner_events WHERE kind='external_drift_reconciled'").fetchone()
         assert 'OLD' not in fake.targets[11]['minus'],fake.targets[11]['minus']
         assert 'стекло iphone 15 pro max' in fake.targets[11]['minus'],fake.targets[11]['minus']
         expect(card).to_contain_text('обработано: 1')

@@ -82,6 +82,10 @@ def running_integration_fixture(port=0):
                 assert old is not None
                 service._review(db,dict(old),'Старый вопрос владельцу')
                 service._sync_reviews(db)
+                # Production regression: an old drift hold must not prevent
+                # the owner UI from starting the scan that can reconcile it.
+                db.execute('INSERT INTO cleaner_target_holds VALUES(?,?,?,?)',
+                           (service.key,target.key,'external_state_drift',clock()))
             assert service.reviews(owner)['items']
             source=CleanerWbSource(account=service.account,runtime=OfficialApiRuntimeConfig('synthetic',wb_url,2),fixture=True,
                                    clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))

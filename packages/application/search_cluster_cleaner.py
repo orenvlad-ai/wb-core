@@ -378,7 +378,8 @@ class KeywordCleaner:
             s=self._settings(c)
             if s['enabled'] or not s['baseline_ready']:
                 raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
-            if c.execute("SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone():
+            held=c.execute("SELECT reason FROM cleaner_target_holds WHERE account=? AND target=?",(self.key,target.key)).fetchone()
+            if held and held['reason']!='external_state_drift':
                 raise CleanerError('target_held','Чистка этой кампании приостановлена до разбора',409)
             latest_batch=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence DESC LIMIT 1",(self.key,)).fetchone()
             if latest_batch:

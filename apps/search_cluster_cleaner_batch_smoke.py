@@ -129,7 +129,28 @@ def incomplete_scan_does_not_abort_other_pair():
         assert final['not_started_count']==0,final
 
 
+def drift_scan_admission():
+    with Sandbox() as box:
+        preview=box.execute('preview')
+        box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        service=ready_service(box);owner=Principal('owner',True,True,True)
+        targets=[Target(i,101,contract_verified=True) for i in (11,12)]
+        admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
+        with service.store.transaction() as db:
+            for target,reason in zip(targets,('external_state_drift','technical_uncertainty')):
+                db.execute('INSERT INTO cleaner_target_holds VALUES(?,?,?,?)',(service.key,target.key,reason,service.clock()))
+        rows=eligibility_rows(service,'monolith',targets,fixture_admission=admitted)
+        assert rows[0]['eligible'] and not rows[1]['eligible'] and rows[1]['reason']=='target_held',rows
+        rejects(lambda:service.start_manual_clean(dict(request_id='held-technical-start',advert_id=12,nm_id=101),owner),'target_held')
+        job=service.start_manual_clean(dict(request_id='held-drift-rescan',advert_id=11,nm_id=101),owner)
+        assert job['run_id']
+        with service.store.read() as db:
+            assert db.execute('SELECT count(*) FROM cleaner_target_holds').fetchone()[0]==2
+            assert db.execute('SELECT count(*) FROM cleaner_write_operations').fetchone()[0]==0
+
+
 def main():
+    drift_scan_admission()
     technical_deferred_path()
     incomplete_scan_does_not_abort_other_pair()
     # The count endpoint can include completed campaigns omitted by the detail
