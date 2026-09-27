@@ -237,12 +237,10 @@ def main() -> None:
             if server.calls.get(("POST", DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH), 0) != 1:
                 raise AssertionError("Seller check must include one exact supply/cost route probe")
 
-            page.locator('[data-source-check="buyer"]').click()
-            page.wait_for_function(
-                "() => document.querySelector('#buyerSourceError')?.innerText !== 'Проверяем точный маршрут...'"
-            )
-            if server.calls.get(("GET", DEFAULT_WB_BUYER_SESSION_CHECK_PATH), 0) != 1:
-                raise AssertionError("Buyer check must use the authenticated SPP capability route")
+            if not page.locator('[data-source-check="buyer"]').is_disabled():
+                raise AssertionError("Buyer price check must stay disabled during Chrome auth-only rollout")
+            if server.calls.get(("GET", DEFAULT_WB_BUYER_SESSION_CHECK_PATH), 0):
+                raise AssertionError("Settings must not probe the legacy Buyer price profile")
             page.locator('[data-source-check="public"]').click()
             page.wait_for_function(
                 "() => document.querySelector('#publicSourceError')?.innerText !== 'Проверяем точный маршрут...'"

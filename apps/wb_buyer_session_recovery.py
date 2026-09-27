@@ -151,6 +151,10 @@ def main() -> None:
 def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False, viewer_owner: str = "", viewer_expires_at: int | None = None) -> dict[str, Any]:
     _ensure_state_dir(config)
     with _recovery_start_lock(config):
+        from apps import wb_buyer_chrome_auth as chrome_auth
+
+        if chrome_auth.raw_status().get("running"):
+            raise RuntimeError("buyer viewer already in use by Chrome login")
         current = read_recovery_status(config, with_probe=False)
         if current.get("running"):
             if not replace:

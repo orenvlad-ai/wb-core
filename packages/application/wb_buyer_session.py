@@ -30,6 +30,8 @@ BUYER_STATUS_LABELS = {
     "timeout": "Время истекло",
     "error": "Ошибка",
     "idle": "Не запускалась",
+    "stopping": "Завершаем вход",
+    "authenticated_surface": "Вход подтверждён",
 }
 
 SAFE_BUYER_REASONS = {
@@ -90,6 +92,15 @@ SAFE_BUYER_REASONS = {
     "buyer_login_surface_unrecognized",
     "buyer_storage_state_missing",
     "buyer_visual_session_starting",
+    "buyer_chrome_starting",
+    "buyer_chrome_start_failed",
+    "buyer_chrome_login_window_ready",
+    "buyer_chrome_restarting",
+    "buyer_chrome_login_confirmed",
+    "buyer_chrome_stopping",
+    "buyer_chrome_unexpected_exit",
+    "buyer_chrome_runtime_error",
+    "buyer_chrome_storage_reserve",
     "invalid_nm_id",
     "network_primary_price_missing",
     "product_payload_missing",
@@ -298,6 +309,31 @@ class WbBuyerSessionRecoveryController:
         )
 
 
+class WbBuyerChromeAuthController:
+    """The site login uses the dedicated Chrome profile and never probes price."""
+
+    @staticmethod
+    def _tool() -> Any:
+        return importlib.import_module("apps.wb_buyer_chrome_auth")
+
+    def read_status(self, *, launcher_download_path: str, run_id: str | None = None, with_probe: bool = False) -> dict[str, Any]:
+        del with_probe
+        return _public_recovery_payload(self._tool().raw_status(requested_run_id=run_id), launcher_download_path=launcher_download_path)
+
+    def start(self, *, replace: bool, launcher_download_path: str, viewer_owner: str = "", viewer_expires_at: int | None = None) -> dict[str, Any]:
+        return _public_recovery_payload(
+            self._tool().start(replace=replace, viewer_owner=viewer_owner, viewer_expires_at=viewer_expires_at),
+            launcher_download_path=launcher_download_path,
+        )
+
+    def stop(self, *, launcher_download_path: str, run_id: str | None = None) -> dict[str, Any]:
+        return _public_recovery_payload(self._tool().stop(requested_run_id=run_id), launcher_download_path=launcher_download_path)
+
+    def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
+        del public_status_url, public_operator_url
+        raise RuntimeError("buyer browser is opened inside the site")
+
+
 def _public_session_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
     status = str(raw.get("status") or "probe_error")
     return {
@@ -368,6 +404,7 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
         "finished_at": str(raw.get("finished_at") or ""),
         "deadline_at": str(raw.get("deadline_at") or ""),
         "reason": _safe_reason(raw.get("reason") or raw.get("message")),
+        "login_confirmed": bool(raw.get("login_confirmed")),
         "stage": status,
         "human_action_required": status == "awaiting_human",
         "human_action": _human_action(_safe_reason(raw.get("reason") or raw.get("message"))) if status == "awaiting_human" else "",
@@ -381,6 +418,7 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
             "checked_at": str(session.get("checked_at") or ""),
             "session_fingerprint": _safe_fingerprint(session.get("session_fingerprint")),
             "account_confirmed": bool(session.get("account_confirmed")),
+            "login_confirmed": bool(session.get("login_confirmed")),
         },
         "price": {
             "status": str(price.get("status") or "not_checked")[:80],

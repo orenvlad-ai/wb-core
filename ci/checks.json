@@ -48,6 +48,7 @@
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
         "apps/sku_inventory_balance_browser_smoke.py",
+        "apps/wb_buyer_chrome_auth_smoke.py",
         "apps/search_cluster_cleaner_browser_smoke.py"
       ],
       "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
@@ -639,6 +640,9 @@
     },
     "wb_buyer_viewer": {
       "patterns": [
+        "apps/wb_buyer_chrome_auth.py",
+        "apps/wb_buyer_chrome_runtime.py",
+        "apps/wb_buyer_chrome_auth_smoke.py",
         "apps/wb_buyer_session_recovery.py",
         "apps/wb_buyer_viewer_auth_smoke.py",
         "apps/wb_buyer_viewer_ui_smoke.py",
@@ -652,6 +656,7 @@
         "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json"
       ],
       "commands": [
+        ["python3", "apps/wb_buyer_chrome_auth_smoke.py"],
         ["python3", "apps/wb_buyer_session_smoke.py"],
         ["python3", "apps/wb_buyer_viewer_auth_smoke.py"],
         ["python3", "apps/sheet_vitrina_v1_settings_sources_sessions_smoke.py"],

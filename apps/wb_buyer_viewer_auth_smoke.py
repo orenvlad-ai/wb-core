@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from apps import wb_buyer_session_recovery as recovery  # noqa: E402
+from apps import wb_buyer_chrome_auth as chrome_auth  # noqa: E402
 from apps.registry_upload_http_entrypoint_live import start_buyer_login_contour  # noqa: E402
 from packages.adapters import registry_upload_http_entrypoint as http  # noqa: E402
 from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint  # noqa: E402
@@ -95,21 +95,30 @@ def main() -> None:
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             old_status = http._buyer_viewer_raw_status
-            old_stop = recovery.stop_recovery
+            old_stop = entrypoint.handle_wb_buyer_session_recovery_stop_request
             old_start = entrypoint.handle_wb_buyer_session_recovery_start_request
-            run_id = "buyer-recovery-20260927T120000Z-aabbccdd"
+            run_id = "buyer-recovery-chrome-20260927T120000Z-aabbccdd"
+            durable_profile = Path(temp) / "durable-wb-profile"
+            durable_profile.mkdir()
+            (durable_profile / "Local State").write_text("fixture")
+            stop_calls: list[str] = []
             status = {
                 "run_id": run_id, "status": "awaiting_human", "running": True,
                 "deadline_at": (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat(),
                 "viewer_owner": "",
             }
             http._buyer_viewer_raw_status = lambda: dict(status)
-            def fake_stop(_config, *, requested_run_id=None, **_kwargs):
-                if requested_run_id and requested_run_id != run_id:
+            def fake_stop(*, run_id: str | None = None, **_kwargs):
+                if run_id and run_id != status["run_id"]:
                     return {**status, "status": "error", "reason": "buyer_recovery_run_not_current"}
-                status.update(status="stopped", running=False)
+                if status["status"] == "completed":
+                    return dict(status)
+                stop_calls.append(str(run_id or ""))
+                status.update(status="stopping", running=True)
                 return dict(status)
-            recovery.stop_recovery = fake_stop
+            entrypoint.handle_wb_buyer_session_recovery_stop_request = fake_stop
+            old_chrome_stop = chrome_auth.stop
+            chrome_auth.stop = lambda *, requested_run_id=None: fake_stop(run_id=requested_run_id)
             entrypoint.handle_wb_buyer_session_recovery_start_request = lambda **_kwargs: {"run_id": run_id, "status": "awaiting_human", "running": True}
             try:
                 auth_url = buyer_base + http.DEFAULT_WB_BUYER_VIEWER_AUTH_PATH
@@ -202,6 +211,15 @@ def main() -> None:
                         readback_cookie = response.headers.get("Set-Cookie", "")
                     if not readback.get("viewer_available") or http.WB_BUYER_VIEWER_COOKIE_NAME not in readback_cookie:
                         raise AssertionError("owned status readback must restore viewer cookie during slow business request")
+                    stale_request = request.Request(
+                        buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH + "?probe=false&run_id=old-run",
+                        headers={**public_host, **cookies},
+                    )
+                    with request.urlopen(stale_request, timeout=5) as response:
+                        stale = json.loads(response.read())
+                        stale_cookie = response.headers.get("Set-Cookie", "")
+                    if stale.get("viewer_available") or stale_cookie:
+                        raise AssertionError("stale status query must not receive current run cookie")
                     expect(200, {}, "viewer auth during slow business request")
                     if _post(start_url, start_headers)[0] != 200:
                         raise AssertionError("buyer start must bypass slow business request")
@@ -233,10 +251,26 @@ def main() -> None:
                 logout = request.Request(base + "/logout", headers={"Cookie": cookies["Cookie"]})
                 with opener.open(logout, timeout=5) as response:
                     response.read()
+                if stop_calls != [run_id] or not (durable_profile / "Local State").is_file():
+                    raise AssertionError("WebCore logout must revoke only the login viewer, not WB profile")
                 expect(403, {}, "logout revokes active run")
+                # A completed auth result can coexist briefly with an active
+                # unit while its main process exits. Logout must still work.
+                with opener.open(login, timeout=5) as response:
+                    response.read()
+                second_session = next(cookie.value for cookie in jar if cookie.name == http.WEB_AUTH_COOKIE_NAME)
+                status.update(status="completed", running=True, login_confirmed=True,
+                    viewer_owner=hashlib.sha256(second_session.encode()).hexdigest())
+                completed_cookies = {"Cookie": f"{http.WEB_AUTH_COOKIE_NAME}={second_session}; {http.WB_BUYER_VIEWER_COOKIE_NAME}={run_id}"}
+                with opener.open(request.Request(base + "/logout", headers=completed_cookies), timeout=5) as response:
+                    response.read()
+                if status["status"] != "completed" or stop_calls != [run_id] or not (durable_profile / "Local State").is_file():
+                    raise AssertionError("logout after completed proof changed WB login or stopped another run")
+                expect(403, completed_cookies, "completed run never reopens viewer")
             finally:
                 http._buyer_viewer_raw_status = old_status
-                recovery.stop_recovery = old_stop
+                entrypoint.handle_wb_buyer_session_recovery_stop_request = old_stop
+                chrome_auth.stop = old_chrome_stop
                 entrypoint.handle_wb_buyer_session_recovery_start_request = old_start
                 buyer_server.shutdown()
                 buyer_server.server_close()

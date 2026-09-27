@@ -207,6 +207,7 @@
     .recovery-step.is-active { border-color: var(--warning); color: var(--warning); background: rgba(250, 204, 21, .08); }
     .recovery-step.is-done { border-color: var(--success); color: var(--success); background: rgba(52, 211, 153, .08); }
     .source-error { min-height: 18px; margin: 0; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+    .source-error.buyer-auth-note { color: var(--muted); }
     .buyer-viewer-dialog { width: min(96vw, 1600px); max-width: none; max-height: 96vh; padding: 16px; border: 1px solid var(--border); border-radius: 10px; color: var(--text); background: var(--panel); }
     .buyer-viewer-dialog::backdrop { background: rgba(0, 0, 0, .78); }
     .buyer-viewer-dialog iframe { display: block; width: 100%; height: min(76vh, 900px); margin-top: 12px; border: 1px solid var(--border); background: #fff; }
@@ -589,10 +590,10 @@
             <p id="sellerSourceError" class="source-error"></p>
           </article>
           <article id="buyerSourceCard" class="source-card" data-source-card="buyer">
-            <div class="source-card-header"><div><h3>WB Buyer</h3><p class="source-card-copy">Аккаунт покупателя для проверки цены и СПП.</p></div><span id="buyerSourceBadge" class="pill warning">Неизвестно</span></div>
+            <div class="source-card-header"><div><h3>WB Buyer</h3><p class="source-card-copy">Вход в аккаунт покупателя Wildberries.</p></div><span id="buyerSourceBadge" class="pill warning">Неизвестно</span></div>
             <dl id="buyerSourceHealth" class="source-health"></dl>
             <div id="buyerRecoverySteps" class="recovery-steps"></div>
-            <div class="compact-actions"><button type="button" data-source-check="buyer">Проверить цену</button><button class="primary" type="button" data-source-recover="buyer">Войти в Wildberries</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
+            <div class="compact-actions"><button type="button" data-source-check="buyer" disabled title="Проверка цены пока недоступна для нового входа">Проверить цену</button><button class="primary" type="button" data-source-recover="buyer">Войти в Wildberries</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
             <p id="buyerSourceError" class="source-error"></p>
           </article>
           <article id="publicSourceCard" class="source-card" data-source-card="public">
@@ -1232,13 +1233,13 @@
           if (dialog.open) {
             document.getElementById("buyerViewerStatus").textContent = viewerReady
               ? (recovery.human_action || "Завершите вход на странице Wildberries.")
-              : recovery && recovery.running ? "Проверяем аккаунт и контрольную цену…" : "Вход завершён.";
+              : recovery && recovery.running ? "Проверяем сохранение входа…" : "Вход завершён.";
             document.getElementById("buyerViewerReconnect").hidden = !viewerReady;
             if (viewerReady && frame.hidden) {
               const runId = encodeURIComponent(String(recovery.run_id || ""));
               // noVNC prepends '/' when it builds the WebSocket URL.
               const websocketPath = (route.viewer + "websockify?run_id=" + runId).replace(/^\/+/, "");
-              frame.src = route.viewer + "vnc.html?run_id=" + runId + "&autoconnect=1&resize=remote&reconnect=1&path=" + encodeURIComponent(websocketPath);
+              frame.src = route.viewer + "vnc.html?run_id=" + runId + "&autoconnect=1&resize=scale&reconnect=1&path=" + encodeURIComponent(websocketPath);
               frame.hidden = false;
             } else if (!viewerReady) {
               frame.hidden = true;
@@ -1275,25 +1276,21 @@
         if (!buyerViewerStarting && !(buyerDialog.open && buyerViewerRunId && buyerAuth.run_id !== buyerViewerRunId)) {
         const buyerSession = buyerAuth.session || {};
         const buyerCapability = buyer.capability || {};
-        const buyerAuthOk = !buyerAuth.running && ((buyerSession.status === "valid" && buyerSession.account_confirmed === true)
-          || (buyerCapability.session_valid === true && buyerCapability.account_confirmed === true));
-        const buyerHealthy = buyerAuthOk && buyerCapability.valid === true;
-        const buyerFingerprint = String(buyerSession.session_fingerprint || buyerCapability.session_fingerprint || "");
-        setSourceBadge("buyer", buyerAuth.running ? "Вход выполняется" : buyerHealthy ? "Готов к сбору цен" : buyerAuthOk ? "Вход выполнен · цена недоступна" : buyerAuth.status === "stopped" ? "Вход отменён" : "Нужен вход", buyerHealthy ? "success" : buyerAuth.running || buyerAuthOk || buyerAuth.status === "stopped" ? "warning" : "danger");
+        const buyerLoginConfirmed = !buyerAuth.running && buyerAuth.login_confirmed === true && buyerSession.login_confirmed === true;
+        setSourceBadge("buyer", buyerAuth.running ? "Вход выполняется" : buyerLoginConfirmed ? "Вход подтверждён" : buyerAuth.status === "stopped" ? "Вход отменён" : "Нужен вход", buyerLoginConfirmed ? "success" : buyerAuth.running || buyerAuth.status === "stopped" ? "warning" : "danger");
         renderHealthRows("buyerSourceHealth", [
-          ["Авторизация", buyerAuth.running ? (buyerAuth.status === "awaiting_human" ? "Ждём подтверждение" : "Проверяем") : buyerAuthOk ? "Вход выполнен" : "Требуется вход"],
-          ["Аккаунт", buyerAuthOk ? "Подтверждён" + (buyerFingerprint ? " · " + buyerFingerprint.slice(0, 12) : "") : "Не подтверждён"],
-          ["Контрольная цена", buyerAuth.running ? "Проверим после входа" : buyerCapability.valid ? (buyerCapability.authenticated_buyer_price == null ? "Получена" : String(buyerCapability.authenticated_buyer_price) + " ₽") : buyerAuthOk ? "Недоступна" : "Не проверена"],
-          ["Последняя проверка", formatSourceTime(buyerCapability.checked_at || buyerSession.checked_at)],
-          ["Сборщики", (buyer.collectors || []).join(", ")]
+          ["Авторизация", buyerAuth.running ? (buyerAuth.status === "awaiting_human" ? "Ждём вход" : "Проверяем") : buyerLoginConfirmed ? "Вход подтверждён" : "Требуется вход"],
+          ["Контрольная цена", "Не проверена"],
+          ["Последняя проверка", formatSourceTime(buyerSession.checked_at)]
         ]);
         document.getElementById("buyerSourceError").textContent = buyerAuth.running
           ? (buyerAuth.human_action || "Вход выполняется. Откройте окно Wildberries для продолжения.")
           : buyerAuth.status === "stopped" ? "Вход отменён. Вы можете начать заново."
           : buyerAuth.status === "timeout" ? "Время входа истекло. Повторите попытку."
           : buyerAuth.status === "error" ? "Не удалось завершить вход. Повторите попытку."
-          : buyerAuthOk && !buyerCapability.valid ? "Аккаунт подтверждён. Контрольную цену можно проверить повторно без SMS."
+          : buyerLoginConfirmed ? "Вход сохранён. Аккаунт для сбора цен ещё не проверен."
           : "";
+        document.getElementById("buyerSourceError").classList.toggle("buyer-auth-note", buyerLoginConfirmed);
         renderRecoverySteps("buyer", buyerAuth);
         }
 
@@ -1405,28 +1402,25 @@
         const session = (recovery || {}).session || {};
         const price = (recovery || {}).price || {};
         const running = Boolean(recovery && recovery.running);
-        const sessionValid = session.valid === true && session.account_confirmed === true;
-        const priceValid = price.status === "ok";
+        const loginConfirmed = recovery.login_confirmed === true && session.login_confirmed === true;
         const label = running ? "Вход выполняется"
           : status === "stopped" ? "Вход отменён"
-          : status === "completed" && sessionValid && priceValid ? "Готов к сбору цен"
-          : status === "completed" && sessionValid ? "Вход выполнен · цена недоступна"
+          : status === "completed" && loginConfirmed ? "Вход подтверждён"
           : "Вход не завершён";
-        setSourceBadge("buyer", label, sessionValid && priceValid ? "success" : "warning");
+        setSourceBadge("buyer", label, loginConfirmed ? "success" : "warning");
         renderHealthRows("buyerSourceHealth", [
-          ["Авторизация", running ? (status === "awaiting_human" ? "Ждём подтверждение" : "Проверяем") : sessionValid ? "Вход выполнен" : "Требуется вход"],
-          ["Аккаунт", sessionValid ? "Подтверждён" : "Не подтверждён"],
-          ["Контрольная цена", running ? "Проверим после входа" : priceValid ? (price.authenticated_buyer_price == null ? "Получена" : String(price.authenticated_buyer_price) + " ₽") : sessionValid ? "Недоступна" : "Не проверена"],
-          ["Последняя проверка", formatSourceTime(price.measured_at || session.checked_at)],
-          ["Сборщики", "Проверка СПП: аутентифицированная цена покупателя"]
+          ["Авторизация", running ? (status === "awaiting_human" ? "Ждём вход" : "Проверяем") : loginConfirmed ? "Вход подтверждён" : "Требуется вход"],
+          ["Контрольная цена", "Не проверена"],
+          ["Последняя проверка", formatSourceTime(session.checked_at)]
         ]);
         document.getElementById("buyerSourceError").textContent = running
           ? (recovery.human_action || "Вход выполняется. Откройте окно Wildberries для продолжения.")
           : status === "stopped" ? "Вход отменён. Вы можете начать заново."
           : status === "timeout" ? "Время входа истекло. Повторите попытку."
-          : status === "completed" && sessionValid && !priceValid ? "Аккаунт подтверждён. Контрольную цену можно проверить повторно без SMS."
+          : status === "completed" && loginConfirmed ? "Вход сохранён. Аккаунт для сбора цен ещё не проверен."
           : status === "error" ? "Не удалось завершить вход. Повторите попытку."
           : "";
+        document.getElementById("buyerSourceError").classList.toggle("buyer-auth-note", loginConfirmed);
       }
 
       async function startRecovery(source) {
