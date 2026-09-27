@@ -136,8 +136,9 @@ class Fixture:
             "status": self.status, "running": running, "run_is_final": self.status in {"completed", "stopped"},
             "viewer_available": running,
             "human_action": "Введите SMS-код на странице Wildberries." if running else "",
-            "session": {"status": "valid" if self.status == "completed" else "missing", "valid": self.status == "completed", "account_confirmed": self.status == "completed", "checked_at": now},
-            "price": {"status": "ok" if self.price_ok else "price_missing"},
+            "login_confirmed": self.status == "completed",
+            "session": {"status": "authenticated_surface" if self.status == "completed" else "missing", "valid": False, "account_confirmed": False, "login_confirmed": self.status == "completed", "checked_at": now},
+            "price": {"status": "not_checked"},
         }
 
     def __enter__(self):
@@ -250,14 +251,13 @@ def main() -> None:
             raise AssertionError("old terminal summary closed the new run dialog")
         fixture.status = "completed"
         fixture.price_ok = False
-        page.wait_for_function("() => document.querySelector('#buyerSourceBadge')?.innerText.includes('цена недоступна')", timeout=10000)
-        if "без SMS" not in page.locator("#buyerSourceError").inner_text():
-            raise AssertionError("missing price must not request login again")
+        page.wait_for_function("() => document.querySelector('#buyerSourceBadge')?.innerText === 'Вход подтверждён'", timeout=10000)
+        if "Не проверена" not in page.locator("#buyerSourceHealth").inner_text() or not page.locator('[data-source-check="buyer"]').is_disabled():
+            raise AssertionError("confirmed login must not imply a price capability")
         page.locator('[data-source-recover="buyer"]').click()
         page.wait_for_function("() => document.querySelector('#buyerViewerDialog').open")
         fixture.status = "completed"
-        fixture.price_ok = True
-        page.wait_for_function("() => document.querySelector('#buyerSourceBadge')?.innerText === 'Готов к сбору цен'", timeout=10000)
+        page.wait_for_function("() => document.querySelector('#buyerSourceBadge')?.innerText === 'Вход подтверждён'", timeout=10000)
         page.screenshot(path=str(output / "buyer-ready-card.png"), full_page=True)
         if errors:
             raise AssertionError(f"browser JavaScript errors: {errors}")

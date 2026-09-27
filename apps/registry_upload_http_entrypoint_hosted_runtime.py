@@ -1062,6 +1062,7 @@ def deploy_current_checkout(
     seller_owner_venv_command = _build_seller_portal_owner_runtime_venv_command(target)
     seller_owner_contract_command = _build_seller_portal_owner_runtime_contract_command(target)
     seller_recovery_playwright_browser_command = _build_seller_portal_recovery_playwright_browser_command(target)
+    buyer_chrome_install_command = _build_buyer_chrome_install_command(target)
     autoanswers_os_dependencies_command = _build_autoanswers_os_dependencies_command(target)
     autoanswers_node_dependencies_command = _build_autoanswers_node_dependencies_command(target)
     autoanswers_prepare_capacity_command = _build_autoanswers_prepare_capacity_command(target)
@@ -1097,6 +1098,7 @@ def deploy_current_checkout(
             "seller_portal_owner_runtime_venv": seller_owner_venv_command,
             "seller_portal_owner_runtime_contract": seller_owner_contract_command,
             "seller_portal_recovery_playwright_browser": seller_recovery_playwright_browser_command,
+            "buyer_chrome_install": buyer_chrome_install_command,
             "autoanswers_os_dependencies": autoanswers_os_dependencies_command,
             "autoanswers_node_dependencies": autoanswers_node_dependencies_command,
             "autoanswers_prepare_capacity": autoanswers_prepare_capacity_command,
@@ -1207,6 +1209,7 @@ def deploy_current_checkout(
     run_stage("dependencies", seller_owner_venv_command)
     run_stage("dependencies", seller_owner_contract_command)
     run_stage("dependencies", seller_recovery_playwright_browser_command)
+    run_stage("dependencies", buyer_chrome_install_command)
     run_stage("dependencies", autoanswers_os_dependencies_command)
     run_stage("dependencies", autoanswers_node_dependencies_command)
     run_stage(
@@ -1474,6 +1477,15 @@ def _build_runtime_pip_install_command(target: HostedRuntimeTarget) -> list[str]
     python_check = "python3 -c 'import apsw, openpyxl, xlrd, playwright, pypdf, reportlab' >/dev/null 2>&1"
     pip_install = f"python3 -m pip install --break-system-packages {package_names}"
     command = f"{python_check} || {pip_install}"
+    return _remote_shell_command(target, command)
+
+
+def _build_buyer_chrome_install_command(target: HostedRuntimeTarget) -> list[str]:
+    """Install only the pinned browser dependency before HTTP activation."""
+    command = (
+        f"cd {shlex.quote(target.target_dir)} && "
+        "python3 apps/wb_buyer_chrome_runtime.py"
+    )
     return _remote_shell_command(target, command)
 
 

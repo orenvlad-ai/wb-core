@@ -58,7 +58,7 @@ from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsBlock
 from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
-from packages.application.wb_buyer_session import WbBuyerSessionBlock, WbBuyerSessionRecoveryController
+from packages.application.wb_buyer_session import WbBuyerChromeAuthController, WbBuyerSessionBlock, WbBuyerSessionRecoveryController
 from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
@@ -1040,7 +1040,7 @@ class RegistryUploadHttpEntrypoint:
         prices_block: WbPricesManagementBlock | None = None,
         spp_tester_block: WbSppTesterBlock | None = None,
         buyer_session_block: WbBuyerSessionBlock | None = None,
-        buyer_session_recovery_controller: WbBuyerSessionRecoveryController | None = None,
+        buyer_session_recovery_controller: WbBuyerSessionRecoveryController | WbBuyerChromeAuthController | None = None,
         sku_management_block: SkuManagementBlock | None = None,
         sku_inventory_balance_block: SkuInventoryBalanceBlock | None = None,
         change_registry_read_surface: ChangeRegistryReadSurface | None = None,
@@ -1182,7 +1182,7 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.seller_portal_recovery = seller_portal_recovery_controller or SellerPortalRecoveryController()
-        self.buyer_session_recovery = buyer_session_recovery_controller or WbBuyerSessionRecoveryController()
+        self.buyer_session_recovery = buyer_session_recovery_controller or WbBuyerChromeAuthController()
         self.factory_order_supply_block = FactoryOrderSupplyBlock(
             runtime=self.runtime,
             now_factory=self.now_factory,
@@ -3511,6 +3511,7 @@ class RegistryUploadHttpEntrypoint:
         buyer_capability = self.runtime.load_source_health_status(
             "wb_buyer_spp_capability"
         ) or {}
+        chrome_auth_mode = isinstance(getattr(self, "buyer_session_recovery", None), WbBuyerChromeAuthController)
         # A completed recovery contains the fresh account and price evidence from
         # its own persistent Chromium operation. Cached pre-recovery failures are stale.
         recovery_finished = str(buyer.get("finished_at") or "")
@@ -3526,7 +3527,7 @@ class RegistryUploadHttpEntrypoint:
                 "checked_at": str(buyer.get("started_at") or ""),
                 "reason": "buyer_recovery_in_progress",
             }
-        elif buyer.get("status") == "completed" and (buyer.get("session") or {}).get("valid") and not cached_is_newer:
+        elif not chrome_auth_mode and buyer.get("status") == "completed" and (buyer.get("session") or {}).get("valid") and not cached_is_newer:
             price = buyer.get("price") or {}
             buyer_capability = {
                 "status": "available" if price.get("status") == "ok" else "price_unavailable",
@@ -3539,7 +3540,7 @@ class RegistryUploadHttpEntrypoint:
                 "validation_nm_id": price.get("nm_id"),
                 "authenticated_buyer_price": price.get("authenticated_buyer_price"),
             }
-        elif cached_is_newer and buyer.get("status") == "completed":
+        elif not chrome_auth_mode and cached_is_newer and buyer.get("status") == "completed":
             session_status = str(buyer_capability.get("session_status") or "probe_error")
             buyer = {
                 **buyer,
@@ -3551,6 +3552,15 @@ class RegistryUploadHttpEntrypoint:
                     "account_confirmed": bool(buyer_capability.get("account_confirmed")),
                     "checked_at": cached_checked,
                 },
+            }
+        if chrome_auth_mode:
+            # The established Chrome login proves only account-page access.
+            # An old Playwright price cache belongs to another profile and
+            # cannot imply a fresh price or a matched account identity here.
+            buyer_capability = {
+                "status": "not_checked", "valid": False,
+                "session_valid": False, "account_confirmed": False,
+                "checked_at": "", "reason": "",
             }
         latest_outcome: dict[str, Any] = {}
         refreshed_at = ""

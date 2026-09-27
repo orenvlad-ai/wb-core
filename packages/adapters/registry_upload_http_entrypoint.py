@@ -2081,6 +2081,9 @@ def _build_handler(
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
+                except _buyer_chrome_busy_error():
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "buyer browser is already in use"})
+                    return
                 except Exception:
                     _write_json_response(
                         self,
@@ -3712,7 +3715,12 @@ def _build_handler(
                     )
                     return
                 current_run_id = str(payload.get("run_id") or "")
-                viewer_available = bool(current_run_id and payload.get("running") and _buyer_viewer_run_matches(self, current_run_id))
+                viewer_available = bool(
+                    current_run_id and payload.get("running")
+                    and (not run_id or run_id == current_run_id)
+                    and payload.get("reason") != "buyer_recovery_run_not_current"
+                    and _buyer_viewer_run_matches(self, current_run_id)
+                )
                 payload = {**payload, "viewer_available": viewer_available}
                 extra_headers = {"Set-Cookie": _buyer_viewer_run_cookie(self, current_run_id)} if viewer_available else {}
                 _write_json_response(self, HTTPStatus.OK, payload, extra_headers=extra_headers)
@@ -8477,10 +8485,20 @@ def _buyer_viewer_session_expiry(handler: BaseHTTPRequestHandler) -> int | None:
 
 
 def _buyer_viewer_raw_status() -> dict[str, Any]:
+    from apps import wb_buyer_chrome_auth as chrome_auth
     from apps import wb_buyer_session_recovery as recovery
 
-    config = recovery.load_recovery_config_from_env()
-    return recovery.read_recovery_status(config, with_probe=False)
+    chrome = chrome_auth.raw_status()
+    if chrome.get("running"):
+        return chrome
+    normal = recovery.read_recovery_status(recovery.load_recovery_config_from_env(), with_probe=False)
+    return normal if normal.get("running") else chrome if chrome.get("run_id") else normal
+
+
+def _buyer_chrome_busy_error() -> type[Exception]:
+    from apps.wb_buyer_chrome_auth import BuyerChromeBusyError
+
+    return BuyerChromeBusyError
 
 
 def _buyer_viewer_run_owned_by_other(handler: BaseHTTPRequestHandler) -> bool:
@@ -8539,7 +8557,9 @@ def _buyer_viewer_auth_allowed(handler: BaseHTTPRequestHandler) -> bool:
         if len(requested_run) != 1 or not hmac.compare_digest(requested_run[0], run_id):
             return False
     status = _buyer_viewer_raw_status()
-    if not run_id or not _buyer_viewer_run_matches(handler, run_id):
+    current_run = str(status.get("run_id") or "")
+    current_owner = str(status.get("viewer_owner") or "")
+    if not run_id or not current_run or not current_owner or not hmac.compare_digest(run_id, current_run) or not hmac.compare_digest(owner, current_owner):
         return False
     if not status.get("running") or status.get("status") != "awaiting_human":
         return False
@@ -8632,14 +8652,22 @@ def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
 
 
 def _handle_web_auth_logout(handler: BaseHTTPRequestHandler) -> None:
-    # Logout revokes an active viewer at the source by ending its owned run.
+    # WebCore logout revokes only this operator's live login viewer. The durable
+    # WB Chrome profile and any collector state remain untouched.
     try:
         status = _buyer_viewer_raw_status()
         owner = _buyer_viewer_owner(handler)
         if owner and status.get("running") and hmac.compare_digest(str(status.get("viewer_owner") or ""), owner):
-            from apps import wb_buyer_session_recovery as recovery
-            stopped = recovery.stop_recovery(recovery.load_recovery_config_from_env(), requested_run_id=str(status.get("run_id") or ""))
-            if stopped.get("running"):
+            run_id = str(status.get("run_id") or "")
+            if run_id.startswith("buyer-recovery-chrome-"):
+                from apps import wb_buyer_chrome_auth as chrome_auth
+                stopped = chrome_auth.stop(requested_run_id=run_id)
+            else:
+                from apps import wb_buyer_session_recovery as recovery
+                stopped = recovery.stop_recovery(recovery.load_recovery_config_from_env(), requested_run_id=run_id)
+            # Chrome stop is asynchronous: `stopping` already denies every
+            # viewer auth_request while its owned process group closes.
+            if stopped.get("running") and stopped.get("status") == "awaiting_human":
                 raise RuntimeError("buyer viewer did not stop")
     except Exception:
         _write_json_response(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "buyer viewer could not be revoked"})
