@@ -719,6 +719,10 @@
           status: config.wb_supplies_transit_cost_status_path
         }
       };
+      let buyerViewerStarting = false;
+      let buyerViewerRunId = "";
+      let buyerViewerStartPromise = null;
+      let buyerViewerCancelRequested = false;
       const vitrinaAutoSchedulesPath = config.auto_schedules_path;
       const vitrinaAutoSchedulesRunNowPath = config.auto_schedules_run_now_path;
       const sheetJobPath = config.job_path;
@@ -855,6 +859,7 @@
       let sourcesSessionsState = null;
       const sourceCheckPromises = new Map();
       const recoveryPollTimers = new Map();
+      const recoveryPollGenerations = new Map();
       let vitrinaScheduleState = {
         loading: false,
         saving: false,
@@ -1200,6 +1205,13 @@
       }
 
       function renderRecoverySteps(source, recovery) {
+        if (source === "buyer") {
+          // A slow sources response or earlier poll can arrive after the user
+          // opened a new run. Never close or replace that run's viewer.
+          if (buyerViewerStarting) return;
+          const dialog = document.getElementById("buyerViewerDialog");
+          if (dialog.open && buyerViewerRunId && (!recovery || recovery.run_id !== buyerViewerRunId)) return;
+        }
         const labels = source === "buyer" ? ["Проверка", "Автовход", "Вход вручную", "Сохранение и проверка", "Готово"] : ["Проверка", "Автовход", "Человек", "Валидация", "Готово"];
         const index = recoveryStepIndex(source, recovery && (recovery.run_status || recovery.status));
         document.getElementById(source + "RecoverySteps").innerHTML = labels.map((label, step) => {
@@ -1224,7 +1236,9 @@
             document.getElementById("buyerViewerReconnect").hidden = !viewerReady;
             if (viewerReady && frame.hidden) {
               const runId = encodeURIComponent(String(recovery.run_id || ""));
-              frame.src = route.viewer + "vnc.html?run_id=" + runId + "&autoconnect=1&resize=remote&reconnect=1&path=" + encodeURIComponent(route.viewer + "websockify?run_id=" + runId);
+              // noVNC prepends '/' when it builds the WebSocket URL.
+              const websocketPath = (route.viewer + "websockify?run_id=" + runId).replace(/^\/+/, "");
+              frame.src = route.viewer + "vnc.html?run_id=" + runId + "&autoconnect=1&resize=remote&reconnect=1&path=" + encodeURIComponent(websocketPath);
               frame.hidden = false;
             } else if (!viewerReady) {
               frame.hidden = true;
@@ -1257,6 +1271,8 @@
 
         const buyer = payload.wb_buyer || {};
         const buyerAuth = buyer.authorization || {};
+        const buyerDialog = document.getElementById("buyerViewerDialog");
+        if (!buyerViewerStarting && !(buyerDialog.open && buyerViewerRunId && buyerAuth.run_id !== buyerViewerRunId)) {
         const buyerSession = buyerAuth.session || {};
         const buyerCapability = buyer.capability || {};
         const buyerAuthOk = !buyerAuth.running && ((buyerSession.status === "valid" && buyerSession.account_confirmed === true)
@@ -1279,6 +1295,7 @@
           : buyerAuthOk && !buyerCapability.valid ? "Аккаунт подтверждён. Контрольную цену можно проверить повторно без SMS."
           : "";
         renderRecoverySteps("buyer", buyerAuth);
+        }
 
         const publicSource = payload.spp_proxy || {};
         const publicProbe = publicSource.latest_route_probe || {};
@@ -1364,15 +1381,14 @@
       async function refreshStaleSources(payload) {
         const ttl = Number(payload.refresh_ttl_seconds || 180);
         const sellerAuth = ((payload.seller_portal || {}).authorization || {});
-        const buyer = payload.wb_buyer || {};
         const publicSource = payload.spp_proxy || {};
         const coverage = (((payload.seller_portal || {}).transit_cost || {}).coverage || {});
         const sellerChecked = sourceTimestamp(sellerAuth.checked_at, (sellerAuth.current_storage_probe || {}).checked_at, sellerAuth.updated_at).text;
-        const buyerChecked = sourceTimestamp((buyer.capability || {}).checked_at, ((buyer.authorization || {}).session || {}).checked_at).text;
         const publicChecked = sourceTimestamp((publicSource.latest_route_probe || {}).checked_at, publicSource.latest_refresh_at).text;
         const transitChecked = sourceTimestamp(coverage.last_attempt_at, coverage.last_success_at).text;
         await Promise.all([
-          sourceIsStale(buyerChecked, ttl) ? checkSource("buyer") : Promise.resolve(),
+          // Buyer checks launch the persistent Chromium profile. Opening
+          // Settings must not compete with a human login for that profile.
           sourceIsStale(publicChecked, ttl) ? checkSource("public") : Promise.resolve(),
           (async () => {
             if (sourceIsStale(sellerChecked, ttl)) {
@@ -1384,55 +1400,147 @@
         ]);
       }
 
+      function renderBuyerRunCard(recovery) {
+        const status = String((recovery || {}).status || "");
+        const session = (recovery || {}).session || {};
+        const price = (recovery || {}).price || {};
+        const running = Boolean(recovery && recovery.running);
+        const sessionValid = session.valid === true && session.account_confirmed === true;
+        const priceValid = price.status === "ok";
+        const label = running ? "Вход выполняется"
+          : status === "stopped" ? "Вход отменён"
+          : status === "completed" && sessionValid && priceValid ? "Готов к сбору цен"
+          : status === "completed" && sessionValid ? "Вход выполнен · цена недоступна"
+          : "Вход не завершён";
+        setSourceBadge("buyer", label, sessionValid && priceValid ? "success" : "warning");
+        renderHealthRows("buyerSourceHealth", [
+          ["Авторизация", running ? (status === "awaiting_human" ? "Ждём подтверждение" : "Проверяем") : sessionValid ? "Вход выполнен" : "Требуется вход"],
+          ["Аккаунт", sessionValid ? "Подтверждён" : "Не подтверждён"],
+          ["Контрольная цена", running ? "Проверим после входа" : priceValid ? (price.authenticated_buyer_price == null ? "Получена" : String(price.authenticated_buyer_price) + " ₽") : sessionValid ? "Недоступна" : "Не проверена"],
+          ["Последняя проверка", formatSourceTime(price.measured_at || session.checked_at)],
+          ["Сборщики", "Проверка СПП: аутентифицированная цена покупателя"]
+        ]);
+        document.getElementById("buyerSourceError").textContent = running
+          ? (recovery.human_action || "Вход выполняется. Откройте окно Wildberries для продолжения.")
+          : status === "stopped" ? "Вход отменён. Вы можете начать заново."
+          : status === "timeout" ? "Время входа истекло. Повторите попытку."
+          : status === "completed" && sessionValid && !priceValid ? "Аккаунт подтверждён. Контрольную цену можно проверить повторно без SMS."
+          : status === "error" ? "Не удалось завершить вход. Повторите попытку."
+          : "";
+      }
+
       async function startRecovery(source) {
         const route = sourceRoutes[source] || {};
         if (!route.start) return;
         const errorTarget = document.getElementById(source + "SourceError");
         if (source === "buyer") {
           const dialog = document.getElementById("buyerViewerDialog");
+          buyerViewerStarting = true;
+          buyerViewerRunId = "";
+          buyerViewerCancelRequested = false;
           if (!dialog.open) dialog.showModal();
+          document.getElementById("buyerViewerStatus").textContent = "Открываем браузер…";
+          setSourceBadge("buyer", "Открываем вход", "warning");
         }
         try {
           const headers = {Accept: "application/json", "Content-Type": "application/json"};
           if (source === "buyer") headers["X-WB-Buyer-Viewer-CSRF"] = "1";
-          const payload = await fetchJson(route.start, {method: "POST", headers, body: JSON.stringify({replace: false})});
+          const request = fetchJson(route.start, {method: "POST", headers, body: JSON.stringify({replace: false})});
+          if (source === "buyer") {
+            buyerViewerStartPromise = request.then((result) => {
+              buyerViewerRunId = String(result.run_id || "");
+              return result;
+            });
+          }
+          const payload = await (source === "buyer" ? buyerViewerStartPromise : request);
+          if (source === "buyer") {
+            buyerViewerStarting = false;
+            if (buyerViewerCancelRequested) return;
+            renderBuyerRunCard(payload);
+          }
           renderRecoverySteps(source, payload);
-          scheduleRecoveryPoll(source, true);
-          await loadSourcesSessions({refreshStale: false});
+          scheduleRecoveryPoll(source, true, true);
         } catch (error) {
-          errorTarget.textContent = error.message || String(error);
-          if (source === "buyer") document.getElementById("buyerViewerStatus").textContent = error.message || "Не удалось открыть вход.";
+          if (source !== "buyer") {
+            errorTarget.textContent = error.message || String(error);
+            return;
+          }
+          if (buyerViewerCancelRequested) return;
+          const message = "Сайт не успел открыть окно. Проверяем, запущен ли вход…";
+          errorTarget.textContent = message;
+          document.getElementById("buyerViewerStatus").textContent = message;
+          try {
+            const readback = await fetchJson(route.status + "?probe=false", {headers: {Accept: "application/json"}});
+            if (buyerViewerCancelRequested) return;
+            buyerViewerStarting = false;
+            if (readback.running && readback.viewer_available) {
+              buyerViewerRunId = String(readback.run_id || "");
+              renderBuyerRunCard(readback);
+              renderRecoverySteps("buyer", readback);
+              scheduleRecoveryPoll("buyer", true, true);
+            } else {
+              document.getElementById("buyerViewerStatus").textContent = readback.running
+                ? "Вход уже открыт другим оператором. Обновите страницу позже."
+                : "Не удалось открыть вход. Повторите попытку.";
+            }
+          } catch (_readbackError) {
+            document.getElementById("buyerViewerStatus").textContent = "Не удалось проверить вход. Обновите страницу и попробуйте снова.";
+          }
+        } finally {
+          if (source === "buyer") {
+            buyerViewerStarting = false;
+            buyerViewerStartPromise = null;
+          }
         }
       }
 
       async function cancelBuyerRecovery() {
+        buyerViewerCancelRequested = true;
+        const startWasPending = Boolean(buyerViewerStartPromise);
+        if (startWasPending) {
+          try { await buyerViewerStartPromise; } catch (_error) { /* Read back the owned run with stop. */ }
+        }
         const auth = ((sourcesSessionsState || {}).wb_buyer || {}).authorization || {};
         try {
           const payload = await fetchJson(sourceRoutes.buyer.stop, {
             method: "POST",
             headers: {Accept: "application/json", "Content-Type": "application/json", "X-WB-Buyer-Viewer-CSRF": "1"},
-            body: JSON.stringify({run_id: auth.run_id || ""})
+            body: JSON.stringify({run_id: buyerViewerRunId || (startWasPending ? "" : auth.run_id || "")})
           });
+          renderBuyerRunCard(payload);
           renderRecoverySteps("buyer", payload);
-          await loadSourcesSessions({refreshStale: false});
+          void loadSourcesSessions({refreshStale: false});
         } catch (error) {
-          document.getElementById("buyerViewerStatus").textContent = error.message || "Не удалось отменить вход.";
+          document.getElementById("buyerViewerStatus").textContent = "Не удалось отменить вход. Проверьте статус и попробуйте снова.";
         }
       }
 
-      function scheduleRecoveryPoll(source, immediate) {
-        if (recoveryPollTimers.has(source)) return;
+      function scheduleRecoveryPoll(source, immediate, restart) {
+        if (recoveryPollTimers.has(source) && !restart) return;
+        if (restart && recoveryPollTimers.has(source)) window.clearTimeout(recoveryPollTimers.get(source));
+        const generation = (recoveryPollGenerations.get(source) || 0) + 1;
+        recoveryPollGenerations.set(source, generation);
         const poll = async () => {
           try {
             const payload = await fetchJson(sourceRoutes[source].status + "?probe=false", {headers: {Accept: "application/json"}});
+            if (recoveryPollGenerations.get(source) !== generation) return;
+            if (source === "buyer" && !buyerViewerStarting && (!buyerViewerRunId || payload.run_id === buyerViewerRunId)) renderBuyerRunCard(payload);
             renderRecoverySteps(source, payload);
-            await loadSourcesSessions({refreshStale: false});
             if (payload.running) {
               recoveryPollTimers.set(source, window.setTimeout(poll, 2000));
             } else {
               recoveryPollTimers.delete(source);
+              // The summary endpoint also computes expensive transit coverage.
+              // Release the poll slot before waiting for that slow request.
+              await loadSourcesSessions({refreshStale: false});
             }
           } catch (error) {
+            if (recoveryPollGenerations.get(source) !== generation) return;
+            if (source === "buyer") {
+              document.getElementById("buyerViewerStatus").textContent = "Связь с окном прервалась. Проверяем состояние входа…";
+              recoveryPollTimers.set(source, window.setTimeout(poll, 3000));
+              return;
+            }
             recoveryPollTimers.delete(source);
             document.getElementById(source + "SourceError").textContent = error.message || String(error);
           }

@@ -56,6 +56,7 @@ def main() -> None:
     _run_recovery_persistent_e2e(price_available=False)
     _run_recovery_persistent_e2e(unknown_surface=True)
     _run_recovery_persistent_e2e(already_valid=True)
+    _run_recovery_persistent_e2e(already_valid=True, challenge_proofs=3)
     _run_single_flight_start_smoke()
     _run_stop_and_launcher_smoke()
     print("wb_buyer_session_smoke: OK")
@@ -411,7 +412,7 @@ def _run_price_extraction_smoke() -> None:
         raise AssertionError(f"authenticated response price extraction failed: {extracted}")
 
 
-def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, already_valid: bool = False) -> None:
+def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surface: bool = False, already_valid: bool = False, challenge_proofs: int = 0) -> None:
     with TemporaryDirectory(prefix="wb-buyer-recovery-e2e-") as tmp:
         state_dir = Path(tmp)
         session = WbBuyerSessionConfig(
@@ -451,6 +452,8 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
 
             def probe_persistent_context(self, context: Any, *, nm_id: int, page: Any) -> Mapping[str, Any]:
                 events.append(f"proof:{context.process_number}:{nm_id}")
+                if context.process_number == 1 and challenge_proofs and events.count(f"proof:1:{nm_id}") <= challenge_proofs:
+                    return {"session": {"status": "security_challenge", "reason": "buyer_security_challenge"}, "price": {}}
                 if page.url != session.buyer_url:
                     page.goto(session.buyer_url, wait_until="domcontentloaded")
                 return {
@@ -461,7 +464,7 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
             def validate_persistent_proof(self, operation: Mapping[str, Any], *, require_price: bool) -> Mapping[str, Any]:
                 price = operation.get("price") if isinstance(operation.get("price"), Mapping) else {}
                 valid = operation.get("session", {}).get("status") == "valid" and (not require_price or price.get("status") == "ok")
-                return {"valid": valid, "session": operation.get("session", {}), "price": price, "reason": "buyer_persistent_profile_authenticated"}
+                return {"valid": valid, "session": operation.get("session", {}), "price": price, "reason": "buyer_persistent_profile_authenticated" if valid else "buyer_security_challenge"}
 
         class FakeProcess:
             def __init__(self, name: str) -> None:
@@ -536,7 +539,7 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
             raise AssertionError(f"missing control price must be reported separately: {terminal}")
         if unknown_surface and "buyer_login_surface_unrecognized" not in reasons:
             raise AssertionError(f"unknown screen must fall back to human viewer: {statuses} {reasons}")
-        if already_valid:
+        if already_valid and not challenge_proofs:
             if "awaiting_human" in statuses or "spawn:x11vnc" in events or "spawn:websockify" in events:
                 raise AssertionError(f"already-valid session must complete without viewer: {statuses} {events}")
         elif "awaiting_human" not in statuses or "spawn:x11vnc" not in events or "spawn:websockify" not in events:
@@ -545,7 +548,9 @@ def _run_recovery_persistent_e2e(*, price_available: bool = True, unknown_surfac
             raise AssertionError(f"the first persistent context must close before restart validation: {events}")
         if "proof:1:210183919" not in events or "proof:2:210183919" not in events:
             raise AssertionError(f"both processes must prove /lk plus authenticated price read: {events}")
-        for process_name in (("Xvfb",) if already_valid else ("Xvfb", "x11vnc", "websockify")):
+        if challenge_proofs and (events.count(f"proof:1:{NM_ID}") <= 2 or "error" in statuses or "timeout" in statuses):
+            raise AssertionError(f"repeated challenge must stay human until solved: {statuses} {events}")
+        for process_name in (("Xvfb",) if already_valid and not challenge_proofs else ("Xvfb", "x11vnc", "websockify")):
             if f"terminate:{process_name}" not in events:
                 raise AssertionError(f"terminal cleanup did not terminate {process_name}: {events}")
         if session.lock_owner_path.exists():
