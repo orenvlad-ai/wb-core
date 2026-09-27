@@ -90,10 +90,16 @@ def save_schedules(cleaner, principal: Principal, generation: str, payload: dict
             raise CleanerError('legacy_scheduler_active','Сначала остановите прежний режим',409)
         if any(enabled for _,_,enabled in normalized) and not settings['baseline_ready']:
             raise CleanerError('schedule_not_ready','Исходная база ещё не подтверждена',409)
+        previous={r['schedule_id']:r for r in c.execute('SELECT * FROM cleaner_daily_schedules WHERE account=?',(cleaner.key,))}
+        authority='bootstrap_operator' if principal.site_owner else 'configured_owner'
+        changed_at=cleaner.clock()
         c.execute('DELETE FROM cleaner_daily_schedules WHERE account=?',(cleaner.key,))
         for sid,t,enabled in normalized:
+            old=previous.get(sid)
+            unchanged=bool(old and old['local_time']==t and old['enabled']==enabled and old['owner']==actor
+                           and old['actor_authority']==authority and old['generation']==generation)
             c.execute('INSERT INTO cleaner_daily_schedules VALUES(?,?,?,?,?,?,?,?)',
-                      (cleaner.key,sid,t,enabled,actor,'bootstrap_operator' if principal.site_owner else 'configured_owner',generation,cleaner.clock()))
+                      (cleaner.key,sid,t,enabled,actor,authority,generation,old['created_at'] if unchanged else changed_at))
         c.execute('UPDATE cleaner_settings SET revision=revision+1 WHERE account=?',(cleaner.key,))
         cleaner._event(c,'daily_schedule_saved',dict(actor=actor,timezone='Asia/Yekaterinburg',schedules=normalized))
         return dict(revision=settings['revision']+1,schedules=[dict(id=sid,time=t,enabled=bool(enabled)) for sid,t,enabled in normalized])
@@ -149,9 +155,10 @@ class DailyCleanerScheduler:
             if now<due:continue
             sid=row['schedule_id'];batch_id=occurrence_id(cleaner,sid,today)
             with cleaner.store.transaction() as c:
-                current=c.execute('SELECT enabled,owner,actor_authority,generation,local_time FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',(cleaner.key,sid)).fetchone()
+                current=c.execute('SELECT enabled,owner,actor_authority,generation,local_time,created_at FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',(cleaner.key,sid)).fetchone()
                 if (not current or not current['enabled'] or not self._principal(current)
                         or current['generation']!=self.generation or current['local_time']!=row['local_time']):continue
+                if due<datetime.fromisoformat(current['created_at'].replace('Z','+00:00')):continue
                 inserted=c.execute('''INSERT OR IGNORE INTO cleaner_daily_occurrences
                     (account,schedule_id,local_date,due_at,state,batch_id,created_at,updated_at)
                     VALUES(?,?,?,?,?,?,?,?)''',(cleaner.key,sid,today,due.isoformat(),'pending',batch_id,cleaner.clock(),cleaner.clock())).rowcount==1

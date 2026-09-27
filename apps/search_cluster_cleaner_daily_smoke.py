@@ -39,6 +39,7 @@ def provision(box):
     cleaner=box.service()
     ChangeRegistryRepository(box.runtime).initialize_schema()
     (box.runtime/'.auto-updates-policy.json').write_text(json.dumps(dict(master_desired=True,revision=1)))
+    cleaner.clock=lambda:'2026-09-26T22:00:00+00:00'  # Before synthetic due slots.
     return cleaner
 
 
@@ -131,6 +132,12 @@ def check() -> None:
         assert ready_cycle(IdleChild(),ManualBusy(),scheduler)
         rows=history(cleaner,owner)['items']
         assert len(rows)==2 and all(r['state']=='pending' for r in rows) and source.calls==0,rows
+        cleaner.clock=lambda:'2026-09-26T23:30:00+00:00'
+        revision=schedules(cleaner,owner,'monolith')['revision']
+        save_schedules(cleaner,owner,'monolith',dict(request_id='close-slots-add-disabled',expected_revision=revision,
+                       schedules=[dict(id='first',time='03:45',enabled=True),dict(id='second',time='03:46',enabled=True),
+                                  dict(id='third',time='05:00',enabled=False)]))
+        assert all(r['state']=='pending' for r in history(cleaner,owner)['items'])
         cleaner.record_manual_batch('manual-long-batch',state='complete',stage='finished',current_index=1)
         first=scheduler.tick()
         assert first['selected_count']==1 and source.calls==1,first
@@ -139,6 +146,31 @@ def check() -> None:
         assert second['selected_count']==1 and source.calls==2 and second['batch_id']!=first['batch_id'],second
         with cleaner.store.read() as c:
             assert c.execute("SELECT count(*) FROM cleaner_requests WHERE account=? AND route='manual-batches'",(cleaner.key,)).fetchone()[0]==3
+
+    with Sandbox() as box:
+        cleaner=provision(box);owner=Principal('owner',True,True,True)
+        cleaner.clock=lambda:'2026-09-27T12:00:00+00:00'  # 17:00 EKT, after today's 03:45.
+        save_schedules(cleaner,owner,'monolith',dict(request_id='enable-after-due',expected_revision=1,
+                       schedules=[dict(id='default',time='03:45',enabled=True)]))
+        target=Target(11,101,name='Active CPM',contract_verified=True)
+        source=Source([target]);current=[datetime(2026,9,27,12,1,tzinfo=timezone.utc)]
+        scheduler=DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:source,
+                                        fixture_admission=[dict(advert_id=11,nm_id=101,state='verified')],now=lambda:current[0])
+        assert scheduler.tick() is None
+        assert history(cleaner,owner)['items']==[] and source.calls==0
+        with cleaner.store.read() as c:
+            activated_at=c.execute('SELECT created_at FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',
+                                   (cleaner.key,'default')).fetchone()[0]
+        cleaner.clock=lambda:'2026-09-27T22:46:00+00:00'  # Tomorrow's 03:46 EKT.
+        save_schedules(cleaner,owner,'monolith',dict(request_id='add-other-slot-after-due',expected_revision=2,
+                       schedules=[dict(id='default',time='03:45',enabled=True),dict(id='other',time='04:30',enabled=False)]))
+        with cleaner.store.read() as c:
+            assert c.execute('SELECT created_at FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',
+                             (cleaner.key,'default')).fetchone()[0]==activated_at
+        current[0]=datetime(2026,9,27,22,47,tzinfo=timezone.utc)
+        assert scheduler.tick()['selected_count']==1
+        rows=history(cleaner,owner)['items']
+        assert len(rows)==1 and rows[0]['local_date']=='2026-09-28' and rows[0]['state']=='queued',rows
 
     with Sandbox() as box:
         cleaner=provision(box)
