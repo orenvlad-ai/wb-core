@@ -450,20 +450,32 @@ def _stop_chrome(process: subprocess.Popen[Any] | None) -> None:
     _stop_process(process, grace=35)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        active = False
-        for item in Path("/proc").iterdir():
-            if not item.name.isdigit():
-                continue
-            try:
-                if str(runtime.CHROME).encode() in (item / "cmdline").read_bytes():
-                    active = True
-                    break
-            except OSError:
-                continue
-        if not active:
+        if not _owned_chrome_pids():
             return
         time.sleep(0.2)
     raise RuntimeError("Chrome descendants did not exit")
+
+
+def _owned_chrome_pids(proc_root: Path = Path("/proc")) -> list[int]:
+    """Only Chrome executables in this supervisor's transient unit count as live."""
+    own_cgroup = (proc_root / "self" / "cgroup").read_bytes()
+    if not own_cgroup:
+        raise RuntimeError("Chrome unit cgroup unavailable")
+    chrome_stat = runtime.CHROME.stat()
+    chrome_identity = (chrome_stat.st_dev, chrome_stat.st_ino)
+    matches: list[int] = []
+    for item in proc_root.iterdir():
+        if not item.name.isdigit() or int(item.name) == os.getpid():
+            continue
+        try:
+            if item.stat().st_uid != os.geteuid() or (item / "cgroup").read_bytes() != own_cgroup:
+                continue
+            executable = (item / "exe").stat()
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # The process exited during the scan.
+        if (executable.st_dev, executable.st_ino) == chrome_identity:
+            matches.append(int(item.name))
+    return matches
 
 
 def supervise(run_id: str, chrome_path: Path) -> int:
