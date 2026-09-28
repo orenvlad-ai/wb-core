@@ -19,9 +19,10 @@ from packages.application.finance_liquidity_cash import (
     _canon,
     _digest,
     bootstrap_finance_cash_store,
+    migrate_finance_cash_store_category_groups,
     migrate_finance_cash_store_v2,
 )
-from packages.application.finance_liquidity_directories import seed_directories
+from packages.application.finance_liquidity_directories import SEED_CATEGORY_GROUPS, install_v3_extension, seed_directories
 
 
 WHEN = "2026-09-21T05:00:00.000000Z"
@@ -48,6 +49,11 @@ def run_checks() -> None:
             "cash_vladislav", "cash_victoria", "cash_carolina"
         }
         assert len(service.list_categories()) == 23
+        groups = service.list_category_groups()
+        assert groups["enabled"] and len(groups["groups"]) == 6
+        seeded = {category["code"]: category for category in service.list_categories()}
+        for group_id, _, codes in SEED_CATEGORY_GROUPS:
+            assert all(seeded[code]["group_id"] == group_id for code in codes)
         assert service.list_counterparties() == []
         sequence = 0
 
@@ -130,7 +136,32 @@ def run_checks() -> None:
                 raise AssertionError(f"Referenced {kind} entry was deleted")
         service.post_document(draft["document_id"], {"base_revision": 1}, "fixture", *op())
         before = service.get_document(draft["document_id"])["document"]
-        service.update_directory("categories", misc, {"action": "rename", "name": "Иные расходы", "base_revision": 1}, "fixture", *op())
+        group_operation = op()
+        group = service.create_category_group({"name": "Особые закупки"}, "fixture", *group_operation)
+        assert group == service.create_category_group({"name": "Особые закупки"}, "fixture", *group_operation)
+        group_id = group["group_id"]
+        service.update_directory("categories", misc, {"action": "set_group", "group_id": group_id, "base_revision": 1}, "fixture", *op())
+        assert next(item for item in service.list_categories() if item["category_id"] == misc)["group_id"] == group_id
+        try:
+            service.update_directory("categories", misc, {"action": "set_group", "group_id": None, "base_revision": 1}, "fixture", *op())
+        except FinanceCashError as error:
+            assert error.code == "version_conflict"
+        else:
+            raise AssertionError("Stale group assignment was accepted")
+        group = service.update_category_group(group_id, {"action": "rename", "name": "Особые закупки и доставка", "base_revision": 1}, "fixture", *op())
+        group = service.update_category_group(group_id, {"action": "archive", "base_revision": group["revision"]}, "fixture", *op())
+        assert not next(item for item in service.list_category_groups()["groups"] if item["group_id"] == group_id)["is_active"]
+        assert next(item for item in service.list_categories() if item["category_id"] == misc)["group_id"] == group_id
+        try:
+            service.update_directory("categories", "category_goods_payment", {"action": "set_group", "group_id": group_id, "base_revision": 1}, "fixture", *op())
+        except FinanceCashError as error:
+            assert error.code == "category_group_unavailable"
+        else:
+            raise AssertionError("Archived group accepted a new article")
+        service.update_directory("categories", misc, {"action": "set_group", "group_id": None, "base_revision": 2}, "fixture", *op())
+        group = service.update_category_group(group_id, {"action": "restore", "base_revision": group["revision"]}, "fixture", *op())
+        assert group["revision"] == 4
+        service.update_directory("categories", misc, {"action": "rename", "name": "Иные расходы", "base_revision": 3}, "fixture", *op())
         service.update_directory("counterparties", counterparty["counterparty_id"], {"action": "rename", "name": "Новое имя", "base_revision": 1}, "fixture", *op())
         try:
             service.update_directory("counterparties", counterparty["counterparty_id"], {"action": "rename", "name": "Устаревшее изменение", "base_revision": 1}, "fixture", *op())
@@ -170,9 +201,9 @@ def run_checks() -> None:
         assert service.get_document(debt["document_id"])["document"]["analytic_class_snapshot"] == "debt_service_unallocated"
         assert service.get_account("cash_vladislav")["balance"] == "127.00"
         assert any(event["event_type"] == "categories.rename" and '"old_name":"Прочие расходы"' in event["payload_json"] and '"new_name":"Иные расходы"' in event["payload_json"] for event in service.list_audit_events())
-        assert all(event["event_type"].split(".")[0] in {"account", "accounts", "category", "categories", "counterparty", "counterparties"} for event in service.list_audit_events(directory_only=True))
-        service.update_directory("categories", misc, {"action": "archive", "base_revision": 2}, "fixture", *op())
-        service.update_directory("categories", misc, {"action": "restore", "base_revision": 3}, "fixture", *op())
+        assert all(event["event_type"].split(".")[0] in {"account", "accounts", "category", "categories", "category_group", "counterparty", "counterparties"} for event in service.list_audit_events(directory_only=True))
+        service.update_directory("categories", misc, {"action": "archive", "base_revision": 4}, "fixture", *op())
+        service.update_directory("categories", misc, {"action": "restore", "base_revision": 5}, "fixture", *op())
         service.update_directory("categories", "category_rent", {"action": "delete", "base_revision": 1}, "fixture", *op())
         with sqlite3.connect(path) as conn:
             conn.row_factory = sqlite3.Row
@@ -184,6 +215,58 @@ def run_checks() -> None:
         unused = service.create_counterparty({"name": "Удаляемый"}, "fixture", *op())
         service.update_directory("counterparties", unused["counterparty_id"], {"action": "delete", "base_revision": 1}, "fixture", *op())
         assert unused["counterparty_id"] not in {item["counterparty_id"] for item in service.list_counterparties()}
+
+        # An existing v3 store stays usable before the explicitly invoked,
+        # additive group install. Documents and balances cannot be rewritten.
+        plain_v3 = Path(directory) / "plain-v3.sqlite3"
+        with sqlite3.connect(plain_v3) as conn:
+            conn.create_function("finance_internal_write", 0, lambda: 1)
+            conn.executescript(_SCHEMA)
+            install_v3_extension(conn, WHEN)
+            conn.execute("INSERT INTO finance_liquidity_schema_meta VALUES(1,3,?)", (WHEN,))
+        plain = FinanceCashService(plain_v3)
+        assert plain.list_category_groups() == {"enabled": False, "groups": []}
+        assert all(item["group_id"] is None for item in plain.list_categories())
+        plain_opening = plain.create_document({"document_type": "opening", "target_account_id": "cash_vladislav", "amount": "20.00", "occurred_at": WHEN, "opening_evidence_type": "manual_confirmation"}, "fixture", *op())
+        plain.post_document(plain_opening["document_id"], {"base_revision": 1}, "fixture", *op())
+        plain_expense = plain.create_document({"document_type": "expense", "source_account_id": "cash_vladislav", "category_id": "category_goods_payment", "amount": "2.00", "occurred_at": WHEN}, "fixture", *op())
+        plain.post_document(plain_expense["document_id"], {"base_revision": 1}, "fixture", *op())
+        plain_draft = plain.create_document({"document_type": "expense", "source_account_id": "cash_vladislav", "category_id": "category_marketing", "amount": "1.00", "occurred_at": WHEN}, "fixture", *op())
+        original_documents = plain.list_documents()
+        original_balance = plain.get_account("cash_vladislav")["balance"]
+        with sqlite3.connect(plain_v3) as conn:
+            original_ledger = list(conn.execute("SELECT * FROM finance_liquidity_ledger_entries ORDER BY entry_id"))
+            original_version = conn.execute("SELECT schema_version FROM finance_liquidity_schema_meta").fetchone()[0]
+        group_backup = Path(directory) / "plain-v3-backup.sqlite3"
+        migrate_finance_cash_store_category_groups(plain_v3, group_backup)
+        assert sqlite3.connect(group_backup).execute("SELECT schema_version FROM finance_liquidity_schema_meta").fetchone()[0] == 3
+        assert plain.list_category_groups()["enabled"]
+        assert plain.get_account("cash_vladislav")["balance"] == original_balance == "18.00"
+        assert plain.list_documents() == original_documents
+        assert plain.get_document(plain_draft["document_id"])["document"]["status"] == "draft"
+        with sqlite3.connect(plain_v3) as conn:
+            assert conn.execute("SELECT schema_version FROM finance_liquidity_schema_meta").fetchone()[0] == original_version == 3
+            assert list(conn.execute("SELECT * FROM finance_liquidity_ledger_entries ORDER BY entry_id")) == original_ledger
+            assert conn.execute("SELECT extension_version FROM finance_liquidity_extensions WHERE extension_name='category_groups'").fetchone()[0] == 1
+        assert next(item for item in plain.list_categories() if item["category_id"] == "category_marketing")["group_id"] == "category_group_marketing_customers"
+        migrate_finance_cash_store_category_groups(plain_v3, Path(directory) / "repeat-backup-must-not-exist.sqlite3")
+        assert not (Path(directory) / "repeat-backup-must-not-exist.sqlite3").exists()
+        partial = Path(directory) / "partial-v3.sqlite3"
+        with sqlite3.connect(group_backup) as source, sqlite3.connect(partial) as target:
+            source.backup(target)
+            target.execute("ALTER TABLE finance_liquidity_categories ADD COLUMN group_id TEXT")
+        try:
+            FinanceCashService(partial).list_categories()
+        except FinanceCashError as error:
+            assert error.code == "finance_schema_unavailable"
+        else:
+            raise AssertionError("Partial group extension was accepted")
+        try:
+            migrate_finance_cash_store_category_groups(partial, Path(directory) / "partial-backup.sqlite3")
+        except FinanceCashError as error:
+            assert error.code == "finance_schema_unavailable"
+        else:
+            raise AssertionError("Partial group extension migrated instead of failing closed")
 
         old = Path(directory) / "old-v2.sqlite3"
         with sqlite3.connect(old) as conn:

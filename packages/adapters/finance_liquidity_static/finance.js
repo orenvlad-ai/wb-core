@@ -8,8 +8,8 @@
   const operationReadbackDeadlineMs = 5000;
   const app = document.querySelector("[data-finance-app]");
   const $ = (selector, root = document) => root.querySelector(selector);
-  const state = { capabilities: null, accounts: [], categories: [], counterparties: [], documents: [], reconciliations: [], auditEvents: [], csrf: "", inFlight: new Map() };
-  const ui = { accounts: $("[data-accounts]"), accountsEmpty: $("[data-accounts-empty]"), history: $("[data-history]"), historyEmpty: $("[data-history-empty]"), reconciliations: $("[data-reconciliations]"), attention: $("[data-attention]"), settings: $("[data-settings]"), audit: $("[data-settings-audit]"), notice: $("[data-notice]"), error: $("[data-error]"), session: $("[data-session-state]"), dialog: $("[data-dialog]"), dialogTitle: $("[data-dialog-title]"), dialogKicker: $("[data-dialog-kicker]"), dialogContent: $("[data-dialog-content]"), dialogSubmit: $("[data-dialog-submit]"), dialogSaveDraft: $("[data-dialog-save-draft]") };
+  const state = { capabilities: null, accounts: [], categories: [], categoryGroups: [], categoryGroupsEnabled: false, counterparties: [], documents: [], reconciliations: [], auditEvents: [], selectedAccountId: "", csrf: "", inFlight: new Map() };
+  const ui = { accounts: $("[data-accounts]"), accountsEmpty: $("[data-accounts-empty]"), operationsTitle: $("[data-account-operations-title]"), operationsHint: $("[data-account-operations-hint]"), history: $("[data-history]"), historyEmpty: $("[data-history-empty]"), reconciliations: $("[data-reconciliations]"), attention: $("[data-attention]"), settings: $("[data-settings]"), audit: $("[data-settings-audit]"), notice: $("[data-notice]"), error: $("[data-error]"), session: $("[data-session-state]"), dialog: $("[data-dialog]"), dialogTitle: $("[data-dialog-title]"), dialogKicker: $("[data-dialog-kicker]"), dialogContent: $("[data-dialog-content]"), dialogSubmit: $("[data-dialog-submit]"), dialogSaveDraft: $("[data-dialog-save-draft]") };
   const has = (grant) => Boolean(state.capabilities?.capabilities?.includes?.(grant) || state.capabilities?.grants?.includes?.(grant) || state.capabilities?.[grant]);
   const canRead = () => has("finance") || has("finance_operate") || has("finance_admin");
   const canOperate = () => has("finance_operate") || has("finance_admin");
@@ -68,16 +68,26 @@
   function normalizeReconciliation(rec) { return {...rec, id: rec.id || rec.reconciliation_id}; }
   function clear(node) { node.replaceChildren(); }
   function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text != null) node.textContent = text; return node; }
+  function selectedCash() { return state.accounts.find(account => account.id === state.selectedAccountId && account.is_active && account.account_type === "cash") || null; }
+  function openingEligible() { return state.accounts.filter(account => account.is_active && account.account_type === "cash" && accountState(account) === "uninitialized" && !state.documents.some(doc => doc.document_type === "opening" && !isCorrection(doc) && doc.target_account_id === account.id)); }
+  function selectAccount(id) {
+    state.selectedAccountId = state.accounts.some(account => account.id === id && account.is_active) ? id : "";
+    const filter = $("[data-account-select]"); filter.value = state.selectedAccountId;
+    for (const card of ui.accounts.querySelectorAll("[data-account-id]")) card.setAttribute("aria-pressed", String(card.dataset.accountId === state.selectedAccountId));
+    renderActionAccess(); renderHistory();
+  }
   function renderAccounts() {
-    clear(ui.accounts); const selectable = $("[data-account-select]"); clear(selectable); selectable.append(new Option("Все счета", ""));
+    clear(ui.accounts); const selectable = $("[data-account-select]"); const previousFilter = selectable.value; clear(selectable); selectable.append(new Option("Все счета", ""));
     for (const account of state.accounts.filter(item => item.is_active)) {
       selectable.append(new Option(accountLabel(account), account.id));
-      const card = element("button", "account-card"); card.type = "button"; card.dataset.accountId = account.id; card.setAttribute("aria-label", `Открыть историю: ${accountLabel(account)}`);
+      const card = element("button", "account-card"); card.type = "button"; card.dataset.accountId = account.id; card.setAttribute("aria-pressed", String(account.id === state.selectedAccountId)); card.setAttribute("aria-label", `Выбрать ${account.account_type === "cash" ? "кассу" : "счёт"}: ${accountLabel(account)}`);
       const head = element("div", "account-head"); const heading = element("div"); heading.append(element("div", "account-name", account.name), element("div", "account-meta", [account.account_type === "cash" ? "Касса" : "Счёт", account.responsible_name, account.currency].filter(Boolean).join(" · "))); head.append(heading);
       const status = accountState(account); head.append(element("span", status === "current" ? "pill" : "pill warn", status === "uninitialized" ? "Не задан" : status === "in_transit" ? "В пути" : "Актуально")); card.append(head);
       const value = accountBalance(account); const negative = account.negative_balance_warning || account.balance_state === "negative" || (typeof value === "string" && value.startsWith("-")); card.append(element("div", "balance", status === "uninitialized" ? "Не задан" : money(value, account.currency)), element("div", "balance-note", status === "uninitialized" ? "Укажите начальный остаток отдельной операцией" : negative ? "Отрицательный остаток · требуется разбор пояснения к расходу" : "Текущий остаток по данным сервера"));
       ui.accounts.append(card);
     }
+    selectable.value = state.accounts.some(account => account.id === previousFilter && account.is_active) ? previousFilter : "";
+    if (!state.accounts.some(account => account.id === state.selectedAccountId && account.is_active)) state.selectedAccountId = "";
     show(ui.accountsEmpty, state.accounts.filter(item => item.is_active).length === 0); renderActionAccess();
   }
   function isCorrection(doc) { return Boolean(doc.reversal_of_document_id || doc.reversal_of || doc.reversal_reason); }
@@ -148,14 +158,41 @@
     if (!items.length) { ui.attention.append(element("p", "readonly", "Важных замечаний нет.")); return; }
     for (const [title, detail, level] of items) { const item = element("div", "attention-item"); item.append(element("strong", level === "danger" ? "pill danger" : "pill warn", title), element("p", "", detail)); ui.attention.append(item); }
   }
-  function renderActionAccess() { for (const button of document.querySelectorAll("[data-action]")) { const action = button.dataset.action; button.classList.toggle("is-hidden", ["new-cash","new-category","new-counterparty"].includes(action) ? !canAdmin() : action === "reload" ? false : !canOperate()); } $("[data-settings-link]").classList.toggle("is-hidden", !canAdmin()); show(ui.settings, canAdmin()); }
+  function renderActionAccess() {
+    const cash = selectedCash(); const status = cash && accountState(cash); const initialized = status === "current";
+    setText(ui.operationsTitle, cash ? `Операции с кассой ${cash.name}` : "Операции с кассой");
+    setText(ui.operationsHint, !cash ? "Выберите кассу выше, чтобы начать операцию." : status !== "current" && status !== "uninitialized" ? "Состояние кассы не подтверждено. Обновите данные." : !initialized && !openingEligible().some(account => account.id === cash.id) ? "Завершите черновик начального остатка этой кассы." : !initialized ? "Сначала укажите начальный остаток для этой кассы." : "Операции будут связаны с выбранной кассой.");
+    for (const button of document.querySelectorAll("[data-action]")) {
+      const action = button.dataset.action;
+      const allowed = action === "new-group" ? canAdmin() && state.categoryGroupsEnabled : ["new-cash","new-category","new-counterparty"].includes(action) ? canAdmin() : action === "reload" ? true : canOperate();
+      button.classList.toggle("is-hidden", !allowed || (action === "opening" && !openingEligible().length));
+      if (["income","expense","transfer","reconcile"].includes(action)) button.disabled = !initialized || !allowed;
+    }
+    $("[data-settings-link]").classList.toggle("is-hidden", !canAdmin()); show(ui.settings, canAdmin());
+  }
   function renderSettings() {
+    const groupsContainer = $("[data-settings-groups]"); clear(groupsContainer);
+    if (!state.categoryGroupsEnabled) groupsContainer.append(element("p", "readonly", "Группы будут доступны после обновления справочника."));
+    else for (const group of state.categoryGroups) {
+      const row = element("div", "settings-entry"); row.append(element("strong", "", group.name));
+      if (!group.is_active) row.append(element("div", "history-meta", "В архиве · статьи остаются доступны без группы"));
+      for (const [label, action] of [["Переименовать", "rename"], [group.is_active ? "В архив" : "Восстановить", group.is_active ? "archive" : "restore"]]) {
+        const button = element("button", "history-action", label); button.type = "button"; button.dataset.directory = `category-groups:${group.group_id}:${action}`; row.append(button);
+      }
+      groupsContainer.append(row);
+    }
+    if (state.categoryGroupsEnabled && !state.categoryGroups.length) groupsContainer.append(element("p", "readonly", "Групп пока нет."));
     for (const [kind, items] of [["accounts", state.accounts.filter(item => item.account_type === "cash")], ["categories", state.categories.filter(item => item.direction === "expense")], ["counterparties", state.counterparties]]) {
       const container = $(`[data-settings-${kind}]`); clear(container);
       if (!items.length) container.append(element("p", "readonly", "Пока пусто."));
       for (const item of items) {
         const row = element("div", "settings-entry"); row.append(element("strong", "", item.name));
         if (!item.is_active) row.append(element("div", "history-meta", "В архиве"));
+        if (kind === "categories" && state.categoryGroupsEnabled) {
+          const current = state.categoryGroups.find(entry => entry.group_id === item.group_id && entry.is_active);
+          row.append(element("div", "history-meta", `Группа: ${current?.name || "Без группы"}`));
+          const changeGroup = element("button", "history-action", "Группа"); changeGroup.type = "button"; changeGroup.dataset.directory = `categories:${item.id}:set_group`; row.append(changeGroup);
+        }
         for (const [label, action] of [["Переименовать", "rename"], [item.is_active ? "В архив" : "Восстановить", item.is_active ? "archive" : "restore"], ["Удалить", "delete"]]) {
           const button = element("button", "history-action", label); button.type = "button"; button.dataset.directory = `${kind}:${item.id}:${action}`; row.append(button);
         }
@@ -166,8 +203,8 @@
     if (!state.auditEvents.length) ui.audit.append(element("p", "readonly", "Изменений пока нет."));
     for (const event of state.auditEvents) {
       const [kind, action] = String(event.event_type || "").split(".");
-      const noun = {account:"Касса",accounts:"Касса",category:"Статья",categories:"Статья",counterparty:"Контрагент",counterparties:"Контрагент"}[kind] || "Запись";
-      const change = {seeded:"Начальное добавление",created:"Добавление",rename:"Переименование",archive:"Перенос в архив",restore:"Восстановление",delete:"Удаление"}[action] || "Изменение";
+      const noun = {account:"Касса",accounts:"Касса",category:"Статья",categories:"Статья",category_group:"Группа",counterparty:"Контрагент",counterparties:"Контрагент"}[kind] || "Запись";
+      const change = {seeded:"Начальное добавление",created:"Добавление",rename:"Переименование",archive:"Перенос в архив",restore:"Восстановление",delete:"Удаление",set_group:"Смена группы"}[action] || "Изменение";
       let details = {}; try { details = JSON.parse(event.payload_json || "{}"); } catch { /* A legacy digest-only event remains readable by type and time. */ }
       const oldName = String(details.old_name || details.name || "").trim();
       const newName = String(details.new_name || "").trim();
@@ -178,7 +215,7 @@
     }
   }
   async function loadAll() { error(); notice(); ui.session.textContent = "Обновляем данные…"; try { const caps = await request("/capabilities"); state.capabilities = caps; state.csrf = caps.csrf_token || ""; if (!canRead()) { ui.session.textContent = "Нет доступа к финансам"; error("Доступ к разделу не выдан. Обратитесь к администратору."); renderActionAccess(); return; }
-      const [accounts, categories, counterparties, docs, reconciliations, audit] = await Promise.all([request("/accounts"), request("/categories"), request("/counterparties"), request("/documents"), request("/cash-reconciliations"), canAdmin() ? request("/audit?scope=directories") : Promise.resolve({events:[]})]); state.accounts = dataList(accounts, "accounts").map(normalizeAccount); state.categories = dataList(categories, "categories").map(normalizeCategory); state.counterparties = dataList(counterparties, "counterparties").map(normalizeCounterparty); state.documents = dataList(docs, "documents").map(normalizeDocument); state.reconciliations = dataList(reconciliations, "reconciliations").map(normalizeReconciliation); state.auditEvents = dataList(audit, "events"); ui.session.textContent = canOperate() ? "Операции доступны" : "Только просмотр"; renderAccounts(); renderHistory(); renderReconciliations(); renderAttention(); renderSettings(); }
+      const [accounts, categories, groups, counterparties, docs, reconciliations, audit] = await Promise.all([request("/accounts"), request("/categories"), request("/category-groups"), request("/counterparties"), request("/documents"), request("/cash-reconciliations"), canAdmin() ? request("/audit?scope=directories") : Promise.resolve({events:[]})]); state.accounts = dataList(accounts, "accounts").map(normalizeAccount); state.categories = dataList(categories, "categories").map(normalizeCategory); state.categoryGroups = dataList(groups, "groups"); state.categoryGroupsEnabled = Boolean(groups.enabled); state.counterparties = dataList(counterparties, "counterparties").map(normalizeCounterparty); state.documents = dataList(docs, "documents").map(normalizeDocument); state.reconciliations = dataList(reconciliations, "reconciliations").map(normalizeReconciliation); state.auditEvents = dataList(audit, "events"); ui.session.textContent = canOperate() ? "Операции доступны" : "Только просмотр"; renderAccounts(); renderHistory(); renderReconciliations(); renderAttention(); renderSettings(); }
     catch (caught) { ui.session.textContent = "Данные недоступны"; error(caught.code === "finance_capability_denied" ? "Доступ к разделу не выдан." : caught.message); renderActionAccess(); }
   }
   function field(label, name, options = {}) {
@@ -203,8 +240,29 @@
     if (help) wrapper.append(element("span", "help", help));
     return wrapper;
   }
-  function accountOptions({ cashOnly = false, initialized = false } = {}) { return [["Выберите счёт", ""], ...state.accounts.filter(a => a.is_active && (!cashOnly || a.account_type === "cash") && (!initialized || accountState(a) !== "uninitialized")).map(a => [accountLabel(a), a.id])]; }
+  function accountOptions({ cashOnly = false, initialized = false, openingOnly = false, includeIds = [] } = {}) { const eligible = new Set(openingEligible().map(account => account.id)); return [["Выберите счёт", ""], ...state.accounts.filter(a => (a.is_active || includeIds.includes(a.id)) && (!cashOnly || a.account_type === "cash") && (!initialized || accountState(a) === "current" || includeIds.includes(a.id)) && (!openingOnly || eligible.has(a.id) || includeIds.includes(a.id))).map(a => [accountLabel(a), a.id])]; }
   function categoryOptions(direction) { return [["Выберите статью", ""], ...state.categories.filter(c => c.is_active && c.direction === direction).map(c => [c.name, c.id])]; }
+  function groupedExpenseCategoryField(selectedId = "") {
+    const wrapper = field("Статья", "category_id", {required:true,options:[["Выберите статью", ""]]});
+    const select = $("select", wrapper);
+    const categories = state.categories.filter(category => category.direction === "expense" && (category.is_active || category.id === selectedId));
+    const shown = new Set();
+    for (const group of state.categoryGroups.filter(item => item.is_active)) {
+      const members = categories.filter(category => category.group_id === group.group_id);
+      if (!members.length) continue;
+      const optgroup = document.createElement("optgroup"); optgroup.label = group.name;
+      for (const category of members) { optgroup.append(new Option(category.name, category.id)); shown.add(category.id); }
+      select.append(optgroup);
+    }
+    const fallback = categories.filter(category => !shown.has(category.id));
+    if (fallback.length) {
+      const optgroup = document.createElement("optgroup"); optgroup.label = "Без группы";
+      for (const category of fallback) optgroup.append(new Option(category.name, category.id));
+      select.append(optgroup);
+    }
+    if (selectedId) select.value = selectedId;
+    return wrapper;
+  }
   function counterpartyOptions() { return [["Без контрагента", ""], ...state.counterparties.filter(c => c.is_active).map(c => [c.name, c.id])]; }
   const businessParts = value => Object.fromEntries(new Intl.DateTimeFormat("en-CA", {timeZone:"Asia/Yekaterinburg", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hourCycle:"h23"}).formatToParts(new Date(value)).filter(part => part.type !== "literal").map(part => [part.type,part.value]));
   function dateValue(value = Date.now()) { const part = businessParts(value); return `${part.year}-${part.month}-${part.day}T${part.hour}:${part.minute}`; }
@@ -215,14 +273,28 @@
   function buildDialog(kind, source) { const form = $("[data-dialog-form]"); const documentKind = kind === "edit-draft" ? source.document_type : kind; form.reset(); clear(ui.dialogContent); ui.dialogContent.dataset.kind = kind; ui.dialogContent.dataset.documentKind = documentKind; ui.dialogContent.dataset.sourceId = source?.id || ""; ui.dialogKicker.textContent = kind === "edit-draft" ? "Черновик" : "Финансы";
     const grid = element("div", "dialog-grid"); const submit = ui.dialogSubmit; submit.disabled = false; ui.dialogSaveDraft.classList.add("is-hidden"); ui.dialogContent.dataset.submitMode = "post";
     if (kind === "new-cash") { ui.dialogTitle.textContent = "Новая касса"; grid.append(field("Название", "name", { required:true, placeholder:"Например, Касса офиса" }), field("Ответственный", "responsible_name", { required:true, placeholder:"Кто отвечает за кассу" }), field("Валюта", "currency", { options:[["Рубли (RUB)","RUB"]], help:"Другие валюты появятся в отдельном этапе." })); submit.textContent = "Создать кассу"; }
-    if (kind === "new-category") { ui.dialogTitle.textContent = "Новая статья расходов"; grid.append(field("Название", "name", {required:true}), field("Назначение", "analytic_class", {options:[["Текущие расходы", "operating_expense"],["Личное изъятие", "owner_draw"],["Распределение прибыли", "profit_distribution"],["Платёж по долгу (без разнесения)", "debt_service_unallocated"]],help:"Назначение сохраняется с проведённой операцией."})); submit.textContent = "Добавить статью"; }
+    if (kind === "new-category") { ui.dialogTitle.textContent = "Новая статья расходов"; grid.append(field("Название", "name", {required:true}), field("Назначение", "analytic_class", {options:[["Текущие расходы", "operating_expense"],["Личное изъятие", "owner_draw"],["Распределение прибыли", "profit_distribution"],["Платёж по долгу (без разнесения)", "debt_service_unallocated"]],help:"Назначение сохраняется с проведённой операцией."})); if (state.categoryGroupsEnabled) grid.append(field("Группа в списке", "group_id", {options:[["Без группы", ""], ...state.categoryGroups.filter(group => group.is_active).map(group => [group.name, group.group_id])],help:"Влияет только на отображение."})); submit.textContent = "Добавить статью"; }
+    if (kind === "new-group") { ui.dialogTitle.textContent = "Новая группа статей"; grid.append(field("Название", "name", {required:true,full:true})); submit.textContent = "Добавить группу"; }
     if (kind === "new-counterparty") { ui.dialogTitle.textContent = "Новый контрагент"; grid.append(field("Имя или название", "name", {required:true,full:true})); submit.textContent = "Добавить контрагента"; }
-    if (kind === "directory") { ui.dialogTitle.textContent = ({rename:"Переименовать",archive:"В архив",restore:"Восстановить",delete:"Удалить"})[source.action]; ui.dialogContent.dataset.directoryKind = source.kind; ui.dialogContent.dataset.directoryAction = source.action; if (source.action === "rename") grid.append(field("Новое название", "name", {required:true,value:source.item.name,full:true})); else ui.dialogContent.append(element("div", "warning-box", source.action === "delete" ? "Удаление возможно только если запись не используется, в том числе в черновиках. История денежных операций сохранится." : `${source.item.name}: подтвердите действие.`)); submit.textContent = ui.dialogTitle.textContent; }
-    if (kind === "common-opening") { ui.dialogTitle.textContent = "Общий старт трёх касс"; grid.append(field("Одна дата и время для всех", "occurred_at", {required:true,type:"datetime-local",help:"Выберите согласованную дату. Суммы не подставляются автоматически.",full:true})); for (const account of state.accounts.filter(item => item.code && item.account_type === "cash")) grid.append(field(account.name, `opening_${account.id}`, {required:true,placeholder:"0,00"})); grid.append(field("Основание", "opening_evidence_ref", {type:"textarea",full:true})); ui.dialogContent.append(element("div", "warning-box", "Будут подготовлены три черновика с одной датой. Деньги изменятся только после отдельного проведения каждого.")); submit.textContent = "Подготовить черновики"; }
-    if (documentKind === "opening") { ui.dialogTitle.textContent = kind === "edit-draft" ? "Изменить черновик" : "Начальный остаток"; grid.append(field("Счёт", "target_account_id", { required:true, options:accountOptions() }), field("Дата и время (Екатеринбург)", "occurred_at", { required:true,type:"datetime-local",value:dateValue() }), field("Сумма", "amount", { required:true, placeholder:"0,00", help:"Укажите сумму явно, в том числе ноль." }), field("Комментарий", "opening_evidence_ref", {type:"textarea",placeholder:"Например, остаток пересчитан вместе с ответственным",help:"Основание отмечается как подтверждённое вручную.",full:true})); submit.textContent = kind === "edit-draft" ? "Сохранить изменения" : "Провести"; if (kind !== "edit-draft") ui.dialogSaveDraft.classList.remove("is-hidden"); }
-    if (documentKind === "income" || documentKind === "expense" || documentKind === "funding") { const isExpense = documentKind === "expense"; const isFunding = documentKind === "funding" || source?.funding_kind === "owner_funding"; ui.dialogTitle.textContent = kind === "edit-draft" ? "Изменить черновик" : isExpense ? "Расход" : isFunding ? "Пополнить кассу" : "Поступление"; grid.append(field(isExpense ? "Касса списания" : "Касса пополнения", isExpense ? "source_account_id" : "target_account_id", {required:true,options:accountOptions({initialized:true})})); if (!isFunding) grid.append(field("Статья", "category_id", {required:true,options:categoryOptions(isExpense ? "expense" : "income")})); grid.append(field("Дата и время (Екатеринбург)", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Сумма", "amount", {required:true,placeholder:"0,00"})); if (!isFunding) grid.append(field("Контрагент", "counterparty_id", {options:counterpartyOptions(),help:"Необязательно."}), field("Новый контрагент", "new_counterparty_name", {placeholder:"Имя или название, если его ещё нет",help:"Добавится прямо при сохранении операции.",full:true})); grid.append(field("Комментарий", "purpose", {type:"textarea",full:true,help:isFunding ? "Внешние собственные деньги; выручка не создаётся." : "Для статьи «Прочие расходы» обязателен."})); if (isExpense) grid.append(field("Почему остаток может стать отрицательным", "negative_balance_explanation", {type:"textarea",full:true,help:"Заполняется только при предупреждении сервера."})); submit.textContent = kind === "edit-draft" ? "Сохранить изменения" : "Провести"; if (kind !== "edit-draft") ui.dialogSaveDraft.classList.remove("is-hidden"); }
-    if (documentKind === "transfer") { ui.dialogTitle.textContent = kind === "edit-draft" ? "Изменить черновик" : "Перевод"; grid.append(field("Откуда", "source_account_id", {required:true,options:accountOptions({initialized:true})}), field("Куда", "target_account_id", {required:true,options:accountOptions({initialized:true})}), field("Дата и время (Екатеринбург)", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Сумма", "amount", {required:true,placeholder:"0,00"}), field("Комментарий", "purpose", {type:"textarea",full:true}), field("Режим", "transfer_mode", {options:[["Сразу провести", "instant"],["В пути", "two_phase"]], help:"В пути можно полностью завершить или отменить тому же оператору."}), field("Почему остаток может стать отрицательным", "negative_balance_explanation", {type:"textarea",full:true,help:"Заполните после предупреждения сервера. Это пояснение к тому же переводу."})); submit.textContent = kind === "edit-draft" ? "Сохранить изменения" : "Провести"; if (kind !== "edit-draft") ui.dialogSaveDraft.classList.remove("is-hidden"); }
-    if (kind === "reconcile") { ui.dialogTitle.textContent = "Сверка кассы"; grid.append(field("Касса", "account_id", {required:true,options:accountOptions({cashOnly:true})}), field("Дата сверки", "week_ending", {required:true,type:"date",value:businessDayValue(),help:"Остаток рассчитывается на конец этого дня по Екатеринбургу (UTC+5)."}), field("Фактический остаток", "actual_amount", {required:true,placeholder:"0,00"}), field("Комментарий", "comment", {type:"textarea",placeholder:"При расхождении укажите причину",help:"При совпадении можно оставить пустым.",full:true})); ui.dialogContent.append(element("div", "warning-box", "Сверка сохранит расхождение на конец выбранного дня и не создаст движение денег.")); submit.textContent = "Зафиксировать сверку"; }
+    if (kind === "directory") { ui.dialogTitle.textContent = ({rename:"Переименовать",archive:"В архив",restore:"Восстановить",delete:"Удалить",set_group:"Группа статьи"})[source.action]; ui.dialogContent.dataset.directoryKind = source.kind; ui.dialogContent.dataset.directoryAction = source.action; if (source.action === "rename") grid.append(field("Новое название", "name", {required:true,value:source.item.name,full:true})); else if (source.action === "set_group") { const active = state.categoryGroups.filter(group => group.is_active); const current = active.find(group => group.group_id === source.item.group_id); grid.append(field(`Группа · ${source.item.name}`, "group_id", {options:[["Без группы", ""],...active.map(group => [group.name,group.group_id])],value:current?.group_id || "",full:true,help:"Меняет только отображение, не назначение статьи и не историю операций."})); } else ui.dialogContent.append(element("div", "warning-box", source.action === "delete" ? "Удаление возможно только если запись не используется, в том числе в черновиках. История денежных операций сохранится." : `${source.item.name}: подтвердите действие.`)); submit.textContent = source.action === "set_group" ? "Сохранить группу" : ui.dialogTitle.textContent; }
+    if (documentKind === "opening") { ui.dialogTitle.textContent = kind === "edit-draft" ? "Изменить черновик" : "Начальный остаток"; grid.append(field("Касса", "target_account_id", { required:true, options:accountOptions({cashOnly:true,openingOnly:true,includeIds:kind === "edit-draft" ? [source.target_account_id] : []}) }), field("Дата и время (Екатеринбург)", "occurred_at", { required:true,type:"datetime-local",value:dateValue() }), field("Сумма", "amount", { required:true, placeholder:"0,00", help:"Укажите сумму явно, в том числе ноль." }), field("Комментарий", "opening_evidence_ref", {type:"textarea",placeholder:"Например, остаток пересчитан вместе с ответственным",help:"Основание отмечается как подтверждённое вручную.",full:true})); submit.textContent = kind === "edit-draft" ? "Сохранить изменения" : "Провести"; if (kind !== "edit-draft") ui.dialogSaveDraft.classList.remove("is-hidden"); }
+    if (documentKind === "income" || documentKind === "expense") {
+      const isExpense = documentKind === "expense";
+      ui.dialogTitle.textContent = kind === "edit-draft" ? "Изменить черновик" : `${isExpense ? "Расход" : "Поступление"} · ${selectedCash()?.name || "Касса"}`;
+      grid.append(field(isExpense ? "Касса списания" : "Касса поступления", isExpense ? "source_account_id" : "target_account_id", {required:true,options:accountOptions({initialized:true,includeIds:kind === "edit-draft" ? [source.source_account_id,source.target_account_id] : []})}));
+      if (!isExpense) grid.append(field("Основание поступления", "incoming_basis", {options:[["Собственные средства", "owner_funding"],["Поступление по статье", "categorized"]],help:"Собственные средства не считаются выручкой.",full:true}));
+      const category = isExpense ? groupedExpenseCategoryField(kind === "edit-draft" ? source.category_id : "") : field("Статья", "category_id", {options:categoryOptions("income")});
+      if (!isExpense) category.dataset.incomingDetail = "";
+      grid.append(category, field("Дата и время (Екатеринбург)", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Сумма", "amount", {required:true,placeholder:"0,00"}));
+      const counterparty = field("Контрагент", "counterparty_id", {options:counterpartyOptions(),help:"Необязательно."});
+      const newCounterparty = field("Новый контрагент", "new_counterparty_name", {placeholder:"Имя или название, если его ещё нет",help:"Добавится прямо при сохранении операции.",full:true});
+      if (!isExpense) { counterparty.dataset.incomingDetail = ""; newCounterparty.dataset.incomingDetail = ""; }
+      grid.append(counterparty,newCounterparty,field("Комментарий", "purpose", {type:"textarea",full:true,help:isExpense ? "Для статьи «Прочие расходы» обязателен." : "При необходимости уточните источник денег."}));
+      if (isExpense) grid.append(field("Почему остаток может стать отрицательным", "negative_balance_explanation", {type:"textarea",full:true,help:"Заполняется только при предупреждении сервера."}));
+      submit.textContent = kind === "edit-draft" ? "Сохранить изменения" : "Провести"; if (kind !== "edit-draft") ui.dialogSaveDraft.classList.remove("is-hidden");
+    }
+    if (documentKind === "transfer") { ui.dialogTitle.textContent = kind === "edit-draft" ? "Изменить черновик" : `Перевод · ${selectedCash()?.name || "Касса"}`; grid.append(field("Откуда", "source_account_id", {required:true,options:accountOptions({initialized:true,includeIds:kind === "edit-draft" ? [source.source_account_id] : []})}), field("Куда", "target_account_id", {required:true,options:accountOptions({initialized:true,includeIds:kind === "edit-draft" ? [source.target_account_id] : []})}), field("Дата и время (Екатеринбург)", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Сумма", "amount", {required:true,placeholder:"0,00"}), field("Комментарий", "purpose", {type:"textarea",full:true}), field("Режим", "transfer_mode", {options:[["Сразу провести", "instant"],["В пути", "two_phase"]], help:"В пути можно полностью завершить или отменить тому же оператору."}), field("Почему остаток может стать отрицательным", "negative_balance_explanation", {type:"textarea",full:true,help:"Заполните после предупреждения сервера. Это пояснение к тому же переводу."})); submit.textContent = kind === "edit-draft" ? "Сохранить изменения" : "Провести"; if (kind !== "edit-draft") ui.dialogSaveDraft.classList.remove("is-hidden"); }
+    if (kind === "reconcile") { ui.dialogTitle.textContent = `Сверка · ${selectedCash()?.name || "Касса"}`; grid.append(field("Касса", "account_id", {required:true,options:accountOptions({cashOnly:true,initialized:true})}), field("Дата сверки", "week_ending", {required:true,type:"date",value:businessDayValue(),help:"Остаток рассчитывается на конец этого дня по Екатеринбургу (UTC+5)."}), field("Фактический остаток", "actual_amount", {required:true,placeholder:"0,00"}), field("Комментарий", "comment", {type:"textarea",placeholder:"При расхождении укажите причину",help:"При совпадении можно оставить пустым.",full:true})); ui.dialogContent.append(element("div", "warning-box", "Сверка сохранит расхождение на конец выбранного дня и не создаст движение денег.")); submit.textContent = "Зафиксировать сверку"; }
     if (kind === "transfer-transition") { const isCancel = source.transition === "cancel"; ui.dialogTitle.textContent = isCancel ? "Отменить перевод" : "Завершить перевод"; grid.append(field(isCancel ? "Дата отмены (Екатеринбург)" : "Дата завершения (Екатеринбург)", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Комментарий", "purpose", {type:"textarea",full:true})); ui.dialogContent.dataset.transition = source.transition; submit.textContent = isCancel ? "Отменить перевод" : "Завершить перевод"; }
     if (kind === "reverse") { ui.dialogTitle.textContent = "Исправление операции"; grid.append(field("Дата исправления", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Причина исправления", "reason", {required:true,type:"textarea",full:true,help:"Будет создана связанная обратная операция; исходная останется в истории."})); submit.textContent = "Создать исправление"; }
     if (kind === "replace-opening") { ui.dialogTitle.textContent = "Заменить начальный остаток"; grid.append(field("Дата и время (Екатеринбург)", "occurred_at", {required:true,type:"datetime-local",value:dateValue()}), field("Новая сумма", "amount", {required:true,placeholder:"0,00",help:"Новый остаток заменит прежний через сохранённую корректировку."}), field("Почему исправляем", "reason", {required:true,type:"textarea",placeholder:"Уточнили остаток после пересчёта",full:true})); submit.textContent = "Заменить"; }
@@ -237,11 +309,40 @@
       const occurred = $(`[name="occurred_at"]`, ui.dialogContent);
       if (occurred && source.occurred_at) occurred.value = dateValue(source.occurred_at);
     }
-    updateCommentRequirement(); ui.dialog.showModal(); const first = $("input,select,textarea", ui.dialogContent); first?.focus();
+    if (documentKind === "income") $("[name='incoming_basis']", ui.dialogContent).value = kind === "edit-draft" && source.funding_kind !== "owner_funding" ? "categorized" : "owner_funding";
+    if (kind !== "edit-draft") {
+      const accountName = documentKind === "opening" || documentKind === "income" ? "target_account_id" : documentKind === "expense" || documentKind === "transfer" ? "source_account_id" : kind === "reconcile" ? "account_id" : "";
+      const accountField = accountName ? $(`[name="${accountName}"]`, ui.dialogContent) : null;
+      if (accountField && [...accountField.options].some(option => option.value === state.selectedAccountId)) accountField.value = state.selectedAccountId;
+    }
+    updateIncomingBasis(); updateCommentRequirement(); ui.dialog.showModal(); const first = $("input,select,textarea", ui.dialogContent); first?.focus();
   }
-  function updateCommentRequirement() { const category = $("[name='category_id']", ui.dialogContent); const comment = $("[name='purpose']", ui.dialogContent); if (category && comment) comment.required = Boolean(state.categories.find(item => item.id === category.value)?.requires_comment); }
+  function updateIncomingBasis(clearHidden = false) {
+    const basis = $("[name='incoming_basis']", ui.dialogContent); if (!basis) return;
+    const own = basis.value === "owner_funding";
+    const hint = $(".help", basis.closest(".field"));
+    if (hint) hint.textContent = own ? "Собственные средства не считаются выручкой." : "Для обычного поступления выберите статью.";
+    for (const wrapper of ui.dialogContent.querySelectorAll("[data-incoming-detail]")) {
+      wrapper.classList.toggle("is-hidden", own);
+      const control = $("select,input", wrapper); control.disabled = own;
+      if (own && clearHidden) control.value = "";
+      if (control.name === "category_id") control.required = !own;
+    }
+  }
+  function updateCommentRequirement() { const category = $("[name='category_id']", ui.dialogContent); const comment = $("[name='purpose']", ui.dialogContent); if (category && comment) comment.required = !category.disabled && Boolean(state.categories.find(item => item.id === category.value)?.requires_comment); }
   function normalizeValue(name, value) { if (name === "occurred_at") return toBusinessUtc(value); if (name === "amount" || name === "actual_amount") return value.trim().replace(",", "."); return value.trim(); }
   function formData(form) { const body = {}; for (const [name,value] of new FormData(form).entries()) if (value !== "") body[name] = normalizeValue(name, String(value)); return body; }
+  function prepareIncomingBody(body, isEdit) {
+    const basis = body.incoming_basis; delete body.incoming_basis;
+    if (basis === "owner_funding") {
+      body.funding_kind = "owner_funding";
+      if (isEdit) { body.category_id = null; body.counterparty_id = null; }
+      delete body.new_counterparty_name;
+    } else {
+      if (isEdit) body.funding_kind = null;
+      if (isEdit && !body.counterparty_id && !body.new_counterparty_name) body.counterparty_id = null;
+    }
+  }
   function operation() { return { id: operationId(), key: operationId() }; }
   async function readUncertainOperation(op) {
     state.inFlight.set(op.id, op);
@@ -264,24 +365,38 @@
     body.counterparty_id = created.id || created.counterparty_id;
     return body;
   }
-  async function submitDialog(event) { if (event.submitter?.value === "cancel") { ui.dialog.close(); return; } event.preventDefault(); const form = event.currentTarget; const kind = ui.dialogContent.dataset.kind; const sourceId = ui.dialogContent.dataset.sourceId; const comment = $("[name='purpose']", ui.dialogContent); if (comment?.required && !comment.value.trim()) { error("Для этой статьи напишите комментарий."); comment.focus(); return; } const body = formData(form); const submit = ui.dialogSubmit; let successMessage = ""; submit.disabled = true; error(); try { if (kind === "new-cash") { await request("/accounts", {method:"POST",body:{...body,account_type:"cash",currency:"RUB"},operation:operation()}); successMessage = "Касса создана. Укажите начальный остаток отдельной операцией."; }
+  async function submitDialog(event) { if (event.submitter?.value === "cancel") { ui.dialog.close(); return; } event.preventDefault(); const form = event.currentTarget; const kind = ui.dialogContent.dataset.kind; const documentKind = ui.dialogContent.dataset.documentKind; const sourceId = ui.dialogContent.dataset.sourceId; const comment = $("[name='purpose']", ui.dialogContent); if (comment?.required && !comment.value.trim()) { error("Для этой статьи напишите комментарий."); comment.focus(); return; } const body = formData(form); if (documentKind === "income") prepareIncomingBody(body, kind === "edit-draft"); const submit = ui.dialogSubmit; let successMessage = ""; submit.disabled = true; error(); try { if (kind === "new-cash") { await request("/accounts", {method:"POST",body:{...body,account_type:"cash",currency:"RUB"},operation:operation()}); successMessage = "Касса создана. Укажите начальный остаток отдельной операцией."; }
       else if (kind === "new-category") { await request("/categories", {method:"POST",body:{...body,direction:"expense",posting_class:"external_outflow"},operation:operation()}); successMessage = "Статья добавлена."; }
+      else if (kind === "new-group") { await request("/category-groups", {method:"POST",body,operation:operation()}); successMessage = "Группа добавлена."; }
       else if (kind === "new-counterparty") { await request("/counterparties", {method:"POST",body,operation:operation()}); successMessage = "Контрагент добавлен."; }
-      else if (kind === "directory") { const directoryKind = ui.dialogContent.dataset.directoryKind; const item = ({accounts:state.accounts,categories:state.categories,counterparties:state.counterparties})[directoryKind].find(entry => entry.id === sourceId); await request(`/directories/${directoryKind}/${encodeURIComponent(sourceId)}`, {method:"POST",body:{...body,action:ui.dialogContent.dataset.directoryAction,base_revision:item.revision},operation:operation()}); successMessage = "Изменение сохранено."; }
-      else if (kind === "common-opening") { const amounts = {}; for (const [name,value] of Object.entries(body)) if (name.startsWith("opening_")) { amounts[name.slice(8)] = value.replace(",", "."); delete body[name]; } await request("/openings/common-draft", {method:"POST",body:{...body,amounts},operation:operation()}); successMessage = "Три черновика с общей датой подготовлены. Проверьте и проведите каждый."; }
+      else if (kind === "directory") { const directoryKind = ui.dialogContent.dataset.directoryKind; const item = ({accounts:state.accounts,categories:state.categories,counterparties:state.counterparties,"category-groups":state.categoryGroups})[directoryKind].find(entry => (entry.id || entry.group_id) === sourceId); await request(`/directories/${directoryKind}/${encodeURIComponent(sourceId)}`, {method:"POST",body:{...body,action:ui.dialogContent.dataset.directoryAction,base_revision:item.revision},operation:operation()}); successMessage = "Изменение сохранено."; }
       else if (kind === "reconcile") { await request("/cash-reconciliations", {method:"POST",body,operation:operation()}); successMessage = "Сверка сохранена. Остаток по ней не изменён."; }
       else if (kind === "edit-draft") { const draft = state.documents.find(item => item.id === sourceId); await attachCounterparty(body); await request(`/documents/${encodeURIComponent(sourceId)}`, {method:"PATCH",body:{...body,base_revision:draft?.revision},operation:operation()}); successMessage = "Черновик обновлён. Проверьте его и проведите, когда всё готово."; }
       else if (kind === "reverse") { const doc = state.documents.find(item => item.id === sourceId); await request(`/documents/${encodeURIComponent(sourceId)}/reverse`, {method:"POST",body:{...body,base_revision:doc?.revision ?? doc?.base_revision},operation:operation()}); successMessage = "Исправление создано. Исходная операция сохранена в истории."; }
       else if (kind === "replace-opening") { const doc = state.documents.find(item => item.id === sourceId); await request(`/documents/${encodeURIComponent(sourceId)}/replace-opening`, {method:"POST",body:{...body,base_revision:doc?.revision,opening_evidence_type:"manual_confirmation"},operation:operation()}); successMessage = "Начальный остаток заменён. Прежний факт сохранён в истории."; }
       else if (kind === "transfer-transition") { const doc = state.documents.find(item => item.id === sourceId); await request(`/transfers/${encodeURIComponent(sourceId)}/${ui.dialogContent.dataset.transition}`, {method:"POST",body:{base_revision:doc?.revision ?? doc?.base_revision, ...body},operation:operation()}); successMessage = ui.dialogContent.dataset.transition === "cancel" ? "Перевод отменён." : "Перевод завершён."; }
-      else { await attachCounterparty(body); const draft = await createDraft({document_type:kind === "funding" ? "income" : kind,...body, ...(kind === "opening" ? {opening_evidence_type:"manual_confirmation"} : {}), ...(kind === "funding" ? {funding_kind:"owner_funding"} : {})}); if (ui.dialogContent.dataset.submitMode === "post") await postDraft(draft.document_id); ui.dialog.close(); return; } await loadAll(); notice(successMessage); ui.dialog.close(); }
+      else { await attachCounterparty(body); const draft = await createDraft({document_type:kind,...body, ...(kind === "opening" ? {opening_evidence_type:"manual_confirmation"} : {})}); if (ui.dialogContent.dataset.submitMode === "post") await postDraft(draft.document_id); ui.dialog.close(); return; } await loadAll(); notice(successMessage); ui.dialog.close(); }
     catch (caught) { if (caught.code === "negative_balance_explanation_required" || /negative cash/i.test(caught.message)) { error("Для этого расхода добавьте пояснение к отрицательному остатку."); } else if (caught.code === "version_conflict") { error("Данные изменились у другого пользователя. Форма сохранена; обновите данные и проверьте её ещё раз."); await loadAll(); } else if (caught.uncertain) { await readUncertainOperation(caught.operation); } else { error(caught.message); } submit.disabled = false; }
   }
   async function postDraft(id, duplicateToken) { const doc = state.documents.find(d => d.id === id); if (!doc) return; const op = operation(); try { const body = {base_revision:doc.revision ?? doc.base_revision}; if (duplicateToken) body.duplicate_confirmation_token = duplicateToken; await request(`/documents/${encodeURIComponent(id)}/post`, {method:"POST",body,operation:op}); await loadAll(); notice("Операция проведена и зафиксирована."); }
     catch (caught) { if (caught.code === "duplicate_confirmation_required") { const token = caught.payload?.error?.duplicate_confirmation_token || caught.payload?.data?.duplicate_confirmation_token; if (token && window.confirm("Похожая операция уже есть. Провести эту операцию всё равно?")) return postDraft(id, token); } if (caught.uncertain) await readUncertainOperation(caught.operation); else if (caught.code === "negative_balance_explanation_required" || /negative cash/i.test(caught.message)) error("Для этой операции добавьте пояснение к отрицательному остатку."); else error(caught.message); } }
-  function actionAllowed(kind) { return ["new-cash","new-category","new-counterparty"].includes(kind) ? canAdmin() : canOperate(); }
-  document.addEventListener("click", (event) => { if (event.target.closest("[data-dialog] [value='cancel']")) { ui.dialog.close(); return; } const action = event.target.closest("[data-action]")?.dataset.action; if (action) { if (action === "reload") loadAll(); else if (actionAllowed(action)) buildDialog(action); return; } if (event.target.closest("[data-dialog-save-draft]")) { ui.dialogContent.dataset.submitMode = "draft"; $("[data-dialog-form]").requestSubmit(); return; } const directory = event.target.closest("[data-directory]"); if (directory && canAdmin()) { const [kind,id,actionName] = directory.dataset.directory.split(":"); const item = ({accounts:state.accounts,categories:state.categories,counterparties:state.counterparties})[kind].find(entry => entry.id === id); buildDialog("directory", {id,kind,action:actionName,item}); return; } const account = event.target.closest("[data-account-id]"); if (account) { const select = $("[data-account-select]"); select.value = account.dataset.accountId; $("[data-history-filters]").requestSubmit(); return; } const edit = event.target.closest("[data-edit-draft]"); if (edit) { buildDialog("edit-draft", state.documents.find(d => d.id === edit.dataset.editDraft)); return; } const post = event.target.closest("[data-post-draft]"); if (post) postDraft(post.dataset.postDraft); const transition = event.target.closest("[data-transfer-transition]"); if (transition) { const [id, actionName] = transition.dataset.transferTransition.split(":"); buildDialog("transfer-transition", {id,transition:actionName}); return; } const replace = event.target.closest("[data-replace-opening]"); if (replace) { buildDialog("replace-opening", state.documents.find(d => d.id === replace.dataset.replaceOpening)); return; } const reverse = event.target.closest("[data-reverse]"); if (reverse) buildDialog("reverse", state.documents.find(d => d.id === reverse.dataset.reverse)); });
-  ui.dialogContent.addEventListener("change", updateCommentRequirement);
+  function actionAllowed(kind) { return kind === "new-group" ? canAdmin() && state.categoryGroupsEnabled : ["new-cash","new-category","new-counterparty"].includes(kind) ? canAdmin() : kind === "opening" ? canOperate() && openingEligible().length > 0 : ["income","expense","transfer","reconcile"].includes(kind) ? canOperate() && selectedCash() && accountState(selectedCash()) === "current" : canOperate(); }
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-dialog] [value='cancel']")) { event.preventDefault(); ui.dialog.close(); return; }
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action) { if (action === "reload") loadAll(); else if (actionAllowed(action)) buildDialog(action); return; }
+    if (event.target.closest("[data-dialog-save-draft]")) { ui.dialogContent.dataset.submitMode = "draft"; $("[data-dialog-form]").requestSubmit(); return; }
+    const directory = event.target.closest("[data-directory]");
+    if (directory && canAdmin()) { const [kind,id,actionName] = directory.dataset.directory.split(":"); const item = ({accounts:state.accounts,categories:state.categories,counterparties:state.counterparties,"category-groups":state.categoryGroups})[kind].find(entry => (entry.id || entry.group_id) === id); buildDialog("directory", {id,kind,action:actionName,item}); return; }
+    const account = event.target.closest("[data-account-id]"); if (account) { selectAccount(account.dataset.accountId); return; }
+    const edit = event.target.closest("[data-edit-draft]"); if (edit) { buildDialog("edit-draft", state.documents.find(d => d.id === edit.dataset.editDraft)); return; }
+    const post = event.target.closest("[data-post-draft]"); if (post) postDraft(post.dataset.postDraft);
+    const transition = event.target.closest("[data-transfer-transition]"); if (transition) { const [id, actionName] = transition.dataset.transferTransition.split(":"); buildDialog("transfer-transition", {id,transition:actionName}); return; }
+    const replace = event.target.closest("[data-replace-opening]"); if (replace) { buildDialog("replace-opening", state.documents.find(d => d.id === replace.dataset.replaceOpening)); return; }
+    const reverse = event.target.closest("[data-reverse]"); if (reverse) buildDialog("reverse", state.documents.find(d => d.id === reverse.dataset.reverse));
+  });
+  ui.dialogContent.addEventListener("change", event => { if (event.target.name === "incoming_basis") updateIncomingBasis(true); updateCommentRequirement(); });
   $("[data-dialog-form]").addEventListener("submit", submitDialog); $("[data-history-filters]").addEventListener("submit", async (event) => { event.preventDefault(); renderHistory(); });
+  $("[data-account-select]").addEventListener("change", renderHistory);
   if (!app) return; loadAll();
 })();

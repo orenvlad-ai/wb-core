@@ -11449,10 +11449,17 @@
       settingsEmbedFrame.setAttribute("src", url.toString());
     }
 
+    function sizeFinanceEmbed() {
+      if (!financeEmbedFrame || financeEmbedFrame.closest("[data-unified-tab-panel]")?.hidden) return;
+      const top = Math.max(0, financeEmbedFrame.getBoundingClientRect().top);
+      financeEmbedFrame.style.height = Math.min(920, Math.max(360, window.innerHeight - top - 16)) + "px";
+    }
+
+    window.addEventListener("resize", sizeFinanceEmbed);
     function ensureFinanceEmbed() {
-      if (!financeEmbedFrame || financeEmbedFrame.getAttribute("src")) {
-        return;
-      }
+      if (!financeEmbedFrame) return;
+      sizeFinanceEmbed();
+      if (financeEmbedFrame.getAttribute("src")) return;
       const url = new URL("/finance/", window.location.origin);
       url.searchParams.set("embedded", "1");
       financeEmbedFrame.setAttribute("src", url.toString());

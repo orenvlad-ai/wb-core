@@ -27,6 +27,7 @@ from packages.adapters.finance_liquidity_http import (
 from packages.application.finance_liquidity_cash import (
     FinanceCashService,
     bootstrap_finance_cash_store,
+    migrate_finance_cash_store_category_groups,
     migrate_finance_cash_store_v2,
 )
 from packages.contracts.finance_liquidity_cash import FINANCE_CASH_DEFAULT_PORT
@@ -41,16 +42,19 @@ def main() -> None:
     parser.add_argument("--db", required=True, type=Path)
     parser.add_argument("--bootstrap", action="store_true")
     parser.add_argument("--migrate-v2", action="store_true")
+    parser.add_argument("--install-category-groups", action="store_true")
     parser.add_argument("--backup", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=FINANCE_CASH_DEFAULT_PORT)
     parser.add_argument("--runtime-dir", type=Path)
     parser.add_argument("--auth-fixture", type=Path)
     args = parser.parse_args()
-    if args.migrate_v2 and (args.bootstrap or args.backup is None):
-        raise SystemExit("--migrate-v2 requires --backup and excludes --bootstrap")
-    if args.backup is not None and not args.migrate_v2:
-        raise SystemExit("--backup is only valid with --migrate-v2")
+    if sum((args.migrate_v2, args.install_category_groups, args.bootstrap)) > 1:
+        raise SystemExit("Choose one bootstrap or migration operation")
+    if (args.migrate_v2 or args.install_category_groups) and args.backup is None:
+        raise SystemExit("Explicit migrations require --backup")
+    if args.backup is not None and not (args.migrate_v2 or args.install_category_groups):
+        raise SystemExit("--backup is only valid with an explicit migration")
     try:
         bootstrap_access = load_finance_bootstrap_access()
     except FinanceBootstrapAccessUnavailable as exc:
@@ -66,6 +70,9 @@ def main() -> None:
             raise SystemExit(str(exc)) from exc
     if args.migrate_v2:
         migrate_finance_cash_store_v2(args.db, args.backup)
+        return
+    if args.install_category_groups:
+        migrate_finance_cash_store_category_groups(args.db, args.backup)
         return
     if args.bootstrap:
         bootstrap_finance_cash_store(args.db)

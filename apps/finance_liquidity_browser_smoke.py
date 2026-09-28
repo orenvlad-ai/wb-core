@@ -57,6 +57,9 @@ def _submit(page: object) -> None:
 
 
 def _open(page: object, action: str) -> None:
+    if action in {"income", "expense", "transfer", "reconcile"} and page.locator(f'[data-action="{action}"]').is_disabled():
+        page.locator("[data-accounts] .account-card", has_text="Тестовая касса A").click()
+        page.locator('[data-account-select]').select_option("")
     page.locator(f'[data-action="{action}"]').click()
     expect(page.locator("[data-dialog]")).to_be_visible()
     expect(page.locator("[data-dialog] [data-instance-label]")).to_have_text(
@@ -186,6 +189,39 @@ def main() -> None:
                 _create_cash(page, "Тестовая касса B", "Тестовый оператор")
                 _opening(page, "Тестовая касса B · Тестовый оператор", "0,00", "Подтверждено ответственным")
 
+                expect(page.locator("[data-settings-groups] .settings-entry")).to_have_count(6)
+                _open(page, "new-group")
+                _field(page, "name").fill("Синтетическая группа")
+                _submit(page)
+                new_group = page.locator("[data-settings-groups] .settings-entry", has_text="Синтетическая группа")
+                expect(new_group).to_be_visible()
+                custom_category = next(item for item in service.list_categories() if item["name"] == "Тестовая статья расхода")
+                group_id = next(item["group_id"] for item in service.list_category_groups()["groups"] if item["name"] == "Синтетическая группа")
+                page.locator(f'[data-directory="categories:{custom_category["category_id"]}:set_group"]').click()
+                _field(page, "group_id").select_option(group_id)
+                _submit(page)
+                expect(page.locator("[data-notice]")).to_contain_text("Изменение сохранено")
+                _open(page, "expense")
+                expect(page.locator('[data-dialog] optgroup[label="Синтетическая группа"] option')).to_have_text("Тестовая статья расхода")
+                page.screenshot(path=evidence_dir / "cash-grouped-expense.png")
+                page.locator('[data-dialog] [value="cancel"]').first.click()
+                new_group = page.locator("[data-settings-groups] .settings-entry", has_text="Синтетическая группа")
+                new_group.locator('[data-directory$=":archive"]').click()
+                _submit(page)
+                _open(page, "expense")
+                expect(page.locator('[data-dialog] optgroup[label="Без группы"] option', has_text="Тестовая статья расхода")).to_have_count(1)
+                page.screenshot(path=evidence_dir / "cash-archived-group-fallback.png")
+                page.locator('[data-dialog] [value="cancel"]').first.click()
+                plain_view = context.new_page()
+                plain_view.route("**/v1/finance/category-groups", lambda route: route.fulfill(status=200, content_type="application/json", body='{"contract":"finance_cash_v1","data":{"enabled":false,"groups":[]}}'))
+                plain_view.goto(f"{base_url}/finance/?embedded=1", wait_until="networkidle")
+                expect(plain_view.locator('[data-action="new-group"]')).to_be_hidden()
+                expect(plain_view.locator("[data-settings-groups]")).to_contain_text("после обновления справочника")
+                plain_view.locator("[data-accounts] .account-card", has_text="Тестовая касса A").click()
+                _open(plain_view, "expense")
+                expect(plain_view.locator('[data-dialog] optgroup[label="Без группы"] option', has_text="Тестовая статья расхода")).to_have_count(1)
+                plain_view.close()
+
                 _open(page, "expense")
                 _field(page, "source_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
                 _field(page, "category_id").select_option(label="Тестовая статья расхода")
@@ -208,6 +244,7 @@ def main() -> None:
                 expect(page.locator("[data-accounts]", has_text="требуется разбор")).to_be_visible()
 
                 _open(page, "income")
+                _field(page, "incoming_basis").select_option("categorized")
                 _field(page, "target_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
                 _field(page, "category_id").select_option(label="Тестовая статья поступления")
                 _field(page, "occurred_at").fill("2026-09-21T11:10")
@@ -311,6 +348,7 @@ def main() -> None:
                     raise AssertionError(f"invalid response created duplicate or missed transfer: {transfers}")
 
                 _open(page, "income")
+                _field(page, "incoming_basis").select_option("categorized")
                 _field(page, "target_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
                 _field(page, "category_id").select_option(label="Тестовая статья поступления")
                 _field(page, "occurred_at").fill("2026-09-21T11:21")
@@ -513,7 +551,7 @@ def main() -> None:
                 if before_reconciliation != after_reconciliation:
                     raise AssertionError("reconciliation changed money")
 
-                _open(page, "funding")
+                _open(page, "income")
                 _field(page, "target_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
                 _field(page, "occurred_at").fill("2026-09-21T14:00")
                 _field(page, "amount").fill("10,00")
@@ -524,6 +562,33 @@ def main() -> None:
                     f"asset:{funding_doc['target_account_id']}", "system:owner_funding:RUB"
                 }
                 expect(page.locator("[data-history]")).to_contain_text("Пополнение собственными средствами")
+
+                _open(page, "income")
+                expect(_field(page, "incoming_basis")).to_have_value("owner_funding")
+                expect(_field(page, "category_id")).to_be_hidden()
+                _field(page, "target_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
+                _field(page, "occurred_at").fill("2026-09-21T14:02")
+                _field(page, "amount").fill("5,00")
+                _field(page, "purpose").fill("Тест смены основания")
+                page.locator("[data-dialog-save-draft]").click()
+                changed_basis = page.locator(".history-row", has_text="Тест смены основания")
+                expect(changed_basis).to_contain_text("Черновик")
+                changed_basis.locator("[data-edit-draft]").click()
+                expect(_field(page, "incoming_basis")).to_have_value("owner_funding")
+                _field(page, "incoming_basis").select_option("categorized")
+                _field(page, "category_id").select_option(label="Тестовая статья поступления")
+                _submit(page)
+                basis_draft = next(item for item in service.list_documents() if item["purpose"] == "Тест смены основания")
+                assert basis_draft["funding_kind"] is None and basis_draft["category_id"]
+                changed_basis.locator("[data-edit-draft]").click()
+                expect(_field(page, "incoming_basis")).to_have_value("categorized")
+                _field(page, "new_counterparty_name").fill("Скрытый контрагент")
+                _field(page, "incoming_basis").select_option("owner_funding")
+                expect(_field(page, "category_id")).to_be_hidden()
+                _submit(page)
+                basis_draft = next(item for item in service.list_documents() if item["purpose"] == "Тест смены основания")
+                assert basis_draft["funding_kind"] == "owner_funding" and basis_draft["category_id"] is None and basis_draft["counterparty_id"] is None
+                assert all(item["name"] != "Скрытый контрагент" for item in service.list_counterparties())
 
                 _open(page, "expense")
                 _field(page, "source_account_id").select_option(label="Тестовая касса A · Тестовый оператор")
@@ -580,6 +645,7 @@ def main() -> None:
                     route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
 
                 shell = context.new_page()
+                shell.set_viewport_size({"width": 1365, "height": 768})
                 shell.route("**/sheet-vitrina-v1/vitrina*", shell_route)
                 shell.route("**/sheet-vitrina-v1/settings*", lambda route: route.fulfill(status=200, content_type="text/html", body="<h1>Настройки</h1>"))
                 shell.goto(f"{base_url}/sheet-vitrina-v1/vitrina", wait_until="domcontentloaded")
@@ -590,6 +656,45 @@ def main() -> None:
                 expect(shell.locator('[data-unified-tab-panel="finance"]')).to_be_visible()
                 finance_frame = shell.frame_locator('[data-finance-embed-frame]')
                 expect(finance_frame.locator("[data-instance-label]").first).to_have_text("ТЕСТОВАЯ БАЗА · ИЗОЛИРОВАННЫЕ ДАННЫЕ")
+                expect(finance_frame.locator("[data-accounts] .account-card")).to_have_count(6)
+                expect(finance_frame.locator('[data-action="income"]')).to_be_disabled()
+                expect(finance_frame.locator("[data-account-operations-hint]")).to_contain_text("Выберите кассу")
+                frame_box = shell.locator('[data-finance-embed-frame]').bounding_box()
+                assert frame_box and frame_box["y"] + frame_box["height"] <= 768
+                finance_frame.locator('[data-action="opening"]').click()
+                opening_choices = finance_frame.locator('[data-dialog-content] [name="target_account_id"] option')
+                assert opening_choices.count() == 4
+                assert all("Тестовая касса A" not in label for label in opening_choices.all_inner_texts())
+                expect(finance_frame.locator("[data-dialog-actions], .dialog-actions")).to_be_in_viewport()
+                actions_box = finance_frame.locator(".dialog-actions").bounding_box()
+                assert actions_box and 0 <= actions_box["y"] and actions_box["y"] + actions_box["height"] <= 768
+                shell.screenshot(path=evidence_dir / "cash-shell-opening-dialog.png")
+                finance_frame.get_by_role("button", name="Отмена").click()
+                uninitialized_card = finance_frame.locator("[data-accounts] .account-card", has_text="Касса Владислав")
+                uninitialized_card.click()
+                expect(finance_frame.locator('[data-action="income"]')).to_be_disabled()
+                finance_frame.locator('[data-action="opening"]').click()
+                expect(finance_frame.locator('[name="target_account_id"]')).to_have_value(uninitialized_card.get_attribute("data-account-id"))
+                finance_frame.get_by_role("button", name="Отмена").click()
+                cash_card = finance_frame.locator("[data-accounts] .account-card", has_text="Тестовая касса A")
+                cash_card.focus()
+                cash_card.press("Enter")
+                expect(cash_card).to_have_attribute("aria-pressed", "true")
+                expect(finance_frame.locator("[data-account-operations-title]")).to_contain_text("Тестовая касса A")
+                for action in ("expense", "income"):
+                    finance_frame.locator(f'[data-action="{action}"]').click()
+                    if action == "income":
+                        finance_frame.locator('[name="incoming_basis"]').select_option("categorized")
+                    expect(finance_frame.locator(".dialog-actions")).to_be_in_viewport()
+                    actions_box = finance_frame.locator(".dialog-actions").bounding_box()
+                    assert actions_box and 0 <= actions_box["y"] and actions_box["y"] + actions_box["height"] <= 768
+                    assert finance_frame.locator(".dialog-scroll").evaluate("node => node.scrollHeight > node.clientHeight")
+                    shell.screenshot(path=evidence_dir / f"cash-shell-{action}-dialog.png")
+                    finance_frame.get_by_role("button", name="Отмена").click()
+                finance_frame.locator('[data-action="transfer"]').click()
+                expect(finance_frame.locator('[name="source_account_id"]')).to_have_value(cash_card.get_attribute("data-account-id"))
+                expect(finance_frame.locator('[name="target_account_id"]')).to_have_value("")
+                finance_frame.get_by_role("button", name="Отмена").click()
                 expect(shell.locator('.shell-header [data-unified-tab-button="settings"]')).to_be_visible()
                 shell.screenshot(path=evidence_dir / "cash-shell-finance.png", full_page=True)
                 shell.locator('.shell-header [data-unified-tab-button="settings"]').click()
@@ -604,7 +709,7 @@ def main() -> None:
                 expect(shell.locator('[data-finance-embed-frame]')).not_to_have_attribute("src", "/finance/?embedded=1")
                 shell.close()
 
-                mobile_shell_context = browser.new_context(viewport={"width": 390, "height": 844}, color_scheme="dark")
+                mobile_shell_context = browser.new_context(viewport={"width": 390, "height": 700}, color_scheme="dark")
                 mobile_shell = mobile_shell_context.new_page()
                 mobile_shell_context.add_cookies([{"name": "finance_fixture_session", "value": "fixture-admin", "url": base_url}])
                 mobile_shell.route("**/sheet-vitrina-v1/vitrina*", shell_route)
@@ -612,6 +717,23 @@ def main() -> None:
                 expect(mobile_shell.locator('[data-unified-tab-button="finance"]')).to_have_attribute("aria-selected", "true")
                 expect(mobile_shell.frame_locator('[data-finance-embed-frame]').locator("[data-finance-app]")).to_be_visible()
                 assert mobile_shell.locator('[data-unified-tab-panel="finance"]').bounding_box()["width"] <= 390
+                mobile_frame = mobile_shell.frame_locator('[data-finance-embed-frame]')
+                mobile_frame.locator('[data-action="opening"]').click()
+                expect(mobile_frame.locator(".dialog-actions")).to_be_in_viewport()
+                mobile_actions_box = mobile_frame.locator(".dialog-actions").bounding_box()
+                assert mobile_actions_box and 0 <= mobile_actions_box["y"] and mobile_actions_box["y"] + mobile_actions_box["height"] <= 700
+                mobile_shell.screenshot(path=evidence_dir / "cash-shell-mobile-opening-dialog.png")
+                mobile_frame.get_by_role("button", name="Отмена").click()
+                mobile_frame.locator("[data-accounts] .account-card", has_text="Тестовая касса A").click()
+                for action in ("expense", "income"):
+                    mobile_frame.locator(f'[data-action="{action}"]').click()
+                    if action == "income":
+                        mobile_frame.locator('[name="incoming_basis"]').select_option("categorized")
+                    assert mobile_frame.locator(".dialog-scroll").evaluate("node => node.scrollHeight > node.clientHeight")
+                    mobile_actions_box = mobile_frame.locator(".dialog-actions").bounding_box()
+                    assert mobile_actions_box and 0 <= mobile_actions_box["y"] and mobile_actions_box["y"] + mobile_actions_box["height"] <= 700
+                    mobile_shell.screenshot(path=evidence_dir / f"cash-shell-mobile-{action}-dialog.png")
+                    mobile_frame.get_by_role("button", name="Отмена").click()
                 mobile_shell.screenshot(path=evidence_dir / "cash-shell-mobile.png", full_page=True)
                 mobile_shell_context.close()
                 context.close()
