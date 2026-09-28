@@ -56,16 +56,19 @@ def projection_payload(projection: Mapping[str, Any], *, business_date: str) -> 
     diagnostics = dict(projection.get("diagnostics") or {})
     first_run = str(diagnostics.get("first_run_business_date") or "")
     pre_cutover = not first_run or business_date < first_run
-    kind = "not_available" if pre_cutover else str(projection.get("kind") or "empty")
+    scope_unknown = diagnostics.get("eligible_scope_source") == "unknown_historical_roster"
+    kind = "not_available" if pre_cutover or scope_unknown else str(projection.get("kind") or "empty")
     if pre_cutover:
         diagnostics["reason"] = "pre_cutover"
+    elif scope_unknown:
+        diagnostics["reason"] = "eligible_roster_unknown"
     items = [
         SimpleNamespace(**dict(item))
-        for item in projection.get("items", [])
+        for item in ([] if scope_unknown else projection.get("items", []))
         if isinstance(item, Mapping) and type(item.get("nm_id")) is int
     ]
     latest_measured_at = max((str(item.measured_at or "") for item in items), default="")
-    detail = "pre_cutover" if pre_cutover else "persisted_authenticated_buyer_observations"
+    detail = "pre_cutover" if pre_cutover else "eligible_roster_unknown" if scope_unknown else "persisted_authenticated_buyer_observations"
     if kind == "empty" and str(diagnostics.get("current_auth_run_reference") or ""):
         detail += "; account_context_reset=true"
     if latest_measured_at:
@@ -74,9 +77,9 @@ def projection_payload(projection: Mapping[str, Any], *, business_date: str) -> 
     return SimpleNamespace(
         kind=kind,
         snapshot_date=str(projection.get("snapshot_date") or business_date),
-        requested_count=int(projection.get("requested_count") or 0),
-        covered_count=int(projection.get("covered_count") or 0),
-        missing_nm_ids=list(projection.get("missing_nm_ids") or []),
+        requested_count=0 if scope_unknown else int(projection.get("requested_count") or 0),
+        covered_count=0 if scope_unknown else int(projection.get("covered_count") or 0),
+        missing_nm_ids=[] if scope_unknown else list(projection.get("missing_nm_ids") or []),
         items=items,
         diagnostics=diagnostics,
         detail=detail,

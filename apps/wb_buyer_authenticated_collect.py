@@ -32,7 +32,7 @@ from packages.application.registry_upload_db_backed_runtime import RegistryUploa
 from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock  # noqa: E402
 from packages.application.wb_buyer_authenticated_observations import (  # noqa: E402
     append_observation, begin_publication, begin_run, classify_observation,
-    finish_publication, finish_run, run_ordinal,
+    finish_publication, finish_run, load_active_requested_nm_ids, run_ordinal,
 )
 from packages.business_time import business_date_from_timestamp  # noqa: E402
 from packages.contracts.prices_snapshot_block import PricesSnapshotRequest  # noqa: E402
@@ -75,8 +75,7 @@ def _sanitize_seller_goods(payload: Mapping[str, Any], wanted: list[int], measur
 
 
 def _requested_ids(runtime: RegistryUploadDbBackedRuntime) -> list[int]:
-    state = runtime.load_current_state()
-    return sorted({int(item.nm_id) for item in state.config_v2 if item.enabled})
+    return load_active_requested_nm_ids(runtime)
 
 
 def _recent_configured_slot(runtime_dir: Path, now: datetime) -> tuple[str, str] | None:
