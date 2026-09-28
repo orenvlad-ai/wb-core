@@ -45,7 +45,7 @@ def check(*,phase:str,expected_sha:str,runtime_dir:Path,admission_dir:Path=ADMIS
         scheduled=conn.execute('SELECT count(*) FROM cleaner_daily_schedules WHERE account=? AND enabled=1',(account,)).fetchone()[0] if schedule_table else 0
     if not row or row['enabled']!=0 or row['baseline_ready']!=1 or row['restore_hold']!=1 or row['transport_enabled']!=0:
         raise RuntimeError('manual-only cleaner setting mismatch')
-    accepted={'ready','busy'} if phase=='after_complete' else {'armed'}
+    accepted={'ready','busy','waiting_wb'} if phase=='after_complete' else {'armed'}
     deadline=time.monotonic()+timeout_seconds
     while True:
         try:

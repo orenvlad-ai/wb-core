@@ -57,7 +57,9 @@ def ready_cycle(coordinator, batch_coordinator, daily) -> bool:
     if jobs:coordinator.tick()
     if batches:batch_coordinator.tick()
     daily.reconcile_finished()
-    return bool(jobs or batches or due and due.get('state') not in {'skipped','missed','no_targets'})
+    waiting=bool(batches and hasattr(batch_coordinator,'waiting_only') and batch_coordinator.waiting_only())
+    return bool(jobs or batches and not waiting or due and due.get('state') not in {
+        'skipped','missed','no_targets','waiting_for_queue'})
 
 
 def armed_cycle(coordinator, batch_coordinator, daily) -> None:
@@ -102,15 +104,17 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     report_health(admission_dir,'storage_wait',type(exc).__name__)
             else:
                 try:
-                    report_health(admission_dir,'busy')
+                    waiting=batch_coordinator.waiting_only()
+                    report_health(admission_dir,'waiting_wb' if waiting else 'busy')
                     stop=threading.Event()
-                    heartbeat=threading.Thread(target=heartbeat_while_busy,args=(admission_dir,stop),daemon=True)
+                    heartbeat=threading.Thread(target=heartbeat_while_busy,args=(admission_dir,stop,
+                                                'waiting_wb' if waiting else 'busy'),daemon=True)
                     heartbeat.start()
                     try:busy=ready_cycle(coordinator,batch_coordinator,daily)
                     finally:
                         stop.set()
                         heartbeat.join()
-                    report_health(admission_dir,'busy' if busy else 'ready')
+                    report_health(admission_dir,'busy' if busy else 'waiting_wb' if batch_coordinator.waiting_only() else 'ready')
                 except Exception as exc:
                     # The exact intent stays durable. Report the failure while
                     # the supervisor keeps this process available for recovery.

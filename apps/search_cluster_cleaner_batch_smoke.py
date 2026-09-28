@@ -19,7 +19,7 @@ from apps import search_cluster_cleaner_stage_e as stage_e
 from apps.search_cluster_cleaner_write_fixture import FakeWB,Clock
 from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.search_cluster_cleaner import KeywordCleaner,batch_child_id
-from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator,batch_status,batch_item_detail
+from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator,batch_status,batch_item_detail,READ_RETRY_DELAYS
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter,ManualCleanerCoordinator
 from packages.application.search_cluster_cleaner_web import CleanerWeb
@@ -277,7 +277,9 @@ def main():
         assert service.stop_unsubmitted_manual_run(run['scan_run_id'])
         service.record_manual_job(run['job_id'],state='failed',stage='finished',error_code='synthetic_scan_error',error='Synthetic read failure')
         after=coordinator.tick()
-        assert after['state']=='partial' and after['failed_count']==1 and after['done_count']==3
+        assert after['state']=='running' and after['items'][2]['state']=='partial'
+        after=coordinator.tick()
+        assert after['state']=='partial' and after['partial_count']==1 and after['done_count']==3
         assert not coordinator.pending_batches()
         detail=batch_item_detail(service,accepted['batch_id'],1,owner)
         assert detail['item']['error_code']=='selected_status_changed' and detail['job'] is None
@@ -342,19 +344,13 @@ def main():
         job_id=parent.tick()['items'][0]['job_id']
         service.record_manual_job(job_id,state='running',stage='scan_apply_claimed')
         child=ManualCleanerCoordinator(service,object())
-        for attempt in range(child.LOCAL_RETRY_LIMIT):
-            assert child._retry_unclaimed(job_id,'scan',{'state':'not_submitted'})
-            assert service.manual_job(job_id,owner)['local_retry_attempts']==attempt+1
-        exhausted=service.manual_job(job_id,owner)
-        assert exhausted['state']=='partial' and exhausted['can_recheck'] and exhausted['error_code']=='local_retry_exhausted'
-        paused=parent.tick()
-        assert paused['state']=='attention_required' and paused['items'][1]['job_id'] is None
-        service.recheck_manual_job(job_id,dict(request_id='synthetic-local-recheck-0001'),owner)
-        child=ManualCleanerCoordinator(service,object())
-        child._launch=lambda action,*args,**kwargs:dict(state='not_submitted')
-        resumed=child.tick()
-        assert resumed['state']=='running' and resumed['stage']=='fetching' and resumed['local_retry_attempts']==1
-        assert parent.tick()['state']=='running' and batch_status(service,batch_id,owner)['items'][1]['job_id'] is None
+        assert child._retry_unclaimed(job_id,'scan',{'state':'not_submitted'})
+        parked=service.manual_job(job_id,owner)
+        assert parked['state']=='failed' and parked['error_code']=='local_not_submitted_retry'
+        assert not child.pending_jobs()
+        deferred=parent.tick()
+        assert deferred['items'][0]['state']=='retry_wait' and deferred['items'][1]['job_id'] is None
+        assert deferred['current_index']==1 and deferred['waiting_count']==1
     with Sandbox() as box:
         preview=box.execute('preview')
         box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
@@ -403,7 +399,8 @@ def main():
                              targets=[dict(advert_id=11,nm_id=101),dict(advert_id=12,nm_id=101)])
                 accepted=service.start_manual_batch(command,owner,snapshot=snapshot)
                 adapter=LocalStageEAdapter(runtime_dir=box.runtime,env_file=box.env,admission_dir=box.admission)
-                parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
+                retry_time=[time.time()]
+                parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted,now=lambda:retry_time[0])
                 child=ManualCleanerCoordinator(service,adapter)
                 # A separate long-lived reader permits BEGIN IMMEDIATE but
                 # makes the exact run+binding COMMIT return BUSY. The rollback
@@ -421,37 +418,25 @@ def main():
                 parent.tick()  # Persist first child before the injected lock.
                 child.tick()   # Fresh preview is durable; no WB submit.
                 before_rollback=service.manual_job(batch_child_id(accepted['batch_id'],0),owner)
-                original_save=child._save
-                def crash_before_retry_save(job_id,**facts):
-                    if facts.get('local_retry_attempts')==1 and facts.get('stage')=='fetching':
-                        raise SystemExit('synthetic worker death before retry journal')
-                    return original_save(job_id,**facts)
-                child._save=crash_before_retry_save
                 with patch.object(KeywordCleaner,'claim_exact_manual_run',locked_claim):
-                    try:child.tick()
-                    except SystemExit:pass
-                    else:raise AssertionError('retry journal crash was not injected')
+                    parked=child.tick()
+                assert parked['state']=='failed' and parked['error_code']=='local_not_submitted_retry',parked
                 claimed=service.manual_job(before_rollback['job_id'],owner)
-                assert claimed['stage']=='scan_apply_claimed' and not claimed.get('local_retry_attempts'),claimed
+                assert claimed['stage']=='finished' and not claimed.get('local_retry_attempts'),claimed
                 assert service.exact_manual_run_unclaimed(claimed['scan_run_id'],child.operation_id(claimed['job_id'],'scan'),Target(11,101))
                 assert not fake.writes
-                assert parent.tick()['state']=='running'
-                # Restart while the persisted state is still apply_claimed.
-                # Readback proves no claim; only then a new preview is saved.
-                parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
+                assert parent.tick()['items'][0]['state']=='retry_wait'
+                # Restart while the child is parked. The parent processes the
+                # second pair before rearming the same first child identity.
+                parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted,now=lambda:retry_time[0])
                 child=ManualCleanerCoordinator(service,adapter)
-                delayed=child.tick()
-                assert delayed['stage']=='fetching' and delayed['local_retry_attempts']==1,delayed
-                assert delayed['scan_candidate']==before_rollback['scan_candidate']
                 fake.targets[11]['minus'].append('Existing WB exclusion changed during lock')
-                time.sleep(max(0,delayed['next_readback_at']-time.time()))
-                refreshed=child.tick()
-                assert refreshed['stage']=='scan_ready' and refreshed['scan_prestate']!=before_rollback['scan_prestate']
                 for _ in range(60):
                     if parent.pending_batches():parent.tick()
                     if child.pending_jobs():child.tick()
                     result=batch_status(service,accepted['batch_id'],owner)
                     if result['state'] in {'complete','partial','failed'}:break
+                    if result['state']=='retry_wait':retry_time[0]+=READ_RETRY_DELAYS[0]
                     active=result['current_target']
                     if active:
                         job=result['items'][result['current_index']]['job_id']
@@ -461,10 +446,9 @@ def main():
                 else:raise AssertionError('composed batch did not finish')
                 assert result['state']=='complete',result
                 assert [item['state'] for item in result['items']]==['complete','complete'],result
-                assert [write['advert_id'] for write in fake.writes]==[11,12],fake.writes
+                assert [write['advert_id'] for write in fake.writes]==[12,11],fake.writes
                 assert all(item['confirmed_excluded'] and item['pending_count']==0 for item in result['items'])
-                assert not service.exact_manual_run_unclaimed(delayed['scan_run_id'],
-                    child.operation_id(delayed['job_id'],'scan'),Target(11,101))
+                assert service.manual_job(claimed['job_id'],owner)['scan_run_id']!=claimed['scan_run_id']
                 parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,fixture_admission=admitted)
                 child=ManualCleanerCoordinator(service,adapter)
                 assert not parent.pending_batches() and not child.pending_jobs()

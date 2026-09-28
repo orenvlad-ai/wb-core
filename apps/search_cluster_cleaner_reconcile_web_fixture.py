@@ -158,11 +158,11 @@ class Scenario:
 
 
 @contextmanager
-def running_reconcile_fixture(port=0):
+def running_reconcile_fixture(port=0,scenario_class=Scenario):
     with running_fixture('normal',port) as fixture:
         with fixture.cleaner.store.transaction() as db:
             db.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(fixture.cleaner.key,))
-        scenario=Scenario(fixture)
+        scenario=scenario_class(fixture)
         with patch.object(fixture.web,'summary',scenario.summary),patch.object(fixture.web,'reviews',scenario.reviews),patch.object(fixture.web,'batch_eligibility',scenario.eligibility),patch.object(fixture.web,'start_manual_batch',scenario.start),patch.object(batch_module,'batch_status',lambda cleaner,batch_id,principal:scenario.status(batch_id,principal)),patch.object(batch_module,'batch_item_detail',lambda cleaner,batch_id,index,principal:scenario.detail(batch_id,index,principal)),patch.object(fixture.cleaner,'controversial_csv',scenario.csv_bytes):
             yield fixture,scenario
 
