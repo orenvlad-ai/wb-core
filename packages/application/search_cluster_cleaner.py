@@ -510,6 +510,8 @@ class KeywordCleaner:
                         item_updates=latest.get('item_updates',{}),current_index=latest.get('current_index'),
                         read_retry_attempts=latest.get('read_retry_attempts',{}),
                         read_retry_started_at=latest.get('read_retry_started_at',{}),
+                        write_retry_attempts=latest.get('write_retry_attempts',{}),
+                        write_retry_started_at=latest.get('write_retry_started_at',{}),
                         error=latest.get('error'),error_code=latest.get('error_code'),created_at=request['created_at'],updated_at=rows[-1]['created_at'])
 
     def record_manual_batch(self,batch_id:str,**facts) -> None:
@@ -561,6 +563,91 @@ class KeywordCleaner:
             updates=dict(parent['item_updates']);updates.pop(str(index))
             self._event(c,'self_service_batch_stage',dict(parent,state='running',stage='retrying',
                         current_index=index,item_updates=updates,error=None,error_code=None))
+
+    def batch_write_retry(self,batch_id:str,index:int,job_id:str,*,attempt:int,
+                          next_retry_at:float=0,first_failed_at:float=0,
+                          terminal:bool=False) -> None:
+        """Atomically park or rearm only a proven-unsent exact batch write.
+
+        The write run and Production Apply operation ID survive both steps.
+        A stopped run cannot block independent children while it waits.
+        """
+        from packages.application.search_cluster_cleaner_self_service import ManualCleanerCoordinator
+        with self.store.transaction(timeout_ms=30000) as c:
+            batch=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,batch_id)).fetchone()
+            request=c.execute("SELECT outcome FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",(self.key,job_id)).fetchone()
+            latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,job_id)).fetchone()
+            if not batch or not request or not latest:raise CleanerError('batch_retry_unavailable','Нет точной операции для повтора',409)
+            parent=json.loads(batch['facts']);job=json.loads(latest['facts']);original=json.loads(request['outcome'])
+            item=parent['items'][index];waiting=parent.get('item_updates',{}).get(str(index),{})
+            if (parent.get('state') in BATCH_TERMINAL_STATES or original.get('batch_id')!=batch_id
+                    or original.get('batch_index')!=index or job.get('job_id')!=job_id
+                    or item['advert_id']!=job.get('advert_id') or item['nm_id']!=job.get('nm_id')
+                    or job.get('state')!='failed' or job.get('stage')!='finished'
+                    or job.get('error_code')!='local_not_submitted_retry'
+                    or job.get('local_retry_phase')!='write' or job.get('can_recheck')
+                    or not job.get('write_run_id')):
+                raise CleanerError('batch_retry_unavailable','Повтор записи больше не безопасен',409)
+            settings=self._settings(c)
+            if settings['generation']!=parent.get('generation') or settings['enabled'] or not settings['baseline_ready']:
+                raise CleanerError('generation_conflict','Поколение или режим чистки изменился',409)
+            run_id=job['write_run_id'];operation_id=ManualCleanerCoordinator.operation_id(job_id,'write')
+            run=c.execute("SELECT state,trigger,targets,worker_token,started_at,reason FROM cleaner_runs WHERE account=? AND run_id=?",(self.key,run_id)).fetchone()
+            target=f"{item['advert_id']}:{item['nm_id']}"
+            if (not run or run['trigger']!='manual_exact_candidates' or
+                    {str(row.get('target') or '') for row in json.loads(run['targets'])}!={target} or
+                    run['worker_token'] or run['started_at'] or
+                    run['state']!=('stopped' if waiting.get('state')=='retry_wait' else 'queued') or
+                    (waiting.get('state')=='retry_wait' and run['reason']!='batch_write_wait')):
+                raise CleanerError('batch_retry_unavailable','Точная запись не доказана как неотправленная',409)
+            bindings=[json.loads(row[0]) for row in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_manual_binding'",(self.key,run_id))]
+            operations=c.execute('SELECT operation_id,state,dispatch_count FROM cleaner_write_operations WHERE account=? AND run_id=?',(self.key,run_id)).fetchall()
+            if (any(row.get('operation_id')!=operation_id or set(row.get('targets') or [])!={target} for row in bindings)
+                    or any(row['state']!='cancelled_before_send' or row['dispatch_count']!=0 for row in operations)
+                    or any(c.execute('SELECT 1 FROM cleaner_readback_jobs WHERE operation_id=?',(row['operation_id'],)).fetchone() for row in operations)):
+                raise CleanerError('batch_retry_unavailable','Возможная отправка требует только readback',409)
+            if bindings:
+                recovered={op for row in c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered'",(self.key,run_id))
+                           for event in [json.loads(row[0])] if event.get('production_operation_id')==operation_id
+                           for op in event.get('cancelled_operations',[])}
+                if not c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND run_id=? AND kind='stage_e_unsent_recovered' AND json_extract(facts,'$.production_operation_id')=?",(self.key,run_id,operation_id)).fetchone():
+                    raise CleanerError('batch_retry_unavailable','Внешняя защита ещё не доказала отсутствие отправки',409)
+                if any(row['operation_id'] not in recovered for row in operations):
+                    raise CleanerError('batch_retry_unavailable','Не все подготовки отменены',409)
+            elif operations or c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='stage_e_manual_binding' AND json_extract(facts,'$.operation_id')=?",(self.key,operation_id)).fetchone():
+                raise CleanerError('batch_retry_unavailable','Идентификатор записи уже связан',409)
+            if waiting.get('state')=='retry_wait':
+                if waiting.get('retry_kind')!='write_unsent' or waiting.get('attempt')!=attempt:
+                    raise CleanerError('batch_retry_unavailable','Окно повтора изменилось',409)
+                if c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running') LIMIT 1",(self.key,)).fetchone():
+                    raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
+                c.execute("UPDATE cleaner_runs SET state='queued',phase='queued',reason='' WHERE account=? AND run_id=?",(self.key,run_id))
+                self._event(c,'batch_write_rearmed',dict(operation_id=operation_id,target=target),run_id=run_id)
+                rearmed=dict(job,state='queued',stage='write_previewing',error=None,error_code=None,
+                             next_readback_at=0,readback_attempts=0)
+                self._event(c,'self_service_stage',rearmed,run_id=job['scan_run_id'])
+                updates=dict(parent['item_updates']);updates.pop(str(index))
+                self._event(c,'self_service_batch_stage',dict(parent,state='running',stage='retrying',
+                            current_index=index,item_updates=updates,error=None,error_code=None))
+            else:
+                if parent.get('current_index')!=index:
+                    raise CleanerError('batch_retry_unavailable','Позиция группы изменилась',409)
+                c.execute("UPDATE cleaner_runs SET state='stopped',phase='finished',reason='batch_write_wait' WHERE account=? AND run_id=?",(self.key,run_id))
+                self._event(c,'batch_write_parked',dict(operation_id=operation_id,target=target),run_id=run_id)
+                self._event(c,'self_service_stage',dict(job,batch_write_deadline_at=first_failed_at+122*60),
+                            run_id=job['scan_run_id'])
+                update=(dict(state='partial',stage='finished',job_id=job_id,error_code='write_retry_exhausted',
+                             error='Срок повтора локальной записи истёк; отправки в WB не было') if terminal else
+                        dict(state='retry_wait',stage='retry_wait',job_id=job_id,retry_kind='write_unsent',
+                             error_code='local_not_submitted_retry',error='Локальная запись не отправлена; ожидаем повтор',
+                             attempt=attempt,next_retry_at=next_retry_at))
+                attempts=dict(parent.get('write_retry_attempts') or {});attempts[str(index)]=attempt
+                started=dict(parent.get('write_retry_started_at') or {});started.setdefault(str(index),first_failed_at)
+                updates=dict(parent['item_updates']);updates[str(index)]=update
+                self._event(c,'self_service_batch_stage',dict(parent,state='running',stage='next_target',
+                            current_index=index+1,item_updates=updates,write_retry_attempts=attempts,
+                            write_retry_started_at=started,error=None,error_code=None))
 
     def resume_drift_batch(self,batch_id:str,payload:Mapping,principal:Principal) -> dict:
         """Explicitly continue the frozen tail after one proven scan-only drift.
