@@ -525,9 +525,14 @@ def test_finance_pilot_prestate_contract() -> None:
         service_name="main.service",
         environment_file="/env",
         loopback_base_url="http://127.0.0.1:1",
+        login_health_loopback_base_url="http://127.0.0.1:2",
         public_base_url="https://example.invalid",
     )
     script = recovery._prestate_script(target, M)
+    compile(script, "prestate-fixture", "exec")
+    assert "http://127.0.0.1:2/login" in script
+    assert "owned_loopback_listener(int(pid), main_port)" in script
+    assert "'main_loopback': 'http://127.0.0.1:1'" in script
     for required in (
         "wb-core-finance-liquidity-pilot.service",
         "finance-liquidity-pilot.sqlite3",

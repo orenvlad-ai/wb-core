@@ -261,6 +261,10 @@ def main() -> None:
             raise AssertionError(f"rendered nginx block must include buyer-session route exactly once: {buyer_path}")
     if rendered.count("location = /login {") != 1 or rendered.count("location = /logout {") != 1:
         raise AssertionError("rendered nginx block must include WebCore auth routes exactly once")
+    if "location = /login {\n        proxy_pass http://127.0.0.1:8777;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;" not in rendered:
+        raise AssertionError("exact WebCore login must use the private fast lane with original forwarding headers")
+    if "location = /logout {\n        proxy_pass http://127.0.0.1:8765;" not in rendered:
+        raise AssertionError("unrelated WebCore routes must remain on the serial listener")
     if rendered.count("location = /.well-known/oauth-protected-resource {") != 1:
         raise AssertionError("rendered nginx block must include MCP protected-resource metadata exactly once")
     if rendered.count("location = /.well-known/oauth-authorization-server {") != 1:

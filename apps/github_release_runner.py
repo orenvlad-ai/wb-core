@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ci.select_checks import canonical_bytes, verify_plan  # noqa: E402
+from ci.loopback_listener_proof import remote_source  # noqa: E402
 
 
 REPOSITORY = "orenvlad-ai/wb-core"
@@ -313,13 +314,19 @@ def runtime_readback_payload(target: Mapping[str, Any], merge: str) -> dict[str,
     payload = {
         "expected_commit": exact_sha(merge, "deploy-readback"),
         "target_dir": str(target.get("target_dir") or "").rstrip("/"),
+        "main_service": str(target.get("service_name") or "").strip(),
+        "main_loopback": str(target.get("loopback_base_url") or "").rstrip("/"),
         "services": services,
         "urls": [
-            str(target.get("loopback_base_url") or "").rstrip("/") + "/login",
+            str(target.get("login_health_loopback_base_url") or target.get("loopback_base_url") or "").rstrip("/") + "/login",
             str(target.get("public_base_url") or "").rstrip("/") + "/login",
         ],
     }
-    if not payload["target_dir"].startswith("/") or not services:
+    main_url = urllib.parse.urlparse(payload["main_loopback"])
+    if (not payload["target_dir"].startswith("/") or not services
+            or payload["main_service"] not in services
+            or main_url.scheme != "http" or main_url.hostname != "127.0.0.1"
+            or not main_url.port):
         raise RunnerError("deploy-readback-contract-invalid")
     if any(not url.startswith(("http://", "https://")) for url in payload["urls"]):
         raise RunnerError("deploy-readback-contract-invalid")
@@ -337,8 +344,10 @@ def runtime_readback(target: Mapping[str, Any], merge: str) -> None:
 import json
 import subprocess
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
+{remote_source()}
 expected = {payload!r}
 root = Path(expected["target_dir"])
 commit = (root / ".wb-core-runtime-sha").read_text(encoding="utf-8").strip()
@@ -349,6 +358,15 @@ if metadata.get("commit") != commit or metadata.get("deployment_complete") is no
     raise SystemExit(3)
 for service in expected["services"]:
     subprocess.run(["systemctl", "is-active", "--quiet", service], check=True)
+pid = int(subprocess.run(
+    ["systemctl", "show", "--property=MainPID", "--value", expected["main_service"]],
+    check=True, text=True, capture_output=True,
+).stdout.strip())
+if pid <= 0:
+    raise SystemExit(5)
+port = urllib.parse.urlparse(expected["main_loopback"]).port
+if not owned_loopback_listener(pid, port):
+    raise SystemExit(5)
 for url in expected["urls"]:
     with urllib.request.urlopen(url, timeout=10) as response:
         if response.status != 200:

@@ -371,6 +371,7 @@ class HostedRuntimeTarget:
     restart_command: str
     status_command: str
     environment_file: str
+    login_health_loopback_base_url: str = ""
     runtime_env: dict[str, str] = field(default_factory=dict)
     finance_generation_filesystem: dict[str, Any] = field(
         default_factory=dict
@@ -478,6 +479,7 @@ def load_hosted_runtime_target(path: Path | None = None) -> HostedRuntimeTarget:
         target_id=str(payload.get("target_id", "")).strip(),
         public_base_url=_normalize_base_url(str(payload.get("public_base_url", "")).strip()),
         loopback_base_url=_normalize_base_url(str(payload.get("loopback_base_url", "")).strip()),
+        login_health_loopback_base_url=_normalize_base_url(str(payload.get("login_health_loopback_base_url") or payload.get("loopback_base_url", "")).strip()),
         ssh_destination=str(payload.get("ssh_destination", "")).strip(),
         target_dir=str(payload.get("target_dir", "")).strip(),
         service_name=str(payload.get("service_name", "")).strip(),
