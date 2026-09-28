@@ -205,6 +205,7 @@ def _hidden_dependency_metrics() -> list[dict[str, Any]]:
             ("orderSum", "rub"),
             ("orderCount", "integer"),
             ("ads_sum", "rub"),
+            ("price_seller_discounted", "rub"),
         ),
         start=1000,
     ):
@@ -232,7 +233,7 @@ def _hidden_dependency_metrics() -> list[dict[str, Any]]:
             "calc_ref": "orderSum",
             "show_in_data": False,
             "format": "rub",
-            "display_order": 1003,
+            "display_order": 1004,
             "section": "Hidden",
         }
     )

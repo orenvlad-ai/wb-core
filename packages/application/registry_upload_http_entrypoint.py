@@ -203,6 +203,11 @@ from packages.application.sheet_vitrina_v1_source_groups import (
     WEB_VITRINA_SOURCE_GROUPS,
     WEB_VITRINA_SOURCE_KEY_TO_GROUP,
 )
+from packages.application.sheet_vitrina_v1_authenticated_buyer import (
+    SOURCE_KEY as AUTHENTICATED_BUYER_SOURCE_KEY,
+    METRIC_KEYS as AUTHENTICATED_BUYER_METRIC_KEYS,
+    extend_metrics_with_authenticated_buyer,
+)
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import (
     build_web_vitrina_gravity_table_adapter,
@@ -494,6 +499,10 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
         "label_ru": "SPP-прокси",
         "description_ru": "Прокси-оценка public-card SPP по цене продавца и анонимной цене покупателя WB.",
     },
+    AUTHENTICATED_BUYER_SOURCE_KEY: {
+        "label_ru": "Цены авторизованного покупателя",
+        "description_ru": "Авторизованная поверхность WB, ожидаемая учётная запись не сверена. Цена покупателя с кошельком и без него; расчётный дисконт не является чистой СПП. СПП покупателя: components_unknown.",
+    },
     "ads_bids": {
         "label_ru": "Ставки рекламы",
         "description_ru": "Ставки в поиске и рекомендациях по SKU.",
@@ -583,6 +592,7 @@ WEB_VITRINA_SOURCE_METRIC_KEYS = {
         "spp_proxy",
         BUYER_PRICE_RUB_METRIC_KEY,
     ),
+    AUTHENTICATED_BUYER_SOURCE_KEY: AUTHENTICATED_BUYER_METRIC_KEYS,
     "sku_action_events": (
         SELLER_PRICE_CHANGE_RUB_METRIC_KEY,
         ADVERTISING_BID_CHANGE_RUB_METRIC_KEY,
@@ -1657,20 +1667,21 @@ class RegistryUploadHttpEntrypoint:
             group_refresh_available_dates,
             preferred_date=current_business_date_iso(self.now_factory()),
         )
-        metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_sku_action_metrics(
-                extend_metrics_with_weighted_seller_price(
-                    extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_proxy_v4(
-                            extend_metrics_with_our_wb_cost_metrics(
-                                extend_metrics_with_onec_stock_metrics(
-                                    getattr(self.runtime.load_current_state(), "metrics_v2", [])
-                                )
+        metric_catalog = extend_metrics_with_sku_action_metrics(
+            extend_metrics_with_weighted_seller_price(
+                extend_metrics_with_own_product_capital_metrics(
+                    extend_metrics_with_proxy_v4(
+                        extend_metrics_with_our_wb_cost_metrics(
+                            extend_metrics_with_onec_stock_metrics(
+                                getattr(self.runtime.load_current_state(), "metrics_v2", [])
                             )
                         )
                     )
                 )
             )
+        )
+        metric_labels_by_source = _build_activity_metric_labels_by_source(
+            extend_metrics_with_authenticated_buyer(metric_catalog)
         )
         activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
             snapshot_as_of_date=source_status_snapshot_as_of_date,
@@ -3746,18 +3757,19 @@ class RegistryUploadHttpEntrypoint:
             group_refresh_available_dates,
             preferred_date=current_business_date,
         )
-        metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_sku_action_metrics(
-                extend_metrics_with_weighted_seller_price(
-                    extend_metrics_with_own_product_capital_metrics(
-                        extend_metrics_with_our_wb_cost_metrics(
-                            extend_metrics_with_onec_stock_metrics(
-                                getattr(self.runtime.load_current_state(), "metrics_v2", [])
-                            )
+        metric_catalog = extend_metrics_with_sku_action_metrics(
+            extend_metrics_with_weighted_seller_price(
+                extend_metrics_with_own_product_capital_metrics(
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(
+                            getattr(self.runtime.load_current_state(), "metrics_v2", [])
                         )
                     )
                 )
             )
+        )
+        metric_labels_by_source = _build_activity_metric_labels_by_source(
+            extend_metrics_with_authenticated_buyer(metric_catalog)
         )
         upload_summary = _build_web_vitrina_endpoint_summary_block(
             title="Загрузка данных",
@@ -8024,16 +8036,17 @@ class RegistryUploadHttpEntrypoint:
                     )
 
                 current_state = self.runtime.load_current_state()
-                metric_keys = _metric_keys_for_source_keys(
-                    extend_metrics_with_sku_action_metrics(
-                        extend_metrics_with_weighted_seller_price(
-                            extend_metrics_with_own_product_capital_metrics(
-                                extend_metrics_with_our_wb_cost_metrics(
-                                    extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
-                                )
+                metric_catalog = extend_metrics_with_sku_action_metrics(
+                    extend_metrics_with_weighted_seller_price(
+                        extend_metrics_with_own_product_capital_metrics(
+                            extend_metrics_with_our_wb_cost_metrics(
+                                extend_metrics_with_onec_stock_metrics(current_state.metrics_v2)
                             )
                         )
-                    ),
+                    )
+                )
+                metric_keys = _metric_keys_for_source_keys(
+                    extend_metrics_with_authenticated_buyer(metric_catalog),
                     source_keys=source_keys,
                     column_date=selected_as_of_date,
                 )
@@ -12035,6 +12048,8 @@ def _source_group_refresh_semantic_payload(merge_summary: Mapping[str, Any]) -> 
         _int_from_any(counts.get(status))
         for status in ("error", "missing", "not_found", "blocked", "not_available")
     )
+    if merge_summary.get("source_group_id") == AUTHENTICATED_BUYER_SOURCE_KEY:
+        blocking_count += _int_from_any(counts.get("empty"))
     warning_count = sum(
         _int_from_any(counts.get(status))
         for status in ("warning", "incomplete")
@@ -12753,6 +12768,12 @@ def _updated_cell_status_for_status_row(row: list[Any]) -> str:
     kind = str(row[1] if len(row) > 1 else "").strip().lower()
     covered_count = _status_row_covered_count(row)
     note = str(row[10] if len(row) > 10 else "").strip().lower()
+    if (
+        _status_row_source_base(row) == AUTHENTICATED_BUYER_SOURCE_KEY
+        and kind == "empty"
+        and "account_context_reset=true" in note
+    ):
+        return "updated"  # A new empty account context invalidates older buyer cells.
     if kind in {"error", "missing", "not_found", "blocked", "not_available"}:
         return ""
     if _status_note_is_unverified_closed_day_fallback(note):

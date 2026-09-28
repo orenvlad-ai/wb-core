@@ -35,7 +35,7 @@ from packages.application.sheet_vitrina_v1_temporal_policy import (
 
 HEALTH_CONTRACT = "sheet_vitrina_v1_web_health/v1"
 HEALTH_OPERATOR_CONTRACT = "sheet_vitrina_v1_web_health_operator/v1"
-GOOD_EXPECTATION_STATES = {"complete", "exact_zero", "inapplicable", "no_events", "accepted_fallback"}
+GOOD_EXPECTATION_STATES = {"complete", "exact_zero", "inapplicable", "no_events", "accepted_fallback", "pre_cutover"}
 BOT_GROUP_IDS = {"seller_portal_bot", "wb_public_card_bot"}
 HISTORICAL_RECOVERY_SOURCE_KEYS = {
     "seller_funnel_snapshot",
@@ -670,6 +670,12 @@ def _expectation_cell(
             for key in ("freshness", "snapshot_date", "date", "date_from", "date_to")
         }
         if (
+            source_key == "wb_buyer_authenticated"
+            and kind == "not_available"
+            and "pre_cutover" in note
+        ):
+            state, reason = "pre_cutover", "дата до первого подтверждённого наблюдения"
+        elif (
             source_key == "sku_action_events"
             and kind == "success"
             and (
@@ -687,7 +693,9 @@ def _expectation_cell(
             state, reason = "accepted_fallback", str(slot.get("reason") or note or "accepted fallback")
         elif kind in {"error", "blocked", "closure_exhausted"}:
             state, reason = "failure", str(slot.get("reason") or note or kind)
-        elif kind in {"missing", "not_found", "not_available"}:
+        elif kind in {"missing", "not_found", "not_available"} or (
+            source_key == "wb_buyer_authenticated" and kind == "empty"
+        ):
             state, reason = "missing", str(slot.get("reason") or note or kind)
         elif kind in {"incomplete", "closure_pending", "closure_retrying", "closure_rate_limited"}:
             state, reason = "partial", str(slot.get("reason") or note or kind)

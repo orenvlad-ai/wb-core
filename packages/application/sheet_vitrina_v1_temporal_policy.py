@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+from packages.application.sheet_vitrina_v1_authenticated_buyer import SOURCE_KEY as AUTHENTICATED_BUYER_SOURCE_KEY
 
 TEMPORAL_SLOT_YESTERDAY_CLOSED = "yesterday_closed"
 TEMPORAL_SLOT_TODAY_CURRENT = "today_current"
@@ -20,6 +21,7 @@ CANONICAL_SOURCE_TEMPORAL_POLICIES = {
     "sf_period": TEMPORAL_POLICY_DUAL_DAY_CAPABLE,
     "spp": TEMPORAL_POLICY_DUAL_DAY_INTRADAY_TOLERANT,
     "spp_proxy": TEMPORAL_POLICY_ACCEPTED_CURRENT_ROLLOVER,
+    AUTHENTICATED_BUYER_SOURCE_KEY: TEMPORAL_POLICY_DUAL_DAY_CAPABLE,
     "ads_bids": TEMPORAL_POLICY_ACCEPTED_CURRENT_ROLLOVER,
     "onec_stocks": TEMPORAL_POLICY_DUAL_DAY_CAPABLE,
     "stocks": TEMPORAL_POLICY_YESTERDAY_CLOSED_ONLY,
@@ -201,6 +203,12 @@ def slot_counts_toward_source_status(
     slot_outcome: Mapping[str, Any] | None,
     has_confirmed_yesterday_success: bool,
 ) -> bool:
+    if (
+        source_key == AUTHENTICATED_BUYER_SOURCE_KEY
+        and str((slot_outcome or {}).get("kind") or "") == "not_available"
+        and "pre_cutover" in str((slot_outcome or {}).get("note") or "")
+    ):
+        return False
     if _is_non_required_slot(temporal_policy=temporal_policy, temporal_slot=temporal_slot):
         return False
     if not _is_intraday_tolerant_slot(temporal_policy=temporal_policy, temporal_slot=temporal_slot):
@@ -218,6 +226,12 @@ def source_nonblocking_slot_reason(
     slot_outcome: Mapping[str, Any] | None,
     has_confirmed_yesterday_success: bool,
 ) -> str:
+    if (
+        source_key == AUTHENTICATED_BUYER_SOURCE_KEY
+        and str((slot_outcome or {}).get("kind") or "") == "not_available"
+        and "pre_cutover" in str((slot_outcome or {}).get("note") or "")
+    ):
+        return "дата до первого подтверждённого наблюдения авторизованного покупателя"
     if _is_non_required_slot(temporal_policy=temporal_policy, temporal_slot=temporal_slot):
         return "текущий день для этого источника не требуется"
     if (

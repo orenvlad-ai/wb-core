@@ -71,6 +71,14 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (
     capture_mature_buyout_percent_snapshots,
     extend_metrics_with_buyout_percent,
 )
+from packages.application.sheet_vitrina_v1_authenticated_buyer import (
+    SOURCE_KEY as AUTHENTICATED_BUYER_SOURCE_KEY,
+    METRIC_KEYS as AUTHENTICATED_BUYER_METRIC_KEYS,
+    AUTHENTICATED_SPP_METRIC_KEY,
+    extend_metrics_with_authenticated_buyer,
+    projection_payload as authenticated_buyer_projection_payload,
+)
+from packages.application.wb_buyer_authenticated_observations import load_daily_projection as load_authenticated_buyer_daily_projection
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
@@ -290,6 +298,7 @@ SOURCE_CLASSIFICATION_GROUPS = {
     "sf_period": "B_wb_api_date_period_capable",
     "spp": "C_seller_portal_current_snapshot_with_accepted_current_rollover",
     SPP_PROXY_SOURCE_KEY: "C_wb_public_card_current_snapshot_with_accepted_current_rollover",
+    AUTHENTICATED_BUYER_SOURCE_KEY: "G_wb_buyer_authenticated_persisted_daily_observation",
     "stocks": "B_wb_api_date_period_capable",
     ONEC_STOCKS_SOURCE_KEY: "E_onec_product_capital_date_capable",
     OWN_PRODUCT_CAPITAL_SOURCE_KEY: "F_webcore_product_capital_persisted_events",
@@ -359,6 +368,12 @@ SOURCE_DIAGNOSTIC_SPECS = {
         "block": "SppProxyBlock",
         "adapter": "HttpBackedPublicWbCardBuyerPriceSource",
         "endpoint": "GET https://www.wildberries.ru/catalog/{nmId}/detail.aspx + public card API fallback",
+    },
+    AUTHENTICATED_BUYER_SOURCE_KEY: {
+        "module": "packages.application.wb_buyer_authenticated_observations",
+        "block": "load_daily_projection",
+        "adapter": "PersistedAuthenticatedBuyerObservations",
+        "endpoint": "sqlite://wb_buyer_authenticated_observations",
     },
     "ads_bids": {
         "module": "packages.application.ads_bids_block",
@@ -449,6 +464,7 @@ class SlotLookups:
     incident_policy: dict[str, Any] = field(default_factory=dict)
     incident_projection_quality: dict[str, Any] = field(default_factory=dict)
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
+    authenticated_buyer_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     own_product_capital_cutover_date: str = ""
@@ -1362,6 +1378,7 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             )
         )
+        effective_metrics = extend_metrics_with_authenticated_buyer(effective_metrics)
         metrics_by_key = {item.metric_key: item for item in effective_metrics}
         formulas_by_id = {item.formula_id: item for item in current_state.formulas_v2}
         public_metrics = (
@@ -1720,6 +1737,7 @@ class SheetVitrinaV1LivePlanBlock:
                 sf_period_lookup={},
                 spp_lookup={},
                 spp_proxy_lookup={},
+                authenticated_buyer_lookup={},
                 ads_bids_lookup={},
                 stocks_lookup={},
                 incident_stocks_lookup={},
@@ -1820,6 +1838,17 @@ class SheetVitrinaV1LivePlanBlock:
                             ),
                         )
                     ).result,
+                ),
+                (
+                    AUTHENTICATED_BUYER_SOURCE_KEY,
+                    lambda slot=slot: authenticated_buyer_projection_payload(
+                        load_authenticated_buyer_daily_projection(
+                            self.runtime,
+                            business_date=slot.column_date,
+                            requested_nm_ids=requested_nm_ids,
+                        ),
+                        business_date=slot.column_date,
+                    ),
                 ),
                 (
                     "ads_bids",
@@ -2005,6 +2034,8 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.spp_lookup = _index_items_by_nm_id(payload)
                 elif source_key == SPP_PROXY_SOURCE_KEY:
                     current_lookups.spp_proxy_lookup = _index_items_by_nm_id(payload)
+                elif source_key == AUTHENTICATED_BUYER_SOURCE_KEY:
+                    current_lookups.authenticated_buyer_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "ads_bids":
                     current_lookups.ads_bids_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "stocks":
@@ -4199,6 +4230,16 @@ class _MetricEvaluator:
         return None if not has_rows or qty <= 0 else confirmed / qty
 
     def _resolve_direct_sku(self, metric_key: str, nm_id: int, temporal_slot: str) -> float | None:
+        if metric_key == AUTHENTICATED_SPP_METRIC_KEY:
+            return None  # Buyer and seller prices do not identify the WB SPP component.
+        if metric_key in AUTHENTICATED_BUYER_METRIC_KEYS:
+            return _lookup_attr(
+                self._slot_lookups(temporal_slot),
+                "authenticated_buyer_lookup",
+                nm_id,
+                metric_key,
+                1.0,
+            )
         if metric_key in {SELLER_PRICE_CHANGE_RUB_METRIC_KEY, ADVERTISING_BID_CHANGE_RUB_METRIC_KEY}:
             return _optional_float(
                 self._slot_lookups(temporal_slot).sku_action_lookup.get(nm_id, {}).get(metric_key)

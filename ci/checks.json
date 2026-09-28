@@ -49,6 +49,7 @@
         "apps/sheet_vitrina_v1_web_vitrina_user_config_browser_smoke.py",
         "apps/sku_inventory_balance_browser_smoke.py",
         "apps/wb_buyer_chrome_auth_smoke.py",
+        "apps/wb_buyer_chrome_price_smoke.py",
         "apps/search_cluster_cleaner_browser_smoke.py"
       ],
       "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
@@ -667,6 +668,37 @@
         ["python3", "apps/sheet_vitrina_v1_settings_sources_sessions_browser_smoke.py"],
         ["python3", "apps/wb_buyer_viewer_ui_smoke.py", "/tmp/wbc0081-buyer-ui-ci"],
         ["python3", "apps/registry_upload_http_entrypoint_public_routes_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
+    },
+    "wb_buyer_authenticated_observations": {
+      "patterns": [
+        "apps/wb_buyer_authenticated_collect.py",
+        "apps/wb_buyer_authenticated_collect_smoke.py",
+        "apps/wb_buyer_authenticated_observations_smoke.py",
+        "apps/sheet_vitrina_v1_authenticated_buyer_integration_smoke.py",
+        "apps/sheet_vitrina_v1_authenticated_buyer_ready_smoke.py",
+        "apps/wb_buyer_chrome_price.py",
+        "apps/wb_buyer_chrome_price_smoke.py",
+        "packages/application/wb_buyer_authenticated_observations.py",
+        "packages/application/sheet_vitrina_v1_authenticated_buyer.py",
+        "packages/application/sheet_vitrina_v1_live_plan.py",
+        "packages/application/sheet_vitrina_v1_temporal_policy.py",
+        "packages/application/sheet_vitrina_v1_health.py",
+        "packages/application/sheet_vitrina_v1_web_vitrina.py",
+        "packages/application/sheet_vitrina_v1_research.py",
+        "packages/application/sheet_vitrina_v1_source_groups.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-buyer-authenticated-collect.service",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-buyer-authenticated-collect.timer",
+        "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json"
+      ],
+      "commands": [
+        ["python3", "apps/wb_buyer_authenticated_observations_smoke.py"],
+        ["python3", "apps/wb_buyer_authenticated_collect_smoke.py"],
+        ["python3", "apps/wb_buyer_chrome_price_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_authenticated_buyer_integration_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_authenticated_buyer_ready_smoke.py"]
       ],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },

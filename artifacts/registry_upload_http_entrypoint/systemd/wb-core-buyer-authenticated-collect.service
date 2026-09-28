@@ -1,0 +1,13 @@
+[Unit]
+Description=WB Core account-scoped buyer price observations
+After=network.target wb-core-registry-http.service
+Wants=network.target wb-core-registry-http.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+Environment=PYTHONUNBUFFERED=1
+Environment=REGISTRY_UPLOAD_RUNTIME_DIR=/opt/wb-core-runtime/state
+EnvironmentFile=/opt/wb-ai/.env
+ExecStart=/usr/bin/python3 apps/wb_buyer_authenticated_collect.py --tick --runtime-dir /opt/wb-core-runtime/state
+TimeoutStartSec=1800

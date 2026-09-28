@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from packages.application.sheet_vitrina_v1_authenticated_buyer import SOURCE_KEY as AUTHENTICATED_BUYER_SOURCE_KEY
 
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     ONEC_STOCKS_SOURCE_GROUP_ID,
@@ -42,6 +43,10 @@ WEB_VITRINA_SOURCE_GROUPS: dict[str, dict[str, Any]] = {
         "label_ru": "WB public card / бот",
         "source_keys": ("spp_proxy",),
     },
+    "wb_buyer_authenticated": {
+        "label_ru": "WB Buyer / авторизованный профиль",
+        "source_keys": (AUTHENTICATED_BUYER_SOURCE_KEY,),
+    },
     "other_sources": {
         "label_ru": "Прочие источники",
         "source_keys": ("cost_price", "sku_action_events"),
@@ -62,6 +67,7 @@ WEB_VITRINA_SOURCE_GROUP_ORDER = (
     OWN_PRODUCT_CAPITAL_SOURCE_GROUP_ID,
     "seller_portal_bot",
     "wb_public_card_bot",
+    "wb_buyer_authenticated",
     "other_sources",
 )
 
