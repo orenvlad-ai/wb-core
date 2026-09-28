@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import time
 from typing import Any
@@ -36,6 +39,12 @@ LIGHT_GC_POLICY_NAME = "promo_refresh_light_gc_v1"
 LIGHT_GC_SUCCESS_DEBUG_TTL_DAYS = 3.0
 LIGHT_GC_FAILED_DEBUG_TTL_DAYS = 14.0
 LIGHT_GC_MAX_DURATION_SECONDS = 20.0
+LIGHT_GC_MAX_FILES = 250
+LIGHT_GC_MAX_BYTES = 256 * 1024 * 1024
+LIGHT_GC_MAX_RUNS = 100
+LIGHT_GC_STATE_FILENAME = "light-gc-state.json"
+LIGHT_GC_LOCK_FILENAME = ".light-gc.lock"
+LIGHT_GC_STATE_CONTRACT = "promo_refresh_light_gc_progress_v1"
 DELETE_DEBUG_EXTENSIONS = {".har", ".png", ".jpg", ".jpeg", ".webp", ".jsonl", ".log", ".txt", ".out", ".err"}
 PROTECTED_FILENAMES = {
     ARCHIVE_RECORD_FILENAME,
@@ -105,6 +114,7 @@ def build_gc_report(
     success_debug_ttl_days: float,
     failed_debug_ttl_days: float,
 ) -> dict[str, Any]:
+    runtime_dir = runtime_dir.resolve()
     archive_root = promo_campaign_archive_root(runtime_dir)
     runs_root = runtime_dir / PROMO_RUNS_DIRNAME
     records = load_promo_campaign_archive(runtime_dir)
@@ -140,7 +150,7 @@ def build_gc_report(
                 skipped=skipped,
             )
         )
-        deletion_plan = _enrich_exact_identities(deletion_plan)
+        deletion_plan = _enrich_exact_identities(deletion_plan, runtime_dir=runtime_dir)
 
     plan_material = {
         "contract_name": EXACT_GC_CONTRACT_NAME,
@@ -193,39 +203,462 @@ def run_promo_campaign_archive_light_gc(
     success_debug_ttl_days: float = LIGHT_GC_SUCCESS_DEBUG_TTL_DAYS,
     failed_debug_ttl_days: float = LIGHT_GC_FAILED_DEBUG_TTL_DAYS,
     max_duration_seconds: float = LIGHT_GC_MAX_DURATION_SECONDS,
+    max_files: int = LIGHT_GC_MAX_FILES,
+    max_bytes: int = LIGHT_GC_MAX_BYTES,
+    max_runs: int = LIGHT_GC_MAX_RUNS,
     policy_name: str = LIGHT_GC_POLICY_NAME,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     deadline = started + max(0.001, float(max_duration_seconds))
     runtime_dir = Path(runtime_dir).expanduser().resolve()
+    gc_dir = runtime_dir / EXACT_GC_AUDIT_DIRNAME
+    lock_fd: int | None = None
+    batch: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    resumed = False
     try:
-        report = build_light_gc_report(
-            runtime_dir=runtime_dir,
-            current_run_dirs=current_run_dirs,
+        if min(float(success_debug_ttl_days), float(failed_debug_ttl_days)) < 0:
+            raise ValueError("promo light GC TTL must be nonnegative")
+        if min(int(max_files), int(max_bytes), int(max_runs)) < 1:
+            raise ValueError("promo light GC batch limits must be positive")
+        if gc_dir.is_symlink():
+            raise ValueError("promo GC state directory must not be a symlink")
+        gc_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_path = gc_dir / LIGHT_GC_LOCK_FILENAME
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return _incremental_light_gc_summary(
+                policy_name=policy_name, started=started, status="skipped",
+                warning="another_promo_light_gc_is_running",
+            )
+        state_path = gc_dir / LIGHT_GC_STATE_FILENAME
+        state = _load_light_gc_state(state_path, runtime_dir)
+        protected = _normalize_protected_run_dirs(current_run_dirs)
+        if state.get("pending"):
+            batch = dict(state["pending"])
+            resumed = True
+            receipt_path = _light_gc_receipt_path(gc_dir, int(state["sequence"]) + 1)
+            if receipt_path.exists():
+                if receipt_path.is_symlink():
+                    raise ValueError("promo light GC receipt must not be a symlink")
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if (
+                    receipt.get("batch_fingerprint") != _stable_hash(batch)
+                    or int(receipt.get("sequence") or -1) != int(state["sequence"]) + 1
+                ):
+                    raise ValueError("promo light GC pending receipt fingerprint mismatch")
+                state["cursor"] = batch["cursor"]
+                state["pending"] = None
+                state["sequence"] = int(receipt["sequence"])
+                state["last_receipt"] = receipt
+                _write_private_json(state_path, state)
+                return _incremental_light_gc_summary(
+                    policy_name=policy_name, started=started, status="success",
+                    warning="", batch=batch, resumed=True,
+                )
+        else:
+            records = load_promo_campaign_archive(runtime_dir)
+            if not any(promo_campaign_has_normalized_rows(record) for record in records):
+                return _incremental_light_gc_summary(
+                    policy_name=policy_name, started=started, status="skipped",
+                    warning="normalized_archive_not_ready_skip_light_gc",
+                )
+            batch = _plan_incremental_light_gc_batch(
+                runtime_dir=runtime_dir, state=state, protected_run_dirs=protected,
+                success_debug_ttl_days=success_debug_ttl_days,
+                failed_debug_ttl_days=failed_debug_ttl_days,
+                deadline=deadline, max_files=max_files, max_bytes=max_bytes,
+                max_runs=max_runs,
+            )
+            resumed = False
+            if not batch["plan"]:
+                state["cursor"] = batch["cursor"]
+                _write_private_json(state_path, state)
+                scan_warning = _light_gc_scan_warning(batch)
+                return _incremental_light_gc_summary(
+                    policy_name=policy_name, started=started,
+                    status="warning" if scan_warning else "success",
+                    warning=scan_warning, batch=batch,
+                )
+            state["pending"] = batch
+            _write_private_json(state_path, state)
+        result = _apply_incremental_light_gc_batch(
+            runtime_dir=runtime_dir, batch=batch, protected_run_dirs=protected,
             success_debug_ttl_days=success_debug_ttl_days,
             failed_debug_ttl_days=failed_debug_ttl_days,
             deadline=deadline,
         )
-        apply_result = apply_gc_plan(runtime_dir=runtime_dir, plan=report["deletion_plan"])
-        status = "success" if not apply_result.get("errors") else "warning"
-        warning = "" if status == "success" else "one_or_more_candidates_failed_to_delete"
-        return _light_gc_summary(
+        if result["completed"]:
+            state["cursor"] = batch["cursor"]
+            state["pending"] = None
+            state["sequence"] = int(state["sequence"]) + 1
+            receipt = {
+                "sequence": state["sequence"],
+                "completed_at": _now(),
+                "batch_fingerprint": _stable_hash(batch),
+                "deleted_count": result["deleted_count"],
+                "freed_bytes": result["freed_bytes"],
+                "already_missing_count": result["already_missing_count"],
+                "drift_count": result["drift_count"],
+                "skipped_unvisited_count": result["skipped_unvisited_count"],
+            }
+            receipt_path = _light_gc_receipt_path(gc_dir, state["sequence"])
+            if receipt_path.exists():
+                raise ValueError("promo light GC receipt sequence collision")
+            _write_private_json(receipt_path, receipt)
+            state["last_receipt"] = receipt
+            _write_private_json(state_path, state)
+        return _incremental_light_gc_summary(
             policy_name=policy_name,
-            status=status,
-            warning=warning,
             started=started,
-            report=report,
-            apply_result=apply_result,
+            status=(
+                "success"
+                if result["completed"] and not result["errors"] and not _light_gc_scan_warning(batch)
+                else "warning"
+            ),
+            warning=(
+                "time_budget_exhausted_with_pending_batch"
+                if not result["completed"] else
+                "one_or_more_candidates_skipped"
+                if result["errors"] else _light_gc_scan_warning(batch)
+            ),
+            batch=batch, result=result, resumed=resumed,
         )
     except Exception as exc:
-        return _light_gc_summary(
+        return _incremental_light_gc_summary(
             policy_name=policy_name,
-            status="warning",
-            warning=f"{type(exc).__name__}: {exc}",
             started=started,
-            report=None,
-            apply_result={"deleted_count": 0, "deleted_size": 0, "errors": []},
+            status="warning", warning=f"{type(exc).__name__}: {exc}",
+            batch=batch, result=result, resumed=resumed,
         )
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
+def _new_light_gc_state(runtime_dir: Path) -> dict[str, Any]:
+    return {
+        "contract_name": LIGHT_GC_STATE_CONTRACT,
+        "runtime_dir": str(runtime_dir),
+        "cursor": {"run": "", "path": ""},
+        "pending": None,
+        "sequence": 0,
+        "last_receipt": None,
+    }
+
+
+def _light_gc_receipt_path(gc_dir: Path, sequence: int) -> Path:
+    return gc_dir / f"light-gc-receipt-{sequence:08d}.json"
+
+
+def _light_gc_scan_warning(batch: dict[str, Any]) -> str:
+    reasons = batch.get("skip_reasons") or {}
+    if any(reasons.get(key) for key in ("run_scan_timeout", "run_scan_failed", "candidate_hash_timeout")):
+        return "one_or_more_runs_not_scanned"
+    return ""
+
+
+def _load_light_gc_state(path: Path, runtime_dir: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ValueError("promo light GC state must not be a symlink")
+    if not path.exists():
+        return _new_light_gc_state(runtime_dir)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(state, dict)
+        or state.get("contract_name") != LIGHT_GC_STATE_CONTRACT
+        or state.get("runtime_dir") != str(runtime_dir)
+        or not isinstance(state.get("cursor"), dict)
+    ):
+        raise ValueError("promo light GC state contract mismatch")
+    return state
+
+
+def _plan_incremental_light_gc_batch(
+    *, runtime_dir: Path, state: dict[str, Any],
+    protected_run_dirs: tuple[Path, ...],
+    success_debug_ttl_days: float, failed_debug_ttl_days: float,
+    deadline: float, max_files: int, max_bytes: int, max_runs: int,
+) -> dict[str, Any]:
+    runs_root = runtime_dir / PROMO_RUNS_DIRNAME
+    cursor = dict(state["cursor"])
+    plan: list[dict[str, Any]] = []
+    skips: dict[str, int] = defaultdict(int)
+    planned_bytes = 0
+    if not runs_root.exists():
+        return {"plan": plan, "cursor": {"run": "", "path": ""}, "scanned_runs": 0, "skip_reasons": {}}
+    run_dirs = sorted(
+        (entry for entry in runs_root.iterdir() if entry.is_dir() and not entry.is_symlink()),
+        key=lambda path: path.name,
+    )
+    names = [path.name for path in run_dirs]
+    start = bisect_left(names, str(cursor.get("run") or ""))
+    if start < len(names) and names[start] == cursor.get("run") and not cursor.get("path"):
+        start += 1
+    ordered = run_dirs[start:] + run_dirs[:start]
+    scanned_runs = 0
+    next_cursor = cursor
+    for run_dir in ordered:
+        if scanned_runs >= max_runs or time.perf_counter() >= deadline:
+            break
+        scanned_runs += 1
+        if _is_protected_path(run_dir, protected_run_dirs):
+            skips["current_run_protected_skip"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
+            continue
+        status = _run_status(run_dir)
+        ttl = (
+            success_debug_ttl_days if status == "success" else
+            failed_debug_ttl_days if status in {"partial", "blocked"} else None
+        )
+        if ttl is None:
+            skips["unknown_run_status_skip"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
+            continue
+        try:
+            files, newest_mtime = _light_gc_run_files(run_dir, deadline=deadline)
+        except TimeoutError:
+            skips["run_scan_timeout"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
+            return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+        except OSError:
+            skips["run_scan_failed"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
+            continue
+        if (time.time() - newest_mtime) / 86400 < ttl:
+            skips["ttl_not_reached"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
+            continue
+        prior_path = str(cursor.get("path") or "") if run_dir.name == cursor.get("run") else ""
+        for path in files:
+            relative = str(path.relative_to(run_dir))
+            if prior_path and relative <= prior_path:
+                continue
+            if time.perf_counter() >= deadline:
+                return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+            if not _is_debug_trace_file(path) or path.name in PROTECTED_FILENAMES:
+                continue
+            try:
+                if path.lstat().st_size > max_bytes:
+                    skips["oversized_file_skip"] += 1
+                    continue
+            except OSError:
+                skips["unsafe_file_skip"] += 1
+                continue
+            try:
+                identity = _light_gc_file_identity(path, run_dir, deadline=deadline)
+            except TimeoutError:
+                skips["candidate_hash_timeout"] += 1
+                next_cursor = {"run": run_dir.name, "path": ""}
+                return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+            if identity is None:
+                skips["unsafe_file_skip"] += 1
+                continue
+            if identity["size"] > max_bytes:
+                skips["oversized_file_skip"] += 1
+                continue
+            if plan and planned_bytes + identity["size"] > max_bytes:
+                return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+            plan.append(identity)
+            planned_bytes += identity["size"]
+            next_cursor = {"run": run_dir.name, "path": relative}
+            if len(plan) >= max_files or planned_bytes >= max_bytes:
+                return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+        next_cursor = {"run": run_dir.name, "path": ""}
+    return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+
+
+def _light_gc_run_files(run_dir: Path, *, deadline: float | None = None) -> tuple[list[Path], float]:
+    files: list[Path] = []
+    newest_mtime = 0.0
+    # Our own unlinks update directory mtimes. Collector writes create/update
+    # files (including run_summary.json when a run starts), so file mtimes
+    # retain the activity guard across repeated GC batches.
+    def fail_on_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, dirs, names in os.walk(run_dir, onerror=fail_on_walk_error):
+        _ensure_before_deadline(deadline)
+        for dirname in dirs:
+            if stat.S_ISLNK((Path(current) / dirname).lstat().st_mode):
+                raise OSError("promo GC run contains a symlinked subdirectory")
+        for name in names:
+            _ensure_before_deadline(deadline)
+            path = Path(current) / name
+            file_stat = path.lstat()
+            files.append(path)
+            newest_mtime = max(newest_mtime, file_stat.st_mtime)
+    return sorted(files, key=lambda path: str(path.relative_to(run_dir))), newest_mtime
+
+
+def _light_gc_file_identity(
+    path: Path, run_dir: Path, *, deadline: float | None = None,
+) -> dict[str, Any] | None:
+    if path.is_symlink() or not _is_relative_to(path, run_dir):
+        return None
+    ancestor = path.parent
+    while ancestor != run_dir:
+        if ancestor.is_symlink() or not _is_relative_to(ancestor, run_dir):
+            return None
+        ancestor = ancestor.parent
+    try:
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            return None
+        digest = _sha256_path_until(path, deadline)
+        after = path.lstat()
+        if (file_stat.st_dev, file_stat.st_ino, file_stat.st_size, file_stat.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ):
+            return None
+    except OSError:
+        return None
+    return {
+        "path": str(path), "run": run_dir.name,
+        "size": file_stat.st_size, "device": file_stat.st_dev,
+        "inode": file_stat.st_ino, "mtime_ns": file_stat.st_mtime_ns,
+        "sha256": digest,
+    }
+
+
+def _sha256_path_until(path: Path, deadline: float | None) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            _ensure_before_deadline(deadline)
+            digest.update(chunk)
+    _ensure_before_deadline(deadline)
+    return digest.hexdigest()
+
+
+def _apply_incremental_light_gc_batch(
+    *, runtime_dir: Path, batch: dict[str, Any],
+    protected_run_dirs: tuple[Path, ...],
+    success_debug_ttl_days: float, failed_debug_ttl_days: float,
+    deadline: float,
+) -> dict[str, Any]:
+    runs_root = runtime_dir / PROMO_RUNS_DIRNAME
+    result: dict[str, Any] = {
+        "deleted_count": 0, "freed_bytes": 0, "already_missing_count": 0,
+        "drift_count": 0, "skipped_unvisited_count": 0,
+        "errors": [], "completed": True,
+    }
+    # Scan each run once per batch, then guard every unlink against a collector
+    # restart: PromoXlsxCollectorBlock writes run_summary.json before work.
+    run_age_ok: dict[str, tuple[bool, int, int]] = {}
+    for index, item in enumerate(batch["plan"]):
+        if time.perf_counter() >= deadline:
+            result["completed"] = False
+            break
+        path = Path(str(item["path"]))
+        run_dir = runs_root / str(item["run"])
+        if not _is_relative_to(path, run_dir) or _is_protected_path(run_dir, protected_run_dirs):
+            result["drift_count"] += 1
+            result["errors"].append("candidate_run_or_path_protection_changed")
+            continue
+        status = _run_status(run_dir)
+        ttl = (
+            success_debug_ttl_days if status == "success" else
+            failed_debug_ttl_days if status in {"partial", "blocked"} else None
+        )
+        if ttl is None or not run_dir.is_dir() or run_dir.is_symlink():
+            result["drift_count"] += 1
+            result["errors"].append("candidate_run_status_changed")
+            continue
+        if run_dir.name not in run_age_ok:
+            try:
+                _files, newest_mtime = _light_gc_run_files(run_dir, deadline=deadline)
+                summary_stat = (run_dir / "run_summary.json").lstat()
+            except (TimeoutError, OSError) as exc:
+                skipped = len(batch["plan"]) - index
+                result["drift_count"] += skipped
+                result["skipped_unvisited_count"] += skipped
+                result["errors"].append(
+                    f"candidate_run_scan_failed: {type(exc).__name__}; skipped_unvisited={skipped}"
+                )
+                break
+            newest_mtime = max(newest_mtime, summary_stat.st_mtime)
+            run_age_ok[run_dir.name] = (
+                (time.time() - newest_mtime) / 86400 >= ttl,
+                summary_stat.st_ino,
+                summary_stat.st_mtime_ns,
+            )
+        age_ok, summary_inode, summary_mtime_ns = run_age_ok[run_dir.name]
+        try:
+            current_summary_stat = (run_dir / "run_summary.json").lstat()
+        except OSError:
+            current_summary_stat = None
+        if (
+            current_summary_stat is None
+            or current_summary_stat.st_ino != summary_inode
+            or current_summary_stat.st_mtime_ns != summary_mtime_ns
+        ):
+            result["drift_count"] += 1
+            result["errors"].append("candidate_run_summary_changed")
+            continue
+        if not age_ok:
+            result["drift_count"] += 1
+            result["errors"].append("candidate_run_age_changed")
+            continue
+        if not path.exists() and not path.is_symlink():
+            result["already_missing_count"] += 1
+            continue
+        try:
+            identity = _light_gc_file_identity(path, run_dir, deadline=deadline)
+        except TimeoutError:
+            skipped = len(batch["plan"]) - index
+            result["drift_count"] += skipped
+            result["skipped_unvisited_count"] += skipped
+            result["errors"].append(f"candidate_hash_timeout; skipped_unvisited={skipped}")
+            break
+        if identity is None or any(identity[key] != item[key] for key in (
+            "size", "device", "inode", "mtime_ns", "sha256"
+        )):
+            result["drift_count"] += 1
+            result["errors"].append("candidate_file_identity_changed")
+            continue
+        if not _is_debug_trace_file(path) or path.name in PROTECTED_FILENAMES:
+            result["drift_count"] += 1
+            result["errors"].append("candidate_file_policy_changed")
+            continue
+        try:
+            path.unlink()
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            result["drift_count"] += 1
+            result["errors"].append(f"{type(exc).__name__}: {exc}")
+            continue
+        result["deleted_count"] += 1
+        result["freed_bytes"] += int(item["size"])
+    return result
+
+
+def _incremental_light_gc_summary(
+    *, policy_name: str, started: float, status: str, warning: str,
+    batch: dict[str, Any] | None = None, result: dict[str, Any] | None = None,
+    resumed: bool = False,
+) -> dict[str, Any]:
+    batch = batch or {}
+    result = result or {}
+    return {
+        "policy_name": policy_name, "status": status, "warning": warning,
+        "duration_ms": max(0, int(round((time.perf_counter() - started) * 1000))),
+        "deleted_count": int(result.get("deleted_count") or 0),
+        "freed_bytes": int(result.get("freed_bytes") or 0),
+        "skipped_count": sum((batch.get("skip_reasons") or {}).values()),
+        "skip_reasons": batch.get("skip_reasons") or {},
+        "deletion_plan_summary": _plan_summary(batch.get("plan") or []),
+        "apply_error_count": len(result.get("errors") or []),
+        "errors": (result.get("errors") or [])[:20],
+        "scanned_runs": int(batch.get("scanned_runs") or 0),
+        "batch_complete": bool(result.get("completed", True)),
+        "resumed_pending_batch": resumed,
+        "already_missing_count": int(result.get("already_missing_count") or 0),
+        "skipped_unvisited_count": int(result.get("skipped_unvisited_count") or 0),
+        "cursor": batch.get("cursor") or {},
+    }
 
 
 def build_light_gc_report(
@@ -315,6 +748,8 @@ def apply_gc_plan(
     for item in plan:
         path = Path(str(item.get("path") or ""))
         try:
+            if path.is_symlink() or _has_symlink_parent(path, runtime_dir):
+                raise ValueError("candidate uses a symlink")
             resolved = path.resolve()
             if not _is_relative_to(resolved, runtime_dir):
                 raise ValueError("candidate is outside runtime_dir")
@@ -332,6 +767,8 @@ def apply_gc_plan(
                     continue
                 raise ValueError("candidate is not a regular file")
             file_stat = resolved.stat()
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise ValueError("candidate is not a single-link regular file")
             size = file_stat.st_size
             if int(item.get("size") or -1) != int(size):
                 raise ValueError("candidate size drifted from exact plan")
@@ -370,13 +807,40 @@ def apply_exact_gc_plan(
     deployed_sha: str,
     deployed_sha_file: Path,
 ) -> dict[str, Any]:
-    approved = str(fingerprint or "").strip()
-    if not approved:
-        raise ValueError("promo GC apply requires the exact dry-run fingerprint")
+    runtime_dir = runtime_dir.resolve()
     _verify_deployed_sha(
         deployed_sha=deployed_sha,
         deployed_sha_file=deployed_sha_file,
     )
+    gc_dir = runtime_dir / EXACT_GC_AUDIT_DIRNAME
+    if gc_dir.is_symlink():
+        raise ValueError("promo GC audit directory must not be a symlink")
+    gc_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_fd = os.open(gc_dir / LIGHT_GC_LOCK_FILENAME, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _apply_exact_gc_plan_locked(
+            runtime_dir=runtime_dir,
+            report=report,
+            fingerprint=fingerprint,
+            deployed_sha=deployed_sha,
+            deployed_sha_file=deployed_sha_file,
+        )
+    finally:
+        os.close(lock_fd)
+
+
+def _apply_exact_gc_plan_locked(
+    *,
+    runtime_dir: Path,
+    report: dict[str, Any],
+    fingerprint: str,
+    deployed_sha: str,
+    deployed_sha_file: Path,
+) -> dict[str, Any]:
+    approved = str(fingerprint or "").strip()
+    if not approved:
+        raise ValueError("promo GC apply requires the exact dry-run fingerprint")
     audit_path = _exact_gc_audit_path(
         runtime_dir=runtime_dir,
         fingerprint=approved,
@@ -700,13 +1164,16 @@ def _sha256_path(path: Path) -> str:
 
 def _enrich_exact_identities(
     plan: list[dict[str, Any]],
+    *, runtime_dir: Path,
 ) -> list[dict[str, Any]]:
     exact = []
     for item in plan:
         path = Path(str(item["path"]))
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink() or not path.is_file() or _has_symlink_parent(path, runtime_dir):
             raise ValueError("promo GC exact candidate is not a regular file")
         file_stat = path.stat()
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise ValueError("promo GC exact candidate is not a single-link regular file")
         exact.append(
             {
                 **item,
@@ -856,6 +1323,18 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _has_symlink_parent(path: Path, root: Path) -> bool:
+    root = Path(os.path.abspath(root))
+    parent = Path(os.path.abspath(path.parent))
+    while parent != root:
+        if parent.is_symlink():
+            return True
+        if parent == parent.parent:
+            return True
+        parent = parent.parent
+    return False
 
 
 def _normalize_protected_run_dirs(current_run_dirs: list[str | Path] | tuple[str | Path, ...]) -> tuple[Path, ...]:

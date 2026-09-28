@@ -2,6 +2,7 @@
 Description=WB Core bounded WB warehouse and cost synchronization
 After=network.target wb-core-registry-http.service
 Wants=network.target wb-core-registry-http.service
+RequiresMountsFor=/opt/wb-core-runtime/state/backups/warehouse-recovery
 
 [Service]
 Type=oneshot

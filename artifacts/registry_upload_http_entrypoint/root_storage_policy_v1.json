@@ -12,6 +12,14 @@
     "path": "/var/lib/wb-core-root-storage-policy/status.json",
     "max_age_seconds": 600
   },
+  "warehouse_recovery_placement": {
+    "contract_version": "wb_core_warehouse_recovery_extra100_v1",
+    "artifact_root": "/opt/wb-core-runtime/state/backups/warehouse-recovery",
+    "outside_marker_path": "/opt/wb-core-runtime/state/backups/.warehouse-recovery-extra100-active.json",
+    "inside_marker_name": ".warehouse-recovery-extra100-active.json",
+    "filesystem_uuid": "9fcfe929-827e-4f81-b2ef-186fd794e671",
+    "role": "warehouse_backup"
+  },
   "filesystems": {
     "root": "/",
     "backup": "/opt/wb-core-runtime/state/backups",
@@ -42,6 +50,16 @@
         "path": "/opt/wb-core-runtime/state/generations",
         "source": "/dev/sdc1",
         "filesystem_uuid": "284b3362-b890-431d-a7da-7f0fcd2ee0a6",
+        "filesystem_type": "ext4",
+        "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
+        "reserve_mode": "fixed",
+        "reserve_bytes": 8589934592
+      },
+      "warehouse_backup": {
+        "active": false,
+        "path": "/opt/wb-core-runtime/state/backups/warehouse-recovery",
+        "source": "/dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671",
+        "filesystem_uuid": "9fcfe929-827e-4f81-b2ef-186fd794e671",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
         "reserve_mode": "fixed",
@@ -99,7 +117,8 @@
       }
     },
     "producers": [
-      {"owner":"warehouse_recovery_policy","current":true,"data_class":"bounded_checkpoint","destination_role":"backup","relative_roots":["warehouse-recovery","warehouse-functional-sync"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_recovery_policy","current":true,"data_class":"bounded_checkpoint","destination_role":"backup","relative_roots":["warehouse-recovery"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
+      {"owner":"warehouse_functional_sync_artifacts","current":true,"data_class":"bounded_checkpoint","destination_role":"backup","relative_roots":["warehouse-functional-sync"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
       {"owner":"calculation_parameters_and_economics","current":true,"data_class":"target_before_image","destination_role":"backup","relative_roots":["calculation-parameters"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
       {"owner":"promo_collector_artifacts","current":true,"data_class":"protected_excluded_promo_artifact","destination_role":"root","relative_roots":["opt/wb-core-runtime/state/promo_xlsx_collector_runs"],"lifecycle_policy":"domain_checkpoint","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},
       {"owner":"finance_post_cutover_backup_rotation","current":true,"data_class":"finance_restore_set","destination_role":"backup","relative_roots":["finance-storage-split-snapshots"],"lifecycle_policy":"finance_restore_set","capacity_mode":"domain_guard","max_single_write_bytes":34359738368},

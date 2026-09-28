@@ -14,6 +14,12 @@ import stat
 import subprocess
 from typing import Any, Mapping
 
+from packages.application.warehouse_recovery_placement import (
+    ROLE as WAREHOUSE_BACKUP_ROLE,
+    WarehousePlacementError,
+    placement_state,
+)
+
 
 GIB = 1024**3
 MIB = 1024**2
@@ -37,6 +43,7 @@ CANONICAL_FILESYSTEM_ROLES = (
     "root",
     "backup",
     "generation",
+    WAREHOUSE_BACKUP_ROLE,
 )
 REQUIRED_ACTIVE_FILESYSTEM_ROLES = frozenset({"root", "backup", "generation"})
 MUTABLE_STORE_ACCESS_MODES = frozenset({"read_only", "read_write", "write_only"})
@@ -135,7 +142,35 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
                 raise RootStoragePolicyError("root storage producer paths must be absolute")
         owner_ids.add(owner)
         producers_by_owner[owner] = producer
+    try:
+        placement = placement_state(payload)
+    except WarehousePlacementError as exc:
+        raise RootStoragePolicyError(str(exc)) from exc
+    registry = payload.get("storage_registry")
+    filesystems = registry.get("filesystems") if isinstance(registry, Mapping) else None
+    warehouse = filesystems.get(WAREHOUSE_BACKUP_ROLE) if isinstance(filesystems, Mapping) else None
+    if not isinstance(warehouse, dict):
+        raise RootStoragePolicyError("warehouse backup role is missing")
+    if (
+        str(warehouse.get("path") or "") != str(placement["artifact_root"])
+        or str(warehouse.get("filesystem_uuid") or "") != str(placement["filesystem_uuid"])
+        or str(warehouse.get("source") or "") != f"/dev/disk/by-uuid/{placement['filesystem_uuid']}"
+    ):
+        raise RootStoragePolicyError("warehouse backup role placement drift")
+    if placement["activated"]:
+        warehouse["active"] = True
+        payload["filesystems"][WAREHOUSE_BACKUP_ROLE] = str(placement["artifact_root"])
+        matching_producers = [
+            item for item in registry.get("producers", [])
+            if isinstance(item, dict) and item.get("owner") == "warehouse_recovery_policy"
+        ]
+        if len(matching_producers) != 1:
+            raise RootStoragePolicyError("warehouse recovery producer is missing or ambiguous")
+        producer = matching_producers[0]
+        producer["destination_role"] = WAREHOUSE_BACKUP_ROLE
+        producer["relative_roots"] = [""]
     _validate_storage_registry(payload)
+    payload["warehouse_recovery_placement_state"] = placement
     non_target_cas = payload.get("non_target_cas")
     if (
         not isinstance(non_target_cas, dict)
@@ -242,7 +277,7 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
         active = bool(raw_active)
         if role in REQUIRED_ACTIVE_FILESYSTEM_ROLES and not active:
             raise RootStoragePolicyError("required storage filesystem role is inactive")
-        if not active:
+        if not active and role != WAREHOUSE_BACKUP_ROLE:
             raise RootStoragePolicyError("canonical storage filesystem role is inactive")
         if active:
             active_roles.add(role)
@@ -312,7 +347,7 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             or not str(producer.get("data_class") or "").strip()
             or destination_role
             not in {
-                "root", "backup", "generation", "canonical_store",
+                "root", "backup", "generation", WAREHOUSE_BACKUP_ROLE, "canonical_store",
                 "caller_bound", "ephemeral",
             }
             or not isinstance(relative_roots, list)
@@ -329,7 +364,7 @@ def _validate_storage_registry(policy: Mapping[str, Any]) -> None:
             or maximum < 0
         ):
             raise RootStoragePolicyError("canonical storage producer is invalid")
-        if destination_role in {"root", "backup", "generation"} and not relative_roots:
+        if destination_role in {"root", "backup", "generation", WAREHOUSE_BACKUP_ROLE} and not relative_roots:
             raise RootStoragePolicyError("canonical storage producer has no destination root")
         if producer.get("current") is True and capacity_mode == "disabled":
             raise RootStoragePolicyError("current storage producer cannot be disabled")
@@ -373,7 +408,7 @@ def storage_destination_root(
     if producer.get("current") is not True:
         raise RootStoragePolicyError(f"storage producer has no current write authority: {owner}")
     role = str(producer.get("destination_role") or "")
-    if role not in {"root", "backup", "generation"}:
+    if role not in {"root", "backup", "generation", WAREHOUSE_BACKUP_ROLE}:
         raise RootStoragePolicyError(
             f"storage producer does not own a persistent destination root: {owner}"
         )
@@ -434,7 +469,7 @@ def resolve_runtime_storage_destination(
     role = str(producer.get("destination_role") or "")
     roots = [str(item) for item in producer.get("relative_roots") or []]
     chosen = roots[0] if relative_root is None else str(relative_root)
-    if chosen not in roots or role not in {"root", "backup", "generation"}:
+    if chosen not in roots or role not in {"root", "backup", "generation", WAREHOUSE_BACKUP_ROLE}:
         raise RootStoragePolicyError(
             f"isolated runtime storage destination is not registered: {owner}:{chosen}"
         )
@@ -442,6 +477,7 @@ def resolve_runtime_storage_destination(
         "root": runtime,
         "backup": runtime / "backups",
         "generation": runtime / "generations",
+        WAREHOUSE_BACKUP_ROLE: runtime / "backups" / "warehouse-recovery",
     }[role]
     root = (role_base / chosen).resolve(strict=False)
     destination = root.joinpath(*(str(item) for item in relative_parts)).resolve(strict=False)
@@ -552,7 +588,7 @@ def admit_root_write(
             f"owner={normalized_owner}, predicted_peak_bytes={predicted_peak}, "
             f"max_single_write_bytes={maximum}"
         )
-    if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
+    if destination_role in {"root", "backup", "generation", WAREHOUSE_BACKUP_ROLE} and enforce_canonical_destination:
         allowed_roots = [
             storage_destination_root(
                 normalized_owner,
@@ -594,7 +630,7 @@ def admit_root_write(
             reason = "large_output_predicted_free_after_below_critical_floor"
     reserve_bytes = 0
     reserve_mode = "domain_guard"
-    if destination_role in {"root", "backup", "generation"} and enforce_canonical_destination:
+    if destination_role in {"root", "backup", "generation", WAREHOUSE_BACKUP_ROLE} and enforce_canonical_destination:
         role_policy = dict(
             dict(dict(resolved_policy["storage_registry"])["filesystems"])[
                 destination_role
@@ -740,7 +776,12 @@ def _collect_storage_registry_status(
         }
         identity_errors: list[str] = []
         for key in ("source", "filesystem_uuid", "filesystem_type"):
-            if str(observed.get(key) or "") != str(contract.get(key) or ""):
+            matches = (
+                _storage_source_matches(str(observed.get(key) or ""), str(contract.get(key) or ""))
+                if key == "source"
+                else str(observed.get(key) or "") == str(contract.get(key) or "")
+            )
+            if not matches:
                 identity_errors.append(key)
         missing_options = sorted(required_options - observed_options)
         if missing_options:
@@ -807,7 +848,7 @@ def _collect_storage_registry_status(
         not in {"canonical_business_store", "protected_excluded_promo_artifact"}
     ]
     unregistered_destination_violations: list[dict[str, Any]] = []
-    for role in ("backup", "generation"):
+    for role in ("backup", "generation", WAREHOUSE_BACKUP_ROLE):
         observed = observed_filesystems.get(role)
         if observed is None:
             continue
@@ -1067,6 +1108,26 @@ def _assert_descendant(path: Path, root: Path) -> None:
         )
 
 
+def _storage_source_matches(observed: str, expected: str) -> bool:
+    if observed == expected:
+        return True
+    # UUID-backed mounts may be presented as their current kernel device name.
+    # Keep legacy exact-source contracts; only the explicit UUID source accepts
+    # an alias, and only when both names resolve to the same block device.
+    if not expected.startswith("/dev/disk/by-uuid/") or not observed.startswith("/dev/"):
+        return False
+    try:
+        actual = os.stat(observed)
+        wanted = os.stat(expected)
+    except OSError:
+        return False
+    return (
+        stat.S_ISBLK(actual.st_mode)
+        and stat.S_ISBLK(wanted.st_mode)
+        and actual.st_rdev == wanted.st_rdev
+    )
+
+
 def _assert_filesystem_identity(
     path: Path,
     *,
@@ -1088,7 +1149,10 @@ def _assert_filesystem_identity(
     mismatches = {
         key: {"expected": value, "observed": observed.get(key)}
         for key, value in expected.items()
-        if str(observed.get(key) or "") != value
+        if not (
+            _storage_source_matches(str(observed.get(key) or ""), value)
+            if key == "source" else str(observed.get(key) or "") == value
+        )
     }
     missing_options = sorted(required_options - observed_options)
     if mismatches or missing_options or "ro" in observed_options:

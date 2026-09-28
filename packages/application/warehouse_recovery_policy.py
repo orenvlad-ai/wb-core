@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.warehouse_recovery_placement import WarehousePlacementError
 
 
 CONTRACT_NAME = "warehouse_recovery_policy_v1"
@@ -467,6 +468,54 @@ class WarehouseRecoveryRegistry:
         self.fault_injector = fault_injector
         self.operational_reserve_bytes = max(int(operational_reserve_bytes), 0)
 
+    def _assert_recovery_placement(self) -> int:
+        """Deny a missing bind and return this placement's native hard floor."""
+
+        if self.runtime_dir != Path("/opt/wb-core-runtime/state").resolve():
+            return T2_HARD_STOP_FREE_BYTES  # Isolated fixtures use legacy topology.
+        from packages.application.root_storage_policy import (
+            RootStoragePolicyError,
+            _assert_filesystem_identity,
+            load_policy,
+        )
+
+        try:
+            policy = load_policy()
+            state = dict(policy["warehouse_recovery_placement_state"])
+            contracts = dict(policy["storage_registry"]["filesystems"])
+            if self.recovery_root != Path(str(state["artifact_root"])):
+                raise RecoveryPolicyError("warehouse recovery root differs from placement contract")
+            if self.recovery_root.is_symlink():
+                raise RecoveryPolicyError("warehouse recovery root cannot be a symlink")
+            _assert_filesystem_identity(
+                self.recovery_root.parent,
+                role="backup",
+                contract=contracts["backup"],
+            )
+            if state["activated"]:
+                if not self.recovery_root.is_dir():
+                    raise RecoveryPolicyError("activated warehouse recovery mount is absent")
+                observed = _assert_filesystem_identity(
+                    self.recovery_root,
+                    role="warehouse_backup",
+                    contract=contracts["warehouse_backup"],
+                )
+                if observed["mount_point"] != str(self.recovery_root):
+                    raise RecoveryPolicyError("warehouse recovery bind mount point drift")
+                return max(
+                    T2_HARD_STOP_FREE_BYTES,
+                    int(contracts["warehouse_backup"]["reserve_bytes"]),
+                )
+            elif self.recovery_root.exists():
+                _assert_filesystem_identity(
+                    self.recovery_root,
+                    role="backup",
+                    contract=contracts["backup"],
+                )
+            return T2_HARD_STOP_FREE_BYTES
+        except (RootStoragePolicyError, WarehousePlacementError) as exc:
+            raise RecoveryPolicyError(f"warehouse recovery mount guard: {exc}") from exc
+
     def ensure_schema(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
@@ -792,6 +841,7 @@ class WarehouseRecoveryRegistry:
         source_watermarks: Mapping[str, Any],
         schema_revision: str = "",
     ) -> dict[str, Any]:
+        self._assert_recovery_placement()
         selection = select_recovery_tier(
             mutation_kind=mutation_kind,
             closure_kind="warehouse_domain",
@@ -978,6 +1028,7 @@ class WarehouseRecoveryRegistry:
             _atomic_write_json(manifest_path, manifest)
             self._inject(operation_id, "after_manifest_rename")
             self._assert_post_write_reserve(self.checkpoint_root)
+            self._assert_recovery_placement()
             with _connect(self.db_path) as conn:
                 _ensure_schema(conn)
                 conn.execute("BEGIN IMMEDIATE")
@@ -1820,6 +1871,8 @@ class WarehouseRecoveryRegistry:
     ) -> dict[str, Any]:
         """Restore only the warehouse/cost domain from a verified checkpoint."""
 
+        self._assert_recovery_placement()
+
         operation = self.get_operation(operation_id)
         if operation is None or operation.get("tier") != RecoveryTier.T2.value:
             raise RecoveryPolicyError("T2 recovery operation is required")
@@ -2115,6 +2168,8 @@ class WarehouseRecoveryRegistry:
 
     def apply_retention(self, *, plan_fingerprint: str) -> dict[str, Any]:
         """Apply or resume one audited exact retention plan."""
+
+        self._assert_recovery_placement()
 
         approved = str(plan_fingerprint or "").strip()
         if not approved:
@@ -2419,6 +2474,7 @@ class WarehouseRecoveryRegistry:
         )
         bounded_bytes_after = max(0, current_bytes - candidate_bytes)
         capacity = self.capacity_status()
+        hard_floor = int(capacity["hard_stop_watermark_bytes"])
         free_after_plan = int(capacity["free_bytes"]) + candidate_bytes
         next_cycle_peak_available = (
             free_after_plan - recent_checkpoint_bytes
@@ -2437,14 +2493,15 @@ class WarehouseRecoveryRegistry:
             "projected_30d_growth_bytes": 0,
             "filesystem_free_after_plan_bytes": free_after_plan,
             "next_cycle_peak_available_bytes": next_cycle_peak_available,
-            "thirty_day_headroom_bytes": next_cycle_peak_available
-            - T2_HARD_STOP_FREE_BYTES,
-            "hard_stop": next_cycle_peak_available < T2_HARD_STOP_FREE_BYTES,
+            "thirty_day_headroom_bytes": next_cycle_peak_available - hard_floor,
+            "hard_stop": next_cycle_peak_available < hard_floor,
             "degraded": next_cycle_peak_available < T2_DEGRADED_FREE_BYTES,
         }
 
     def release_failed_canary_pre_mutations(self) -> dict[str, Any]:
         """Release exact failed canary evidence that never reached mutation."""
+
+        self._assert_recovery_placement()
 
         candidates = [
             operation
@@ -2857,6 +2914,10 @@ class WarehouseRecoveryRegistry:
         pre_policy_legacy: list[str] = []
         corrupt_registered: list[dict[str, Any]] = []
         backup_root = (self.runtime_dir / "backups").resolve()
+        placement_markers = {
+            backup_root / ".warehouse-recovery-extra100-active.json",
+            self.recovery_root / ".warehouse-recovery-extra100-active.json",
+        }
         roots = [backup_root]
         if not _path_is_below(self.legacy_recovery_root, backup_root):
             roots.append(self.legacy_recovery_root)
@@ -2897,6 +2958,8 @@ class WarehouseRecoveryRegistry:
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("*")):
+                if path in placement_markers:
+                    continue
                 if path.is_symlink() or not path.is_file():
                     continue
                 kind = _artifact_kind(path)
@@ -3070,6 +3133,7 @@ class WarehouseRecoveryRegistry:
         }
 
     def capacity_status(self) -> dict[str, Any]:
+        hard_floor = self._assert_recovery_placement()
         capacity_root = (
             self.checkpoint_root
             if self.checkpoint_root.exists()
@@ -3110,8 +3174,12 @@ class WarehouseRecoveryRegistry:
                         ).fetchone()[0]
                     )
         available = max(0, free_bytes - reserved)
-        t2_degraded = available < T2_DEGRADED_FREE_BYTES
-        t2_hard_stop = available < T2_HARD_STOP_FREE_BYTES
+        t2_degraded = available < max(T2_DEGRADED_FREE_BYTES, hard_floor)
+        t2_hard_stop = available < hard_floor
+        generic_floor = max(
+            self.operational_reserve_bytes,
+            hard_floor if hard_floor > T2_HARD_STOP_FREE_BYTES else 0,
+        )
         return {
             "filesystem_id": filesystem_id,
             "runtime_filesystem_id": runtime_filesystem_id,
@@ -3122,17 +3190,16 @@ class WarehouseRecoveryRegistry:
             "reserved_bytes": reserved,
             "expired_reservation_count": expired_reservation_count,
             "operational_reserve_bytes": self.operational_reserve_bytes,
+            "effective_reserve_bytes": generic_floor,
             "artifact_root": str(self.recovery_root),
             "legacy_artifact_root": str(self.legacy_recovery_root),
-            "degraded_watermark_bytes": T2_DEGRADED_FREE_BYTES,
-            "hard_stop_watermark_bytes": T2_HARD_STOP_FREE_BYTES,
+            "degraded_watermark_bytes": max(T2_DEGRADED_FREE_BYTES, hard_floor),
+            "hard_stop_watermark_bytes": hard_floor,
             "available_after_reservations_bytes": available,
-            # Keep the established generic capacity semantics for T1 and
-            # callers that use a custom operational reserve. T2 receives
-            # separate absolute watermarks because it is routed to the
-            # backup filesystem and needs a stronger disk-full guard.
-            "degraded": available < self.operational_reserve_bytes * 2,
-            "hard_stop": available < self.operational_reserve_bytes,
+            # On the activated extra volume, every writer shares its 8 GiB
+            # floor. Legacy generic/T1 semantics remain unchanged.
+            "degraded": available < generic_floor * 2,
+            "hard_stop": available < generic_floor,
             "t2_degraded": t2_degraded,
             "t2_hard_stop": t2_hard_stop,
         }
@@ -3508,6 +3575,7 @@ class WarehouseRecoveryRegistry:
         target_root: Path,
     ) -> dict[str, Any]:
         target_root = Path(target_root)
+        hard_floor = self._assert_recovery_placement()
         target_root.mkdir(parents=True, exist_ok=True)
         self._expire_reservations()
         filesystem_id = _filesystem_id(target_root)
@@ -3517,9 +3585,13 @@ class WarehouseRecoveryRegistry:
             _path_is_below(target_root.resolve(), root)
             for root in self.recovery_roots
         )
+        on_activated_volume = (
+            hard_floor > T2_HARD_STOP_FREE_BYTES
+            and filesystem_id == _filesystem_id(self.recovery_root)
+        )
         operational_reserve = (
-            max(self.operational_reserve_bytes, T2_HARD_STOP_FREE_BYTES)
-            if is_t2_artifact
+            max(self.operational_reserve_bytes, hard_floor)
+            if is_t2_artifact or on_activated_volume
             else self.operational_reserve_bytes
         )
         now = self.clock()
@@ -3542,6 +3614,15 @@ class WarehouseRecoveryRegistry:
                         "active",
                         "consumed",
                     }:
+                        if (
+                            str(existing_payload.get("filesystem_id") or "")
+                            != filesystem_id
+                            or int(existing_payload.get("operational_reserve_bytes") or 0)
+                            < operational_reserve
+                        ):
+                            raise RecoveryPolicyError(
+                                "recovery capacity reservation placement or reserve drift"
+                            )
                         conn.commit()
                         return existing_payload
                 reserved = int(
@@ -3635,13 +3716,18 @@ class WarehouseRecoveryRegistry:
             conn.commit()
 
     def _assert_post_write_reserve(self, target_root: Path) -> None:
+        hard_floor = self._assert_recovery_placement()
         free_bytes = int(shutil.disk_usage(Path(target_root)).free)
+        on_activated_volume = (
+            hard_floor > T2_HARD_STOP_FREE_BYTES
+            and _filesystem_id(Path(target_root)) == _filesystem_id(self.recovery_root)
+        )
         required_reserve = (
-            max(self.operational_reserve_bytes, T2_HARD_STOP_FREE_BYTES)
+            max(self.operational_reserve_bytes, hard_floor)
             if any(
                 _path_is_below(Path(target_root).resolve(), root)
                 for root in self.recovery_roots
-            )
+            ) or on_activated_volume
             else self.operational_reserve_bytes
         )
         if free_bytes < required_reserve:
@@ -3857,6 +3943,11 @@ class WarehouseRecoveryRegistry:
         source_watermarks: Mapping[str, Any],
         schema_revision: str,
     ) -> dict[str, Any]:
+        managed_recovery_path = any(
+            _path_is_below(final, root) for root in self.recovery_roots
+        )
+        if managed_recovery_path:
+            self._assert_recovery_placement()
         if final.exists():
             digest = _sha256_file(final)
             return {
@@ -3965,6 +4056,8 @@ class WarehouseRecoveryRegistry:
         _fsync_file(temporary)
         os.replace(temporary, final)
         _fsync_directory(final.parent)
+        if managed_recovery_path:
+            self._assert_recovery_placement()
         return {
             "size_bytes": final.stat().st_size,
             "read_bytes": read_bytes,
