@@ -6,6 +6,7 @@ never discovered or consumed by this worker.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 import time
 from typing import Any
@@ -14,6 +15,7 @@ from apps import search_cluster_cleaner_stage_e as stage_e
 from apps.production_apply_contract import AmbiguousSubmit
 from apps.production_apply_launcher import execute as production_apply
 from packages.application.search_cluster_cleaner import KeywordCleaner
+from packages.application.search_cluster_cleaner_store import CleanerTransactionRolledBack
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal
 
 
@@ -50,6 +52,7 @@ class LocalStageEAdapter:
 
 class ManualCleanerCoordinator:
     LOCAL_RETRY_LIMIT=8
+    BATCH_WRITE_DEADLINE_SECONDS=122*60
     def __init__(self, cleaner:KeywordCleaner, adapter:LocalStageEAdapter, *, bootstrap_owner_username:str=''):
         self.cleaner=cleaner
         self.adapter=adapter
@@ -118,12 +121,17 @@ class ManualCleanerCoordinator:
             else:
                 self._release_unsubmitted(job)
                 self._save(job_id,state='failed',stage='finished',error_code=exc.code,error=str(exc))
-        except (OSError,ValueError,RuntimeError) as exc:
+        except (CleanerTransactionRolledBack,OSError,ValueError,RuntimeError) as exc:
             # Preserve an apply claim for readback-only recovery. Other stages
             # can be retried by a later worker tick with the same identity.
             job=self._job(job_id)
             if job.get('stage','').endswith('_apply_claimed'):
-                self._settle(job_id,job['stage'].split('_')[0],'ambiguous',{})
+                if job.get('batch_id') and isinstance(exc,CleanerTransactionRolledBack):
+                    # A rolled-back local readback did not observe WB. Keep the
+                    # exact apply claim, without spending an unknown-WB attempt.
+                    try:self._save(job_id,state='ambiguous',next_readback_at=time.time()+30)
+                    except CleanerTransactionRolledBack:pass
+                else:self._settle(job_id,job['stage'].split('_')[0],'ambiguous',{})
             else:
                 self._release_unsubmitted(job)
                 self._save(job_id,state='failed',stage='finished',error_code=type(exc).__name__,error='Не удалось завершить ручную чистку')
@@ -181,14 +189,25 @@ class ManualCleanerCoordinator:
             self._readback_claimed(job_id,prepare_op,prepare,'prepare')
             return
         if stage=='write_previewing':
+            if job.get('batch_id') and job.get('batch_write_deadline_at') and time.time()>float(job['batch_write_deadline_at']):
+                if not self._retry_unclaimed(job_id,'write',{'state':'not_submitted'}):
+                    self._save(job_id,state='partial',stage='write_apply_claimed',can_recheck=True,
+                               error_code='readback_unresolved',error='Срок уточнения записи истёк; возможная отправка требует только чтения.')
+                return
             if float(job.get('next_readback_at') or 0)>time.time():return
             write=dict(mode='manual',run_id=job['write_run_id'],targets=targets)
             preview=self._launch('preview',self.operation_id(job_id,'write'),write)
             self._save(job_id,state='running',stage='write_ready',write_prestate=preview['prestate_sha256'],write_candidate=preview['candidate_sha256'])
             return
         if stage=='write_ready':
+            if job.get('batch_id') and job.get('batch_write_deadline_at') and time.time()>float(job['batch_write_deadline_at']):
+                if not self._retry_unclaimed(job_id,'write',{'state':'not_submitted'}):
+                    self._save(job_id,state='partial',stage='write_apply_claimed',can_recheck=True,
+                               error_code='readback_unresolved',error='Срок уточнения записи истёк; возможная отправка требует только чтения.')
+                return
             if float(job.get('next_readback_at') or 0)>time.time():return
-            self._save(job_id,state='running',stage='write_apply_claimed',next_readback_at=0,error_code=None,error=None)
+            self._save(job_id,state='running',stage='write_apply_claimed',next_readback_at=0,error_code=None,error=None,
+                       batch_write_started_at=job.get('batch_write_started_at') or time.time())
             write=dict(mode='manual',run_id=job['write_run_id'],targets=targets)
             self._apply_claimed(job_id,self.operation_id(job_id,'write'),write,'write')
             return
@@ -208,7 +227,23 @@ class ManualCleanerCoordinator:
     def _readback_claimed(self,job_id:str,operation_id:str,request:dict,phase:str) -> None:
         job=self._job(job_id)
         if float(job.get('next_readback_at') or 0)>time.time():return
-        if int(job.get('readback_attempts') or 0)>=20:
+        write_deadline=0.0
+        if phase=='write' and job.get('batch_id'):
+            started=float(job.get('batch_write_started_at') or 0)
+            if not started and not job.get('batch_write_deadline_at'):
+                # Pre-upgrade claimed jobs lack the new timestamp. The first
+                # immutable claim event supplies a stable recovery deadline.
+                with self.cleaner.store.read() as c:
+                    first=c.execute("SELECT created_at FROM cleaner_events WHERE account=? AND kind='self_service_stage' AND json_extract(facts,'$.job_id')=? AND json_extract(facts,'$.stage')='write_apply_claimed' AND json_extract(facts,'$.write_run_id')=? ORDER BY sequence LIMIT 1",
+                                    (self.cleaner.key,job_id,job['write_run_id'])).fetchone()
+                if not first:raise CleanerError('manual_job_journal_missing','Точная запись не имеет времени запуска',503)
+                started=datetime.fromisoformat(first['created_at']).timestamp()
+            write_deadline=float(job.get('batch_write_deadline_at') or 0) or started+self.BATCH_WRITE_DEADLINE_SECONDS
+        if phase=='write' and job.get('batch_id') and write_deadline and time.time()>write_deadline:
+            self._save(job_id,state='partial',stage=phase+'_apply_claimed',can_recheck=True,
+                       error_code='readback_unresolved',error='Срок автоматического уточнения операции истёк; возможную отправку можно проверять только чтением.')
+            return
+        if int(job.get('readback_attempts') or 0)>=20 and not (phase=='write' and job.get('batch_id')):
             self._save(job_id,state='partial',stage=phase+'_apply_claimed',can_recheck=True,
                        error_code='readback_unresolved',error='Состояние точной операции не подтверждено. Доступна повторная проверка той же операции.')
             return
@@ -272,6 +307,13 @@ class ManualCleanerCoordinator:
             self._save(job_id,state='failed',stage='finished',can_recheck=False,
                        error_code='local_not_submitted_retry',
                        error='Локальный запуск чтения не подтверждён; пара отложена')
+            return True
+        if phase=='write' and job.get('batch_id'):
+            # The parent parks the same write run and owns the long retry
+            # window. Only the exact unclaimed proof permits a fresh preview.
+            self._save(job_id,state='failed',stage='finished',can_recheck=False,
+                       local_retry_phase='write',error_code='local_not_submitted_retry',
+                       error='Локальная запись не отправлена; пара отложена')
             return True
         attempts=(int(job.get('local_retry_attempts') or 0) if job.get('local_retry_phase')==phase else 0)+1
         if attempts>=self.LOCAL_RETRY_LIMIT:
