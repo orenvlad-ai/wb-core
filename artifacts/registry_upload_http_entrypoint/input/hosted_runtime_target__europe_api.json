@@ -8,6 +8,7 @@
   "target_id": "wb_core_eu_hosted_runtime_active",
   "public_base_url": "https://api.selleros.pro",
   "loopback_base_url": "http://127.0.0.1:8765",
+  "login_health_loopback_base_url": "http://127.0.0.1:8777",
   "ssh_destination": "wb-core-eu-root",
   "target_dir": "/opt/wb-core-runtime/app",
   "service_name": "wb-core-registry-http.service",

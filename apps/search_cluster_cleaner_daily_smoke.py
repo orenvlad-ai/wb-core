@@ -2,7 +2,7 @@
 """Synthetic daily scheduler, owner authority, queue and restart smoke."""
 from __future__ import annotations
 
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 import json
 from pathlib import Path
 import sys
@@ -13,7 +13,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from apps.search_cluster_cleaner_stage_e_recovery_smoke import Sandbox
 from packages.application.change_registry import ChangeRegistryRepository
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
-from packages.application.search_cluster_cleaner_daily import DailyCleanerScheduler,history,policy_ready,save_schedules,schedules
+from packages.application.search_cluster_cleaner_daily import ZONE,DailyCleanerScheduler,history,policy_ready,save_schedules,schedules
 from apps.search_cluster_cleaner_self_service_worker import ready_cycle
 from packages.contracts.search_cluster_cleaner import CleanerError,Principal,Target
 from packages.domain.search_cluster_sources import union_snapshot
@@ -256,8 +256,12 @@ def integrated_flow() -> None:
         status,result,_=fixture.request('/daily-schedules',command)
         assert status==202 and result['revision']==2,(status,result)
         assert fixture.request('/daily-schedules')[1]['schedules'][0]['enabled'] is True
+        # The integration fixture timestamps the saved schedule with its live
+        # clock. Keep this synthetic due slot after that timestamp on any day.
+        due_day=datetime.fromisoformat(cleaner.clock()).astimezone(ZONE)+timedelta(days=1)
+        due_now=due_day.replace(hour=3,minute=47,second=0,microsecond=0).astimezone(timezone.utc)
         scheduler=DailyCleanerScheduler(cleaner,generation='monolith',source_factory=lambda:CleanerWbSource.from_env(cleaner.account),
-                                        fixture_admission=fixture.web._fixture_approved_targets,now=lambda:NOW,
+                                        fixture_admission=fixture.web._fixture_approved_targets,now=lambda:due_now,
                                         bootstrap_owner_username='owner')
         assert scheduler.tick()['selected_count']==1
         deadline=time.monotonic()+35

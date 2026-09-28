@@ -89,6 +89,13 @@ def main() -> None:
             "WB_CORE_WEB_AUTH_SESSION_SECRET": "fixture-session-secret",
         }):
             entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
+            entrypoint.runtime.save_sheet_vitrina_user({
+                "user_id": "usr_fixture_settings", "username": "fixture_settings",
+                "display_name": "Fixture settings", "role": "operator",
+                "allowed_sections": ["settings"], "manage_users": False,
+                "password_hash": _password_hash("runtime-password"), "is_active": True,
+                "created_at": "2026-09-28T00:00:00Z", "updated_at": "2026-09-28T00:00:00Z",
+            })
             server = http.build_registry_upload_http_server(config, entrypoint)
             buyer_server, buyer_thread = start_buyer_login_contour(server, port=_port())
             buyer_base = f"http://127.0.0.1:{buyer_server.server_port}"
@@ -201,7 +208,47 @@ def main() -> None:
                     first.start()
                     if not slow_entered.wait(timeout=2):
                         raise AssertionError("slow business request did not enter")
+                    # Reproduce the incident on the unchanged serial listener:
+                    # even the static login form queues behind a slow business read.
+                    primary_login_done = threading.Event()
+                    primary_login_code: list[int] = []
+                    def primary_login_get():
+                        primary_login_code.append(_get(base + "/login"))
+                        primary_login_done.set()
+                    primary_login = threading.Thread(target=primary_login_get, daemon=True)
+                    primary_login.start()
+                    if primary_login_done.wait(timeout=0.3):
+                        raise AssertionError("baseline primary /login unexpectedly bypassed slow business request")
                     second.start()
+                    if _get(buyer_base + "/login") != 200:
+                        raise AssertionError("login form must bypass a slow business read")
+                    if _get(buyer_base + "/login/", {"Host": f"127.0.0.1:{port}"}) != 404:
+                        raise AssertionError("login lane must reject a non-exact path")
+                    if _get(buyer_base + "/logout") != 404 or _post(buyer_base + "/logout", {})[0] != 404:
+                        raise AssertionError("login lane must not expose logout or unrelated endpoints")
+                    class NoRedirect(request.HTTPRedirectHandler):
+                        def redirect_request(self, req, fp, code, msg, headers, newurl):
+                            return None
+                    runtime_jar = CookieJar()
+                    runtime_opener = request.build_opener(request.HTTPCookieProcessor(runtime_jar), NoRedirect())
+                    def runtime_login(password: str) -> tuple[int, str]:
+                        login_request = request.Request(buyer_base + "/login", data=parse.urlencode({
+                            "username": "fixture_settings", "password": password,
+                            "next": http.DEFAULT_SETTINGS_UI_PATH,
+                        }).encode(), headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
+                        try:
+                            with runtime_opener.open(login_request, timeout=3) as response:
+                                response.read()
+                                return response.status, response.headers.get("Location", "")
+                        except error.HTTPError as exc:
+                            exc.read()
+                            return exc.code, exc.headers.get("Location", "")
+                    if runtime_login("wrong-password")[0] != 200 or list(runtime_jar):
+                        raise AssertionError("runtime user wrong password must not issue session cookie")
+                    if runtime_login("runtime-password") != (303, http.DEFAULT_SETTINGS_UI_PATH):
+                        raise AssertionError("runtime user must receive the same authorized next redirect")
+                    if not any(cookie.name == http.WEB_AUTH_COOKIE_NAME for cookie in runtime_jar):
+                        raise AssertionError("runtime user login must issue a WebCore session cookie")
                     readback_request = request.Request(
                         buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH + "?probe=false",
                         headers={**public_host, **cookies},
@@ -229,9 +276,10 @@ def main() -> None:
                     slow_release.set()
                     first.join(timeout=5)
                     second.join(timeout=5)
+                    primary_login.join(timeout=5)
                     entrypoint.handle_sources_sessions_status_request = old_sources
                     entrypoint.handle_wb_buyer_session_recovery_status_request = old_recovery_status
-                if ordinary_results != [200, 200] or len(slow_calls) != 2:
+                if primary_login_code != [200] or ordinary_results != [200, 200] or len(slow_calls) != 2:
                     raise AssertionError(f"serial business listener did not drain: {ordinary_results} {slow_calls}")
                 owner = status["viewer_owner"]
                 status["viewer_owner"] = "0" * 64

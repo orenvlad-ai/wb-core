@@ -816,7 +816,8 @@
       "name": "webcore_login",
       "match": "exact",
       "path": "/login",
-      "methods": ["GET", "POST"]
+      "methods": ["GET", "POST"],
+      "proxy_pass_url": "http://127.0.0.1:8777"
     },
     {
       "name": "webcore_logout",

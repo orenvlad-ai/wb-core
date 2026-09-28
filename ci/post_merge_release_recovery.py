@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import github_release_runner as release  # noqa: E402
+from ci.loopback_listener_proof import remote_source  # noqa: E402
 from ci.select_checks import build_plan_from_paths, canonical_bytes, git_file_exists  # noqa: E402
 
 
@@ -654,9 +655,10 @@ def _prestate_script(target: Any, merge: str) -> str:
         "merge": merge,
         "target_dir": target.target_dir.rstrip("/"),
         "service": target.service_name,
+        "main_loopback": target.loopback_base_url.rstrip("/"),
         "services": services,
         "urls": [
-            target.loopback_base_url.rstrip("/") + "/login",
+            (getattr(target, "login_health_loopback_base_url", "") or target.loopback_base_url).rstrip("/") + "/login",
             target.public_base_url.rstrip("/") + "/login",
         ],
         "pilot_store": "/opt/wb-core-runtime/state/finance-liquidity-pilot/finance-liquidity-pilot.sqlite3",
@@ -702,6 +704,9 @@ if not pid.isdigit() or int(pid) <= 0 or not pilot_pid.isdigit() or int(pilot_pi
     raise SystemExit(21)
 for service in e['services']:
     subprocess.run(['systemctl','is-active','--quiet',service], check=True)
+main_port = urllib.parse.urlparse(e['main_loopback']).port
+if not owned_loopback_listener(int(pid), main_port):
+    raise SystemExit(21)
 stage = 'health'
 health = {{}}
 for url in e['urls']:
@@ -811,6 +816,7 @@ print(json.dumps({{
 import hashlib, json, os, re, sqlite3, stat, subprocess, sys, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 {finance_validator}
+{remote_source()}
 e = {expected!r}
 stage = 'metadata'
 try:
