@@ -114,10 +114,9 @@ class CleanerWorkerSupervisor:
             value=json.loads(Path('/var/lib/wb-core/search-cluster-cleaner-admission/self-service-worker-health.json').read_text(encoding='utf-8'))
             if value.get('pid')==process.pid:
                 state=str(value.get('state') or 'down')
-                # A WB request can exceed the heartbeat freshness window.
-                # The child PID is still alive, and a saved busy phase cannot
-                # be mistaken for readiness or an abandoned worker.
-                if state=='busy':return state
+                # The worker refreshes busy every two seconds even during a
+                # long WB call. A stale busy file proves no current admission
+                # health merely because the child PID still exists.
                 if time.time()-float(value.get('updated_at') or 0)<10:return state
         except (OSError,ValueError,TypeError):pass
         return 'starting'

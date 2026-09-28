@@ -155,7 +155,7 @@ def run(output:Path):
         for outcome in ('complete','partial','failed','detail-missing'):
             with running_fixture() as f:
                 with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
-                page=browser.new_page();browser_login(page,f);polls=[];rechecks=[]
+                page=browser.new_page();browser_login(page,f);polls=[];rechecks=[];completed_backend=set()
                 def manual_status(route):
                     polls.append(1);job_id=route.request.url.rsplit('/',1)[-1]
                     state='running' if len(polls)==1 else ('complete' if outcome=='detail-missing' else outcome)
@@ -167,6 +167,12 @@ def run(output:Path):
                     if state=='complete':body.update(result='applied',write_run_id='synthetic-write')
                     if state=='partial':body.update(result='ambiguous',write_run_id='synthetic-write',error='WB ещё не подтвердил исключение',can_recheck=True,stage='write_apply_claimed')
                     if state=='failed':body.update(error='WB не ответил; запись не подтверждена')
+                    if state=='complete' and job_id not in completed_backend:
+                        f.cleaner.record_manual_job(job_id,state='complete',stage='finished',result='applied')
+                        scan=f.cleaner.manual_job(job_id,OWNER)['scan_run_id']
+                        with f.cleaner.store.transaction() as c:
+                            c.execute("UPDATE cleaner_runs SET state='complete',summary='{}' WHERE run_id=?",(scan,))
+                        completed_backend.add(job_id)
                     route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
                 def write_detail(route):
                     if outcome=='detail-missing':route.abort();return
@@ -200,6 +206,7 @@ def run(output:Path):
                     expect(page.locator('[data-kc-selected-target]')).to_contain_text('Прозрачное стекло · iPhone 16 Pro Max')
                     phrase_filter.select_option('all')
                     check('manual_reason_available_in_compact_table','Другая модель' in page.locator('[data-kc-manual-result] .kc-phrase-detail').inner_text())
+                    expect(page.locator('[data-kc-manual-advert]')).to_be_enabled()
                     page.locator('[data-kc-manual-advert]').select_option('10102');page.locator('[data-kc-manual-nm]').select_option('102')
                     expect(page.locator('[data-kc-selected-target]')).to_contain_text('Тестовая кампания 10102')
                     expect(page.locator('[data-kc-manual-result]')).to_contain_text('Кампания: Тестовая кампания 10101 · 10101')
@@ -372,7 +379,7 @@ def run(output:Path):
             page.route('**/keyword-cleaner/requests/*',lambda route:route.abort())
             browser_login(page,f);page.locator('[data-kc-batch-open]').click();expect(page.locator('[data-kc-batch-start]')).to_be_enabled();page.locator('[data-kc-batch-start]').click()
             expect(page.locator('[data-kc-recover]')).to_be_visible(timeout=18000);check('batch_lost_reply_keeps_one_durable_request',len(posts)==1)
-            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-batch-result]')).to_contain_text('Массовая чистка · Выполнено',timeout=8000)
+            page.reload(wait_until='domcontentloaded');expect(page.locator('[data-kc-batch-result]')).to_contain_text('Предыдущая массовая чистка · Выполнено',timeout=8000)
             page.unroute('**/keyword-cleaner/requests/*')
             page.route('**/keyword-cleaner/requests/*',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(batch_id='lost-batch',state='complete',selected_count=1,created_at='2026-09-25T14:00:00Z'))))
             page.locator('[data-kc-recover]').click();expect(page.locator('[data-kc-recover]')).to_be_hidden()
