@@ -134,6 +134,16 @@ class CleanerWeb:
         result = self.cleaner.summary(principal)
         with self.cleaner.store.read() as c:
             result["inflight_count"] = c.execute("SELECT count(*) FROM cleaner_write_operations WHERE account=? AND state IN ('dispatching','submitted')", (self.cleaner.key,)).fetchone()[0]
+            queued_work=c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN ('queued','accepted','running') LIMIT 1",(self.cleaner.key,)).fetchone()
+            active_batch=self.cleaner._active_manual_batch(c)
+            latest_job=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence DESC LIMIT 1",(self.cleaner.key,)).fetchone()
+            active_job=False
+            if latest_job:
+                job_id=json.loads(latest_job['facts'])['job_id']
+                stage=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.cleaner.key,job_id)).fetchone()
+                facts=json.loads(stage['facts']) if stage else json.loads(latest_job['facts'])
+                active_job=facts.get('state') not in {'complete','partial','failed','no_change'} or bool(facts.get('can_recheck'))
+            result['manual_queue_busy']=bool(queued_work or active_batch or active_job)
         if not config["owner_configured"] or not config["generation_matches"] or not result["settings"]["baseline_ready"]:
             result["settings"]["enabled"] = False
         result.update(configuration=config, registry_ready=self._registry_ready(),
@@ -189,7 +199,9 @@ class CleanerWeb:
                                 (cleaner.key,principal.username.strip().casefold(),request_id)).fetchone()
             if saved:return cleaner.start_manual_clean(payload,principal)
         self._require_registry_ready()
-        if self.worker_status and self.worker_status()!='ready':
+        state=self.worker_status() if self.worker_status else None
+        if state and (state not in {'ready','busy'} or self.worker_alive and not self.worker_alive()
+                      or state=='busy' and not self.worker_alive):
             raise CleanerError('manual_worker_unavailable','Исполнитель ручной чистки сейчас недоступен',503)
         listed=self.targets(principal)
         if listed['error'] or listed['loading']:
@@ -267,7 +279,9 @@ class CleanerWeb:
                 saved=c.execute("SELECT 1 FROM cleaner_requests WHERE account=? AND actor=? AND request_id=? AND route='manual-batches'",(cleaner.key,principal.username.strip().casefold(),request_id)).fetchone()
             if saved:return cleaner.start_manual_batch(payload,principal)
         self._require_registry_ready()
-        if self.worker_status and self.worker_status()!='ready':
+        state=self.worker_status() if self.worker_status else None
+        if state and (state not in {'ready','busy'} or self.worker_alive and not self.worker_alive()
+                      or state=='busy' and not self.worker_alive):
             raise CleanerError('manual_worker_unavailable','Исполнитель ручной чистки сейчас недоступен',503)
         from packages.adapters.search_cluster_cleaner_wb import CleanerWbSource
         from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows

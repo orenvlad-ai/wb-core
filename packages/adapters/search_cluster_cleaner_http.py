@@ -138,8 +138,11 @@ def dispatch(handler, parsed, web, *, auth_config, authenticated_user, has_ads, 
         respond(202, operation())
     except CleanerError as exc:
         response={"code": exc.code, "error": str(exc)}
-        if path == '/manual-batches' and exc.code == 'storage_rolled_back':
-            response.update(request_id=payload.get('request_id'),definitively_not_accepted=True,retry_after_ms=1000)
+        request_id=payload.get('request_id') if isinstance(payload,dict) else None
+        if (path in {'/manual-clean','/manual-batches'}
+                and exc.code in {'manual_worker_unavailable','registry_upgrade_required','storage_rolled_back'}
+                and isinstance(request_id,str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{7,119}',request_id)):
+            response.update(request_id=request_id,definitively_not_accepted=True,retry_after_ms=1000)
         respond(exc.http_status, response)
     except (ValueError, TypeError, UnicodeError):
         respond(400, {"code": "invalid_request", "error": "Не удалось прочитать команду"})

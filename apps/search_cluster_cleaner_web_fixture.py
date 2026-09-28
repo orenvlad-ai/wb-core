@@ -31,7 +31,7 @@ from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.storage_registry import StoreRegistry
-from packages.contracts.search_cluster_cleaner import Account, Principal, Target, digest
+from packages.contracts.search_cluster_cleaner import Account, CleanerError, Principal, Target, digest
 from packages.domain.search_cluster_sources import union_snapshot
 
 PASSWORD = 'cleaner-fixture-only'
@@ -164,7 +164,7 @@ class Fixture:
 
 
 @contextmanager
-def running_fixture(mode='normal', port=0, *, cleaner_owner_username='owner'):
+def running_fixture(mode='normal', port=0, *, cleaner_owner_username='owner', scenario=None):
     env = {key: os.environ[key] for key in ('PATH','HOME','TMPDIR','LANG','PYTHONPATH','PLAYWRIGHT_BROWSERS_PATH') if key in os.environ}
     env.update(WB_CORE_WEB_AUTH_REQUIRED='1', WB_CORE_WEB_AUTH_USERNAME='owner', WB_CORE_WEB_AUTH_PASSWORD_HASH=_password_hash(PASSWORD), WB_CORE_WEB_AUTH_SESSION_SECRET='synthetic-stage-c-auth-secret')
     original_urlopen = urllib.request.urlopen
@@ -187,6 +187,29 @@ def running_fixture(mode='normal', port=0, *, cleaner_owner_username='owner'):
                                    Target(10103,101,status=7,name='Завершённая кампания',contract_verified=True)])
         fixture.web.worker_alive=lambda:True
         fixture.web.worker_status=lambda:'ready'
+        if scenario == 'admission-ui':
+            # Real HTTP/JS and durable local admission, with only the worker
+            # response and eventual completion simulated. No WB connection.
+            with fixture.cleaner.store.transaction() as c:
+                c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(fixture.cleaner.key,))
+            snapshot=fixture.web.batch_eligibility(OWNER)['items']
+            target=[dict(advert_id=10101,nm_id=101)]
+            previous=fixture.cleaner.start_manual_batch(dict(request_id='fixture-previous-batch-0001',selected_categories=['active'],targets=target),OWNER,snapshot=snapshot)
+            fixture.cleaner.record_manual_batch(previous['batch_id'],state='complete',stage='finished',current_index=1,
+                                                item_update=(0,dict(state='no_change',stage='finished')))
+            fixture.web.worker_status=lambda:'busy'
+            fixture.admission_posts=[]
+            def simulated_batch_admission(payload,principal):
+                fixture.admission_posts.append(payload['request_id'])
+                if len(fixture.admission_posts)<=3:
+                    raise CleanerError('manual_worker_unavailable','Синтетический отказ до приёма',503)
+                accepted=fixture.cleaner.start_manual_batch(payload,principal,snapshot=fixture.web.batch_eligibility(principal)['items'])
+                def complete():
+                    fixture.cleaner.record_manual_batch(accepted['batch_id'],state='complete',stage='finished',current_index=1,
+                                                        item_update=(0,dict(state='no_change',stage='finished')))
+                threading.Timer(2,complete).start()
+                return accepted
+            fixture.web.start_manual_batch=simulated_batch_admission
         fixture.entrypoint = RegistryUploadHttpEntrypoint(runtime_dir=fixture.runtime_dir, runtime=runtime, now_factory=lambda: NOW, cleaner_web=fixture.web, ads_block=_build_ads_block(runtime, fixture.runtime_dir, FakePromotionSource(), write_enabled=False))
         password_hash = _password_hash(PASSWORD)
         for username, role, sections in [('reader','operator',['ads']), ('admin','admin',['ads','sku_management']), ('noads','operator',['vitrina'])]:
@@ -205,9 +228,9 @@ def running_fixture(mode='normal', port=0, *, cleaner_owner_username='owner'):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--serve',action='store_true',required=True);parser.add_argument('--mode',choices=['normal','empty','partial','failed','unresolved','rejected','unready','profile-required','confirmed'],default='normal');parser.add_argument('--port',type=int,default=0);args=parser.parse_args()
-    with running_fixture(args.mode,args.port) as fixture:
-        print(json.dumps(dict(url=fixture.url,username='owner',password=PASSWORD,synthetic=True),ensure_ascii=False),flush=True)
+    parser=argparse.ArgumentParser();parser.add_argument('--serve',action='store_true',required=True);parser.add_argument('--mode',choices=['normal','empty','partial','failed','unresolved','rejected','unready','profile-required','confirmed'],default='normal');parser.add_argument('--scenario',choices=['admission-ui']);parser.add_argument('--port',type=int,default=0);args=parser.parse_args()
+    with running_fixture(args.mode,args.port,scenario=args.scenario) as fixture:
+        print(json.dumps(dict(url=fixture.url,username='owner',password=PASSWORD,synthetic=True,scenario=args.scenario),ensure_ascii=False),flush=True)
         try:
             threading.Event().wait()
         except KeyboardInterrupt:
