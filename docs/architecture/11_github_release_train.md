@@ -33,11 +33,12 @@ workflow ошибкой, а не зелёным статусом.
 
 ## Завершение прерванного выпуска после merge
 
-Workflow `Post-merge Release Recovery` поддерживает один определённый случай:
-Release Runner уже слил PR и остановился с кодом 3 на проверке
-`root-storage status-readback` после перезапуска сервисов. Причина отказа должна
-быть устранена отдельно. Другие стадии и транспортно неопределённый исход
-первоначального выпуска этот путь не принимает.
+Workflow `Post-merge Release Recovery` принимает только явно доказанные стадии
+сбоя после merge. Помимо исторических storage/readback и activation-precheck
+случаев, выпуск 36437349246 допускает восстановление после локального
+`SQLiteContentionExhausted` в exact Change Registry activation: failed systemd
+invocation и отсутствие activation job в каноническом operational store должны
+быть подтверждены чтением. Транспортно неопределённый исход не допускается.
 
 Сначала запусти workflow в режиме `preview` с `release_run_id` исходного
 неуспешного Release Runner. Проверь сформированный план: исходные PR, Gate,
@@ -46,13 +47,17 @@ Finance pilot в его утверждённом изолированном со
 передай тот же `release_run_id` и точный `preview_fingerprint` из проверенного
 плана. Изменение состояния между preview и apply останавливает выполнение.
 
-Допустимы только два точных случая: storage-tail после уже выполненного restart
-не повторяет sync, зависимости и сервисные операции; normal activation tail
+Storage-tail после уже выполненного restart не повторяет sync, зависимости и
+сервисные операции; normal activation tail
 после доказанного сбоя drain повторяет с canonical `prepare-deploy` только
 оставшиеся activation stages (install/reload, nginx, restart, reconcile,
 readback, Change Registry и metadata completion). Оба случая сохраняют один
 claim и phase evidence, не делают merge, sync, chown или установку зависимостей,
 а незавершённый claim разрешает лишь readback, без обхода или повторной записи.
+Exact SQLite activation tail повторяет только незафиксированный activation job,
+затем обязательный cleaner `before_complete` probe и каноническое metadata CAS.
+Он не повторяет sync, зависимости, nginx или restart; drift исходного unit,
+journal или operational job блокирует применение до новой записи.
 Успех подтверждают связанный recovery receipt, завершённая metadata, точная
 версия, сервисы и неизменный изолированный Finance pilot.
 
