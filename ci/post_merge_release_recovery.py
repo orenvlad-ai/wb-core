@@ -24,6 +24,7 @@ import time
 import textwrap
 import zipfile
 from collections.abc import Mapping
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,10 @@ EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA = "ae2d7f2f309cc84f0d5b1b9bb9b7be3161be
 EXPECTED_SELECTIVE_GATE_RUN_ID = 35779448242
 EXPECTED_SELECTIVE_HEAD_SHA = "2aee46a3967e0ae1deaae2ed152d496dff9644c3"
 EXPECTED_SELECTIVE_MERGE_SHA = "b9b709805b9eb1da9d417f3b8028dd22e4ccb1d6"
+EXPECTED_ACTIVATION_RELEASE_RUN_ID = 36437349246
+EXPECTED_ACTIVATION_GATE_RUN_ID = 36436062816
+EXPECTED_ACTIVATION_PR = 1341
+EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 
 
 class RecoveryCase(str, Enum):
@@ -79,9 +84,12 @@ class RecoveryCase(str, Enum):
     SELECTIVE_B9_ACTIVATION = "normal-b9-activation-tail"
     REGISTRY_PRECHECK_ACTIVATION = "normal-registry-precheck-activation-tail"
     WORKER_HEALTH_PRECHECK_ACTIVATION = "normal-worker-health-precheck-activation-tail"
+    SQLITE_ACTIVATION = "sqlite-activation-tail"
 
 
 def recovery_case(release_run_id: int) -> RecoveryCase:
+    if release_run_id == EXPECTED_ACTIVATION_RELEASE_RUN_ID:
+        return RecoveryCase.SQLITE_ACTIVATION
     if release_run_id == EXPECTED_SELECTIVE_RUN_ID:
         return RecoveryCase.SELECTIVE_B9_ACTIVATION
     return RecoveryCase.STORAGE_TAIL
@@ -264,11 +272,32 @@ def _validate_original_receipt(value: Mapping[str, Any], *, case: RecoveryCase =
         or normalized["merge_sha"] != EXPECTED_SELECTIVE_MERGE_SHA
     ):
         raise RecoveryError("original-receipt-not-exact-selective-b9")
+    if case is RecoveryCase.SQLITE_ACTIVATION and (
+        normalized["pull_request"] != EXPECTED_ACTIVATION_PR
+        or normalized["gate_run_id"] != EXPECTED_ACTIVATION_GATE_RUN_ID
+        or normalized["merge_sha"] != EXPECTED_ACTIVATION_MERGE_SHA
+    ):
+        raise RecoveryError("original-receipt-not-exact-sqlite-activation")
     return normalized
 
 
 def _prove_failed_stage(raw_log: bytes, gate_run_id: int, job_name: str, *, case: RecoveryCase = RecoveryCase.STORAGE_TAIL) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
+    if case is RecoveryCase.SQLITE_ACTIVATION:
+        unit = f"wb-core-change-registry-activation@{EXPECTED_ACTIVATION_MERGE_SHA}.service"
+        required = (
+            "deploy_current_checkout", "run_stage(",
+            f"systemctl start {unit}", "activation-status",
+            f"--deployed-sha {EXPECTED_ACTIVATION_MERGE_SHA}",
+            f'--workflow-run-id "{gate_run_id}"', "returned non-zero exit status 1",
+        )
+        if any(item not in text for item in required):
+            raise RecoveryError("failed-stage-not-exact-sqlite-activation-exit1")
+        failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if failures != ["1"] or "exit status 255" in text:
+            raise RecoveryError("failed-stage-not-definite-single-exit1")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "change-registry-activation", "exit_status": 1, "unit": unit}
     if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
         required = ("deploy_current_checkout", "wb_autoanswers_activation.py prepare-deploy",
                     "wb-core-autoanswers-worker.service", "returned non-zero exit status 1",
@@ -374,6 +403,16 @@ def collect_evidence(client: release.GitHub, release_run_id: int) -> dict[str, A
     if case is RecoveryCase.STORAGE_TAIL:
         case = _activation_case_from_log(raw_log, gate_id)
     failure = _prove_failed_stage(raw_log, gate_id, str(deployed_job["name"]), case=case)
+    if case is RecoveryCase.SQLITE_ACTIVATION:
+        failure["job_started_at"] = str(deployed_job.get("started_at") or "")
+        failure["job_completed_at"] = str(deployed_job.get("completed_at") or "")
+        try:
+            start = datetime.fromisoformat(failure["job_started_at"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(failure["job_completed_at"].replace("Z", "+00:00"))
+            if start.utcoffset() is None or end.utcoffset() is None or start >= end:
+                raise ValueError("invalid job time")
+        except ValueError as exc:
+            raise RecoveryError("release-job-time-invalid") from exc
     if exact_sha(run.get("head_sha"), "release-run-head") != original["base_sha"]:
         raise RecoveryError("release-run-trusted-source-mismatch")
     gate_run, gate_plan = release.collect_plan(client, gate_id)
@@ -932,6 +971,101 @@ def collect_prestate(target: Any, merge: str, *, require_incomplete: bool, case:
     return state
 
 
+def _sqlite_activation_failure_script(expected: Mapping[str, Any]) -> str:
+    """Remote read-only unit, journal, and canonical operational-store guards."""
+    return "import hashlib, json, re, sqlite3, subprocess, urllib.parse\nfrom datetime import datetime\nfrom pathlib import Path\n" + \
+        "e = json.loads(" + repr(json.dumps(expected, sort_keys=True)) + ")\n" + textwrap.dedent("""
+        def command(*args):
+            return subprocess.run(args, check=True, text=True, capture_output=True, timeout=15).stdout
+        raw = command('systemctl', 'show', e['unit'], '--property=Result,ExecMainCode,ExecMainStatus,ActiveState,SubState,InvocationID', '--no-pager')
+        state = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+        invocation = state.get('InvocationID', '')
+        if (state.get('Result') != 'exit-code' or state.get('ExecMainCode') != '1'
+                or state.get('ExecMainStatus') != '1' or state.get('ActiveState') != 'failed'
+                or not re.fullmatch(r'[0-9a-f]{32}', invocation)):
+            raise SystemExit(40)
+        lines = command('journalctl', '_SYSTEMD_INVOCATION_ID=' + invocation, '-o', 'json', '--no-pager').splitlines()
+        records = [json.loads(line) for line in lines]
+        records = [record for record in records if record.get('_SYSTEMD_UNIT') == e['unit']]
+        if not records or any(record.get('_SYSTEMD_INVOCATION_ID') != invocation for record in records):
+            raise SystemExit(41)
+        start = datetime.fromisoformat(e['started_at'].replace('Z', '+00:00')).timestamp() * 1000000
+        end = datetime.fromisoformat(e['completed_at'].replace('Z', '+00:00')).timestamp() * 1000000
+        if start >= end:
+            raise SystemExit(42)
+        observed = []
+        for record in records:
+            stamp = int(record['__REALTIME_TIMESTAMP'])
+            if not start - 10000000 <= stamp <= end + 10000000:
+                raise SystemExit(43)
+            try:
+                message = json.loads(record['MESSAGE'])
+            except (ValueError, TypeError, KeyError):
+                continue
+            observed.append((record.get('_PID'), stamp, message))
+        exhausted = [(pid, stamp) for pid, stamp, value in observed
+                     if value.get('event') == 'sqlite_contention_exhausted'
+                     and value.get('phase') == 'commit' and value.get('exhausted') is True
+                     and value.get('owner') == 'change_registry_observer.py']
+        failed = [(pid, stamp) for pid, stamp, value in observed
+                  if value.get('status') == 'failed' and value.get('error_code') == 'SQLiteContentionExhausted']
+        if len(exhausted) != 1 or len(failed) != 1 or exhausted[0][0] != failed[0][0] or exhausted[0][1] > failed[0][1]:
+            raise SystemExit(44)
+        root = Path(e['runtime_dir']).resolve(strict=True)
+        manifest_raw = (root / 'storage_generation_manifest.json').read_bytes()
+        manifest = json.loads(manifest_raw)
+        relative = Path(manifest['operational']['relative_path'])
+        path = (root / relative).resolve(strict=True)
+        if relative.is_absolute() or not path.is_relative_to(root) or path.is_symlink():
+            raise SystemExit(45)
+        identity = path.stat()
+        conn = sqlite3.connect('file:' + urllib.parse.quote(str(path), safe='/') + '?mode=ro', uri=True, timeout=3)
+        try:
+            conn.execute('PRAGMA query_only=ON')
+            if conn.execute('PRAGMA query_only').fetchone() != (1,):
+                raise SystemExit(46)
+            counts = [conn.execute('SELECT COUNT(*) FROM ' + table + ' WHERE job_id=?', (e['job_id'],)).fetchone()[0]
+                      for table in ('change_registry_observer_jobs', 'change_registry_observer_job_events')]
+            lease_count = conn.execute('SELECT COUNT(*) FROM change_registry_observer_leases WHERE owner_job_id=?', (e['job_id'],)).fetchone()[0]
+            if counts != [0, 0] or lease_count != 0:
+                raise SystemExit(47)
+        finally:
+            conn.close()
+        print(json.dumps({'unit': e['unit'], 'invocation_id': invocation, 'commit_failure_at_us': exhausted[0][1],
+                          'job_id': e['job_id'], 'job_rows': 0, 'event_rows': 0, 'owned_leases': 0,
+                          'manifest_sha256': hashlib.sha256(manifest_raw).hexdigest(),
+                          'operational_relative_path': str(relative),
+                          'operational_device': identity.st_dev, 'operational_inode': identity.st_ino}, sort_keys=True))
+        """)
+
+
+def collect_sqlite_activation_failure(target: Any, failure: Mapping[str, Any]) -> dict[str, Any]:
+    """Read-only proof that the exact failed unit never admitted its activation job."""
+    unit = f"wb-core-change-registry-activation@{EXPECTED_ACTIVATION_MERGE_SHA}.service"
+    if failure.get("unit") != unit or failure.get("stage") != "change-registry-activation":
+        raise RecoveryError("sqlite-activation-failure-binding-invalid")
+    expected = {
+        "unit": unit,
+        "job_id": f"crjob_activation_{EXPECTED_ACTIVATION_MERGE_SHA}",
+        "runtime_dir": str(target.runtime_env.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ""),
+        "started_at": failure.get("job_started_at"),
+        "completed_at": failure.get("job_completed_at"),
+    }
+    if expected["runtime_dir"] != "/opt/wb-core-runtime/state":
+        raise RecoveryError("sqlite-activation-runtime-dir-invalid")
+    proof = _run_remote_json(target, _sqlite_activation_failure_script(expected))
+    if (proof.get("unit") != unit or proof.get("job_id") != expected["job_id"]
+            or not re.fullmatch(r"[0-9a-f]{32}", str(proof.get("invocation_id") or ""))
+            or any(proof.get(key) != 0 for key in ("job_rows", "event_rows", "owned_leases"))
+            or not isinstance(proof.get("commit_failure_at_us"), int)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("manifest_sha256") or ""))
+            or not isinstance(proof.get("operational_relative_path"), str)
+            or not isinstance(proof.get("operational_device"), int)
+            or not isinstance(proof.get("operational_inode"), int)):
+        raise RecoveryError("sqlite-activation-remote-proof-invalid")
+    return proof
+
+
 def preview_fingerprint(payload: Mapping[str, Any]) -> str:
     stable = {
         "schema": payload["schema"],
@@ -942,6 +1076,7 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
         "target": payload["target"],
         "failure": payload["failure"],
         "recovery_case": payload.get("recovery_case"),
+        "activation_failure_proof": payload.get("activation_failure_proof"),
         "selective_b9_diff": payload.get("selective_b9_diff"),
         "selective_previous_recovery": payload.get("selective_previous_recovery"),
         "prestate": payload["prestate"],
@@ -1014,6 +1149,13 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
+    if case is RecoveryCase.SQLITE_ACTIVATION:
+        if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != EXPECTED_ACTIVATION_MERGE_SHA:
+            raise RecoveryError("sqlite-activation-target-contract-invalid")
+        commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
+            target, f"cd {shlex.quote(target.target_dir)} && /usr/bin/python3 apps/search_cluster_cleaner_release_probe.py "
+            f"--phase before_complete --expected-sha {shlex.quote(merge)} --runtime-dir {shlex.quote(runtime_dir)}"
+        )
     if normal_activation_tail_case(case):
         if target.service_name != "wb-core-registry-http.service" or target.restart_command != "systemctl restart wb-core-registry-http.service":
             raise RecoveryError("normal-tail-restart-contract-invalid")
@@ -1107,6 +1249,8 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
     case = RecoveryCase(str(evidence["recovery_case"]))
     runner = prove_repo_only_descendant(client, original)
     prestate = collect_prestate(target, original["merge_sha"], require_incomplete=True, case=case)
+    activation_failure_proof = (collect_sqlite_activation_failure(target, evidence["failure"])
+                                if case is RecoveryCase.SQLITE_ACTIVATION else None)
     operation = recovery_operation_id(release_run_id, original)
     result = {
         "schema": RECOVERY_SCHEMA,
@@ -1128,11 +1272,12 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "target": {"target_id": target.target_id, "ssh_destination": target.ssh_destination, "target_dir": target.target_dir},
         "failure": evidence["failure"],
         "recovery_case": case.value,
+        "activation_failure_proof": activation_failure_proof,
         "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
         "finance_acceptance": prestate["finance_pilot"]["write_mode"],
-        "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if not normal_activation_tail_case(case) else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
+        "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "cleaner-before-complete-probe", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if case is RecoveryCase.SQLITE_ACTIVATION else ["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if not normal_activation_tail_case(case) else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
         "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if not normal_activation_tail_case(case) else ["merge", "rsync", "chown", "dependency-install"]),
     }
     result["preview_fingerprint"] = preview_fingerprint(result)
@@ -1278,6 +1423,10 @@ def apply_recovery(
         fresh_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(fresh_runner) != canonical_bytes(preview["runner"]):
             raise RecoveryError("trusted-main-drift-after-claim")
+        if case is RecoveryCase.SQLITE_ACTIVATION:
+            current_proof = collect_sqlite_activation_failure(target, preview["failure"])
+            if canonical_bytes(current_proof) != canonical_bytes(preview.get("activation_failure_proof")):
+                raise RecoveryError("sqlite-activation-failure-proof-drift-after-claim")
         if normal_activation_tail_case(case):
             if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and canonical_bytes(
                 _selective_b9_diff_proof()
@@ -1309,6 +1458,8 @@ def apply_recovery(
             stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
         else:
             stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
+        if case is RecoveryCase.SQLITE_ACTIVATION:
+            stages.append(_must_succeed("cleaner-before-complete-probe", commands["cleaner_precomplete_probe"]))
         before_completion = collect_prestate(
             target, preview["source"]["merge_sha"], require_incomplete=True, case=case
         )
