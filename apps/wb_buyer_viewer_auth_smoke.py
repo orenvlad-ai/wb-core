@@ -104,6 +104,7 @@ def main() -> None:
             old_status = http._buyer_viewer_raw_status
             old_stop = entrypoint.handle_wb_buyer_session_recovery_stop_request
             old_start = entrypoint.handle_wb_buyer_session_recovery_start_request
+            old_finish = entrypoint.handle_wb_buyer_session_recovery_finish_request
             run_id = "buyer-recovery-chrome-20260927T120000Z-aabbccdd"
             durable_profile = Path(temp) / "durable-wb-profile"
             durable_profile.mkdir()
@@ -124,6 +125,12 @@ def main() -> None:
                 status.update(status="stopping", running=True)
                 return dict(status)
             entrypoint.handle_wb_buyer_session_recovery_stop_request = fake_stop
+            finish_calls: list[str] = []
+            def fake_finish(*, run_id: str, **_kwargs):
+                finish_calls.append(run_id)
+                status.update(status="validating_session", running=True)
+                return dict(status)
+            entrypoint.handle_wb_buyer_session_recovery_finish_request = fake_finish
             old_chrome_stop = chrome_auth.stop
             chrome_auth.stop = lambda *, requested_run_id=None: fake_stop(run_id=requested_run_id)
             entrypoint.handle_wb_buyer_session_recovery_start_request = lambda **_kwargs: {"run_id": run_id, "status": "awaiting_human", "running": True}
@@ -155,6 +162,21 @@ def main() -> None:
                 start_code, start_cookie = _post(start_url, start_headers)
                 if start_code != 200 or http.WB_BUYER_VIEWER_COOKIE_NAME not in start_cookie:
                     raise AssertionError("owned start must issue scoped viewer cookie")
+                finish_url = buyer_base + http.DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH
+                if _post(finish_url, {**start_headers, "X-WB-Buyer-Viewer-CSRF": ""}, {"run_id": run_id})[0] != 403:
+                    raise AssertionError("finish without CSRF marker must be denied")
+                if _post(finish_url, {**start_headers, "Origin": "https://other.example"}, {"run_id": run_id})[0] != 403:
+                    raise AssertionError("finish with foreign Origin must be denied")
+                if _post(finish_url, start_headers, {"run_id": "buyer-recovery-chrome-foreign"})[0] != 403:
+                    raise AssertionError("finish for another run must be denied")
+                owned = status["viewer_owner"]
+                status["viewer_owner"] = "0" * 64
+                if _post(finish_url, start_headers, {"run_id": run_id})[0] != 403:
+                    raise AssertionError("foreign operator must not finish this run")
+                status["viewer_owner"] = owned
+                if _post(finish_url, start_headers, {"run_id": run_id})[0] != 200 or finish_calls != [run_id]:
+                    raise AssertionError("owned finish must transition this run exactly once")
+                status["status"] = "awaiting_human"  # Subsequent viewer tests require an open manual window.
                 def expect(expected: int, extra: dict[str, str], label: str) -> None:
                     actual = _get(auth_url, {**cookies, **headers, **extra})
                     if actual != expected:
@@ -320,6 +342,7 @@ def main() -> None:
                 entrypoint.handle_wb_buyer_session_recovery_stop_request = old_stop
                 chrome_auth.stop = old_chrome_stop
                 entrypoint.handle_wb_buyer_session_recovery_start_request = old_start
+                entrypoint.handle_wb_buyer_session_recovery_finish_request = old_finish
                 buyer_server.shutdown()
                 buyer_server.server_close()
                 buyer_thread.join(timeout=5)

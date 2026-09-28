@@ -17,6 +17,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from typing import Iterator
 from urllib.request import urlopen
 
 
@@ -37,6 +39,41 @@ PROFILE = Path("/opt/wb-core-runtime/wb_buyer_chrome_profile")
 STATE = Path("/opt/wb-core-runtime/wb_buyer_chrome_auth_state")
 USER = "wbchab"  # Dedicated pilot UID; changing OS identity can invalidate cookies.
 POLICY = Path(__file__).resolve().parents[1] / "artifacts/registry_upload_http_entrypoint/root_storage_policy_v1.json"
+
+
+@contextmanager
+def profile_operation_lock(*, blocking: bool = False) -> Iterator[int]:
+    """One lock for every official Chrome process using the durable profile."""
+
+    if not STATE.is_dir() or STATE.is_symlink():
+        raise RuntimeError("Chrome state unavailable")
+    descriptor = os.open(STATE / "profile_operation.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        if os.geteuid() == 0:
+            user = _ensure_user()
+            os.fchown(descriptor, user.pw_uid, user.pw_gid)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        try:
+            yield descriptor
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def ensure_runner_idle(proc_root: Path = Path("/proc")) -> None:
+    """Fail closed after a failed cleanup, even if its flock holder exited."""
+
+    runner_uid = _ensure_user().pw_uid
+    for item in proc_root.iterdir():
+        if not item.name.isdigit():
+            continue
+        try:
+            if item.stat().st_uid == runner_uid:
+                raise RuntimeError("dedicated Chrome runner still has processes")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
 
 
 def _available(path: Path) -> int:

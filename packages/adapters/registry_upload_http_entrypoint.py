@@ -239,6 +239,7 @@ DEFAULT_WB_BUYER_SESSION_CHECK_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buye
 DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/status"
 DEFAULT_WB_BUYER_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/start"
 DEFAULT_WB_BUYER_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/stop"
+DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/finish"
 DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/launcher.zip"
 DEFAULT_WB_BUYER_VIEWER_PREFIX = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer/"
 DEFAULT_WB_BUYER_VIEWER_AUTH_PATH = "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth"
@@ -2130,6 +2131,37 @@ def _build_handler(
                     _write_json_response(self, HTTPStatus.CONFLICT, result)
                     return
                 _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Set-Cookie": _buyer_viewer_run_cookie(self, "")})
+                return
+
+            if parsed.path == DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH:
+                if not _buyer_viewer_owner(self):
+                    _write_auth_forbidden(self, parsed.path)
+                    return
+                if not _ensure_buyer_viewer_same_origin(self):
+                    return
+                try:
+                    payload = _load_optional_request_payload(self)
+                    run_id = payload.get("run_id")
+                    if not isinstance(run_id, str) or not run_id:
+                        raise ValueError("run_id required")
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                if not _buyer_viewer_run_matches(self, run_id):
+                    _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "buyer recovery belongs to another operator"})
+                    return
+                try:
+                    result = entrypoint.handle_wb_buyer_session_recovery_finish_request(
+                        launcher_download_path=DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
+                        run_id=run_id,
+                    )
+                except Exception:
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "buyer login finish failed"})
+                    return
+                if result.get("reason") in {"buyer_recovery_run_not_current", "buyer_chrome_finish_not_ready"}:
+                    _write_json_response(self, HTTPStatus.CONFLICT, result)
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH:
@@ -9811,6 +9843,7 @@ def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = ""
         DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
         DEFAULT_WB_BUYER_RECOVERY_START_PATH,
         DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+        DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH,
         DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
         DEFAULT_WB_BUYER_VIEWER_AUTH_PATH,
     }:
@@ -10370,6 +10403,7 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "wb_buyer_recovery_status_path": DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
         "wb_buyer_recovery_start_path": DEFAULT_WB_BUYER_RECOVERY_START_PATH,
         "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+        "wb_buyer_recovery_finish_path": DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH,
         "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
         "wb_buyer_recovery_viewer_path": DEFAULT_WB_BUYER_VIEWER_PREFIX,
         "wb_supplies_transit_cost_check_path": DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH,
@@ -10707,6 +10741,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "wb_buyer_recovery_status_path": DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
         "wb_buyer_recovery_start_path": DEFAULT_WB_BUYER_RECOVERY_START_PATH,
         "wb_buyer_recovery_stop_path": DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
+        "wb_buyer_recovery_finish_path": DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH,
         "wb_buyer_recovery_launcher_path": DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH,
         "wb_buyer_recovery_viewer_path": DEFAULT_WB_BUYER_VIEWER_PREFIX,
         "sku_management_path": DEFAULT_SKU_MANAGEMENT_PATH,

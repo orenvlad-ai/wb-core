@@ -18,6 +18,8 @@ from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOGIN_CHECKED_AT = "2026-09-28T12:00:00Z"
+PRICE_MEASURED_AT = "2026-09-28T12:35:42Z"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -38,6 +40,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
 class _SettingsServer(AbstractContextManager):
     def __init__(self) -> None:
         self.calls: dict[tuple[str, str], int] = {}
+        self.buyer_checked = False
         self.server = ThreadingHTTPServer(("127.0.0.1", _reserve_free_port()), self._handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -86,11 +89,22 @@ class _SettingsServer(AbstractContextManager):
     def _payload(self, method: str, path: str) -> dict[str, object]:
         now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         if path == DEFAULT_SOURCES_SESSIONS_PATH:
-            return _sources_payload(now)
+            payload = _sources_payload(now)
+            if self.buyer_checked:
+                payload["wb_buyer"]["capability"] = {
+                    "status": "observed", "valid": False, "wallet_price": 139,
+                    "nonwallet_price": 144, "authenticated_buyer_price": None,
+                    "checked_at": PRICE_MEASURED_AT, "price_measured_at": PRICE_MEASURED_AT,
+                }
+            return payload
         if path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
             return {"status": "session_valid_canonical", "organization_confirmed": True, "checked_at": now}
         if path == DEFAULT_WB_BUYER_SESSION_CHECK_PATH:
-            return {"capability_status": "available", "capability_valid": True, "checked_at": now}
+            self.buyer_checked = True
+            return {"capability_status": "observed", "capability_valid": False,
+                    "capability_checked_at": PRICE_MEASURED_AT,
+                    "price": {"wallet_price": 139, "nonwallet_price": 144,
+                              "authenticated_buyer_price": None, "measured_at": PRICE_MEASURED_AT}}
         if path == DEFAULT_SPP_PROXY_SOURCE_CHECK_PATH:
             return {"status": "available", "authorization_required": False, "checked_at": now}
         if path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH:
@@ -157,15 +171,17 @@ def _sources_payload(now: str) -> dict[str, object]:
             "authorization": {
                 "status": "completed",
                 "running": False,
+                "login_confirmed": True,
                 "session": {
-                    "status": "valid",
-                    "status_label": "Сессия активна",
-                    "account_confirmed": True,
-                    "checked_at": now,
+                    "status": "authenticated_surface",
+                    "status_label": "Вход подтверждён",
+                    "login_confirmed": True,
+                    "account_confirmed": False,
+                    "checked_at": LOGIN_CHECKED_AT,
                 },
             },
-            "capability": {"status": "available", "valid": True, "checked_at": now},
-            "collectors": ["Проверка СПП"],
+            "capability": {"status": "not_checked", "valid": False, "checked_at": now},
+            "collectors": ["Контрольная цена WB Buyer"],
         },
         "spp_proxy": {
             "authorization_required": False,
@@ -237,10 +253,28 @@ def main() -> None:
             if server.calls.get(("POST", DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH), 0) != 1:
                 raise AssertionError("Seller check must include one exact supply/cost route probe")
 
-            if not page.locator('[data-source-check="buyer"]').is_disabled():
-                raise AssertionError("Buyer price check must stay disabled during Chrome auth-only rollout")
+            if page.locator('[data-source-check="buyer"]').is_disabled():
+                raise AssertionError("Buyer price check must use the isolated durable Chrome source")
             if server.calls.get(("GET", DEFAULT_WB_BUYER_SESSION_CHECK_PATH), 0):
-                raise AssertionError("Settings must not probe the legacy Buyer price profile")
+                raise AssertionError("Opening Settings must not launch the Buyer price browser")
+            page.locator('[data-source-check="buyer"]').click()
+            page.wait_for_function("() => document.querySelector('#buyerSourceHealth')?.innerText.includes('139 ₽ с WB Кошельком')")
+            if "144 ₽ без WB Кошелька" not in page.locator("#buyerSourceHealth").inner_text():
+                raise AssertionError("Buyer check must preserve separate payment labels")
+            checked_rows = page.locator("#buyerSourceHealth").inner_text()
+            measured_label = page.evaluate("new Date('2026-09-28T12:35:42Z').toLocaleString('ru-RU')")
+            login_label = page.evaluate("new Date('2026-09-28T12:00:00Z').toLocaleString('ru-RU')")
+            if "Вход подтверждён" not in checked_rows or measured_label not in checked_rows or login_label in checked_rows:
+                raise AssertionError("Buyer price must show its own measurement time, not login proof time")
+            summary_calls = server.calls.get(("GET", DEFAULT_SOURCES_SESSIONS_PATH), 0)
+            with page.expect_response(lambda response: urlparse(response.url).path == DEFAULT_SOURCES_SESSIONS_PATH):
+                page.locator("#reloadSourcesSessionsButton").click()
+            page.wait_for_timeout(100)
+            if server.calls.get(("GET", DEFAULT_SOURCES_SESSIONS_PATH), 0) <= summary_calls:
+                raise AssertionError("Explicit summary reload was not requested")
+            reloaded_rows = page.locator("#buyerSourceHealth").inner_text()
+            if "139 ₽ с WB Кошельком" not in reloaded_rows or "144 ₽ без WB Кошелька" not in reloaded_rows or "Вход подтверждён" not in reloaded_rows or measured_label not in reloaded_rows or login_label in reloaded_rows:
+                raise AssertionError("Summary reload lost buyer prices, time, or auth")
             page.locator('[data-source-check="public"]').click()
             page.wait_for_function(
                 "() => document.querySelector('#publicSourceError')?.innerText !== 'Проверяем точный маршрут...'"

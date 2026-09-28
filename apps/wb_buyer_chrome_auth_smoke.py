@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import wb_buyer_chrome_auth as auth  # noqa: E402
+from apps import wb_buyer_chrome_price_smoke as price_smoke  # noqa: E402
 from apps import wb_buyer_chrome_runtime as runtime  # noqa: E402
 from apps.wb_buyer_network_diagnostic import MAX_EVENTS, NetworkDiagnostic, endpoint_category  # noqa: E402
 from packages.application.wb_buyer_session import _public_recovery_payload  # noqa: E402
@@ -48,6 +49,8 @@ def _fast_start_and_private_boundary() -> None:
             patch.object(runtime, "_available", return_value=30 * 1024**3),
             patch.object(runtime, "_root_reserve", return_value=25 * 1024**3),
             patch.object(runtime, "ensure_runtime", side_effect=AssertionError("HTTP start unpacked Chrome")),
+            patch.object(runtime, "ensure_runner_idle"),
+            patch.object(runtime, "_ensure_user", return_value=SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())),
             patch.object(auth, "NOVNC_DIR", novnc),
             patch.object(auth, "_shared_start_lock", side_effect=lambda: nullcontext()),
             patch.object(auth, "_systemd_properties", return_value={"ActiveState": "active", "InvocationID": "fixture-invocation"}),
@@ -123,6 +126,48 @@ def _pinned_package_and_deploy_contract() -> None:
     command = _build_buyer_chrome_install_command(SimpleNamespace(target_dir="/opt/wb-core-runtime/app", ssh_destination="fixture-host"))
     assert "python3 apps/wb_buyer_chrome_runtime.py" in command[-1]
     assert command[-2] == "fixture-host"
+
+
+def _manual_chrome_and_finish_are_owner_latched() -> None:
+    with TemporaryDirectory() as directory:
+        state = Path(directory)
+        run_id = "buyer-recovery-chrome-20260928T120000Z-aabbccdd"
+        with (
+            patch.object(runtime, "STATE", state),
+            patch.object(runtime, "PROFILE", state / "profile"),
+            patch.object(runtime, "USER", pwd.getpwuid(os.getuid()).pw_name),
+            patch.object(auth, "_shared_start_lock", side_effect=lambda: nullcontext()),
+            patch.object(auth, "_systemd_properties", return_value={"ActiveState": "active", "InvocationID": "fixture"}),
+        ):
+            auth._write({"run_id": run_id, "unit": f"wbc-{run_id}.service", "invocation_id": "fixture",
+                         "status": "awaiting_human", "viewer_owner": "owner", "session": {"valid": False}})
+            calls: list[list[str]] = []
+            with patch.object(auth, "_spawn", side_effect=lambda command, *_args, **_kwargs: calls.append(list(command)) or object()):
+                auth._launch_manual_chrome(Path("/fixture/chrome"), {"PATH": "/usr/bin"})
+            assert calls and calls[0][0] == "/fixture/chrome"
+            assert not any("debugging" in part or "playwright" in part.lower() for part in calls[0])
+            assert auth.finish(requested_run_id="foreign")["reason"] == "buyer_recovery_run_not_current"
+            first = auth.finish(requested_run_id=run_id)
+            second = auth.finish(requested_run_id=run_id)
+            assert first["status"] == second["status"] == "validating_session"
+            assert auth._read()["reason"] == "buyer_chrome_manual_finish_requested"
+            auth._write({**auth._read(), "status": "stopping"})
+            assert auth.finish(requested_run_id=run_id)["reason"] == "buyer_chrome_finish_not_ready"
+
+
+def _orphan_runner_blocks_new_login() -> None:
+    with TemporaryDirectory() as directory:
+        proc = Path(directory)
+        (proc / "1234").mkdir()
+        with patch.object(runtime, "_ensure_user", return_value=SimpleNamespace(pw_uid=os.getuid())):
+            try:
+                runtime.ensure_runner_idle(proc)
+            except RuntimeError as error:
+                assert "runner still has processes" in str(error)
+            else:
+                raise AssertionError("orphan runner was accepted")
+            (proc / "1234").rmdir()
+            runtime.ensure_runner_idle(proc)
 
 
 def _stop_latches_against_late_proof() -> None:
@@ -386,12 +431,17 @@ def main() -> None:
     _english_login_and_account_surface()
     _foreground_target_is_not_ambiguous()
     _pinned_package_and_deploy_contract()
+    _manual_chrome_and_finish_are_owner_latched()
+    _orphan_runner_blocks_new_login()
     _stop_latches_against_late_proof()
     _chrome_cleanup_counts_only_owned_executables()
     _network_diagnostic_is_bounded_and_redacted()
     _private_pipe_interleaves_network_events_and_replies()
     _network_is_armed_before_human_window()
     _diagnostic_expires_only_its_own_run()
+    # The current PR Gate selects its check map from base; keep the new
+    # isolated reader fixture reachable through this established smoke.
+    price_smoke.main()
     print("wb_buyer_chrome_auth_smoke: OK")
 
 

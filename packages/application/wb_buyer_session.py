@@ -41,6 +41,7 @@ SAFE_BUYER_REASONS = {
     "authenticated_price_probe_failed",
     "authenticated_price_unstable",
     "authenticated_price_unavailable",
+    "buyer_price_context_not_verified",
     "authenticated_primary_price_missing",
     "buyer_account_context_missing",
     "buyer_account_fingerprint_mismatch",
@@ -101,6 +102,14 @@ SAFE_BUYER_REASONS = {
     "buyer_chrome_unexpected_exit",
     "buyer_chrome_runtime_error",
     "buyer_chrome_storage_reserve",
+    "buyer_chrome_manual_login_ready",
+    "buyer_chrome_manual_finish_requested",
+    "buyer_chrome_finish_not_ready",
+    "buyer_chrome_verification_unavailable",
+    "buyer_chrome_profile_busy",
+    "buyer_chrome_cleanup_failed",
+    "buyer_session_automation_busy",
+    "authenticated_price_unavailable",
     "invalid_nm_id",
     "network_primary_price_missing",
     "product_payload_missing",
@@ -329,6 +338,9 @@ class WbBuyerChromeAuthController:
     def stop(self, *, launcher_download_path: str, run_id: str | None = None) -> dict[str, Any]:
         return _public_recovery_payload(self._tool().stop(requested_run_id=run_id), launcher_download_path=launcher_download_path)
 
+    def finish(self, *, launcher_download_path: str, run_id: str) -> dict[str, Any]:
+        return _public_recovery_payload(self._tool().finish(requested_run_id=run_id), launcher_download_path=launcher_download_path)
+
     def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
         del public_status_url, public_operator_url
         raise RuntimeError("buyer browser is opened inside the site")
@@ -361,10 +373,12 @@ def _public_price_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
         "authenticated_buyer_price": _number_or_none(raw.get("authenticated_buyer_price")),
         "normal_price": _number_or_none(raw.get("normal_price")),
         "wallet_price": _number_or_none(raw.get("wallet_price")),
+        "nonwallet_price": _number_or_none(raw.get("normal_price")),
         "card_price": _number_or_none(raw.get("card_price")),
         "club_price": _number_or_none(raw.get("club_price")),
         "payment_context": str(raw.get("payment_context") or "unknown/mixed")[:120],
         "destination_context": dict(raw.get("destination_context") or {}) if isinstance(raw.get("destination_context"), Mapping) else {},
+        "variant_context": dict(raw.get("variant_context") or {}) if isinstance(raw.get("variant_context"), Mapping) else {},
         "measured_at": str(raw.get("measured_at") or ""),
         "source_method": _safe_source_method(raw.get("source_method")),
         "source_endpoint": _safe_public_wb_endpoint(raw.get("source_endpoint")),
@@ -432,6 +446,8 @@ def _public_recovery_payload(raw: Mapping[str, Any], *, launcher_download_path: 
 
 def _human_action(reason: str) -> str:
     return {
+        "buyer_chrome_manual_login_ready": "Войдите на странице Wildberries. Когда увидите личный кабинет, нажмите «Я вошёл».",
+        "buyer_chrome_verification_unavailable": "Вход пока не подтвердился. Проверьте страницу Wildberries и нажмите «Я вошёл» ещё раз.",
         "buyer_sms_required": "Введите SMS-код в защищённом окне Wildberries.",
         "buyer_phone_required": "Введите номер телефона в защищённом окне Wildberries.",
         "buyer_captcha_required": "Пройдите проверку Wildberries в защищённом окне.",

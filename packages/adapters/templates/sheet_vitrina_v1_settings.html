@@ -593,7 +593,7 @@
             <div class="source-card-header"><div><h3>WB Buyer</h3><p class="source-card-copy">Вход в аккаунт покупателя Wildberries.</p></div><span id="buyerSourceBadge" class="pill warning">Неизвестно</span></div>
             <dl id="buyerSourceHealth" class="source-health"></dl>
             <div id="buyerRecoverySteps" class="recovery-steps"></div>
-            <div class="compact-actions"><button type="button" data-source-check="buyer" disabled title="Проверка цены пока недоступна для нового входа">Проверить цену</button><button class="primary" type="button" data-source-recover="buyer">Войти в Wildberries</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
+            <div class="compact-actions"><button type="button" data-source-check="buyer">Проверить цену</button><button class="primary" type="button" data-source-recover="buyer">Войти в Wildberries</button><a id="buyerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
             <p id="buyerSourceError" class="source-error"></p>
           </article>
           <article id="publicSourceCard" class="source-card" data-source-card="public">
@@ -604,7 +604,7 @@
           </article>
         </div>
         <dialog id="buyerViewerDialog" class="buyer-viewer-dialog" aria-labelledby="buyerViewerTitle">
-          <div class="toolbar" style="justify-content: space-between;"><div><h2 id="buyerViewerTitle">Вход в Wildberries</h2><p id="buyerViewerStatus">Открываем браузер Wildberries…</p></div><div class="compact-actions"><button id="buyerViewerReconnect" type="button" hidden>Переподключить экран</button><button id="buyerViewerCancel" class="danger" type="button">Отменить вход</button><button id="buyerViewerClose" type="button">Закрыть окно</button></div></div>
+          <div class="toolbar" style="justify-content: space-between;"><div><h2 id="buyerViewerTitle">Вход в Wildberries</h2><p id="buyerViewerStatus">Открываем браузер Wildberries…</p></div><div class="compact-actions"><button id="buyerViewerFinish" class="primary" type="button" hidden>Я вошёл</button><button id="buyerViewerReconnect" type="button" hidden>Переподключить экран</button><button id="buyerViewerCancel" class="danger" type="button">Отменить вход</button><button id="buyerViewerClose" type="button">Закрыть окно</button></div></div>
           <iframe id="buyerViewerFrame" title="Настоящая страница Wildberries в серверном браузере" referrerpolicy="same-origin" hidden></iframe>
         </dialog>
       </section>
@@ -711,6 +711,7 @@
           status: config.wb_buyer_recovery_status_path,
           start: config.wb_buyer_recovery_start_path,
           stop: config.wb_buyer_recovery_stop_path,
+          finish: config.wb_buyer_recovery_finish_path,
           launcher: config.wb_buyer_recovery_launcher_path,
           viewer: config.wb_buyer_recovery_viewer_path
         },
@@ -858,6 +859,7 @@
       let proxyV4PreviewFingerprint = "";
       let autoUpdatesState = null;
       let sourcesSessionsState = null;
+      let buyerSourceRevision = 0;
       const sourceCheckPromises = new Map();
       const recoveryPollTimers = new Map();
       const recoveryPollGenerations = new Map();
@@ -1195,6 +1197,15 @@
         badge.className = "pill " + (tone || "warning");
       }
 
+      function buyerPriceLabel(capability) {
+        const wallet = Number(capability && capability.wallet_price);
+        const nonwallet = Number(capability && capability.nonwallet_price);
+        if (capability && capability.status === "observed" && wallet > 0 && nonwallet > 0) {
+          return wallet + " ₽ с WB Кошельком · " + nonwallet + " ₽ без WB Кошелька";
+        }
+        return capability && capability.status && capability.status !== "not_checked" ? "Цена недоступна" : "Не проверена";
+      }
+
       function recoveryStepIndex(source, status) {
         const value = String(status || "idle");
         if (["completed", "not_needed"].includes(value)) return 4;
@@ -1235,6 +1246,7 @@
               ? (recovery.human_action || "Завершите вход на странице Wildberries.")
               : recovery && recovery.running ? "Проверяем сохранение входа…" : "Вход завершён.";
             document.getElementById("buyerViewerReconnect").hidden = !viewerReady;
+            document.getElementById("buyerViewerFinish").hidden = !viewerReady;
             if (viewerReady && frame.hidden) {
               const runId = encodeURIComponent(String(recovery.run_id || ""));
               // noVNC prepends '/' when it builds the WebSocket URL.
@@ -1280,15 +1292,15 @@
         setSourceBadge("buyer", buyerAuth.running ? "Вход выполняется" : buyerLoginConfirmed ? "Вход подтверждён" : buyerAuth.status === "stopped" ? "Вход отменён" : "Нужен вход", buyerLoginConfirmed ? "success" : buyerAuth.running || buyerAuth.status === "stopped" ? "warning" : "danger");
         renderHealthRows("buyerSourceHealth", [
           ["Авторизация", buyerAuth.running ? (buyerAuth.status === "awaiting_human" ? "Ждём вход" : "Проверяем") : buyerLoginConfirmed ? "Вход подтверждён" : "Требуется вход"],
-          ["Контрольная цена", "Не проверена"],
-          ["Последняя проверка", formatSourceTime(buyerSession.checked_at)]
+          ["Контрольная цена", buyerPriceLabel(buyerCapability)],
+          ["Цена измерена", formatSourceTime(buyerCapability.status === "observed" ? buyerCapability.price_measured_at : "")]
         ]);
         document.getElementById("buyerSourceError").textContent = buyerAuth.running
           ? (buyerAuth.human_action || "Вход выполняется. Откройте окно Wildberries для продолжения.")
           : buyerAuth.status === "stopped" ? "Вход отменён. Вы можете начать заново."
           : buyerAuth.status === "timeout" ? "Время входа истекло. Повторите попытку."
           : buyerAuth.status === "error" ? "Не удалось завершить вход. Повторите попытку."
-          : buyerLoginConfirmed ? "Вход сохранён. Аккаунт для сбора цен ещё не проверен."
+          : buyerLoginConfirmed ? (buyerCapability.status === "observed" ? "Вход сохранён. Цена относится к контрольной карточке; аккаунт и условия для сбора ещё не сверены." : "Вход сохранён. Аккаунт для сбора цен ещё не проверен.")
           : "";
         document.getElementById("buyerSourceError").classList.toggle("buyer-auth-note", buyerLoginConfirmed);
         renderRecoverySteps("buyer", buyerAuth);
@@ -1316,10 +1328,14 @@
 
       async function loadSourcesSessions(options) {
         if (!sourcesSessionsPath) return null;
+        const requestedBuyerRevision = buyerSourceRevision;
         sourcesSessionsMessage.textContent = "Читаем кешированный server-side status...";
         sourcesSessionsMessage.className = "message";
         try {
           const payload = await fetchJson(sourcesSessionsPath, {headers: {Accept: "application/json"}});
+          // An older summary may finish after a manual price check. Its
+          // cached pre-check buyer price must not replace the newer result.
+          if (requestedBuyerRevision !== buyerSourceRevision) return payload;
           renderSourcesSessions(payload);
           if (options && options.refreshStale) refreshStaleSources(payload);
           return payload;
@@ -1348,7 +1364,7 @@
           await fetchJson(route.check, {headers: {Accept: "application/json"}});
           await performSourceCheck("transit");
         } else if (source === "buyer") {
-          await fetchJson(route.check, {headers: {Accept: "application/json"}});
+          return fetchJson(route.check, {headers: {Accept: "application/json"}});
         } else if (source === "transit") {
           const accepted = await fetchJson(route.check, {method: "POST", headers: {Accept: "application/json", "Content-Type": "application/json"}, body: "{}"});
           await pollTransitRun(accepted.run_id);
@@ -1363,7 +1379,24 @@
           const errorTarget = document.getElementById(source + "SourceError");
           if (errorTarget) errorTarget.textContent = "Проверяем точный маршрут...";
           try {
-            await performSourceCheck(source);
+            const result = await performSourceCheck(source);
+            if (source === "buyer" && result) {
+              buyerSourceRevision += 1;
+              const nextCapability = {
+                ...(((sourcesSessionsState || {}).wb_buyer || {}).capability || {}),
+                status: result.capability_status, wallet_price: (result.price || {}).wallet_price,
+                nonwallet_price: (result.price || {}).nonwallet_price,
+                price_measured_at: (result.price || {}).measured_at || "",
+                checked_at: result.capability_checked_at || result.checked_at || ""
+              };
+              if (sourcesSessionsState) {
+                sourcesSessionsState.wb_buyer = {...(sourcesSessionsState.wb_buyer || {}), capability: nextCapability};
+                renderSourcesSessions(sourcesSessionsState);
+              } else {
+                const priceRow = [...document.querySelectorAll("#buyerSourceHealth dt")].find((node) => node.textContent === "Контрольная цена");
+                if (priceRow && priceRow.nextElementSibling) priceRow.nextElementSibling.textContent = buyerPriceLabel(nextCapability);
+              }
+            }
             await loadSourcesSessions({refreshStale: false});
           } catch (error) {
             if (errorTarget) errorTarget.textContent = error.message || String(error);
@@ -1506,6 +1539,28 @@
           void loadSourcesSessions({refreshStale: false});
         } catch (error) {
           document.getElementById("buyerViewerStatus").textContent = "Не удалось отменить вход. Проверьте статус и попробуйте снова.";
+        }
+      }
+
+      async function finishBuyerRecovery() {
+        const runId = buyerViewerRunId;
+        if (!runId) return;
+        const button = document.getElementById("buyerViewerFinish");
+        button.disabled = true;
+        document.getElementById("buyerViewerStatus").textContent = "Сохраняем вход и проверяем его после перезапуска браузера…";
+        try {
+          const payload = await fetchJson(sourceRoutes.buyer.finish, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json", "X-WB-Buyer-Viewer-CSRF": "1"},
+            body: JSON.stringify({run_id: runId})
+          });
+          renderBuyerRunCard(payload);
+          renderRecoverySteps("buyer", payload);
+          scheduleRecoveryPoll("buyer", true, true);
+        } catch (_error) {
+          document.getElementById("buyerViewerStatus").textContent = "Не удалось начать проверку. Вход остаётся открытым — попробуйте ещё раз.";
+        } finally {
+          button.disabled = false;
         }
       }
 
@@ -3803,6 +3858,7 @@
       });
       document.getElementById("buyerViewerClose").addEventListener("click", () => document.getElementById("buyerViewerDialog").close());
       document.getElementById("buyerViewerCancel").addEventListener("click", cancelBuyerRecovery);
+      document.getElementById("buyerViewerFinish").addEventListener("click", finishBuyerRecovery);
       document.getElementById("buyerViewerReconnect").addEventListener("click", () => {
         const frame = document.getElementById("buyerViewerFrame");
         if (frame.src) frame.src = frame.src;
