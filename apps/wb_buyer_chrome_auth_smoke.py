@@ -5,9 +5,11 @@ from __future__ import annotations
 from contextlib import nullcontext, redirect_stderr
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+import json
 from pathlib import Path
 import os
 import pwd
+import re
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -20,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from apps import wb_buyer_chrome_auth as auth  # noqa: E402
 from apps import wb_buyer_chrome_runtime as runtime  # noqa: E402
+from apps.wb_buyer_network_diagnostic import MAX_EVENTS, NetworkDiagnostic, endpoint_category  # noqa: E402
 from packages.application.wb_buyer_session import _public_recovery_payload  # noqa: E402
 
 
@@ -40,6 +43,7 @@ def _fast_start_and_private_boundary() -> None:
             patch.object(runtime, "PACKAGE", package),
             patch.object(runtime, "PROFILE", profile),
             patch.object(runtime, "STATE", state),
+            patch.object(auth, "DIAGNOSTIC_DIR", base / "diagnostic-run"),
             patch.object(runtime, "USER", pwd.getpwuid(__import__("os").getuid()).pw_name),
             patch.object(runtime, "_available", return_value=30 * 1024**3),
             patch.object(runtime, "_root_reserve", return_value=25 * 1024**3),
@@ -57,10 +61,11 @@ def _fast_start_and_private_boundary() -> None:
             payload = auth.start(viewer_owner="owner-hash", viewer_expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=20)).timestamp()))
             assert payload["status"] == "starting" and payload["running"]
             assert payload["price"]["status"] == "not_checked"
-            assert commands and commands[0][0] == "systemd-run"
-            assert "prepare-supervise" in commands[0]
-            assert not any(part.startswith("--property=User=") or part.startswith("--property=Group=") for part in commands[0])
-            assert "--remote-debugging-port" not in " ".join(commands[0])
+            assert len(commands) == 2 and all(command[0] == "systemd-run" for command in commands)
+            assert "expire-diagnostic" in commands[0] and "--on-active=2h" in commands[0]
+            assert "prepare-supervise" in commands[1]
+            assert not any(part.startswith("--property=User=") or part.startswith("--property=Group=") for part in commands[1])
+            assert "--remote-debugging-port" not in " ".join(commands[1])
             public = _public_recovery_payload({**payload, "status": "completed", "running": False, "login_confirmed": True,
                 "session": {"status": "authenticated_surface", "login_confirmed": True, "valid": False, "account_confirmed": False}}, launcher_download_path="")
             assert public["login_confirmed"] and not public["session"]["valid"]
@@ -241,6 +246,141 @@ def _chrome_cleanup_counts_only_owned_executables() -> None:
         assert diagnostic.getvalue().strip() == "buyer_chrome_diagnostic stage=chrome_stop class=PermissionError errno=13"
 
 
+def _network_diagnostic_is_bounded_and_redacted() -> None:
+    secret = "phone79998887766-otp123456-stateoauthsecret"
+    assert endpoint_category(f"https://id.wb.ru/login/{secret}?state={secret}") == "wbid_login"
+    assert endpoint_category(f"https://www.wildberries.ru/wb-id/callback?code={secret}") == "marketplace_callback"
+    assert endpoint_category(f"https://evil.example/login/{secret}") == ""
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "events.jsonl"
+        with path.open("wb") as output:
+            diagnostic = NetworkDiagnostic(output_fd=output.fileno())
+            diagnostic.enable_session("owned-session")
+            request = lambda request_id, url, method="POST": {
+                "sessionId": "owned-session", "method": "Network.requestWillBeSent",
+                "params": {"requestId": request_id, "type": "XHR", "request": {"url": url, "method": method, "postData": secret}},
+            }
+            response = lambda request_id, status: {
+                "sessionId": "owned-session", "method": "Network.responseReceived",
+                "params": {"requestId": request_id, "response": {"status": status, "url": f"https://id.wb.ru/{secret}?state={secret}", "headers": {"Cookie": secret}}},
+            }
+            diagnostic.consume(request("1", f"https://id.wb.ru/login/{secret}?state={secret}"))
+            diagnostic.consume(response("foreign-id", 500))
+            diagnostic.consume(response("1", 502))
+            diagnostic.consume(request("2", f"https://id.wb.ru/api/{secret}?phone={secret}"))
+            diagnostic.consume({"sessionId": "owned-session", "method": "Network.loadingFailed",
+                "params": {"requestId": "2", "errorText": f"net::ERR_FAILED?token={secret}"}})
+            diagnostic.consume(request("3", f"https://id.wb.ru/api/{secret}?phone={secret}"))
+            diagnostic.consume({"sessionId": "owned-session", "method": "Network.loadingFailed",
+                "params": {"requestId": "3", "errorText": "net::ERR_CONNECTION_RESET"}})
+            diagnostic.consume(request("4", f"https://evil.example/{secret}"))
+            diagnostic.consume(response("4", 403))
+            diagnostic.enable_session("second-owned-tab")
+            diagnostic.consume(request("collision", "https://id.wb.ru/login/"))
+            diagnostic.consume({"sessionId": "second-owned-tab", "method": "Network.requestWillBeSent",
+                "params": {"requestId": "collision", "type": "XHR", "request": {"url": "https://www.wildberries.ru/api/check", "method": "POST"}}})
+            diagnostic.consume(response("collision", 500))
+            diagnostic.consume({"sessionId": "second-owned-tab", "method": "Network.responseReceived",
+                "params": {"requestId": "collision", "response": {"status": 401}}})
+            diagnostic.consume({"sessionId": "foreign-session", "method": "Network.requestWillBeSent",
+                "params": {"requestId": "5", "type": "XHR", "request": {"url": f"https://id.wb.ru/api/{secret}", "method": "POST"}}})
+            for index in range(MAX_EVENTS + 20):
+                identifier = f"bounded-{index}"
+                diagnostic.consume(request(identifier, "https://id.wb.ru/api/check"))
+                diagnostic.consume(response(identifier, 429))
+            assert diagnostic.events == MAX_EVENTS and len(diagnostic.requests) <= 256
+        raw = path.read_text()
+        assert secret not in raw and "Cookie" not in raw and "?" not in raw and "/login" not in raw
+        records = [json.loads(line) for line in raw.splitlines()]
+        assert len(records) == MAX_EVENTS
+        assert records[:3] == [
+            {**records[0], "endpoint": "wbid_login", "code": 502},
+            {**records[1], "endpoint": "wbid_api", "code": "network_other"},
+            {**records[2], "endpoint": "wbid_api", "code": "net::ERR_CONNECTION_RESET"},
+        ]
+        assert records[3]["endpoint"] == "wbid_login" and records[3]["code"] == 500
+        assert records[4]["endpoint"] == "marketplace_api" and records[4]["code"] == 401
+        assert all(set(record) == {"event", "at", "stage", "endpoint", "kind", "method", "outcome", "code"} for record in records)
+        assert all(re.fullmatch(r"[a-z_]+", record["endpoint"]) for record in records)
+
+
+def _private_pipe_interleaves_network_events_and_replies() -> None:
+    to_chrome_read, to_chrome_write = os.pipe()
+    from_chrome_read, from_chrome_write = os.pipe()
+    with TemporaryDirectory() as directory:
+        with (Path(directory) / "events.jsonl").open("wb") as output:
+            pipe = object.__new__(auth.ChromePipe)
+            pipe._read_fd, pipe._write_fd = from_chrome_read, to_chrome_write
+            pipe._buffer, pipe._next_id = bytearray(), 1
+            pipe._diagnostic = NetworkDiagnostic(output_fd=output.fileno())
+            pipe._diagnostic.enable_session("owned")
+            def reply():
+                command = json.loads(os.read(to_chrome_read, 4096).rstrip(b"\0"))
+                for event in (
+                    {"sessionId": "owned", "method": "Network.requestWillBeSent", "params": {"requestId": "r", "type": "Document", "request": {"url": "https://id.wb.ru/login/", "method": "GET"}}},
+                    {"sessionId": "owned", "method": "Network.responseReceived", "params": {"requestId": "r", "response": {"status": 503}}},
+                    {"id": command["id"], "result": {"product": "Chrome"}},
+                ):
+                    os.write(from_chrome_write, json.dumps(event).encode() + b"\0")
+            worker = threading.Thread(target=reply)
+            worker.start()
+            assert pipe.call("Browser.getVersion") == {"product": "Chrome"}
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+        assert json.loads((Path(directory) / "events.jsonl").read_text())["code"] == 503
+    for fd in (to_chrome_read, to_chrome_write, from_chrome_read, from_chrome_write):
+        os.close(fd)
+
+
+def _network_is_armed_before_human_window() -> None:
+    pipe = object.__new__(auth.ChromePipe)
+    pipe._diagnostic = NetworkDiagnostic(output_fd=-1)
+    pipe._network_sessions = {}
+    seen: list[str] = []
+    targets = [{"type": "page", "targetId": "initial", "url": "about:blank"}]
+    fail_new_tab = False
+    def call(method, params=None, *, session="", timeout=6):
+        del timeout
+        seen.append(method)
+        if method == "Target.getTargets":
+            return {"targetInfos": list(targets)}
+        if method == "Target.attachToTarget":
+            return {"sessionId": params["targetId"]}
+        if method == "Network.enable" and fail_new_tab and session == "new-wbid-tab":
+            raise RuntimeError("fixture target not armed")
+        if method == "Runtime.evaluate":
+            return {"result": {"value": "phone"}}
+        return {}
+    pipe.call = call
+    pipe.enable_network()
+    assert seen == ["Target.getTargets", "Target.attachToTarget", "Network.enable"]
+    targets.append({"type": "page", "targetId": "new-wbid-tab", "url": "https://id.wb.ru/login/"})
+    fail_new_tab = True
+    assert pipe.visible_surface() == "unknown"
+    assert "new-wbid-tab" not in pipe._network_sessions
+    fail_new_tab = False
+    assert pipe.visible_surface() == "phone"
+    assert pipe._network_sessions == {"initial": "initial", "new-wbid-tab": "new-wbid-tab"}
+    assert seen.count("Network.enable") == 3
+    assert seen.index("Network.enable", 4) < seen.index("Runtime.evaluate")
+
+
+def _diagnostic_expires_only_its_own_run() -> None:
+    with TemporaryDirectory() as directory:
+        state = Path(directory)
+        path = state / "network_diagnostic.jsonl"
+        run = "buyer-recovery-chrome-20260928T110909Z-ca76cc20"
+        other = "buyer-recovery-chrome-20260928T111010Z-aabbccdd"
+        with patch.object(auth, "DIAGNOSTIC_DIR", state), patch.object(auth.os, "geteuid", return_value=0), patch.object(auth, "_shared_start_lock", side_effect=lambda: nullcontext()):
+            path.write_text(json.dumps({"event": "buyer_network_run", "run_id": other}) + "\n")
+            os.utime(path, (100, 100))
+            with patch.object(auth.time, "time", return_value=100 + 3 * 3600):
+                auth.expire_diagnostic(run)
+                assert path.exists()
+                auth.expire_diagnostic(other)
+                assert not path.exists()
+
+
 def main() -> None:
     _fast_start_and_private_boundary()
     _english_login_and_account_surface()
@@ -248,6 +388,10 @@ def main() -> None:
     _pinned_package_and_deploy_contract()
     _stop_latches_against_late_proof()
     _chrome_cleanup_counts_only_owned_executables()
+    _network_diagnostic_is_bounded_and_redacted()
+    _private_pipe_interleaves_network_events_and_replies()
+    _network_is_armed_before_human_window()
+    _diagnostic_expires_only_its_own_run()
     print("wb_buyer_chrome_auth_smoke: OK")
 
 

@@ -1,7 +1,8 @@
 """Owner-scoped WB Buyer login in ordinary, sandboxed Chrome on the VPS.
 
-Only a boolean visible-login result crosses the private DevTools pipe.  This
-module never reads prices or writes the canonical Playwright buyer profile.
+Only boolean visible-login evidence and bounded, sanitized network outcomes
+cross the private DevTools pipe. This module never reads prices or writes the
+canonical Playwright buyer profile.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import secrets
 import select
 import shutil
@@ -34,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps import wb_buyer_chrome_runtime as runtime  # noqa: E402
+from apps.wb_buyer_network_diagnostic import MAX_EVENTS, NetworkDiagnostic  # noqa: E402
 from apps import wb_buyer_session_recovery as legacy  # noqa: E402
 
 
@@ -42,6 +45,7 @@ DISPLAY = ":98"
 VNC_PORT = 45911
 WEB_PORT = 46090
 NOVNC_DIR = Path("/usr/share/novnc")
+DIAGNOSTIC_DIR = Path("/run/wb-buyer-chrome-network")
 LOGIN_URL = "https://www.wildberries.ru/lk"
 ACTIVE = {"starting", "awaiting_human", "validating_session", "stopping"}
 FINAL = {"completed", "stopped", "timeout", "error"}
@@ -84,6 +88,10 @@ def _now() -> datetime:
 
 def _status_path() -> Path:
     return runtime.STATE / "recovery_status.json"
+
+
+def _diagnostic_path() -> Path:
+    return DIAGNOSTIC_DIR / "network_diagnostic.jsonl"
 
 
 def _read() -> dict[str, Any]:
@@ -219,6 +227,12 @@ def start(*, replace: bool = False, viewer_owner: str = "", viewer_expires_at: i
             raise RuntimeError("Chrome profile ownership invalid")
         if runtime.STATE.stat().st_uid != user.pw_uid or runtime.STATE.stat().st_mode & 0o777 != 0o700:
             raise RuntimeError("Chrome auth state ownership invalid")
+        if DIAGNOSTIC_DIR.is_symlink():
+            raise RuntimeError("Chrome network directory invalid")
+        DIAGNOSTIC_DIR.mkdir(mode=0o700, exist_ok=True)
+        if not DIAGNOSTIC_DIR.is_dir() or DIAGNOSTIC_DIR.stat().st_uid not in {0, user.pw_uid} or DIAGNOSTIC_DIR.stat().st_mode & 0o777 != 0o700:
+            raise RuntimeError("Chrome network directory invalid")
+        os.chown(DIAGNOSTIC_DIR, user.pw_uid, user.pw_gid)
         if not NOVNC_DIR.is_dir() or any(shutil.which(name) is None for name in ("Xvfb", "xauth", "x11vnc", "websockify", "openbox", "systemd-run", "setpriv")):
             raise RuntimeError("Chrome viewer dependencies unavailable")
         if any(_port_open(port) for port in (VNC_PORT, WEB_PORT)):
@@ -235,6 +249,9 @@ def start(*, replace: bool = False, viewer_owner: str = "", viewer_expires_at: i
             "session": {"status": "recovery_running", "valid": False, "account_confirmed": False, "login_confirmed": False},
             "price": {"status": "not_checked"}, "login_confirmed": False,
         }
+        # A failed start must not leave the previous run's diagnostic looking
+        # like evidence for the new attempt.
+        _diagnostic_path().unlink(missing_ok=True)
         _write(payload)
         duration = max(30, int((deadline - _now()).total_seconds()))
         command = [
@@ -246,6 +263,13 @@ def start(*, replace: bool = False, viewer_owner: str = "", viewer_expires_at: i
             sys.executable, str(Path(__file__).resolve()), "prepare-supervise", "--run-id", run_id,
         ]
         try:
+            expire_unit = f"wbc-buyer-network-expire-{run_id.removeprefix(RUN_PREFIX)}"
+            subprocess.run([
+                "systemd-run", "--on-active=2h", f"--unit={expire_unit}",
+                "--property=RuntimeMaxSec=30s", "--property=NoNewPrivileges=yes",
+                "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", sys.executable,
+                str(Path(__file__).resolve()), "expire-diagnostic", "--run-id", run_id,
+            ], capture_output=True, timeout=15, check=True)
             subprocess.run(command, capture_output=True, timeout=15, check=True)
         except Exception:
             _write({**payload, "status": "error", "reason": "buyer_chrome_start_failed", "finished_at": _now().isoformat()})
@@ -288,7 +312,7 @@ def stop(*, requested_run_id: str | None = None) -> dict[str, Any]:
 
 
 class ChromePipe:
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, diagnostic_fd: int | None = None, existing_events: int = 0) -> None:
         if not directory.is_dir() or directory.stat().st_mode & 0o777 != 0o700:
             raise RuntimeError("Chrome pipe directory invalid")
         self.directory = directory
@@ -300,6 +324,9 @@ class ChromePipe:
         self._write_fd = -1
         self._buffer = bytearray()
         self._next_id = 1
+        self._diagnostic = NetworkDiagnostic(output_fd=diagnostic_fd, existing_events=existing_events) if diagnostic_fd is not None else None
+        self._diagnostic_fd = diagnostic_fd
+        self._network_sessions: dict[str, str] = {}
 
     def connect(self) -> None:
         deadline = time.monotonic() + 12
@@ -315,6 +342,8 @@ class ChromePipe:
         os.close(self._read_fd)
         if self._write_fd >= 0:
             os.close(self._write_fd)
+        if self._diagnostic_fd is not None:
+            os.close(self._diagnostic_fd)
         shutil.rmtree(self.directory)
 
     def call(self, method: str, params: Mapping[str, Any] | None = None, *, session: str = "", timeout: float = 6) -> dict[str, Any]:
@@ -336,18 +365,57 @@ class ChromePipe:
                 raw, _, tail = self._buffer.partition(b"\0")
                 self._buffer = bytearray(tail)
                 response = json.loads(raw)
+                if self._diagnostic is not None and isinstance(response, Mapping) and "method" in response:
+                    self._diagnostic.consume(response)
                 if response.get("id") == identifier:
                     if "error" in response:
                         raise RuntimeError("Chrome pipe method failed")
                     return dict(response.get("result") or {})
         raise TimeoutError("Chrome pipe did not respond")
 
+    def enable_network(self, targets: list[dict[str, Any]] | None = None) -> int:
+        """Arm the same pipe before showing the viewer or waiting for input."""
+        if self._diagnostic is None:
+            return 0
+        if targets is None:
+            targets = self.call("Target.getTargets").get("targetInfos") or []
+        live_ids = {str(target.get("targetId") or "") for target in targets if target.get("type") == "page"}
+        for target_id in list(self._network_sessions):
+            if target_id not in live_ids:
+                self._network_sessions.pop(target_id, None)
+        for target in targets[:30]:
+            target_id = str(target.get("targetId") or "")
+            if target.get("type") != "page" or not target_id or target_id in self._network_sessions:
+                continue
+            session = str(self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True}).get("sessionId") or "")
+            if not session:
+                continue
+            try:
+                self.call("Network.enable", {}, session=session)
+            except (OSError, TimeoutError, RuntimeError, ValueError):
+                self.call("Target.detachFromTarget", {"sessionId": session})
+                continue
+            self._network_sessions[target_id] = session
+            self._diagnostic.enable_session(session)
+        for target in targets[:30]:
+            target_id = str(target.get("targetId") or "")
+            parsed = urllib_parse.urlparse(str(target.get("url") or ""))
+            if target_id in self._network_sessions and parsed.hostname == "id.wb.ru":
+                self._diagnostic.mark_wbid_armed(target_id)
+        return len(self._network_sessions)
+
     def visible_surface(self) -> str:
         targets = self.call("Target.getTargets").get("targetInfos") or []
+        if getattr(self, "_diagnostic", None) is not None:
+            self.enable_network(targets)
         visible: list[str] = []
         for target in targets[:30]:
             parsed = urllib_parse.urlparse(str(target.get("url") or ""))
             if target.get("type") != "page" or parsed.hostname not in {"wildberries.ru", "www.wildberries.ru", "id.wb.ru"}:
+                continue
+            if getattr(self, "_diagnostic", None) is not None and parsed.hostname == "id.wb.ru" and str(target.get("targetId") or "") not in self._network_sessions:
+                # Never report a phone form ready for the one permitted submit
+                # until this particular WB ID target has Network enabled.
                 continue
             session = str(self.call("Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}).get("sessionId") or "")
             if not session:
@@ -411,7 +479,25 @@ def _stop_process(process: subprocess.Popen[Any] | None, *, grace: float = 5) ->
 
 
 def _launch_chrome(chrome: Path, env: Mapping[str, str], *, run_id: str, generation: int) -> tuple[subprocess.Popen[Any], ChromePipe]:
-    pipe = ChromePipe(Path(tempfile.mkdtemp(prefix=f".{run_id}-{generation}-", dir=runtime.STATE)))
+    # One private, bounded diagnostic for the current run only. The next run
+    # replaces it; there is no public endpoint or raw CDP event persistence.
+    if DIAGNOSTIC_DIR.stat().st_uid != os.geteuid() or DIAGNOSTIC_DIR.stat().st_mode & 0o777 != 0o700:
+        raise RuntimeError("Chrome network directory invalid")
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if generation == 1 else os.O_APPEND)
+    diagnostic_fd = os.open(_diagnostic_path(), flags, 0o600)
+    os.fchmod(diagnostic_fd, 0o600)
+    try:
+        if generation == 1:
+            os.write(diagnostic_fd, json.dumps({"event": "buyer_network_run", "run_id": run_id}, separators=(",", ":")).encode("ascii") + b"\n")
+        existing_events = 0
+        if generation > 1:
+            existing_events = min(MAX_EVENTS, os.read(diagnostic_fd, 32_768).count(b"\n"))
+        os.lseek(diagnostic_fd, 0, os.SEEK_END)
+        pipe = ChromePipe(Path(tempfile.mkdtemp(prefix=f".{run_id}-{generation}-", dir=runtime.STATE)),
+                          diagnostic_fd=diagnostic_fd, existing_events=existing_events)
+    except Exception:
+        os.close(diagnostic_fd)
+        raise
     # tempfile creates 0700; Chrome inherits only FD 3 and FD 4 through exec.
     command = [
         "/bin/bash", "-c",
@@ -422,6 +508,18 @@ def _launch_chrome(chrome: Path, env: Mapping[str, str], *, run_id: str, generat
     try:
         pipe.connect()
         pipe.call("Browser.getVersion", timeout=15)
+        # Direct /lk launch is unchanged. Network is armed before noVNC opens
+        # and well before the human can submit a phone number in WB ID.
+        for _ in range(30):
+            if pipe.enable_network():
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("Chrome network diagnostic unavailable")
+        if not pipe._network_sessions:
+            raise RuntimeError("Chrome network diagnostic unavailable")
         return process, pipe
     except Exception:
         try:
@@ -645,14 +743,41 @@ def prepare_supervise(run_id: str) -> None:
     os.execvpe("setpriv", command, {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PYTHONUNBUFFERED": "1"})
 
 
+def expire_diagnostic(run_id: str) -> None:
+    """One-shot timer removes only its own expired, private run metadata."""
+    if os.geteuid() != 0 or not re.fullmatch(r"buyer-recovery-chrome-\d{8}T\d{6}Z-[0-9a-f]{8}", run_id):
+        raise RuntimeError("diagnostic expiry identity invalid")
+    with _shared_start_lock():
+        path = _diagnostic_path()
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return
+        try:
+            info = os.fstat(descriptor)
+            if time.time() - info.st_mtime < 75 * 60:
+                return
+            first = os.read(descriptor, 256).split(b"\n", 1)[0]
+            header = json.loads(first)
+            if header != {"event": "buyer_network_run", "run_id": run_id}:
+                return
+            if path.stat(follow_symlinks=False).st_ino == info.st_ino:
+                path.unlink()
+        finally:
+            os.close(descriptor)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("supervise", "prepare-supervise"))
+    parser.add_argument("command", choices=("supervise", "prepare-supervise", "expire-diagnostic"))
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--chrome", default="")
     args = parser.parse_args()
     if args.command == "prepare-supervise":
         prepare_supervise(args.run_id)
+    if args.command == "expire-diagnostic":
+        expire_diagnostic(args.run_id)
+        return
     raise SystemExit(supervise(args.run_id, Path(args.chrome)))
 
 
