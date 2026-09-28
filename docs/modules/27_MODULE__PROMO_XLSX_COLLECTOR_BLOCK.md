@@ -80,7 +80,7 @@ update_note: "Обновлён под archive-first promo semantics: collector r
   - `campaign_rows.jsonl` is the minimal normalized replay archive: campaign identity/title/period, SKU, `Плановая цена для акции`, workbook fingerprint, row count/column signature via manifest, `collected_at`, `source_run_id` and trace metadata
   - unchanged campaign metadata must reuse existing workbook artifact instead of generating a new download
   - raw workbook retention may be reduced only after normalized rows + manifest exist and replay without raw workbook is proven by smoke; unknown/incomplete parse state is preserved, not deleted
-  - hosted refresh runs automatic light retention only after normalized archive and ready snapshot persistence; it protects the current run, archive metadata/fingerprints and normalized rows/manifests, and deletes only old successful debug traces or hash-proven duplicate workbook copies
+  - hosted refresh runs incremental light retention only after normalized archive and ready snapshot persistence; it protects the current, unknown and running runs plus all XLSX and canonical archive data, and deletes only old debug traces from successful or partial/blocked runs under the existing 3/14-day TTL
 - Canonical metadata fields:
   - `collected_at`
   - `trace_run_dir`
