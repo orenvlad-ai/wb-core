@@ -1,0 +1,11 @@
+[Unit]
+Description=WB Core hourly bounded Promo debug artifact GC
+
+[Timer]
+OnCalendar=*-*-* *:35:00
+AccuracySec=1m
+Persistent=false
+Unit=wb-core-promo-light-gc.service
+
+[Install]
+WantedBy=timers.target

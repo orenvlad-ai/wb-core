@@ -1,0 +1,9 @@
+[Unit]
+Description=WB Core bounded Promo debug artifact GC
+RequiresMountsFor=/opt/wb-core-runtime/state
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/promo_campaign_archive_light_gc_tick.py --runtime-dir /opt/wb-core-runtime/state
+TimeoutStartSec=60s
