@@ -2,7 +2,7 @@
 Description=WB Core Registry HTTP Runtime
 After=network.target
 Wants=network.target
-RequiresMountsFor=/opt/wb-core-runtime/state/generations
+RequiresMountsFor=/opt/wb-core-runtime/state/generations /opt/wb-core-runtime/state/backups/warehouse-recovery
 ConditionPathIsMountPoint=/opt/wb-core-runtime/state/generations
 
 [Service]
