@@ -444,6 +444,9 @@ def _plan_incremental_light_gc_batch(
 def _light_gc_run_files(run_dir: Path, *, deadline: float | None = None) -> tuple[list[Path], float]:
     files: list[Path] = []
     newest_mtime = 0.0
+    # Our own unlinks update directory mtimes. Collector writes create/update
+    # files (including run_summary.json when a run starts), so file mtimes
+    # retain the activity guard across repeated GC batches.
     for path in _iter_files(run_dir, deadline=deadline):
         try:
             file_stat = path.lstat()

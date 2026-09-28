@@ -108,6 +108,7 @@ def main() -> None:
         )
     _assert_light_gc_policy()
     _assert_incremental_backlog_and_lock()
+    _assert_same_run_multi_batch_and_producer_write()
     _assert_pending_batch_resume_and_drift()
 
 
@@ -286,6 +287,58 @@ def _assert_incremental_backlog_and_lock() -> None:
             protected_metadata, protected_workbook,
         )):
             raise AssertionError("bounded GC crossed protected status or file boundary")
+
+
+def _assert_same_run_multi_batch_and_producer_write() -> None:
+    with TemporaryDirectory(prefix="promo-light-gc-same-run-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        files = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial",
+            tuple(f"{index:04d}.png" for index in range(520)),
+        )
+        run_dir = files[0].parent.parent
+        metadata = run_dir / "metadata.json"
+        workbook = run_dir / "workbook.xlsx"
+        metadata.write_text("{}\n", encoding="utf-8")
+        workbook.write_bytes(b"retained")
+        old = time.time() - 20 * 86400
+        for path in (metadata, workbook):
+            os.utime(path, (old, old))
+        total_deleted = 0
+        for _ in range(12):
+            summary = run_promo_campaign_archive_light_gc(
+                runtime_dir=runtime_dir, max_files=75, max_runs=3,
+            )
+            total_deleted += summary["deleted_count"]
+            if total_deleted == len(files):
+                break
+        if total_deleted != len(files) or any(path.exists() for path in files):
+            raise AssertionError(f"GC did not finish old same-run debug in repeated batches: {total_deleted}")
+        if not metadata.is_file() or not workbook.is_file():
+            raise AssertionError("same-run multi-batch GC removed protected data")
+        if run_dir.stat().st_mtime < old:
+            raise AssertionError("fixture did not exercise GC-updated directory mtime")
+
+    with TemporaryDirectory(prefix="promo-light-gc-producer-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        first, second = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial",
+            ("first.har", "second.har"),
+        )
+        first_pass = run_promo_campaign_archive_light_gc(
+            runtime_dir=runtime_dir, max_files=1, max_runs=3,
+        )
+        if first_pass["deleted_count"] != 1 or first.exists():
+            raise AssertionError(f"producer fixture did not finish first batch: {first_pass}")
+        producer_file = second.parent / "new-producer.har"
+        producer_file.write_bytes(b"new activity")
+        second_pass = run_promo_campaign_archive_light_gc(
+            runtime_dir=runtime_dir, max_files=1, max_runs=3,
+        )
+        if second_pass["deleted_count"] or not second.exists() or not producer_file.exists():
+            raise AssertionError(f"new producer activity was hidden by GC cursor: {second_pass}")
 
 
 def _assert_pending_batch_resume_and_drift() -> None:
