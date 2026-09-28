@@ -42,11 +42,11 @@ def report_health(admission_dir:Path,state:str,reason:str='') -> None:
     os.replace(temporary,path)
 
 
-def heartbeat_while_busy(admission_dir:Path, stop:threading.Event) -> None:
+def heartbeat_while_busy(admission_dir:Path, stop:threading.Event, state:str='busy') -> None:
     # One guarded batch can take longer than the release probe's freshness
     # window. The live worker keeps its busy receipt fresh until it finishes.
     while not stop.wait(2):
-        report_health(admission_dir,'busy')
+        report_health(admission_dir,state)
 
 
 def ready_cycle(coordinator, batch_coordinator, daily) -> bool:
@@ -58,6 +58,13 @@ def ready_cycle(coordinator, batch_coordinator, daily) -> bool:
     if batches:batch_coordinator.tick()
     daily.reconcile_finished()
     return bool(jobs or batches or due and due.get('state') not in {'skipped','missed','no_targets'})
+
+
+def armed_cycle(coordinator, batch_coordinator, daily) -> None:
+    """Expose due slots while deployment is blocked; never consume work."""
+    coordinator.pending_jobs()
+    batch_coordinator.pending_batches()
+    daily.observe_deployment_blocked()
 
 
 def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2.0) -> None:
@@ -74,15 +81,22 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
         bootstrap_owner_username=os.environ.get('WB_CORE_WEB_AUTH_USERNAME','')
         coordinator=ManualCleanerCoordinator(cleaner,adapter,bootstrap_owner_username=bootstrap_owner_username)
         batch_coordinator=BatchCleanerCoordinator(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username)
-        daily=DailyCleanerScheduler(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username)
+        daily=DailyCleanerScheduler(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username,
+                                    deployment_check=deployment_ready)
         while True:
             if not deployment_ready():
                 try:
                     # The final deploy marker is still false. Prove that the
                     # exact initialized worker can read its durable queue,
                     # without consuming or executing any pending job.
-                    coordinator.pending_jobs()
-                    batch_coordinator.pending_batches()
+                    report_health(admission_dir,'armed')
+                    stop=threading.Event()
+                    heartbeat=threading.Thread(target=heartbeat_while_busy,args=(admission_dir,stop,'armed'),daemon=True)
+                    heartbeat.start()
+                    try:armed_cycle(coordinator,batch_coordinator,daily)
+                    finally:
+                        stop.set()
+                        heartbeat.join()
                     report_health(admission_dir,'armed')
                 except Exception as exc:
                     report_health(admission_dir,'storage_wait',type(exc).__name__)

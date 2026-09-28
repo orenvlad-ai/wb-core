@@ -96,7 +96,7 @@
     function kcBatchAdopt(job){if(!job||!job.batch_id)return;const changed=!kc.batch.job||kc.batch.job.batch_id!==job.batch_id;kc.batch.job=job;if(changed){kc.batch.startedAt=Date.parse(job.created_at||job.updated_at)||Date.now();kc.batch.expanded=null;kc.batch.page=0;kc.batch.details.clear();}kcBatchSave();kcBatchRender();kcBatchSchedule();}
     function kcBatchNumber(value){return Number.isInteger(value)&&value>=0?String(value):'—';}
     function kcBatchTarget(item){return (item.campaign_name||'Кампания '+item.advert_id)+' · '+item.advert_id+' / '+(item.product_title||'товар WB '+item.nm_id)+' · WB '+item.nm_id;}
-    function kcBatchStatus(state){return ({queued:'Ожидает',running:'Проверяем',attention_required:'Требуется уточнение',complete:'Выполнено',partial:'Частично',failed:'Ошибка',no_change:'Без изменений',skipped:'Пропущено'})[state]||'Статус уточняется';}
+    function kcBatchStatus(state){return ({deployment_blocked:'Выпуск не завершён',start_wait:'Ожидает повторной попытки',not_started:'Не запущено',pending:'Ожидает',catalog_wait:'Ожидаем каталог WB',missed:'Пропущено',no_targets:'Нет доступных пар',queued:'Ожидает',running:'Проверяем',attention_required:'Требуется уточнение',complete:'Выполнено',partial:'Частично',failed:'Ошибка',no_change:'Без изменений',skipped:'Пропущено'})[state]||'Статус уточняется';}
     function kcBatchErrorText(code){return code==='catalog_timeout'?'WB не ответил вовремя. Повторяем чтение списка; выбранные пары сохранены.':code==='campaign_catalog_unavailable'?'Не удалось загрузить список кампаний. Повторяем чтение.':kcReason(code);}
     function kcBatchCanStart(){const settings=kc.summary&&kc.summary.settings;return kcEdit()&&!!(settings&&settings.baseline_ready&&!settings.enabled&&kc.summary.registry_ready!==false)&&kcManualWorkerReady()&&!kcManualBlocksNew()&&!kcBatchBusy()&&!kc.batch.submitting&&!kc.batch.loading&&!kc.batch.error;}
     function kcBatchSelectable(item,data){return !!(item&&item.payment_type==='cpm'&&item.eligible&&data.categories?.[item.status]?.selectable);}
@@ -191,9 +191,11 @@
           const body=kcMake('tbody','');
           for(const item of result.items){
             const row=kcMake('tr','');
-            const title=kcMake('td','',item.local_date+' · '+kcBatchStatus(item.state));
+            const status=item.state==='deployment_blocked'&&item.reason?.startsWith('Ожидает повторной')?'Ожидает повторной попытки':kcBatchStatus(item.state);
+            const title=kcMake('td','',item.local_date+' · '+status);
             title.append(kcMake('div','kc-note',kcDate(item.due_at)));
             if(item.reason)title.append(kcMake('div','kc-note',item.reason));
+            if(item.details?.next_retry_at)title.append(kcMake('div','kc-note','Следующая попытка: '+kcDate(item.details.next_retry_at)));
             row.append(title,kcMake('td','',number(item.checked_campaigns)+' / '+number(item.discovered_campaigns)),
               kcMake('td','',number(item.checked_keys)),kcMake('td','',number(item.excluded)),kcMake('td','',number(item.returned)));
             const action=kcMake('td',''),expand=kcButton('Раскрыть',()=>{
@@ -208,7 +210,7 @@
           }
           table.append(body);wrap.append(table);list.append(wrap);
         }
-        needsRefresh=result.items.some(item=>['pending','catalog_wait','queued','running','attention_required'].includes(item.state));
+        needsRefresh=result.items.some(item=>['deployment_blocked','start_wait','pending','catalog_wait','queued','running','attention_required'].includes(item.state));
       }catch(error){kcText('scheduled-state',error.message||'Не удалось загрузить расписание. Повторяем чтение.');}
       finally{if(needsRefresh&&kcVisible()&&kcMode==='scheduled')kcScheduledTimer=setTimeout(kcScheduledLoad,10000);}
     }

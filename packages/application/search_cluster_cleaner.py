@@ -432,7 +432,7 @@ class KeywordCleaner:
         return self._command(principal,'manual-clean',payload,command)
 
     def start_manual_batch(self,payload:Mapping,principal:Principal,*,snapshot:list[dict]|None=None,
-                           daily_occurrence:tuple[str,str]|None=None) -> dict:
+                           daily_occurrence:tuple[str,str]|None=None,daily_deployment_check=None) -> dict:
         """Freeze only caller-selected exact pairs admitted by one fresh catalog."""
         def command(c,actor):
             targets=payload.get('targets');categories=payload.get('selected_categories')
@@ -450,15 +450,18 @@ class KeywordCleaner:
             s=self._settings(c)
             if daily_occurrence is not None:
                 sid,local_date=daily_occurrence
-                schedule=c.execute('SELECT enabled,owner,actor_authority,generation FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',
+                schedule=c.execute('SELECT enabled,owner,actor_authority,generation,created_at FROM cleaner_daily_schedules WHERE account=? AND schedule_id=?',
                                    (self.key,sid)).fetchone()
-                occurrence=c.execute('SELECT state,batch_id FROM cleaner_daily_occurrences WHERE account=? AND schedule_id=? AND local_date=?',
+                occurrence=c.execute('SELECT state,batch_id,details FROM cleaner_daily_occurrences WHERE account=? AND schedule_id=? AND local_date=?',
                                      (self.key,sid,local_date)).fetchone()
                 if (not schedule or not schedule['enabled'] or schedule['owner']!=actor
                         or schedule['actor_authority']!=('bootstrap_operator' if principal.site_owner else 'configured_owner')
                         or schedule['generation']!=s['generation'] or not occurrence
+                        or json.loads(occurrence['details']).get('slot_created_at')!=schedule['created_at']
                         or occurrence['state'] not in {'pending','catalog_wait'} or occurrence['batch_id']!=payload.get('request_id')):
                     raise CleanerError('schedule_changed','Расписание изменилось до запуска',409)
+                if daily_deployment_check is not None and not daily_deployment_check():
+                    raise CleanerError('deployment_blocked','Выпуск сервиса не завершён',503)
             if s['enabled'] or not s['baseline_ready']:
                 raise CleanerError('manual_not_ready','Ручная чистка сейчас недоступна',409)
             if snapshot is None:
