@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -889,6 +890,177 @@ class WarehouseRecoveryPolicySmoke(unittest.TestCase):
                         }
                     ],
                 )
+
+    def test_activated_extra_floor_is_native_for_status_projection_and_t2(self) -> None:
+        self.registry.ensure_schema()
+        self.registry._create_operation(  # noqa: SLF001 - exact reservation boundary
+            operation_id="extra-floor",
+            selection=RecoverySelection(
+                mutation_kind="hourly_warehouse_sync",
+                closure_kind="warehouse_domain",
+                tier=RecoveryTier.T2,
+                would_change=True,
+                migration_id="",
+                reason="smoke",
+            ),
+            plan_fingerprint="sha256:extra-floor",
+            scope={"test": "extra-floor"},
+            planned_bytes=101,
+            source_digest="",
+            non_target_digest="",
+            rollback_expires_at="2026-07-27T00:00:00Z",
+        )
+        self.registry.checkpoint_root.mkdir(parents=True)
+        floor = 8 * 1024**3
+        with patch.object(self.registry, "_assert_recovery_placement", return_value=floor), patch(
+            "packages.application.warehouse_recovery_policy.shutil.disk_usage",
+            return_value=SimpleNamespace(free=floor + 100),
+        ):
+            with self.assertRaisesRegex(RecoveryPolicyError, "capacity hard stop"):
+                self.registry._reserve_capacity(  # noqa: SLF001
+                    operation_id="extra-floor", required_bytes=101,
+                    target_root=self.registry.checkpoint_root,
+                )
+            reserved = self.registry._reserve_capacity(  # noqa: SLF001
+                operation_id="extra-floor", required_bytes=100,
+                target_root=self.registry.checkpoint_root,
+            )
+            self.assertEqual(reserved["operational_reserve_bytes"], floor)
+        with patch.object(self.registry, "_assert_recovery_placement", return_value=floor), patch(
+            "packages.application.warehouse_recovery_policy.shutil.disk_usage",
+            return_value=SimpleNamespace(free=floor - 1),
+        ):
+            status = self.registry.capacity_status()
+            self.assertEqual(status["hard_stop_watermark_bytes"], floor)
+            self.assertTrue(status["t2_hard_stop"])
+            projection = self.registry._retention_projection(  # noqa: SLF001
+                retained_t2=[], candidate_ids=set(),
+            )
+            self.assertTrue(projection["hard_stop"])
+            with self.assertRaisesRegex(RecoveryPolicyError, "post-write reserve"):
+                self.registry._assert_post_write_reserve(  # noqa: SLF001
+                    self.registry.checkpoint_root
+                )
+
+    def test_legacy_t2_floor_remains_four_gib(self) -> None:
+        floor = 4 * 1024**3
+        for free, stopped in ((floor - 1, True), (floor, False)):
+            with patch(
+                "packages.application.warehouse_recovery_policy.shutil.disk_usage",
+                return_value=SimpleNamespace(free=free),
+            ):
+                status = self.registry.capacity_status()
+            self.assertEqual(status["hard_stop_watermark_bytes"], floor)
+            self.assertIs(status["t2_hard_stop"], stopped)
+
+    def test_activated_extra_floor_applies_to_other_writer_on_same_device(self) -> None:
+        self.registry.ensure_schema()
+        self.registry.recovery_root.mkdir(parents=True)
+        self.registry._create_operation(  # noqa: SLF001 - exact device boundary
+            operation_id="extra-t1",
+            selection=RecoverySelection(
+                mutation_kind="supplier_cost_queue_replay",
+                closure_kind="shipment",
+                tier=RecoveryTier.T1,
+                would_change=True,
+                migration_id="",
+                reason="smoke",
+            ),
+            plan_fingerprint="sha256:extra-t1",
+            scope={"test": "extra-t1"},
+            planned_bytes=1,
+            source_digest="",
+            non_target_digest="",
+            rollback_expires_at="2026-07-27T00:00:00Z",
+        )
+        target = self.runtime_dir / "same-extra-device-t1"
+        floor = 8 * 1024**3
+        with patch.object(self.registry, "_assert_recovery_placement", return_value=floor), patch(
+            "packages.application.warehouse_recovery_policy.shutil.disk_usage",
+            return_value=SimpleNamespace(free=floor + 1),
+        ):
+            reservation = self.registry._reserve_capacity(  # noqa: SLF001
+                operation_id="extra-t1", required_bytes=1, target_root=target,
+            )
+            self.assertEqual(reservation["operational_reserve_bytes"], floor)
+        with patch.object(self.registry, "_assert_recovery_placement", return_value=floor), patch(
+            "packages.application.warehouse_recovery_policy.shutil.disk_usage",
+            return_value=SimpleNamespace(free=floor - 1),
+        ):
+            with self.assertRaisesRegex(RecoveryPolicyError, "post-write reserve"):
+                self.registry._assert_post_write_reserve(target)  # noqa: SLF001
+
+    def test_resumed_reservation_cannot_keep_old_four_gib_floor(self) -> None:
+        self.registry.ensure_schema()
+        self.registry._create_operation(  # noqa: SLF001 - migration resume guard
+            operation_id="placement-drift",
+            selection=RecoverySelection(
+                mutation_kind="supplier_cost_queue_replay",
+                closure_kind="shipment",
+                tier=RecoveryTier.T1,
+                would_change=True,
+                migration_id="",
+                reason="smoke",
+            ),
+            plan_fingerprint="sha256:placement-drift",
+            scope={"test": "placement-drift"},
+            planned_bytes=1,
+            source_digest="",
+            non_target_digest="",
+            rollback_expires_at="2026-07-27T00:00:00Z",
+        )
+        self.registry.checkpoint_root.mkdir(parents=True)
+        with patch(
+            "packages.application.warehouse_recovery_policy.shutil.disk_usage",
+            return_value=SimpleNamespace(free=9 * 1024**3),
+        ):
+            old = self.registry._reserve_capacity(  # noqa: SLF001
+                operation_id="placement-drift", required_bytes=1,
+                target_root=self.registry.checkpoint_root,
+            )
+            self.assertEqual(old["operational_reserve_bytes"], 4 * 1024**3)
+            with patch.object(
+                self.registry, "_assert_recovery_placement", return_value=8 * 1024**3
+            ):
+                with self.assertRaisesRegex(RecoveryPolicyError, "reserve drift"):
+                    self.registry._reserve_capacity(  # noqa: SLF001
+                        operation_id="placement-drift", required_bytes=1,
+                        target_root=self.registry.checkpoint_root,
+                    )
+
+    def test_checkpoint_open_rechecks_activated_mount(self) -> None:
+        checkpoint = self.registry.checkpoint_root / "guarded.sqlite3"
+        temporary = checkpoint.with_name(checkpoint.name + ".tmp")
+        with patch.object(
+            self.registry, "_assert_recovery_placement",
+            side_effect=RecoveryPolicyError("bind disappeared"),
+        ):
+            with self.assertRaisesRegex(RecoveryPolicyError, "bind disappeared"):
+                self.registry._write_domain_checkpoint(  # noqa: SLF001
+                    temporary=temporary, final=checkpoint, table_names=[],
+                    operation_id="guarded", plan_fingerprint="sha256:guarded",
+                    source_digest="", source_watermarks={}, schema_revision="",
+                )
+        self.assertFalse(temporary.exists())
+
+    def test_checkpoint_fsync_rechecks_activated_mount_before_receipt(self) -> None:
+        self.registry.checkpoint_root.mkdir(parents=True)
+        checkpoint = self.registry.checkpoint_root / "fsync-guarded.sqlite3"
+        temporary = checkpoint.with_name(checkpoint.name + ".tmp")
+        with patch.object(
+            self.registry, "_assert_recovery_placement",
+            side_effect=[4 * 1024**3, RecoveryPolicyError("bind disappeared after fsync")],
+        ) as guard:
+            with self.assertRaisesRegex(RecoveryPolicyError, "after fsync"):
+                self.registry._write_domain_checkpoint(  # noqa: SLF001
+                    temporary=temporary, final=checkpoint,
+                    table_names=["bounded_rows"],
+                    operation_id="fsync-guarded",
+                    plan_fingerprint="sha256:fsync-guarded",
+                    source_digest="", source_watermarks={}, schema_revision="",
+                )
+        self.assertEqual(guard.call_count, 2)
+        self.assertTrue(checkpoint.is_file())
 
     def test_orphan_scanner_covers_all_owned_file_families(self) -> None:
         root = self.runtime_dir / "warehouse-recovery" / "domain-checkpoints"
