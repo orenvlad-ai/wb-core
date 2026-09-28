@@ -25,6 +25,7 @@ from apps.promo_campaign_archive_gc import (  # noqa: E402
     build_gc_report,
     run_promo_campaign_archive_light_gc,
 )
+from apps import promo_campaign_archive_gc as gc_module  # noqa: E402
 from apps.promo_campaign_archive_integrity_smoke import _write_promo_fixture  # noqa: E402
 from packages.application.promo_campaign_archive import (  # noqa: E402
     load_promo_campaign_archive,
@@ -109,6 +110,7 @@ def main() -> None:
     _assert_light_gc_policy()
     _assert_incremental_backlog_and_lock()
     _assert_same_run_multi_batch_and_producer_write()
+    _assert_run_scan_failure_is_fail_closed_and_nonblocking()
     _assert_pending_batch_resume_and_drift()
 
 
@@ -339,6 +341,103 @@ def _assert_same_run_multi_batch_and_producer_write() -> None:
         )
         if second_pass["deleted_count"] or not second.exists() or not producer_file.exists():
             raise AssertionError(f"new producer activity was hidden by GC cursor: {second_pass}")
+
+    with TemporaryDirectory(prefix="promo-light-gc-inflight-producer-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        first, second = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial",
+            ("first.har", "second.har"),
+        )
+        summary_path = first.parent.parent / "run_summary.json"
+        original_fsync = gc_module._fsync_directory
+        changed = False
+
+        def producer_after_first_unlink(path: Path) -> None:
+            nonlocal changed
+            original_fsync(path)
+            if path == first.parent and not changed:
+                summary_path.write_text('{"status":"partial"}\n', encoding="utf-8")
+                changed = True
+
+        try:
+            gc_module._fsync_directory = producer_after_first_unlink
+            result = run_promo_campaign_archive_light_gc(
+                runtime_dir=runtime_dir, max_files=2, max_runs=3,
+            )
+        finally:
+            gc_module._fsync_directory = original_fsync
+        if (
+            not changed or result["deleted_count"] != 1
+            or first.exists() or not second.exists()
+            or "candidate_run_summary_changed" not in result["errors"]
+        ):
+            raise AssertionError(f"in-flight collector summary write was not detected: {result}")
+
+
+def _assert_run_scan_failure_is_fail_closed_and_nonblocking() -> None:
+    with TemporaryDirectory(prefix="promo-light-gc-scan-error-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        unreadable = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial", ("unreadable.har",),
+        )[0]
+        healthy = _old_run(
+            runtime_dir, "2026-08-002__partial", "partial", ("healthy.har",),
+        )[0]
+        original_lstat = Path.lstat
+
+        def failing_lstat(path: Path):
+            if path == unreadable:
+                raise PermissionError("fixture unreadable file")
+            return original_lstat(path)
+
+        try:
+            Path.lstat = failing_lstat
+            summary = run_promo_campaign_archive_light_gc(
+                runtime_dir=runtime_dir, max_runs=5,
+            )
+        finally:
+            Path.lstat = original_lstat
+        if (
+            summary["status"] != "warning"
+            or summary["skip_reasons"].get("run_scan_failed") != 1
+            or not unreadable.exists()
+            or healthy.exists()
+        ):
+            raise AssertionError(f"unreadable age proof was not fail-closed: {summary}")
+
+    with TemporaryDirectory(prefix="promo-light-gc-scan-timeout-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        oversized = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial", ("oversized.har",),
+        )[0]
+        healthy = _old_run(
+            runtime_dir, "2026-08-002__partial", "partial", ("healthy.har",),
+        )[0]
+        original_scan = gc_module._light_gc_run_files
+
+        def timed_out_scan(run_dir: Path, *, deadline: float | None = None):
+            if run_dir == oversized.parent.parent:
+                raise TimeoutError("fixture large run scan exceeded budget")
+            return original_scan(run_dir, deadline=deadline)
+
+        try:
+            gc_module._light_gc_run_files = timed_out_scan
+            first = run_promo_campaign_archive_light_gc(runtime_dir=runtime_dir, max_runs=5)
+            second = run_promo_campaign_archive_light_gc(runtime_dir=runtime_dir, max_runs=5)
+        finally:
+            gc_module._light_gc_run_files = original_scan
+        if (
+            first["status"] != "warning"
+            or first["skip_reasons"].get("run_scan_timeout") != 1
+            or first["deleted_count"]
+            or not oversized.exists()
+            or second["deleted_count"] != 1
+            or healthy.exists()
+        ):
+            raise AssertionError(f"timed-out run starved later run or hid warning: {first}, {second}")
 
 
 def _assert_pending_batch_resume_and_drift() -> None:

@@ -276,9 +276,11 @@ def run_promo_campaign_archive_light_gc(
             if not batch["plan"]:
                 state["cursor"] = batch["cursor"]
                 _write_private_json(state_path, state)
+                scan_warning = _light_gc_scan_warning(batch)
                 return _incremental_light_gc_summary(
-                    policy_name=policy_name, started=started, status="success",
-                    warning="", batch=batch,
+                    policy_name=policy_name, started=started,
+                    status="warning" if scan_warning else "success",
+                    warning=scan_warning, batch=batch,
                 )
             state["pending"] = batch
             _write_private_json(state_path, state)
@@ -310,12 +312,16 @@ def run_promo_campaign_archive_light_gc(
         return _incremental_light_gc_summary(
             policy_name=policy_name,
             started=started,
-            status="success" if result["completed"] and not result["errors"] else "warning",
+            status=(
+                "success"
+                if result["completed"] and not result["errors"] and not _light_gc_scan_warning(batch)
+                else "warning"
+            ),
             warning=(
                 "time_budget_exhausted_with_pending_batch"
                 if not result["completed"] else
                 "one_or_more_candidates_skipped"
-                if result["errors"] else ""
+                if result["errors"] else _light_gc_scan_warning(batch)
             ),
             batch=batch, result=result, resumed=resumed,
         )
@@ -344,6 +350,13 @@ def _new_light_gc_state(runtime_dir: Path) -> dict[str, Any]:
 
 def _light_gc_receipt_path(gc_dir: Path, sequence: int) -> Path:
     return gc_dir / f"light-gc-receipt-{sequence:08d}.json"
+
+
+def _light_gc_scan_warning(batch: dict[str, Any]) -> str:
+    reasons = batch.get("skip_reasons") or {}
+    if any(reasons.get(key) for key in ("run_scan_timeout", "run_scan_failed", "candidate_hash_timeout")):
+        return "one_or_more_runs_not_scanned"
+    return ""
 
 
 def _load_light_gc_state(path: Path, runtime_dir: Path) -> dict[str, Any]:
@@ -406,7 +419,13 @@ def _plan_incremental_light_gc_batch(
         try:
             files, newest_mtime = _light_gc_run_files(run_dir, deadline=deadline)
         except TimeoutError:
+            skips["run_scan_timeout"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
             return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
+        except OSError:
+            skips["run_scan_failed"] += 1
+            next_cursor = {"run": run_dir.name, "path": ""}
+            continue
         if (time.time() - newest_mtime) / 86400 < ttl:
             skips["ttl_not_reached"] += 1
             next_cursor = {"run": run_dir.name, "path": ""}
@@ -430,6 +449,8 @@ def _plan_incremental_light_gc_batch(
             try:
                 identity = _light_gc_file_identity(path, run_dir, deadline=deadline)
             except TimeoutError:
+                skips["candidate_hash_timeout"] += 1
+                next_cursor = {"run": run_dir.name, "path": ""}
                 return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
             if identity is None:
                 skips["unsafe_file_skip"] += 1
@@ -454,13 +475,20 @@ def _light_gc_run_files(run_dir: Path, *, deadline: float | None = None) -> tupl
     # Our own unlinks update directory mtimes. Collector writes create/update
     # files (including run_summary.json when a run starts), so file mtimes
     # retain the activity guard across repeated GC batches.
-    for path in _iter_files(run_dir, deadline=deadline):
-        try:
+    def fail_on_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, dirs, names in os.walk(run_dir, onerror=fail_on_walk_error):
+        _ensure_before_deadline(deadline)
+        for dirname in dirs:
+            if stat.S_ISLNK((Path(current) / dirname).lstat().st_mode):
+                raise OSError("promo GC run contains a symlinked subdirectory")
+        for name in names:
+            _ensure_before_deadline(deadline)
+            path = Path(current) / name
             file_stat = path.lstat()
-        except OSError:
-            continue
-        files.append(path)
-        newest_mtime = max(newest_mtime, file_stat.st_mtime)
+            files.append(path)
+            newest_mtime = max(newest_mtime, file_stat.st_mtime)
     return sorted(files, key=lambda path: str(path.relative_to(run_dir))), newest_mtime
 
 
@@ -515,7 +543,9 @@ def _apply_incremental_light_gc_batch(
         "deleted_count": 0, "freed_bytes": 0, "already_missing_count": 0,
         "drift_count": 0, "errors": [], "completed": True,
     }
-    run_age_ok: dict[str, bool] = {}
+    # Scan each run once per batch, then guard every unlink against a collector
+    # restart: PromoXlsxCollectorBlock writes run_summary.json before work.
+    run_age_ok: dict[str, tuple[bool, int, int]] = {}
     for item in batch["plan"]:
         if time.perf_counter() >= deadline:
             result["completed"] = False
@@ -538,11 +568,31 @@ def _apply_incremental_light_gc_batch(
         if run_dir.name not in run_age_ok:
             try:
                 _files, newest_mtime = _light_gc_run_files(run_dir, deadline=deadline)
-            except TimeoutError:
-                result["completed"] = False
+                summary_stat = (run_dir / "run_summary.json").lstat()
+            except (TimeoutError, OSError) as exc:
+                result["drift_count"] += 1
+                result["errors"].append(f"candidate_run_scan_failed: {type(exc).__name__}")
                 break
-            run_age_ok[run_dir.name] = (time.time() - newest_mtime) / 86400 >= ttl
-        if not run_age_ok[run_dir.name]:
+            newest_mtime = max(newest_mtime, summary_stat.st_mtime)
+            run_age_ok[run_dir.name] = (
+                (time.time() - newest_mtime) / 86400 >= ttl,
+                summary_stat.st_ino,
+                summary_stat.st_mtime_ns,
+            )
+        age_ok, summary_inode, summary_mtime_ns = run_age_ok[run_dir.name]
+        try:
+            current_summary_stat = (run_dir / "run_summary.json").lstat()
+        except OSError:
+            current_summary_stat = None
+        if (
+            current_summary_stat is None
+            or current_summary_stat.st_ino != summary_inode
+            or current_summary_stat.st_mtime_ns != summary_mtime_ns
+        ):
+            result["drift_count"] += 1
+            result["errors"].append("candidate_run_summary_changed")
+            continue
+        if not age_ok:
             result["drift_count"] += 1
             result["errors"].append("candidate_run_age_changed")
             continue
@@ -552,7 +602,8 @@ def _apply_incremental_light_gc_batch(
         try:
             identity = _light_gc_file_identity(path, run_dir, deadline=deadline)
         except TimeoutError:
-            result["completed"] = False
+            result["drift_count"] += 1
+            result["errors"].append("candidate_hash_timeout")
             break
         if identity is None or any(identity[key] != item[key] for key in (
             "size", "device", "inode", "mtime_ns", "sha256"
