@@ -11,13 +11,13 @@ already occupied by protected Proxy V4/buyout evidence; do not format it.
 | Item | Contract |
 | --- | --- |
 | Existing backup | `/opt/wb-core-runtime/state/backups` on `/dev/sdb1`, UUID `bd3d563f-e5ea-4e4a-a76a-be45e7f94ec0` |
-| Extra filesystem | `/mnt/wb-core-extra100` on `/dev/sdd`, ext4 UUID `9fcfe929-827e-4f81-b2ef-186fd794e671` |
+| Extra filesystem | `/mnt/wb-core-extra100` via stable `/dev/disk/by-uuid/…` (currently `/dev/sdd`), ext4 UUID `9fcfe929-827e-4f81-b2ef-186fd794e671` |
 | Protected existing archive | `/mnt/wb-core-extra100/proxy-v4-pr948` and `/opt/wb-core-runtime/state/backups/proxy-v4-pr948`; both must remain read-only from their served paths |
 | Moved family | Entire `/opt/wb-core-runtime/state/backups/warehouse-recovery`, including retained, failed, held and superseded artifacts; keep this **literal path** after a bind from `/mnt/wb-core-extra100/warehouse-recovery` |
 | Activation markers | Exact JSON payload from `warehouse_recovery_placement.placement_state` in both `/opt/wb-core-runtime/state/backups/.warehouse-recovery-extra100-active.json` (outside the bind) and `warehouse-recovery/.warehouse-recovery-extra100-active.json` (inside; write it to old underlay and new copy before binding) |
 
 The storage policy carries an inactive fourth role until both markers exist.
-After activation, status/admission require `/dev/sdd` UUID and rw mount flags;
+After activation, status/admission require the pinned UUID and rw mount flags;
 the native T2 writer checks the bind identity **before** opening a recovery
 transaction or creating a directory. The old underlay marker remains visible
 if the bind disappears, preventing fallback to `/dev/sdb1`. The old source is

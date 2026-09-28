@@ -154,7 +154,7 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     if (
         str(warehouse.get("path") or "") != str(placement["artifact_root"])
         or str(warehouse.get("filesystem_uuid") or "") != str(placement["filesystem_uuid"])
-        or str(warehouse.get("source") or "") != "/dev/sdd"
+        or str(warehouse.get("source") or "") != f"/dev/disk/by-uuid/{placement['filesystem_uuid']}"
     ):
         raise RootStoragePolicyError("warehouse backup role placement drift")
     if placement["activated"]:
@@ -776,7 +776,12 @@ def _collect_storage_registry_status(
         }
         identity_errors: list[str] = []
         for key in ("source", "filesystem_uuid", "filesystem_type"):
-            if str(observed.get(key) or "") != str(contract.get(key) or ""):
+            matches = (
+                _storage_source_matches(str(observed.get(key) or ""), str(contract.get(key) or ""))
+                if key == "source"
+                else str(observed.get(key) or "") == str(contract.get(key) or "")
+            )
+            if not matches:
                 identity_errors.append(key)
         missing_options = sorted(required_options - observed_options)
         if missing_options:
@@ -1103,6 +1108,26 @@ def _assert_descendant(path: Path, root: Path) -> None:
         )
 
 
+def _storage_source_matches(observed: str, expected: str) -> bool:
+    if observed == expected:
+        return True
+    # UUID-backed mounts may be presented as their current kernel device name.
+    # Keep legacy exact-source contracts; only the explicit UUID source accepts
+    # an alias, and only when both names resolve to the same block device.
+    if not expected.startswith("/dev/disk/by-uuid/") or not observed.startswith("/dev/"):
+        return False
+    try:
+        actual = os.stat(observed)
+        wanted = os.stat(expected)
+    except OSError:
+        return False
+    return (
+        stat.S_ISBLK(actual.st_mode)
+        and stat.S_ISBLK(wanted.st_mode)
+        and actual.st_rdev == wanted.st_rdev
+    )
+
+
 def _assert_filesystem_identity(
     path: Path,
     *,
@@ -1124,7 +1149,10 @@ def _assert_filesystem_identity(
     mismatches = {
         key: {"expected": value, "observed": observed.get(key)}
         for key, value in expected.items()
-        if str(observed.get(key) or "") != value
+        if not (
+            _storage_source_matches(str(observed.get(key) or ""), value)
+            if key == "source" else str(observed.get(key) or "") == value
+        )
     }
     missing_options = sorted(required_options - observed_options)
     if mismatches or missing_options or "ro" in observed_options:

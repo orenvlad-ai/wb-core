@@ -6,7 +6,9 @@ from __future__ import annotations
 import sys
 from copy import deepcopy
 import json
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -110,6 +112,15 @@ def _warehouse_placement_transition(loaded: dict) -> None:
         )["destination_role"] == "backup"
         assert policy.storage_destination_root("warehouse_recovery_policy", policy=active) == recovery.resolve()
         role_contract = active["storage_registry"]["filesystems"]["warehouse_backup"]
+        block = SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=2096)
+        with patch.object(policy.os, "stat", return_value=block):
+            assert policy._storage_source_matches("/dev/sdd", role_contract["source"])
+            assert policy._storage_source_matches("/dev/sde", role_contract["source"])
+            assert not policy._storage_source_matches("/dev/sdc1", "/dev/sdb1")
+        with patch.object(policy.os, "stat", side_effect=[block, SimpleNamespace(st_mode=stat.S_IFBLK, st_rdev=2097)]):
+            assert not policy._storage_source_matches("/dev/sdd", role_contract["source"])
+        with patch.object(policy.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFREG, st_rdev=2096)):
+            assert not policy._storage_source_matches("/dev/sdd", role_contract["source"])
         observed = {
             **role_contract,
             "path": str(recovery),

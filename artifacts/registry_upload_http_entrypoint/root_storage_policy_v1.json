@@ -58,7 +58,7 @@
       "warehouse_backup": {
         "active": false,
         "path": "/opt/wb-core-runtime/state/backups/warehouse-recovery",
-        "source": "/dev/sdd",
+        "source": "/dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671",
         "filesystem_uuid": "9fcfe929-827e-4f81-b2ef-186fd794e671",
         "filesystem_type": "ext4",
         "required_mount_options": ["rw", "noatime", "nodev", "nosuid", "noexec"],
