@@ -28,7 +28,13 @@ from packages.business_time import (
     CANONICAL_BUSINESS_TIMEZONE_NAME,
 )
 from packages.contracts.finance_liquidity_cash import FINANCE_CASH_SCHEMA_VERSION
-from packages.application.finance_liquidity_directories import SEED_ACCOUNTS, install_v3_extension, seed_directories
+from packages.application.finance_liquidity_directories import (
+    SEED_ACCOUNTS,
+    category_group_extension_state,
+    install_category_group_extension,
+    install_v3_extension,
+    seed_directories,
+)
 
 
 class FinanceCashError(ValueError):
@@ -140,6 +146,7 @@ def bootstrap_finance_cash_store(path: Path) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
         install_v3_extension(conn, _now())
+        install_category_group_extension(conn, _now())
         conn.execute(
             "INSERT INTO finance_liquidity_schema_meta(singleton, schema_version, created_at) VALUES(1, ?, ?)",
             (FINANCE_CASH_SCHEMA_VERSION, _now()),
@@ -176,9 +183,52 @@ def migrate_finance_cash_store_v2(path: Path, backup_path: Path) -> None:
         if current is None or current[0] != 2:
             raise FinanceCashError("invalid_migration_source", "Source changed before migration", 409)
         install_v3_extension(conn, _now(), capture_legacy_snapshots=True)
+        install_category_group_extension(conn, _now())
         conn.execute("UPDATE finance_liquidity_schema_meta SET schema_version=3 WHERE singleton=1")
         if conn.execute("PRAGMA foreign_key_check").fetchone():
             raise FinanceCashError("invalid_migration_result", "Migration has foreign-key errors", 500)
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def migrate_finance_cash_store_category_groups(path: Path, backup_path: Path) -> None:
+    """Explicit additive v3 extension with a verified backup and atomic marker."""
+    source, backup = Path(path), Path(backup_path)
+    if not source.is_file() or source.is_symlink() or source.resolve() == backup.resolve():
+        raise FinanceCashError("invalid_migration_target", "Exact source and separate backup are required", 409)
+    conn = sqlite3.connect(f"file:{source.resolve()}?mode=rw", uri=True, isolation_level=None, timeout=5)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        version = conn.execute("SELECT schema_version FROM finance_liquidity_schema_meta WHERE singleton=1").fetchone()
+        if version is None or version[0] != 3 or conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise FinanceCashError("invalid_migration_source", "Valid schema v3 store required", 409)
+        try:
+            if category_group_extension_state(conn):
+                return  # An already complete marker makes repeat invocation read-only.
+        except ValueError as exc:
+            raise FinanceCashError("finance_schema_unavailable", str(exc), 503) from exc
+        if backup.exists() or backup.is_symlink():
+            raise FinanceCashError("invalid_migration_target", "Backup path must be absent", 409)
+        data_version = conn.execute("PRAGMA data_version").fetchone()[0]
+        descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        with sqlite3.connect(backup) as backup_conn:
+            conn.backup(backup_conn)
+            if backup_conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or backup_conn.execute("PRAGMA foreign_key_check").fetchone():
+                raise FinanceCashError("invalid_migration_backup", "Backup validation failed", 500)
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("PRAGMA data_version").fetchone()[0] != data_version:
+            raise FinanceCashError("migration_source_changed", "Source changed during backup", 409)
+        if category_group_extension_state(conn):
+            raise FinanceCashError("migration_source_changed", "Extension appeared during backup", 409)
+        install_category_group_extension(conn, _now())
+        if not category_group_extension_state(conn) or conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok" or conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise FinanceCashError("invalid_migration_result", "Category group extension validation failed", 500)
         conn.commit()
     except Exception:
         if conn.in_transaction:
@@ -218,6 +268,12 @@ class FinanceCashService:
                 raise FinanceCashError(
                     "finance_schema_unavailable", "Finance schema is unavailable", 503
                 )
+            try:
+                category_group_extension_state(conn)
+            except ValueError as exc:
+                raise FinanceCashError(
+                    "finance_schema_unavailable", "Finance category group schema is incomplete", 503
+                ) from exc
             yield conn
             conn.commit()
         except sqlite3.OperationalError as exc:
@@ -651,6 +707,7 @@ class FinanceCashService:
         posting_class = str(payload.get("posting_class") or "external_outflow").strip()
         analytic_class = str(payload.get("analytic_class") or ("external_inflow_unclassified" if direction == "income" else "operating_expense")).strip()
         requires_comment = 1 if payload.get("requires_comment") is True else 0
+        group_id = str(payload.get("group_id") or "").strip() or None
         if (
             not name
             or direction not in {"income", "expense"}
@@ -660,6 +717,7 @@ class FinanceCashService:
             )
             or (direction == "income" and analytic_class != "external_inflow_unclassified")
             or (direction == "expense" and analytic_class not in {"operating_expense", "owner_draw", "profit_distribution", "debt_service_unallocated"})
+            or (direction == "income" and group_id is not None)
         ):
             raise FinanceCashError("invalid_category", "Category is invalid")
         return self._command(
@@ -669,7 +727,7 @@ class FinanceCashService:
             actor,
             payload,
             lambda conn: self._create_category_tx(
-                conn, name, direction, posting_class, analytic_class, requires_comment, actor
+                conn, name, direction, posting_class, analytic_class, requires_comment, group_id, actor
             ),
         )
 
@@ -681,33 +739,94 @@ class FinanceCashService:
         posting_class: str,
         analytic_class: str,
         requires_comment: int,
+        group_id: str | None,
         actor: str,
     ) -> dict[str, Any]:
+        enabled = category_group_extension_state(conn)
+        if group_id:
+            self._active_category_group(conn, group_id)
         category_id, now = _id("flc"), _now()
-        conn.execute(
-            "INSERT INTO finance_liquidity_categories(category_id,name,direction,posting_class,is_active,created_at,analytic_class,requires_comment,revision,updated_at,is_deleted) VALUES(?,?,?,?,1,?,?,?,1,?,0)",
-            (
-                category_id,
-                name,
-                direction,
-                posting_class if direction == "expense" else None,
-                now,
-                analytic_class,
-                requires_comment,
-                now,
-            ),
-        )
+        columns = "category_id,name,direction,posting_class,is_active,created_at,analytic_class,requires_comment,revision,updated_at,is_deleted"
+        values = "?,?,?,?,1,?,?,?,1,?,0"
+        args: tuple[Any, ...] = (category_id, name, direction, posting_class if direction == "expense" else None, now, analytic_class, requires_comment, now)
+        if enabled:
+            columns += ",group_id"; values += ",?"; args += (group_id,)
+        conn.execute(f"INSERT INTO finance_liquidity_categories({columns}) VALUES({values})", args)
         self._audit(conn, actor, "category.created", category_id, {"name": name})
         return {"category_id": category_id}
 
     def list_categories(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             return [
-                _row(row)
+                {**_row(row), "group_id": _row(row).get("group_id")}
                 for row in conn.execute(
                     "SELECT * FROM finance_liquidity_categories WHERE is_deleted=0 ORDER BY name COLLATE NOCASE"
                 )
             ]
+
+    @staticmethod
+    def _active_category_group(conn: sqlite3.Connection, group_id: str) -> sqlite3.Row:
+        if not category_group_extension_state(conn):
+            raise FinanceCashError("category_groups_unavailable", "Category groups are not installed", 409)
+        row = conn.execute(
+            "SELECT * FROM finance_liquidity_category_groups WHERE group_id=? AND is_active=1",
+            (group_id,),
+        ).fetchone()
+        if row is None:
+            raise FinanceCashError("category_group_unavailable", "Category group is unavailable", 422)
+        return row
+
+    def list_category_groups(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            enabled = category_group_extension_state(conn)
+            return {
+                "enabled": enabled,
+                "groups": [_row(row) for row in conn.execute(
+                    "SELECT * FROM finance_liquidity_category_groups ORDER BY sort_order,group_id"
+                )] if enabled else [],
+            }
+
+    def create_category_group(self, payload: Mapping[str, Any], actor: str, operation_id: str, key: str) -> dict[str, Any]:
+        name = str(payload.get("name") or "").strip()
+        if not name or len(name) > 160:
+            raise FinanceCashError("invalid_directory_name", "Group name is required")
+        def action(conn: sqlite3.Connection) -> dict[str, Any]:
+            if not category_group_extension_state(conn):
+                raise FinanceCashError("category_groups_unavailable", "Category groups are not installed", 409)
+            if conn.execute("SELECT 1 FROM finance_liquidity_category_groups WHERE name=? COLLATE NOCASE", (name,)).fetchone():
+                raise FinanceCashError("directory_name_conflict", "Group name already exists", 409)
+            ident, now = _id("flg"), _now()
+            sort_order = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM finance_liquidity_category_groups").fetchone()[0]
+            conn.execute(
+                "INSERT INTO finance_liquidity_category_groups(group_id,name,sort_order,is_active,revision,created_at,updated_at) VALUES(?,?,?,1,1,?,?)",
+                (ident, name, sort_order, now, now),
+            )
+            self._audit(conn, actor, "category_group.created", ident, {"name": name})
+            return {"group_id": ident, "revision": 1}
+        return self._command("category_group.create", key, operation_id, actor, payload, action)
+
+    def update_category_group(self, ident: str, payload: Mapping[str, Any], actor: str, operation_id: str, key: str) -> dict[str, Any]:
+        action_name = str(payload.get("action") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if action_name not in {"rename", "archive", "restore"} or (action_name == "rename" and (not name or len(name) > 160)):
+            raise FinanceCashError("invalid_directory_action", "Group action is invalid")
+        def action(conn: sqlite3.Connection) -> dict[str, Any]:
+            if not category_group_extension_state(conn):
+                raise FinanceCashError("category_groups_unavailable", "Category groups are not installed", 409)
+            row = conn.execute("SELECT * FROM finance_liquidity_category_groups WHERE group_id=?", (ident,)).fetchone()
+            if row is None:
+                raise FinanceCashError("not_found", "Group not found", 404)
+            if int(payload.get("base_revision", -1)) != int(row["revision"]):
+                raise FinanceCashError("version_conflict", "Group changed", 409, data={"current_revision": row["revision"]})
+            if action_name == "rename":
+                if conn.execute("SELECT 1 FROM finance_liquidity_category_groups WHERE name=? COLLATE NOCASE AND group_id<>?", (name, ident)).fetchone():
+                    raise FinanceCashError("directory_name_conflict", "Group name already exists", 409)
+                conn.execute("UPDATE finance_liquidity_category_groups SET name=?,revision=revision+1,updated_at=? WHERE group_id=?", (name, _now(), ident))
+            else:
+                conn.execute("UPDATE finance_liquidity_category_groups SET is_active=?,revision=revision+1,updated_at=? WHERE group_id=?", (1 if action_name == "restore" else 0, _now(), ident))
+            self._audit(conn, actor, f"category_group.{action_name}", ident, {"old_name": row["name"], "new_name": name if action_name == "rename" else row["name"]})
+            return {"group_id": ident, "revision": int(row["revision"]) + 1, "action": action_name}
+        return self._command(f"category_group.{action_name}:{ident}", key, operation_id, actor, payload, action)
 
     def list_counterparties(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -765,7 +884,7 @@ class FinanceCashService:
         if kind not in tables:
             raise FinanceCashError("not_found", "Directory not found", 404)
         action_name = str(payload.get("action") or "").strip()
-        if action_name not in {"rename", "archive", "restore", "delete"}:
+        if action_name not in {"rename", "archive", "restore", "delete", "set_group"} or (action_name == "set_group" and kind != "categories"):
             raise FinanceCashError("invalid_directory_action", "Directory action is invalid")
         name = str(payload.get("name") or "").strip()
         if action_name == "rename" and (not name or len(name) > 160):
@@ -777,6 +896,20 @@ class FinanceCashService:
                 raise FinanceCashError("not_found", "Directory entry not found", 404)
             if int(payload.get("base_revision", -1)) != int(row["revision"]):
                 raise FinanceCashError("version_conflict", "Directory entry changed", 409, data={"current_revision": row["revision"]})
+            if action_name == "set_group":
+                if not category_group_extension_state(conn):
+                    raise FinanceCashError("category_groups_unavailable", "Category groups are not installed", 409)
+                if row["direction"] != "expense":
+                    raise FinanceCashError("invalid_category_group", "Only expense articles can be grouped")
+                group_id = str(payload.get("group_id") or "").strip() or None
+                if group_id:
+                    self._active_category_group(conn, group_id)
+                conn.execute(
+                    "UPDATE finance_liquidity_categories SET group_id=?,revision=revision+1,updated_at=? WHERE category_id=?",
+                    (group_id, _now(), ident),
+                )
+                self._audit(conn, actor, "categories.set_group", ident, {"old_group_id": row["group_id"], "new_group_id": group_id})
+                return {"category_id": ident, "revision": int(row["revision"]) + 1, "action": action_name, "group_id": group_id}
             if action_name == "delete":
                 checks = {
                     "accounts": ("SELECT 1 FROM finance_liquidity_documents WHERE source_account_id=? OR target_account_id=?", (ident, ident)),
@@ -2500,6 +2633,7 @@ class FinanceCashService:
         with self._connect() as conn:
             where = ("WHERE event_type LIKE 'account.%' OR event_type LIKE 'accounts.%' "
                      "OR event_type LIKE 'category.%' OR event_type LIKE 'categories.%' "
+                     "OR event_type LIKE 'category_group.%' "
                      "OR event_type LIKE 'counterparty.%' OR event_type LIKE 'counterparties.%'") if directory_only else ""
             return [_row(row) for row in conn.execute(
                 f"SELECT event_id,actor,event_type,object_id,payload_json,created_at FROM finance_liquidity_audit_events {where} ORDER BY created_at DESC,event_id DESC LIMIT ?",

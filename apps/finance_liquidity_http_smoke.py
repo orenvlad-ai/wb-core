@@ -117,6 +117,8 @@ def main() -> None:
             csrf = str(capabilities["data"]["csrf_token"])  # type: ignore[index]
             status, categories = request(base, "/v1/finance/categories")
             assert status == 200 and len(categories["data"]["categories"]) == 23  # type: ignore[index]
+            status, groups = request(base, "/v1/finance/category-groups", actor="viewer")
+            assert status == 200 and groups["data"]["enabled"] and len(groups["data"]["groups"]) == 6  # type: ignore[index]
             status, counterparties = request(base, "/v1/finance/counterparties")
             assert status == 200 and counterparties["data"]["counterparties"] == []  # type: ignore[index]
             status, audit = request(base, "/v1/finance/audit")
@@ -129,6 +131,17 @@ def main() -> None:
             assert status == 403 and denied["error"]["code"] == "finance_capability_denied"  # type: ignore[index]
             status, denied = request(base, "/v1/finance/counterparties", payload={"name": "Denied"}, csrf=viewer_csrf, actor="viewer")
             assert status == 403 and denied["error"]["code"] == "finance_capability_denied"  # type: ignore[index]
+            status, denied = request(base, "/v1/finance/category-groups", payload={"name": "Denied"}, csrf=viewer_csrf, actor="viewer")
+            assert status == 403 and denied["error"]["code"] == "finance_capability_denied"  # type: ignore[index]
+            status, group = request(base, "/v1/finance/category-groups", payload={"name": "HTTP группа"}, csrf=csrf)
+            assert status == 201 and group["data"]["group_id"]  # type: ignore[index]
+            group_id = str(group["data"]["group_id"])  # type: ignore[index]
+            status, assigned = request(base, "/v1/finance/directories/categories/category_goods_payment", payload={"action": "set_group", "group_id": group_id, "base_revision": 1}, csrf=csrf)
+            assert status == 200 and assigned["data"]["group_id"] == group_id  # type: ignore[index]
+            status, archived = request(base, f"/v1/finance/directories/category-groups/{group_id}", payload={"action": "archive", "base_revision": 1}, csrf=csrf)
+            assert status == 200 and archived["data"]["revision"] == 2  # type: ignore[index]
+            status, categories = request(base, "/v1/finance/categories")
+            assert status == 200 and next(item for item in categories["data"]["categories"] if item["category_id"] == "category_goods_payment")["group_id"] == group_id  # type: ignore[index]
             status, counterparty = request(base, "/v1/finance/counterparties", payload={"name": "HTTP fixture counterparty"}, csrf=csrf)
             assert status == 201 and counterparty["data"]["counterparty_id"]  # type: ignore[index]
             status, account = request(

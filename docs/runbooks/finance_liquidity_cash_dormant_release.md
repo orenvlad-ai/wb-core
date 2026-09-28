@@ -94,6 +94,47 @@ replacement, and read back schema v2 and original balances. After v3 writes,
 do not restore an older backup over new facts; use a reviewed forward repair.
 This runbook does not itself authorize TEST or REAL migration.
 
+## Additive category-group extension for an existing v3 TEST store
+
+This extension keeps the core `schema_version=3` and adds only group display
+metadata. Code start, GET, and the canonical deploy do not install it. The new
+code accepts either a fully absent extension (group editing disabled) or a
+complete `category_groups` version-1 marker with its tables, indexes, column
+and foreign key. Partial/mismatched extension fails closed. A fresh bootstrap
+and an explicit v2 migration install it transactionally; an existing v3 TEST
+store needs the separate command below. No REAL store is in scope.
+
+1. Let the usual PR Gate, canonical prepare-deploy checks and Finance probe run
+   with the existing v3 store unchanged; new code reads it and ordinary money
+   operations remain available. Deploy the reviewed code through the standard
+   Release Runner. Do not mutate the database to make an intermediate Gate
+   state pass.
+2. In the agreed Finance TEST window, hold only the Finance TEST writer/sidecar
+   briefly. Recheck the exact canonical TEST database path, schema v3, complete
+   absence of the extension, `integrity_check`, `foreign_key_check`, latest
+   document/operation counts, and balances. Select a new absent backup path
+   on the protected volume. Do not use a stale count from the code-release
+   moment: TEST operations may have continued meanwhile.
+3. Run exactly once against that verified stopped store:
+   `apps/finance_liquidity_http.py --db <exact TEST sqlite path> --install-category-groups --backup <new protected backup sqlite path>`.
+   The command validates the backup, then installs schema features, seed
+   groups, assignments by stable seed codes, and the completion marker in one
+   transaction. It leaves posted documents, ledger rows and balances untouched.
+4. Read back marker version 1, six seed groups, active and unassigned articles,
+   unchanged documents/operations/balances and the same integrity checks;
+   confirm Finance HTTP readback and resume the TEST sidecar. Keep the exact
+   backup and pre/post evidence. A repeat invocation with a complete marker is
+   read-only; a partial extension is never auto-repaired.
+
+If installation fails before commit, keep the sidecar held and inspect the
+original v3 store; its transaction rolls back. If the extension committed but
+new code must be rolled back, the previous v3 Finance code can read and perform
+ordinary fixture operations against the additive schema (verified in a local
+old-code compatibility test); it ignores groups. Prefer this code rollback
+without restoring an older database. Restoring the backup requires a separate
+review of exact paths and proof that no newer TEST operation would be lost;
+never overwrite later user operations with the pre-extension backup.
+
 Before activation, rerun the synthetic cash, auth, HTTP and browser checks and
 verify the sanctioned live signed session, explicit grants, supplier denial
 and revocation against the selected operational owner.

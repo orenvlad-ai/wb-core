@@ -211,6 +211,9 @@ def build_finance_http_server(
                 if suffix == "/categories":
                     self._ok({"categories": app.service.list_categories()})
                     return
+                if suffix == "/category-groups":
+                    self._ok(app.service.list_category_groups())
+                    return
                 if suffix == "/counterparties":
                     self._ok({"counterparties": app.service.list_counterparties()})
                     return
@@ -259,6 +262,10 @@ def build_finance_http_server(
                     app.service.create_category(payload, actor, operation_id, key), 201
                 )
                 return
+            if suffix == "/category-groups":
+                need("finance_admin")
+                self._ok(app.service.create_category_group(payload, actor, operation_id, key), 201)
+                return
             if suffix == "/counterparties":
                 need("finance_operate")
                 self._ok(app.service.create_counterparty(payload, actor, operation_id, key), 201)
@@ -270,7 +277,11 @@ def build_finance_http_server(
             parts = suffix.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "directories" and self.command == "POST":
                 need("finance_admin")
-                self._ok(app.service.update_directory(parts[1], parts[2], payload, actor, operation_id, key))
+                self._ok(
+                    app.service.update_category_group(parts[2], payload, actor, operation_id, key)
+                    if parts[1] == "category-groups"
+                    else app.service.update_directory(parts[1], parts[2], payload, actor, operation_id, key)
+                )
                 return
             if suffix == "/documents":
                 need("finance_operate")

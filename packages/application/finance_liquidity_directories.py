@@ -43,6 +43,16 @@ SEED_CATEGORIES = (
     ("debt_payment", "Платежи по кредитам и займам", "debt_service_unallocated", 0),
 )
 
+# Applied only while creating/upgrading a store. Runtime grouping uses persisted IDs.
+SEED_CATEGORY_GROUPS = (
+    ("category_group_goods_logistics", "Товар и логистика", ("goods_payment", "china_delivery", "russia_delivery", "packaging", "fulfillment", "cash_delivery")),
+    ("category_group_team_running", "Команда и текущие расходы", ("salary_advances", "rent", "office", "software", "accounting", "travel")),
+    ("category_group_marketing_customers", "Маркетинг и работа с покупателями", ("marketing", "listing_content", "customer_replacement", "giveaways", "bonuses_100")),
+    ("category_group_tax_bank", "Налоги и банковские расходы", ("taxes", "bank_fees")),
+    ("category_group_owner_financing", "Собственник и финансирование", ("owner_draw", "profit_distribution", "debt_payment")),
+    ("category_group_other", "Прочее", ("miscellaneous",)),
+)
+
 
 def seed_directories(conn: sqlite3.Connection, now: str) -> None:
     """Insert only absent stable IDs.  A deleted row is a lasting tombstone."""
@@ -144,3 +154,85 @@ def install_v3_extension(conn: sqlite3.Connection, now: str, *, capture_legacy_s
         "SELECT RAISE(ABORT,'migration snapshot immutable'); END"
     )
     seed_directories(conn, now)
+
+
+def install_category_group_extension(conn: sqlite3.Connection, now: str) -> None:
+    """One-time display-only grouping; existing document and ledger rows stay untouched."""
+    conn.execute(
+        "CREATE TABLE finance_liquidity_extensions("
+        "extension_name TEXT PRIMARY KEY,extension_version INTEGER NOT NULL,installed_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE finance_liquidity_category_groups("
+        "group_id TEXT PRIMARY KEY,name TEXT NOT NULL CHECK(length(trim(name))>0),"
+        "sort_order INTEGER NOT NULL,is_active INTEGER NOT NULL CHECK(is_active IN(0,1)),"
+        "revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "ALTER TABLE finance_liquidity_categories ADD COLUMN group_id TEXT "
+        "REFERENCES finance_liquidity_category_groups(group_id)"
+    )
+    conn.execute("CREATE INDEX finance_categories_group ON finance_liquidity_categories(group_id)")
+    conn.execute("CREATE UNIQUE INDEX finance_category_group_name ON finance_liquidity_category_groups(name COLLATE NOCASE)")
+    for order, (group_id, name, codes) in enumerate(SEED_CATEGORY_GROUPS, start=1):
+        conn.execute(
+            "INSERT INTO finance_liquidity_category_groups"
+            "(group_id,name,sort_order,is_active,revision,created_at,updated_at)"
+            " VALUES(?,?,?,1,1,?,?)",
+            (group_id, name, order, now, now),
+        )
+        for code in codes:
+            # A stable seed code is the only migration identity. Legacy and
+            # user-created articles remain unassigned until an admin chooses.
+            conn.execute(
+                "UPDATE finance_liquidity_categories SET group_id=? "
+                "WHERE code=? AND direction='expense' AND group_id IS NULL",
+                (group_id, code),
+            )
+    conn.execute(
+        "INSERT INTO finance_liquidity_extensions(extension_name,extension_version,installed_at) "
+        "VALUES('category_groups',1,?)",
+        (now,),
+    )
+
+
+def category_group_extension_state(conn: sqlite3.Connection) -> bool:
+    """False only for untouched v3; any partial or corrupt extension is an error."""
+    names = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN('table','index') AND name IN "
+        "('finance_liquidity_extensions','finance_liquidity_category_groups','finance_categories_group','finance_category_group_name')"
+    )}
+    category_columns = {row[1] for row in conn.execute("PRAGMA table_info(finance_liquidity_categories)")}
+    features = {
+        "finance_liquidity_extensions",
+        "finance_liquidity_category_groups",
+        "finance_categories_group",
+        "finance_category_group_name",
+    }
+    if not names and "group_id" not in category_columns:
+        return False
+    if names != features or "group_id" not in category_columns:
+        raise ValueError("Finance category group extension is incomplete")
+    group_columns = {row[1]: row for row in conn.execute("PRAGMA table_info(finance_liquidity_category_groups)")}
+    marker_columns = {row[1]: row for row in conn.execute("PRAGMA table_info(finance_liquidity_extensions)")}
+    foreign_keys = {(row[2], row[3], row[4]) for row in conn.execute("PRAGMA foreign_key_list(finance_liquidity_categories)")}
+    group_index = [row[2] for row in conn.execute("PRAGMA index_info(finance_categories_group)")]
+    name_index = [row[2] for row in conn.execute("PRAGMA index_info(finance_category_group_name)")]
+    group_indexes = {row[1]: row for row in conn.execute("PRAGMA index_list(finance_liquidity_category_groups)")}
+    name_index_collations = [row[4] for row in conn.execute("PRAGMA index_xinfo(finance_category_group_name)") if row[5]]
+    marker = conn.execute(
+        "SELECT extension_version FROM finance_liquidity_extensions WHERE extension_name='category_groups'"
+    ).fetchone()
+    if (
+        not {"group_id", "name", "sort_order", "is_active", "revision", "created_at", "updated_at"}.issubset(group_columns)
+        or not {"extension_name", "extension_version", "installed_at"}.issubset(marker_columns)
+        or group_columns.get("group_id", (None,) * 6)[5] != 1
+        or marker_columns.get("extension_name", (None,) * 6)[5] != 1
+        or ("finance_liquidity_category_groups", "group_id", "group_id") not in foreign_keys
+        or group_index != ["group_id"] or name_index != ["name"]
+        or group_indexes.get("finance_category_group_name", (None,) * 3)[2] != 1
+        or name_index_collations != ["NOCASE"]
+        or marker is None or marker[0] != 1
+    ):
+        raise ValueError("Finance category group extension marker or schema is invalid")
+    return True
