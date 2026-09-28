@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.warehouse_recovery_placement import WarehousePlacementError
 
 
 CONTRACT_NAME = "warehouse_recovery_policy_v1"
@@ -467,6 +468,49 @@ class WarehouseRecoveryRegistry:
         self.fault_injector = fault_injector
         self.operational_reserve_bytes = max(int(operational_reserve_bytes), 0)
 
+    def _assert_recovery_placement(self) -> None:
+        """Deny writes on a missing bind instead of falling back to /dev/sdb1."""
+
+        if self.runtime_dir != Path("/opt/wb-core-runtime/state"):
+            return  # Isolated fixtures have their own filesystem topology.
+        from packages.application.root_storage_policy import (
+            RootStoragePolicyError,
+            _assert_filesystem_identity,
+            load_policy,
+        )
+
+        try:
+            policy = load_policy()
+            state = dict(policy["warehouse_recovery_placement_state"])
+            contracts = dict(policy["storage_registry"]["filesystems"])
+            if self.recovery_root != Path(str(state["artifact_root"])):
+                raise RecoveryPolicyError("warehouse recovery root differs from placement contract")
+            if self.recovery_root.is_symlink():
+                raise RecoveryPolicyError("warehouse recovery root cannot be a symlink")
+            _assert_filesystem_identity(
+                self.recovery_root.parent,
+                role="backup",
+                contract=contracts["backup"],
+            )
+            if state["activated"]:
+                if not self.recovery_root.is_dir():
+                    raise RecoveryPolicyError("activated warehouse recovery mount is absent")
+                observed = _assert_filesystem_identity(
+                    self.recovery_root,
+                    role="warehouse_backup",
+                    contract=contracts["warehouse_backup"],
+                )
+                if observed["mount_point"] != str(self.recovery_root):
+                    raise RecoveryPolicyError("warehouse recovery bind mount point drift")
+            elif self.recovery_root.exists():
+                _assert_filesystem_identity(
+                    self.recovery_root,
+                    role="backup",
+                    contract=contracts["backup"],
+                )
+        except (RootStoragePolicyError, WarehousePlacementError) as exc:
+            raise RecoveryPolicyError(f"warehouse recovery mount guard: {exc}") from exc
+
     def ensure_schema(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
@@ -792,6 +836,7 @@ class WarehouseRecoveryRegistry:
         source_watermarks: Mapping[str, Any],
         schema_revision: str = "",
     ) -> dict[str, Any]:
+        self._assert_recovery_placement()
         selection = select_recovery_tier(
             mutation_kind=mutation_kind,
             closure_kind="warehouse_domain",
@@ -1820,6 +1865,8 @@ class WarehouseRecoveryRegistry:
     ) -> dict[str, Any]:
         """Restore only the warehouse/cost domain from a verified checkpoint."""
 
+        self._assert_recovery_placement()
+
         operation = self.get_operation(operation_id)
         if operation is None or operation.get("tier") != RecoveryTier.T2.value:
             raise RecoveryPolicyError("T2 recovery operation is required")
@@ -2115,6 +2162,8 @@ class WarehouseRecoveryRegistry:
 
     def apply_retention(self, *, plan_fingerprint: str) -> dict[str, Any]:
         """Apply or resume one audited exact retention plan."""
+
+        self._assert_recovery_placement()
 
         approved = str(plan_fingerprint or "").strip()
         if not approved:
@@ -2445,6 +2494,8 @@ class WarehouseRecoveryRegistry:
 
     def release_failed_canary_pre_mutations(self) -> dict[str, Any]:
         """Release exact failed canary evidence that never reached mutation."""
+
+        self._assert_recovery_placement()
 
         candidates = [
             operation
@@ -2857,6 +2908,10 @@ class WarehouseRecoveryRegistry:
         pre_policy_legacy: list[str] = []
         corrupt_registered: list[dict[str, Any]] = []
         backup_root = (self.runtime_dir / "backups").resolve()
+        placement_markers = {
+            backup_root / ".warehouse-recovery-extra100-active.json",
+            self.recovery_root / ".warehouse-recovery-extra100-active.json",
+        }
         roots = [backup_root]
         if not _path_is_below(self.legacy_recovery_root, backup_root):
             roots.append(self.legacy_recovery_root)
@@ -2897,6 +2952,8 @@ class WarehouseRecoveryRegistry:
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("*")):
+                if path in placement_markers:
+                    continue
                 if path.is_symlink() or not path.is_file():
                     continue
                 kind = _artifact_kind(path)
@@ -3070,6 +3127,7 @@ class WarehouseRecoveryRegistry:
         }
 
     def capacity_status(self) -> dict[str, Any]:
+        self._assert_recovery_placement()
         capacity_root = (
             self.checkpoint_root
             if self.checkpoint_root.exists()
@@ -3508,6 +3566,8 @@ class WarehouseRecoveryRegistry:
         target_root: Path,
     ) -> dict[str, Any]:
         target_root = Path(target_root)
+        if any(_path_is_below(target_root.resolve(), root) for root in self.recovery_roots):
+            self._assert_recovery_placement()
         target_root.mkdir(parents=True, exist_ok=True)
         self._expire_reservations()
         filesystem_id = _filesystem_id(target_root)

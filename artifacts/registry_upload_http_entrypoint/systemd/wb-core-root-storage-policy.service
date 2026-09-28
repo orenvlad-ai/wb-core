@@ -1,7 +1,7 @@
 [Unit]
 Description=WB Core Root Storage Policy Status
 After=local-fs.target
-RequiresMountsFor=/opt/wb-core-runtime/state/backups /opt/wb-core-runtime/state/generations
+RequiresMountsFor=/opt/wb-core-runtime/state/backups /opt/wb-core-runtime/state/generations /opt/wb-core-runtime/state/backups/warehouse-recovery
 
 [Service]
 Type=oneshot
