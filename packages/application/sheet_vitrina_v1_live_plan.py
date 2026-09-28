@@ -78,7 +78,10 @@ from packages.application.sheet_vitrina_v1_authenticated_buyer import (
     extend_metrics_with_authenticated_buyer,
     projection_payload as authenticated_buyer_projection_payload,
 )
-from packages.application.wb_buyer_authenticated_observations import load_daily_projection as load_authenticated_buyer_daily_projection
+from packages.application.wb_buyer_authenticated_observations import (
+    load_daily_projection as load_authenticated_buyer_daily_projection,
+    load_source_requested_nm_ids as load_authenticated_buyer_source_scope,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import (
     DEFAULT_ONEC_STAGE_MAPPING,
     ONEC_INVENTORY_CAPITAL_RETURN_PCT_METRIC_KEY,
@@ -1907,6 +1910,27 @@ class SheetVitrinaV1LivePlanBlock:
                 source_nm_ids = requested_nm_ids
                 stock_scope = None
                 stock_scope_error = None
+                if source_key == AUTHENTICATED_BUYER_SOURCE_KEY:
+                    # The reporting catalog also contains historical/disabled
+                    # SKUs. Buyer coverage is measured against the immutable
+                    # collection roster for this business day, not that entire
+                    # catalog. The ready table can still keep all its rows.
+                    source_nm_ids, scope_source = load_authenticated_buyer_source_scope(
+                        self.runtime, slot.column_date,
+                    )
+
+                    def loader(slot=slot, nm_ids=tuple(source_nm_ids), scope_source=scope_source):
+                        projection = load_authenticated_buyer_daily_projection(
+                            self.runtime, business_date=slot.column_date,
+                            requested_nm_ids=list(nm_ids),
+                        )
+                        projection["diagnostics"] = {
+                            **dict(projection.get("diagnostics") or {}),
+                            "eligible_scope_source": scope_source,
+                        }
+                        return authenticated_buyer_projection_payload(
+                            projection, business_date=slot.column_date,
+                        )
                 if source_key == "stocks":
                     try:
                         stock_scope = require_stock_catalog_scope(self.runtime.db_path)

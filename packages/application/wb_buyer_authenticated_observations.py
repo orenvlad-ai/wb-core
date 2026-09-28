@@ -6,11 +6,13 @@ non-wallet difference is not the separately identifiable WB discount (SPP).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import sqlite3
 from typing import Any, Mapping
+
+from zoneinfo import ZoneInfo
 
 from packages.business_time import business_date_from_timestamp
 
@@ -18,6 +20,7 @@ from packages.business_time import business_date_from_timestamp
 SOURCE_KEY = "wb_buyer_authenticated"
 MAX_REQUESTED = 1000  # Denominator is never silently clipped to the Chrome batch limit.
 MAX_SELLER_SKEW_SECONDS = 300
+BUSINESS_ZONE = ZoneInfo("Asia/Yekaterinburg")
 
 
 def _connect(runtime: Any, *, write: bool = False) -> sqlite3.Connection:
@@ -28,6 +31,70 @@ def _connect(runtime: Any, *, write: bool = False) -> sqlite3.Connection:
     if not write:
         connection.execute("PRAGMA query_only=ON")
     return connection
+
+
+def load_active_requested_nm_ids(runtime: Any) -> list[int]:
+    """Read the collector roster without the runtime's schema-writing loader."""
+    with _connect(runtime) as connection:
+        rows = connection.execute("""
+            SELECT config.nm_id FROM registry_upload_config_v2 AS config
+            JOIN registry_upload_current_state AS current
+              ON current.bundle_version=config.bundle_version AND current.slot=1
+            WHERE config.enabled=1 ORDER BY config.nm_id
+        """).fetchall()
+    return [int(row[0]) for row in rows]
+
+
+def load_source_requested_nm_ids(runtime: Any, business_date: str) -> tuple[list[int], str]:
+    """Use a frozen collection roster, or the immutable bundle active that day.
+
+    An imported single-card diagnostic is not a 1-SKU operational roster.
+    When the historical eligible roster cannot be proved, return no claimed
+    denominator. The caller reports not_available/eligible_roster_unknown;
+    an absence of rows can never become a 0/0 success.
+    """
+    day_end = datetime.fromisoformat(business_date).replace(tzinfo=BUSINESS_ZONE) + timedelta(days=1)
+    with _connect(runtime) as connection:
+        try:
+            runs = connection.execute("""
+                SELECT run_id,started_at,requested_nm_ids_json FROM wb_buyer_authenticated_runs
+                WHERE business_date=? ORDER BY started_at DESC,run_id DESC
+            """, (business_date,)).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error).lower():
+                raise
+            runs = []
+        for run in runs:
+            if str(run["run_id"]).startswith("buyer-auth-evidence-"):
+                continue
+            scope = [int(item) for item in json.loads(run["requested_nm_ids_json"])]
+            return sorted(set(scope)), "frozen_collection_run"
+        # Single-card imports retain their original observation timestamp.
+        # A bundle activated later that day cannot retroactively define their
+        # eligible denominator. For an empty day, only describe the roster at
+        # the end of that day; no measurement claim is made.
+        observed_at = _timestamp(str(runs[0]["started_at"])) if runs else None
+        cutoff = observed_at or day_end.astimezone(timezone.utc)
+        versions = connection.execute("SELECT bundle_version,activated_at FROM registry_upload_versions").fetchall()
+        eligible_versions = []
+        for version in versions:
+            try:
+                activated = _timestamp(str(version["activated_at"]))
+            except ValueError:
+                continue
+            within_cutoff = activated <= cutoff if observed_at else activated < cutoff
+            if within_cutoff:
+                eligible_versions.append((activated, str(version["bundle_version"])))
+        if eligible_versions:
+            _, bundle_version = max(eligible_versions)
+            rows = connection.execute("""
+                SELECT nm_id FROM registry_upload_config_v2
+                WHERE bundle_version=? AND enabled=1 ORDER BY nm_id
+            """, (bundle_version,)).fetchall()
+            scope = sorted({int(row[0]) for row in rows})
+            if scope:
+                return scope, "versioned_at_observation" if observed_at else "versioned_day_bundle"
+    return [], "unknown_historical_roster"
 
 
 def ensure_schema(runtime: Any) -> None:
@@ -376,7 +443,7 @@ def load_daily_projection(runtime: Any, business_date: str, requested_nm_ids: li
     items = [observed[nm_id] for nm_id in wanted if nm_id in observed]
     missing = [nm_id for nm_id in wanted if nm_id not in observed]
     latest_run_status = str(rows[0]["run_status"] or "") if rows else ""
-    return {"snapshot_date": business_date, "kind": "success" if not missing and latest_run_status == "completed" else "incomplete" if items else "empty",
+    return {"snapshot_date": business_date, "kind": "success" if items and not missing and latest_run_status == "completed" else "incomplete" if items else "empty",
             "requested_count": len(wanted), "covered_count": len(items), "missing_nm_ids": missing, "items": items,
             "diagnostics": {"first_observed_business_date": first_observed, "first_run_business_date": first_run,
                             "latest_run_status": latest_run_status,
