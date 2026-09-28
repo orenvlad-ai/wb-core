@@ -59,6 +59,16 @@
       "restart": false
     },
     {
+      "name": "wb-core-buyer-authenticated-collect.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-buyer-authenticated-collect.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-core-promo-light-gc.service",
       "enable": false,
       "restart": false

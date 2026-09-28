@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_archived_metrics import ARCHIVED_PUBLIC_METRIC_KEYS
+from packages.application.sheet_vitrina_v1_authenticated_buyer import extend_metrics_with_authenticated_buyer
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.contracts.registry_upload_bundle_v1 import ConfigV2Item, MetricV2Item
 from packages.contracts.web_vitrina_contract import WebVitrinaContractV1
@@ -119,7 +120,7 @@ class SheetVitrinaV1ResearchBlock:
         sku_options = _attach_promo_filter_flags(sku_options, promo_filter)
         sku_metric_keys = self._current_sku_metric_keys(page_route=page_route, read_route=read_route)
         metric_options = _selectable_metric_options(
-            current_state.metrics_v2,
+            extend_metrics_with_authenticated_buyer(current_state.metrics_v2),
             sku_metric_keys=sku_metric_keys,
         )
         default_metric_keys = [item["metric_key"] for item in metric_options[:5]]

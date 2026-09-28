@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import json
 from pathlib import Path
 import os
 import sys
@@ -119,12 +120,115 @@ def _cleanup_continues_after_chrome_failure() -> None:
     assert marker == ["chrome", "other", "other"]
 
 
+def _batch_rechecks_auth_and_streams_partial() -> None:
+    partial = (json.dumps({"nm_id": 1, "status": "observed"}) + "\n" +
+               json.dumps({"nm_id": 999, "status": "observed"}) + "\n" + "truncated")
+    assert price._parse_batch_lines(partial.encode(), [1, 2]) == {1: {"nm_id": 1, "status": "observed"}}
+    class Pipe:
+        def __init__(self):
+            self.navigations = []
+        def call(self, method, params=None, *, session=None):
+            if method == "Target.attachToTarget":
+                return {"sessionId": "fixture-session"}
+            if method == "Page.navigate":
+                self.navigations.append(params["url"])
+            return {}
+        def visible_surface(self):
+            return "account"
+    pipe = Pipe()
+    def evaluate(_pipe, _session, expression):
+        return "account" if expression == price.auth.SURFACE_EXPRESSION else {"wallet": 139, "nonwallet": 144}
+    with (patch.object(price, "_product_target", return_value="fixture-card"),
+          patch.object(price, "_evaluate", side_effect=evaluate),
+          patch.object(price.time, "sleep")):
+        row = price._read_product_in_batch(pipe, 497416931, "fixture-account",
+                                           batch_deadline=price.time.monotonic() + 5)
+    assert row["status"] == "observed" and row["session_checked_at"]
+    assert pipe.navigations == ["https://www.wildberries.ru/lk",
+                                "https://www.wildberries.ru/catalog/497416931/detail.aspx"]
+
+    emitted = []
+    fake = SimpleNamespace(
+        visible_surface=lambda: "account",
+        call=lambda method, *_args, **_kwargs: {"targetInfos": [{"type": "page", "targetId": "account",
+            "url": "https://www.wildberries.ru/lk"}]} if method == "Target.getTargets" else {},
+        close=lambda: None,
+    )
+    first = {**price._unknown(1), "status": "observed", "session_status": "authenticated_surface",
+             "authenticated_session_proof": True, "wallet_price": 139, "normal_price": 144}
+    with (patch.object(price.os, "geteuid", return_value=123),
+          patch.object(price.runtime, "STATE", Path("/tmp/fixture")),
+          patch.object(price.runtime, "PROFILE", ROOT),
+          patch.object(price.auth, "_spawn", return_value=SimpleNamespace()),
+          patch.object(price.auth, "_wait_display"),
+          patch.object(price.auth, "_launch_chrome", return_value=(SimpleNamespace(), fake)),
+          patch.object(price.auth, "_stop_chrome"), patch.object(price.auth, "_stop_process"),
+          patch.object(price.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
+          patch.object(Path, "touch"), patch.object(os, "chmod"),
+          patch.object(price, "_read_product_in_batch", side_effect=[first, RuntimeError("fixture"),
+                                                              RuntimeError("fixture"), RuntimeError("fixture")])):
+        rows = price._read_batch_in_runner([1, 2, 3, 4, 5], on_result=emitted.append)
+    assert len(rows) == len(emitted) == 5
+    assert rows[0]["status"] == "observed"
+    assert rows[-1]["reason"] == "authenticated_price_batch_probe_failures"
+
+
+def _printed_rows_survive_failed_cleanup_without_healthy_run() -> None:
+    measured = "2026-09-28T18:29:02+00:00"
+    output = "".join(json.dumps({
+        "nm_id": nm_id, "measured_at": measured, "status": "observed",
+        "session_status": "authenticated_surface", "authenticated_session_proof": True,
+        "wallet_price": 139, "normal_price": 144,
+    }) + "\n" for nm_id in (1, 2))
+
+    class Child:
+        returncode = 1  # Rows were streamed, then browser cleanup failed.
+
+        def communicate(self, *, timeout):
+            return output, ""
+
+    with (
+        patch.object(price.os, "geteuid", return_value=0),
+        patch.object(price.runtime, "profile_operation_lock", side_effect=lambda: nullcontext(7)),
+        patch.object(price.auth, "_shared_start_lock", side_effect=lambda: nullcontext()),
+        patch.object(price.auth, "raw_status", return_value={"running": False, "status": "completed", "login_confirmed": True, "run_id": "auth-one"}),
+        patch.object(price.legacy, "load_recovery_config_from_env", return_value=object()),
+        patch.object(price.legacy, "read_recovery_status", return_value={"running": False}),
+        patch.object(price.runtime, "ensure_runner_idle"),
+        patch.object(price.runtime, "_available", return_value=100_000_000_000),
+        patch.object(price.runtime, "_root_reserve", return_value=25_000_000_000),
+        patch.object(price.runtime, "ensure_runtime"),
+        patch.object(price.runtime, "PROFILE", ROOT),
+        patch.object(price.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())),
+        patch.object(price.subprocess, "Popen", return_value=Child()),
+    ):
+        rows = price.read_prices([1, 2])
+    assert len(rows) == 2 and all(row["status"] == "observed" for row in rows)
+    assert all(row["reader_lifecycle_status"] == "cleanup_failed" for row in rows)
+    assert all(row["auth_run_reference"] == "auth-one" for row in rows)
+
+
+def _early_reader_failure_carries_current_login_generation() -> None:
+    with (
+        patch.object(price.os, "geteuid", return_value=0),
+        patch.object(price.runtime, "profile_operation_lock", side_effect=BlockingIOError),
+        patch.object(price.auth, "raw_status", return_value={"status": "completed", "run_id": "new-login"}),
+        patch.object(price.runtime, "PROFILE", ROOT),
+    ):
+        rows = price.read_prices([1, 2])
+    assert all(row["status"] == "price_unavailable" for row in rows)
+    assert all(row["auth_run_reference"] == "new-login" and row["profile_reference"] for row in rows)
+
+
 def main() -> None:
     _labelled_popup_only()
     _missing_price_is_not_zero_or_spp()
     _settings_reader_does_not_replace_spp_source()
     _reader_blocks_orphan_and_serializes_profile()
     _cleanup_continues_after_chrome_failure()
+    _batch_rechecks_auth_and_streams_partial()
+    _printed_rows_survive_failed_cleanup_without_healthy_run()
+    _early_reader_failure_carries_current_login_generation()
     print("wb_buyer_chrome_price_smoke: OK")
 
 

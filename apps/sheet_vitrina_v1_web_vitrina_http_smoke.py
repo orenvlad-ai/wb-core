@@ -410,6 +410,7 @@ def main() -> None:
                 "other_sources",
                 "seller_portal_bot",
                 "wb_api",
+                "wb_buyer_authenticated",
                 "wb_public_card_bot",
                 "webcore_product_capital",
             ]:
@@ -428,7 +429,7 @@ def main() -> None:
                 "other_sources",
             }
             if not expected_row_groups.issubset(row_group_ids) or not row_group_ids.issubset(
-                expected_row_groups | {"wb_public_card_bot"}
+                expected_row_groups | {"wb_public_card_bot", "wb_buyer_authenticated"}
             ):
                 raise AssertionError(f"loading table rows must be grouped by source group, got {loading_rows}")
             if not str((loading_columns.get("today_status") or {}).get("label") or "").startswith("Сегодня: "):

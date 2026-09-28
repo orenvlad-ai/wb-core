@@ -45,6 +45,7 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (
     extend_metrics_with_buyout_percent,
     load_buyout_percent_snapshot_metrics,
 )
+from packages.application.sheet_vitrina_v1_authenticated_buyer import extend_metrics_with_authenticated_buyer
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
@@ -338,6 +339,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 )
             )
         )
+        effective_metrics = extend_metrics_with_authenticated_buyer(effective_metrics)
         metrics_by_key = {
             str(item.metric_key): item
             for item in effective_metrics

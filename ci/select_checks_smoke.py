@@ -728,6 +728,16 @@ def main() -> None:
     assert "web_vitrina" in web_vitrina["groups"]
     assert "openpyxl==3.1.5" in web_vitrina["pip"]
 
+    buyer_ready = "apps/sheet_vitrina_v1_authenticated_buyer_ready_smoke.py"
+    buyer_plan = build_plan_from_paths(
+        pull_request=3, base=BASE, head=HEAD,
+        paths=["packages/application/wb_buyer_authenticated_observations.py"],
+        file_exists=exists,
+    )
+    verify_plan(buyer_plan)
+    assert "wb_buyer_authenticated_observations" in buyer_plan["groups"]
+    assert ["python3", buyer_ready] in buyer_plan["commands"]
+
     warehouse = build_plan_from_paths(
         pull_request=4,
         base=BASE,

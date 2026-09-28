@@ -471,7 +471,7 @@ def main() -> None:
         (item["source_key"], item["date_role"]): item
         for item in evaluation["expectation_matrix"]
     }
-    assert len(evaluation["expectation_matrix"]) == 28
+    assert len(evaluation["expectation_matrix"]) == 30
     assert "cost_price" not in {item["source_key"] for item in evaluation["expectation_matrix"]}
     assert "onec_stocks" not in {item["source_key"] for item in evaluation["expectation_matrix"]}
     assert cells[("sku_action_events", "yesterday_closed")]["expectation_state"] == "no_events"

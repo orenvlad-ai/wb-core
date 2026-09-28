@@ -1,0 +1,10 @@
+[Unit]
+Description=WB Core buyer observations near configured Web Vitrina slots
+
+[Timer]
+OnCalendar=*-*-* *:00,10,20,30,40,50:00
+AccuracySec=1m
+Unit=wb-core-buyer-authenticated-collect.service
+
+[Install]
+WantedBy=timers.target
