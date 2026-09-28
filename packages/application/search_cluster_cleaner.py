@@ -508,6 +508,8 @@ class KeywordCleaner:
             return dict(batch_id=batch_id,items=original['items'],selected_categories=original['selected_categories'],
                         state=latest.get('state','queued'),stage=latest.get('stage','queued'),
                         item_updates=latest.get('item_updates',{}),current_index=latest.get('current_index'),
+                        read_retry_attempts=latest.get('read_retry_attempts',{}),
+                        read_retry_started_at=latest.get('read_retry_started_at',{}),
                         error=latest.get('error'),error_code=latest.get('error_code'),created_at=request['created_at'],updated_at=rows[-1]['created_at'])
 
     def record_manual_batch(self,batch_id:str,**facts) -> None:
@@ -522,6 +524,43 @@ class KeywordCleaner:
                 index,update=value.pop('item_update')
                 value['item_updates']=dict(value.get('item_updates') or {},**{str(index):update})
             self._event(c,'self_service_batch_stage',value)
+
+    def retry_batch_scan(self,batch_id:str,index:int,job_id:str,attempt:int) -> None:
+        """Atomically rearm a proven read-only child under its original job identity."""
+        with self.store.transaction(timeout_ms=30000) as c:
+            batch=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,batch_id)).fetchone()
+            request=c.execute("SELECT outcome FROM cleaner_requests WHERE account=? AND request_id=? AND route='manual-clean'",(self.key,job_id)).fetchone()
+            latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.key,job_id)).fetchone()
+            if not batch or not request or not latest:raise CleanerError('batch_retry_unavailable','Нет точной операции для повтора',409)
+            parent=json.loads(batch['facts']);job=json.loads(latest['facts']);original=json.loads(request['outcome'])
+            waiting=parent.get('item_updates',{}).get(str(index),{})
+            if (parent.get('state') in BATCH_TERMINAL_STATES or waiting.get('state')!='retry_wait'
+                    or waiting.get('attempt')!=attempt or job.get('state')!='failed' or job.get('stage')!='finished'
+                    or job.get('write_run_id') or job.get('can_recheck') or original.get('batch_id')!=batch_id
+                    or original.get('batch_index')!=index or job.get('job_id')!=job_id
+                    or parent['items'][index]['advert_id']!=job.get('advert_id')
+                    or parent['items'][index]['nm_id']!=job.get('nm_id')):
+                raise CleanerError('batch_retry_unavailable','Повтор чтения больше не безопасен',409)
+            settings=self._settings(c)
+            if settings['generation']!=parent.get('generation') or settings['enabled'] or not settings['baseline_ready']:
+                raise CleanerError('generation_conflict','Поколение или режим чистки изменился',409)
+            target=Target(job['advert_id'],job['nm_id'])
+            declared=[dict(target=target.key,advert_id=target.advert_id,nm_id=target.nm_id)]
+            old=c.execute('SELECT state,kind,trigger,targets FROM cleaner_runs WHERE account=? AND run_id=?',(self.key,job['scan_run_id'])).fetchone()
+            if (not old or old['state'] not in {'stopped','partial','failed'} or old['kind']!='scan'
+                    or old['trigger']!='manual_exact' or json.loads(old['targets'])!=declared or c.execute(
+                    'SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=? LIMIT 1',(self.key,job['scan_run_id'])).fetchone()):
+                raise CleanerError('batch_retry_unavailable','Прежняя операция не доказана как чтение',409)
+            if c.execute("SELECT 1 FROM cleaner_runs WHERE account=? AND state IN('queued','accepted','running') LIMIT 1",(self.key,)).fetchone():
+                raise CleanerError('manual_queue_blocked','Есть другое незавершённое задание',409)
+            run_id=self._new_run(c,'scan','manual_exact',request_id=f'{job_id}-read-{attempt}',
+                                 targets=declared)
+            rearmed=dict(job,state='queued',stage='fetching',scan_run_id=run_id,scan_attempt=attempt,
+                         error=None,error_code=None,next_readback_at=0)
+            self._event(c,'self_service_stage',rearmed,run_id=run_id)
+            updates=dict(parent['item_updates']);updates.pop(str(index))
+            self._event(c,'self_service_batch_stage',dict(parent,state='running',stage='retrying',
+                        current_index=index,item_updates=updates,error=None,error_code=None))
 
     def resume_drift_batch(self,batch_id:str,payload:Mapping,principal:Principal) -> dict:
         """Explicitly continue the frozen tail after one proven scan-only drift.

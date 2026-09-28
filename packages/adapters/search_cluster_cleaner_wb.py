@@ -13,6 +13,7 @@ from email.utils import parsedate_to_datetime
 import json
 import http.client
 import io
+import logging
 import os
 import threading
 import time
@@ -23,8 +24,9 @@ from packages.domain.search_cluster_sources import union_snapshot
 
 
 class WbReadError(CleanerError):
-    def __init__(self,code,status=None,retry_after=0):
-        super().__init__(code,'WB: '+code,503);self.status=status;self.retry_after=retry_after
+    def __init__(self,code,status=None,retry_after=0,*,endpoint='',category=''):
+        super().__init__(code,'WB: '+code,503)
+        self.status,self.retry_after,self.endpoint,self.category=status,retry_after,endpoint,category
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class WriteResponse:
 ERROR_BODY_LIMIT = 8192
 ERROR_BODY_EXCERPT_LIMIT = 2048
 STATS_WINDOW_DAYS = 7
+LOG=logging.getLogger(__name__)
 
 
 class AccountLimiter:
@@ -148,11 +151,16 @@ class CleanerWbSource:
         return dict(request_id=request_id,body_prefix_sha256=hashlib.sha256(raw).hexdigest(),body_excerpt=text[:ERROR_BODY_EXCERPT_LIMIT],body_truncated=truncated)
 
     def _call(self,method,path,payload=None,*,deadline,write=False):
+        endpoint=path.split('?',1)[0].rsplit('/',1)[-1]
+        statistics=path.endswith('/normquery/stats')
         if self._target_deadline is not None:deadline=min(deadline,self._target_deadline)
-        if not write:self.limiter.wait(deadline,statistics=path.endswith("/normquery/stats"))
-        deadline=min(deadline,self.monotonic()+self.timeout)
-        timeout=min(self.timeout,deadline-self.monotonic())
-        if timeout<=0:raise WbReadError('read_budget')
+        if not write:self.limiter.wait(deadline,statistics=statistics)
+        # WB stats may return its own 504 after ~10s. Let the read observe that
+        # status while keeping the one-shot set-minus write budget unchanged.
+        budget=max(self.timeout,25) if statistics and not self.runtime.base_url.startswith('http://') else self.timeout
+        deadline=min(deadline,self.monotonic()+budget)
+        timeout=min(budget,deadline-self.monotonic())
+        if timeout<=0:raise WbReadError('read_budget',endpoint=endpoint,category='budget')
         parsed=parse.urlparse(self.runtime.base_url)
         connection_cls=http.client.HTTPSConnection if parsed.scheme=='https' else http.client.HTTPConnection
         connection=connection_cls(parsed.hostname,parsed.port,timeout=timeout)
@@ -181,14 +189,20 @@ class CleanerWbSource:
                 return WriteResponse(status,delay,'validation_rejected' if validation else 'http_error',
                     request_id=receipt.pop('request_id'),request_id_header=request_id_header,**receipt)
             if status!=200:
-                raise WbReadError({401:'unauthorized',403:'forbidden',429:'rate_limited'}.get(status,'http_error'),status,delay)
+                if statistics and (status in {408,429} or 500<=status<=599):
+                    self.limiter.backoff(max(delay,10))
+                code=({401:'unauthorized',403:'forbidden',429:'rate_limited'}.get(status)
+                      or ('source_temporarily_unavailable' if status==408 or 500<=status<=599 else 'http_error'))
+                LOG.warning('cleaner WB read failed endpoint=%s category=http status=%d',endpoint,status)
+                raise WbReadError(code,status,delay,endpoint=endpoint,category='http')
             raw=response.read(16*1024*1024+1)
-            if len(raw)>16*1024*1024 or self.monotonic()>deadline:raise WbReadError('read_budget')
+            if len(raw)>16*1024*1024 or self.monotonic()>deadline:raise WbReadError('read_budget',endpoint=endpoint,category='budget')
             try:return json.loads(raw)
             except ValueError:raise WbReadError('response_malformed')
         except (TimeoutError,ConnectionError,OSError,http.client.HTTPException):
             if write:return WriteResponse(None,0,'transport_ambiguous')
-            raise WbReadError('source_temporarily_unavailable') from None
+            LOG.warning('cleaner WB read failed endpoint=%s category=transport',endpoint)
+            raise WbReadError('source_temporarily_unavailable',endpoint=endpoint,category='transport') from None
         finally:connection.close()
 
     def _adverts(self,ids,deadline,*,strict=True):

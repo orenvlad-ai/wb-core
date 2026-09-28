@@ -78,10 +78,10 @@ class ManualCleanerCoordinator:
         return Principal(actor,True,True,True)
 
     @staticmethod
-    def operation_id(job_id:str,phase:str) -> str:
+    def operation_id(job_id:str,phase:str,attempt:int=0) -> str:
         # UUID-shaped browser request IDs are durable and unique. The suffix
         # keeps scan, prepare and write identities disjoint.
-        return 'ui-'+job_id.lower().replace(':','-')+'-'+phase
+        return 'ui-'+job_id.lower().replace(':','-')+'-'+phase+(f'-read-{attempt}' if phase=='scan' and attempt else '')
 
     def _launch(self,action:str,operation_id:str,request:dict,**expected) -> dict:
         return production_apply(action=action,adapter_name=ADAPTER_NAME,operation_id=operation_id,
@@ -141,7 +141,7 @@ class ManualCleanerCoordinator:
         target=dict(advert_id=job['advert_id'],nm_id=job['nm_id'])
         targets=[target]
         scan=dict(mode='manual',run_id=job['scan_run_id'],targets=targets)
-        scan_op=self.operation_id(job_id,'scan')
+        scan_op=self.operation_id(job_id,'scan',int(job.get('scan_attempt') or 0))
         stage=job['stage']
         if stage=='fetching':
             if float(job.get('next_readback_at') or 0)>time.time():return
@@ -261,10 +261,18 @@ class ManualCleanerCoordinator:
         elif phase in {'scan','write'}:
             run_id=job['scan_run_id'] if phase=='scan' else job.get('write_run_id')
             if not run_id or not self.cleaner.exact_manual_run_unclaimed(
-                    run_id,self.operation_id(job_id,phase),stage_e.Target(job['advert_id'],job['nm_id'])):
+                    run_id,self.operation_id(job_id,phase,int(job.get('scan_attempt') or 0)),stage_e.Target(job['advert_id'],job['nm_id'])):
                 return False
             preview_stage='fetching' if phase=='scan' else 'write_previewing'
         else:return False
+        if phase=='scan' and job.get('batch_id'):
+            # The parent owns the long retry window. Release this proven
+            # unclaimed scan on its next tick. Save the terminal child first:
+            # a crash here leaves a queued run that the parent can still prove.
+            self._save(job_id,state='failed',stage='finished',can_recheck=False,
+                       error_code='local_not_submitted_retry',
+                       error='Локальный запуск чтения не подтверждён; пара отложена')
+            return True
         attempts=(int(job.get('local_retry_attempts') or 0) if job.get('local_retry_phase')==phase else 0)+1
         if attempts>=self.LOCAL_RETRY_LIMIT:
             self._save(job_id,state='partial',stage=phase+'_apply_claimed',can_recheck=True,
