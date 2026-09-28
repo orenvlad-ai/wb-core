@@ -25,6 +25,18 @@ kept through full new-target/restore readback; only its exact verified files
 may be retired afterward. The copy-stage free-space gain is not real until
 that retirement completes.
 
+All four extra-disk mount presentations—parent, direct archive self-bind,
+logical archive bind and activated warehouse bind—must have **private** mount
+propagation. Keep the parent **read-only** in persistent fstab until the explicit
+rw copy phase; both archive paths remain read-only in every phase. Before the
+self-bind, detach propagation from the existing logical archive bind and
+parent so it cannot propagate a second mount onto the logical path. After
+each mount and after boot, inspect `/proc/self/mountinfo`: exactly one mount ID
+per path, no `shared:` or `master:`, the pinned UUID and expected ro/rw flags.
+A duplicate logical archive mount is a fail-closed topology error; never use
+blind, recursive, forced or lazy unmount. Recover only under a reviewed exact
+mount-ID/parent graph and the same durable operation intent.
+
 ## Preview: record the candidate, never submit from stale output
 
 1. Confirm deployed code contains this switch; read runtime SHA, current
@@ -71,10 +83,13 @@ because the job lock alone does not cover interactive writers.
    stop before copying. Verify the archive digests did not change.
 2. Create `/mnt/wb-core-extra100/warehouse-recovery` on the UUID-verified
    filesystem. Copy the **entire** source tree preserving ownership, modes,
-   times, hard links and xattrs (for example, `rsync -aHAX --numeric-ids` under
-   the held locks). Run `...manifest.py compare --manifest <external-plan-path>
+   times, hard links and xattrs (for example, `rsync -aHAX --fsync --numeric-ids` under
+   the held locks). Fsync the target directories and filesystem before the
+   prepared receipt. Run `...manifest.py compare --manifest <external-plan-path>
    --root /mnt/wb-core-extra100/warehouse-recovery`. Re-run the same compare
-   against the old source to prove it stayed unchanged. Do not rewrite stored
+   against the old source as a fresh whole-tree SHA/metadata comparison; the
+   earlier SQLite quick check remains valid only while that fingerprint matches.
+   A changed fingerprint stops the cutover. Do not rewrite stored
    checkpoint paths, manifests, selectors or registry rows.
 3. Write the exact marker payload, with `fsync(file)` and `fsync(parent)`, to
    the old underlay recovery directory, then to the new extra directory, and
@@ -99,7 +114,8 @@ because the job lock alone does not cover interactive writers.
    artifact and run `apps/root_storage_policy.py status-readback`; require
    fourth-role `identity_ok=true`, `reserve_breached=false`, overall `ok=true`
    and unchanged old-backup Finance floor. Verify boot/fstab declarations will
-   restore the same topology, then release locks and re-enable the timer.
+   restore the same topology. Keep both locks and timers stopped through the
+   exact old-source retirement and final reserve/status readback below.
 
 **Retirement is a separate exact phase of the same intent.** Keep an access
 path to the old `/dev/sdb1` underlay while the new bind is live (a controlled
@@ -108,7 +124,9 @@ the old underlay to the original manifest once more, list each exact path,
 prove no readers, holds or new files, then remove only those exact old files
 under the approved intent and verify `df -B1` on `/dev/sdb1`. Do not remove the
 underlay activation marker or bind mountpoint. Read the result by operation ID;
-an uncertain response means status/readback only, never repeat deletion.
+an uncertain response means status/readback only, never repeat deletion. Only
+after verified retirement, fourth-role and Finance reserve readback, and HTTP
+namespace proof may the controller release both locks and re-enable the timers.
 
 ## Failure, rollback and next release
 

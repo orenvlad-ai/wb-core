@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import fcntl
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -26,6 +28,7 @@ from apps.promo_campaign_archive_gc import (  # noqa: E402
     run_promo_campaign_archive_light_gc,
 )
 from apps import promo_campaign_archive_gc as gc_module  # noqa: E402
+from apps.promo_campaign_archive_light_gc_tick import main as gc_tick_main  # noqa: E402
 from apps.promo_campaign_archive_integrity_smoke import _write_promo_fixture  # noqa: E402
 from packages.application.promo_campaign_archive import (  # noqa: E402
     load_promo_campaign_archive,
@@ -113,6 +116,7 @@ def main() -> None:
     _assert_run_scan_failure_is_fail_closed_and_nonblocking()
     _assert_apply_failure_receipt_accounting()
     _assert_pending_batch_resume_and_drift()
+    _assert_hourly_cli_uses_bounded_native_gc()
 
 
 def _assert_light_gc_policy() -> None:
@@ -215,6 +219,50 @@ def _normalized_runtime(runtime_dir: Path) -> None:
         workbook_kind="valid",
     )
     sync_promo_campaign_archive(runtime_dir)
+
+
+def _assert_hourly_cli_uses_bounded_native_gc() -> None:
+    with TemporaryDirectory(prefix="promo-light-gc-hourly-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        run_dir = runtime_dir / "promo_xlsx_collector_runs" / "2026-04-20__old-partial"
+        logs = run_dir / "logs"
+        logs.mkdir(parents=True)
+        summary = run_dir / "run_summary.json"
+        summary.write_text('{"status":"partial"}\n', encoding="utf-8")
+        traces = [logs / f"trace-{index:03d}.har" for index in range(260)]
+        for trace in traces:
+            trace.write_bytes(b"old debug trace")
+        old = time.time() - 20 * 86400
+        for path in [summary, *traces, logs, run_dir]:
+            os.utime(path, (old, old))
+
+        gc_dir = runtime_dir / EXACT_GC_AUDIT_DIRNAME
+        gc_dir.mkdir()
+        lock_fd = os.open(gc_dir / LIGHT_GC_LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            output = StringIO()
+            with redirect_stdout(output):
+                exit_code = gc_tick_main(["--runtime-dir", str(runtime_dir)])
+            locked = json.loads(output.getvalue())
+            assert exit_code == 0 and locked["status"] == "skipped" and locked["deleted_count"] == 0, locked
+        finally:
+            os.close(lock_fd)
+
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = gc_tick_main(["--runtime-dir", str(runtime_dir)])
+        first = json.loads(output.getvalue())
+        assert exit_code == 0 and first["deleted_count"] == 250, first
+        assert sum(path.exists() for path in traces) == 10
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = gc_tick_main(["--runtime-dir", str(runtime_dir)])
+        second = json.loads(output.getvalue())
+        assert exit_code == 0 and second["deleted_count"] == 10, second
+        assert summary.exists() and not any(path.exists() for path in traces)
+        assert not (runtime_dir / "registry_upload_runtime.sqlite3").exists()
 
 
 def _old_run(runtime_dir: Path, name: str, status: str, filenames: tuple[str, ...]) -> list[Path]:
