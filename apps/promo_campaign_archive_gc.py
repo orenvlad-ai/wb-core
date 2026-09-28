@@ -302,6 +302,7 @@ def run_promo_campaign_archive_light_gc(
                 "freed_bytes": result["freed_bytes"],
                 "already_missing_count": result["already_missing_count"],
                 "drift_count": result["drift_count"],
+                "skipped_unvisited_count": result["skipped_unvisited_count"],
             }
             receipt_path = _light_gc_receipt_path(gc_dir, state["sequence"])
             if receipt_path.exists():
@@ -541,12 +542,13 @@ def _apply_incremental_light_gc_batch(
     runs_root = runtime_dir / PROMO_RUNS_DIRNAME
     result: dict[str, Any] = {
         "deleted_count": 0, "freed_bytes": 0, "already_missing_count": 0,
-        "drift_count": 0, "errors": [], "completed": True,
+        "drift_count": 0, "skipped_unvisited_count": 0,
+        "errors": [], "completed": True,
     }
     # Scan each run once per batch, then guard every unlink against a collector
     # restart: PromoXlsxCollectorBlock writes run_summary.json before work.
     run_age_ok: dict[str, tuple[bool, int, int]] = {}
-    for item in batch["plan"]:
+    for index, item in enumerate(batch["plan"]):
         if time.perf_counter() >= deadline:
             result["completed"] = False
             break
@@ -570,8 +572,12 @@ def _apply_incremental_light_gc_batch(
                 _files, newest_mtime = _light_gc_run_files(run_dir, deadline=deadline)
                 summary_stat = (run_dir / "run_summary.json").lstat()
             except (TimeoutError, OSError) as exc:
-                result["drift_count"] += 1
-                result["errors"].append(f"candidate_run_scan_failed: {type(exc).__name__}")
+                skipped = len(batch["plan"]) - index
+                result["drift_count"] += skipped
+                result["skipped_unvisited_count"] += skipped
+                result["errors"].append(
+                    f"candidate_run_scan_failed: {type(exc).__name__}; skipped_unvisited={skipped}"
+                )
                 break
             newest_mtime = max(newest_mtime, summary_stat.st_mtime)
             run_age_ok[run_dir.name] = (
@@ -602,8 +608,10 @@ def _apply_incremental_light_gc_batch(
         try:
             identity = _light_gc_file_identity(path, run_dir, deadline=deadline)
         except TimeoutError:
-            result["drift_count"] += 1
-            result["errors"].append("candidate_hash_timeout")
+            skipped = len(batch["plan"]) - index
+            result["drift_count"] += skipped
+            result["skipped_unvisited_count"] += skipped
+            result["errors"].append(f"candidate_hash_timeout; skipped_unvisited={skipped}")
             break
         if identity is None or any(identity[key] != item[key] for key in (
             "size", "device", "inode", "mtime_ns", "sha256"
@@ -648,6 +656,7 @@ def _incremental_light_gc_summary(
         "batch_complete": bool(result.get("completed", True)),
         "resumed_pending_batch": resumed,
         "already_missing_count": int(result.get("already_missing_count") or 0),
+        "skipped_unvisited_count": int(result.get("skipped_unvisited_count") or 0),
         "cursor": batch.get("cursor") or {},
     }
 

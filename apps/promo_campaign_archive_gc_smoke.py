@@ -111,6 +111,7 @@ def main() -> None:
     _assert_incremental_backlog_and_lock()
     _assert_same_run_multi_batch_and_producer_write()
     _assert_run_scan_failure_is_fail_closed_and_nonblocking()
+    _assert_apply_failure_receipt_accounting()
     _assert_pending_batch_resume_and_drift()
 
 
@@ -438,6 +439,99 @@ def _assert_run_scan_failure_is_fail_closed_and_nonblocking() -> None:
             or healthy.exists()
         ):
             raise AssertionError(f"timed-out run starved later run or hid warning: {first}, {second}")
+
+
+def _assert_apply_failure_receipt_accounting() -> None:
+    with TemporaryDirectory(prefix="promo-light-gc-apply-scan-failure-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        first, second = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial",
+            ("first.har", "second.har"),
+        )
+        original_scan = gc_module._light_gc_run_files
+        scans = 0
+
+        def fail_apply_scan(run_dir: Path, *, deadline: float | None = None):
+            nonlocal scans
+            if run_dir == first.parent.parent:
+                scans += 1
+                if scans == 2:
+                    raise TimeoutError("fixture apply age scan timeout")
+            return original_scan(run_dir, deadline=deadline)
+
+        try:
+            gc_module._light_gc_run_files = fail_apply_scan
+            result = run_promo_campaign_archive_light_gc(
+                runtime_dir=runtime_dir, max_files=2, max_runs=3,
+            )
+        finally:
+            gc_module._light_gc_run_files = original_scan
+        state = json.loads(
+            (runtime_dir / EXACT_GC_AUDIT_DIRNAME / LIGHT_GC_STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        receipt = json.loads(
+            (runtime_dir / EXACT_GC_AUDIT_DIRNAME / "light-gc-receipt-00000001.json").read_text(encoding="utf-8")
+        )
+        if (
+            result["status"] != "warning"
+            or result["deleted_count"] != 0
+            or result["skipped_unvisited_count"] != 2
+            or state["pending"] is not None
+            or state["sequence"] != 1
+            or receipt["skipped_unvisited_count"] != 2
+            or not first.exists() or not second.exists()
+        ):
+            raise AssertionError(f"apply scan failure receipt omitted unvisited targets: {result}, {receipt}")
+
+    with TemporaryDirectory(prefix="promo-light-gc-apply-hash-failure-") as tmp:
+        runtime_dir = (Path(tmp) / "runtime").resolve()
+        _normalized_runtime(runtime_dir)
+        first, second = _old_run(
+            runtime_dir, "2026-08-001__partial", "partial",
+            ("first.har", "second.har"),
+        )
+        original_identity = gc_module._light_gc_file_identity
+        second_checks = 0
+
+        def fail_second_apply_hash(
+            path: Path, run_dir: Path, *, deadline: float | None = None,
+        ):
+            nonlocal second_checks
+            if path == second:
+                second_checks += 1
+                if second_checks == 2:
+                    raise TimeoutError("fixture apply hash timeout")
+            return original_identity(path, run_dir, deadline=deadline)
+
+        try:
+            gc_module._light_gc_file_identity = fail_second_apply_hash
+            result = run_promo_campaign_archive_light_gc(
+                runtime_dir=runtime_dir, max_files=2, max_runs=3,
+            )
+        finally:
+            gc_module._light_gc_file_identity = original_identity
+        state = json.loads(
+            (runtime_dir / EXACT_GC_AUDIT_DIRNAME / LIGHT_GC_STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        receipt = json.loads(
+            (runtime_dir / EXACT_GC_AUDIT_DIRNAME / "light-gc-receipt-00000001.json").read_text(encoding="utf-8")
+        )
+        if (
+            result["deleted_count"] != 1
+            or result["skipped_unvisited_count"] != 1
+            or state["pending"] is not None
+            or state["sequence"] != 1
+            or receipt["skipped_unvisited_count"] != 1
+            or first.exists() or not second.exists()
+        ):
+            raise AssertionError(f"apply hash timeout receipt omitted unvisited target: {result}, {receipt}")
+        for _ in range(3):
+            run_promo_campaign_archive_light_gc(runtime_dir=runtime_dir, max_runs=3)
+            if not second.exists():
+                break
+        if second.exists():
+            raise AssertionError("skipped hash-timeout file never became eligible again")
 
 
 def _assert_pending_batch_resume_and_drift() -> None:
