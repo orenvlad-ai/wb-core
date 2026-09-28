@@ -31,14 +31,8 @@
       <section class="notice is-hidden" data-notice role="status" aria-live="polite"></section>
       <section class="notice notice-error is-hidden" data-error role="alert"></section>
 
-      <nav class="action-bar" aria-label="Действия со счетами">
+      <nav class="action-bar" aria-label="Общие действия">
         <button class="button" type="button" data-action="opening">Начальный остаток</button>
-        <button class="button" type="button" data-action="common-opening">Общий старт трёх касс</button>
-        <button class="button primary" type="button" data-action="funding">Пополнить кассу</button>
-        <button class="button" type="button" data-action="income">Поступление</button>
-        <button class="button" type="button" data-action="expense">Расход</button>
-        <button class="button" type="button" data-action="transfer">Перевод</button>
-        <button class="button" type="button" data-action="reconcile">Сверка</button>
         <a class="button quiet" href="#finance-settings" data-settings-link>Настройки</a>
       </nav>
 
@@ -52,6 +46,16 @@
           <h3>Пока нет счетов</h3>
           <p>Создайте кассу или добавьте банковский счёт, чтобы начать учёт.</p>
         </div>
+      </section>
+
+      <section class="panel account-operations" aria-labelledby="account-operations-title">
+        <div class="section-heading"><div><h2 id="account-operations-title" data-account-operations-title>Операции с кассой</h2><p data-account-operations-hint aria-live="polite">Выберите кассу выше, чтобы начать операцию.</p></div></div>
+        <nav class="action-bar" aria-label="Операции с выбранной кассой">
+          <button class="button primary" type="button" data-action="income" disabled>Поступление</button>
+          <button class="button" type="button" data-action="expense" disabled>Расход</button>
+          <button class="button" type="button" data-action="transfer" disabled>Перевод</button>
+          <button class="button" type="button" data-action="reconcile" disabled>Сверка</button>
+        </nav>
       </section>
 
       <section class="workspace-grid">
@@ -91,10 +95,10 @@
     </main>
 
     <dialog class="dialog" data-dialog>
-      <form method="dialog" class="dialog-card" data-dialog-form>
+      <form method="dialog" class="dialog-card" data-dialog-form aria-labelledby="dialog-title">
         {{FINANCE_INSTANCE_BANNER}}
-        <div class="dialog-heading"><div><p class="eyebrow" data-dialog-kicker>Финансы</p><h2 data-dialog-title>Операция</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
-        <div data-dialog-content></div>
+        <div class="dialog-heading"><div><p class="eyebrow" data-dialog-kicker>Финансы</p><h2 id="dialog-title" data-dialog-title>Операция</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
+        <div class="dialog-scroll"><div data-dialog-content></div></div>
         <div class="dialog-actions"><button class="button quiet" value="cancel">Отмена</button><button class="button" type="button" data-dialog-save-draft>Сохранить черновик</button><button class="button primary" value="default" data-dialog-submit>Провести</button></div>
       </form>
     </dialog>
