@@ -421,6 +421,13 @@ def _plan_incremental_light_gc_batch(
             if not _is_debug_trace_file(path) or path.name in PROTECTED_FILENAMES:
                 continue
             try:
+                if path.lstat().st_size > max_bytes:
+                    skips["oversized_file_skip"] += 1
+                    continue
+            except OSError:
+                skips["unsafe_file_skip"] += 1
+                continue
+            try:
                 identity = _light_gc_file_identity(path, run_dir, deadline=deadline)
             except TimeoutError:
                 return {"plan": plan, "cursor": next_cursor, "scanned_runs": scanned_runs, "skip_reasons": dict(skips)}
