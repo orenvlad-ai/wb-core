@@ -222,6 +222,11 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
                     row['delivery_state']='local_prepared';row['pending_count']=0;row['not_sent_count']=unresolved
                 elif not active and unresolved and any(op['state']=='cancelled_before_send' for op in run['write_operations']):
                     row['delivery_state']='not_sent';row['pending_count']=0;row['not_sent_count']=unresolved
+                elif (not active and unresolved and run['state']=='stopped'
+                        and run.get('reason')=='batch_write_wait'):
+                    # Parking required the exact no-dispatch + closed-guard
+                    # proof in the same transaction as the stopped run.
+                    row['delivery_state']='not_sent';row['pending_count']=0;row['not_sent_count']=unresolved
             elif job['state'] in {'no_change','complete'}:
                 row['confirmed_excluded']=0
                 row['returned']=0
@@ -338,9 +343,10 @@ class BatchCleanerCoordinator:
         if row is None:raise CleanerError('campaign_sku_missing','Пара больше не найдена в кампании WB',409)
         return row
 
-    def _stop(self,batch:dict,index:int,*,code:str,message:str,item_state:str='failed') -> None:
+    def _stop(self,batch:dict,index:int,*,code:str,message:str,item_state:str='failed',job_id:str|None=None) -> None:
         updates=dict(batch['item_updates'])
-        updates[str(index)]=dict(state=item_state,stage='finished',error_code=code,error=message)
+        updates[str(index)]=dict(state=item_state,stage='finished',error_code=code,error=message,
+                                 **({'job_id':job_id} if job_id else {}))
         for key,prior in list(updates.items()):
             if prior.get('state')=='retry_wait':
                 updates[key]=dict(state='partial',stage='finished',job_id=prior.get('job_id'),
@@ -407,6 +413,21 @@ class BatchCleanerCoordinator:
             item_update=(index,update))
         return batch_status(self.cleaner,batch['batch_id'],self.owner)
 
+    def _defer_write(self,batch:dict,index:int,child:dict) -> dict:
+        """Park the same proven-unsent write run while siblings proceed."""
+        attempts=batch.get('write_retry_attempts') or {}
+        started=batch.get('write_retry_started_at') or {}
+        prior=int(attempts.get(str(index),0));now=self.now()
+        first=float(started.get(str(index),now))
+        deadline=first+READ_RETRY_DELAYS[-1]+READ_RETRY_POLL_GRACE
+        next_window=next((number for number in range(prior+1,len(READ_RETRY_DELAYS)+1)
+                          if first+READ_RETRY_DELAYS[number-1]>now),None)
+        terminal=now>deadline or next_window is None
+        self.cleaner.batch_write_retry(batch['batch_id'],index,child['job_id'],
+            attempt=next_window or prior,next_retry_at=first+READ_RETRY_DELAYS[next_window-1] if not terminal else 0,
+            first_failed_at=first,terminal=terminal)
+        return batch_status(self.cleaner,batch['batch_id'],self.owner)
+
     def tick(self) -> dict|None:
         ids=self.pending_batches()
         if not ids:return None
@@ -418,15 +439,19 @@ class BatchCleanerCoordinator:
                      if batch['item_updates'].get(str(i),{}).get('state')=='retry_wait']
             if waiting:
                 now=self.now()
-                started=batch.get('read_retry_started_at') or {}
-                expired=[(i,update) for i,update in waiting if now>float(started.get(str(i),0))+
+                read_started=batch.get('read_retry_started_at') or {}
+                write_started=batch.get('write_retry_started_at') or {}
+                expired=[(i,update) for i,update in waiting if now>float((write_started if update.get('retry_kind')=='write_unsent'
+                         else read_started).get(str(i),0))+
                          READ_RETRY_DELAYS[-1]+READ_RETRY_POLL_GRACE]
                 if expired:
                     updates=dict(batch['item_updates'])
                     for expired_index,update in expired:
                         updates[str(expired_index)]=dict(state='partial',stage='finished',
-                            job_id=update.get('job_id'),error_code='read_retry_exhausted',
-                            error='Время повторного чтения WB истекло')
+                            job_id=update.get('job_id'),
+                            error_code='write_retry_exhausted' if update.get('retry_kind')=='write_unsent' else 'read_retry_exhausted',
+                            error=('Срок повтора локальной записи истёк; отправки в WB не было' if update.get('retry_kind')=='write_unsent'
+                                   else 'Время повторного чтения WB истекло'))
                     remaining=len(waiting)-len(expired)
                     self.cleaner.record_manual_batch(batch['batch_id'],
                         state='running' if remaining else 'partial',
@@ -437,7 +462,10 @@ class BatchCleanerCoordinator:
                 if due:
                     retry_index,update=due[0]
                     if update.get('job_id'):
-                        try:self.cleaner.retry_batch_scan(batch['batch_id'],retry_index,update['job_id'],update['attempt'])
+                        try:
+                            if update.get('retry_kind')=='write_unsent':
+                                self.cleaner.batch_write_retry(batch['batch_id'],retry_index,update['job_id'],attempt=update['attempt'])
+                            else:self.cleaner.retry_batch_scan(batch['batch_id'],retry_index,update['job_id'],update['attempt'])
                         except CleanerError as exc:
                             if exc.code!='manual_queue_blocked':
                                 if exc.code in GLOBAL_STOP_CODES:
@@ -471,6 +499,12 @@ class BatchCleanerCoordinator:
             return batch_status(self.cleaner,batch['batch_id'],self.owner)
         if child:
             if child['state']=='partial' and child.get('can_recheck'):
+                if (child.get('batch_id')==batch['batch_id'] and child.get('stage')=='write_apply_claimed'
+                        and child.get('error_code')=='readback_unresolved'):
+                    self._stop(batch,index,code='readback_unresolved',
+                        message='Срок автоматического readback истёк; возможная запись остаётся под защитой',
+                        item_state='partial',job_id=child['job_id'])
+                    return batch_status(self.cleaner,batch['batch_id'],self.owner)
                 if batch['state']!='attention_required':
                     self.cleaner.record_manual_batch(batch['batch_id'],state='attention_required',stage='readback',current_index=index,
                                                      error_code='readback_unresolved',error='Уточните состояние текущей пары и продолжите группу')
@@ -485,6 +519,12 @@ class BatchCleanerCoordinator:
                                                  item_update=(index,update))
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if child['state'] in {'failed','partial'}:
+                if (child['state']=='failed' and child.get('error_code')=='local_not_submitted_retry'
+                        and child.get('local_retry_phase')=='write' and child.get('write_run_id')):
+                    try:return self._defer_write(batch,index,child)
+                    except CleanerError as exc:
+                        self._stop(batch,index,code=exc.code,message=str(exc))
+                        return batch_status(self.cleaner,batch['batch_id'],self.owner)
                 if child['state']=='failed' and child.get('error_code')=='local_not_submitted_retry':
                     from packages.application.search_cluster_cleaner_self_service import ManualCleanerCoordinator
                     from packages.contracts.search_cluster_cleaner import Target
