@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,10 +29,29 @@ def main() -> int:
             conn.execute("CREATE TABLE proof (value TEXT NOT NULL)")
             conn.execute("INSERT INTO proof VALUES ('retained')")
         (source / "checkpoint.sqlite3.manifest.json").write_text("{}", encoding="utf-8")
+        (source / "empty-retained-family").mkdir()
         manifest = inventory(source)
         shutil.copytree(source, target)
         (target / ".warehouse-recovery-extra100-active.json").write_text("{}", encoding="utf-8")
         assert compare(manifest, target)["ok"] is True
+        (target / "empty-retained-family").rmdir()
+        try:
+            compare(manifest, target)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("missing empty recovery family was accepted")
+        (target / "empty-retained-family").mkdir()
+        def unreadable_walk(*args, **kwargs):
+            kwargs["onerror"](PermissionError("unreadable recovery subtree"))
+            return iter(())
+        with patch("apps.warehouse_recovery_extra100_manifest.os.walk", unreadable_walk):
+            try:
+                inventory(source)
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("unreadable subtree was silently omitted")
         (target / "checkpoint.sqlite3.manifest.json").write_text("changed", encoding="utf-8")
         try:
             compare(manifest, target)

@@ -49,8 +49,23 @@ def inventory(root: Path) -> dict:
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"recovery root is not a regular directory: {root}")
     entries: list[dict] = []
-    for directory, dirs, files in os.walk(root, followlinks=False):
+    directories: list[dict] = []
+    root_device = root.stat().st_dev
+
+    def fail_walk(error: OSError) -> None:
+        raise error
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=fail_walk):
         parent = Path(directory)
+        parent_stat = parent.stat()
+        if parent_stat.st_dev != root_device:
+            raise ValueError(f"nested filesystem in recovery tree: {parent}")
+        directories.append({
+            "path": parent.relative_to(root).as_posix(),
+            "mode": parent_stat.st_mode & 0o7777,
+            "uid": parent_stat.st_uid,
+            "gid": parent_stat.st_gid,
+        })
         for name in dirs:
             if (parent / name).is_symlink():
                 raise ValueError(f"symlink directory in recovery tree: {parent / name}")
@@ -62,23 +77,29 @@ def inventory(root: Path) -> dict:
             if path.is_symlink() or not path.is_file():
                 raise ValueError(f"nonregular file in recovery tree: {path}")
             before = path.stat()
+            if before.st_dev != root_device:
+                raise ValueError(f"file on another filesystem: {path}")
             digest = _sha256(path)
+            if path.suffix == ".sqlite3":
+                _sqlite_check(path)
             after = path.stat()
             if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
                 after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
             ):
                 raise ValueError(f"recovery file changed during inventory: {path}")
-            if path.suffix == ".sqlite3":
-                _sqlite_check(path)
             entries.append(
                 {
                     "path": relative,
                     "size_bytes": before.st_size,
                     "allocated_bytes": before.st_blocks * 512,
                     "sha256": digest,
+                    "mode": before.st_mode & 0o7777,
+                    "uid": before.st_uid,
+                    "gid": before.st_gid,
                 }
             )
     entries.sort(key=lambda item: item["path"])
+    directories.sort(key=lambda item: item["path"])
     return {
         "contract_version": CONTRACT,
         "file_count": len(entries),
@@ -86,6 +107,8 @@ def inventory(root: Path) -> dict:
         "total_allocated_bytes": sum(item["allocated_bytes"] for item in entries),
         "entries": entries,
         "entries_sha256": hashlib.sha256(_canonical(entries)).hexdigest(),
+        "directories": directories,
+        "directories_sha256": hashlib.sha256(_canonical(directories)).hexdigest(),
     }
 
 
@@ -95,14 +118,19 @@ def compare(manifest: dict, root: Path) -> dict:
     entries = manifest.get("entries")
     if not isinstance(entries, list) or hashlib.sha256(_canonical(entries)).hexdigest() != manifest.get("entries_sha256"):
         raise ValueError("copy manifest entries fingerprint mismatch")
+    directories = manifest.get("directories")
+    if not isinstance(directories, list) or hashlib.sha256(_canonical(directories)).hexdigest() != manifest.get("directories_sha256"):
+        raise ValueError("copy manifest directories fingerprint mismatch")
     observed = inventory(root)
+    if directories != observed["directories"]:
+        raise ValueError("recovery directory topology or metadata differs from manifest")
     # Allocation may legitimately differ across ext4 volumes; compare content.
     expected_content = [
-        (item["path"], item["size_bytes"], item["sha256"])
+        (item["path"], item["size_bytes"], item["sha256"], item["mode"], item["uid"], item["gid"])
         for item in entries
     ]
     observed_content = [
-        (item["path"], item["size_bytes"], item["sha256"])
+        (item["path"], item["size_bytes"], item["sha256"], item["mode"], item["uid"], item["gid"])
         for item in observed["entries"]
     ]
     if expected_content != observed_content:
