@@ -1,8 +1,7 @@
-"""Owner-scoped WB Buyer login in ordinary, sandboxed Chrome on the VPS.
+"""Owner-scoped manual WB Buyer login in ordinary sandboxed Chrome on the VPS.
 
-Only boolean visible-login evidence and bounded, sanitized network outcomes
-cross the private DevTools pipe. This module never reads prices or writes the
-canonical Playwright buyer profile.
+The manual window has no DevTools connection. A private pipe is used only
+after the operator finishes, to verify the saved profile after a restart.
 """
 
 from __future__ import annotations
@@ -218,6 +217,12 @@ def start(*, replace: bool = False, viewer_owner: str = "", viewer_expires_at: i
             if replace:
                 raise BuyerChromeBusyError("wait for current Chrome login to stop")
             return current
+        runtime.ensure_runner_idle()
+        try:
+            with runtime.profile_operation_lock():
+                pass
+        except BlockingIOError as exc:
+            raise BuyerChromeBusyError("buyer profile is already in use") from exc
         if not runtime.PACKAGE.is_file():
             raise RuntimeError("pinned Chrome package is not installed")
         if runtime._available(Path("/")) < runtime._root_reserve():
@@ -308,6 +313,26 @@ def stop(*, requested_run_id: str | None = None) -> dict[str, Any]:
                 subprocess.run(["systemctl", "stop", "--no-block", str(payload["unit"])], check=True, capture_output=True, timeout=8)
         elif payload.get("status") not in FINAL:
             _write({**payload, "status": "stopped", "reason": "buyer_recovery_stopped", "finished_at": _now().isoformat()})
+        return raw_status()
+
+
+def finish(*, requested_run_id: str) -> dict[str, Any]:
+    """One owner-approved, idempotent transition from manual UI to proof."""
+
+    if not requested_run_id:
+        raise ValueError("run_id required")
+    with _shared_start_lock():
+        payload = raw_status()
+        if requested_run_id != str(payload.get("run_id") or ""):
+            return {**payload, "status": "error", "reason": "buyer_recovery_run_not_current"}
+        with _status_lock():
+            latest = _read()
+            if requested_run_id != latest.get("run_id"):
+                return {**payload, "status": "error", "reason": "buyer_recovery_run_not_current"}
+            if latest.get("status") == "awaiting_human" and payload.get("running"):
+                _write_unlocked({**latest, "status": "validating_session", "reason": "buyer_chrome_manual_finish_requested"})
+            elif latest.get("status") not in FINAL and latest.get("status") != "validating_session":
+                return {**payload, "status": "error", "reason": "buyer_chrome_finish_not_ready"}
         return raw_status()
 
 
@@ -478,25 +503,29 @@ def _stop_process(process: subprocess.Popen[Any] | None, *, grace: float = 5) ->
         process.wait(timeout=5)
 
 
-def _launch_chrome(chrome: Path, env: Mapping[str, str], *, run_id: str, generation: int) -> tuple[subprocess.Popen[Any], ChromePipe]:
+def _launch_chrome(chrome: Path, env: Mapping[str, str], *, run_id: str, generation: int, diagnostic: bool = True) -> tuple[subprocess.Popen[Any], ChromePipe]:
     # One private, bounded diagnostic for the current run only. The next run
     # replaces it; there is no public endpoint or raw CDP event persistence.
-    if DIAGNOSTIC_DIR.stat().st_uid != os.geteuid() or DIAGNOSTIC_DIR.stat().st_mode & 0o777 != 0o700:
-        raise RuntimeError("Chrome network directory invalid")
-    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if generation == 1 else os.O_APPEND)
-    diagnostic_fd = os.open(_diagnostic_path(), flags, 0o600)
-    os.fchmod(diagnostic_fd, 0o600)
+    diagnostic_fd = None
+    if diagnostic:
+        if DIAGNOSTIC_DIR.stat().st_uid != os.geteuid() or DIAGNOSTIC_DIR.stat().st_mode & 0o777 != 0o700:
+            raise RuntimeError("Chrome network directory invalid")
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | (os.O_TRUNC if generation == 1 else os.O_APPEND)
+        diagnostic_fd = os.open(_diagnostic_path(), flags, 0o600)
+        os.fchmod(diagnostic_fd, 0o600)
     try:
-        if generation == 1:
+        if diagnostic and generation == 1:
             os.write(diagnostic_fd, json.dumps({"event": "buyer_network_run", "run_id": run_id}, separators=(",", ":")).encode("ascii") + b"\n")
         existing_events = 0
-        if generation > 1:
+        if diagnostic and generation > 1:
             existing_events = min(MAX_EVENTS, os.read(diagnostic_fd, 32_768).count(b"\n"))
-        os.lseek(diagnostic_fd, 0, os.SEEK_END)
+        if diagnostic:
+            os.lseek(diagnostic_fd, 0, os.SEEK_END)
         pipe = ChromePipe(Path(tempfile.mkdtemp(prefix=f".{run_id}-{generation}-", dir=runtime.STATE)),
                           diagnostic_fd=diagnostic_fd, existing_events=existing_events)
     except Exception:
-        os.close(diagnostic_fd)
+        if diagnostic_fd is not None:
+            os.close(diagnostic_fd)
         raise
     # tempfile creates 0700; Chrome inherits only FD 3 and FD 4 through exec.
     command = [
@@ -510,16 +539,17 @@ def _launch_chrome(chrome: Path, env: Mapping[str, str], *, run_id: str, generat
         pipe.call("Browser.getVersion", timeout=15)
         # Direct /lk launch is unchanged. Network is armed before noVNC opens
         # and well before the human can submit a phone number in WB ID.
-        for _ in range(30):
-            if pipe.enable_network():
-                break
-            if process.poll() is not None:
-                break
-            time.sleep(0.2)
-        else:
-            raise RuntimeError("Chrome network diagnostic unavailable")
-        if not pipe._network_sessions:
-            raise RuntimeError("Chrome network diagnostic unavailable")
+        if diagnostic:
+            for _ in range(30):
+                if pipe.enable_network():
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("Chrome network diagnostic unavailable")
+            if not pipe._network_sessions:
+                raise RuntimeError("Chrome network diagnostic unavailable")
         return process, pipe
     except Exception:
         try:
@@ -605,6 +635,20 @@ def _report_failure(stage: str, error: Exception) -> None:
     )
 
 
+def _launch_manual_chrome(chrome_path: Path, env: Mapping[str, str]) -> subprocess.Popen[Any]:
+    # Exactly the browser used in the successful fresh-login pilot: no CDP,
+    # Playwright flags, profile export, automatic clicks, or surface polling.
+    return _spawn([str(chrome_path), f"--user-data-dir={runtime.PROFILE}", LOGIN_URL], "chrome.log", env=env, capture=False)
+
+
+def _start_viewer(env: Mapping[str, str], xauth: Path) -> tuple[subprocess.Popen[Any], subprocess.Popen[Any]]:
+    vnc = _spawn(["x11vnc", "-display", DISPLAY, "-auth", str(xauth), "-localhost", "-forever", "-nopw", "-noxdamage", "-rfbport", str(VNC_PORT)], "x11vnc.log", env=env)
+    _wait_port(VNC_PORT, vnc)
+    web = _spawn(["websockify", f"127.0.0.1:{WEB_PORT}", f"127.0.0.1:{VNC_PORT}", "--web", str(NOVNC_DIR)], "websockify.log", env=env)
+    _wait_port(WEB_PORT, web)
+    return vnc, web
+
+
 def supervise(run_id: str, chrome_path: Path) -> int:
     if os.geteuid() == 0 or not run_id.startswith(RUN_PREFIX):
         return 1
@@ -625,10 +669,13 @@ def supervise(run_id: str, chrome_path: Path) -> int:
     web: subprocess.Popen[Any] | None = None
     chrome: subprocess.Popen[Any] | None = None
     pipe: ChromePipe | None = None
-    restarted = False
-    restart_at = 0.0
-    final_status = "error"
-    final_reason = "buyer_chrome_runtime_error"
+    final_status, final_reason = "error", "buyer_chrome_runtime_error"
+    profile_guard = runtime.profile_operation_lock()
+    try:
+        profile_guard.__enter__()
+    except BlockingIOError:
+        _safe_status_update(run_id, status="error", reason="buyer_chrome_profile_busy", finished_at=_now().isoformat())
+        return 1
     try:
         xauth = runtime.STATE / "display.Xauthority"
         xauth.touch(mode=0o600)
@@ -637,61 +684,69 @@ def supervise(run_id: str, chrome_path: Path) -> int:
         xvfb = _spawn(["Xvfb", DISPLAY, "-screen", "0", "1600x900x24", "-nolisten", "tcp", "-auth", str(xauth)], "xvfb.log", env=env)
         _wait_display(xvfb)
         openbox = _spawn(["openbox", "--sm-disable"], "openbox.log", env=env)
-        chrome, pipe = _launch_chrome(chrome_path, env, run_id=run_id, generation=1)
-        vnc = _spawn(["x11vnc", "-display", DISPLAY, "-auth", str(xauth), "-localhost", "-forever", "-nopw", "-noxdamage", "-rfbport", str(VNC_PORT)], "x11vnc.log", env=env)
-        _wait_port(VNC_PORT, vnc)
-        web = _spawn(["websockify", f"127.0.0.1:{WEB_PORT}", f"127.0.0.1:{VNC_PORT}", "--web", str(NOVNC_DIR)], "websockify.log", env=env)
-        _wait_port(WEB_PORT, web)
-        _safe_status_update(run_id, status="awaiting_human", reason="buyer_chrome_login_window_ready")
-        while not stop_event.wait(2):
+        chrome = _launch_manual_chrome(chrome_path, env)
+        vnc, web = _start_viewer(env, xauth)
+        _safe_status_update(run_id, status="awaiting_human", reason="buyer_chrome_manual_login_ready")
+        while not stop_event.wait(1):
             if _now() >= deadline:
                 final_status, final_reason = "timeout", "buyer_login_timeout"
                 break
             if runtime._available(Path("/")) < runtime._root_reserve():
                 final_status, final_reason = "error", "buyer_chrome_storage_reserve"
                 break
-            if chrome.poll() is not None or xvfb.poll() is not None or (web is not None and web.poll() is not None) or (vnc is not None and vnc.poll() is not None):
-                raise RuntimeError("Chrome login process exited")
-            try:
-                surface = pipe.visible_surface()
-            except (OSError, TimeoutError, RuntimeError, ValueError):
+            if chrome.poll() is not None or xvfb.poll() is not None or web.poll() is not None or vnc.poll() is not None:
+                raise RuntimeError("Chrome manual login process exited")
+            current = _read()
+            if stop_event.is_set() or current.get("status") == "stopping":
+                final_status, final_reason = "stopped", "buyer_recovery_stopped"
+                break
+            if current.get("status") != "validating_session" or current.get("reason") != "buyer_chrome_manual_finish_requested":
                 continue
+            # The operator declared completion. Revoke the viewer immediately,
+            # flush the manual Chrome profile, then verify one cold restart.
+            _stop_process(web)
+            _stop_process(vnc)
+            web = vnc = None
+            _stop_chrome(chrome)
+            chrome = None
             if stop_event.is_set() or _read().get("status") == "stopping":
                 final_status, final_reason = "stopped", "buyer_recovery_stopped"
                 break
-            if surface != "account":
-                if restarted and web is None and (surface in {"phone", "sms", "challenge"} or time.monotonic() - restart_at >= 20):
-                    vnc = _spawn(["x11vnc", "-display", DISPLAY, "-auth", str(xauth), "-localhost", "-forever", "-nopw", "-noxdamage", "-rfbport", str(VNC_PORT)], "x11vnc.log", env=env)
-                    _wait_port(VNC_PORT, vnc)
-                    web = _spawn(["websockify", f"127.0.0.1:{WEB_PORT}", f"127.0.0.1:{VNC_PORT}", "--web", str(NOVNC_DIR)], "websockify.log", env=env)
-                    _wait_port(WEB_PORT, web)
-                reason = {"phone": "buyer_phone_required", "sms": "buyer_sms_required", "challenge": "buyer_security_challenge"}.get(surface, "buyer_chrome_login_window_ready")
-                _safe_status_update(run_id, status="awaiting_human" if web is not None else "validating_session", reason=reason)
-                continue
-            if not restarted:
-                _safe_status_update(run_id, status="validating_session", reason="buyer_chrome_restarting")
-                _stop_process(web)
-                _stop_process(vnc)
-                web = vnc = None
-                _stop_chrome(chrome)
-                pipe.close()
-                pipe = None
-                if stop_event.is_set() or _read().get("status") == "stopping":
-                    final_status, final_reason = "stopped", "buyer_recovery_stopped"
+            chrome, pipe = _launch_chrome(chrome_path, env, run_id=run_id, generation=1, diagnostic=False)
+            confirmed = False
+            verify_deadline = min(time.monotonic() + 25, time.monotonic() + max(0, (deadline - _now()).total_seconds()))
+            while time.monotonic() < verify_deadline and not stop_event.is_set():
+                if _read().get("status") == "stopping":
                     break
-                chrome, pipe = _launch_chrome(chrome_path, env, run_id=run_id, generation=2)
-                restarted = True
-                restart_at = time.monotonic()
-                continue
-            final_status, final_reason = "completed", "buyer_chrome_login_confirmed"
-            break
+                try:
+                    if pipe.visible_surface() == "account":
+                        confirmed = True
+                        break
+                except (OSError, TimeoutError, RuntimeError, ValueError):
+                    pass
+                stop_event.wait(1)
+            _stop_chrome(chrome)
+            chrome = None
+            pipe.close()
+            pipe = None
+            if stop_event.is_set() or _read().get("status") == "stopping":
+                final_status, final_reason = "stopped", "buyer_recovery_stopped"
+                break
+            if confirmed:
+                final_status, final_reason = "completed", "buyer_chrome_login_confirmed"
+                break
+            if _now() >= deadline:
+                final_status, final_reason = "timeout", "buyer_login_timeout"
+                break
+            chrome = _launch_manual_chrome(chrome_path, env)
+            vnc, web = _start_viewer(env, xauth)
+            _safe_status_update(run_id, status="awaiting_human", reason="buyer_chrome_verification_unavailable")
         else:
             final_status, final_reason = "stopped", "buyer_recovery_stopped"
     except Exception as error:
         _report_failure("supervise", error)
         final_status, final_reason = "error", "buyer_chrome_runtime_error"
     finally:
-        # Revoke the live viewer first, but keep X alive while Chrome flushes.
         cleanup_ok = True
         try:
             _stop_process(web)
@@ -715,11 +770,12 @@ def supervise(run_id: str, chrome_path: Path) -> int:
             except Exception as error:
                 _report_failure(stage, error)
                 cleanup_ok = False
+        profile_guard.__exit__(None, None, None)
         if not cleanup_ok:
             final_status, final_reason = "error", "buyer_chrome_cleanup_failed"
         if final_status == "completed":
-            # This is a confirmed login surface after a full browser restart,
-            # not a match to the canonical expected account fingerprint.
+            # Account page evidence survived a full Chrome restart, but no
+            # expected-account fingerprint has been compared here.
             _safe_status_update(
                 run_id, status="completed", reason=final_reason, finished_at=_now().isoformat(), login_confirmed=True,
                 session={"status": "authenticated_surface", "valid": False, "login_confirmed": True, "account_confirmed": False, "checked_at": _now().isoformat()},

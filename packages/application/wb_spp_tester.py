@@ -560,7 +560,11 @@ class WbSppTesterBlock:
         measurement["evidence"]["buyer_session_preflight"] = session
         if session.get("status") != "valid" or session.get("capability_valid") is not True:
             measurement["status"] = "buyer_session_invalid"
-            measurement["note"] = "authenticated buyer-price capability is not ready; no seller price write was attempted"
+            measurement["note"] = (
+                "buyer prices are visible, but account, variant and destination context are not verified; no seller price write was attempted"
+                if str(session.get("status") or "") == "authenticated_surface"
+                else "authenticated buyer-price capability is not ready; no seller price write was attempted"
+            )
             self._append_audit(str(job["job_id"]), "measurement_buyer_session_blocked", measurement)
             return measurement
         try:
@@ -1501,10 +1505,12 @@ class WbSppTesterBlock:
             raise WbSppTesterError(
                 "Бот покупателя разлогинен. Ни одна цена не изменена. Восстановите сессию в настройках."
                 if logged_out
+                else "Цены покупателя видны, но аккаунт, вариант и регион ещё не сверены. Ни одна цена не изменена."
+                if session.get("status") == "authenticated_surface"
                 else "Бот покупателя не готов к чтению авторизованной цены. Ни одна цена не изменена.",
                 http_status=422,
                 payload={
-                    "reason": "buyer_logged_out" if logged_out else "buyer_capability_invalid",
+                    "reason": "buyer_logged_out" if logged_out else "buyer_price_context_not_verified" if session.get("status") == "authenticated_surface" else "buyer_capability_invalid",
                     "buyer_session": session,
                     "action": "Откройте Настройки → Источники и сессии",
                 },

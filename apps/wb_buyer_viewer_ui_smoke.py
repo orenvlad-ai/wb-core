@@ -22,6 +22,7 @@ from packages.adapters.registry_upload_http_entrypoint import (  # noqa: E402
     DEFAULT_SETTINGS_UI_PATH, DEFAULT_SOURCES_SESSIONS_PATH,
     DEFAULT_WB_BUYER_RECOVERY_START_PATH, DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
     DEFAULT_WB_BUYER_RECOVERY_STOP_PATH, DEFAULT_WB_BUYER_VIEWER_PREFIX,
+    DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH, DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
     _render_sheet_vitrina_settings_ui,
 )
 
@@ -33,9 +34,12 @@ class Fixture:
             port = sock.getsockname()[1]
         self.status = "idle"
         self.price_ok = False
+        self.price_checked = False
+        self.fail_price_once = False
         self.viewer_reads = 0
         self.run_number = 0
         self.start_requests = 0
+        self.finish_requests = 0
         self.fail_start_response_once = False
         self.run_id = "buyer-recovery-20260927T120000Z-00000000"
         self.last_stop_run_id = ""
@@ -97,15 +101,23 @@ class Fixture:
                 if self.last_stop_run_id and self.last_stop_run_id != self.run_id:
                     raise AssertionError("UI cancelled a stale buyer run")
                 self.status = "stopped"
+            elif method == "POST" and parsed.path == DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH:
+                assert handler.headers.get("X-WB-Buyer-Viewer-CSRF") == "1"
+                assert json.loads(handler.body.decode()).get("run_id") == self.run_id
+                self.finish_requests += 1
+                self.status = "validating_session"
+                threading.Timer(0.5, lambda: setattr(self, "status", "completed")).start()
             if parsed.path == DEFAULT_SOURCES_SESSIONS_PATH:
                 payload = _sources_payload(now)
                 payload["wb_buyer"]["authorization"] = self.recovery(now)
                 payload["wb_buyer"]["capability"] = {
-                    "status": "available" if self.status == "awaiting_human" or self.status == "completed" and self.price_ok else "price_unavailable",
-                    "valid": self.status == "awaiting_human" or self.status == "completed" and self.price_ok,
-                    "session_valid": self.status == "awaiting_human",
-                    "account_confirmed": self.status == "awaiting_human",
+                    "status": "observed" if self.price_ok else "price_unavailable" if self.price_checked else "not_checked",
+                    "valid": False,
+                    "session_valid": False,
+                    "account_confirmed": False,
                     "authenticated_buyer_price": 999 if self.status == "awaiting_human" else 386 if self.price_ok else None,
+                    "wallet_price": 139 if self.price_ok else None,
+                    "nonwallet_price": 144 if self.price_ok else None,
                     "checked_at": now,
                 }
                 if self.hold_sources_once:
@@ -114,6 +126,14 @@ class Fixture:
                     self.sources_release.wait(timeout=15)
             elif parsed.path in {DEFAULT_WB_BUYER_RECOVERY_START_PATH, DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH, DEFAULT_WB_BUYER_RECOVERY_STOP_PATH}:
                 payload = self.recovery(now)
+            elif parsed.path == DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH:
+                payload = self.recovery(now)
+            elif parsed.path == DEFAULT_WB_BUYER_SESSION_CHECK_PATH:
+                self.price_checked = True
+                self.price_ok = not self.fail_price_once
+                self.fail_price_once = False
+                payload = {"status": "authenticated_surface", "capability_status": "observed" if self.price_ok else "price_unavailable", "capability_valid": False,
+                           "price": {"wallet_price": 139 if self.price_ok else None, "nonwallet_price": 144 if self.price_ok else None, "authenticated_buyer_price": None}}
             else:
                 payload = {"items": [], "groups": [], "documents": [], "rows": [], "available_sections": [], "status": "ready"}
             body = json.dumps(payload, ensure_ascii=False).encode()
@@ -130,12 +150,12 @@ class Fixture:
         handler.wfile.write(body)
 
     def recovery(self, now: str) -> dict[str, object]:
-        running = self.status == "awaiting_human"
+        running = self.status in {"awaiting_human", "validating_session"}
         return {
             "run_id": self.run_id,
             "status": self.status, "running": running, "run_is_final": self.status in {"completed", "stopped"},
-            "viewer_available": running,
-            "human_action": "Введите SMS-код на странице Wildberries." if running else "",
+            "viewer_available": self.status == "awaiting_human",
+            "human_action": "Войдите в Wildberries и нажмите «Я вошёл»." if self.status == "awaiting_human" else "",
             "login_confirmed": self.status == "completed",
             "session": {"status": "authenticated_surface" if self.status == "completed" else "missing", "valid": False, "account_confirmed": False, "login_confirmed": self.status == "completed", "checked_at": now},
             "price": {"status": "not_checked"},
@@ -167,8 +187,8 @@ def main() -> None:
         websocket_path = parse_qs(urlsplit(frame_url).query).get("path", [""])[0]
         if not websocket_path.startswith("v1/") or websocket_path.startswith("/"):
             raise AssertionError(f"noVNC adds the slash itself; path must be relative: {websocket_path}")
-        if "Введите SMS-код" not in page.locator("#buyerViewerStatus").inner_text():
-            raise AssertionError("human action was not displayed")
+        if "Я вошёл" not in page.locator("#buyerViewerStatus").inner_text() or not page.locator("#buyerViewerFinish").is_visible():
+            raise AssertionError("manual finish action was not displayed")
         if page.locator("#buyerSourceBadge").inner_text() != "Вход выполняется" or "999" in page.locator("#buyerSourceHealth").inner_text():
             raise AssertionError("active recovery must hide previously cached green capability")
         if page.locator("#buyerLauncherLink").is_visible():
@@ -252,12 +272,34 @@ def main() -> None:
         fixture.status = "completed"
         fixture.price_ok = False
         page.wait_for_function("() => document.querySelector('#buyerSourceBadge')?.innerText === 'Вход подтверждён'", timeout=10000)
-        if "Не проверена" not in page.locator("#buyerSourceHealth").inner_text() or not page.locator('[data-source-check="buyer"]').is_disabled():
+        if "Не проверена" not in page.locator("#buyerSourceHealth").inner_text() or page.locator('[data-source-check="buyer"]').is_disabled():
             raise AssertionError("confirmed login must not imply a price capability")
         page.locator('[data-source-recover="buyer"]').click()
         page.wait_for_function("() => document.querySelector('#buyerViewerDialog').open")
-        fixture.status = "completed"
+        page.wait_for_function("() => !document.querySelector('#buyerViewerFinish').hidden")
+        page.locator("#buyerViewerFinish").click()
         page.wait_for_function("() => document.querySelector('#buyerSourceBadge')?.innerText === 'Вход подтверждён'", timeout=10000)
+        if fixture.finish_requests != 1:
+            raise AssertionError("one manual finish must send one request")
+        fixture.hold_sources_once = True
+        fixture.sources_entered.clear()
+        fixture.sources_release.clear()
+        page.locator("#reloadSourcesSessionsButton").click()
+        if not fixture.sources_entered.wait(timeout=3):
+            raise AssertionError("pre-check summary did not enter")
+        page.locator('[data-source-check="buyer"]').click()
+        page.wait_for_function("() => document.querySelector('#buyerSourceHealth')?.innerText.includes('139 ₽ с WB Кошельком')")
+        fixture.sources_release.set()
+        page.wait_for_timeout(300)
+        if "144 ₽ без WB Кошелька" not in page.locator("#buyerSourceHealth").inner_text():
+            raise AssertionError("wallet and nonwallet prices must remain distinct")
+        if page.locator("#buyerSourceBadge").inner_text() != "Вход подтверждён":
+            raise AssertionError("stale pre-check summary must not revoke saved login")
+        fixture.fail_price_once = True
+        page.locator('[data-source-check="buyer"]').click()
+        page.wait_for_function("() => document.querySelector('#buyerSourceHealth')?.innerText.includes('Цена недоступна')")
+        if page.locator("#buyerSourceBadge").inner_text() != "Вход подтверждён":
+            raise AssertionError("unavailable price must not revoke saved login")
         page.screenshot(path=str(output / "buyer-ready-card.png"), full_page=True)
         if errors:
             raise AssertionError(f"browser JavaScript errors: {errors}")

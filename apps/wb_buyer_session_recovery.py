@@ -152,9 +152,16 @@ def start_recovery(config: BuyerRecoveryConfig, *, replace: bool = False, viewer
     _ensure_state_dir(config)
     with _recovery_start_lock(config):
         from apps import wb_buyer_chrome_auth as chrome_auth
+        from apps import wb_buyer_chrome_runtime as chrome_runtime
 
         if chrome_auth.raw_status().get("running"):
             raise RuntimeError("buyer viewer already in use by Chrome login")
+        if chrome_runtime.STATE.exists():
+            try:
+                with chrome_runtime.profile_operation_lock():
+                    chrome_runtime.ensure_runner_idle()
+            except BlockingIOError as exc:
+                raise RuntimeError("buyer Chrome profile is in use") from exc
         current = read_recovery_status(config, with_probe=False)
         if current.get("running"):
             if not replace:

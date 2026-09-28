@@ -59,6 +59,7 @@ from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.wb_prices_management import WbPricesManagementBlock, WbPricesSafetyConfig
 from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerChromeAuthController, WbBuyerSessionBlock, WbBuyerSessionRecoveryController
+from packages.adapters.wb_buyer_chrome_price import WbBuyerChromePriceAdapter
 from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
@@ -1165,6 +1166,12 @@ class RegistryUploadHttpEntrypoint:
             buyer_session_block
             or (getattr(spp_tester_block, "buyer_source", None) if spp_tester_block is not None else None)
             or WbBuyerSessionBlock()
+        )
+        # The visible two-price reader is an isolated source. Numeric SPP jobs
+        # retain their existing buyer source until identity and context match.
+        self.buyer_price_block = (
+            self.buyer_session_block if buyer_session_block is not None
+            else WbBuyerSessionBlock(adapter=WbBuyerChromePriceAdapter())
         )
         self.spp_tester_block = spp_tester_block or WbSppTesterBlock(
             runtime=self.runtime,
@@ -2335,7 +2342,7 @@ class RegistryUploadHttpEntrypoint:
         return self.spp_tester_block.history(params or {})
 
     def handle_wb_buyer_session_check_request(self) -> dict[str, Any]:
-        payload = self.buyer_session_block.check_spp_capability()
+        payload = self.buyer_price_block.check_spp_capability()
         # Completion time is comparable with recovery.finished_at, including
         # checks that end in the same second or fail before a price timestamp.
         checked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2357,6 +2364,13 @@ class RegistryUploadHttpEntrypoint:
                 "validation_nm_id": payload.get("validation_nm_id"),
                 "account_confirmed": bool(payload.get("account_confirmed")),
                 "authenticated_buyer_price": (payload.get("price") or {}).get("authenticated_buyer_price") if isinstance(payload.get("price"), Mapping) else None,
+                "wallet_price": (payload.get("price") or {}).get("wallet_price") if isinstance(payload.get("price"), Mapping) else None,
+                "nonwallet_price": (payload.get("price") or {}).get("nonwallet_price") if isinstance(payload.get("price"), Mapping) else None,
+                "variant_context": (payload.get("price") or {}).get("variant_context") if isinstance(payload.get("price"), Mapping) else None,
+                "destination_context": (payload.get("price") or {}).get("destination_context") if isinstance(payload.get("price"), Mapping) else None,
+                "price_measured_at": (payload.get("price") or {}).get("measured_at") if isinstance(payload.get("price"), Mapping) else None,
+                "price_source": (payload.get("price") or {}).get("source_method") if isinstance(payload.get("price"), Mapping) else None,
+                "profile_source": "durable_chrome" if isinstance(self.buyer_session_recovery, WbBuyerChromeAuthController) else "legacy_chromium",
             },
             checked_at=checked_at,
         )
@@ -2397,6 +2411,14 @@ class RegistryUploadHttpEntrypoint:
         run_id: str | None = None,
     ) -> dict[str, Any]:
         return self.buyer_session_recovery.stop(launcher_download_path=launcher_download_path, run_id=run_id)
+
+    def handle_wb_buyer_session_recovery_finish_request(
+        self,
+        *,
+        launcher_download_path: str,
+        run_id: str,
+    ) -> dict[str, Any]:
+        return self.buyer_session_recovery.finish(launcher_download_path=launcher_download_path, run_id=run_id)
 
     def handle_wb_buyer_session_recovery_launcher_request(
         self,
@@ -3557,11 +3579,17 @@ class RegistryUploadHttpEntrypoint:
             # The established Chrome login proves only account-page access.
             # An old Playwright price cache belongs to another profile and
             # cannot imply a fresh price or a matched account identity here.
-            buyer_capability = {
-                "status": "not_checked", "valid": False,
-                "session_valid": False, "account_confirmed": False,
-                "checked_at": "", "reason": "",
-            }
+            if (buyer_capability.get("profile_source") != "durable_chrome" or not cached_is_newer
+                    or buyer.get("status") != "completed" or not buyer.get("login_confirmed")):
+                buyer_capability = {
+                    "status": "not_checked", "valid": False,
+                    "session_valid": False, "account_confirmed": False,
+                    "checked_at": "", "reason": "",
+                }
+            else:
+                # A price failure or missing delivery/variant context never
+                # revokes the independent saved login proof.
+                buyer_capability = {**buyer_capability, "valid": False, "session_valid": False, "account_confirmed": False}
         latest_outcome: dict[str, Any] = {}
         refreshed_at = ""
         try:
@@ -3594,7 +3622,7 @@ class RegistryUploadHttpEntrypoint:
             "wb_buyer": {
                 "authorization": buyer,
                 "capability": buyer_capability,
-                "collectors": ["Проверка СПП: аутентифицированная цена покупателя"],
+                "collectors": ["Контрольная цена WB Buyer"],
             },
             "spp_proxy": {
                 "authorization_required": False,
