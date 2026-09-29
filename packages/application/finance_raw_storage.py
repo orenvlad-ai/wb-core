@@ -37,6 +37,11 @@ RAW_SCHEMA_TABLES = frozenset(
         "finance_raw_bridge_cursors",
     }
 )
+DAILY_RAW_TABLES = frozenset({
+    "wb_finance_daily_batches", "wb_finance_daily_raw_rows",
+    "wb_finance_daily_pointers",
+})
+DAILY_RAW_VIEW = "wb_finance_daily_current_rows"
 OPERATIONAL_SCHEMA_TABLES = frozenset(
     {
         "finance_operational_schema_meta",

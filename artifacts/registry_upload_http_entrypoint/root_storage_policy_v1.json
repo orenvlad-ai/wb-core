@@ -191,6 +191,11 @@
             "allowed_access_modes": ["read_only", "read_write"]
           },
           {
+            "service": "wb-core-wb-finance-daily.service",
+            "declared_role": "reader_writer",
+            "allowed_access_modes": ["read_only", "read_write"]
+          },
+          {
             "service": "wb-core-finance-backup-rotation.service",
             "declared_role": "reader",
             "allowed_access_modes": ["read_only"]
@@ -240,6 +245,11 @@
           },
           {
             "service": "wb-core-wb-finance-weekly.service",
+            "declared_role": "reader_writer",
+            "allowed_access_modes": ["read_only", "read_write"]
+          },
+          {
+            "service": "wb-core-wb-finance-daily.service",
             "declared_role": "reader_writer",
             "allowed_access_modes": ["read_only", "read_write"]
           },

@@ -42,6 +42,7 @@ from packages.application.fulfillment_services import FulfillmentServicesBlock
 from packages.application.our_wb_costs import OurWbCostBlock
 from packages.application.own_product_capital import OwnProductCapitalBlock
 from packages.application.wb_finance_weekly import block_from_env
+from packages.application.wb_finance_daily import daily_block_from_env
 from packages.application.partner_report import PartnerReportBlock
 from packages.application.promo_live_source import PromoLiveSourceBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -1116,6 +1117,8 @@ class RegistryUploadHttpEntrypoint:
         )
         self.wb_finance_weekly_block = block_from_env(self.runtime.runtime_dir)
         self.wb_finance_weekly_block.ensure_schema()
+        self.wb_finance_daily_block = daily_block_from_env(self.runtime.runtime_dir)
+        self.wb_finance_daily_block.ensure_schema()
         self.partner_report_block = PartnerReportBlock(
             self.runtime.runtime_dir,
             seller_id=self.wb_finance_weekly_block.seller_id,
@@ -1418,6 +1421,9 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_finance_weekly_request(self) -> dict[str, Any]:
         return self.wb_finance_weekly_block.build_payload()
+
+    def handle_wb_finance_daily_request(self) -> dict[str, Any]:
+        return self.wb_finance_daily_block.build_daily_payload()
 
     def handle_partner_report_options_request(self) -> dict[str, Any]:
         return self.partner_report_block.options()
