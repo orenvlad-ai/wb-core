@@ -238,8 +238,8 @@ def _parse_0401060_adapter(
     amount = _extract_amount(text)
     if amount is not None:
         result["amount"] = _decimal_text(amount)
-    first_inn_position = text.casefold().find("инн")
-    amount_words_region = text[:first_inn_position] if first_inn_position >= 0 else text
+    inn_label = re.search(r"\bИНН\b", text, re.IGNORECASE)
+    amount_words_region = text[:inn_label.start()] if inn_label else text
     if re.search(r"\bруб(?:ль|ля|лей|\.)?\b", amount_words_region, re.IGNORECASE):
         result["currency"] = RUSSIAN_PAYMENT_ORDER_CURRENCY
 
