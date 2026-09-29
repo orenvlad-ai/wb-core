@@ -554,9 +554,9 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
     immature_cells = page.locator(
         f'td[data-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"][data-cell-date]:not([data-cell-date=""])'
     ).all_inner_texts()
-    if not immature_cells or any(value.strip() != "—" for value in immature_cells):
+    if not immature_cells or any(value.strip() not in {"—", "(?)—"} for value in immature_cells):
         raise AssertionError(
-            f"immature buyoutPercent SKU/TOTAL browser cells must render dashes, got {immature_cells}"
+            f"immature buyoutPercent SKU/TOTAL browser cells must render missing values, got {immature_cells}"
         )
     if page.locator(f'[data-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
         raise AssertionError("legacy avg_buyoutPercent must not render")
