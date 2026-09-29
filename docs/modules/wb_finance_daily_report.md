@@ -40,11 +40,17 @@ Daily and weekly periods share the Finance row classifier, monetary formulas,
 canonical channel-aware COGS resolver and operator table definitions. Daily
 capitalization applies exact, capped supply-layer allocations over daily raw
 history only; the weekly allocator continues over weekly raw history only.
-Its dependency hash covers every authoritative daily pointer, including a
-later report containing earlier operations. A separate exact canonical cost
-source fingerprint and economic `cost_state_hash` fail closed after cost
-changes. The background tick reprojects stale days from stored raw; read HTTP
-checks dependencies without recalculating COGS.
+Its dependency hash covers every authoritative daily pointer, the supply
+layers and effective SKU alias mappings, including a later report containing
+earlier operations. A separate cost-source fingerprint tracks the exact
+operation date/SKU used by an active shared-cost snapshot. Legacy WB/FBS cost
+rows and unrelated catalogue timestamps do not invalidate days calculated
+from that shared source; a change to the applicable shared cost or alias does.
+The economic `cost_state_hash` remains stored with each projection. Each tick
+repairs all stale days in the bounded 14-day display from stored raw before
+fetching new reports and again after acquisition. This repair continues across
+individual corrupt days and reports an error if any remain. Read HTTP checks
+dependencies without recalculating COGS.
 The daily screen uses the same row order, expenses, margins, coverage meanings
 and colors as the weekly screen. Missing source or cost remains missing.
 

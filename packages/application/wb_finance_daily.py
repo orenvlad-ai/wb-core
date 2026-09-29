@@ -7,18 +7,20 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any, Mapping
 
 from packages.adapters.wb_finance_api import FinanceApiError, WbFinanceApiClient
 from packages.application.wb_finance_weekly import (
     CLASSIFIER_VERSION, MOSCOW, WbFinanceWeeklyBlock,
+    _nomenclature_identity_index,
 )
 from packages.application.canonical_wb_cost_resolver import CanonicalChannelCostSnapshot
 from packages.application.wb_finance_spp import project_spp
 
 
 DAILY_CONTRACT_VERSION = "wb_finance_daily_v1"
-DAILY_FORMULA_VERSION = "wb_finance_daily_aggregate_v1"
+DAILY_FORMULA_VERSION = "wb_finance_daily_aggregate_v2_scoped_cost_dependencies"
 DAILY_INITIAL_DAYS = 14
 
 
@@ -199,8 +201,17 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
             )]
             if layer_exists else []
         )
+        # The shared cap allocator can resolve a missing nmId from an alias in
+        # any daily report, then change another day's capped addback. Bind the
+        # whole allocation universe to effective identity mappings, excluding
+        # catalogue metadata/timestamps that do not affect resolution.
+        alias_to_nm, ambiguous_aliases, _groups, _items = (
+            _nomenclature_identity_index(conn)
+        )
         return hashlib.sha256(json.dumps(
-            {"pointers": pointers, "layers": layers},
+            {"pointers": pointers, "layers": layers,
+             "aliases": sorted(alias_to_nm.items()),
+             "ambiguous_aliases": sorted(ambiguous_aliases)},
             ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
 
@@ -211,12 +222,11 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
         exact = str(self._finance_source_dependency_fingerprint(
             conn, target_keys={(self.seller_id, day.isoformat(), day.isoformat())},
             raw_table="wb_finance_daily_current_rows", report_table=None,
-            snapshot_override=snapshot,
+            snapshot_override=snapshot, scoped_daily_dependencies=True,
         )["digest"])
-        shared = (self.shared_cost_snapshot.metadata()
-                  if self.shared_cost_snapshot is not None else None)
         return hashlib.sha256(json.dumps(
-            [exact, shared], sort_keys=True, ensure_ascii=False, default=str,
+            ["daily_cost_dependencies_v2", exact], sort_keys=True,
+            ensure_ascii=False,
         ).encode("utf-8")).hexdigest()
 
     def _store_complete_raw(self, day: date, rows: list[dict[str, Any]],
@@ -285,7 +295,8 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
                 "raw_row_count": len(normalized),
                 "changed": previous is None or str(previous["batch_id"]) != batch_id}
 
-    def _prepare_projection(self, reader, day: date) -> dict[str, Any]:
+    def _prepare_projection(self, reader, day: date, *,
+                            cost_snapshot: CanonicalChannelCostSnapshot | None = None) -> dict[str, Any]:
         day_text = day.isoformat()
         pointer = reader.execute(
             f"SELECT batch_id,content_hash,row_count FROM {self._raw_pointer_table(reader)} "
@@ -307,7 +318,7 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
         rows = [json.loads(row["raw_json"]) for row in stored]
         allocation_dependency_hash = self._allocation_dependency_hash(reader, day)
         metrics, coverage, unknown = self._aggregate_rows(reader, rows, day)
-        cost_source_hash = self._cost_source_hash(reader, day)
+        cost_source_hash = self._cost_source_hash(reader, day, cost_snapshot)
         cost_state_hash = str(coverage["cost_state_hash"])
         spp = project_spp(rows)
         metrics.update(spp_fbo_pct=spp["spp_fbo_pct"], spp_fbs_pct=spp["spp_fbs_pct"])
@@ -520,28 +531,53 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
                 (self.seller_id, max_days),
             ).fetchall()
         recovered = [self.project_pointer(date.fromisoformat(row["report_day"])) for row in pointers]
-        already = {item["report_day"] for item in recovered}
-        stale_days = [
-            date.fromisoformat(item["day"])
-            for item in self.build_daily_payload()["days"]
-            if item["status"] == "stale_projection" and item["day"] not in already
-        ][:max_days]
-        recovered.extend(self.project_pointer(day) for day in stale_days)
-        results = [self.sync_day(day, client) for day in self.due_days(max_days=max_days)]
-        # A new pointer may redistribute a capped supply expense into an older
-        # visible day. Repair the complete bounded display after acquisition;
-        # max_days limits external calls, not local stale disclosure repair.
-        stale_after_fetch = [date.fromisoformat(item["day"])
-                             for item in self.build_daily_payload()["days"]
-                             if item["status"] == "stale_projection"]
-        if stale_after_fetch:
-            with closing(self._connect_daily_read()) as reader:
-                reader.execute("BEGIN")
-                prepared = [self._prepare_projection(reader, day)
-                            for day in stale_after_fetch]
-                reader.rollback()
-            recovered.extend(self._commit_projection(item) for item in prepared)
-        return {"status": "ok", "recovered": recovered, "days": results}
+        # A formula/source dependency change can stale the entire displayed
+        # window. Restore it from completed raw before contacting WB, so one
+        # failed external fetch cannot leave older days hidden. max_days bounds
+        # WB requests; the local display repair is independently bounded to 14.
+        recovered.extend(self._repair_visible_stale())
+        try:
+            results = [self.sync_day(day, client) for day in self.due_days(max_days=max_days)]
+        except Exception:
+            # Preserve the fetch error if cleanup itself fails. Previously
+            # committed projections from complete raw remain available.
+            try:
+                recovered.extend(self._repair_visible_stale())
+            except Exception:
+                pass
+            raise
+        # A newly acquired pointer can redistribute capped expenses into
+        # older days. Repair that same bounded display after acquisition.
+        recovered.extend(self._repair_visible_stale())
+        failed = any(item.get("status") in {
+            "projection_error", "source_advanced", "no_raw_pointer"
+        } for item in recovered) or any(item.get("status") in {
+            "error_loading", "rate_limited"
+        } for item in results)
+        return {"status": "completed_with_errors" if failed else "ok",
+                "recovered": recovered, "days": results}
+
+    def _repair_visible_stale(self) -> list[dict[str, Any]]:
+        stale_days = [date.fromisoformat(item["day"])
+                      for item in self.build_daily_payload()["days"]
+                      if item["status"] == "stale_projection"]
+        if not stale_days:
+            return []
+        prepared = []
+        errors = []
+        with closing(self._connect_daily_read()) as reader:
+            reader.execute("BEGIN")
+            snapshot = CanonicalChannelCostSnapshot.from_connection(reader)
+            for day in stale_days:
+                try:
+                    prepared.append(self._prepare_projection(
+                        reader, day, cost_snapshot=snapshot))
+                except (ValueError, sqlite3.Error) as exc:
+                    errors.append({"status": "projection_error",
+                                   "report_day": day.isoformat(),
+                                   "error": type(exc).__name__})
+            reader.rollback()
+        return [self._commit_projection(item) for item in prepared] + errors
 
     def build_daily_payload(self) -> dict[str, Any]:
         """Light read-only payload; never fetch or recalculate on HTTP GET."""

@@ -6235,6 +6235,7 @@ class WbFinanceWeeklyBlock:
         raw_table: str = "wb_finance_weekly_raw_rows",
         report_table: str | None = "wb_finance_weekly_reports",
         snapshot_override: CanonicalChannelCostSnapshot | None = None,
+        scoped_daily_dependencies: bool = False,
     ) -> dict[str, Any]:
         """Fingerprint only inputs that can alter the reviewed target images.
 
@@ -6279,7 +6280,7 @@ class WbFinanceWeeklyBlock:
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='sheet_vitrina_v1_nomenclature_items'"
         ).fetchone()
-        if table_exists is not None:
+        if table_exists is not None and not scoped_daily_dependencies:
             for row in conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_nomenclature_items "
                 "ORDER BY nm_id,rowid"
@@ -6289,6 +6290,16 @@ class WbFinanceWeeklyBlock:
         relevant_wb_keys: set[tuple[str, str]] = set()
         relevant_wb_nm_ids: set[int] = set()
         relevant_fbs_cost_keys: set[tuple[str, str]] = set()
+        relevant_aliases: set[str] = set()
+        relevant_shared_keys: set[tuple[str, str]] = set()
+        shared = self.shared_cost_snapshot if scoped_daily_dependencies else None
+        if scoped_daily_dependencies:
+            metadata = shared.metadata() if shared is not None else None
+            add("shared_cost_policy", "active", (
+                {key: metadata[key] for key in
+                 ("effective_date", "cost_method_version", "candidate_only")}
+                if metadata is not None else None
+            ))
         for seller_id, week_start, week_end in sorted(target_keys):
             raw_rows = conn.execute(
                 "SELECT report_id,rrd_id,row_hash,raw_json "
@@ -6302,6 +6313,12 @@ class WbFinanceWeeklyBlock:
                     operation = json.loads(raw_json)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     operation = None
+                shared_applies = False
+                if scoped_daily_dependencies and isinstance(operation, Mapping):
+                    operation_day, operation_day_source = _operation_date(
+                        operation, date.fromisoformat(week_start)
+                    )
+                    shared_applies = shared is not None and shared.applies_to(operation_day)
                 identity_hashes = (
                     {
                         "sha256:"
@@ -6321,7 +6338,7 @@ class WbFinanceWeeklyBlock:
                     [
                         str(row["row_hash"] or ""),
                         hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
-                        [
+                        [] if shared_applies else [
                             [
                                 identity_hash,
                                 list(
@@ -6336,6 +6353,15 @@ class WbFinanceWeeklyBlock:
                 )
                 if not isinstance(operation, Mapping):
                     continue
+                if (scoped_daily_dependencies
+                    and str(operation.get("nmId") or "").strip() in {"", "0"}):
+                    # Capitalization also resolves service/expense rows, so
+                    # alias dependencies cannot be limited to sale movements.
+                    relevant_aliases.update(
+                        str(operation.get(field) or "").strip().casefold()
+                        for field in ("vendorCode", "sku")
+                        if str(operation.get(field) or "").strip()
+                    )
                 if str(operation.get("docTypeName") or "").casefold() not in {
                     "продажа",
                     "возврат",
@@ -6348,10 +6374,15 @@ class WbFinanceWeeklyBlock:
                     alias_to_nm=alias_to_nm,
                     ambiguous_aliases=ambiguous_aliases,
                 )
-                operation_date, operation_date_source = _operation_date(
-                    operation, date.fromisoformat(week_start)
+                operation_date, operation_date_source = (
+                    (operation_day, operation_day_source)
+                    if scoped_daily_dependencies
+                    else _operation_date(operation, date.fromisoformat(week_start))
                 )
                 if operation_date_source == "week_start_fallback" or not nm_id:
+                    continue
+                if shared_applies:
+                    relevant_shared_keys.add((operation_date.isoformat(), nm_id))
                     continue
                 matched_order_ids: set[int] = set()
                 for identity_hash in identity_hashes:
@@ -6392,27 +6423,46 @@ class WbFinanceWeeklyBlock:
                         [row["report_type"], row["content_hash"], row["row_count"]],
                     )
 
-        add(
-            "canonical_table_presence",
-            "channel_location_cost",
-            sorted(
-                name
-                for name in snapshot.wb.table_names
-                if name
-                in {
-                    "sheet_vitrina_v1_warehouse_functional_cutovers",
-                    FUNCTIONAL_DAILY_TABLE,
-                    "sheet_vitrina_v1_warehouse_archival_estimate_rows",
-                    "sheet_vitrina_v1_warehouse_functional_events",
-                    FBS_OBSERVATIONS_TABLE,
-                    "sheet_vitrina_v1_ff_facilities",
-                    "sheet_vitrina_v1_warehouse_business_operations",
-                    "sheet_vitrina_v1_ff_pool_movement_lines",
-                    "sheet_vitrina_v1_ready_snapshots",
-                }
-            ),
-        )
-        add("wb_cutover", FUNCTIONAL_CUTOVER_ID, dict(snapshot.wb.cutover or {}))
+        if scoped_daily_dependencies:
+            for alias in sorted(relevant_aliases):
+                add("nomenclature_alias", alias, {
+                    "resolved_nm_id": alias_to_nm.get(alias, ""),
+                    "ambiguous": alias in ambiguous_aliases,
+                })
+            for operation_day, nm_id in sorted(relevant_shared_keys):
+                resolution = shared.resolve(
+                    nm_id=nm_id, operation_date=date.fromisoformat(operation_day)
+                ) if shared is not None else None
+                add("shared_cost_exact_day_sku", [operation_day, nm_id], (
+                    {key: resolution.get(key) for key in (
+                        "status", "reason", "unit_cost_rub", "source_digest",
+                        "canonical_source_identity", "canonical_source_version",
+                        "quality", "formula_version",
+                    )} if resolution is not None else None
+                ))
+
+        if not scoped_daily_dependencies or relevant_wb_keys or relevant_fbs_cost_keys:
+            add(
+                "canonical_table_presence",
+                "channel_location_cost",
+                sorted(
+                    name
+                    for name in snapshot.wb.table_names
+                    if name
+                    in {
+                        "sheet_vitrina_v1_warehouse_functional_cutovers",
+                        FUNCTIONAL_DAILY_TABLE,
+                        "sheet_vitrina_v1_warehouse_archival_estimate_rows",
+                        "sheet_vitrina_v1_warehouse_functional_events",
+                        FBS_OBSERVATIONS_TABLE,
+                        "sheet_vitrina_v1_ff_facilities",
+                        "sheet_vitrina_v1_warehouse_business_operations",
+                        "sheet_vitrina_v1_ff_pool_movement_lines",
+                        "sheet_vitrina_v1_ready_snapshots",
+                    }
+                ),
+            )
+            add("wb_cutover", FUNCTIONAL_CUTOVER_ID, dict(snapshot.wb.cutover or {}))
         for key in sorted(relevant_wb_keys):
             row = snapshot.wb.daily_rows.get(key)
             add("wb_daily_cost", list(key), dict(row) if row is not None else None)

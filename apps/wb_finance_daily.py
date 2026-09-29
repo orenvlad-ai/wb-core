@@ -74,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
                         Path(args.runtime_dir)
                     ).refresh_recent_spp()
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result.get("status") not in {"error_loading", "rate_limited"} else 1
+    return 0 if result.get("status") not in {
+        "error_loading", "rate_limited", "completed_with_errors"
+    } else 1
 
 
 if __name__ == "__main__":
