@@ -115,7 +115,7 @@ def main() -> None:
 
         if (
             payload.meta.snapshot_id != "web-vitrina-v1-fixture"
-            or payload.meta.row_count != 15 + (2 * len(enabled))
+            or payload.meta.row_count != 16 + (2 * len(enabled))
         ):
             raise AssertionError(f"meta mismatch, got {payload.meta}")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
