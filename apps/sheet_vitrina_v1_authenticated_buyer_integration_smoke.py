@@ -11,14 +11,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
+    _build_activity_metric_labels_by_source,
     _source_key_for_metric_key,
     _updated_cell_status_for_status_row,
 )
 from packages.application.sheet_vitrina_v1_authenticated_buyer import (  # noqa: E402
+    AUTHENTICATED_SPP_METRIC_KEY,
+    AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
+    EFFECTIVE_DISCOUNT_METRIC_KEY,
     METRIC_KEYS,
     SOURCE_KEY,
     extend_metrics_with_authenticated_buyer,
     projection_payload,
+    visible_authenticated_buyer_metrics,
 )
 from packages.application.sheet_vitrina_v1_health import (  # noqa: E402
     _expectation_cell,
@@ -29,16 +34,37 @@ from packages.application.sheet_vitrina_v1_live_plan import (  # noqa: E402
     _capture_live_source,
     _index_items_by_nm_id,
 )
+from packages.application.sheet_vitrina_v1_web_vitrina import (  # noqa: E402
+    _include_authenticated_discount_total_row,
+    _normalize_rows,
+)
 from packages.application.sheet_vitrina_v1_research import _selectable_metric_options  # noqa: E402
 from packages.application.sheet_vitrina_v1_temporal_policy import (  # noqa: E402
     reduce_source_temporal_semantics,
 )
+from packages.contracts.registry_upload_bundle_v1 import MetricV2Item  # noqa: E402
+from packages.contracts.web_vitrina_contract import WebVitrinaContractRow  # noqa: E402
 
 
 def main() -> None:
     metrics = extend_metrics_with_authenticated_buyer([])
     assert {item.metric_key for item in metrics} == set(METRIC_KEYS)
-    assert all(item.scope == "SKU" for item in metrics)
+    assert {item.metric_key for item in metrics if item.scope == "TOTAL"} == {AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}
+    total_metric = next(item for item in metrics if item.metric_key == AVG_EFFECTIVE_DISCOUNT_METRIC_KEY)
+    assert total_metric.calc_ref == EFFECTIVE_DISCOUNT_METRIC_KEY
+    assert total_metric.label_ru == "СПП с авторизацией"
+    proxy_metrics = extend_metrics_with_authenticated_buyer([
+        MetricV2Item(key, True, scope, "SPP-прокси", "metric", ref, True, "percent", 1, "Цены")
+        for key, scope, ref in (("spp_proxy", "SKU", "spp_proxy"),
+                                ("avg_spp_proxy", "TOTAL", "spp_proxy"))
+    ])
+    assert [item.label_ru for item in proxy_metrics[:2]] == ["СПП без авторизации"] * 2
+    activity_labels = _build_activity_metric_labels_by_source(
+        visible_authenticated_buyer_metrics([*proxy_metrics, *metrics])
+    )
+    assert "СПП покупателя, %" not in activity_labels[SOURCE_KEY]
+    assert "СПП с авторизацией" in activity_labels[SOURCE_KEY]
+    assert "СПП без авторизации" in activity_labels["spp_proxy"]
     assert _source_key_for_metric_key("buyer_nonwallet_price_rub") == SOURCE_KEY
     assert _source_key_for_metric_key("spp") == "spp"
     assert _source_key_for_metric_key("spp_proxy") == "spp_proxy"
@@ -46,8 +72,39 @@ def main() -> None:
     assert _updated_cell_status_for_status_row(empty_status) == "updated"
     assert _updated_cell_status_for_status_row([*empty_status[:10], ""]) == ""
     assert _updated_cell_status_for_status_row(["spp[today_current]", *empty_status[1:]]) == ""
-    options = _selectable_metric_options(metrics, sku_metric_keys=set(METRIC_KEYS))
-    assert {item["metric_key"] for item in options} == set(METRIC_KEYS)
+    options = _selectable_metric_options(
+        visible_authenticated_buyer_metrics(metrics),
+        sku_metric_keys={item.metric_key for item in metrics if item.scope == "SKU"},
+    )
+    assert {item["metric_key"] for item in options} == set(METRIC_KEYS) - {
+        AVG_EFFECTIVE_DISCOUNT_METRIC_KEY, AUTHENTICATED_SPP_METRIC_KEY,
+    }
+    # A previously published ready sheet has SKU values but no new TOTAL row.
+    # The read model must supply a non-zero-only mean without editing that sheet.
+    dates = ["2026-09-28", "2026-09-29"]
+    def discount_row(nm_id: int, value: object) -> WebVitrinaContractRow:
+        return WebVitrinaContractRow(
+            row_id=f"SKU:{nm_id}|{EFFECTIVE_DISCOUNT_METRIC_KEY}", row_order=nm_id,
+            scope_kind="SKU", scope_key=f"SKU:{nm_id}", scope_label=str(nm_id),
+            metric_key=EFFECTIVE_DISCOUNT_METRIC_KEY, metric_label="СПП с авторизацией",
+            row_last_updated_at="2026-09-29T10:00:00Z", section="Цены", group=None,
+            nm_id=nm_id, format="percent", values_by_date={dates[0]: "", dates[1]: value},
+        )
+    result = _include_authenticated_discount_total_row(
+        [discount_row(1, 0.2), discount_row(2, ""), discount_row(3, 0.4)],
+        date_columns=dates, metric=total_metric,
+    )
+    total = next(row for row in result if row.row_id == f"TOTAL|{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}")
+    assert total.values_by_date[dates[0]] == ""
+    assert abs(total.values_by_date[dates[1]] - 0.3) < 1e-12
+    historical = _normalize_rows(
+        [["old pure", "SKU:1|authenticated_spp", 0.99],
+         ["current", "SKU:1|effective_nonwallet_discount", 0.2]],
+        date_columns=[dates[1]], config_by_nm_id={},
+        metrics_by_key={item.metric_key: item for item in visible_authenticated_buyer_metrics(metrics)},
+        row_updated_at_by_id={},
+    )
+    assert [row.metric_key for row in historical] == [EFFECTIVE_DISCOUNT_METRIC_KEY]
 
     prior = projection_payload(
         {

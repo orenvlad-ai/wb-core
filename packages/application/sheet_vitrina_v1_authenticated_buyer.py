@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
@@ -11,23 +12,32 @@ SOURCE_KEY = "wb_buyer_authenticated"
 WALLET_PRICE_METRIC_KEY = "buyer_wallet_price_rub"
 NONWALLET_PRICE_METRIC_KEY = "buyer_nonwallet_price_rub"
 EFFECTIVE_DISCOUNT_METRIC_KEY = "effective_nonwallet_discount"
+AVG_EFFECTIVE_DISCOUNT_METRIC_KEY = "avg_effective_nonwallet_discount"
 AUTHENTICATED_SPP_METRIC_KEY = "authenticated_spp"
+PUBLIC_SPP_LABEL = "СПП без авторизации"
+AUTHENTICATED_DISCOUNT_LABEL = "СПП с авторизацией"
 METRIC_KEYS = (
     WALLET_PRICE_METRIC_KEY,
     NONWALLET_PRICE_METRIC_KEY,
     EFFECTIVE_DISCOUNT_METRIC_KEY,
+    AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
     AUTHENTICATED_SPP_METRIC_KEY,
 )
 
 
 def extend_metrics_with_authenticated_buyer(metrics: Iterable[MetricV2Item]) -> list[MetricV2Item]:
-    existing = list(metrics)
+    existing = [
+        replace(item, label_ru=PUBLIC_SPP_LABEL)
+        if item.metric_key in {"spp_proxy", "avg_spp_proxy"} else item
+        for item in metrics
+    ]
     keys = {item.metric_key for item in existing}
     additions = (
-        (WALLET_PRICE_METRIC_KEY, "Цена покупателя с кошельком, ₽", "rub", 516),
-        (NONWALLET_PRICE_METRIC_KEY, "Цена покупателя без кошелька, ₽", "rub", 517),
-        (EFFECTIVE_DISCOUNT_METRIC_KEY, "Расчётное снижение цены без кошелька, %", "percent", 518),
-        (AUTHENTICATED_SPP_METRIC_KEY, "СПП покупателя, %", "percent", 519),
+        (WALLET_PRICE_METRIC_KEY, "Цена покупателя с кошельком, ₽", "rub", 516, "SKU"),
+        (NONWALLET_PRICE_METRIC_KEY, "Цена покупателя без кошелька, ₽", "rub", 517, "SKU"),
+        (EFFECTIVE_DISCOUNT_METRIC_KEY, AUTHENTICATED_DISCOUNT_LABEL, "percent", 518, "SKU"),
+        (AVG_EFFECTIVE_DISCOUNT_METRIC_KEY, AUTHENTICATED_DISCOUNT_LABEL, "percent", 518, "TOTAL"),
+        (AUTHENTICATED_SPP_METRIC_KEY, "СПП покупателя, %", "percent", 519, "SKU"),
     )
     return [
         *existing,
@@ -35,19 +45,24 @@ def extend_metrics_with_authenticated_buyer(metrics: Iterable[MetricV2Item]) -> 
             MetricV2Item(
                 metric_key=key,
                 enabled=True,
-                scope="SKU",
+                scope=scope,
                 label_ru=label,
                 calc_type="metric",
-                calc_ref=key,
+                calc_ref=(EFFECTIVE_DISCOUNT_METRIC_KEY if key == AVG_EFFECTIVE_DISCOUNT_METRIC_KEY else key),
                 show_in_data=True,
                 format=metric_format,
                 display_order=order,
                 section="Цены",
             )
-            for key, label, metric_format, order in additions
+            for key, label, metric_format, order, scope in additions
             if key not in keys
         ),
     ]
+
+
+def visible_authenticated_buyer_metrics(metrics: Iterable[MetricV2Item]) -> list[MetricV2Item]:
+    """Keep the unproven pure-SPP column in stored plans, but hide it from UI catalogs."""
+    return [item for item in metrics if item.metric_key != AUTHENTICATED_SPP_METRIC_KEY]
 
 
 def projection_payload(projection: Mapping[str, Any], *, business_date: str) -> SimpleNamespace:

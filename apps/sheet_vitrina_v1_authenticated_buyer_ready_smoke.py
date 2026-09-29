@@ -175,6 +175,7 @@ def main() -> None:
         assert _today_value(rows[f"SKU:{sku}|buyer_wallet_price_rub"]) == 139.0
         assert _today_value(rows[f"SKU:{sku}|buyer_nonwallet_price_rub"]) == 144.0
         assert _today_value(rows[f"SKU:{sku}|effective_nonwallet_discount"]) == 0.2
+        assert _today_value(rows["TOTAL|avg_effective_nonwallet_discount"]) == 0.2
         assert _today_value(rows[f"SKU:{sku}|authenticated_spp"]) == ""
         assert _today_value(rows[f"SKU:{sku}|spp"]) == prior_spp
 
@@ -186,6 +187,9 @@ def main() -> None:
         partial_rows = _data_rows(runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE))
         assert _today_value(partial_rows[f"SKU:{sku}|buyer_wallet_price_rub"]) == 149.0
         assert _today_value(partial_rows[f"SKU:{REQUESTED_NM_IDS[1]}|buyer_wallet_price_rub"]) == ""
+        assert _today_value(partial_rows["TOTAL|avg_effective_nonwallet_discount"]) == _today_value(
+            partial_rows[f"SKU:{sku}|effective_nonwallet_discount"]
+        )
         assert _today_value(partial_rows[f"SKU:{sku}|spp"]) == prior_spp
         partial_ready = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=AS_OF_DATE)
         partial_status_sheet = next(sheet for sheet in partial_ready.sheets if sheet.sheet_name == "STATUS")
@@ -211,6 +215,7 @@ def main() -> None:
             assert _today_value(final_rows[f"SKU:{nm_id}|spp"]) == _today_value(
                 prior_rows[f"SKU:{nm_id}|spp"]
             )
+        assert _today_value(final_rows["TOTAL|avg_effective_nonwallet_discount"]) == ""
         status_sheet = next(sheet for sheet in final_ready.sheets if sheet.sheet_name == "STATUS")
         buyer_status = next(row for row in status_sheet.rows if row[0] == "wb_buyer_authenticated[today_current]")
         assert buyer_status[1] == "empty" and "account_context_reset=true" in buyer_status[10]

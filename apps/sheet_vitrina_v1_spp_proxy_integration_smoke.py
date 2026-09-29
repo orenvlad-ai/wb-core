@@ -87,7 +87,7 @@ def main() -> None:
         contract_rows = {row["row_id"]: row for row in contract_payload["rows"]}
         if probe_key not in contract_rows:
             raise AssertionError(f"web-vitrina contract must expose SPP proxy row, got {contract_rows.keys()}")
-        if contract_rows[probe_key]["metric_label"] != "SPP-прокси":
+        if contract_rows[probe_key]["metric_label"] != "СПП без авторизации":
             raise AssertionError(f"SPP proxy label mismatch, got {contract_rows[probe_key]}")
         if contract_rows[probe_key]["values_by_date"][NEXT_CURRENT_DATE] != 0.2:
             raise AssertionError(f"web-vitrina SPP proxy value mismatch, got {contract_rows[probe_key]}")
@@ -127,7 +127,7 @@ def main() -> None:
             raise AssertionError(f"loading table must expose spp_proxy source, got {loading_rows.keys()}")
         if proxy_row["source_group_id"] != "wb_public_card_bot":
             raise AssertionError(f"SPP proxy must live in WB public card group, got {proxy_row}")
-        if "SPP-прокси" not in proxy_row["metric_labels"]:
+        if "СПП без авторизации" not in proxy_row["metric_labels"]:
             raise AssertionError(f"SPP proxy source row must expose metric label, got {proxy_row}")
         if not proxy_row["today"]["ok"]:
             raise AssertionError(f"preserved SPP proxy current value must be latest-confirmed OK, got {proxy_row}")
