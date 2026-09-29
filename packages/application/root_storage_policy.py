@@ -60,6 +60,7 @@ MUTABLE_STORE_SERVICE_UNITS = frozenset(
         "wb-core-sheet-vitrina-closure-retry.service",
         "wb-core-feedbacks-auto-complaints-tick.service",
         "wb-core-wb-finance-weekly.service",
+        "wb-core-wb-finance-daily.service",
         "wb-core-finance-backup-rotation.service",
         "wb-core-warehouse-functional-sync.service",
         "wb-core-fbs-shadow-collector.service",

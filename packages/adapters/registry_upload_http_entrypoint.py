@@ -145,6 +145,7 @@ DEFAULT_SHEET_DAILY_REPORT_PATH = "/v1/sheet-vitrina-v1/daily-report"
 DEFAULT_SHEET_STOCK_REPORT_PATH = "/v1/sheet-vitrina-v1/stock-report"
 DEFAULT_SHEET_PLAN_REPORT_PATH = "/v1/sheet-vitrina-v1/plan-report"
 DEFAULT_SHEET_WB_FINANCE_REPORT_PATH = "/v1/sheet-vitrina-v1/wb-finance-report"
+DEFAULT_SHEET_WB_FINANCE_DAILY_PATH = "/v1/sheet-vitrina-v1/wb-finance-daily"
 DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH = (
     "/v1/sheet-vitrina-v1/maintenance/write-barrier"
 )
@@ -4327,6 +4328,17 @@ def _build_handler(
                         self,
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"WB Finance weekly report runtime failed: {exc}"},
+                    )
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+            if parsed.path == DEFAULT_SHEET_WB_FINANCE_DAILY_PATH:
+                try:
+                    payload = entrypoint.handle_wb_finance_daily_request()
+                except Exception as exc:  # pragma: no cover - bounded fallback
+                    _write_json_response(
+                        self, HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"WB Finance daily report runtime failed: {exc}"},
                     )
                     return
                 _write_json_response(self, HTTPStatus.OK, payload)
@@ -10201,6 +10213,7 @@ def _render_sheet_vitrina_operator_ui(
         "stock_report_path": stock_report_path,
         "plan_report_path": plan_report_path,
         "wb_finance_report_path": wb_finance_report_path,
+        "wb_finance_daily_path": DEFAULT_SHEET_WB_FINANCE_DAILY_PATH,
         "partner_report_options_path": DEFAULT_PARTNER_REPORT_OPTIONS_PATH,
         "partner_report_settings_path": DEFAULT_PARTNER_REPORT_SETTINGS_PATH,
         "partner_report_preview_path": DEFAULT_PARTNER_REPORT_PREVIEW_PATH,

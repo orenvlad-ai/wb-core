@@ -22,6 +22,7 @@ from packages.application.finance_raw_storage import (
     FinanceRawLiveTailBridge,
     OPERATIONAL_SCHEMA_TABLES,
     RAW_SCHEMA_TABLES,
+    DAILY_RAW_TABLES,
     bind_generation_identity,
     ensure_operational_schema,
     ensure_raw_schema,
@@ -74,6 +75,8 @@ _SYSTEMD_UNITS = (
     "wb-core-registry-http.service",
     "wb-core-wb-finance-weekly.service",
     "wb-core-wb-finance-weekly.timer",
+    "wb-core-wb-finance-daily.service",
+    "wb-core-wb-finance-daily.timer",
     "wb-core-finance-backup-rotation.service",
     "wb-core-finance-backup-rotation.timer",
     "wb-core-warehouse-functional-sync.service",
@@ -347,7 +350,26 @@ def _schema_inventory(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
+def _assert_no_daily_raw_monolith(conn: sqlite3.Connection) -> None:
+    tables = {str(row[0]) for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    for table in sorted(DAILY_RAW_TABLES & tables):
+        if conn.execute(f"SELECT 1 FROM {_quoted(table)} LIMIT 1").fetchone():
+            raise FinanceStorageMigrationError(
+                "legacy monolith migration cannot move nonempty daily Finance raw; "
+                "preserve the source and use a separately reviewed raw migration"
+            )
+
+
 def _table_owner(table: str) -> dict[str, Any]:
+    if table in DAILY_RAW_TABLES:
+        return {
+            "owner": "finance_raw",
+            "readers": ["finance_daily_projection", "finance_daily_recovery"],
+            "writers": ["finance_daily_ingest"],
+            "migration_action": "blocked_if_nonempty_in_legacy_monolith",
+        }
     if table == LEGACY_RAW_TABLE:
         return {
             "owner": "finance_raw",
@@ -1979,6 +2001,7 @@ class FinanceStorageMigrationPlanner:
             }
             if LEGACY_RAW_TABLE not in tables:
                 raise FinanceStorageMigrationError(f"required source table is missing: {LEGACY_RAW_TABLE}")
+            _assert_no_daily_raw_monolith(conn)
             allocations, allocation_evidence = _dbstat_allocations(conn)
             raw_scan_started = time.monotonic()
             chunks, raw_digest, watermarks = _raw_chunk_manifest(
@@ -2039,6 +2062,7 @@ class FinanceStorageMigrationPlanner:
             excluded_operational_tables = (
                 set(RAW_LEGACY_OBJECTS)
                 | set(RAW_SCHEMA_TABLES)
+                | set(DAILY_RAW_TABLES)
                 | set(OPERATIONAL_SCHEMA_TABLES)
             )
             operational_copy = _operational_copy_plan(
@@ -2617,9 +2641,11 @@ class FinanceStorageCandidateBuilder:
             completed_operational_tables = 0
             try:
                 source_schema = _schema_inventory(source)
+                _assert_no_daily_raw_monolith(source)
                 excluded = (
                     set(RAW_LEGACY_OBJECTS)
                     | set(RAW_SCHEMA_TABLES)
+                    | set(DAILY_RAW_TABLES)
                     | set(OPERATIONAL_SCHEMA_TABLES)
                 )
                 table_names = [
@@ -4390,9 +4416,11 @@ class FinanceStorageCutover:
             source_identity = _source_identity(source_path, source)
             destination.execute("PRAGMA foreign_keys=OFF")
             source_schema = _schema_inventory(source)
+            _assert_no_daily_raw_monolith(source)
             excluded = (
                 set(RAW_LEGACY_OBJECTS)
                 | set(RAW_SCHEMA_TABLES)
+                | set(DAILY_RAW_TABLES)
                 | set(OPERATIONAL_SCHEMA_TABLES)
             )
             table_names = [
@@ -5254,7 +5282,7 @@ class FinanceStorageRollback:
         source.execute("BEGIN")
         destination.execute("PRAGMA foreign_keys=OFF")
         source_schema = _schema_inventory(source)
-        protected = set(RAW_LEGACY_OBJECTS)
+        protected = set(RAW_LEGACY_OBJECTS) | set(DAILY_RAW_TABLES)
         for item in reversed(
             [
                 item
@@ -5287,6 +5315,7 @@ class FinanceStorageRollback:
             if item["type"] == "table"
             and item["name"] not in RAW_LEGACY_OBJECTS
             and item["name"] not in RAW_SCHEMA_TABLES
+            and item["name"] not in DAILY_RAW_TABLES
         ]
         for table in source_tables:
             schema = next(
@@ -5327,6 +5356,7 @@ class FinanceStorageRollback:
                 and item["name"] not in protected
                 and item["table"] not in protected
                 and item["table"] not in RAW_SCHEMA_TABLES
+                and item["table"] not in DAILY_RAW_TABLES
             ):
                 destination.execute(str(item["sql"]))
         destination.commit()

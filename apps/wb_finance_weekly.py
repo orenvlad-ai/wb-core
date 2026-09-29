@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             "repair-derived-orphans",
             "tick",
             "status",
+            "refresh-spp",
         ),
     )
     parser.add_argument(
@@ -89,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         result = {"status": "ok", "schema": "wb_finance_weekly_v1"}
     elif args.command == "status":
         result = block.build_payload()
+    elif args.command == "refresh-spp":
+        result = block.refresh_recent_spp()
     elif args.command == "recalculate":
         result = block.recalculate_week(
             date.fromisoformat(args.date_from), date.fromisoformat(args.date_to)
@@ -295,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
                 else block.sync_week(due[0], due[1], client)
             )
             result["storage_outbox_recovery"] = outbox_recovery
+            result["spp_refresh"] = block.refresh_recent_spp()
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return (
         0 if str(result.get("status")) not in {"error", "completed_with_errors"} else 1

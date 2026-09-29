@@ -1,0 +1,11 @@
+[Unit]
+Description=WB Core hourly official daily Wildberries Finance synchronization scheduler
+
+[Timer]
+OnCalendar=*-*-* *:20:00 Europe/Moscow
+AccuracySec=1m
+Persistent=true
+Unit=wb-core-wb-finance-daily.service
+
+[Install]
+WantedBy=timers.target

@@ -26,6 +26,7 @@ from packages.adapters.wb_finance_api import (
 )
 
 from packages.application.ads_snapshot_payload import resolve_ads_snapshot_payload
+from packages.application.wb_finance_spp import SPP_FORMULA_VERSION, project_spp
 from packages.application.wb_finance_payout import loyalty, standalone_adjustment
 from packages.application.finance_raw_storage import (
     FinanceOutboxConsumer,
@@ -737,6 +738,9 @@ def classify_deduction(row: Mapping[str, Any]) -> str:
 
 
 class WbFinanceWeeklyBlock:
+    allocation_raw_table = "wb_finance_weekly_raw_rows"
+    allocation_sync_table = "wb_finance_weekly_sync"
+
     def __init__(
         self,
         runtime_dir: Path,
@@ -870,6 +874,13 @@ class WbFinanceWeeklyBlock:
                     scope_json TEXT NOT NULL,
                     result_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS wb_finance_weekly_spp (
+                    seller_id TEXT NOT NULL, week_start TEXT NOT NULL,
+                    week_end TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    formula_version TEXT NOT NULL, projection_json TEXT NOT NULL,
+                    calculated_at TEXT NOT NULL,
+                    PRIMARY KEY(seller_id,week_start,week_end)
                 );
                 """
             )
@@ -2356,16 +2367,18 @@ class WbFinanceWeeklyBlock:
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
+        sync_table = self.allocation_sync_table
+        raw_table = self.allocation_raw_table
         sync_manifest = (
             [
                 list(row)
                 for row in conn.execute(
-                    """SELECT week_start,week_end,content_hash FROM wb_finance_weekly_sync
+                    f"""SELECT week_start,week_end,content_hash FROM {sync_table}
                        WHERE seller_id=? ORDER BY week_start,week_end""",
                     (self.seller_id,),
                 ).fetchall()
             ]
-            if "wb_finance_weekly_sync" in tables
+            if sync_table in tables
             else []
         )
         layer_manifest: list[list[Any]] = []
@@ -2391,8 +2404,8 @@ class WbFinanceWeeklyBlock:
         )
         candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         raw_rows = conn.execute(
-            """SELECT report_id,rrd_id,week_start,raw_json
-               FROM wb_finance_weekly_raw_rows WHERE seller_id=?
+            f"""SELECT report_id,rrd_id,week_start,raw_json
+               FROM {raw_table} WHERE seller_id=?
                ORDER BY week_start,report_id,rrd_id""",
             (self.seller_id,),
         )
@@ -3461,7 +3474,7 @@ class WbFinanceWeeklyBlock:
             rows = conn.execute(
                 """SELECT s.week_start,s.week_end,a.metrics_json,a.report_ids_json,a.report_types_json,
                 a.unknown_reasons_json,a.classifier_version,s.status,s.first_loaded_at,s.last_synced_at,
-                s.report_count,s.raw_row_count,s.last_error,c.matched_units,c.unmatched_units,c.coverage_pct,
+                s.report_count,s.raw_row_count,s.content_hash,s.last_error,c.matched_units,c.unmatched_units,c.coverage_pct,
                 c.problem_skus_json,c.quality_json,c.coverage_json,c.cost_state_hash,r.status reconciliation_status
                 FROM wb_finance_weekly_sync s
                 LEFT JOIN wb_finance_weekly_aggregates a USING(seller_id,week_start,week_end)
@@ -3470,8 +3483,24 @@ class WbFinanceWeeklyBlock:
                 WHERE s.seller_id=? ORDER BY s.week_start""",
                 (self.seller_id,),
             ).fetchall()
+            spp_rows = conn.execute(
+                """SELECT week_start,week_end,source_hash,formula_version,projection_json
+                   FROM wb_finance_weekly_spp WHERE seller_id=?""",
+                (self.seller_id,),
+            ).fetchall()
+        spp_by_week = {(row["week_start"], row["week_end"]): row for row in spp_rows}
+        recent = {(row["week_start"], row["week_end"]) for row in rows[-10:]}
         weeks = []
         for row in rows:
+            spp_row = spp_by_week.get((row["week_start"], row["week_end"]))
+            spp = (
+                json.loads(spp_row["projection_json"])
+                if spp_row is not None
+                and (row["week_start"], row["week_end"]) in recent
+                and spp_row["source_hash"] == row["content_hash"]
+                and spp_row["formula_version"] == SPP_FORMULA_VERSION
+                else None
+            )
             weeks.append(
                 {
                     "week_start": row["week_start"],
@@ -3483,7 +3512,11 @@ class WbFinanceWeeklyBlock:
                     "raw_row_count": row["raw_row_count"],
                     "report_ids": json.loads(row["report_ids_json"] or "[]"),
                     "report_types": json.loads(row["report_types_json"] or "[]"),
-                    "metrics": json.loads(row["metrics_json"] or "{}"),
+                    "metrics": {
+                        **json.loads(row["metrics_json"] or "{}"),
+                        "spp_fbo_pct": spp["spp_fbo_pct"] if spp else None,
+                        "spp_fbs_pct": spp["spp_fbs_pct"] if spp else None,
+                    },
                     "classifier_version": row["classifier_version"]
                     or CLASSIFIER_VERSION,
                     "unknown_reasons": json.loads(row["unknown_reasons_json"] or "[]"),
@@ -3500,6 +3533,7 @@ class WbFinanceWeeklyBlock:
                         }
                     ),
                     "reconciliation_status": row["reconciliation_status"] or "pending",
+                    "spp": spp,
                 }
             )
         return {
@@ -3515,6 +3549,83 @@ class WbFinanceWeeklyBlock:
             .isoformat()
             .replace("+00:00", "Z"),
         }
+
+    def refresh_recent_spp(self, *, limit: int = 10) -> dict[str, Any]:
+        """Refresh a bounded disclosure from acknowledged raw membership only."""
+
+        if limit < 1 or limit > 10:
+            raise ValueError("SPP refresh limit must be 1..10 weeks")
+        self.ensure_schema()
+        with closing(self._connect_canonical_plan()) as reader:
+            periods = reader.execute(
+                """SELECT week_start,week_end,content_hash,raw_row_count
+                   FROM wb_finance_weekly_sync WHERE seller_id=?
+                   ORDER BY week_start DESC LIMIT ?""",
+                (self.seller_id, limit),
+            ).fetchall()
+            projections = []
+            for period in periods:
+                prior = reader.execute(
+                    """SELECT source_hash,formula_version FROM wb_finance_weekly_spp
+                       WHERE seller_id=? AND week_start=? AND week_end=?""",
+                    (self.seller_id, period["week_start"], period["week_end"]),
+                ).fetchone()
+                if (prior is not None
+                    and str(prior["source_hash"]) == str(period["content_hash"] or "")
+                    and str(prior["formula_version"]) == SPP_FORMULA_VERSION):
+                    projections.append({"week_start": period["week_start"],
+                                        "week_end": period["week_end"], "status": "unchanged"})
+                    continue
+                raw_rows = reader.execute(
+                    """SELECT row_hash,raw_json FROM wb_finance_weekly_raw_rows
+                       WHERE seller_id=? AND week_start=? AND week_end=?
+                       ORDER BY report_id,rrd_id""",
+                    (self.seller_id, period["week_start"], period["week_end"]),
+                ).fetchall()
+                observed_hash = hashlib.sha256(
+                    "\n".join(sorted(str(raw["row_hash"]) for raw in raw_rows)).encode("utf-8")
+                ).hexdigest()
+                if (observed_hash != str(period["content_hash"] or "")
+                    or len(raw_rows) != int(period["raw_row_count"] or 0)):
+                    projections.append({
+                        "week_start": period["week_start"],
+                        "week_end": period["week_end"],
+                        "status": "raw_membership_mismatch",
+                    })
+                    continue
+                projections.append({
+                    "week_start": period["week_start"],
+                    "week_end": period["week_end"],
+                    "source_hash": observed_hash,
+                    "projection": project_spp(json.loads(raw["raw_json"]) for raw in raw_rows),
+                    "status": "ready",
+                })
+        now = self.now_factory().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self._connect() as writer:
+            for item in projections:
+                if item["status"] != "ready":
+                    continue
+                current = writer.execute(
+                    """SELECT content_hash,raw_row_count FROM wb_finance_weekly_sync
+                       WHERE seller_id=? AND week_start=? AND week_end=?""",
+                    (self.seller_id, item["week_start"], item["week_end"]),
+                ).fetchone()
+                if current is None or str(current["content_hash"] or "") != item["source_hash"]:
+                    item["status"] = "changed_before_apply"
+                    continue
+                writer.execute(
+                    """INSERT INTO wb_finance_weekly_spp
+                       (seller_id,week_start,week_end,source_hash,formula_version,projection_json,calculated_at)
+                       VALUES(?,?,?,?,?,?,?)
+                       ON CONFLICT(seller_id,week_start,week_end) DO UPDATE SET
+                       source_hash=excluded.source_hash,formula_version=excluded.formula_version,
+                       projection_json=excluded.projection_json,calculated_at=excluded.calculated_at""",
+                    (self.seller_id, item["week_start"], item["week_end"],
+                     item["source_hash"], SPP_FORMULA_VERSION,
+                     json.dumps(item["projection"], ensure_ascii=False, sort_keys=True), now),
+                )
+            writer.commit()
+        return {"status": "ok", "weeks": projections}
 
     def run_backfill(
         self,
@@ -6121,6 +6232,9 @@ class WbFinanceWeeklyBlock:
         *,
         target_keys: set[tuple[str, str, str]],
         force_reload: bool = False,
+        raw_table: str = "wb_finance_weekly_raw_rows",
+        report_table: str | None = "wb_finance_weekly_reports",
+        snapshot_override: CanonicalChannelCostSnapshot | None = None,
     ) -> dict[str, Any]:
         """Fingerprint only inputs that can alter the reviewed target images.
 
@@ -6134,7 +6248,9 @@ class WbFinanceWeeklyBlock:
         starve this CAS.
         """
 
-        if force_reload or self._canonical_cost_snapshot_connection is not conn:
+        if snapshot_override is not None:
+            snapshot = snapshot_override
+        elif force_reload or self._canonical_cost_snapshot_connection is not conn:
             snapshot = CanonicalChannelCostSnapshot.from_connection(conn)
         else:
             snapshot = self._canonical_cost_snapshot
@@ -6176,7 +6292,7 @@ class WbFinanceWeeklyBlock:
         for seller_id, week_start, week_end in sorted(target_keys):
             raw_rows = conn.execute(
                 "SELECT report_id,rrd_id,row_hash,raw_json "
-                "FROM wb_finance_weekly_raw_rows WHERE seller_id=? "
+                f"FROM {raw_table} WHERE seller_id=? "
                 "AND week_start=? AND week_end=? ORDER BY report_id,rrd_id",
                 (seller_id, week_start, week_end),
             ).fetchall()
@@ -6263,17 +6379,18 @@ class WbFinanceWeeklyBlock:
                 if nm_id.isdigit() and int(nm_id) > 0:
                     relevant_wb_nm_ids.add(int(nm_id))
 
-            for row in conn.execute(
-                "SELECT report_id,report_type,content_hash,row_count "
-                "FROM wb_finance_weekly_reports WHERE seller_id=? "
-                "AND week_start=? AND week_end=? ORDER BY report_id",
-                (seller_id, week_start, week_end),
-            ).fetchall():
-                add(
-                    "finance_report",
-                    [seller_id, week_start, week_end, row["report_id"]],
-                    [row["report_type"], row["content_hash"], row["row_count"]],
-                )
+            if report_table is not None:
+                for row in conn.execute(
+                    "SELECT report_id,report_type,content_hash,row_count "
+                    f"FROM {report_table} WHERE seller_id=? "
+                    "AND week_start=? AND week_end=? ORDER BY report_id",
+                    (seller_id, week_start, week_end),
+                ).fetchall():
+                    add(
+                        "finance_report",
+                        [seller_id, week_start, week_end, row["report_id"]],
+                        [row["report_type"], row["content_hash"], row["row_count"]],
+                    )
 
         add(
             "canonical_table_presence",

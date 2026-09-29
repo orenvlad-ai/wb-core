@@ -69,6 +69,7 @@ CORE_TIMER_UNITS = (
     "wb-core-sheet-vitrina-closure-retry.timer",
     "wb-core-feedbacks-auto-complaints-tick.timer",
     "wb-core-wb-finance-weekly.timer",
+    "wb-core-wb-finance-daily.timer",
     "wb-core-finance-backup-rotation.timer",
 )
 INDEPENDENT_WRITER_TIMER_UNITS = (
@@ -192,6 +193,9 @@ SERVICE_WRITER_PROCESS_MARKERS = {
     ),
     "wb-core-wb-finance-weekly.service": frozenset(
         {"wb_finance_weekly.py"}
+    ),
+    "wb-core-wb-finance-daily.service": frozenset(
+        {"wb_finance_daily.py"}
     ),
     "wb-core-finance-backup-rotation.service": frozenset(
         {"finance_storage_backup_rotation.py"}

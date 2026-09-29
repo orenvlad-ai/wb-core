@@ -67,6 +67,12 @@
       "methods": ["GET"]
     },
     {
+      "name": "sheet_vitrina_wb_finance_daily",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/wb-finance-daily",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_partner_report",
       "match": "prefix",
       "path": "/v1/sheet-vitrina-v1/partner-report/",
