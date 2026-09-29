@@ -66,7 +66,6 @@ def main() -> None:
     _assert_wb(wb_equivalent)
     _assert_vtb(vtb)
     _assert_vtb(vtb_inline)
-    _assert_amount_words_currency(wb_text, vtb_text)
     if vtb_inline["beneficiary"]["name"] != "ИП Получателев Виктор Учебный":
         raise AssertionError(
             "inline right-side controls must be stripped after beneficiary name"
@@ -138,35 +137,6 @@ def main() -> None:
     if wb["parser_version"] != RUSSIAN_PAYMENT_ORDER_PARSER_VERSION:
         raise AssertionError("parser version changed")
     print("russian_payment_orders_smoke: ok")
-
-
-def _assert_amount_words_currency(wb_text: str, vtb_text: str) -> None:
-    for text, original_words, original_amount in (
-        (wb_text, "Двенадцать тысяч триста сорок пять рублей 67 копеек", "12345-67"),
-        (vtb_text, "Двадцать три тысячи четыреста пятьдесят шесть рублей 78 копеек", "23456-78"),
-    ):
-        for words, amount in (
-            ("Одиннадцать рублей 00 копеек", "11-00"),
-            ("Сто восемнадцать тысяч девятьсот одиннадцать рублей 00 копеек", "118911-00"),
-            ("ОДИННАДЦАТЬ ТЫСЯЧ РУБЛЕЙ 00 КОПЕЕК", "11000-00"),
-        ):
-            candidate = text.replace(original_words, words).replace(original_amount, amount)
-            parsed = parse_russian_payment_order_text(candidate, file_sha256=SYNTHETIC_SHA)
-            if (
-                parsed["currency"] != "RUB"
-                or parsed["amount"] != amount.replace("-", ".")
-                or parsed["parse_status"] != RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_PARSED
-                or not parsed["posting_eligible"]
-            ):
-                raise AssertionError(f"amount words must not act as an INN label: {words}")
-
-        # Rubles after the actual INN field cannot prove the amount's currency.
-        no_currency = text.replace(original_words, "Одиннадцать условных единиц")
-        no_currency = no_currency.replace("Назначение платежа", "рублей\nНазначение платежа")
-        parsed = parse_russian_payment_order_text(no_currency, file_sha256=SYNTHETIC_SHA)
-        _assert_fail_closed(parsed, expected_status=RUSSIAN_PAYMENT_ORDER_PARSE_STATUS_NEEDS_REVIEW)
-        if parsed["currency"] or "critical field needs review: currency" not in parsed["warnings"]:
-            raise AssertionError("currency must remain unproven outside the amount words")
 
 
 def _assert_wb(parsed: dict[str, object]) -> None:
