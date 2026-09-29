@@ -44,6 +44,10 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.application.sheet_vitrina_v1_archived_metrics import (  # noqa: E402
     LEGACY_COST_PROXY_1_ARCHIVED_METRIC_KEYS,
 )
+from packages.application.sheet_vitrina_v1_authenticated_buyer import (  # noqa: E402
+    AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
+    EFFECTIVE_DISCOUNT_METRIC_KEY,
+)
 from packages.application.sheet_vitrina_v1_buyout_percent import (  # noqa: E402
     BUYOUT_PERCENT_METRIC_KEY,
     LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY,
@@ -87,6 +91,9 @@ WEIGHTED_SELLER_PRICE_LOGICAL_ID = (
     f"pair::{WEIGHTED_SELLER_PRICE_DISCOUNTED_METRIC_KEY}::{SELLER_PRICE_DISCOUNTED_METRIC_KEY}"
 )
 CTR_LOGICAL_METRIC_ID = "pair::ctr::ctr"
+AUTH_DISCOUNT_LOGICAL_METRIC_ID = (
+    f"pair::{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}::{EFFECTIVE_DISCOUNT_METRIC_KEY}"
+)
 TOTAL_ORDER_SUM_SELECTOR = (
     '[data-metric-config-row][data-total-metric-key="total_orderSum"] '
     "[data-metric-display-select]"
@@ -116,6 +123,8 @@ def main() -> None:
                     _run_ctr_persistence_checks(browser, server)
                     server.reset_user_config()
                     _run_checks(browser, server)
+                    server.reset_user_config()
+                    _run_authenticated_discount_pair_checks(browser, server)
                 finally:
                     browser.close()
     print(
@@ -124,6 +133,7 @@ def main() -> None:
             "checks": [
                 "v3_v4_v5_sanitizer",
                 "seller_price_weighted_pair_migration",
+                "authenticated_discount_total_sku_pair_migration",
                 "buyout_total_sku_logical_pair",
                 "buyout_saved_preset_compatibility",
                 "buyout_shared_display_control",
@@ -300,6 +310,77 @@ def _check_server_config_sanitizer() -> None:
         raise AssertionError(f"server sanitizer must preserve bounded v5 migration state, got {weighted_v5}")
 
 
+def _run_authenticated_discount_pair_checks(browser, server: "FixtureServer") -> None:
+    _remove_fixture_metric(server.composition, AVG_EFFECTIVE_DISCOUNT_METRIC_KEY)
+    _add_fixture_logical_metric_pair(
+        server.composition,
+        metric_key=EFFECTIVE_DISCOUNT_METRIC_KEY,
+        total_metric_key=AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
+        label="СПП с авторизацией",
+        section_id="section:Скидки",
+        section_label="Скидки",
+    )
+    old_id = f"sku::{EFFECTIVE_DISCOUNT_METRIC_KEY}"
+    neighbor_id = "total::total_orderSum"
+    server.user_config = {
+        "status": "ok",
+        "revision": 1,
+        "updated_at": "2026-09-29T10:00:00Z",
+        "config": {
+            "version": 5,
+            "presentation": {
+                "order": [neighbor_id, old_id],
+                "display": {neighbor_id: "shown", old_id: "collapsed"},
+                "manual": True,
+            },
+            "expanded_anchors": [old_id],
+            "sku_presets": [],
+            "sku_highlight_metric_keys": [],
+            "sku_metric_selection": {"mode": "all", "preset_id": "", "all": True, "metric_keys": []},
+            "migrations": {
+                "incident_effective_shown_v1": True,
+                "sku_presets_seeded_v1": True,
+                "unified_presentation_v1": True,
+                "seller_price_weighted_v1": True,
+            },
+        },
+    }
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto(server.base_url + DEFAULT_SHEET_WEB_VITRINA_UI_PATH, wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    _wait_for_server_save_count(server, 1)
+    _open_metrics(page)
+    pair = page.locator(
+        f'[data-metric-config-row="{AUTH_DISCOUNT_LOGICAL_METRIC_ID}"]'
+        f'[data-total-metric-key="{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}"]'
+        f'[data-sku-metric-key="{EFFECTIVE_DISCOUNT_METRIC_KEY}"]'
+    )
+    if (
+        pair.count() != 1
+        or pair.get_attribute("data-metric-availability") != "common"
+        or pair.locator(".metrics-config-label").inner_text().strip() != "СПП с авторизацией"
+        or pair.locator("[data-metric-display-select]").input_value() != "collapsed"
+        or "без WB Кошелька" not in (pair.locator(".metrics-config-label").get_attribute("title") or "")
+    ):
+        raise AssertionError("authenticated SKU and TOTAL discount must share one explained picker item")
+    persisted = server.user_config["config"]
+    order = persisted["presentation"]["order"]
+    if (
+        order.index(AUTH_DISCOUNT_LOGICAL_METRIC_ID) != order.index(neighbor_id) + 1
+        or old_id in json.dumps(persisted, ensure_ascii=False)
+        or persisted["presentation"]["display"].get(AUTH_DISCOUNT_LOGICAL_METRIC_ID) != "collapsed"
+    ):
+        raise AssertionError(f"authenticated discount migration must preserve order and display: {persisted}")
+    save_count = server.save_count
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector("[data-table-shell]:not(.is-hidden)", timeout=20000)
+    page.wait_for_timeout(500)
+    if server.save_count != save_count or pair.count() != 1:
+        raise AssertionError("authenticated discount pair migration must be stable after reload")
+    context.close()
+
+
 def _run_seller_price_pair_checks(browser, server: "FixtureServer") -> None:
     neighbor_logical_id = "total::total_orderSum"
     server.user_config = {
@@ -473,9 +554,9 @@ def _run_buyout_pair_checks(browser, server: "FixtureServer") -> None:
     immature_cells = page.locator(
         f'td[data-metric-key="{BUYOUT_PERCENT_METRIC_KEY}"][data-cell-date]:not([data-cell-date=""])'
     ).all_inner_texts()
-    if not immature_cells or any(value.strip() != "—" for value in immature_cells):
+    if not immature_cells or any(value.strip() not in {"—", "(?)—"} for value in immature_cells):
         raise AssertionError(
-            f"immature buyoutPercent SKU/TOTAL browser cells must render dashes, got {immature_cells}"
+            f"immature buyoutPercent SKU/TOTAL browser cells must render missing values, got {immature_cells}"
         )
     if page.locator(f'[data-metric-key="{LEGACY_AVG_BUYOUT_PERCENT_METRIC_KEY}"]').count():
         raise AssertionError("legacy avg_buyoutPercent must not render")
@@ -1491,6 +1572,7 @@ def _add_fixture_logical_metric_pair(
     composition: dict[str, object],
     *,
     metric_key: str,
+    total_metric_key: str | None = None,
     label: str,
     section_id: str,
     section_label: str,
@@ -1501,17 +1583,18 @@ def _add_fixture_logical_metric_pair(
     sku_source = next(row for row in rows if row.get("row_kind") == "sku")
     additions = []
     for source, row_kind in ((total_source, "total"), (sku_source, "sku")):
+        current_metric_key = total_metric_key if row_kind == "total" and total_metric_key else metric_key
         row = deepcopy(source)
         scope_key = str((row.get("values") or {}).get("scope_key", {}).get("value") or row_kind)
-        row["row_id"] = f"{scope_key}|{metric_key}"
+        row["row_id"] = f"{scope_key}|{current_metric_key}"
         row["section_id"] = section_id
-        row["search_text"] = f"{scope_key} {label} {section_label} {metric_key}"
+        row["search_text"] = f"{scope_key} {label} {section_label} {current_metric_key}"
         row["filter_tokens"] = deepcopy(row.get("filter_tokens") or {})
-        row["filter_tokens"]["metric_key"] = [metric_key]
+        row["filter_tokens"]["metric_key"] = [current_metric_key]
         row["filter_tokens"]["section"] = [section_label]
         row["filter_tokens"]["section_id"] = [section_id]
         row["values"] = deepcopy(row.get("values") or {})
-        row["values"]["metric_key"].update(value=metric_key, display_text=metric_key)
+        row["values"]["metric_key"].update(value=current_metric_key, display_text=current_metric_key)
         row["values"]["metric_label"].update(value=label, display_text=label)
         row["values"]["section"].update(value=section_label, display_text=section_label)
         additions.append(row)
@@ -1523,7 +1606,7 @@ def _add_fixture_logical_metric_pair(
     metric_control.setdefault("options", []).extend(
         [
             {
-                "value": metric_key,
+                "value": total_metric_key if scope == "total" and total_metric_key else metric_key,
                 "label": label,
                 "count": 1,
                 "scope_group_id": scope,

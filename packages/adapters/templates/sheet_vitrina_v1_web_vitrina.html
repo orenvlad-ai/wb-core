@@ -7635,6 +7635,11 @@
     const WEIGHTED_SELLER_PRICE_TOTAL_METRIC_KEY = "weighted_price_seller_discounted";
     const LEGACY_SELLER_PRICE_LOGICAL_ID = "pair::avg_price_seller_discounted::price_seller_discounted";
     const WEIGHTED_SELLER_PRICE_LOGICAL_ID = "pair::weighted_price_seller_discounted::price_seller_discounted";
+    const AUTH_DISCOUNT_SKU_KEY = "effective_nonwallet_discount";
+    const AUTH_DISCOUNT_TOTAL_KEY = "avg_effective_nonwallet_discount";
+    const AUTH_DISCOUNT_OLD_LOGICAL_ID = "sku::effective_nonwallet_discount";
+    const AUTH_DISCOUNT_LOGICAL_ID = "pair::avg_effective_nonwallet_discount::effective_nonwallet_discount";
+    const AUTH_DISCOUNT_EXPLANATION = "От цены продавца после скидки к цене покупателя без WB Кошелька. Не отдельная скидка WB.";
     const INVENTORY_PLANNING_STATIC_SKU_METRIC_KEYS = new Set([
       "inventory_wb_total_qty_v1",
       "inventory_wb_effective_qty_v1",
@@ -7804,7 +7809,7 @@
       {id:"deficit_date", label:"Дата дефицита", width:120}, {id:"coverage_pct", label:"Обеспеченность, %", width:125},
       {id:"deficit_units", label:"Дефицит, шт.", width:110}, {id:"nearest_inbound", label:"Ближ. поставка", width:170},
       {id:"seller_price", label:"Наша цена", width:190}, {id:"buyer_price", label:"Цена покупателя", width:120},
-      {id:"spp_proxy", label:"СПП / прокси", width:110}, {id:"promo", label:"Акции", width:100},
+      {id:"spp_proxy", label:"СПП без авторизации", width:150}, {id:"promo", label:"Акции", width:100},
       {id:"campaigns", label:"Кампании", width:100}, {id:"current_bid", label:"Рекламная ставка", width:300},
       {id:"ads_drr", label:"Общий ДРР", width:100}, {id:"ads_drr_attributed", label:"ДРР рекламных заказов", width:150},
       {id:"ads_spend_rub", label:"Рекламные расходы", width:140},
@@ -12582,6 +12587,33 @@
       ]).has(normalized) ? WEIGHTED_SELLER_PRICE_LOGICAL_ID : normalized;
     }
 
+    function migrateAuthenticatedDiscountPresentationPayload(candidate) {
+      if (!candidate || !candidate.presentation) {
+        return candidate;
+      }
+      const presentation = candidate.presentation;
+      const order = uniqueLogicalMetricIds(
+        (presentation.order || []).map(function(id) {
+          return id === AUTH_DISCOUNT_OLD_LOGICAL_ID ? AUTH_DISCOUNT_LOGICAL_ID : id;
+        }), 500
+      );
+      const display = Object.assign({}, presentation.display || {});
+      if (Object.prototype.hasOwnProperty.call(display, AUTH_DISCOUNT_OLD_LOGICAL_ID)) {
+        if (!Object.prototype.hasOwnProperty.call(display, AUTH_DISCOUNT_LOGICAL_ID)) {
+          display[AUTH_DISCOUNT_LOGICAL_ID] = display[AUTH_DISCOUNT_OLD_LOGICAL_ID];
+        }
+        delete display[AUTH_DISCOUNT_OLD_LOGICAL_ID];
+      }
+      return Object.assign({}, candidate, {
+        presentation: Object.assign({}, presentation, {order: order, display: display}),
+        expanded_anchors: uniqueLogicalMetricIds(
+          (candidate.expanded_anchors || []).map(function(id) {
+            return id === AUTH_DISCOUNT_OLD_LOGICAL_ID ? AUTH_DISCOUNT_LOGICAL_ID : id;
+          }), 500
+        )
+      });
+    }
+
     function migrateSellerPricePresentationPayload(candidate) {
       if (!candidate || (candidate.migrations || {}).sellerPriceWeightedV1) {
         return candidate;
@@ -13332,6 +13364,12 @@
       const storageKey = buildMetricPresentationStorageKey(payload);
       const persistedCandidate = resolveMetricPresentationPersistedCandidate(storageKey, forceDefault);
       const persistedBeforeSellerPriceMigration = persistedCandidate.payload;
+      const authDiscountPresentation = persistedBeforeSellerPriceMigration && persistedBeforeSellerPriceMigration.presentation || {};
+      const requiresAuthenticatedDiscountMigration = !!(
+        (authDiscountPresentation.order || []).indexOf(AUTH_DISCOUNT_OLD_LOGICAL_ID) !== -1
+        || Object.prototype.hasOwnProperty.call(authDiscountPresentation.display || {}, AUTH_DISCOUNT_OLD_LOGICAL_ID)
+        || ((persistedBeforeSellerPriceMigration && persistedBeforeSellerPriceMigration.expanded_anchors) || []).indexOf(AUTH_DISCOUNT_OLD_LOGICAL_ID) !== -1
+      );
       const requiresSellerPriceWeightedMigration = !!(
         persistedBeforeSellerPriceMigration
         && (
@@ -13339,8 +13377,8 @@
           || !persistedBeforeSellerPriceMigration.migrations.sellerPriceWeightedV1
         )
       );
-      const persisted = migrateSellerPricePresentationPayload(
-        persistedBeforeSellerPriceMigration
+      const persisted = migrateAuthenticatedDiscountPresentationPayload(
+        migrateSellerPricePresentationPayload(persistedBeforeSellerPriceMigration)
       );
       const preservedSkuPresets = options && Array.isArray(options.preservedSkuPresets)
         ? options.preservedSkuPresets
@@ -13478,6 +13516,7 @@
         || requiresSkuPresetSeedMigration
         || requiresUnifiedMigration
         || requiresSellerPriceWeightedMigration
+        || requiresAuthenticatedDiscountMigration
         || newInventoryPlanningKeys.length
       ) {
         persistMetricPresentation({
@@ -14037,7 +14076,7 @@
         selectionActive ? '<input class="metrics-config-select-checkbox" type="checkbox" data-metric-selection-checkbox data-metric-config-key="' + escapeHtml(logicalMetricId) + '" aria-label="' + escapeHtml("Выбрать: " + label) + '"' + (selected ? " checked" : "") + ">" : "",
         '<span class="metrics-config-drag-handle" draggable="true" role="button" tabindex="0" aria-label="' + escapeHtml("Перетащить метрику: " + label) + '" data-metric-drag-handle data-metric-config-key="' + escapeHtml(logicalMetricId) + '" title="Перетащить метрику">⋮⋮</span>',
         '<span class="metrics-config-accent" aria-hidden="true"></span>',
-        '<span class="metrics-config-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>',
+        '<span class="metrics-config-label" title="' + escapeHtml(record.skuKey === AUTH_DISCOUNT_SKU_KEY ? AUTH_DISCOUNT_EXPLANATION : label) + '">' + escapeHtml(label) + '</span>',
         availabilityBadge,
         "</span>",
         '<span class="metrics-config-group-badge" role="cell" title="' + escapeHtml(groupLabel) + '">' + escapeHtml(groupLabel) + '</span>',
@@ -17096,7 +17135,7 @@
       if (column.id === "metric_label") {
         const scopeId = rowMetricPresentationScopeId(row);
         const metricKey = String(cellValue(row, "metric_key") || "");
-        const content = '<span class="metric-label-text">' + escapeHtml(formatCellValue(cell)) + '</span>';
+        const content = '<span class="metric-label-text"' + ((metricKey === AUTH_DISCOUNT_SKU_KEY || metricKey === AUTH_DISCOUNT_TOTAL_KEY) ? ' title="' + escapeHtml(AUTH_DISCOUNT_EXPLANATION) + '"' : '') + '>' + escapeHtml(formatCellValue(cell)) + '</span>';
         const collapsedMetricKeys = metricAnchorCollapsedMetricKeys(scopeId, metricKey);
         const hiddenCount = collapsedMetricKeys.length;
         if (hiddenCount > 0) {
@@ -21193,7 +21232,7 @@
           '<label class="research-option">',
           '<input type="checkbox" data-research-metric value="' + escapeHtml(metricKey) + '"' + (checked ? " checked" : "") + '>',
           '<span>',
-          '<span class="research-option-main">' + escapeHtml(item.metric_label || metricKey) + '</span>',
+          '<span class="research-option-main"' + (metricKey === AUTH_DISCOUNT_SKU_KEY ? ' title="' + escapeHtml(AUTH_DISCOUNT_EXPLANATION) + '"' : '') + '>' + escapeHtml(item.metric_label || metricKey) + '</span>',
           '<span class="research-option-meta">' + escapeHtml(item.section || "") + " · " + escapeHtml(item.aggregation_method || "") + '</span>',
           '</span>',
           '</label>'

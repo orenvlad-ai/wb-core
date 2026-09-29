@@ -45,7 +45,13 @@ from packages.application.sheet_vitrina_v1_buyout_percent import (
     extend_metrics_with_buyout_percent,
     load_buyout_percent_snapshot_metrics,
 )
-from packages.application.sheet_vitrina_v1_authenticated_buyer import extend_metrics_with_authenticated_buyer
+from packages.application.sheet_vitrina_v1_authenticated_buyer import (
+    AUTHENTICATED_SPP_METRIC_KEY,
+    AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
+    EFFECTIVE_DISCOUNT_METRIC_KEY,
+    extend_metrics_with_authenticated_buyer,
+    visible_authenticated_buyer_metrics,
+)
 from packages.application.sheet_vitrina_v1_onec_stocks import extend_metrics_with_onec_stock_metrics
 from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
@@ -339,7 +345,9 @@ class SheetVitrinaV1WebVitrinaBlock:
                 )
             )
         )
-        effective_metrics = extend_metrics_with_authenticated_buyer(effective_metrics)
+        effective_metrics = visible_authenticated_buyer_metrics(
+            extend_metrics_with_authenticated_buyer(effective_metrics)
+        )
         metrics_by_key = {
             str(item.metric_key): item
             for item in effective_metrics
@@ -496,6 +504,10 @@ class SheetVitrinaV1WebVitrinaBlock:
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         from packages.application.metric_completeness import aggregate_counters
         rows = aggregate_counters(rows, dates=snapshot.date_columns)
+        rows = _include_authenticated_discount_total_row(
+            rows, date_columns=snapshot.date_columns,
+            metric=metrics_by_key[AVG_EFFECTIVE_DISCOUNT_METRIC_KEY],
+        )
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(
             self.runtime,
@@ -1422,7 +1434,7 @@ def _normalize_rows(
         if not row_id or "|" not in row_id:
             continue
         scope_token, metric_key = row_id.split("|", 1)
-        if metric_key in ARCHIVED_PUBLIC_METRIC_KEYS:
+        if metric_key in ARCHIVED_PUBLIC_METRIC_KEYS or metric_key == AUTHENTICATED_SPP_METRIC_KEY:
             continue
         metric = metrics_by_key.get(metric_key)
         scope = _parse_scope(scope_token, row_label=str(row[0] or ""), config_by_nm_id=config_by_nm_id)
@@ -1455,6 +1467,53 @@ def _normalize_rows(
             )
         )
     return normalized
+
+
+def _include_authenticated_discount_total_row(
+    rows: list[WebVitrinaContractRow],
+    *,
+    date_columns: list[str],
+    metric: MetricV2Item,
+) -> list[WebVitrinaContractRow]:
+    """Expose the existing SKU facts as a mean even in pre-catalog ready snapshots."""
+    result = list(rows)
+    source_rows = [
+        row for row in result
+        if row.scope_kind == "SKU" and row.metric_key == EFFECTIVE_DISCOUNT_METRIC_KEY
+    ]
+    values_by_date: dict[str, Any] = {}
+    for column_date in date_columns:
+        numeric = [
+            value for row in source_rows
+            if (value := _numeric_value(row.values_by_date.get(column_date))) is not None
+        ]
+        values_by_date[column_date] = sum(numeric) / len(numeric) if numeric else ""
+    row_id = f"TOTAL|{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}"
+    existing = next((row for row in result if row.row_id == row_id), None)
+    total = WebVitrinaContractRow(
+        row_id=row_id,
+        row_order=existing.row_order if existing is not None else len(result) + 1,
+        scope_kind="TOTAL",
+        scope_key="TOTAL",
+        scope_label="ИТОГО",
+        metric_key=AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
+        metric_label=metric.label_ru,
+        row_last_updated_at=max(
+            (row.row_last_updated_at for row in source_rows if row.row_last_updated_at),
+            default="",
+        ),
+        section=metric.section,
+        group=None,
+        nm_id=None,
+        format=metric.format,
+        values_by_date=values_by_date,
+    )
+    if existing is not None:
+        result[result.index(existing)] = total
+    else:
+        total_indexes = [index for index, row in enumerate(result) if row.scope_kind == "TOTAL"]
+        result.insert(total_indexes[-1] + 1 if total_indexes else 0, total)
+    return result
 
 
 def _include_proxy_v4_unit_margin_rows(

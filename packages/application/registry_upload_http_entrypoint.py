@@ -207,6 +207,7 @@ from packages.application.sheet_vitrina_v1_authenticated_buyer import (
     SOURCE_KEY as AUTHENTICATED_BUYER_SOURCE_KEY,
     METRIC_KEYS as AUTHENTICATED_BUYER_METRIC_KEYS,
     extend_metrics_with_authenticated_buyer,
+    visible_authenticated_buyer_metrics,
 )
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.web_vitrina_gravity_table_adapter import (
@@ -496,12 +497,12 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
         "description_ru": "Скидка постоянного покупателя на выбранную дату.",
     },
     "spp_proxy": {
-        "label_ru": "SPP-прокси",
+        "label_ru": "СПП без авторизации",
         "description_ru": "Прокси-оценка public-card SPP по цене продавца и анонимной цене покупателя WB.",
     },
     AUTHENTICATED_BUYER_SOURCE_KEY: {
         "label_ru": "Цены авторизованного покупателя",
-        "description_ru": "Авторизованная поверхность WB, ожидаемая учётная запись не сверена. Цена покупателя с кошельком и без него; расчётный дисконт не является чистой СПП. СПП покупателя: components_unknown.",
+        "description_ru": "Цены текущего авторизованного профиля. СПП с авторизацией рассчитана относительно цены продавца после скидки и цены покупателя без WB Кошелька; это не отдельный компонент скидки WB.",
     },
     "ads_bids": {
         "label_ru": "Ставки рекламы",
@@ -1681,7 +1682,7 @@ class RegistryUploadHttpEntrypoint:
             )
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_authenticated_buyer(metric_catalog)
+            visible_authenticated_buyer_metrics(extend_metrics_with_authenticated_buyer(metric_catalog))
         )
         activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
             snapshot_as_of_date=source_status_snapshot_as_of_date,
@@ -3769,7 +3770,7 @@ class RegistryUploadHttpEntrypoint:
             )
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            extend_metrics_with_authenticated_buyer(metric_catalog)
+            visible_authenticated_buyer_metrics(extend_metrics_with_authenticated_buyer(metric_catalog))
         )
         upload_summary = _build_web_vitrina_endpoint_summary_block(
             title="Загрузка данных",
