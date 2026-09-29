@@ -234,6 +234,7 @@ def _retro_cap_repair_contract() -> None:
         old = dict(_rows(old_day)[0], paidAcceptance="10", giId="77",
                    saleDt="2026-06-24", rrdId="9007199254743001")
         later = dict(_rows(later_day)[0], paidAcceptance="10", giId="77",
+                     nmId=0, vendorCode="VC101", sku="",
                      saleDt="2026-06-23", reportId="1318872202609289",
                      rrdId="9007199254743002")
         block._store_complete_raw(old_day, [old], "sha256:old")
@@ -251,6 +252,18 @@ def _retro_cap_repair_contract() -> None:
         assert old_after["status"] != "stale_projection", old_after
         assert old_after["metrics"]["capitalized_acceptance"] == "0.0000", old_after
         assert later_after["metrics"]["capitalized_acceptance"] == "10.0000", later_after
+        # An alias on the other day's earlier operation changes which row
+        # consumes the shared cap; the old day's own raw/cost hash is unchanged.
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET vendor_code='VC999'")
+            conn.commit()
+        old_stale = next(item for item in block.build_daily_payload()["days"]
+                         if item["day"] == str(old_day))
+        assert old_stale["status"] == "stale_projection", old_stale
+        block.project_pointer(old_day)
+        old_repaired = next(item for item in block.build_daily_payload()["days"]
+                            if item["day"] == str(old_day))
+        assert old_repaired["metrics"]["capitalized_acceptance"] == "10.0000", old_repaired
 
 
 def _weekly_spp_bound_contract() -> None:
@@ -346,6 +359,148 @@ def _weekly_refresh_wiring_contract() -> None:
                                     "--env-file", str(Path(tmp)/"absent")])
                 assert json.loads(output.getvalue())["status"] == "busy"
                 assert calls[-1] == ("daily_sync", None), calls
+            with patch.object(Daily, "tick", return_value={
+                "status": "completed_with_errors", "days": []}):
+                with redirect_stdout(io.StringIO()) as output:
+                    exit_code = daily_cli.main(["tick", "--runtime-dir", tmp,
+                        "--env-file", str(Path(tmp)/"absent")])
+                assert exit_code == 1
+                assert json.loads(output.getvalue())["status"] == "completed_with_errors"
+
+
+def _scoped_cost_freshness_contract() -> None:
+    class Shared:
+        effective_date = "2026-09-08"
+        formula_version = "shared_fixture_v1"
+        version_id = "global-day-set-v1"
+        row_digest = "exact-day-sku-v1"
+        unit_cost = "100"
+
+        def applies_to(self, operation_date):
+            return operation_date.isoformat() >= self.effective_date
+
+        def metadata(self):
+            return {"effective_date": self.effective_date,
+                    "cost_method_version": self.formula_version,
+                    "candidate_only": False, "version_id": self.version_id}
+
+        def resolve(self, *, nm_id, operation_date):
+            return {"status": "resolved", "reason": "", "nm_id": nm_id,
+                    "operation_date": operation_date.isoformat(),
+                    "canonical_source_date": operation_date.isoformat(),
+                    "canonical_source_identity": "shared:" + self.row_digest,
+                    "canonical_source_version": self.row_digest,
+                    "source_digest": self.row_digest,
+                    "quality": "shared_daily_cost_closed",
+                    "projection_quality": "shared_daily_cost_closed",
+                    "selection_method": "exact_day_sku", "formula_version": self.formula_version,
+                    "channel": "COMMON", "pool": "WB+FBS+FBO", "facility_id": "",
+                    "unit_cost_rub": self.unit_cost}
+
+    shared = Shared()
+    with TemporaryDirectory(prefix="wb-finance-daily-scoped-") as tmp:
+        block = WbFinanceDailyBlock(Path(tmp), seller_id="seller-1", now_factory=lambda: NOW)
+        block.ensure_schema()
+        _seed_canonical_cost(block.db_path)
+        day = date(2026, 9, 28)
+        sale = dict(_rows(day)[0], nmId=0, vendorCode="VC101", sku="",
+                    saleDt="2026-09-20", quantity=1,
+                    retailPriceWithDisc="120", rrdId="9007199254744001")
+        with patch("packages.application.fbs_accounting_runtime.load_shared", return_value=shared):
+            block._store_complete_raw(day, [sale], "sha256:scoped")
+            block.project_pointer(day)
+            original = block.build_daily_payload()["days"][-1]
+            assert original["metrics"]["cogs"] == "100.0000", original
+            with sqlite3.connect(block.db_path) as conn:
+                conn.execute("ALTER TABLE sheet_vitrina_v1_nomenclature_items ADD COLUMN updated_at TEXT")
+                conn.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET updated_at='t1'")
+                conn.commit()
+            # Only metadata/timestamp changed; effective alias and cost did not.
+            assert block.build_daily_payload()["days"][-1]["status"] != "stale_projection"
+            shared.version_id = "global-day-set-v2"  # a different unrelated shared day
+            assert block.build_daily_payload()["days"][-1]["status"] != "stale_projection"
+            with sqlite3.connect(block.db_path) as conn:
+                conn.execute("UPDATE sheet_vitrina_v1_warehouse_wb_daily_cost SET wac_rub='250'")
+                conn.commit()
+            # Active shared exact-day cost makes this old WB source irrelevant.
+            assert block.build_daily_payload()["days"][-1]["status"] != "stale_projection"
+            with sqlite3.connect(block.db_path) as conn:
+                conn.execute("""UPDATE sheet_vitrina_v1_warehouse_functional_cutovers
+                                SET updated_at='2026-09-29T14:27:13Z'""")
+                conn.commit()
+            assert block.build_daily_payload()["days"][-1]["status"] != "stale_projection"
+            shared.unit_cost, shared.row_digest = "130", "exact-day-sku-v2"
+            assert block.build_daily_payload()["days"][-1]["status"] == "stale_projection"
+            block.project_pointer(day)
+            assert block.build_daily_payload()["days"][-1]["metrics"]["cogs"] == "130.0000"
+            with sqlite3.connect(block.db_path) as conn:
+                conn.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET vendor_code='VC999'")
+                conn.commit()
+            assert block.build_daily_payload()["days"][-1]["status"] == "stale_projection"
+
+    # Service expenses also resolve aliases for canonical supply addbacks.
+    with TemporaryDirectory(prefix="wb-finance-daily-service-alias-") as tmp:
+        block = WbFinanceDailyBlock(Path(tmp), seller_id="seller-1", now_factory=lambda: NOW)
+        block.ensure_schema()
+        _seed_canonical_cost(block.db_path)
+        day = date(2026, 9, 28)
+        service = dict(_rows(day)[2], nmId=0, vendorCode="VC101", sku="",
+                       paidAcceptance="10", giId="77", rrdId="9007199254745001")
+        block._store_complete_raw(day, [service], "sha256:service")
+        block.project_pointer(day)
+        assert block.build_daily_payload()["days"][-1]["status"] != "stale_projection"
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_nomenclature_items SET vendor_code='VC999'")
+            conn.commit()
+        assert block.build_daily_payload()["days"][-1]["status"] == "stale_projection"
+
+
+def _full_visible_repair_before_fetch_contract() -> None:
+    class BrokenClient:
+        def fetch_report(self, **_kwargs):
+            raise RuntimeError("one new due day failed")
+
+    with TemporaryDirectory(prefix="wb-finance-daily-repair-") as tmp:
+        block = WbFinanceDailyBlock(Path(tmp), seller_id="seller-1", now_factory=lambda: NOW)
+        block.ensure_schema()
+        _seed_canonical_cost(block.db_path)
+        days = closed_daily_dates(NOW)
+        for day in days:
+            block._store_complete_raw(day, _rows(day), "sha256:repair")
+        for day in days:
+            block.project_pointer(day)
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute("UPDATE wb_finance_daily_aggregates SET formula_version='old'")
+            conn.commit()
+        assert sum(item["status"] == "stale_projection"
+                   for item in block.build_daily_payload()["days"]) == 14
+        try:
+            block.tick(BrokenClient(), max_days=1)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("unexpected WB fetch error was hidden")
+        assert all(item["status"] != "stale_projection"
+                   for item in block.build_daily_payload()["days"])
+        with sqlite3.connect(block.db_path) as conn:
+            conn.execute("""UPDATE wb_finance_daily_aggregates SET formula_version='old'
+                            WHERE report_day IN (?,?)""",
+                         (days[0].isoformat(), days[1].isoformat()))
+            conn.commit()
+        original_prepare = block._prepare_projection
+
+        def one_bad_projection(reader, day, **kwargs):
+            if day == days[0]:
+                raise ValueError("corrupt stored day")
+            return original_prepare(reader, day, **kwargs)
+
+        with patch.object(block, "_prepare_projection", side_effect=one_bad_projection):
+            result = block.tick(_Client(), max_days=1)
+        assert result["status"] == "completed_with_errors", result
+        assert any(item["status"] == "projection_error" for item in result["recovered"])
+        by_day = {item["day"]: item for item in block.build_daily_payload()["days"]}
+        assert by_day[days[0].isoformat()]["status"] == "stale_projection"
+        assert by_day[days[1].isoformat()]["status"] != "stale_projection"
 
 
 def main() -> None:
@@ -355,6 +510,8 @@ def main() -> None:
     _retro_cap_repair_contract()
     _weekly_spp_bound_contract()
     _weekly_refresh_wiring_contract()
+    _scoped_cost_freshness_contract()
+    _full_visible_repair_before_fetch_contract()
     print("wb_finance_daily: ok -> SPP, 204/429, replay, parity, cost freshness, allocation, due policy")
 
 
