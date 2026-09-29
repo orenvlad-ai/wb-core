@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from apps.wb_finance_weekly import _load_env  # noqa: E402
 from packages.adapters.wb_finance_api import WbFinanceApiClient  # noqa: E402
 from packages.application.wb_finance_daily import daily_block_from_env  # noqa: E402
+from packages.application.wb_finance_weekly import block_from_env as weekly_block_from_env  # noqa: E402
 
 
 @contextmanager
@@ -66,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
                     result = block.sync_day(date.fromisoformat(args.day), client)
                 else:
                     result = block.tick(client, max_days=(14 if args.command == "bootstrap" else args.max_days))
+                    # The weekly timer is disabled. Keep the last ten weekly
+                    # SPP disclosures current during the active daily tick,
+                    # with a separate weekly block and no Finance API fetch.
+                    result["weekly_spp_refresh"] = weekly_block_from_env(
+                        Path(args.runtime_dir)
+                    ).refresh_recent_spp()
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("status") not in {"error_loading", "rate_limited"} else 1
 

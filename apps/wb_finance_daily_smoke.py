@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta, timezone
+import io
+import json
 from pathlib import Path
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import time
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -26,6 +30,7 @@ from packages.application.finance_raw_storage import (
     bind_generation_identity, ensure_operational_schema, ensure_raw_schema,
 )
 from packages.application.storage_registry import atomic_write_manifest, build_manifest
+from apps import wb_finance_daily as daily_cli
 
 
 NOW = datetime(2026, 9, 29, 9, tzinfo=timezone.utc)
@@ -302,12 +307,54 @@ def _benchmark_admission() -> None:
         print(f"daily admission benchmark: 140000 rows / 14 days / 1 SKU -> {seconds:.3f}s")
 
 
+def _weekly_refresh_wiring_contract() -> None:
+    calls: list[tuple[str, int | None]] = []
+
+    class Daily:
+        def tick(self, _client, *, max_days):
+            calls.append(("daily_tick", max_days))
+            return {"status": "ok", "days": []}
+
+        def sync_day(self, _day, _client):
+            calls.append(("daily_sync", None))
+            return {"status": "waiting"}
+
+    class Weekly:
+        def refresh_recent_spp(self):
+            calls.append(("weekly_spp", None))
+            return {"status": "ok", "weeks": []}
+
+    with TemporaryDirectory(prefix="wb-finance-daily-cli-") as tmp:
+        with (patch.object(daily_cli, "daily_block_from_env", return_value=Daily()),
+              patch.object(daily_cli, "weekly_block_from_env", return_value=Weekly()),
+              patch.object(daily_cli, "WbFinanceApiClient", return_value=object())):
+            for command, expected in (("tick", 2), ("bootstrap", 14)):
+                with redirect_stdout(io.StringIO()) as output:
+                    assert daily_cli.main([command, "--runtime-dir", tmp,
+                                           "--env-file", str(Path(tmp)/"absent")]) == 0
+                assert json.loads(output.getvalue())["weekly_spp_refresh"]["status"] == "ok"
+                assert calls[-2:] == [("daily_tick", expected), ("weekly_spp", None)], calls
+            with redirect_stdout(io.StringIO()):
+                daily_cli.main(["sync-day", "--day", "2026-09-28",
+                                "--runtime-dir", tmp,
+                                "--env-file", str(Path(tmp)/"absent")])
+            assert calls[-1] == ("daily_sync", None), calls
+            with daily_cli._worker_lock(Path(tmp)) as acquired:
+                assert acquired
+                with redirect_stdout(io.StringIO()) as output:
+                    daily_cli.main(["tick", "--runtime-dir", tmp,
+                                    "--env-file", str(Path(tmp)/"absent")])
+                assert json.loads(output.getvalue())["status"] == "busy"
+                assert calls[-1] == ("daily_sync", None), calls
+
+
 def main() -> None:
     _spp_contract()
     _daily_contract()
     _split_backup_contract()
     _retro_cap_repair_contract()
     _weekly_spp_bound_contract()
+    _weekly_refresh_wiring_contract()
     print("wb_finance_daily: ok -> SPP, 204/429, replay, parity, cost freshness, allocation, due policy")
 
 

@@ -26,6 +26,9 @@ due days per run, then follows new closed dates and retains retry state. The
 the timer take the same process lock, while the shared Finance API gate keeps
 seller requests serialized. The canonical HTTP startup creates the daily
 schema before the first GET.
+Each active daily `tick`/`bootstrap` also runs the separate weekly block's
+bounded latest-ten SPP refresh from acknowledged raw evidence. This does not
+call Wildberries or rebuild weekly COGS; the weekly timer remains disabled.
 The screen and read admission cover the latest 14 days; older stored history is
 retained but is not presented as freshly checked. The latest days remain
 preliminary until a second unchanged fetch. No synthetic daily report is made
