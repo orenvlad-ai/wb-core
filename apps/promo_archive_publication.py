@@ -32,7 +32,7 @@ from packages.application.ready_publication import (
     operational_authority,
     replace_ready,
 )
-from packages.application.sheet_vitrina_v1 import _column_name
+from packages.application.sheet_vitrina_v1 import _column_name, parse_sheet_write_plan_payload
 from packages.application.root_storage_policy import (
     admit_root_write,
     storage_destination_root,
@@ -49,6 +49,7 @@ TOTAL_METRICS = {
 }
 LEDGER = "promo_archive_publication_runs"
 ROLLBACK_LEDGER = "promo_archive_publication_rollbacks"
+GEOMETRY_LEDGER = "promo_ready_geometry_repairs"
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 SCOPED_BACKUP_TABLES = (
     "temporal_source_slot_snapshots",
@@ -846,6 +847,8 @@ def _verified_superseded(conn: sqlite3.Connection, scope: dict[str, Any], before
 
 class PromoArchivePublicationAdapter:
     def preview(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]:
+        if request.get("mode") == "repair_ready_geometry":
+            return _geometry_preview(request, operation_id)
         runtime, dates, reconstruction = _request(request)
         authority = operational_authority(runtime)
         with closing(_connect(authority[0], readonly=True)) as conn:
@@ -878,6 +881,8 @@ class PromoArchivePublicationAdapter:
         }
 
     def apply(self, request: dict[str, Any], operation_id: str, preview: dict[str, Any]) -> dict[str, Any]:
+        if request.get("mode") == "repair_ready_geometry":
+            return _geometry_apply(request, operation_id, preview)
         runtime, dates, reconstruction = _request(request)
         with promo_archive_fence(runtime):
             candidate = _candidate(runtime, dates, reconstruction)
@@ -946,6 +951,8 @@ class PromoArchivePublicationAdapter:
         return {"operation_id": operation_id, "disposition": "submitted", "backup_path": str(backup_path)}
 
     def readback(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]:
+        if request.get("mode") == "repair_ready_geometry":
+            return _geometry_readback(request, operation_id)
         runtime, _dates, _reconstruction = _request(request)
         authority = operational_authority(runtime)
         with closing(_connect(authority[0], readonly=True)) as conn:
@@ -972,6 +979,256 @@ class PromoArchivePublicationAdapter:
                 "applied_at": row["applied_at"], "backup_path": row["backup_path"],
                 "backup_sha256": row["backup_sha256"],
                 "superseded": bool(superseded)}
+
+
+def _geometry_request(request: dict[str, Any]) -> tuple[Path, str, int, str]:
+    required = {"mode", "runtime_dir", "as_of_date", "expected_status_row_count", "expected_write_rect"}
+    if set(request) != required or request.get("mode") != "repair_ready_geometry":
+        raise AdapterError("promo-geometry-request-fields-invalid")
+    runtime = Path(str(request["runtime_dir"])).resolve()
+    if not runtime.is_absolute() or not runtime.is_dir():
+        raise AdapterError("promo-geometry-runtime-invalid")
+    as_of = request["as_of_date"]
+    try:
+        if type(as_of) is not str or date.fromisoformat(as_of).isoformat() != as_of:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise AdapterError("promo-geometry-date-invalid") from None
+    count = request["expected_status_row_count"]
+    rect = request["expected_write_rect"]
+    if type(count) is not int or count < 0 or type(rect) is not str:
+        raise AdapterError("promo-geometry-before-shape-invalid")
+    return runtime, as_of, count, rect
+
+
+def _geometry_ledger_row(conn: sqlite3.Connection, operation_id: str) -> sqlite3.Row | None:
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (GEOMETRY_LEDGER,)).fetchone():
+        return None
+    return conn.execute(f"SELECT * FROM {GEOMETRY_LEDGER} WHERE operation_id=?", (operation_id,)).fetchone()
+
+
+def _geometry_ready_row(conn: sqlite3.Connection, bundle: str, as_of: str) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                       (bundle, as_of)).fetchone()
+    if row is None:
+        raise AdapterError("promo-geometry-ready-missing")
+    return dict(row)
+
+
+def _geometry_candidate(runtime: Path, as_of: str, expected_count: int, expected_rect: str) -> dict[str, Any]:
+    authority = operational_authority(runtime)
+    with closing(_connect(authority[0], readonly=True)) as conn:
+        conn.execute("BEGIN")
+        state = conn.execute("SELECT bundle_version FROM registry_upload_current_state WHERE slot=1").fetchone()
+        if state is None:
+            raise AdapterError("promo-geometry-bundle-missing")
+        bundle = str(state[0])
+        before_row = _geometry_ready_row(conn, bundle, as_of)
+    before_plan = json.loads(before_row["plan_json"])
+    statuses = [sheet for sheet in before_plan.get("sheets") or [] if sheet.get("sheet_name") == "STATUS"]
+    if len(statuses) != 1:
+        raise AdapterError("promo-geometry-status-sheet-missing-or-duplicate")
+    status = statuses[0]
+    rows = status.get("rows")
+    if (not isinstance(rows, list) or len(rows) != expected_count + 1
+            or status.get("row_count") != expected_count or status.get("write_rect") != expected_rect):
+        raise AdapterError("promo-geometry-unexpected-before-shape")
+    if not rows[-1] or rows[-1][0] not in {
+        f"{SOURCE}[{slot.get('slot_key')}]" for slot in before_plan.get("temporal_slots") or []
+    }:
+        raise AdapterError("promo-geometry-trailing-row-not-promo")
+    if (status.get("write_start_cell") != "A1" or status.get("column_count") != 11
+            or expected_rect != f"A1:K{expected_count + 1}"):
+        raise AdapterError("promo-geometry-before-rect-invalid")
+    after_plan = deepcopy(before_plan)
+    after_status = next(sheet for sheet in after_plan["sheets"] if sheet.get("sheet_name") == "STATUS")
+    _set_status_shape(after_status)
+    if after_status["row_count"] != len(rows) or after_status["write_rect"] != f"A1:K{len(rows) + 1}":
+        raise AdapterError("promo-geometry-after-shape-invalid")
+    try:
+        parse_sheet_write_plan_payload(after_plan)
+    except ValueError as exc:
+        raise AdapterError(f"promo-geometry-after-envelope-invalid:{exc}") from exc
+    before_masked = deepcopy(before_plan)
+    after_masked = deepcopy(after_plan)
+    for plan in (before_masked, after_masked):
+        sheet = next(sheet for sheet in plan["sheets"] if sheet.get("sheet_name") == "STATUS")
+        sheet.pop("row_count", None)
+        sheet.pop("write_rect", None)
+    if _digest(before_masked) != _digest(after_masked):
+        raise AdapterError("promo-geometry-non-shape-drift")
+    after_row = dict(before_row)
+    after_row["plan_json"] = json.dumps(after_plan, ensure_ascii=False, separators=(",", ":"))
+    prestate = _digest({"authority": [str(authority[0]), authority[1]], "before_row": before_row})
+    candidate_sha = _digest({"prestate": prestate, "after_row": after_row})
+    return {"authority": authority, "db_path": authority[0], "bundle": bundle, "as_of_date": as_of,
+            "before_row": before_row, "after_row": after_row, "before_plan": before_plan,
+            "after_plan": after_plan, "prestate_sha": prestate, "candidate_sha": candidate_sha,
+            "before_row_sha": _digest(before_row), "after_row_sha": _digest(after_row),
+            "non_shape_sha": _digest(before_masked), "dates": [], "roles": {},
+            "ready_updates": [{"as_of_date": as_of}]}
+
+
+def _geometry_preview(request: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    runtime, as_of, count, rect = _geometry_request(request)
+    authority = operational_authority(runtime)
+    with closing(_connect(authority[0], readonly=True)) as conn:
+        prior = _geometry_ledger_row(conn, operation_id)
+    if prior is not None:
+        if prior["request_sha256"] != _digest(request):
+            raise AdapterError("promo-geometry-operation-request-mismatch")
+        return json.loads(prior["preview_json"])
+    candidate = _geometry_candidate(runtime, as_of, count, rect)
+    return {"operation_id": operation_id, "target": str(candidate["db_path"]),
+            "scope": {"mode": "repair_ready_geometry", "bundle_version": candidate["bundle"],
+                      "as_of_date": as_of, "before_row_count": count, "after_row_count": count + 1,
+                      "before_write_rect": rect, "after_write_rect": f"A1:K{count + 2}",
+                      "metric_cells_changed": 0, "source_rows_changed": 0,
+                      "non_shape_sha256": candidate["non_shape_sha"],
+                      "before_ready_row_sha256": candidate["before_row_sha"],
+                      "after_ready_row_sha256": candidate["after_row_sha"]},
+            "prestate_sha256": candidate["prestate_sha"], "candidate_sha256": candidate["candidate_sha"],
+            "recovery": {"method": "attested scoped full ready-row SQLite backup before atomic CAS",
+                         "rollback": "exact full-row inverse CAS through promo_archive_publication_rollback.py --mode ready_geometry"}}
+
+
+def _geometry_apply(request: dict[str, Any], operation_id: str, preview: dict[str, Any]) -> dict[str, Any]:
+    runtime, as_of, count, rect = _geometry_request(request)
+    with promo_archive_fence(runtime):
+        candidate = _geometry_candidate(runtime, as_of, count, rect)
+        if (candidate["prestate_sha"], candidate["candidate_sha"]) != (
+                preview.get("prestate_sha256"), preview.get("candidate_sha256")):
+            raise AdapterError("promo-geometry-preview-drift")
+        backup_root = (storage_destination_root("promo_archive_publication")
+                       if candidate["db_path"].resolve().is_relative_to(Path("/opt/wb-core-runtime/state"))
+                       else runtime / "backups" / "promo_archive_publication")
+        backup_path = backup_root / f"{candidate['db_path'].stem}__promo_geometry__{operation_id}.sqlite3"
+        if backup_path.exists():
+            raise AdapterError("promo-geometry-backup-already-exists")
+        before_target_sha, before_rows_sha, backup_sha = _create_scoped_backup(
+            candidate, operation_id, backup_path,
+            production=candidate["db_path"].resolve().is_relative_to(Path("/opt/wb-core-runtime/state")))
+        with closing(_connect(candidate["db_path"], readonly=False)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                check_authority(runtime, candidate["authority"])
+                fresh = _geometry_candidate(runtime, as_of, count, rect)
+                if (fresh["prestate_sha"], fresh["candidate_sha"]) != (candidate["prestate_sha"], candidate["candidate_sha"]):
+                    raise AdapterError("promo-geometry-drift-before-submit")
+                if _digest(_scoped_backup_rows(conn, candidate)) != before_rows_sha:
+                    raise AdapterError("promo-geometry-full-row-drift-before-submit")
+                if _digest(_geometry_ready_row(conn, candidate["bundle"], as_of)) != candidate["before_row_sha"]:
+                    raise AdapterError("promo-geometry-ready-cas-drift")
+                conn.execute(f"CREATE TABLE IF NOT EXISTS {GEOMETRY_LEDGER}(operation_id TEXT PRIMARY KEY,request_sha256 TEXT NOT NULL,preview_json TEXT NOT NULL,candidate_sha256 TEXT NOT NULL,before_target_sha256 TEXT NOT NULL,before_row_sha256 TEXT NOT NULL,after_row_sha256 TEXT NOT NULL,applied_at TEXT NOT NULL,backup_path TEXT NOT NULL,backup_sha256 TEXT NOT NULL,rolled_back_at TEXT)")
+                if _geometry_ledger_row(conn, operation_id) is not None:
+                    raise AdapterError("promo-geometry-operation-already-submitted")
+                replace_ready(conn, expected=ExpectedReady(candidate["bundle"], as_of, candidate["before_row"]["plan_json"]),
+                              plan_json=candidate["after_row"]["plan_json"])
+                if _digest(_geometry_ready_row(conn, candidate["bundle"], as_of)) != candidate["after_row_sha"]:
+                    raise AdapterError("promo-geometry-poststate-mismatch")
+                applied_at = datetime.now(timezone.utc).isoformat()
+                conn.execute(f"INSERT INTO {GEOMETRY_LEDGER} VALUES(?,?,?,?,?,?,?,?,?,?,NULL)",
+                             (operation_id, _digest(request), json.dumps(preview, ensure_ascii=False),
+                              candidate["candidate_sha"], before_target_sha, candidate["before_row_sha"],
+                              candidate["after_row_sha"], applied_at, str(backup_path), backup_sha))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    return {"operation_id": operation_id, "disposition": "submitted", "backup_path": str(backup_path)}
+
+
+def _geometry_readback(request: dict[str, Any], operation_id: str) -> dict[str, Any]:
+    runtime, as_of, _count, _rect = _geometry_request(request)
+    authority = operational_authority(runtime)
+    with closing(_connect(authority[0], readonly=True)) as conn:
+        row = _geometry_ledger_row(conn, operation_id)
+        if row is None:
+            return {"operation_id": operation_id, "state": "not_submitted"}
+        if row["request_sha256"] != _digest(request):
+            return {"operation_id": operation_id, "state": "failed", "reason": "request-mismatch"}
+        scope = json.loads(row["preview_json"])["scope"]
+        try:
+            current = _geometry_ready_row(conn, scope["bundle_version"], as_of)
+        except AdapterError:
+            current = None
+    actual = _digest(current)
+    superseded = False
+    if (current is not None and actual != row["after_row_sha256"]
+            and _later_timestamp(current["refreshed_at"], row["applied_at"])):
+        try:
+            parse_sheet_write_plan_payload(json.loads(current["plan_json"]))
+        except (ValueError, json.JSONDecodeError):
+            pass
+        else:
+            superseded = True
+    return {"operation_id": operation_id,
+            "state": ("restored" if row["rolled_back_at"] else "applied" if actual == row["after_row_sha256"] or superseded else "ambiguous"),
+            "superseded": superseded, "actual_ready_row_sha256": actual,
+            "expected_ready_row_sha256": row["after_row_sha256"], "backup_path": row["backup_path"],
+            "backup_sha256": row["backup_sha256"], "applied_at": row["applied_at"]}
+
+
+def geometry_rollback_preview(runtime: Path, operation_id: str) -> dict[str, Any]:
+    authority = operational_authority(runtime)
+    with closing(_connect(authority[0], readonly=True)) as conn:
+        row = _geometry_ledger_row(conn, operation_id)
+        if row is None or row["rolled_back_at"]:
+            raise AdapterError("promo-geometry-rollback-not-applicable")
+        scope = json.loads(row["preview_json"])["scope"]
+        current = _geometry_ready_row(conn, scope["bundle_version"], scope["as_of_date"])
+        if _digest(current) != row["after_row_sha256"]:
+            raise AdapterError("promo-geometry-rollback-after-row-drift")
+        backup_path = Path(row["backup_path"])
+        if not backup_path.is_file() or "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest() != row["backup_sha256"]:
+            raise AdapterError("promo-geometry-rollback-backup-drift")
+        with closing(_connect(backup_path, readonly=True)) as backup:
+            _verify_scoped_backup(backup, operation_id=operation_id,
+                                  before_target_sha=row["before_target_sha256"],
+                                  candidate_sha=row["candidate_sha256"])
+            before = _geometry_ready_row(backup, scope["bundle_version"], scope["as_of_date"])
+            if _digest(before) != row["before_row_sha256"]:
+                raise AdapterError("promo-geometry-rollback-before-row-drift")
+    return {"operation_id": operation_id, "target": str(authority[0]), "backup_path": str(backup_path),
+            "after_row_sha256": row["after_row_sha256"], "restored_row_sha256": row["before_row_sha256"]}
+
+
+def geometry_rollback_apply(runtime: Path, operation_id: str, expected_after_row_sha: str) -> dict[str, Any]:
+    with promo_archive_fence(runtime):
+        preview = geometry_rollback_preview(runtime, operation_id)
+        if preview["after_row_sha256"] != expected_after_row_sha:
+            raise AdapterError("promo-geometry-rollback-approval-drift")
+        authority = operational_authority(runtime)
+        backup_path = Path(preview["backup_path"])
+        with closing(_connect(backup_path, readonly=True)) as backup, closing(_connect(authority[0], readonly=False)) as conn:
+            ledger = _geometry_ledger_row(conn, operation_id)
+            scope = json.loads(ledger["preview_json"])["scope"]
+            before = _geometry_ready_row(backup, scope["bundle_version"], scope["as_of_date"])
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                check_authority(runtime, authority)
+                ledger = _geometry_ledger_row(conn, operation_id)
+                if ledger is None or ledger["rolled_back_at"]:
+                    raise AdapterError("promo-geometry-rollback-not-applicable")
+                if "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest() != ledger["backup_sha256"]:
+                    raise AdapterError("promo-geometry-rollback-backup-drift")
+                _verify_scoped_backup(backup, operation_id=operation_id,
+                                      before_target_sha=ledger["before_target_sha256"],
+                                      candidate_sha=ledger["candidate_sha256"])
+                current = _geometry_ready_row(conn, scope["bundle_version"], scope["as_of_date"])
+                if _digest(current) != expected_after_row_sha:
+                    raise AdapterError("promo-geometry-rollback-after-row-drift")
+                replace_ready(conn, expected=ExpectedReady(scope["bundle_version"], scope["as_of_date"], current["plan_json"]),
+                              plan_json=before["plan_json"])
+                if _digest(_geometry_ready_row(conn, scope["bundle_version"], scope["as_of_date"])) != ledger["before_row_sha256"]:
+                    raise AdapterError("promo-geometry-rollback-restored-row-mismatch")
+                conn.execute(f"UPDATE {GEOMETRY_LEDGER} SET rolled_back_at=? WHERE operation_id=? AND rolled_back_at IS NULL",
+                             (datetime.now(timezone.utc).isoformat(), operation_id))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    return {"operation_id": operation_id, "state": "restored", "restored_row_sha256": preview["restored_row_sha256"]}
 
 
 def rollback_preview(runtime: Path, operation_id: str) -> dict[str, Any]:

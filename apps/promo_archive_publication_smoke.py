@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 from apps.production_apply_launcher import execute  # noqa: E402
 from apps.production_apply_contract import AdapterError  # noqa: E402
 import apps.promo_archive_publication as publication  # noqa: E402
-from apps.promo_archive_publication import PromoArchivePublicationAdapter, SKU_METRICS, TOTAL_METRICS, _plan_non_target, rollback_preview, rollback_apply  # noqa: E402
+from apps.promo_archive_publication import PromoArchivePublicationAdapter, SKU_METRICS, TOTAL_METRICS, _plan_non_target, geometry_rollback_preview, geometry_rollback_apply, rollback_preview, rollback_apply  # noqa: E402
 from apps.sheet_vitrina_v1_promo_live_source_smoke import _write_promo_run_fixture  # noqa: E402
 from packages.application.promo_campaign_archive import sync_promo_campaign_archive  # noqa: E402
 from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload  # noqa: E402
@@ -259,7 +259,86 @@ def main() -> None:
         restored_rows = {item[1]: item[2] for sheet in restored["sheets"] if sheet["sheet_name"] == "DATA_VITRINA" for item in sheet["rows"]}
         assert restored_rows["SKU:999999|unrelated"] == 19.0
         assert restored_rows[f"SKU:{ids[0]}|promo_participation"] == ""
+        _assert_geometry_repair(runtime_dir, db_path)
     print("promo archive publication smoke passed")
+
+
+def _assert_geometry_repair(runtime_dir: Path, db_path: Path) -> None:
+    as_of = "2026-05-02"
+    with sqlite3.connect(str(db_path)) as conn:
+        old = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (as_of,)).fetchone()[0])
+        status = next(sheet for sheet in old["sheets"] if sheet["sheet_name"] == "STATUS")
+        status["rows"].append(["promo_by_price[today_current]", "success", as_of, "", "", "", "", 1, 1, "", "retained"])
+        malformed = json.dumps(old, ensure_ascii=False, separators=(",", ":"))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?", (malformed, as_of))
+    request = {"mode": "repair_ready_geometry", "runtime_dir": str(runtime_dir), "as_of_date": as_of,
+               "expected_status_row_count": 1, "expected_write_rect": "A1:K2"}
+    adapter = PromoArchivePublicationAdapter()
+    preview = adapter.preview(request, "geometry-fixture")
+    assert preview == adapter.preview(request, "geometry-fixture")
+    assert preview["scope"]["metric_cells_changed"] == preview["scope"]["source_rows_changed"] == 0
+    with sqlite3.connect(str(db_path)) as conn:
+        original_row = tuple(conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (as_of,)).fetchone())
+        source_before = [tuple(row) for table in ("temporal_source_slot_snapshots", "temporal_source_snapshots")
+                         for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1,2")]
+        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE as_of_date=?",
+                     ("2026-05-03T08:01:00Z", as_of))
+    try:
+        adapter.apply(request, "geometry-fixture", preview)
+    except AdapterError as exc:
+        assert str(exc) == "promo-geometry-preview-drift", exc
+    else:
+        raise AssertionError("geometry repair must reject metadata-only ready drift")
+    assert adapter.readback(request, "geometry-fixture")["state"] == "not_submitted"
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE as_of_date=?",
+                     (original_row[5], as_of))
+    result = adapter.apply(request, "geometry-fixture", preview)
+    assert result["disposition"] == "submitted"
+    readback = adapter.readback(request, "geometry-fixture")
+    assert readback["state"] == "applied" and not readback["superseded"]
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        after_row = tuple(conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (as_of,)).fetchone())
+        source_after = [tuple(row) for table in ("temporal_source_slot_snapshots", "temporal_source_snapshots")
+                        for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1,2")]
+    assert source_after == source_before
+    assert after_row[:6] == original_row[:6]
+    before_plan = json.loads(original_row[6])
+    after_plan = json.loads(after_row[6])
+    before_status = next(sheet for sheet in before_plan["sheets"] if sheet["sheet_name"] == "STATUS")
+    after_status = next(sheet for sheet in after_plan["sheets"] if sheet["sheet_name"] == "STATUS")
+    assert (before_status["row_count"], before_status["write_rect"], len(before_status["rows"])) == (1, "A1:K2", 2)
+    assert (after_status["row_count"], after_status["write_rect"], len(after_status["rows"])) == (2, "A1:K3", 2)
+    parse_sheet_write_plan_payload(after_plan)
+    for status in (before_status, after_status):
+        status.pop("row_count")
+        status.pop("write_rect")
+    assert before_plan == after_plan, "only STATUS geometry may change"
+    backup = Path(readback["backup_path"])
+    with sqlite3.connect(f"file:{backup}?mode=ro", uri=True) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        assert conn.execute("SELECT COUNT(*) FROM temporal_source_slot_snapshots").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM temporal_source_snapshots").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM sheet_vitrina_v1_ready_snapshots").fetchone()[0] == 1
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE as_of_date=?",
+                     ("2026-05-03T08:02:00Z", as_of))
+    try:
+        geometry_rollback_preview(runtime_dir, "geometry-fixture")
+    except AdapterError as exc:
+        assert str(exc) == "promo-geometry-rollback-after-row-drift", exc
+    else:
+        raise AssertionError("geometry inverse must refuse a later full-row write")
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE as_of_date=?",
+                     (after_row[5], as_of))
+    inverse = geometry_rollback_preview(runtime_dir, "geometry-fixture")
+    assert geometry_rollback_apply(runtime_dir, "geometry-fixture", inverse["after_row_sha256"])["state"] == "restored"
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        assert tuple(conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (as_of,)).fetchone()) == original_row
+    assert adapter.readback(request, "geometry-fixture")["state"] == "restored"
 
 
 

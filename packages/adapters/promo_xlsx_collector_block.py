@@ -40,6 +40,7 @@ DEFAULT_SESSION_STATE_PATH = str(Path.home() / "Projects" / "wb-web-bot" / "stor
 SERVER_DEFAULT_SESSION_STATE_PATH = "/opt/wb-web-bot/storage_state.json"
 TIMELINE_ACTION_SELECTOR = '[data-testid="timeline-action"]'
 COOKIE_ACCEPT_TEXT = "Принимаю"
+COOKIE_MODAL_SELECTOR = "#Portal-warning-cookies-modal"
 AUTO_PROMO_MODAL_OVERLAY_SELECTOR = '[data-testid="components/auto-promo-modal-overlay"]'
 AUTO_PROMO_MODAL_CLOSE_SELECTOR = (
     '[data-testid="components/auto-promo-modal/close-button-button-interface"]'
@@ -251,6 +252,7 @@ class PlaywrightPromoCollectorDriver:
         timeline = page.locator(TIMELINE_ACTION_SELECTOR)
         block = timeline.nth(candidate.index)
         block.scroll_into_view_if_needed(timeout=5000)
+        self._dismiss_cookie_banner_before_timeline_click()
         self._record_action(
             "click_timeline_candidate",
             {
@@ -263,6 +265,23 @@ class PlaywrightPromoCollectorDriver:
         self._wait_for(lambda: DRAWER_CLOSE_SELECTOR in page.content() or self._count(DRAWER_CLOSE_SELECTOR) > 0, timeout_sec=10)
         time.sleep(0.5)
         return self.capture_state(f"card__{_slug(getattr(candidate, 'title', 'candidate'))}")
+
+    def _dismiss_cookie_banner_before_timeline_click(self) -> None:
+        """Dismiss only WB's identified cookie layer before it can intercept a card."""
+        page = self._require_page()
+        modal = page.locator(COOKIE_MODAL_SELECTOR)
+        if modal.count() == 0 or not modal.is_visible():
+            return
+        accept = modal.get_by_text(COOKIE_ACCEPT_TEXT, exact=True)
+        if accept.count() != 1 or not accept.is_visible():
+            raise RuntimeError("visible cookie layer has no unique accept control")
+        self._record_action("click_cookie_accept_before_timeline", {
+            "selector": COOKIE_MODAL_SELECTOR,
+            "text": COOKIE_ACCEPT_TEXT,
+            "url": page.url,
+        })
+        accept.click(timeout=5000)
+        self._wait_for(lambda: not modal.is_visible(), timeout_sec=5)
 
     def open_generate_screen(self, slug: str) -> CollectorStateSnapshot:
         page = self._require_page()

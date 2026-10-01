@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -16,6 +18,7 @@ from packages.adapters.promo_xlsx_collector_block import (  # noqa: E402
     AUTO_PROMO_MODAL_CLOSE_SELECTOR,
     CAMPAIGN_MANIFEST_FETCH_TIMEOUT_MS,
     COOKIE_ACCEPT_TEXT,
+    COOKIE_MODAL_SELECTOR,
     DRAWER_CLOSE_SELECTOR,
     DRAWER_OVERLAY_SELECTOR,
     PROMOTIONS_TIMELINE_PATH,
@@ -49,6 +52,7 @@ ARTIFACTS = ROOT / "artifacts" / "promo_xlsx_collector_block" / "fixture"
 
 def main() -> None:
     _assert_manifest_response_callback_never_reads_body()
+    _assert_cookie_layer_cleared_before_timeline_identity()
     exclude_fixture = json.loads((ARTIFACTS / "workbook_headers__exclude_list_template__fixture.json").read_text(encoding="utf-8"))
     eligible_fixture = json.loads((ARTIFACTS / "workbook_headers__eligible_items_report__fixture.json").read_text(encoding="utf-8"))
     cross_year_fixture = json.loads((ARTIFACTS / "card__cross_year__fixture.json").read_text(encoding="utf-8"))
@@ -369,8 +373,91 @@ def main() -> None:
     print("timeline_unknown_full_flow: ok")
     print("drawer_open_failure_surface: ok")
     print("manifest_ended_no_drawer: ok")
+    print("cookie_layer_timeline_identity: ok")
     print("hydration_exception_surface: ok")
     print("smoke-check passed")
+
+
+def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
+    """A cookie layer over card 31 must not turn 41 identities into 40."""
+    known = set(range(41)) - {31}
+    actions: list[str] = []
+
+    class Accept:
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return True
+
+        def click(self, *, timeout):
+            assert timeout == 5000
+            modal.visible = False
+
+    class Modal:
+        visible = False
+
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return self.visible
+
+        def get_by_text(self, text, *, exact):
+            assert text == COOKIE_ACCEPT_TEXT and exact
+            return Accept()
+
+    modal = Modal()
+
+    class Block:
+        def __init__(self, index):
+            self.index = index
+
+        def scroll_into_view_if_needed(self, *, timeout):
+            assert timeout == 5000
+            if self.index == 31:
+                modal.visible = True
+
+        def click(self, *, timeout):
+            assert timeout == 8000
+            if modal.visible:
+                raise RuntimeError("cookie layer intercepted timeline click")
+            known.add(self.index)
+
+    class Timeline:
+        def nth(self, index):
+            assert 0 <= index < 41
+            return Block(index)
+
+    class Page:
+        url = "https://seller.wildberries.ru/dp-promo-calendar"
+
+        def locator(self, selector):
+            if selector == COOKIE_MODAL_SELECTOR:
+                return modal
+            assert selector == TIMELINE_ACTION_SELECTOR
+            return Timeline()
+
+        def content(self):
+            return "drawer-close"
+
+    driver = PlaywrightPromoCollectorDriver(Path("/tmp/wb-core-promo-cookie-smoke"))
+    driver._page = Page()
+    driver._record_action = lambda kind, payload: actions.append(kind)
+    driver._count = lambda _selector: 1
+    driver.capture_state = lambda label: label
+    with patch("packages.adapters.promo_xlsx_collector_block.time.sleep", lambda _seconds: None):
+        driver.open_timeline_candidate(SimpleNamespace(index=31, title="Скидки к новому сезону - 2"))
+    assert len(known) == 41 and not modal.visible
+    assert actions == ["click_cookie_accept_before_timeline", "click_timeline_candidate"]
+    modal.visible = True
+    modal.get_by_text = lambda *_args, **_kwargs: SimpleNamespace(count=lambda: 0, is_visible=lambda: False)
+    try:
+        driver.open_timeline_candidate(SimpleNamespace(index=31, title="unverified"))
+    except RuntimeError as exc:
+        assert str(exc) == "visible cookie layer has no unique accept control"
+    else:
+        raise AssertionError("an unknown cookie layer must block identity confirmation")
 
 
 def _assert_manifest_response_callback_never_reads_body() -> None:
