@@ -12,6 +12,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -19,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from apps.production_apply_launcher import execute  # noqa: E402
 from apps.production_apply_contract import AdapterError  # noqa: E402
+import apps.promo_archive_publication as publication  # noqa: E402
 from apps.promo_archive_publication import PromoArchivePublicationAdapter, SKU_METRICS, TOTAL_METRICS, rollback_preview, rollback_apply  # noqa: E402
 from apps.sheet_vitrina_v1_promo_live_source_smoke import _write_promo_run_fixture  # noqa: E402
 from packages.application.promo_campaign_archive import sync_promo_campaign_archive  # noqa: E402
@@ -54,6 +56,17 @@ def main() -> None:
         )
         _ready(runtime_dir, ids)
         _assert_reconstruction_determinism(runtime_dir, ids)
+        db_path = operational_authority(runtime_dir)[0]
+        old_payload = json.dumps({"kind": "incomplete", "note": "retained prior capture"})
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)",
+                         ("promo_by_price", DAY, "accepted_current_snapshot", "2026-05-03T07:00:00Z", old_payload))
+            conn.execute("INSERT INTO temporal_source_snapshots VALUES(?,?,?,?)",
+                         ("promo_by_price", DAY, "2026-05-03T07:00:00Z", old_payload))
+            conn.execute("INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)",
+                         ("promo_by_price", "2026-05-02", "accepted_current_snapshot", "2026-05-02T07:00:00Z", old_payload))
+            conn.execute("INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)",
+                         ("promo_by_price", DAY, "unaccepted_fixture", "2026-05-03T07:00:00Z", old_payload))
         request = {"runtime_dir": str(runtime_dir), "dates": [DAY]}
         operation = "promo-archive-publication-smoke"
         adapter = PromoArchivePublicationAdapter()
@@ -75,6 +88,31 @@ def main() -> None:
             raise AssertionError("every requested date requires a ready target column")
         assert before["scope"]["metric_cells_changed"]["TOTAL"] == 6, before
         assert all(before["scope"]["metric_cells_changed"][metric] == 2 * len(ids) for metric in SKU_METRICS), before
+        with sqlite3.connect(str(db_path)) as conn:
+            original_refreshed_at = conn.execute("SELECT refreshed_at FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (DAY,)).fetchone()[0]
+        real_create_backup = publication._create_scoped_backup
+
+        def backup_then_metadata_refresh(*args: object, **kwargs: object) -> tuple[str, str, str]:
+            result = real_create_backup(*args, **kwargs)
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE as_of_date=?",
+                             ("2026-05-03T08:01:00Z", DAY))
+            return result
+
+        with patch.object(publication, "_create_scoped_backup", side_effect=backup_then_metadata_refresh):
+            try:
+                execute(action="apply", adapter_name="promo_archive_publication_v1",
+                        operation_id=operation + "-metadata-drift", request=request,
+                        expected_prestate=before["prestate_sha256"],
+                        expected_candidate=before["candidate_sha256"])
+            except AdapterError as exc:
+                assert str(exc) == "promo-scoped-backup-full-row-drift", exc
+            else:
+                raise AssertionError("metadata-only refresh must invalidate the retained preimage")
+        assert adapter.readback(request, operation + "-metadata-drift")["state"] == "not_submitted"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET refreshed_at=? WHERE as_of_date=?",
+                         (original_refreshed_at, DAY))
         receipt = execute(
             action="apply", adapter_name="promo_archive_publication_v1", operation_id=operation,
             request=request, expected_prestate=before["prestate_sha256"],
@@ -83,7 +121,6 @@ def main() -> None:
         assert receipt["state"] == "applied", receipt
         assert adapter.readback(request, operation)["state"] == "applied"
         assert adapter.preview(request, operation) == before, "applied operation retains exact preview"
-        db_path = operational_authority(runtime_dir)[0]
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             conn.execute("PRAGMA query_only=ON")
             slot = conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='promo_by_price' AND snapshot_date=? AND snapshot_role='accepted_closed_day_snapshot'", (DAY,)).fetchone()
@@ -102,7 +139,34 @@ def main() -> None:
         assert rows[TOTAL_METRICS["promo_count_by_price"]] == 1.0
         assert rows[TOTAL_METRICS["promo_entry_price_best"]] == round(508.0 / len(ids), 6)
         assert rows["SKU:999999|unrelated"] == 17.0
-        assert Path(receipt["readback"]["backup_path"]).exists()
+        backup_path = Path(receipt["readback"]["backup_path"])
+        assert backup_path.exists()
+        with sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True) as backup:
+            backup.execute("PRAGMA query_only=ON")
+            tables = {row[0] for row in backup.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            assert tables == {"temporal_source_slot_snapshots", "temporal_source_snapshots",
+                              "sheet_vitrina_v1_ready_snapshots", "promo_archive_scoped_backup_manifest"}, tables
+            saved_slots = backup.execute("SELECT source_key,snapshot_date,snapshot_role,payload_json FROM temporal_source_slot_snapshots").fetchall()
+            assert saved_slots == [("promo_by_price", DAY, "accepted_current_snapshot", old_payload)], saved_slots
+            assert backup.execute("SELECT source_key,snapshot_date,payload_json FROM temporal_source_snapshots").fetchall() == [("promo_by_price", DAY, old_payload)]
+            assert {row[0] for row in backup.execute("SELECT as_of_date FROM sheet_vitrina_v1_ready_snapshots")} == {"2026-05-02", DAY}
+            manifest = json.loads(backup.execute("SELECT manifest_json FROM promo_archive_scoped_backup_manifest").fetchone()[0])
+            assert manifest["operation_id"] == operation
+            assert manifest["before_target_sha256"] == receipt["readback"]["before_target_sha256"]
+            assert manifest["target_keys"]["slots"] == [[DAY, "accepted_closed_day_snapshot"], [DAY, "accepted_current_snapshot"]]
+            assert manifest["present_keys"]["slots"] == [[DAY, "accepted_current_snapshot"]]
+            assert manifest["present_keys"]["exact"] == [DAY]
+        assert "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest() == receipt["readback"]["backup_sha256"]
+        original_backup = backup_path.read_bytes()
+        with sqlite3.connect(str(backup_path)) as backup:
+            backup.execute("UPDATE promo_archive_scoped_backup_manifest SET manifest_json=?", ("{}",))
+        try:
+            rollback_preview(runtime_dir, operation)
+        except AdapterError as exc:
+            assert str(exc) == "promo-rollback-backup-file-drift", exc
+        else:
+            raise AssertionError("inverse must reject backup bytes changed after publication")
+        backup_path.write_bytes(original_backup)
         published_at = receipt["readback"]["applied_at"]
         with sqlite3.connect(str(db_path)) as conn:
             conn.execute("UPDATE temporal_source_slot_snapshots SET captured_at=? WHERE source_key='promo_by_price' AND snapshot_date=? AND snapshot_role='accepted_closed_day_snapshot'", ("2030-01-01T00:00:00Z", DAY))
@@ -151,7 +215,9 @@ def main() -> None:
         assert rollback_apply(runtime_dir, operation, rollback["after_target_sha256"])["state"] == "restored"
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             conn.execute("PRAGMA query_only=ON")
-            assert conn.execute("SELECT 1 FROM temporal_source_slot_snapshots WHERE source_key='promo_by_price' AND snapshot_date=?", (DAY,)).fetchone() is None
+            assert conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='promo_by_price' AND snapshot_date=? AND snapshot_role='accepted_current_snapshot'", (DAY,)).fetchone()[0] == old_payload
+            assert conn.execute("SELECT 1 FROM temporal_source_slot_snapshots WHERE source_key='promo_by_price' AND snapshot_date=? AND snapshot_role='accepted_closed_day_snapshot'", (DAY,)).fetchone() is None
+            assert conn.execute("SELECT payload_json FROM temporal_source_snapshots WHERE source_key='promo_by_price' AND snapshot_date=?", (DAY,)).fetchone()[0] == old_payload
             restored = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (DAY,)).fetchone()[0])
         restored_rows = {item[1]: item[2] for sheet in restored["sheets"] if sheet["sheet_name"] == "DATA_VITRINA" for item in sheet["rows"]}
         assert restored_rows["SKU:999999|unrelated"] == 19.0
