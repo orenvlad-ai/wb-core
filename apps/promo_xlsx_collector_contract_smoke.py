@@ -28,6 +28,7 @@ from packages.application.promo_xlsx_collector_block import (  # noqa: E402
     PromoXlsxCollectorBlock,
     build_metadata,
     build_timeline_candidate,
+    classify_collector_preflight,
     classify_timeline_preflight,
     classify_export_kind,
     extract_card_data,
@@ -131,6 +132,15 @@ def main() -> None:
         raise AssertionError(f"ended no-download card must record absent action, got {ended_card}")
     if ended_card.campaign_identity_match is not True:
         raise AssertionError(f"ended card must keep title-match guard, got {ended_card}")
+    announcement = replace(
+        ended_card,
+        ui_status="future",
+        promo_status="Акция запланирована. Список товаров появится ближе к старту акции.",
+    )
+    assert classify_collector_preflight(announcement)["early_preflight_decision"] == "early_announcement_without_list"
+    assert classify_collector_preflight(replace(announcement, promo_status="Акция запланирована"))["early_preflight_decision"] == "full_flow"
+    assert classify_collector_preflight(replace(announcement, download_action_state="available"))["early_preflight_decision"] == "full_flow"
+    assert classify_collector_preflight(replace(announcement, campaign_identity_match=False))["early_preflight_decision"] == "full_flow"
 
     # Current WB drawer uses an en dash and participation label, not "Акция идёт".
     for observed, expected in [("2026-09-03T10:00:00+05:00", "future"), ("2026-09-06T10:00:00+05:00", "current"), ("2026-09-29T10:00:00+05:00", "past")]:

@@ -170,6 +170,8 @@ class PromoXlsxCollectorBlock:
                     downloads_seen += 1
                 elif outcome.status == "skipped_past":
                     summary.skipped_past_count += 1
+                elif outcome.status == "skipped_announcement":
+                    summary.skipped_announcement_count += 1
                 elif outcome.status == "blocked_before_card":
                     summary.blocked_before_card_count += 1
                 elif outcome.status == "blocked_after_card":
@@ -331,7 +333,7 @@ class PromoXlsxCollectorBlock:
         preflight = classify_collector_preflight(card)
         early_preflight_duration_ms = _elapsed_ms(preflight_started)
 
-        if preflight["early_preflight_decision"] == "early_non_materializable":
+        if preflight["early_preflight_decision"] in {"early_non_materializable", "early_announcement_without_list"}:
             promo_folder = run_dir / "promos" / build_promo_folder_name(card.promo_id, None, card.promo_title)
             promo_folder.mkdir(parents=True, exist_ok=True)
             card_path = promo_folder / "card.json"
@@ -355,13 +357,13 @@ class PromoXlsxCollectorBlock:
             )
             metadata_path = promo_folder / "metadata.json"
             self._write_json(metadata_path, asdict(metadata))
-            drawer_reset = self._driver.reset_drawer(f"early_non_materializable__{slugify(card.promo_title)}")
+            drawer_reset = self._driver.reset_drawer(f"{preflight['early_preflight_decision']}__{slugify(card.promo_title)}")
             return PromoOutcome(
                 promo_title=card.promo_title,
                 timeline_block_index=candidate.index,
                 timeline_short_period_text=candidate.short_period_text,
                 timeline_preliminary_classification=candidate.preliminary_classification,
-                status="skipped_past",
+                status=("skipped_announcement" if preflight["early_preflight_decision"] == "early_announcement_without_list" else "skipped_past"),
                 promo_id=card.promo_id,
                 period_id=None,
                 promo_folder=str(promo_folder),
@@ -721,7 +723,7 @@ class PromoXlsxCollectorBlock:
             summary.non_materializable_expected_count += 1
         if getattr(outcome, "non_materializable_reason", None) == "ended_without_download":
             summary.early_ended_no_download_count += 1
-        if getattr(outcome, "early_preflight_decision", None) == "early_non_materializable":
+        if getattr(outcome, "early_preflight_decision", None) in {"early_non_materializable", "early_announcement_without_list"}:
             summary.early_non_materializable_count += 1
             summary.heavy_flow_avoided_count += 1
             summary.estimated_heavy_flow_avoided_count += 1
@@ -1670,6 +1672,27 @@ def classify_collector_preflight(card: PromoCardData) -> dict[str, Any]:
     identity_matched = bool(card.campaign_identity_match)
     status_sources = set(card.status_evidence_sources or [])
     has_status_evidence = bool(status_sources & {"footer_label", "badge"})
+
+    status_text = " ".join(str(card.promo_status or "").lower().split())
+    if (
+        card.promo_id is not None
+        and ui_status == "future"
+        and confidence == "high"
+        and "акция запланирована" in status_text
+        and "список товаров появится ближе к старту акции" in status_text
+        and download_action_state == "absent"
+        and loaded
+        and identity_matched
+        and has_status_evidence
+    ):
+        return {
+            "early_preflight_decision": "early_announcement_without_list",
+            "heavy_flow_required": False,
+            "heavy_flow_reason": "announced_product_list_not_yet_available",
+            "non_materializable_reason": "announced_without_list",
+            "fallback_to_full_flow_reason": None,
+            "collector_preflight_schema_version": COLLECTOR_PREFLIGHT_SCHEMA_VERSION,
+        }
 
     high_confidence_non_materializable = (
         ui_status == "ended"
