@@ -21,9 +21,10 @@ if str(ROOT) not in sys.path:
 from apps.production_apply_launcher import execute  # noqa: E402
 from apps.production_apply_contract import AdapterError  # noqa: E402
 import apps.promo_archive_publication as publication  # noqa: E402
-from apps.promo_archive_publication import PromoArchivePublicationAdapter, SKU_METRICS, TOTAL_METRICS, rollback_preview, rollback_apply  # noqa: E402
+from apps.promo_archive_publication import PromoArchivePublicationAdapter, SKU_METRICS, TOTAL_METRICS, _plan_non_target, rollback_preview, rollback_apply  # noqa: E402
 from apps.sheet_vitrina_v1_promo_live_source_smoke import _write_promo_run_fixture  # noqa: E402
 from packages.application.promo_campaign_archive import sync_promo_campaign_archive  # noqa: E402
+from packages.application.sheet_vitrina_v1 import parse_sheet_write_plan_payload  # noqa: E402
 from packages.application.ready_publication import operational_authority  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
 
@@ -57,6 +58,23 @@ def main() -> None:
         _ready(runtime_dir, ids)
         _assert_reconstruction_determinism(runtime_dir, ids)
         db_path = operational_authority(runtime_dir)[0]
+        with sqlite3.connect(str(db_path)) as conn:
+            earlier_row = conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?",
+                                       ("2026-05-02",)).fetchone()
+            invalid = json.loads(earlier_row[0])
+            invalid["sheets"][1]["row_count"] = 1
+            assert _plan_non_target(invalid, {DAY}) != _plan_non_target(json.loads(earlier_row[0]), {DAY})
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
+                         (json.dumps(invalid, ensure_ascii=False), "2026-05-02"))
+        try:
+            PromoArchivePublicationAdapter().preview({"runtime_dir": str(runtime_dir), "dates": [DAY]}, "invalid-status-count")
+        except AdapterError as exc:
+            assert str(exc) == "promo-ready-status-row-count-mismatch", exc
+        else:
+            raise AssertionError("publication must refuse an already invalid STATUS row count")
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
+                         (earlier_row[0], "2026-05-02"))
         old_payload = json.dumps({"kind": "incomplete", "note": "retained prior capture"})
         with sqlite3.connect(str(db_path)) as conn:
             conn.execute("INSERT INTO temporal_source_slot_snapshots VALUES(?,?,?,?,?)",
@@ -127,10 +145,15 @@ def main() -> None:
             exact = conn.execute("SELECT payload_json FROM temporal_source_snapshots WHERE source_key='promo_by_price' AND snapshot_date=?", (DAY,)).fetchone()
             plan = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (DAY,)).fetchone()[0])
         assert slot and exact and json.loads(slot[0])["kind"] == "success"
+        parse_sheet_write_plan_payload(plan)
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
             conn.execute("PRAGMA query_only=ON")
             current = conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='promo_by_price' AND snapshot_date=? AND snapshot_role='accepted_current_snapshot'", (DAY,)).fetchone()
+            earlier_plan = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", ("2026-05-02",)).fetchone()[0])
         assert current and json.loads(current[0])["kind"] == "success", "historical today_current needs its accepted role"
+        parse_sheet_write_plan_payload(earlier_plan)
+        assert earlier_plan["sheets"][1]["row_count"] == len(earlier_plan["sheets"][1]["rows"]) == 1
+        assert earlier_plan["sheets"][1]["write_rect"] == "A1:K2"
         rows = {row[1]: row[2] for sheet in plan["sheets"] if sheet["sheet_name"] == "DATA_VITRINA" for row in sheet["rows"]}
         assert rows[f"SKU:{ids[0]}|promo_participation"] == 1.0
         assert rows[f"SKU:{ids[0]}|promo_count_by_price"] == 1.0
@@ -210,6 +233,14 @@ def main() -> None:
             newer = json.loads(row[0])
             next(item for sheet in newer["sheets"] if sheet["sheet_name"] == "DATA_VITRINA" for item in sheet["rows"] if item[1] == "SKU:999999|unrelated")[2] = 19.0
             conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?", (json.dumps(newer), DAY))
+            earlier_now = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?",
+                                                  ("2026-05-02",)).fetchone()[0])
+            unrelated_status = ["prices_snapshot[today_current]", "success", DAY, "", "", "", "", 1, 1, "", "later unrelated status"]
+            earlier_now["sheets"][1]["rows"].append(unrelated_status)
+            earlier_now["sheets"][1]["row_count"] = 2
+            earlier_now["sheets"][1]["write_rect"] = "A1:K3"
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?",
+                         (json.dumps(earlier_now), "2026-05-02"))
         assert adapter.readback(request, operation)["state"] == "applied", "unrelated later edit must be preserved"
         rollback = rollback_preview(runtime_dir, operation)
         assert rollback_apply(runtime_dir, operation, rollback["after_target_sha256"])["state"] == "restored"
@@ -219,6 +250,12 @@ def main() -> None:
             assert conn.execute("SELECT 1 FROM temporal_source_slot_snapshots WHERE source_key='promo_by_price' AND snapshot_date=? AND snapshot_role='accepted_closed_day_snapshot'", (DAY,)).fetchone() is None
             assert conn.execute("SELECT payload_json FROM temporal_source_snapshots WHERE source_key='promo_by_price' AND snapshot_date=?", (DAY,)).fetchone()[0] == old_payload
             restored = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (DAY,)).fetchone()[0])
+            restored_earlier = json.loads(conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", ("2026-05-02",)).fetchone()[0])
+        parse_sheet_write_plan_payload(restored)
+        parse_sheet_write_plan_payload(restored_earlier)
+        assert restored_earlier["sheets"][1]["rows"] == [unrelated_status]
+        assert restored_earlier["sheets"][1]["row_count"] == 1
+        assert restored_earlier["sheets"][1]["write_rect"] == "A1:K2"
         restored_rows = {item[1]: item[2] for sheet in restored["sheets"] if sheet["sheet_name"] == "DATA_VITRINA" for item in sheet["rows"]}
         assert restored_rows["SKU:999999|unrelated"] == 19.0
         assert restored_rows[f"SKU:{ids[0]}|promo_participation"] == ""
@@ -290,8 +327,8 @@ def _ready(runtime_dir: Path, ids: list[int]) -> None:
     for row_id in TOTAL_METRICS.values():
         data_rows.append([row_id, row_id, ""])
     plan = {
-        "plan_version": "fixture", "snapshot_id": "fixture", "date_columns": [DAY],
-        "temporal_slots": [{"slot_key": "yesterday_closed", "column_date": DAY}],
+        "plan_version": "fixture", "snapshot_id": "fixture", "as_of_date": DAY, "date_columns": [DAY],
+        "temporal_slots": [{"slot_key": "yesterday_closed", "slot_label": "closed", "column_date": DAY}],
         "metadata": {"refresh_diagnostics": {
             "source_slots": [{"source_key": "promo_by_price", "slot_kind": "yesterday_closed",
                               "requested_date": DAY, "status": "incomplete", "rows_accepted": 0},
@@ -300,17 +337,28 @@ def _ready(runtime_dir: Path, ids: list[int]) -> None:
                               "rows_accepted": 0}],
             "source_summary": [{"source_key": "promo_by_price", "status_counts": {"incomplete": 1}}],
         }},
-        "sheets": [{"sheet_name": "DATA_VITRINA", "rows": data_rows},
-                   {"sheet_name": "STATUS", "rows": [["promo_by_price[yesterday_closed]", "incomplete", DAY, "", "", "", "", len(ids), 0, "", "old"]]}],
+        "sheets": [{"sheet_name": "DATA_VITRINA", "header": ["label", "key", DAY],
+                    "rows": data_rows, "row_count": len(data_rows), "column_count": 3,
+                    "write_start_cell": "A1", "write_rect": f"A1:C{len(data_rows) + 1}", "clear_range": "A:C",
+                    "write_mode": "replace", "partial_update_allowed": False},
+                   {"sheet_name": "STATUS", "header": [f"column_{index}" for index in range(11)],
+                    "rows": [["promo_by_price[yesterday_closed]", "incomplete", DAY, "", "", "", "", len(ids), 0, "", "old"]],
+                    "row_count": 1, "column_count": 11,
+                    "write_start_cell": "A1", "write_rect": "A1:K2", "clear_range": "A:K",
+                    "write_mode": "replace", "partial_update_allowed": False}],
     }
     with sqlite3.connect(str(db_path)) as conn:
         state = conn.execute("SELECT bundle_version,activated_at FROM registry_upload_current_state WHERE slot=1").fetchone()
         conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots(bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json) VALUES(?,?,?,?,?,?,?)",
                      (state[0], state[1], DAY, "fixture", "fixture", "2026-05-04T08:00:00Z", json.dumps(plan, ensure_ascii=False)))
         earlier = json.loads(json.dumps(plan, ensure_ascii=False))
+        earlier["as_of_date"] = "2026-05-02"
         earlier["temporal_slots"][0]["slot_key"] = "today_current"
+        earlier["temporal_slots"][0]["slot_label"] = "current"
         earlier["metadata"]["refresh_diagnostics"]["source_slots"][0]["slot_kind"] = "today_current"
-        earlier["sheets"][1]["rows"][0][0] = "promo_by_price[today_current]"
+        earlier["sheets"][1]["rows"] = []
+        earlier["sheets"][1]["row_count"] = 0
+        earlier["sheets"][1]["write_rect"] = "A1:K1"
         conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots(bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json) VALUES(?,?,?,?,?,?,?)",
                      (state[0], state[1], "2026-05-02", "fixture-prior", "fixture", "2026-05-03T08:00:00Z", json.dumps(earlier, ensure_ascii=False)))
 

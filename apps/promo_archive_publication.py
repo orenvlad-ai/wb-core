@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -31,6 +32,7 @@ from packages.application.ready_publication import (
     operational_authority,
     replace_ready,
 )
+from packages.application.sheet_vitrina_v1 import _column_name
 from packages.application.root_storage_policy import (
     admit_root_write,
     storage_destination_root,
@@ -127,6 +129,27 @@ def _source_fingerprint(runtime: Path, dates: list[str]) -> str:
     return _digest(source)
 
 
+def _status_write_rect(status: dict[str, Any]) -> str:
+    header = status.get("header")
+    columns = status.get("column_count")
+    start = status.get("write_start_cell")
+    if not isinstance(header, list) or type(columns) is not int or columns != len(header) or not isinstance(start, str) or not start:
+        raise AdapterError("promo-ready-status-layout-invalid")
+    return f"{start}:{_column_name(columns)}{len(status.get('rows') or []) + 1}"
+
+
+def _require_status_shape(status: dict[str, Any]) -> None:
+    if status.get("row_count") != len(status.get("rows") or []):
+        raise AdapterError("promo-ready-status-row-count-mismatch")
+    if status.get("write_rect") != _status_write_rect(status):
+        raise AdapterError("promo-ready-status-write-rect-mismatch")
+
+
+def _set_status_shape(status: dict[str, Any]) -> None:
+    status["row_count"] = len(status.get("rows") or [])
+    status["write_rect"] = _status_write_rect(status)
+
+
 def _plan_non_target(plan: dict[str, Any], dates: set[str]) -> str:
     value = deepcopy(plan)
     columns = set(index for index, day in enumerate(value.get("date_columns") or []) if day in dates)
@@ -143,8 +166,17 @@ def _plan_non_target(plan: dict[str, Any], dates: set[str]) -> str:
         elif sheet.get("sheet_name") == "STATUS":
             target_slots = {str(item.get("slot_key")) for item in value.get("temporal_slots") or []
                             if item.get("column_date") in dates}
+            original_rows = sheet.get("rows") or []
             sheet["rows"] = [row for row in sheet.get("rows") or []
                              if not (row and str(row[0]) in {f"{SOURCE}[{slot}]" for slot in target_slots})]
+            if type(sheet.get("row_count")) is not int:
+                raise AdapterError("promo-ready-status-row-count-invalid")
+            removed = len(original_rows) - len(sheet["rows"])
+            sheet["row_count"] -= removed
+            match = re.fullmatch(r"([A-Z]+[0-9]+:[A-Z]+)([0-9]+)", str(sheet.get("write_rect") or ""))
+            if match is None:
+                raise AdapterError("promo-ready-status-write-rect-invalid")
+            sheet["write_rect"] = match.group(1) + str(int(match.group(2)) - removed)
     refresh = (value.get("metadata") or {}).get("refresh_diagnostics") or {}
     if "source_slots" in refresh:
         refresh["source_slots"] = [slot for slot in refresh["source_slots"]
@@ -233,6 +265,7 @@ def _restore_plan_target(current: dict[str, Any], old: dict[str, Any], dates: se
                                     if not (row and str(row[0]) in target_status_ids)]
     sheets_now["STATUS"]["rows"].extend(deepcopy(row) for row in sheets_old["STATUS"].get("rows") or []
                                          if row and str(row[0]) in target_status_ids)
+    _set_status_shape(sheets_now["STATUS"])
     refresh_now = (restored.get("metadata") or {}).get("refresh_diagnostics") or {}
     refresh_old = (old.get("metadata") or {}).get("refresh_diagnostics") or {}
     refresh_now["source_slots"] = [slot for slot in refresh_now.get("source_slots") or []
@@ -429,6 +462,7 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
     status = sheets.get("STATUS")
     if data is None or status is None:
         raise AdapterError("promo-ready-sheets-missing")
+    _require_status_shape(status)
     rows = {str(row[1]): row for row in data.get("rows") or [] if len(row) > 1}
     status_rows = {str(row[0]): row for row in status.get("rows") or [] if row}
     for index, day in enumerate(plan.get("date_columns") or []):
@@ -462,6 +496,7 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
         if status_row is None:
             status_row = [f"{SOURCE}[{slot_kind}]"]
             status.setdefault("rows", []).append(status_row)
+            _set_status_shape(status)
             status_rows[str(status_row[0])] = status_row
         while len(status_row) < 11:
             status_row.append("")
