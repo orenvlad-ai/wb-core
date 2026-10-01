@@ -33,7 +33,6 @@ from packages.application.ready_publication import (
 )
 from packages.application.root_storage_policy import (
     admit_root_write,
-    predict_sqlite_backup_bytes,
     storage_destination_root,
 )
 
@@ -49,6 +48,12 @@ TOTAL_METRICS = {
 LEDGER = "promo_archive_publication_runs"
 ROLLBACK_LEDGER = "promo_archive_publication_rollbacks"
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+SCOPED_BACKUP_TABLES = (
+    "temporal_source_slot_snapshots",
+    "temporal_source_snapshots",
+    "sheet_vitrina_v1_ready_snapshots",
+)
+SCOPED_BACKUP_MANIFEST = "promo_archive_scoped_backup_manifest"
 
 
 def _canonical(value: Any) -> bytes:
@@ -274,6 +279,146 @@ def _source_rows(conn: sqlite3.Connection, *, dates: list[str], roles: dict[str,
         row = conn.execute("SELECT source_key,snapshot_date,captured_at,payload_json FROM temporal_source_snapshots WHERE source_key=? AND snapshot_date=?", (SOURCE, day)).fetchone()
         exact[day] = tuple(row) if row else None
     return {"slots": slots, "exact": exact}
+
+
+def _scoped_backup_rows(conn: sqlite3.Connection, candidate: dict[str, Any]) -> dict[str, list[tuple[Any, ...]]]:
+    """Retain full rows for exactly the keys this publication can change."""
+    dates = candidate["dates"]
+    roles = candidate["roles"]
+    rows: dict[str, list[tuple[Any, ...]]] = {table: [] for table in SCOPED_BACKUP_TABLES}
+    for day in dates:
+        for role in sorted(roles[day]):
+            row = conn.execute("SELECT * FROM temporal_source_slot_snapshots WHERE source_key=? AND snapshot_date=? AND snapshot_role=?",
+                               (SOURCE, day, role)).fetchone()
+            if row is not None:
+                rows["temporal_source_slot_snapshots"].append(tuple(row))
+        row = conn.execute("SELECT * FROM temporal_source_snapshots WHERE source_key=? AND snapshot_date=?",
+                           (SOURCE, day)).fetchone()
+        if row is not None:
+            rows["temporal_source_snapshots"].append(tuple(row))
+    for as_of in sorted(update["as_of_date"] for update in candidate["ready_updates"]):
+        row = conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                           (candidate["bundle"], as_of)).fetchone()
+        if row is None:
+            raise AdapterError("promo-scoped-backup-ready-missing")
+        rows["sheet_vitrina_v1_ready_snapshots"].append(tuple(row))
+    return rows
+
+
+def _scoped_backup_rows_from_file(conn: sqlite3.Connection) -> dict[str, list[tuple[Any, ...]]]:
+    return {
+        table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY " + order)]
+        for table, order in (
+            ("temporal_source_slot_snapshots", "source_key,snapshot_date,snapshot_role"),
+            ("temporal_source_snapshots", "source_key,snapshot_date"),
+            ("sheet_vitrina_v1_ready_snapshots", "bundle_version,as_of_date"),
+        )
+    }
+
+
+def _verify_scoped_backup(conn: sqlite3.Connection, *, operation_id: str,
+                          before_target_sha: str, candidate_sha: str | None = None) -> dict[str, Any]:
+    row = conn.execute(f"SELECT manifest_json FROM {SCOPED_BACKUP_MANIFEST}").fetchone()
+    if row is None:
+        raise AdapterError("promo-scoped-backup-manifest-missing")
+    manifest = json.loads(row[0])
+    if (manifest.get("schema") != "wb_core_promo_scoped_backup_v1"
+            or manifest.get("operation_id") != operation_id
+            or manifest.get("before_target_sha256") != before_target_sha
+            or candidate_sha is not None and manifest.get("candidate_sha256") != candidate_sha):
+        raise AdapterError("promo-scoped-backup-manifest-mismatch")
+    rows = _scoped_backup_rows_from_file(conn)
+    if (manifest.get("row_counts") != {table: len(items) for table, items in rows.items()}
+            or manifest.get("rows_sha256") != _digest(rows)):
+        raise AdapterError("promo-scoped-backup-rows-mismatch")
+    target_keys = manifest.get("target_keys") or {}
+    if (any(row[0] != SOURCE for row in rows["temporal_source_slot_snapshots"] + rows["temporal_source_snapshots"])
+            or any(row[0] != manifest["bundle_version"] for row in rows["sheet_vitrina_v1_ready_snapshots"])):
+        raise AdapterError("promo-scoped-backup-other-source-row")
+    if (target_keys.get("slots") != [[day, role] for day in manifest["dates"] for role in sorted(manifest["roles"][day])]
+            or target_keys.get("exact") != manifest["dates"]
+            or target_keys.get("ready") != manifest["ready_asofs"]
+            or manifest.get("present_keys") != {
+                "slots": [[row[1], row[2]] for row in rows["temporal_source_slot_snapshots"]],
+                "exact": [row[1] for row in rows["temporal_source_snapshots"]],
+                "ready": [row[2] for row in rows["sheet_vitrina_v1_ready_snapshots"]],
+            }):
+        raise AdapterError("promo-scoped-backup-key-scope-mismatch")
+    if (not set(map(tuple, manifest["present_keys"]["slots"])).issubset(set(map(tuple, target_keys["slots"])))
+            or not set(manifest["present_keys"]["exact"]).issubset(set(target_keys["exact"]))
+            or manifest["present_keys"]["ready"] != target_keys["ready"]):
+        raise AdapterError("promo-scoped-backup-other-target-row")
+    if _digest(_target_image(conn, bundle=manifest["bundle_version"], dates=manifest["dates"],
+                             ready_asofs=manifest["ready_asofs"], roles=manifest["roles"])) != before_target_sha:
+        raise AdapterError("promo-scoped-backup-target-mismatch")
+    return manifest
+
+
+def _create_scoped_backup(candidate: dict[str, Any], operation_id: str, backup_path: Path,
+                          *, production: bool) -> tuple[str, str, str]:
+    """Persist an attested, transaction-consistent preimage with no other source rows."""
+    with closing(_connect(candidate["db_path"], readonly=True)) as source:
+        source.execute("BEGIN")
+        rows = _scoped_backup_rows(source, candidate)
+        before_target_sha = _digest(_target_image(
+            source, bundle=candidate["bundle"], dates=candidate["dates"],
+            ready_asofs=[update["as_of_date"] for update in candidate["ready_updates"]],
+            roles=candidate["roles"],
+        ))
+        schemas = {}
+        for table in SCOPED_BACKUP_TABLES:
+            row = source.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if row is None or not row[0]:
+                raise AdapterError(f"promo-scoped-backup-schema-missing:{table}")
+            schemas[table] = str(row[0])
+    row_bytes = sum(len(str(value).encode("utf-8")) for items in rows.values() for row in items for value in row)
+    predicted_bytes = 16 * 1024 * 1024 + 4 * row_bytes
+    if production:
+        admit_root_write(owner="promo_archive_publication", destination=backup_path,
+                         predicted_output_bytes=predicted_bytes)
+    manifest = {
+        "schema": "wb_core_promo_scoped_backup_v1", "operation_id": operation_id,
+        "source_path": str(candidate["db_path"]), "bundle_version": candidate["bundle"],
+        "dates": candidate["dates"], "ready_asofs": sorted(update["as_of_date"] for update in candidate["ready_updates"]),
+        "roles": candidate["roles"], "prestate_sha256": candidate["prestate_sha"],
+        "candidate_sha256": candidate["candidate_sha"], "before_target_sha256": before_target_sha,
+        "row_counts": {table: len(items) for table, items in rows.items()},
+        "target_keys": {
+            "slots": [[day, role] for day in candidate["dates"] for role in sorted(candidate["roles"][day])],
+            "exact": candidate["dates"],
+            "ready": sorted(update["as_of_date"] for update in candidate["ready_updates"]),
+        },
+        "present_keys": {
+            "slots": [[row[1], row[2]] for row in rows["temporal_source_slot_snapshots"]],
+            "exact": [row[1] for row in rows["temporal_source_snapshots"]],
+            "ready": [row[2] for row in rows["sheet_vitrina_v1_ready_snapshots"]],
+        },
+        "rows_sha256": _digest(rows), "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with closing(sqlite3.connect(str(backup_path))) as backup:
+            backup.execute("BEGIN IMMEDIATE")
+            for table in SCOPED_BACKUP_TABLES:
+                backup.execute(schemas[table])
+                items = rows[table]
+                if items:
+                    placeholders = ",".join("?" for _ in items[0])
+                    backup.executemany(f"INSERT INTO {table} VALUES({placeholders})", items)
+            backup.execute(f"CREATE TABLE {SCOPED_BACKUP_MANIFEST}(manifest_json TEXT NOT NULL)")
+            backup.execute(f"INSERT INTO {SCOPED_BACKUP_MANIFEST} VALUES(?)",
+                           (json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),))
+            backup.commit()
+        if backup_path.stat().st_size > predicted_bytes:
+            raise AdapterError("promo-scoped-backup-prediction-exceeded")
+        with closing(_connect(backup_path, readonly=True)) as backup:
+            _verify_scoped_backup(backup, operation_id=operation_id,
+                                  before_target_sha=before_target_sha,
+                                  candidate_sha=candidate["candidate_sha"])
+    except Exception:
+        backup_path.unlink(missing_ok=True)
+        raise
+    return before_target_sha, manifest["rows_sha256"], "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest()
 
 
 def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], dates: set[str]) -> dict[str, int]:
@@ -693,7 +838,7 @@ class PromoArchivePublicationAdapter:
                       } for day, value in candidate["results"].items()}},
             "prestate_sha256": candidate["prestate_sha"],
             "candidate_sha256": candidate["candidate_sha"],
-            "recovery": {"method": "online SQLite backup before one atomic transaction",
+            "recovery": {"method": "attested promo-target scoped SQLite backup before one atomic transaction",
                          "rollback": "scoped inverse target CAS from retained backup via apps/promo_archive_publication_rollback.py", "no_change_outside_promo_targets": True},
         }
 
@@ -711,11 +856,10 @@ class PromoArchivePublicationAdapter:
             backup_path = backup_root / f"{candidate['db_path'].stem}__promo_archive__{operation_id}.sqlite3"
             if backup_path.exists():
                 raise AdapterError("promo-backup-already-exists")
-            admit_root_write(owner="promo_archive_publication", destination=backup_path,
-                             predicted_output_bytes=predict_sqlite_backup_bytes(candidate["db_path"]))
-            backup_root.mkdir(parents=True, exist_ok=True)
-            with closing(sqlite3.connect(str(candidate["db_path"]))) as source, closing(sqlite3.connect(str(backup_path))) as target:
-                source.backup(target)
+            before_backup_target_sha, before_backup_rows_sha, backup_sha = _create_scoped_backup(
+                candidate, operation_id, backup_path,
+                production=candidate["db_path"].resolve().is_relative_to(Path("/opt/wb-core-runtime/state")),
+            )
             captured_at = datetime.now(timezone.utc).isoformat()
             with closing(_connect(candidate["db_path"], readonly=False)) as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -724,12 +868,20 @@ class PromoArchivePublicationAdapter:
                     fresh = _candidate(runtime, dates, reconstruction)
                     if (fresh["prestate_sha"], fresh["candidate_sha"]) != (candidate["prestate_sha"], candidate["candidate_sha"]):
                         raise AdapterError("promo-source-or-target-changed-before-submit")
-                    conn.execute(f"CREATE TABLE IF NOT EXISTS {LEDGER}(operation_id TEXT PRIMARY KEY,request_sha256 TEXT NOT NULL,preview_json TEXT NOT NULL,candidate_sha256 TEXT NOT NULL,before_target_sha256 TEXT NOT NULL,after_target_sha256 TEXT NOT NULL,after_target_json TEXT NOT NULL,after_ready_metadata_json TEXT NOT NULL,applied_at TEXT NOT NULL,backup_path TEXT NOT NULL)")
+                    if _digest(_scoped_backup_rows(conn, fresh)) != before_backup_rows_sha:
+                        raise AdapterError("promo-scoped-backup-full-row-drift")
+                    if _digest(_target_image(conn, bundle=fresh["bundle"], dates=dates,
+                                             ready_asofs=[update["as_of_date"] for update in fresh["ready_updates"]],
+                                             roles=fresh["roles"])) != before_backup_target_sha:
+                        raise AdapterError("promo-scoped-backup-preimage-drift")
+                    conn.execute(f"CREATE TABLE IF NOT EXISTS {LEDGER}(operation_id TEXT PRIMARY KEY,request_sha256 TEXT NOT NULL,preview_json TEXT NOT NULL,candidate_sha256 TEXT NOT NULL,before_target_sha256 TEXT NOT NULL,after_target_sha256 TEXT NOT NULL,after_target_json TEXT NOT NULL,after_ready_metadata_json TEXT NOT NULL,applied_at TEXT NOT NULL,backup_path TEXT NOT NULL,backup_sha256 TEXT NOT NULL)")
                     if _ledger_row(conn, operation_id) is not None:
                         raise AdapterError("promo-operation-already-submitted")
                     ready_asofs = [update["as_of_date"] for update in fresh["ready_updates"]]
                     before_target_sha = _digest(_target_image(conn, bundle=fresh["bundle"], dates=dates,
                                                              ready_asofs=ready_asofs, roles=fresh["roles"]))
+                    if before_target_sha != before_backup_target_sha:
+                        raise AdapterError("promo-scoped-backup-preimage-drift")
                     for day, payload in fresh["results"].items():
                         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
                         for role in fresh["roles"][day]:
@@ -751,7 +903,7 @@ class PromoArchivePublicationAdapter:
                     if _digest({"archive_and_runs": replay_source_sha, "reconstruction": replay_proof}) != fresh["source_sha"]:
                         raise AdapterError("promo-source-changed-during-submit")
                     after_ready_metadata = _ready_metadata(conn, bundle=fresh["bundle"], ready_asofs=ready_asofs)
-                    conn.execute(f"INSERT INTO {LEDGER} VALUES(?,?,?,?,?,?,?,?,?,?)", (operation_id, _digest(request), json.dumps(preview, ensure_ascii=False), fresh["candidate_sha"], before_target_sha, actual_target_sha, json.dumps(actual_target_image, ensure_ascii=False, separators=(",", ":")), json.dumps(after_ready_metadata, ensure_ascii=False), captured_at, str(backup_path)))
+                    conn.execute(f"INSERT INTO {LEDGER} VALUES(?,?,?,?,?,?,?,?,?,?,?)", (operation_id, _digest(request), json.dumps(preview, ensure_ascii=False), fresh["candidate_sha"], before_target_sha, actual_target_sha, json.dumps(actual_target_image, ensure_ascii=False, separators=(",", ":")), json.dumps(after_ready_metadata, ensure_ascii=False), captured_at, str(backup_path), backup_sha))
                     conn.commit()
                 except Exception:
                     conn.rollback()
@@ -780,8 +932,10 @@ class PromoArchivePublicationAdapter:
             return {"operation_id": operation_id, "state": "failed", "reason": "request-mismatch"}
         state = "applied" if actual_target_sha == row["after_target_sha256"] or superseded else "ambiguous"
         return {"operation_id": operation_id, "state": state, "candidate_sha256": row["candidate_sha256"],
+                "before_target_sha256": row["before_target_sha256"],
                 "expected_target_sha256": row["after_target_sha256"], "actual_target_sha256": actual_target_sha,
                 "applied_at": row["applied_at"], "backup_path": row["backup_path"],
+                "backup_sha256": row["backup_sha256"],
                 "superseded": bool(superseded)}
 
 
@@ -797,7 +951,12 @@ def rollback_preview(runtime: Path, operation_id: str) -> dict[str, Any]:
         backup_path = Path(row["backup_path"])
         if not backup_path.is_file():
             raise AdapterError("promo-rollback-backup-missing")
+        if "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest() != row["backup_sha256"]:
+            raise AdapterError("promo-rollback-backup-file-drift")
         with closing(_connect(backup_path, readonly=True)) as backup:
+            _verify_scoped_backup(backup, operation_id=operation_id,
+                                  before_target_sha=row["before_target_sha256"],
+                                  candidate_sha=row["candidate_sha256"])
             before_image = _target_image(backup, bundle=scope["bundle_version"], dates=dates,
                                          ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"])
             if _digest(before_image) != row["before_target_sha256"]:
@@ -833,6 +992,14 @@ def rollback_apply(runtime: Path, operation_id: str, expected_after_target_sha: 
         backup_path = Path(preview["backup_path"])
         authority = operational_authority(runtime)
         with closing(_connect(backup_path, readonly=True)) as backup, closing(_connect(authority[0], readonly=False)) as current:
+            publication_before = _ledger_row(current, operation_id)
+            if publication_before is None:
+                raise AdapterError("promo-rollback-publication-missing")
+            if "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest() != publication_before["backup_sha256"]:
+                raise AdapterError("promo-rollback-backup-file-drift")
+            _verify_scoped_backup(backup, operation_id=operation_id,
+                                  before_target_sha=publication_before["before_target_sha256"],
+                                  candidate_sha=publication_before["candidate_sha256"])
             old_rows = _source_rows(backup, dates=dates, roles=roles)
             old_plans = {as_of: json.loads(backup.execute(
                 "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
