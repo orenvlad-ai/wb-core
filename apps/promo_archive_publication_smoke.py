@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import subprocess
+from datetime import datetime
 from pathlib import Path
 import sqlite3
 import sys
@@ -49,6 +53,7 @@ def main() -> None:
             ]),
         )
         _ready(runtime_dir, ids)
+        _assert_reconstruction_determinism(runtime_dir, ids)
         request = {"runtime_dir": str(runtime_dir), "dates": [DAY]}
         operation = "promo-archive-publication-smoke"
         adapter = PromoArchivePublicationAdapter()
@@ -154,6 +159,62 @@ def main() -> None:
     print("promo archive publication smoke passed")
 
 
+
+def _assert_reconstruction_determinism(runtime_dir: Path, ids: list[int]) -> None:
+    """Independent processes must pin identical original checkpoint rows."""
+    db_path = operational_authority(runtime_dir)[0]
+    run_dir = runtime_dir / "promo_xlsx_collector_runs" / "2026-05-03__fixture"
+    raw_dir = run_dir / "promos" / "2400__2300__promo"
+    archive_dir = runtime_dir / "promo_campaign_archive" / "2400__2300__promo"
+    workbook = archive_dir / "workbook.xlsx"
+    observed_at = "2026-05-03T03:00:00Z"
+    workbook_time = datetime.fromisoformat("2026-05-03T08:30:00+05:00").timestamp()
+    os.utime(workbook, (workbook_time, workbook_time))
+    (raw_dir / "archive_reuse.json").write_text(json.dumps({
+        "archive_key": archive_dir.name, "reused_workbook_path": str(workbook),
+        "downloaded_at": "2026-05-03T08:30:00+05:00",
+    }), encoding="utf-8")
+    (run_dir / "run_summary.json").write_text(json.dumps({
+        "run_dir": str(run_dir), "status": "partial", "started_at": "2026-05-03T09:00:00+05:00",
+        "timeline_candidates_found": 1, "card_confirmed_count": 1, "blocked_before_card_count": 0,
+        "hydration_attempts": [{"hydrated_success": True, "timeline_count": 1}],
+        "promos": [{"promo_id": 2400, "timeline_block_index": 0, "promo_title": "Promo",
+                    "status": "reused_archive", "metadata_path": str(raw_dir / "metadata.json"),
+                    "saved_path": str(workbook),
+                    "metadata": {"campaign_identity_match": True, "ui_loaded_success": True}}],
+    }), encoding="utf-8")
+    evidence_digest = "sha256:" + "0" * 64
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS change_registry_checkpoints(checkpoint_id TEXT PRIMARY KEY,started_at TEXT,completed_at TEXT,completeness_status TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS change_registry_checkpoint_source_manifests(checkpoint_id TEXT,source_name TEXT,completeness_status TEXT,expected_count INTEGER,observed_count INTEGER,evidence_digest TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS change_registry_observation_values(checkpoint_id TEXT,target_kind TEXT,parameter_field TEXT,nm_id INTEGER,observation_status TEXT,value_kind TEXT,value_integer INTEGER,observed_at TEXT,evidence_digest TEXT)")
+        conn.execute("INSERT INTO change_registry_checkpoints(checkpoint_id,seller_id,account_scope,source_surface,scan_kind,started_at,completed_at,completeness_status,expected_target_count,observed_target_count,completeness_digest,evidence_digest,mapping_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("crcp_fixture", "seller-fixture", "fixture", "wb_prices_ads_joint", "observer", observed_at, observed_at, "complete", len(ids), len(ids), evidence_digest, evidence_digest, "wb_change_registry_mapping_v1"))
+        conn.execute("INSERT INTO change_registry_checkpoint_source_manifests(source_manifest_id,checkpoint_id,source_name,completeness_status,expected_count,observed_count,summary_json,evidence_digest,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                     ("crsm_fixture", "crcp_fixture", "prices", "complete", len(ids), len(ids), "{}", evidence_digest, observed_at))
+        conn.executemany("INSERT INTO change_registry_observation_values(observation_value_id,checkpoint_id,target_kind,nm_id,advert_id,placement,parameter_field,observation_status,value_kind,value_integer,health_code,health_detail,observed_at,evidence_digest,mapping_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         [(f"crobs_fixture_{nm_id}", "crcp_fixture", "price", nm_id, 0, "", "seller_price_minor", "exact", "integer", 50800, "", "", observed_at, evidence_digest, "wb_change_registry_mapping_v1") for nm_id in ids])
+    child = """import json,sys
+from pathlib import Path
+from apps.promo_archive_publication import _candidate
+r=Path(sys.argv[1]);d='2026-05-03';c=_candidate(r,[d],{d:{'identity_run':'2026-05-03__fixture','price_checkpoint_id':'crcp_fixture'}})
+summary=json.loads(c['ready_updates'][0]['plan_json'])['metadata']['refresh_diagnostics']['source_summary'][0]
+print(json.dumps({'candidate':c['candidate_sha'],'fingerprint':c['results'][d]['diagnostics']['fingerprints']['accepted_price_truth_fingerprint'],'rows':c['reconstruction_proof'][d]['price_rows_sha256'],'status_counts':summary['status_counts'],'origin_counts':summary['origin_counts']}))
+"""
+    observed = []
+    for seed in ("1", "2"):
+        result = subprocess.run([sys.executable, "-c", child, str(runtime_dir)], cwd=ROOT,
+                                env={**os.environ, "PYTHONHASHSEED": seed},
+                                text=True, capture_output=True, check=True)
+        observed.append(json.loads(result.stdout))
+    expected_rows = [[nm_id, "exact", "integer", 50800, observed_at, evidence_digest] for nm_id in sorted(ids)]
+    expected = "sha256:" + hashlib.sha256(json.dumps(expected_rows, ensure_ascii=False, sort_keys=True,
+                                                     separators=(",", ":")).encode()).hexdigest()
+    assert observed[0] == observed[1], observed
+    assert observed[0]["fingerprint"] == observed[0]["rows"] == expected, observed
+    assert len(observed[0]["status_counts"]) == len(observed[0]["origin_counts"]) == 2, observed
+
+
 def _ready(runtime_dir: Path, ids: list[int]) -> None:
     db_path = operational_authority(runtime_dir)[0]
     data_rows = [["Unrelated", "SKU:999999|unrelated", 17.0]]
@@ -167,7 +228,10 @@ def _ready(runtime_dir: Path, ids: list[int]) -> None:
         "temporal_slots": [{"slot_key": "yesterday_closed", "column_date": DAY}],
         "metadata": {"refresh_diagnostics": {
             "source_slots": [{"source_key": "promo_by_price", "slot_kind": "yesterday_closed",
-                              "requested_date": DAY, "status": "incomplete", "rows_accepted": 0}],
+                              "requested_date": DAY, "status": "incomplete", "rows_accepted": 0},
+                             {"source_key": "promo_by_price", "slot_kind": "older_fixture",
+                              "requested_date": "2026-05-01", "status": "partial", "origin": "earlier_fixture",
+                              "rows_accepted": 0}],
             "source_summary": [{"source_key": "promo_by_price", "status_counts": {"incomplete": 1}}],
         }},
         "sheets": [{"sheet_name": "DATA_VITRINA", "rows": data_rows},
