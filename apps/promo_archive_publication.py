@@ -347,7 +347,7 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
                 for field in ("status", "origin"):
                     summary[f"{field}_counts"] = {
                         value: sum(1 for entry in matching if str(entry.get(field) or "") == value)
-                        for value in {str(entry.get(field) or "") for entry in matching}
+                        for value in sorted({str(entry.get(field) or "") for entry in matching})
                     }
                 for field in ("rows_fetched", "rows_accepted", "rows_reused", "rows_skipped"):
                     summary[field] = sum(int(entry.get(field) or 0) for entry in matching)
@@ -496,10 +496,11 @@ def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, dict[s
             if set(checkpoint_prices) != price_id_sets[day] or len(checkpoint_prices) != manifest[1]:
                 raise AdapterError(f"promo-reconstruction-price-sku-scope-mismatch:{day}")
             artifact_sha = _reconstruction_artifact_proof(runtime, day, run_path, summary, identity_observed)
+            price_rows_sha = _digest([tuple(row) for row in observed_rows])
             price_truth[day] = DailyPriceTruthResolution(
                 price_by_nm_id=checkpoint_prices,
                 source_note=f"daily_price_source=change_registry_checkpoint; checkpoint_id={spec['price_checkpoint_id']}; price_observed_at={checkpoint[1]}; identities_observed_at={summary['started_at']}; historical_composite_reconstruction=true",
-                captured_at=str(checkpoint[1]), fingerprint=_digest(observed_rows),
+                captured_at=str(checkpoint[1]), fingerprint=price_rows_sha,
             )
             later_runs = sorted((runtime / "promo_xlsx_collector_runs").glob(f"{day}__*/run_summary.json"))
             later_runs = [path for path in later_runs if path.parent.name > run_path.parent.name]
@@ -514,7 +515,6 @@ def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, dict[s
                                 "unresolved_identity_count": sum(1 for item in latest_summary.get("promos") or []
                                                                  if isinstance(item, dict) and item.get("promo_id") is None),
                                 "sha256": "sha256:" + hashlib.sha256(latest_bytes).hexdigest()}
-            price_rows_sha = _digest([tuple(row) for row in observed_rows])
             price_values_sha = "sha256:" + hashlib.sha256(json.dumps(
                 [[row[0], row[1], row[3]] for row in observed_rows],
                 ensure_ascii=False, separators=(",", ":"),
