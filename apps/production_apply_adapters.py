@@ -24,6 +24,9 @@ _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
     "web_source_publication_v1": (
         "apps.web_vitrina_web_source_publication", "WebSourcePublicationAdapter",
     ),
+    "promo_archive_publication_v1": (
+        "apps.promo_archive_publication", "PromoArchivePublicationAdapter",
+    ),
     "finance_daily_publication_v1": (
         "apps.finance_daily_publication", "FinanceDailyPublicationAdapter",
     ),

@@ -127,6 +127,7 @@ from apps.production_apply_adapters import ADAPTERS
 expected = {
     "inventory_retention_publication_v1",
     "web_source_publication_v1",
+    "promo_archive_publication_v1",
     "finance_daily_publication_v1",
     "ads_partial_publication_v1",
     "fbs_snapshot_accounting_v1",

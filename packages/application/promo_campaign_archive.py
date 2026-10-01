@@ -15,6 +15,7 @@ import re
 import shutil
 import time
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 
@@ -47,6 +48,7 @@ ARCHIVE_WORKBOOK_INSPECTION_FILENAME = "workbook_inspection.json"
 ARCHIVE_NORMALIZED_ROWS_FILENAME = "campaign_rows.jsonl"
 ARCHIVE_NORMALIZED_ROWS_MANIFEST_FILENAME = "campaign_rows_manifest.json"
 NORMALIZED_CAMPAIGN_ROWS_SCHEMA_VERSION = "promo_campaign_rows_v1"
+BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
 PRICES_SOURCE_KEY = "prices_snapshot"
 PRICES_ACCEPTED_CURRENT_ROLE = "accepted_current_snapshot"
 ARTIFACT_VALIDATION_SCHEMA_VERSION = "promo_artifact_validation_v1"
@@ -60,7 +62,9 @@ ARTIFACT_STATE_WORKBOOK_WITHOUT_METADATA = "workbook_without_metadata"
 ARTIFACT_STATE_AMBIGUOUS_DATE = "ambiguous_date"
 ARTIFACT_STATE_UNUSABLE = "unusable"
 ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD = "ended_without_download"
+ARTIFACT_STATE_ANNOUNCED_WITHOUT_LIST = "announced_without_list"
 ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD = "metadata_only_ended_without_download"
+ARTIFACT_REASON_ANNOUNCED_WITHOUT_LIST = "same_day_announcement_without_product_list"
 ARTIFACT_REASON_METADATA_ONLY_TRUE_ARTIFACT_LOSS = "metadata_only_true_artifact_loss"
 ARTIFACT_STATES = (
     ARTIFACT_STATE_COMPLETE,
@@ -73,6 +77,7 @@ ARTIFACT_STATES = (
     ARTIFACT_STATE_AMBIGUOUS_DATE,
     ARTIFACT_STATE_UNUSABLE,
     ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD,
+    ARTIFACT_STATE_ANNOUNCED_WITHOUT_LIST,
 )
 
 
@@ -158,7 +163,10 @@ class PromoCampaignArtifactValidation:
 
     @property
     def is_expected_non_materializable(self) -> bool:
-        return self.artifact_state == ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
+        return self.artifact_state in {
+            ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD,
+            ARTIFACT_STATE_ANNOUNCED_WITHOUT_LIST,
+        }
 
     def to_diagnostic(self) -> dict[str, Any]:
         return {
@@ -300,6 +308,11 @@ def validate_promo_campaign_artifact(
     non_materializable_reason: str | None = None
     metadata_exists = metadata_path.exists()
     ended_without_download = _metadata_indicates_ended_without_download(record.metadata)
+    announced_without_list = (
+        requested_slot_date is not None
+        and _metadata_indicates_announced_without_list(record.metadata)
+        and _observation_date(record.metadata.collected_at) == requested_slot_date
+    )
     coverage_dates = {
         "promo_start_at": record.metadata.promo_start_at,
         "promo_end_at": record.metadata.promo_end_at,
@@ -321,7 +334,12 @@ def validate_promo_campaign_artifact(
         state = ARTIFACT_STATE_STALE
         reason = "coverage_does_not_include_requested_slot"
     elif not record_workbook_path:
-        if ended_without_download:
+        if announced_without_list:
+            state = ARTIFACT_STATE_ANNOUNCED_WITHOUT_LIST
+            reason = ARTIFACT_REASON_ANNOUNCED_WITHOUT_LIST
+            workbook_required = False
+            non_materializable_reason = "announced_without_list"
+        elif ended_without_download:
             state = ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
             reason = ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD
             workbook_required = False
@@ -336,7 +354,12 @@ def validate_promo_campaign_artifact(
         state = ARTIFACT_STATE_STALE
         reason = "workbook_path_mismatch"
     elif not workbook_exists:
-        if ended_without_download:
+        if announced_without_list and not record.workbook_present:
+            state = ARTIFACT_STATE_ANNOUNCED_WITHOUT_LIST
+            reason = ARTIFACT_REASON_ANNOUNCED_WITHOUT_LIST
+            workbook_required = False
+            non_materializable_reason = "announced_without_list"
+        elif ended_without_download:
             state = ARTIFACT_STATE_ENDED_WITHOUT_DOWNLOAD
             reason = ARTIFACT_REASON_METADATA_ONLY_ENDED_WITHOUT_DOWNLOAD
             workbook_required = False
@@ -563,6 +586,8 @@ def materialize_promo_result_from_archive(
     trace_run_dir: str | None = None,
     detail_prefix: str | None = None,
     diagnostics: dict[str, Any] | None = None,
+    price_truth: DailyPriceTruthResolution | None = None,
+    identity_run_summary: Path | None = None,
 ) -> PromoLiveSourceSuccess | PromoLiveSourceIncomplete:
     if sync_summary is None:
         sync_phase = _start_promo_diag_phase(diagnostics, "archive_sync")
@@ -577,6 +602,18 @@ def materialize_promo_result_from_archive(
     slot_date = date.fromisoformat(snapshot_date)
     records = load_promo_campaign_archive(runtime_dir)
     covering = [record for record in records if _record_covers_date_safe(record, slot_date)]
+    discovery = _complete_identity_discovery(runtime_dir, snapshot_date, capture_run_summary=identity_run_summary)
+    discovery_excluded = [
+        record for record in covering
+        if discovery is not None
+        and record.metadata.promo_id not in discovery[0]
+        and _observation_time(record.metadata.collected_at) is not None
+        and _observation_time(record.metadata.collected_at) <= discovery[2]
+        and not record.workbook_present
+        and not promo_campaign_has_normalized_rows(record)
+        and _metadata_indicates_announced_without_list(record.metadata)
+    ]
+    validated_covering = [record for record in covering if record not in discovery_excluded]
     validation_pairs = [
         (
             record,
@@ -586,7 +623,7 @@ def materialize_promo_result_from_archive(
                 deep_workbook_check=True,
             ),
         )
-        for record in covering
+        for record in validated_covering
     ]
     usable = [
         record
@@ -621,6 +658,12 @@ def materialize_promo_result_from_archive(
     _set_promo_diag_counter(diagnostics, "current_promo_count", len(covering))
     _set_promo_diag_counter(diagnostics, "requested_count", len(requested))
     _set_promo_diag_counter(diagnostics, "covering_campaigns", len(covering))
+    _set_promo_diag_counter(diagnostics, "announcement_placeholders_excluded_by_discovery", len(discovery_excluded))
+    if discovery_excluded and diagnostics is not None:
+        diagnostics["announcement_discovery_evidence"] = {
+            "run_summary": discovery[1],
+            "absent_promo_ids": sorted({record.metadata.promo_id for record in discovery_excluded}),
+        }
     _set_promo_diag_counter(diagnostics, "usable_campaigns", len(usable))
     _set_promo_diag_counter(diagnostics, "materializable_campaigns", len(usable))
     _set_promo_diag_counter(
@@ -707,6 +750,7 @@ def materialize_promo_result_from_archive(
         f"usable_campaigns={len(usable)}",
         f"materializable_campaigns={len(usable)}",
         f"excluded_non_materializable_campaigns={len(expected_non_materializable_artifacts)}",
+        f"announcement_placeholders_excluded_by_discovery={len(discovery_excluded)}",
         f"fatal_missing_artifacts={len(missing_artifacts)}",
         f"artifact_validation_schema={ARTIFACT_VALIDATION_SCHEMA_VERSION}",
     ]
@@ -736,6 +780,8 @@ def materialize_promo_result_from_archive(
                 )
             )
         )
+    if discovery_excluded:
+        detail_parts.append(f"complete_identity_discovery={discovery[1]}")
 
     if missing_artifacts:
         missing_keys = ",".join(record.archive_key for record in missing_artifacts[:8])
@@ -856,11 +902,12 @@ def materialize_promo_result_from_archive(
         )
 
     price_truth_phase = _start_promo_diag_phase(diagnostics, "price_truth_lookup")
-    price_truth = _load_daily_price_truth(
-        runtime_dir=runtime_dir,
-        snapshot_date=snapshot_date,
-        requested_nm_ids=requested_nm_ids_with_candidates,
-    )
+    if price_truth is None:
+        price_truth = _load_daily_price_truth(
+            runtime_dir=runtime_dir,
+            snapshot_date=snapshot_date,
+            requested_nm_ids=requested_nm_ids_with_candidates,
+        )
     _set_promo_diag_fingerprint(diagnostics, "accepted_price_truth_date", snapshot_date if price_truth.price_by_nm_id else None)
     _set_promo_diag_fingerprint(diagnostics, "accepted_price_truth_version", price_truth.captured_at)
     _set_promo_diag_fingerprint(diagnostics, "accepted_price_truth_fingerprint", price_truth.fingerprint)
@@ -1680,6 +1727,151 @@ def _metadata_indicates_ended_without_download(metadata: PromoMetadata) -> bool:
         and "manifest_end_date_elapsed" in manifest_sources
     )
     return drawer_evidence or timeline_evidence or manifest_evidence
+
+
+def _observation_date(value: str | None) -> date | None:
+    observed = _observation_time(value)
+    return observed.date() if observed is not None else None
+
+
+def _observation_time(value: str | None) -> datetime | None:
+    try:
+        observed = datetime.fromisoformat(str(value or ""))
+        if observed.tzinfo is None:
+            return None
+        return observed.astimezone(BUSINESS_TIMEZONE)
+    except ValueError:
+        return None
+
+
+def _metadata_indicates_announced_without_list(metadata: PromoMetadata) -> bool:
+    """A loaded, identified WB announcement says its product list does not exist yet."""
+    status_text = " ".join(str(metadata.promo_status or "").lower().split())
+    return (
+        metadata.promo_id is not None
+        and metadata.period_id is None
+        and str(metadata.ui_status or "") == "future"
+        and str(metadata.ui_status_confidence or "") == "high"
+        and "акция запланирована" in status_text
+        and "список товаров появится ближе к старту акции" in status_text
+        and str(metadata.download_action_state or "") == "absent"
+        and "footer_label" in set(metadata.status_evidence_sources or [])
+        and bool(metadata.ui_loaded_success)
+        and bool(metadata.campaign_identity_match)
+    )
+
+
+def _complete_identity_discovery(runtime_dir: Path, snapshot_date: str, *, capture_run_summary: Path | None = None) -> tuple[set[int], str, datetime] | None:
+    """Latest exact-day collector with every visible campaign identity resolved.
+
+    A partial workbook result is allowed; a partial identity enumeration is not.
+    This proves a placeholder was absent, never that another missing workbook is safe.
+    """
+    runs_root = runtime_dir / "promo_xlsx_collector_runs"
+    later_seen_ids: set[int] = set()
+    later_summaries: list[dict[str, Any]] = []
+    if capture_run_summary is not None:
+        exact = capture_run_summary.resolve()
+        if exact.parent.parent.resolve() != runs_root.resolve() or not exact.parent.name.startswith(snapshot_date + "__") or exact.name != "run_summary.json":
+            return None
+        paths = [exact]
+    else:
+        paths = sorted(runs_root.glob(f"{snapshot_date}__*/run_summary.json"), reverse=True)
+    for summary_path in paths:
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            if Path(str(summary.get("run_dir") or "")).resolve() != summary_path.parent.resolve():
+                continue
+            started_at = _observation_time(summary.get("started_at"))
+            if started_at is None or started_at.date() != date.fromisoformat(snapshot_date):
+                continue
+            promos = summary.get("promos")
+            if isinstance(promos, list):
+                later_seen_ids.update(
+                    item["promo_id"] for item in promos
+                    if isinstance(item, dict) and type(item.get("promo_id")) is int and item["promo_id"] > 0
+                )
+            later_summaries.append(summary)
+            if summary.get("status") not in {"success", "partial"}:
+                continue
+            count = summary.get("timeline_candidates_found")
+            if type(count) is not int or count <= 0 or not isinstance(promos, list):
+                continue
+            if len(promos) != count or summary.get("card_confirmed_count") != count:
+                continue
+            if summary.get("blocked_before_card_count") != 0:
+                continue
+            hydration = summary.get("hydration_attempts")
+            if not isinstance(hydration, list) or not any(
+                item.get("hydrated_success") is True and item.get("timeline_count") == count
+                for item in hydration if isinstance(item, dict)
+            ):
+                continue
+            ids = [item.get("promo_id") for item in promos if isinstance(item, dict)]
+            if len(ids) != count or any(type(promo_id) is not int or promo_id <= 0 for promo_id in ids):
+                continue
+            if any(
+                not isinstance(item.get("metadata"), dict)
+                or item["metadata"].get("campaign_identity_match") is not True
+                or item["metadata"].get("ui_loaded_success") is not True
+                for item in promos
+            ):
+                continue
+            if len(set(ids)) != count:
+                continue
+            unresolved_later = [
+                later for later in later_summaries[:-1]
+                if any(isinstance(item, dict) and item.get("promo_id") is None for item in later.get("promos") or [])
+            ]
+            baseline = {item.get("timeline_block_index"): item for item in promos}
+            if unresolved_later and (len(baseline) != count or any(type(index) is not int for index in baseline)):
+                continue
+            # A later failed drawer may be preserved only when its unidentified
+            # timeline card is the same independently identified, already-ended
+            # card from this complete exact-day observation.  A changed roster,
+            # title, index or another unresolved card invalidates the proof.
+            later_safe = True
+            for later in unresolved_later:
+                later_promos = later.get("promos")
+                if (not isinstance(later_promos, list) or len(later_promos) != count
+                        or later.get("timeline_candidates_found") != count):
+                    later_safe = False
+                    break
+                later_by_index = {item.get("timeline_block_index"): item for item in later_promos if isinstance(item, dict)}
+                if len(later_by_index) != count or set(later_by_index) != set(baseline):
+                    later_safe = False
+                    break
+                for index, item in later_by_index.items():
+                    before = baseline[index]
+                    if item.get("promo_title") != before.get("promo_title"):
+                        later_safe = False
+                        break
+                    later_id = item.get("promo_id")
+                    if later_id is not None and later_id != before.get("promo_id"):
+                        later_safe = False
+                        break
+                    if later_id is None:
+                        before_metadata = before.get("metadata") or {}
+                        try:
+                            before_end = date.fromisoformat(str(before_metadata.get("promo_end_at") or "")[:10])
+                        except ValueError:
+                            before_end = None
+                        later_metadata = item.get("metadata") or {}
+                        if (before_metadata.get("period_parse_confidence") != "high"
+                                or later_metadata.get("period_parse_confidence") != "high"
+                                or later_metadata.get("promo_start_at") != before_metadata.get("promo_start_at")
+                                or later_metadata.get("promo_end_at") != before_metadata.get("promo_end_at")
+                                or before_end is None or before_end >= date.fromisoformat(snapshot_date)):
+                            later_safe = False
+                            break
+                if not later_safe:
+                    break
+            if not later_safe:
+                continue
+            return set(ids) | later_seen_ids, str(summary_path), started_at
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return None
 
 
 def _normalize_text_list(value: object) -> list[str]:

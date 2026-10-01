@@ -121,6 +121,7 @@ def main() -> None:
         _assert_only_expected_non_materializable_stays_incomplete(Path(tmp) / "case-c")
         _assert_normalized_rows_replay_without_workbook(Path(tmp) / "case-d")
         _assert_pending_metadata_duplicate_does_not_block_replay(Path(tmp) / "case-e")
+        _assert_announcement_is_date_scoped(Path(tmp) / "case-f")
         print(
             "promo campaign archive integrity smoke passed: "
             f"states={counts}; validation_failed_count={audit.get('validation_failed_count')}"
@@ -398,6 +399,114 @@ def _assert_pending_metadata_duplicate_does_not_block_replay(runtime_dir: Path) 
         raise AssertionError(f"result detail must preserve superseded duplicate evidence, got {result.detail}")
 
 
+def _assert_announcement_is_date_scoped(runtime_dir: Path) -> None:
+    interval = {"coverage_start": "2026-04-26T02:00", "coverage_end": "2026-04-27T23:59"}
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__080000",
+        promo_folder="2901__pending__announcement",
+        promo_id=2901,
+        period_id=None,
+        title="Announcement",
+        confidence="high",
+        workbook_kind="missing",
+        ui_status="future",
+        download_action_state="absent",
+        promo_status="Акция запланирована. Список товаров появится ближе к старту акции.",
+        **interval,
+    )
+    _write_promo_fixture(
+        runtime_dir=runtime_dir,
+        run_name="2026-04-26__active",
+        promo_folder="3001__4001__active",
+        promo_id=3001,
+        period_id=4001,
+        title="Usable active campaign",
+        confidence="high",
+        workbook_kind="valid",
+        **interval,
+    )
+    sync = sync_promo_campaign_archive(runtime_dir)
+    for day in ("2026-04-26", "2026-04-27"):
+        _write_price_truth(runtime_dir=runtime_dir, snapshot_date=day, nm_id=123456, discounted_price=900)
+
+    def replay(day: str):
+        return materialize_promo_result_from_archive(
+            runtime_dir=runtime_dir,
+            snapshot_date=day,
+            requested_nm_ids=[123456],
+            sync_summary=sync,
+            diagnostics={},
+        )
+
+    same_day = replay("2026-04-26")
+    assert same_day.kind == "success", same_day
+    assert same_day.diagnostics["artifact_validation_summary"]["fatal_missing_artifact_count"] == 0
+    assert same_day.diagnostics["artifact_validation_summary"]["non_materializable_expected_count"] == 1
+    assert replay("2026-04-27").kind == "incomplete", "old announcement must not prove a later day"
+
+    _write_identity_summary(runtime_dir, "2026-04-27__080000", [3001, 3001], blocked_before=0)
+    assert replay("2026-04-27").kind == "incomplete", "duplicate identities cannot prove absence"
+    _write_identity_summary(runtime_dir, "2026-04-27__090000", [3001], blocked_before=1)
+    assert replay("2026-04-27").kind == "incomplete", "blocked card cannot prove absence"
+    _write_identity_summary(runtime_dir, "2026-04-27__100000", [3001], blocked_before=0)
+    absent = replay("2026-04-27")
+    assert absent.kind == "success", absent
+    assert absent.diagnostics["counters"]["announcement_placeholders_excluded_by_discovery"] == 1
+    _write_identity_summary(runtime_dir, "2026-04-27__103000", [None], blocked_before=1)
+    assert replay("2026-04-27").kind == "incomplete", "later unknown without period cannot inherit earlier absence"
+    historical = materialize_promo_result_from_archive(
+        runtime_dir=runtime_dir, snapshot_date="2026-04-27", requested_nm_ids=[123456],
+        sync_summary=sync, diagnostics={},
+        identity_run_summary=runtime_dir / "promo_xlsx_collector_runs/2026-04-27__100000/run_summary.json",
+    )
+    assert historical.kind == "success", "explicit earlier capture is distinct from later unknown"
+    _write_identity_summary(runtime_dir, "2026-04-27__110000", [2901], blocked_before=1)
+    assert replay("2026-04-27").kind == "incomplete", "later observed presence must revoke absence proof"
+
+    only = runtime_dir.parent / "announcement-only"
+    _write_promo_fixture(
+        runtime_dir=only,
+        run_name="2026-04-26__080000",
+        promo_folder="2901__pending__announcement",
+        promo_id=2901,
+        period_id=None,
+        title="Announcement",
+        confidence="high",
+        workbook_kind="missing",
+        ui_status="future",
+        download_action_state="absent",
+        promo_status="Акция запланирована. Список товаров появится ближе к старту акции.",
+    )
+    only_result = materialize_promo_result_from_archive(
+        runtime_dir=only,
+        snapshot_date="2026-04-26",
+        requested_nm_ids=[123456],
+        sync_summary=sync_promo_campaign_archive(only),
+        diagnostics={},
+    )
+    assert only_result.kind == "incomplete" and not only_result.items, only_result
+
+
+def _write_identity_summary(runtime_dir: Path, run_name: str, ids: list[int], *, blocked_before: int) -> None:
+    run_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    day = run_name[:10]
+    stamp = run_name.split("__", 1)[1]
+    started_at = f"{day}T{stamp[:2]}:{stamp[2:4]}:{stamp[4:6]}+05:00"
+    payload = {
+        "run_dir": str(run_dir),
+        "status": "partial",
+        "started_at": started_at,
+        "timeline_candidates_found": len(ids),
+        "card_confirmed_count": len(ids),
+        "blocked_before_card_count": blocked_before,
+        "hydration_attempts": [{"hydrated_success": True, "timeline_count": len(ids)}],
+        "promos": [{"promo_id": promo_id, "metadata": {"campaign_identity_match": True, "ui_loaded_success": True}} for promo_id in ids],
+    }
+    (run_dir / "run_summary.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _write_promo_fixture(
     *,
     runtime_dir: Path,
@@ -410,6 +519,9 @@ def _write_promo_fixture(
     workbook_kind: str,
     ui_status: str = "active",
     download_action_state: str = "available",
+    promo_status: str | None = None,
+    coverage_start: str = "2026-04-26T02:00",
+    coverage_end: str = "2026-04-26T23:59",
 ) -> None:
     promo_dir = runtime_dir / "promo_xlsx_collector_runs" / run_name / "promos" / promo_folder
     promo_dir.mkdir(parents=True, exist_ok=True)
@@ -430,11 +542,11 @@ def _write_promo_fixture(
         period_id=period_id,
         promo_title=title,
         promo_period_text="26 апреля 02:00 -> 26 апреля 23:59",
-        promo_start_at="2026-04-26T02:00",
-        promo_end_at="2026-04-26T23:59",
+        promo_start_at=coverage_start,
+        promo_end_at=coverage_end,
         period_parse_confidence=confidence,
         temporal_classification="past" if ui_status == "ended" else "current",
-        promo_status="Акция завершилась" if ui_status == "ended" else "Акция идёт",
+        promo_status=promo_status or ("Акция завершилась" if ui_status == "ended" else "Акция идёт"),
         promo_status_text="fixture",
         eligible_count=1,
         participating_count=1,
@@ -460,7 +572,7 @@ def _write_promo_fixture(
         ),
         status_evidence_sources=(
             ["download_button_absent", "drawer_loaded", "footer_label", "title_match"]
-            if ui_status == "ended"
+            if download_action_state == "absent"
             else ["drawer_loaded", "footer_label", "title_match"]
         ),
         ui_loaded_success=True,

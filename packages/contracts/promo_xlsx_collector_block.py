@@ -33,6 +33,7 @@ PromoOutcomeStatus = Literal[
     "downloaded",
     "reused_archive",
     "skipped_past",
+    "skipped_announcement",
     "blocked_before_card",
     "blocked_after_card",
     "blocked_before_download",
@@ -347,6 +348,7 @@ class CollectorRunSummary:
     downloaded_count: int = 0
     reused_archive_count: int = 0
     skipped_past_count: int = 0
+    skipped_announcement_count: int = 0
     blocked_before_card_count: int = 0
     blocked_after_card_count: int = 0
     blocked_before_download_count: int = 0

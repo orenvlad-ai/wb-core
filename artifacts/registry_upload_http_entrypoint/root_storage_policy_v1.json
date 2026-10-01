@@ -142,6 +142,7 @@
       {"owner":"proxy_v4_transit_repair","current":true,"data_class":"full_copy_evidence","destination_role":"backup","relative_roots":["private-evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"sheet_vitrina_exact_date_recovery","current":true,"data_class":"full_copy_evidence","destination_role":"backup","relative_roots":["private-evidence"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"promo_metric_eligibility_recompute","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["promo_metric_eligibility_recompute"],"lifecycle_policy":"verified_compressed_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
+      {"owner":"promo_archive_publication","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["promo_archive_publication"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"spp_metric_recompute","current":true,"data_class":"full_copy","destination_role":"backup","relative_roots":["spp_metric_recompute"],"lifecycle_policy":"verified_reconciliation_evidence","capacity_mode":"shared_backup_floor","max_single_write_bytes":34359738368},
       {"owner":"finance_legacy_helper","current":false,"data_class":"full_copy","destination_role":"backup","relative_roots":["wb_finance_stale_cost"],"lifecycle_policy":"retained_legacy_no_writer","capacity_mode":"disabled","max_single_write_bytes":0},
       {"owner":"canonical_cost_diagnostic_candidate","current":true,"data_class":"ephemeral_candidate","destination_role":"ephemeral","relative_roots":[],"lifecycle_policy":"temporary_candidate","capacity_mode":"ephemeral","max_single_write_bytes":34359738368},
@@ -516,6 +517,11 @@
     },
     {
       "owner": "promo_metric_eligibility_recompute",
+      "classification": "discretionary_root_writer",
+      "path_patterns": []
+    },
+    {
+      "owner": "promo_archive_publication",
       "classification": "discretionary_root_writer",
       "path_patterns": []
     },
