@@ -181,6 +181,7 @@ DIRECT_WRITERS = (
     "sheet_vitrina_v1_proxy_v4_transit_repair",
     "sheet_vitrina_v1_historical_cost_carry_forward",
     "web_vitrina_management_history",
+    "promo_archive_publication",
     "promo_metric_eligibility_recompute",
     "spp_metric_recompute",
     "sheet_vitrina_v1_proxy_margin_3_historical_backfill",

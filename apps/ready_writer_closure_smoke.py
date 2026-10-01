@@ -23,6 +23,7 @@ WRITERS = {
     "apps/canonical_cost_engine_vitrina_publication.py",
     "apps/finance_daily_publication.py",
     "apps/supplier_shipment_publication_chain.py",  # disposable proof, apply remains disabled
+    "apps/promo_archive_publication.py",
     "apps/promo_metric_eligibility_recompute.py",
     "apps/spp_metric_recompute.py",
     "apps/sheet_vitrina_v1_historical_cost_carry_forward.py",

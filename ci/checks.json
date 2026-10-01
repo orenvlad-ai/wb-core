@@ -438,6 +438,11 @@
       ],
       "pip": ["openpyxl==3.1.5"]
     },
+    "promo_archive_ready_publication": {
+      "patterns": ["apps/promo_archive_publication.py", "apps/promo_archive_publication_rollback.py"],
+      "commands": [["python3", "apps/promo_archive_publication_smoke.py"], ["python3", "apps/ready_writer_closure_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "disabled_proxy3_apply": {
       "patterns": ["apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill.py"],
       "commands": [["python3", "apps/sheet_vitrina_v1_proxy_margin_3_historical_backfill_smoke.py"]],
