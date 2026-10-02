@@ -119,7 +119,6 @@ SESSION_TTL_SECONDS = 15 * 60
 MAX_JOB_RESULT_BYTES = 16 * 1024 * 1024
 JOB_TTL_SECONDS = 60
 MAX_GLOBAL_BYTES = 8 * 1024 * 1024
-GLOBAL_TTL_SECONDS = 60
 MAX_PENDING_JOBS = 3
 MAX_QUERY_BYTES = 4096
 
@@ -1402,10 +1401,6 @@ class WindowV3Service:
         for session_id, session in list(self._sessions.items()):
             if session.cancelled or now - session.touched_at > SESSION_TTL_SECONDS:
                 self._retire_session_locked(session_id)
-        for session in self._sessions.values():
-            for handle, item in list(session.globals.items()):
-                if now - float(item["created_at"]) > GLOBAL_TTL_SECONDS:
-                    session.globals.pop(handle, None)
 
     def _retire_session_locked(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
@@ -1692,7 +1687,7 @@ class WindowV3Service:
         if handle:
             with self._lock:
                 global_result = session.globals.get(handle)
-                if global_result is None or time.monotonic() - global_result["created_at"] > GLOBAL_TTL_SECONDS:
+                if global_result is None:
                     raise WindowV3Error("window_version_stale", 409, "Глобальный поиск истёк.")
                 matched = global_result["matched_set"]
             if not selected or any(index not in matched for index in selected):
@@ -1957,8 +1952,9 @@ class WindowV3Service:
             )
             if held_without_current + candidate_bytes > MAX_SESSION_BYTES:
                 raise WindowV3Error("window_global_too_large", 413, "Метаданные поиска превышают лимит памяти.")
+            # One result per bounded session: it must survive a slow sequence
+            # of date chunks and an ordinary pause before scrolling. Session
+            # expiry/cancel/eviction and a replacement query release it.
             session.globals.clear()
-            session.globals[handle] = {
-                "created_at": time.monotonic(), "matched_set": set(indexes),
-            }
+            session.globals[handle] = {"matched_set": set(indexes)}
         return prepared
