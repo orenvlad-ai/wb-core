@@ -16421,6 +16421,25 @@
       state.filters.sort = ((payload && payload.filter_surface && payload.filter_surface.default_sort_value) || "");
     }
 
+    function reconcileDeferredFilters(payload) {
+      const surface = (payload && payload.filter_surface) || {};
+      ["section", "group"].forEach(function(controlId) {
+        const control = (surface.controls || []).find(function(item) {
+          return String(item.control_id || "") === controlId;
+        }) || {};
+        const allowed = new Set((control.options || []).map(function(item) { return String(item.value || ""); }));
+        if (!allowed.has(String(state.filters[controlId] || ALL_VALUE))) {
+          state.filters[controlId] = ALL_VALUE;
+        }
+      });
+      const validSort = (surface.sort_options || []).some(function(item) {
+        return String(item.value || "") === String(state.filters.sort || "");
+      });
+      if (state.filters.sort && !validSort) {
+        state.filters.sort = String(surface.default_sort_value || "");
+      }
+    }
+
     function setStateBox(kind, title, body) {
       tableStateNode.classList.remove("is-hidden");
       tableShellNode.classList.add("is-hidden");
@@ -23142,6 +23161,13 @@
       if (fields.length !== expected.length || fields.some(function(field, index) { return field !== expected[index]; }) || defaults.length !== fields.length) {
         throw new Error("Неизвестная версия ячеек. Обновите страницу.");
       }
+      const defaultCell = Object.create(null);
+      fields.forEach(function(field, index) { defaultCell[field] = defaults[index]; });
+      Object.defineProperty(defaultCell, "toJSON", {value: function() {
+        const complete = {};
+        fields.forEach(function(field) { complete[field] = this[field]; }, this);
+        return complete;
+      }});
       const columns = (table.columns || []).map(function(column) { return String(column.id || ""); });
       (table.rows || []).forEach(function(row) {
         if (!Array.isArray(row.values)) {
@@ -23154,10 +23180,10 @@
           if (!Number.isInteger(index) || index < 0 || index >= columns.length || columns[index] in values) {
             throw new Error("Некорректный индекс ячейки. Обновите страницу.");
           }
-          const cell = {};
-          fields.forEach(function(field, fieldIndex) {
-            cell[field] = entry.length > fieldIndex + 1 ? entry[fieldIndex + 1] : defaults[fieldIndex];
-          });
+          const cell = Object.create(defaultCell);
+          for (let fieldIndex = 0; fieldIndex < entry.length - 1; fieldIndex += 1) {
+            cell[fields[fieldIndex]] = entry[fieldIndex + 1];
+          }
           values[columns[index]] = cell;
         });
         row.values = values;
@@ -23499,12 +23525,9 @@
         }
         const tableRenderStartedAt = window.performance.now();
         const renderPayload = mergeDeferredShellWithFreshTable(shellPayload, payload);
-        resetFilterState(renderPayload);
+        reconcileDeferredFilters(renderPayload);
         renderPage(renderPayload, {tableFreshness: "fresh", deferSourceStatusAutoLoad: refreshSourceDetails});
         markFreshTableDisplayed(renderPayload);
-        if (refreshSourceDetails) {
-          await loadSourceStatusDetails({force: true});
-        }
         const tableRenderFinishedAt = window.performance.now();
         if (performanceMetrics) {
           performanceMetrics.table_merge_render_ms = boundedPerformanceDuration(
@@ -23518,6 +23541,13 @@
           performanceMetrics.shell_double_raf_paint_ms = paintValues[0];
           performanceMetrics.table_double_raf_paint_ms = paintValues[1];
           sendWebVitrinaPerformanceEnvelope(performanceMetrics);
+        }
+        if (refreshSourceDetails) {
+          try {
+            await loadSourceStatusDetails({force: true});
+          } catch (_statusError) {
+            // The authoritative table has already rendered successfully.
+          }
         }
       } catch (error) {
         if (requestId !== state.requestSequence) {
