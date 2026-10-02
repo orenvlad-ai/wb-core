@@ -303,18 +303,23 @@ def load_proxy_v4_parameters_for_date(
     if target < PROXY_V4_FIXED_BOUNDARY:
         return None
     database_path = runtime.db_path.resolve()
-    with sqlite3.connect(
-        f"file:{database_path.as_posix()}?mode=ro",
-        uri=True,
-        timeout=30.0,
-    ) as conn:
+    from packages.application.web_vitrina_window_read_context import (
+        WindowReadContextError, borrowed_operational_connection,
+    )
+    borrowed = borrowed_operational_connection(database_path)
+    with (borrowed if borrowed is not None else sqlite3.connect(
+        f"file:{database_path.as_posix()}?mode=ro", uri=True, timeout=30.0,
+    )) as conn:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
+        if borrowed is None:
+            conn.execute("PRAGMA query_only=ON")
         table_exists = conn.execute(
             """SELECT 1 FROM sqlite_master
                WHERE type='table' AND name='sheet_vitrina_v1_proxy_v4_parameter_versions'"""
         ).fetchone()
         if table_exists is None:
+            if borrowed is not None:
+                raise WindowReadContextError("window Proxy V4 parameter schema is missing")
             return None
         row = conn.execute(
             """

@@ -32,6 +32,7 @@ from packages.application.ff_pool_fbs_lifecycle import (
     fbs_lifecycle_quality_coverage,
 )
 from packages.application.storage_registry import StoreRegistry
+from packages.application.web_vitrina_window_read_context import WindowReadContextError
 
 
 CACHE_SCHEMA = "web_vitrina_fbs_lifecycle_last_good_v1"
@@ -105,11 +106,18 @@ def load_owner_paused_fallback(
 
     root = Path(runtime_dir).resolve()
     policy_path = root / OWNER_POLICY_FILENAME
-    if not policy_path.is_file():
-        return None
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    window_context = active_window_read_context()
     try:
-        policy = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        policy_bytes = (
+            window_context.read_file_once(policy_path)
+            if window_context is not None else
+            policy_path.read_bytes() if policy_path.is_file() else None
+        )
+        if policy_bytes is None:
+            return None
+        policy = json.loads(policy_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return _unavailable_fallback("Политика обновления FBS повреждена или недоступна.")
     if not isinstance(policy, Mapping) or policy.get("schema_version") != OWNER_POLICY_SCHEMA:
         return _unavailable_fallback("Политика обновления FBS имеет неизвестную версию.")
@@ -394,9 +402,15 @@ def _load_cache(
     expected_policy_revision: int | None = None,
     expected_policy_digest: str | None = None,
 ) -> dict[str, Any] | None:
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    window_context = active_window_read_context()
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        content = (
+            window_context.read_file_once(path)
+            if window_context is not None else path.read_bytes()
+        )
+        payload = json.loads(content.decode("utf-8")) if content is not None else None
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict) or payload.get("schema") != CACHE_SCHEMA:
         return None
@@ -470,12 +484,15 @@ def _cache_matches_current_source(
         current_db_path = StoreRegistry(runtime_dir).resolve("operational").resolve()
         if str(cache.get("source_db_path") or "") != str(current_db_path):
             return False
+        from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+        borrowed = borrowed_operational_connection(current_db_path)
         uri = f"file:{current_db_path.as_posix()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=0.2) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only=ON")
-            conn.execute("PRAGMA busy_timeout=200")
-            conn.execute("BEGIN")
+        with (borrowed if borrowed is not None else sqlite3.connect(uri, uri=True, timeout=0.2)) as conn:
+            if borrowed is None:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only=ON")
+                conn.execute("PRAGMA busy_timeout=200")
+                conn.execute("BEGIN")
             tables = {
                 str(row[0])
                 for row in conn.execute(
@@ -483,7 +500,10 @@ def _cache_matches_current_source(
                 )
             }
             current_source_state = _source_state(conn, tables=tables)
-            conn.rollback()
+            if borrowed is None:
+                conn.rollback()
+    except WindowReadContextError:
+        raise
     except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
         return False
     return _fingerprint(current_source_state) == _fingerprint(cache.get("source_state"))

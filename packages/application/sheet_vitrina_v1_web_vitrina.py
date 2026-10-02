@@ -57,6 +57,7 @@ from packages.application.sheet_vitrina_v1_incident_stocks import (
     extend_metrics_with_incident_stock_metrics,
 )
 from packages.application.sheet_vitrina_v1_inventory_planning import (
+    COMBINED_TOTAL_ALIAS_KEY,
     apply_fbs_last_good_presentation,
     apply_fbs_unavailable_presentation,
     extend_rows_with_inventory_planning,
@@ -128,6 +129,31 @@ WEB_VITRINA_PERIOD_READ_MODEL = "persisted_ready_snapshot_window"
 WEB_VITRINA_SOURCE_SHEET_NAME = "DATA_VITRINA"
 WEB_VITRINA_PERIOD_PLAN_VERSION = "delivery_contract_v1__web_vitrina_period_window_v1"
 WEB_VITRINA_DEFAULT_PERIOD_DAYS = 14
+
+
+def _effective_web_vitrina_metrics(metrics: list[MetricV2Item]) -> list[MetricV2Item]:
+    """Keep the lightweight catalog and the full row builder in lockstep."""
+    return visible_authenticated_buyer_metrics(
+        extend_metrics_with_authenticated_buyer(
+            extend_metrics_with_buyout_percent(
+                extend_metrics_with_weighted_seller_price(
+                    extend_metrics_with_sku_action_metrics(
+                        extend_metrics_with_incident_stock_metrics(
+                            extend_metrics_with_own_product_capital_metrics(
+                                extend_metrics_with_proxy_v4(
+                                    extend_metrics_with_our_wb_cost_metrics(
+                                        extend_metrics_with_onec_stock_metrics(metrics)
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+
 FUNNEL_SECTION_LABEL = "Воронка"
 FUNNEL_VIEW_METRIC_KEY = "view_count"
 FUNNEL_TOTAL_VIEW_METRIC_KEY = "total_view_count"
@@ -247,6 +273,27 @@ class SheetVitrinaV1WebVitrinaBlock:
             descending=descending,
         )
 
+    def list_readable_dates_metadata(self, *, descending: bool = False) -> list[str]:
+        """Same shell calendar as the full read without decoding snapshot rows."""
+        default_columns = self.runtime.list_default_sheet_vitrina_ready_date_columns(
+            default_as_of_date=default_business_as_of_date(self.now_factory()),
+        )
+        return _merge_readable_dates(
+            exact_ready_dates=(
+                self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle()
+                + default_columns
+            ),
+            default_visible_snapshot=None,
+            business_week_dates=_default_business_period_dates(self.now_factory()),
+            date_from=None,
+            date_to=None,
+            descending=descending,
+        )
+
+    def metric_catalog_metadata(self) -> list[MetricV2Item]:
+        """The complete authorized metric definitions without reading table rows."""
+        return _effective_web_vitrina_metrics(self.runtime.load_current_state().metrics_v2)
+
     def build(
         self,
         *,
@@ -255,6 +302,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         as_of_date: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
+        output_row_ids: frozenset[str] | None = None,
     ) -> WebVitrinaContractV1:
         now = self.now_factory()
         fbs_lifecycle_fallback = load_owner_paused_fallback(
@@ -266,6 +314,10 @@ class SheetVitrinaV1WebVitrinaBlock:
             else None
         )
         current_state = self.runtime.load_current_state()
+        source_row_ids = (
+            _window_source_row_ids(output_row_ids, current_state.config_v2)
+            if output_row_ids is not None else None
+        )
         _validate_period_request(as_of_date=as_of_date, date_from=date_from, date_to=date_to)
         read_model = WEB_VITRINA_READ_MODEL
         source_status_snapshot_as_of_date = ""
@@ -279,14 +331,32 @@ class SheetVitrinaV1WebVitrinaBlock:
                 date_from=date_from,
                 date_to=date_to,
                 default_visible_snapshot=default_visible_snapshot,
+                source_row_ids=source_row_ids,
+                output_row_ids=output_row_ids,
             )
+            from packages.application.web_vitrina_window_read_context import active_window_read_context
+            window_status_loader = None
+            if output_row_ids is not None and active_window_read_context() is not None:
+                status_cache: dict[tuple[str, bool], Any] = {}
+
+                def window_status_loader(*, as_of_date: str, current_bundle_only: bool = False) -> Any:
+                    key = (as_of_date, current_bundle_only)
+                    if key not in status_cache:
+                        status_cache[key] = _window_refresh_status_metadata(
+                            self.runtime, as_of_date=as_of_date,
+                            current_bundle_only=current_bundle_only,
+                        )
+                    return status_cache[key]
+
             refreshed_at = _resolve_period_refreshed_at(
                 runtime=self.runtime,
                 period_date_bindings=period_date_bindings,
+                status_loader=window_status_loader,
             )
             period_refresh_summary = _resolve_period_refresh_summary(
                 runtime=self.runtime,
                 period_date_bindings=period_date_bindings,
+                status_loader=window_status_loader,
             )
             source_status_snapshot_as_of_date = _last_materialized_snapshot_as_of_date(period_date_bindings)
             data_sheet_row_count = len(snapshot.sheets[0].rows) if snapshot.sheets else 0
@@ -321,6 +391,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         load_window_status = _resolve_latest_load_window_status(
             runtime=self.runtime,
             now=now,
+            status_loader=window_status_loader if date_from and date_to else None,
         )
         data_sheet = _require_data_sheet(snapshot)
 
@@ -328,26 +399,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             int(item.nm_id): item
             for item in current_state.config_v2
         }
-        effective_metrics = extend_metrics_with_buyout_percent(
-            extend_metrics_with_weighted_seller_price(
-                extend_metrics_with_sku_action_metrics(
-                    extend_metrics_with_incident_stock_metrics(
-                        extend_metrics_with_own_product_capital_metrics(
-                            extend_metrics_with_proxy_v4(
-                                extend_metrics_with_our_wb_cost_metrics(
-                                    extend_metrics_with_onec_stock_metrics(
-                                        current_state.metrics_v2
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        effective_metrics = visible_authenticated_buyer_metrics(
-            extend_metrics_with_authenticated_buyer(effective_metrics)
-        )
+        effective_metrics = _effective_web_vitrina_metrics(current_state.metrics_v2)
         metrics_by_key = {
             str(item.metric_key): item
             for item in effective_metrics
@@ -365,6 +417,16 @@ class SheetVitrinaV1WebVitrinaBlock:
             displayed_metrics=effective_metrics,
             **presentation_arguments,
         )
+        row_updated_at_by_id = _resolve_row_updated_at_by_id(
+            snapshot, fallback_updated_at=refreshed_at,
+        )
+        window_operands = (
+            _window_compact_operands(
+                data_sheet.rows, date_columns=snapshot.date_columns,
+                row_updated_at_by_id=row_updated_at_by_id,
+                server_cell_presentation=server_cell_presentation,
+            ) if output_row_ids is not None else None
+        )
         from packages.application.management_inventory_history import legacy_wb_operands
         for row_id, cells in legacy_wb_operands(snapshot).items():
             for day, operand in cells.items():
@@ -374,13 +436,22 @@ class SheetVitrinaV1WebVitrinaBlock:
             date_columns=snapshot.date_columns,
             config_by_nm_id=config_by_nm_id,
             metrics_by_key=metrics_by_key,
-            row_updated_at_by_id=_resolve_row_updated_at_by_id(
-                snapshot,
-                fallback_updated_at=refreshed_at,
-            ),
+            row_updated_at_by_id=row_updated_at_by_id,
             server_cell_presentation=server_cell_presentation,
+            row_ids=(
+                _window_normalized_row_ids(output_row_ids)
+                if output_row_ids is not None else None
+            ),
         )
-        rows = _include_proxy_v4_unit_margin_rows(
+        if output_row_ids is None or any(
+            row_id.endswith("|" + metric)
+            for row_id in output_row_ids
+            for metric in (
+                PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+                PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY,
+            )
+        ):
+            rows = _include_proxy_v4_unit_margin_rows(
             rows,
             runtime=self.runtime,
             date_columns=snapshot.date_columns,
@@ -390,8 +461,14 @@ class SheetVitrinaV1WebVitrinaBlock:
                 PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY
             ],
             parameters_for_date=self.proxy_v4_parameters_resolver,
-        )
-        rows = _include_buyout_percent_rows(
+            output_row_ids=output_row_ids,
+            window_operands=window_operands,
+            )
+        if output_row_ids is None or any(
+            row_id.endswith("|" + BUYOUT_PERCENT_METRIC_KEY)
+            for row_id in output_row_ids
+        ):
+            rows = _include_buyout_percent_rows(
             rows,
             runtime=self.runtime,
             date_columns=snapshot.date_columns,
@@ -399,16 +476,23 @@ class SheetVitrinaV1WebVitrinaBlock:
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
             metric=metrics_by_key[BUYOUT_PERCENT_METRIC_KEY],
             current_business_date=date.fromisoformat(current_business_date_iso(now)),
-        )
+            output_row_ids=output_row_ids,
+            )
         inventory_planning_model = InventoryPlanningReadModel(
             db_path=self.runtime.db_path
         )
+        from packages.application.web_vitrina_window_read_context import active_window_read_context
+        planning_options = (
+            {"business_date": current_business_date_iso(now)}
+            if active_window_read_context() is not None else {}
+        )
         inventory_planning = (
             inventory_planning_model.current(
-                lifecycle_quality_resolver=lifecycle_quality_resolver
+                lifecycle_quality_resolver=lifecycle_quality_resolver,
+                **planning_options,
             )
             if lifecycle_quality_resolver is not None
-            else inventory_planning_model.current()
+            else inventory_planning_model.current(**planning_options)
         )
         inventory_current_date = str(
             (inventory_planning.get("wb") or {}).get("snapshot_date") or ""
@@ -429,6 +513,11 @@ class SheetVitrinaV1WebVitrinaBlock:
             history=inventory_history,
             date_columns=list(snapshot.date_columns),
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
+            output_row_ids=output_row_ids,
+            legacy_wb_history_present=(
+                _window_legacy_wb_history_present(window_operands, snapshot.date_columns)
+                if window_operands is not None else None
+            ),
         )
         rows = apply_breakglass_last_good_overlay(
             rows,
@@ -469,45 +558,72 @@ class SheetVitrinaV1WebVitrinaBlock:
                 current_estimate = build_current_official_fbs_estimate(
                     self.runtime.db_path, nm_ids=[item.nm_id for item in current_state.config_v2 if item.enabled], now=now,
                 )
-                rows = apply_current_official_fbs_estimate(rows, estimate=current_estimate)
+                rows = apply_current_official_fbs_estimate(
+                    rows, estimate=current_estimate, compact_operands=window_operands,
+                )
             else:
                 current_estimate = {"available": False}
             import sqlite3
-            with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+            from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+            borrowed = borrowed_operational_connection(self.runtime.db_path)
+            with (borrowed if borrowed is not None else sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
-                conn.execute('PRAGMA query_only=ON')
+                if borrowed is None:
+                    conn.execute('PRAGMA query_only=ON')
                 parameters = dated_parameters(conn, current_business_date_iso(now)) if current_estimate.get('available') else None
-            if not management_book_mode:
+            if not management_book_mode and (
+                output_row_ids is None or any(
+                    "proxy_" in row_id.split("|", 1)[-1]
+                    for row_id in output_row_ids
+                )
+            ):
                 rows = recalculate_current_rows(rows, business_date=current_business_date_iso(now), parameters=parameters,
-                    original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}), snapshot_id=snapshot.snapshot_id)
+                    original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}),
+                    snapshot_id=snapshot.snapshot_id, output_row_ids=output_row_ids,
+                    window_operands=window_operands)
         yesterday = yesterday_date(current_business_date_iso(now))
         if yesterday in snapshot.date_columns and not management_book_mode:
             import sqlite3
-            with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+            from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+            borrowed = borrowed_operational_connection(self.runtime.db_path)
+            with (borrowed if borrowed is not None else sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
-                conn.execute('PRAGMA query_only=ON')
+                if borrowed is None:
+                    conn.execute('PRAGMA query_only=ON')
                 previous_parameters = dated_parameters(conn, yesterday)
             rows = recalculate_yesterday_rows(rows, business_date=current_business_date_iso(now),
                 parameters=previous_parameters, original_presentation=dict(snapshot.metadata or {}).get('server_cell_presentation', {}),
-                snapshot_id=snapshot.snapshot_id)
-        corrected_dates = corrected_proxy_dates(rows)
+                snapshot_id=snapshot.snapshot_id, output_row_ids=output_row_ids,
+                window_operands=window_operands)
+        corrected_dates = corrected_proxy_dates(rows, compact_operands=window_operands)
         if corrected_dates:
             import sqlite3
-            with sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True) as conn:
+            from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+            borrowed = borrowed_operational_connection(self.runtime.db_path)
+            with (borrowed if borrowed is not None else sqlite3.connect(self.runtime.db_path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
-                conn.execute('PRAGMA query_only=ON')
+                if borrowed is None:
+                    conn.execute('PRAGMA query_only=ON')
                 corrected_parameters = {day: dated_parameters(conn, day) for day in corrected_dates}
-            rows = recalculate_corrected_unit_margin_rows(rows, parameters=corrected_parameters)
+            rows = recalculate_corrected_unit_margin_rows(
+                rows, parameters=corrected_parameters,
+                compact_operands=window_operands,
+            )
         from packages.application.sheet_vitrina_v1_inventory_planning import restore_finalized_inventory_history
         rows = restore_finalized_inventory_history(rows, history=inventory_history,
                                                   current_date=current_business_date_iso(now))
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         from packages.application.metric_completeness import aggregate_counters
-        rows = aggregate_counters(rows, dates=snapshot.date_columns)
+        rows = aggregate_counters(
+            rows, dates=snapshot.date_columns, compact_operands=window_operands,
+        )
         rows = _include_authenticated_discount_total_row(
             rows, date_columns=snapshot.date_columns,
             metric=metrics_by_key[AVG_EFFECTIVE_DISCOUNT_METRIC_KEY],
+            window_operands=window_operands,
         )
+        if output_row_ids is not None:
+            rows = [row for row in rows if row.row_id in output_row_ids]
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
         current_incident_policy = get_policy_state(
             self.runtime,
@@ -617,7 +733,12 @@ def _read_time_warehouse_cell_presentation(
     if business_date not in {str(value) for value in snapshot.date_columns}:
         return presentation
 
-    capital = OwnProductCapitalBlock(runtime=runtime)
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    capital = OwnProductCapitalBlock(
+        runtime=runtime,
+        **({"timestamp_factory": lambda: now.isoformat()}
+           if active_window_read_context() is not None else {}),
+    )
     cutover_date = capital.functional_warehouse_cutover_date()
     if not cutover_date or business_date < cutover_date:
         return presentation
@@ -808,6 +929,8 @@ def _build_period_snapshot(
     date_from: str,
     date_to: str,
     default_visible_snapshot: SheetVitrinaV1Envelope | None,
+    source_row_ids: frozenset[str] | None = None,
+    output_row_ids: frozenset[str] | None = None,
 ) -> tuple[SheetVitrinaV1Envelope, list[_PeriodDateBinding]]:
     period_date_bindings = _resolve_period_date_bindings(
         runtime=runtime,
@@ -830,17 +953,28 @@ def _build_period_snapshot(
     materialized_bindings = [binding for binding in period_date_bindings if not binding.missing]
     if not materialized_bindings:
         raise ValueError("web_vitrina period window has no materialized row template")
+    if source_row_ids is not None and output_row_ids is not None:
+        source_row_ids = _window_discovered_source_row_ids(
+            source_row_ids, output_row_ids,
+            snapshots=snapshots_by_as_of_date.values(),
+        )
+        source_row_ids = _window_counter_source_row_ids(
+            source_row_ids, output_row_ids,
+            period_date_bindings=period_date_bindings,
+            snapshots_by_as_of_date=snapshots_by_as_of_date,
+        )
     template_sheets = _period_template_sheets(
         snapshots_by_as_of_date=snapshots_by_as_of_date,
         materialized_bindings=materialized_bindings,
         default_visible_snapshot=default_visible_snapshot,
     )
     template_sheet = template_sheets[0]
-    template_rows = _merge_period_template_rows(template_sheets)
+    template_rows = _merge_period_template_rows(template_sheets, source_row_ids=source_row_ids)
     value_maps = {
         binding.requested_date: _extract_snapshot_values_by_row_id(
             _require_data_sheet(snapshots_by_as_of_date[binding.storage_key]),
             expected_date=binding.column_date,
+            source_row_ids=source_row_ids,
         )
         for binding in period_date_bindings
         if not binding.missing
@@ -849,6 +983,7 @@ def _build_period_snapshot(
         period_date_bindings=period_date_bindings,
         snapshots_by_as_of_date=snapshots_by_as_of_date,
         template_rows=template_rows,
+        source_row_ids=source_row_ids,
     )
 
     combined_rows: list[list[Any]] = []
@@ -922,6 +1057,210 @@ def _build_period_snapshot(
             },
         },
     ), period_date_bindings
+
+
+def _window_source_row_ids(
+    output_row_ids: frozenset[str], config: Iterable[ConfigV2Item],
+) -> frozenset[str]:
+    """Retain the exact raw operands needed by derived TOTAL and date cells.
+
+    The source sheets are still read whole, but only these rows become dated
+    contract rows. Aggregators continue to see every enabled SKU operand.
+    """
+    included = set(output_row_ids)
+    parsed = [row_id.split("|", 1) for row_id in output_row_ids if "|" in row_id]
+    selected_proxy = [(scope, metric) for scope, metric in parsed if "proxy_" in metric]
+    all_proxy_scopes = any(scope == "TOTAL" or scope.startswith("GROUP:")
+                           for scope, _ in selected_proxy)
+    selected_sku_proxy_scopes = {scope for scope, _ in selected_proxy if scope.startswith("SKU:")}
+    need_discount_total = f"TOTAL|{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}" in output_row_ids
+    need_planning = any(
+        metric.startswith(("inventory_", "total_inventory_"))
+        or metric in {"stock_total", "total_stock_total"}
+        for _, metric in parsed
+    )
+    need_v4_marker = any(
+        metric == PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY and scope == "TOTAL"
+        for scope, metric in selected_proxy
+    )
+    economics_operands = {
+        "orderSum", "orderCount", "ads_sum", "our_wb_unit_cost_rub",
+        "stock_total", "proxy_profit_3_rub", "proxy_profit_4_rub",
+    }
+    for item in config:
+        if not item.enabled:
+            continue
+        scope = f"SKU:{item.nm_id}"
+        if all_proxy_scopes or scope in selected_sku_proxy_scopes:
+            included.update(f"{scope}|{metric}" for metric in economics_operands)
+        if need_v4_marker:
+            # This persisted marker suppresses the legacy additive TOTAL.
+            included.add(f"{scope}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}")
+        if need_discount_total:
+            included.add(f"{scope}|{EFFECTIVE_DISCOUNT_METRIC_KEY}")
+        if need_planning:
+            included.add(f"{scope}|{COMBINED_TOTAL_ALIAS_KEY}")
+    for scope in selected_sku_proxy_scopes:
+        included.update(f"{scope}|{metric}" for metric in economics_operands)
+    if need_planning:
+        included.add(f"TOTAL|total_{COMBINED_TOTAL_ALIAS_KEY}")
+    if f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}" in output_row_ids:
+        included.add("TOTAL|total_proxy_profit_4_rub")
+    for row_id in output_row_ids:
+        if "|" not in row_id:
+            continue
+        scope, metric = row_id.split("|", 1)
+        if metric == FUNNEL_CTR_METRIC_KEY:
+            numerator = (
+                FUNNEL_TOTAL_OPEN_CARD_METRIC_KEY if scope == "TOTAL"
+                else FUNNEL_OPEN_CARD_METRIC_KEY
+            )
+            denominator = (
+                FUNNEL_TOTAL_VIEW_METRIC_KEY if scope == "TOTAL"
+                else FUNNEL_VIEW_METRIC_KEY
+            )
+            included.update((f"{scope}|{numerator}", f"{scope}|{denominator}"))
+    return frozenset(included)
+
+
+def _window_normalized_row_ids(output_row_ids: frozenset[str]) -> frozenset[str]:
+    """Only displayed rows and same-scope CTR operands become contract rows."""
+    included = set(output_row_ids)
+    from packages.application.vitrina_economics import METRICS as PROXY_METRICS
+    for row_id in output_row_ids:
+        if "|" not in row_id:
+            continue
+        scope, metric = row_id.split("|", 1)
+        if scope.startswith("SKU:") and metric in PROXY_METRICS:
+            # Current-day Proxy may create this output row from a raw anchor;
+            # keep at most this scope's two anchors, never all SKU outputs.
+            included.update((f"{scope}|orderSum", f"{scope}|our_wb_unit_cost_rub"))
+        if metric != FUNNEL_CTR_METRIC_KEY:
+            continue
+        numerator = FUNNEL_TOTAL_OPEN_CARD_METRIC_KEY if scope == "TOTAL" else FUNNEL_OPEN_CARD_METRIC_KEY
+        denominator = FUNNEL_TOTAL_VIEW_METRIC_KEY if scope == "TOTAL" else FUNNEL_VIEW_METRIC_KEY
+        included.update((f"{scope}|{numerator}", f"{scope}|{denominator}"))
+    return frozenset(included)
+
+
+def _window_discovered_source_row_ids(
+    source_row_ids: frozenset[str], output_row_ids: frozenset[str], *,
+    snapshots: Iterable[SheetVitrinaV1Envelope],
+) -> frozenset[str]:
+    """Include every dated raw SKU operand, even outside today's config."""
+    parsed = [row_id.split("|", 1) for row_id in output_row_ids if "|" in row_id]
+    need_proxy_total = any(scope == "TOTAL" and "proxy_" in metric for scope, metric in parsed)
+    need_v4_marker = f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}" in output_row_ids
+    need_discount = f"TOTAL|{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}" in output_row_ids
+    need_planning = any(
+        metric.startswith(("inventory_", "total_inventory_"))
+        or metric in {"stock_total", "total_stock_total"}
+        for _, metric in parsed
+    )
+    needed_metrics: set[str] = set()
+    if need_proxy_total:
+        needed_metrics.update({
+            "orderSum", "orderCount", "ads_sum", "our_wb_unit_cost_rub",
+            "stock_total", "proxy_profit_3_rub", "proxy_profit_4_rub",
+        })
+    if need_v4_marker:
+        needed_metrics.add(PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY)
+    if need_discount:
+        needed_metrics.add(EFFECTIVE_DISCOUNT_METRIC_KEY)
+    if need_planning:
+        needed_metrics.add(COMBINED_TOTAL_ALIAS_KEY)
+    if not needed_metrics:
+        return source_row_ids
+    included = set(source_row_ids)
+    for snapshot in snapshots:
+        for row in _require_data_sheet(snapshot).rows:
+            row_id = str(row[1] or "") if len(row) > 1 else ""
+            if row_id.startswith("SKU:") and row_id.split("|", 1)[-1] in needed_metrics:
+                included.add(row_id)
+    return frozenset(included)
+
+
+def _window_counter_source_row_ids(
+    source_row_ids: frozenset[str], output_row_ids: frozenset[str], *,
+    period_date_bindings: list[_PeriodDateBinding],
+    snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
+) -> frozenset[str]:
+    """Keep compact dated SKU evidence needed by selected TOTAL/GROUP quality."""
+    included = set(source_row_ids)
+    aggregate_ids = [
+        row_id for row_id in output_row_ids
+        if row_id.startswith(("TOTAL|", "GROUP:"))
+    ]
+    if not aggregate_ids:
+        return source_row_ids
+    for binding in period_date_bindings:
+        if binding.missing:
+            continue
+        presentation = (
+            dict(snapshots_by_as_of_date[binding.storage_key].metadata or {})
+            .get("server_cell_presentation") or {}
+        )
+        for row_id in aggregate_ids:
+            cell = (presentation.get(row_id) or {}).get(binding.column_date) or {}
+            if not isinstance(cell, Mapping):
+                continue
+            evidence = cell.get("evidence") or {}
+            if not isinstance(evidence, Mapping) or not isinstance(evidence.get("applicable_scope"), list):
+                evidence = cell.get("metric_scope_evidence") or {}
+            if (not isinstance(evidence, Mapping)
+                    or evidence.get("operand_date") != binding.column_date):
+                continue
+            scopes = [str(item) for item in evidence.get("applicable_scope") or []
+                      if str(item).startswith("SKU:")]
+            if row_id.startswith("GROUP:"):
+                group = row_id.split("|", 1)[0]
+                scopes = [scope for scope in scopes
+                          if scope in (evidence.get("group_scopes") or {}).get(group, [])]
+            for scope in scopes:
+                included.update(
+                    f"{scope}|{key}" for key in evidence.get("sku_metric_keys") or []
+                )
+    return frozenset(included)
+
+
+def _window_compact_operands(
+    rows: list[list[Any]], *, date_columns: list[str],
+    row_updated_at_by_id: Mapping[str, str],
+    server_cell_presentation: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Keep raw selected source cells without constructing dated contract rows."""
+    result: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        if len(raw) < 2:
+            continue
+        row_id = str(raw[1] or "").strip()
+        if not row_id or row_id in result:
+            continue
+        result[row_id] = {
+            "label": str(raw[0] or ""),
+            "values_by_date": {
+                day: raw[index] if index < len(raw) else ""
+                for index, day in enumerate(date_columns, start=2)
+            },
+            "presentation_by_date": {
+                str(day): dict(cell) for day, cell in
+                (server_cell_presentation.get(row_id) or {}).items()
+                if isinstance(cell, Mapping)
+            },
+            "row_last_updated_at": str(row_updated_at_by_id.get(row_id) or ""),
+        }
+    return result
+
+
+def _window_legacy_wb_history_present(
+    operands: Mapping[str, Mapping[str, Any]], dates: list[str],
+) -> bool:
+    metric_keys = {COMBINED_TOTAL_ALIAS_KEY, f"total_{COMBINED_TOTAL_ALIAS_KEY}"}
+    return any(
+        row_id.split("|", 1)[-1] in metric_keys
+        and any(item["values_by_date"].get(day) not in {None, ""} for day in dates)
+        for row_id, item in operands.items()
+    )
 
 
 def _merge_period_incident_projection_quality(
@@ -1039,6 +1378,7 @@ def _merge_period_server_cell_presentation(
     period_date_bindings: list[_PeriodDateBinding],
     snapshots_by_as_of_date: Mapping[str, SheetVitrinaV1Envelope],
     template_rows: list[list[Any]],
+    source_row_ids: frozenset[str] | None = None,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Preserve exact-date warehouse explanations in a multi-day read."""
 
@@ -1070,6 +1410,8 @@ def _merge_period_server_cell_presentation(
         if not isinstance(raw, Mapping):
             continue
         for row_id, by_date in raw.items():
+            if source_row_ids is not None and str(row_id) not in source_row_ids:
+                continue
             if not isinstance(by_date, Mapping):
                 continue
             presentation = by_date.get(binding.column_date)
@@ -1112,12 +1454,15 @@ def _period_template_sheets(
     return sheets
 
 
-def _merge_period_template_rows(template_sheets: list[SheetVitrinaWriteTarget]) -> list[list[Any]]:
+def _merge_period_template_rows(
+    template_sheets: list[SheetVitrinaWriteTarget],
+    *, source_row_ids: frozenset[str] | None = None,
+) -> list[list[Any]]:
     rows_by_id: dict[str, list[Any]] = {}
     for sheet in template_sheets:
         for row in sheet.rows:
             row_id = str(row[1] or "").strip() if len(row) > 1 else ""
-            if not row_id or row_id in rows_by_id:
+            if not row_id or row_id in rows_by_id or (source_row_ids is not None and row_id not in source_row_ids):
                 continue
             rows_by_id[row_id] = list(row[:2])
     return list(rows_by_id.values())
@@ -1214,6 +1559,7 @@ def _extract_snapshot_values_by_row_id(
     data_sheet: SheetVitrinaWriteTarget,
     *,
     expected_date: str,
+    source_row_ids: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     try:
         column_index = data_sheet.header.index(expected_date)
@@ -1224,19 +1570,88 @@ def _extract_snapshot_values_by_row_id(
     values_by_row_id: dict[str, Any] = {}
     for row in data_sheet.rows:
         row_id = str(row[1] or "").strip() if len(row) > 1 else ""
-        if not row_id:
+        if not row_id or (source_row_ids is not None and row_id not in source_row_ids):
             continue
         values_by_row_id[row_id] = row[column_index] if column_index < len(row) else None
     return values_by_row_id
+
+
+def _window_refresh_status_metadata(
+    runtime: RegistryUploadDbBackedRuntime, *, as_of_date: str,
+    current_bundle_only: bool,
+) -> Any:
+    """Read the exact persisted STATUS semantics without decoding DATA_VITRINA.
+
+    The V3 chunk consumes rows only; its internal contract still carries the
+    legacy status fields. Select the small STATUS sheet and header metadata
+    from the already pinned ready record, using the same status reducer.
+    """
+    import json
+    from packages.application.registry_upload_db_backed_runtime import (
+        _derive_sheet_vitrina_refresh_semantic_summary,
+    )
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+
+    borrowed = borrowed_operational_connection(runtime.db_path)
+    if borrowed is None:
+        raise ValueError("window status requires a pinned operational read")
+    with borrowed as conn:
+        bundle_clause = (
+            "AND s.bundle_version=(SELECT bundle_version FROM registry_upload_current_state WHERE slot=1)"
+            if current_bundle_only else ""
+        )
+        row = conn.execute(
+            "SELECT s.as_of_date,s.refreshed_at,"
+            "json_extract(s.plan_json,'$.source_temporal_policies'),"
+            "json_extract(s.plan_json,'$.temporal_slots'),"
+            "(SELECT json_extract(sheet.value,'$.rows') "
+            "FROM json_each(s.plan_json,'$.sheets') sheet "
+            "WHERE json_extract(sheet.value,'$.sheet_name')='STATUS' LIMIT 1) "
+            "FROM sheet_vitrina_v1_ready_snapshots s WHERE s.as_of_date=? "
+            + bundle_clause
+            + " ORDER BY s.activated_at DESC,s.refreshed_at DESC,s.bundle_version DESC LIMIT 1",
+            (as_of_date,),
+        ).fetchone()
+    if row is None:
+        raise ValueError(f"sheet_vitrina_v1 ready snapshot missing: as_of_date={as_of_date}")
+    try:
+        policies = json.loads(row[2] or "{}")
+        slots = json.loads(row[3] or "[]")
+        status_rows = json.loads(row[4]) if row[4] is not None else None
+    except json.JSONDecodeError as exc:
+        raise ValueError("sheet_vitrina_v1 ready status metadata is invalid") from exc
+    if not isinstance(policies, dict) or not isinstance(slots, list) or (
+        status_rows is not None and not isinstance(status_rows, list)
+    ):
+        raise ValueError("sheet_vitrina_v1 ready status metadata is invalid")
+    status_plan = SimpleNamespace(
+        source_temporal_policies=policies,
+        sheets=(
+            [SimpleNamespace(sheet_name="STATUS", rows=status_rows)]
+            if status_rows is not None else []
+        ),
+    )
+    semantic = _derive_sheet_vitrina_refresh_semantic_summary(status_plan)
+    return SimpleNamespace(
+        as_of_date=str(row[0]), refreshed_at=str(row[1]),
+        temporal_slots=[
+            SimpleNamespace(**item) for item in slots if isinstance(item, Mapping)
+        ],
+        semantic_status=semantic["status"], semantic_label=semantic["label"],
+        semantic_tone=semantic["tone"], semantic_reason=semantic["reason"],
+        source_outcomes=semantic["sources"],
+    )
 
 
 def _resolve_period_refreshed_at(
     *,
     runtime: RegistryUploadDbBackedRuntime,
     period_date_bindings: list[_PeriodDateBinding],
+    status_loader: Callable[..., Any] | None = None,
 ) -> str:
+    loader = status_loader or runtime.load_sheet_vitrina_refresh_status_any_bundle
     refreshed_values = [
-        runtime.load_sheet_vitrina_refresh_status_any_bundle(as_of_date=snapshot_as_of_date).refreshed_at
+        loader(as_of_date=snapshot_as_of_date).refreshed_at
         for snapshot_as_of_date in sorted(
             {
                 binding.snapshot_as_of_date
@@ -1254,9 +1669,11 @@ def _resolve_period_refresh_summary(
     *,
     runtime: RegistryUploadDbBackedRuntime,
     period_date_bindings: list[_PeriodDateBinding],
+    status_loader: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
+    loader = status_loader or runtime.load_sheet_vitrina_refresh_status_any_bundle
     statuses = [
-        runtime.load_sheet_vitrina_refresh_status_any_bundle(as_of_date=snapshot_as_of_date)
+        loader(as_of_date=snapshot_as_of_date)
         for snapshot_as_of_date in sorted(
             {
                 binding.snapshot_as_of_date
@@ -1297,6 +1714,7 @@ def _resolve_latest_load_window_status(
     *,
     runtime: RegistryUploadDbBackedRuntime,
     now: datetime,
+    status_loader: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     yesterday_closed_date = default_business_as_of_date(now)
     today_current_date = current_business_date_iso(now)
@@ -1306,7 +1724,11 @@ def _resolve_latest_load_window_status(
         f"tz={CANONICAL_BUSINESS_TIMEZONE_NAME}"
     )
     try:
-        refresh_status = runtime.load_sheet_vitrina_refresh_status(as_of_date=yesterday_closed_date)
+        refresh_status = (
+            status_loader(as_of_date=yesterday_closed_date, current_bundle_only=True)
+            if status_loader is not None else
+            runtime.load_sheet_vitrina_refresh_status(as_of_date=yesterday_closed_date)
+        )
     except ValueError as exc:
         return {
             "status": "warning",
@@ -1425,13 +1847,14 @@ def _normalize_rows(
     metrics_by_key: Mapping[str, MetricV2Item],
     row_updated_at_by_id: Mapping[str, str],
     server_cell_presentation: Mapping[str, Any] | None = None,
+    row_ids: frozenset[str] | None = None,
 ) -> list[WebVitrinaContractRow]:
     normalized: list[WebVitrinaContractRow] = []
     for row_order, row in enumerate(rows, start=1):
         if len(row) < 2:
             continue
         row_id = str(row[1] or "").strip()
-        if not row_id or "|" not in row_id:
+        if not row_id or "|" not in row_id or (row_ids is not None and row_id not in row_ids):
             continue
         scope_token, metric_key = row_id.split("|", 1)
         if metric_key in ARCHIVED_PUBLIC_METRIC_KEYS or metric_key == AUTHENTICATED_SPP_METRIC_KEY:
@@ -1474,6 +1897,7 @@ def _include_authenticated_discount_total_row(
     *,
     date_columns: list[str],
     metric: MetricV2Item,
+    window_operands: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[WebVitrinaContractRow]:
     """Expose the existing SKU facts as a mean even in pre-catalog ready snapshots."""
     result = list(rows)
@@ -1481,12 +1905,23 @@ def _include_authenticated_discount_total_row(
         row for row in result
         if row.scope_kind == "SKU" and row.metric_key == EFFECTIVE_DISCOUNT_METRIC_KEY
     ]
+    represented = {row.row_id for row in source_rows}
+    compact_sources = [
+        operand for row_id, operand in (window_operands or {}).items()
+        if row_id.startswith("SKU:")
+        and row_id.endswith("|" + EFFECTIVE_DISCOUNT_METRIC_KEY)
+        and row_id not in represented
+    ]
     values_by_date: dict[str, Any] = {}
     for column_date in date_columns:
         numeric = [
             value for row in source_rows
             if (value := _numeric_value(row.values_by_date.get(column_date))) is not None
         ]
+        numeric.extend(
+            value for operand in compact_sources
+            if (value := _numeric_value(operand["values_by_date"].get(column_date))) is not None
+        )
         values_by_date[column_date] = sum(numeric) / len(numeric) if numeric else ""
     row_id = f"TOTAL|{AVG_EFFECTIVE_DISCOUNT_METRIC_KEY}"
     existing = next((row for row in result if row.row_id == row_id), None)
@@ -1499,7 +1934,9 @@ def _include_authenticated_discount_total_row(
         metric_key=AVG_EFFECTIVE_DISCOUNT_METRIC_KEY,
         metric_label=metric.label_ru,
         row_last_updated_at=max(
-            (row.row_last_updated_at for row in source_rows if row.row_last_updated_at),
+            [*(row.row_last_updated_at for row in source_rows if row.row_last_updated_at),
+             *(str(item.get("row_last_updated_at") or "") for item in compact_sources
+               if item.get("row_last_updated_at"))],
             default="",
         ),
         section=metric.section,
@@ -1525,6 +1962,8 @@ def _include_proxy_v4_unit_margin_rows(
     sku_metric: MetricV2Item,
     total_metric: MetricV2Item,
     parameters_for_date: Callable[[str], ProxyV4Parameters | None],
+    output_row_ids: frozenset[str] | None = None,
+    window_operands: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[WebVitrinaContractRow]:
     """Complete the additive V4 unit-margin pair from exact read-side operands."""
 
@@ -1536,6 +1975,17 @@ def _include_proxy_v4_unit_margin_rows(
         for day, cell in row.presentation_by_date.items()
         if cell.get("calculation_contract") == "catalog_economics_v1"
         and cell.get("source_as_of_date") == day}
+    for row_id, operand in (window_operands or {}).items():
+        if row_id.split("|", 1)[-1] not in target_keys:
+            continue
+        canonical_dates.update(
+            day for day, cell in (operand.get("presentation_by_date") or {}).items()
+            if cell.get("calculation_contract") == "catalog_economics_v1"
+            and cell.get("source_as_of_date") == day
+        )
+    # A recursive legacy-only projection keeps the original compact operands.
+    # Canonical evidence outside its narrowed date range must not recurse again.
+    canonical_dates.intersection_update(date_columns)
     if canonical_dates:
         legacy_dates = [day for day in date_columns if day not in canonical_dates]
         if not legacy_dates:
@@ -1544,7 +1994,8 @@ def _include_proxy_v4_unit_margin_rows(
             [replace(row, presentation_by_date={d: c for d, c in row.presentation_by_date.items()
                      if d not in canonical_dates}) for row in rows],
             runtime=runtime, date_columns=legacy_dates, enabled_config=enabled_config,
-            sku_metric=sku_metric, total_metric=total_metric, parameters_for_date=parameters_for_date)
+            sku_metric=sku_metric, total_metric=total_metric, parameters_for_date=parameters_for_date,
+            output_row_ids=output_row_ids, window_operands=window_operands)
         originals = {row.row_id: row for row in rows if row.metric_key in target_keys}
         restored = []
         for row in projected:
@@ -1563,6 +2014,11 @@ def _include_proxy_v4_unit_margin_rows(
         (row.scope_key, row.metric_key): row
         for row in result
     }
+    def source(scope: str, metric: str) -> Any:
+        return source_by_scope_metric.get((scope, metric)) or (window_operands or {}).get(f"{scope}|{metric}")
+
+    def field(item: Any, name: str) -> Any:
+        return item.get(name) if isinstance(item, Mapping) else getattr(item, name) if item is not None else None
     daily_cost_by_date: dict[str, dict[int, dict[str, Any]]] = {}
     parameters_by_date: dict[str, ProxyV4Parameters | None] = {}
     for column_date in date_columns:
@@ -1570,11 +2026,22 @@ def _include_proxy_v4_unit_margin_rows(
             daily_cost_by_date[column_date] = runtime.load_our_wb_cost_daily_state(
                 as_of_date=column_date
             )
-        except Exception:
+        except Exception as exc:
+            from packages.application.web_vitrina_window_read_context import (
+                WindowReadContextError, active_window_read_context,
+            )
+            import sqlite3
+            if active_window_read_context() is not None and isinstance(
+                exc, (WindowReadContextError, sqlite3.Error)
+            ):
+                raise
             daily_cost_by_date[column_date] = {}
         try:
             parameters_by_date[column_date] = parameters_for_date(column_date)
         except Exception:
+            from packages.application.web_vitrina_window_read_context import active_window_read_context
+            if active_window_read_context() is not None:
+                raise
             parameters_by_date[column_date] = None
 
     aggregate_inputs_by_date: dict[str, list[tuple[float, float]]] = {
@@ -1582,13 +2049,12 @@ def _include_proxy_v4_unit_margin_rows(
     }
     aggregate_invalid_by_date = {column_date: False for column_date in date_columns}
     sku_rows: list[WebVitrinaContractRow] = []
+    sku_updated_at_values: list[str] = []
     for config in sorted(enabled_config, key=lambda item: item.display_order):
         scope_key = f"SKU:{config.nm_id}"
-        profit_row = source_by_scope_metric.get(
-            (scope_key, PROXY_V4_PROFIT_RUB_METRIC_KEY)
-        )
-        order_count_row = source_by_scope_metric.get((scope_key, "orderCount"))
-        order_sum_row = source_by_scope_metric.get((scope_key, "orderSum"))
+        profit_row = source(scope_key, PROXY_V4_PROFIT_RUB_METRIC_KEY)
+        order_count_row = source(scope_key, "orderCount")
+        order_sum_row = source(scope_key, "orderSum")
         existing = original_by_id.get(
             f"{scope_key}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
         )
@@ -1597,24 +2063,24 @@ def _include_proxy_v4_unit_margin_rows(
             value
             for value in (
                 existing.row_last_updated_at if existing is not None else "",
-                profit_row.row_last_updated_at if profit_row is not None else "",
-                order_count_row.row_last_updated_at if order_count_row is not None else "",
+                field(profit_row, "row_last_updated_at") or "",
+                field(order_count_row, "row_last_updated_at") or "",
             )
             if value
         ]
         for column_date in date_columns:
             profit = _numeric_value(
-                profit_row.values_by_date.get(column_date)
+                field(profit_row, "values_by_date").get(column_date)
                 if profit_row is not None
                 else None
             )
             raw_order_count = _numeric_value(
-                order_count_row.values_by_date.get(column_date)
+                field(order_count_row, "values_by_date").get(column_date)
                 if order_count_row is not None
                 else None
             )
             raw_order_sum = _numeric_value(
-                order_sum_row.values_by_date.get(column_date)
+                field(order_sum_row, "values_by_date").get(column_date)
                 if order_sum_row is not None
                 else None
             )
@@ -1654,6 +2120,11 @@ def _include_proxy_v4_unit_margin_rows(
             if calculated_at and column_date < INVENTORY_COST_BLEND_EFFECTIVE_DATE:
                 updated_at_values.append(calculated_at)
 
+        sku_updated_at_values.extend(updated_at_values)
+        if output_row_ids is not None and (
+            f"{scope_key}|{PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY}" not in output_row_ids
+        ):
+            continue
         sku_row = (
             replace(
                 existing,
@@ -1699,11 +2170,7 @@ def _include_proxy_v4_unit_margin_rows(
     total_row_id = f"TOTAL|{PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY}"
     existing_total = original_by_id.get(total_row_id)
     total_updated_at = max(
-        (
-            row.row_last_updated_at
-            for row in sku_rows
-            if row.row_last_updated_at
-        ),
+        (value for value in sku_updated_at_values if value),
         default=(existing_total.row_last_updated_at if existing_total is not None else ""),
     )
     total_row = (
@@ -1833,6 +2300,7 @@ def _include_buyout_percent_rows(
     enabled_config: list[ConfigV2Item],
     metric: MetricV2Item,
     current_business_date: date,
+    output_row_ids: frozenset[str] | None = None,
 ) -> list[WebVitrinaContractRow]:
     """Complete SKU rows and derive the paired daily TOTAL from exact-date source truth."""
 
@@ -1929,6 +2397,8 @@ def _include_buyout_percent_rows(
 
     for config in sorted(enabled_config, key=lambda item: item.display_order):
         row_id = f"SKU:{config.nm_id}|{BUYOUT_PERCENT_METRIC_KEY}"
+        if output_row_ids is not None and row_id not in output_row_ids:
+            continue
         existing = rows_by_id.get(row_id)
         values_by_date = (
             dict(existing.values_by_date)

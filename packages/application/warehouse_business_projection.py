@@ -3839,9 +3839,22 @@ def apply_warehouse_business_projection_overlay(
     target_dates = [str(value) for value in snapshot.date_columns]
     if not target_dates:
         return snapshot
-    with sqlite3.connect(runtime.db_path) as conn:
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    borrowed = borrowed_operational_connection(runtime.db_path)
+    with (borrowed if borrowed is not None else sqlite3.connect(runtime.db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        ensure_warehouse_business_projection_schema(conn)
+        if borrowed is None:
+            ensure_warehouse_business_projection_schema(conn)
+        else:
+            required = {CURRENT_ROW_TABLE, STATE_TABLE}
+            present = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+                    tuple(sorted(required)),
+                )
+            }
+            if present != required:
+                raise WarehouseBusinessProjectionError("window projection schema is incomplete")
         placeholders = ",".join("?" for _ in target_dates)
         stored_rows = conn.execute(
             f"""

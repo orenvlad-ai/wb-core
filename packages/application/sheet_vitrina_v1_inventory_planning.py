@@ -183,6 +183,8 @@ def extend_rows_with_inventory_planning(
     history: Mapping[str, Any] | None = None,
     date_columns: list[str],
     enabled_config: list[ConfigV2Item],
+    output_row_ids: frozenset[str] | None = None,
+    legacy_wb_history_present: bool | None = None,
 ) -> list[WebVitrinaContractRow]:
     """Materialize current planning rows while preserving exact-date history."""
 
@@ -190,9 +192,9 @@ def extend_rows_with_inventory_planning(
     history_payload = dict(history or {})
     current_applies = _planning_applies(planning, date_columns=date_columns)
     history_applies = bool(dict(history_payload.get("dates") or {}))
-    legacy_wb_applies = _has_legacy_wb_history(
-        source_rows,
-        date_columns=date_columns,
+    legacy_wb_applies = (
+        _has_legacy_wb_history(source_rows, date_columns=date_columns)
+        if legacy_wb_history_present is None else legacy_wb_history_present
     )
     if not current_applies and not history_applies and not legacy_wb_applies:
         return source_rows
@@ -266,6 +268,7 @@ def extend_rows_with_inventory_planning(
                         scope_key="TOTAL",
                     ),
                     row_updated_at=_planning_updated_at(planning),
+                    output_row_ids=output_row_ids,
                 )
             )
             continue
@@ -303,6 +306,7 @@ def extend_rows_with_inventory_planning(
                         scope_key=scope_id,
                     ),
                     row_updated_at=_planning_updated_at(planning),
+                    output_row_ids=output_row_ids,
                 )
             )
             continue
@@ -511,6 +515,7 @@ def _replace_planning_cluster(
     value_source: Mapping[str, Any],
     history_by_date: Mapping[str, Mapping[str, Any]],
     row_updated_at: str,
+    output_row_ids: frozenset[str] | None = None,
 ) -> list[WebVitrinaContractRow]:
     existing_by_key = {
         row.metric_key: row for row in cluster if row.metric_key in planning_keys
@@ -551,6 +556,10 @@ def _replace_planning_cluster(
             row_updated_at=row_updated_at,
         )
         for spec in specs
+        if output_row_ids is None or (
+            f"{scope_key}|{spec.total_key if scope_kind == 'TOTAL' else spec.sku_key}"
+            in output_row_ids
+        )
     ]
     return [*retained[:insert_at], *materialized, *retained[insert_at:]]
 

@@ -216,6 +216,7 @@ from packages.application.web_vitrina_gravity_table_adapter import (
 )
 from packages.application.web_vitrina_page_composition import (
     build_web_vitrina_page_composition,
+    build_web_vitrina_page_shell_composition,
     build_web_vitrina_page_error_composition,
     resolve_web_vitrina_default_period,
 )
@@ -1598,16 +1599,85 @@ class RegistryUploadHttpEntrypoint:
         date_to: str | None = None,
         include_source_status: bool = False,
         include_table_data: bool = False,
+        table_format: str = "legacy",
+        shell_format: str = "legacy",
     ) -> dict[str, Any]:
         page_composition_started_perf = time.perf_counter()
         now = self.now_factory()
         default_period = resolve_web_vitrina_default_period(now)
         canonical_default_range: tuple[str, str] = (default_period.date_from, default_period.date_to)
         effective_as_of_date = as_of_date or default_period.date_to
-        available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
         default_as_of_date = default_business_as_of_date(now)
         selected_date_from = date_from
         selected_date_to = date_to
+        if not as_of_date and not date_from and not date_to:
+            selected_date_from, selected_date_to = canonical_default_range
+        if not include_table_data and shell_format == "metadata_v2":
+            # A shell has no row-derived business version, counts or quality.
+            # Keep its read strictly on indexed metadata and the current bundle.
+            available_snapshot_dates = self.web_vitrina_block.list_readable_dates_metadata(descending=True)
+            if selected_date_from and selected_date_to:
+                period_ready_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
+                    date_from=selected_date_from, date_to=selected_date_to,
+                )
+                source_date = period_ready_dates[-1] if period_ready_dates else ""
+            else:
+                source_date = as_of_date or default_as_of_date
+            group_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(descending=False)
+            group_default = _default_group_refresh_date(
+                group_dates, preferred_date=current_business_date_iso(now)
+            )
+            activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
+                snapshot_as_of_date=source_date,
+                snapshot_id="",
+                refreshed_at="",
+                read_model="pending_table",
+                available_dates=group_dates,
+                default_refresh_date=group_default,
+            )
+            if include_source_status and source_date:
+                try:
+                    activity_surface = self._build_web_vitrina_activity_surface(
+                        snapshot_as_of_date=source_date,
+                        snapshot_id="",
+                        refreshed_at="",
+                        read_model="pending_table",
+                        job_path=job_path,
+                    )
+                except Exception as exc:
+                    activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
+                        requested_as_of_date=source_date,
+                        snapshot_as_of_date=source_date,
+                        technical_detail=str(exc),
+                        now=self.now_factory(),
+                    )
+            metric_catalog = [asdict(item) for item in self.web_vitrina_block.metric_catalog_metadata()]
+            metric_catalog.extend(_active_incident_metric_catalog())
+            return _with_page_composition_diagnostics(
+                {
+                    **build_web_vitrina_page_shell_composition(
+                        page_route=page_route,
+                        read_route=read_route,
+                        operator_route=operator_route,
+                        available_snapshot_dates=available_snapshot_dates,
+                        default_as_of_date=default_as_of_date,
+                        selected_as_of_date=as_of_date,
+                        selected_date_from=selected_date_from,
+                        selected_date_to=selected_date_to,
+                        default_date_from=canonical_default_range[0],
+                        default_date_to=canonical_default_range[1],
+                        source_status_snapshot_as_of_date=source_date,
+                        metric_catalog=metric_catalog,
+                        activity_surface=activity_surface,
+                    ),
+                    "health_surface": self.handle_sheet_web_vitrina_health_request(),
+                },
+                started_perf=page_composition_started_perf,
+                include_source_status=include_source_status,
+                include_table_data=False,
+            )
+
+        available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
         try:
             if not as_of_date and not date_from and not date_to:
                 selected_date_from, selected_date_to = canonical_default_range
@@ -1728,9 +1798,7 @@ class RegistryUploadHttpEntrypoint:
                         update_message=f"update summary unavailable: {exc}",
                     )
 
-        return _with_page_composition_diagnostics(
-            {
-                **build_web_vitrina_page_composition(
+        page_payload = build_web_vitrina_page_composition(
                     page_route=page_route,
                     read_route=read_route,
                     operator_route=operator_route,
@@ -1746,9 +1814,10 @@ class RegistryUploadHttpEntrypoint:
                     activity_surface=activity_surface,
                     include_table_data=include_table_data,
                     metric_catalog=incident_metric_catalog,
-                ),
-                "health_surface": self.handle_sheet_web_vitrina_health_request(),
-            },
+                    compact_table=table_format == "indexed_cells_v2",
+                )
+        return _with_page_composition_diagnostics(
+            {**page_payload, "health_surface": self.handle_sheet_web_vitrina_health_request()},
             started_perf=page_composition_started_perf,
             include_source_status=include_source_status,
             include_table_data=include_table_data,

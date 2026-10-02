@@ -314,6 +314,7 @@ class InventoryPlanningReadModel:
     def current(
         self,
         *,
+        business_date: str | None = None,
         lifecycle_quality_resolver: Callable[
             [str, Iterable[int] | None], Mapping[str, Any]
         ]
@@ -362,6 +363,7 @@ class InventoryPlanningReadModel:
                 conn,
                 seller_id=seller_id,
                 requested_nm_ids=[item["nm_id"] for item in wb_items],
+                business_date=business_date,
                 lifecycle_quality_resolver=lifecycle_quality_resolver,
             )
             fbs_total = fbs["available_total"]
@@ -722,13 +724,14 @@ def _fbs_facilities(
     *,
     seller_id: str,
     requested_nm_ids: list[int],
+    business_date: str | None = None,
     include_seller_stock_reconciliation: bool = True,
     lifecycle_quality_resolver: Callable[
         [str, Iterable[int] | None], Mapping[str, Any]
     ]
     | None = None,
 ) -> dict[str, Any]:
-    canonical_as_of_date = current_business_date()
+    canonical_as_of_date = business_date or current_business_date()
     manifest = conn.execute(
         f"""SELECT cutover_id,business_date,feature_epoch,cutover_at,
                    manifest_digest,observation_watermark_digest
@@ -1342,6 +1345,10 @@ def _metric(
 
 
 def _connect_readonly(db_path: Path) -> sqlite3.Connection:
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    borrowed = borrowed_operational_connection(db_path)
+    if borrowed is not None:
+        return borrowed
     resolved = Path(db_path).resolve()
     if not resolved.is_file():
         raise RuntimeError("inventory planning runtime store is missing")

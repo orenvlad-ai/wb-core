@@ -48,6 +48,9 @@ def build_current_official_fbs_estimate(
     empty: dict[str, Any] = {"available": False, "date": day, "source": SOURCE}
     if not universe or not Path(db_path).exists():
         return empty
+    if connection is None:
+        from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+        connection = borrowed_operational_connection(db_path)
     try:
         if connection is not None:
             with localcontext() as context:
@@ -58,6 +61,9 @@ def build_current_official_fbs_estimate(
             conn.execute("BEGIN")
             return _build(conn, universe=universe, day=day, now=now)
     except (sqlite3.OperationalError, ValueError, TypeError, KeyError, InvalidOperation) as exc:
+        from packages.application.web_vitrina_window_read_context import active_window_read_context
+        if active_window_read_context() is not None and isinstance(exc, sqlite3.OperationalError):
+            raise
         return {**empty, "reason": str(exc)[:160]}
 
 
@@ -271,6 +277,7 @@ def _estimate_cost(wb: dict[str, Any], ff: dict[str, Any], stocks: dict[str, Dec
 
 def apply_current_official_fbs_estimate(
     rows: Iterable[WebVitrinaContractRow], *, estimate: dict[str, Any],
+    compact_operands: dict[str, dict[str, Any]] | None = None,
 ) -> list[WebVitrinaContractRow]:
     """Map precomputed server operands to existing cells, only on their date."""
     if not estimate.get("available"):
@@ -286,16 +293,44 @@ def apply_current_official_fbs_estimate(
         if item is None:
             result.append(row)
             continue
-        value = item.get("stock_quantity") if key == "stock_total" else item.get("cost") if key == COST else (
-            item["fbs_quantity"] if key == FBS_TOTAL else item["facilities"].get(key[len(FBS_FACILITY):]))
-        reason = ("Управленческая оценка: капитал WB и FBO FF плюс остатки FBS из WB × "
+        value, presentation = _official_estimated_cell(item, key=key, estimate=estimate, day=day)
+        result.append(replace(row, values_by_date={**row.values_by_date, day: value},
+                              presentation_by_date={**row.presentation_by_date, day: presentation}))
+    if compact_operands is not None:
+        for row_id, operand in compact_operands.items():
+            if "|" not in row_id or day not in operand.get("values_by_date", {}):
+                continue
+            scope, metric = row_id.split("|", 1)
+            key = metric.removeprefix("total_")
+            if not (key in {FBS_TOTAL, COST, "stock_total"} or key.startswith(FBS_FACILITY)):
+                continue
+            if scope == "TOTAL":
+                item = estimate["total"]
+            elif scope.startswith("SKU:") and scope[4:].isdigit():
+                item = estimate["skus"].get(int(scope[4:]))
+            else:
+                continue
+            if item is None:
+                continue
+            value, presentation = _official_estimated_cell(item, key=key, estimate=estimate, day=day)
+            operand["values_by_date"][day] = value
+            operand.setdefault("presentation_by_date", {})[day] = presentation
+    return result
+
+
+def _official_estimated_cell(
+    item: dict[str, Any], *, key: str, estimate: dict[str, Any], day: str,
+) -> tuple[Any, dict[str, Any]]:
+    value = item.get("stock_quantity") if key == "stock_total" else item.get("cost") if key == COST else (
+        item["fbs_quantity"] if key == FBS_TOTAL else item["facilities"].get(key[len(FBS_FACILITY):]))
+    reason = ("Управленческая оценка: капитал WB и FBO FF плюс остатки FBS из WB × "
                   "складская себестоимость того же SKU; деление на их общее количество. "
                   "Учётные стадии товарного капитала используют физический складской журнал."
                   if key == COST else "Физический остаток WB плюс заявленные WB остатки FBS."
                   if key == "stock_total" else "Остаток, заявленный в WB; полный официальный снимок FBS.")
-        if value is None:
-            reason = "Недостаточно согласованных данных для оценки себестоимости; неизвестное не считается нулём."
-        presentation = {
+    if value is None:
+        reason = "Недостаточно согласованных данных для оценки себестоимости; неизвестное не считается нулём."
+    presentation = {
             "state": "unconfirmed" if value is not None else "unavailable", "tone": "warning",
             "source": SOURCE, "quality_state": "management_estimate" if key == COST else "official_declared_stock",
             "quality_label": "Управленческая оценка" if key == COST else "Остаток по WB",
@@ -305,17 +340,15 @@ def apply_current_official_fbs_estimate(
             "functional_version_id": estimate["functional_version_id"],
             "management_value": str(value) if value is not None else "",
         }
-        if item.get("wb_zero_evidence"):
-            presentation["wb_zero_evidence"] = item["wb_zero_evidence"]
-        if key == "stock_total":
-            presentation["wb_component_value"] = (
+    if item.get("wb_zero_evidence"):
+        presentation["wb_zero_evidence"] = item["wb_zero_evidence"]
+    if key == "stock_total":
+        presentation["wb_component_value"] = (
                 str(item["stock_quantity"] - item["fbs_quantity"])
                 if item.get("stock_quantity") is not None else ""
             )
-            presentation["fbs_component_value"] = str(item["fbs_quantity"])
-        result.append(replace(row, values_by_date={**row.values_by_date, day: float(value) if value is not None else ""},
-                              presentation_by_date={**row.presentation_by_date, day: presentation}))
-    return result
+        presentation["fbs_component_value"] = str(item["fbs_quantity"])
+    return (float(value) if value is not None else ""), presentation
 
 
 def materialize_current_official_fbs_estimate(

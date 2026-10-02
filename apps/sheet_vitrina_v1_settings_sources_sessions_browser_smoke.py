@@ -244,10 +244,21 @@ def main() -> None:
             if "7/7" not in panel.locator("#sellerSourceHealth").inner_text():
                 raise AssertionError("Seller status must expose exact transit coverage")
 
-            page.evaluate("document.querySelector('[data-source-check=\"seller\"]').click(); document.querySelector('[data-source-check=\"seller\"]').click()")
-            page.wait_for_function(
-                "() => document.querySelector('#sourcesSessionsMessage')?.innerText.includes('кешированный')"
-            )
+            with page.expect_response(
+                lambda response: response.request.method == "POST"
+                and urlparse(response.url).path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH
+            ) as transit_probe, page.expect_response(
+                lambda response: response.request.method == "GET"
+                and urlparse(response.url).path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_STATUS_PATH
+            ) as transit_status:
+                page.evaluate("document.querySelector('[data-source-check=\"seller\"]').click(); document.querySelector('[data-source-check=\"seller\"]').click()")
+            if transit_probe.value.status != 200 or transit_probe.value.json() != {
+                "accepted": True, "run_id": "route-check-1", "status": "queued"
+            }:
+                raise AssertionError("Seller check must receive the exact supply/cost probe response")
+            if transit_status.value.status != 200 or transit_status.value.json().get("run", {}).get("status") != "success":
+                raise AssertionError("Seller check must finish the exact supply/cost route probe")
+            page.wait_for_function("() => document.querySelector('#sellerSourceError')?.textContent === ''")
             if server.calls.get(("GET", DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH), 0) != 1:
                 raise AssertionError("identical Seller checks must be single-flight")
             if server.calls.get(("POST", DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH), 0) != 1:

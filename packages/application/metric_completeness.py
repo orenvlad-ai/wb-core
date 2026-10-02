@@ -57,7 +57,7 @@ def ads_partial_presentation(*, rows, slots, statuses, metrics, formulas):
     return result
 
 
-def aggregate_counters(rows, *, dates, metrics=None):
+def aggregate_counters(rows, *, dates, metrics=None, compact_operands=None):
     """Count only an explicit dated metric scope, intersected with the row scope."""
     metrics = metrics or {}
     sku_rows = {(row.scope_key, row.metric_key): row for row in rows if row.scope_kind == 'SKU'}
@@ -93,10 +93,14 @@ def aggregate_counters(rows, *, dates, metrics=None):
                 for member in scope:
                     for key in keys:
                         source = sku_rows.get((member, key))
-                        detail = source.presentation_by_date.get(day, {}) if source else {}
+                        compact = (compact_operands or {}).get(member + '|' + key) if source is None else None
+                        detail = (source.presentation_by_date.get(day, {}) if source else
+                                  (compact or {}).get('presentation_by_date', {}).get(day, {}))
                         if detail.get('completeness_state') == 'unknown_scope':
                             unknown = True
-                        if source is None or source.values_by_date.get(day) in (None, '') or detail.get('quality_state') in ('partial', 'inventory_history_partial'):
+                        value = (source.values_by_date.get(day) if source else
+                                 (compact or {}).get('values_by_date', {}).get(day))
+                        if (source is None and compact is None) or value in (None, '') or detail.get('quality_state') in ('partial', 'inventory_history_partial'):
                             missing.add(member)
                 cell.update(completeness_state='unknown_scope' if unknown else 'partial' if missing else 'complete',
                             missing_sku_count=None if unknown else len(missing))

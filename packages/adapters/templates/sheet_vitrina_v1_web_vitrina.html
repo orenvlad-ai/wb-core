@@ -3634,6 +3634,18 @@
       height: 33px;
     }
 
+    .vitrina-table .window-v3-spacer-cell {
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+
+    .vitrina-table .window-v3-vertical-spacer td {
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+
     .vitrina-table thead th {
       position: sticky;
       top: 0;
@@ -7971,6 +7983,33 @@
         showingCached: false,
         freshLoading: false
       },
+      windowV3: {
+        generation: 0,
+        viewportGeneration: 0,
+        controllers: new Set(),
+        viewportController: null,
+        sessionId: "",
+        token: "",
+        ackJobIds: [],
+        manifest: null,
+        catalogRows: [],
+        displaySlots: [],
+        displayIndexes: [],
+        globalKey: "",
+        globalResult: null,
+        globalPending: false,
+        stale: false,
+        error: "",
+        transferChunks: new Map(),
+        transferBytes: 0,
+        visibleCells: new Map(),
+        visibleBytes: 0,
+        visibleKey: "",
+        frame: 0,
+        lastViewport: null,
+        restorePosition: null,
+        globalController: null
+      },
       businessProjection: {
         revisionNo: 0,
         revisionId: "",
@@ -9085,6 +9124,7 @@
 
     tableScrollNode.addEventListener("scroll", function() {
       updateTableObjectIndicator();
+      if (state.windowV3.manifest) scheduleWindowV3Viewport();
     }, {passive: true});
 
     function buildReadUrl(surface, options) {
@@ -9112,13 +9152,158 @@
       if (normalizedOptions.includeTableData) {
         url.searchParams.set("include_table_data", "1");
       }
+      if (normalizedOptions.tableFormat) {
+        url.searchParams.set("table_format", String(normalizedOptions.tableFormat));
+      }
+      if (normalizedOptions.shellFormat) {
+        url.searchParams.set("shell_format", String(normalizedOptions.shellFormat));
+      }
       return url;
+    }
+
+    const windowV3ResultJobs = new WeakMap();
+
+    function windowV3Url(operation, parameters) {
+      const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
+      url.searchParams.set("surface", WEB_VITRINA_CONFIG.page_composition_surface);
+      url.searchParams.set("window_format", "window_v3");
+      url.searchParams.set("window_op", operation);
+      Object.keys(parameters || {}).forEach(function(key) {
+        const value = parameters[key];
+        if (value !== null && typeof value !== "undefined" && value !== "") {
+          url.searchParams.set(key, String(value));
+        }
+      });
+      const acknowledgements = state.windowV3.ackJobIds.slice(0, 8);
+      if (acknowledgements.length) url.searchParams.set("ack_job_ids", acknowledgements.join(","));
+      return url;
+    }
+
+    function windowV3MarkAcksDelivered(url) {
+      const csv = url.searchParams.get("ack_job_ids");
+      if (!csv) return;
+      const delivered = new Set(csv.split(","));
+      state.windowV3.ackJobIds = state.windowV3.ackJobIds.filter(function(jobId) {
+        return !delivered.has(jobId);
+      });
+    }
+
+    function windowV3AcceptResult(payload) {
+      const jobId = windowV3ResultJobs.get(payload);
+      if (!jobId) return;
+      windowV3ResultJobs.delete(payload);
+      if (!state.windowV3.ackJobIds.includes(jobId)) state.windowV3.ackJobIds.push(jobId);
+    }
+
+    function clearWindowV3(options) {
+      const windowState = state.windowV3;
+      windowState.generation += 1;
+      windowState.viewportGeneration += 1;
+      windowState.controllers.forEach(function(controller) { controller.abort(); });
+      windowState.controllers.clear();
+      if (windowState.viewportController) windowState.viewportController.abort();
+      windowState.viewportController = null;
+      if (windowState.frame) window.cancelAnimationFrame(windowState.frame);
+      windowState.frame = 0;
+      const oldSession = windowState.sessionId;
+      windowState.sessionId = "";
+      windowState.token = "";
+      windowState.manifest = null;
+      windowState.catalogRows = [];
+      windowState.displaySlots = [];
+      windowState.displayIndexes = [];
+      windowState.globalKey = "";
+      windowState.globalResult = null;
+      windowState.globalPending = false;
+      windowState.stale = false;
+      windowState.error = "";
+      windowState.transferChunks.clear();
+      windowState.transferBytes = 0;
+      windowState.visibleCells.clear();
+      windowState.visibleBytes = 0;
+      windowState.visibleKey = "";
+      windowState.lastViewport = null;
+      windowState.restorePosition = null;
+      if (windowState.globalController) windowState.globalController.abort();
+      windowState.globalController = null;
+      if (oldSession && !(options && options.keepServerSession)) {
+        void windowV3Request("cancel", {session_id: oldSession}).catch(function() {});
+      }
+      return windowState.generation;
+    }
+
+    function windowV3Schema(payload, operation) {
+      if (!payload || payload.response_schema_version !== 3 || payload.window_format !== "window_v3" || payload.kind !== operation) {
+        throw new Error("Формат окна витрины изменился. Обновите страницу.");
+      }
+      return payload;
+    }
+
+    async function windowV3Request(operation, parameters, signal) {
+      let url = windowV3Url(operation, parameters);
+      let busyAttempts = 0;
+      let pollAttempts = 0;
+      let jobId = "";
+      try {
+        while (true) {
+          if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+          const response = await fetch(url.toString(), {
+            method: "GET", headers: {"Accept": "application/json"},
+            cache: "no-store", signal: signal
+          });
+          const payload = await readJsonResponse(response, "non-json window_v3 response");
+          if (response.status === 200 || response.status === 202) windowV3MarkAcksDelivered(url);
+          if (response.status === 409) {
+            const error = new Error(String(payload.message || "Версия данных изменилась. Обновите представление."));
+            error.windowStale = true;
+            throw error;
+          }
+          if (response.status === 429 && busyAttempts < 3) {
+            busyAttempts += 1;
+            await windowV3Delay(Math.min(2500, Number(payload.retry_after_ms) || 500), signal);
+            continue;
+          }
+          if (!response.ok) {
+            throw new Error(String(payload.message || payload.error || ("window_v3 returned " + response.status)));
+          }
+          if (response.status === 202) {
+            jobId = String(payload.job_id || "");
+            if (!jobId || ++pollAttempts > 120) throw new Error("Ожидание окна витрины превысило лимит.");
+            await windowV3Delay(Math.min(2500, Math.max(100, Number(payload.retry_after_ms) || 350)), signal);
+            url = windowV3Url("job", {job_id: jobId});
+            continue;
+          }
+          const accepted = windowV3Schema(payload, operation);
+          if (jobId) windowV3ResultJobs.set(accepted, jobId);
+          return accepted;
+        }
+      } catch (error) {
+        if (jobId && signal && signal.aborted) {
+          void windowV3Request("cancel", {job_id: jobId}).catch(function() {});
+        }
+        throw error;
+      }
+    }
+
+    function windowV3Delay(milliseconds, signal) {
+      return new Promise(function(resolve, reject) {
+        const timer = window.setTimeout(function() {
+          if (signal) signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, milliseconds);
+        function onAbort() {
+          window.clearTimeout(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+        }
+        if (signal) signal.addEventListener("abort", onAbort, {once: true});
+      });
     }
 
     function buildSourceStatusDetailsUrl() {
       return buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
         includeSourceStatus: true,
-        asOfDate: visibleSnapshotAsOfDate()
+        asOfDate: visibleSnapshotAsOfDate(),
+        shellFormat: "metadata_v2"
       });
     }
 
@@ -9665,6 +9850,12 @@
         ensureVitrinaRuntimeActive(wasVitrinaActive);
       } else if (wasVitrinaActive) {
         pauseBusinessProjectionMonitoring();
+        if (state.windowV3.viewportController) state.windowV3.viewportController.abort();
+        state.windowV3.visibleKey = "";
+        if (state.windowV3.globalController) {
+          state.windowV3.globalController.abort();
+          state.windowV3.globalKey = "";
+        }
       }
       return activeTab;
     }
@@ -9685,6 +9876,7 @@
         initializeBusinessProjectionMonitoring();
       } else if (!wasVitrinaActive) {
         if (!state.composition || vitrinaDeferredTableSkipped) loadInitialVitrinaComposition();
+        else if (state.windowV3.manifest) renderWindowV3Table();
         pollBusinessProjectionRevision();
       }
     }
@@ -14616,6 +14808,11 @@
 
     function initializeColumnVisibility(payload) {
       const columns = (payload && payload.table_surface && payload.table_surface.columns) || [];
+      if (!columns.length) {
+        // A metadata-only shell has no visibility catalog; persisting it would
+        // turn an unknown Section column into a saved hidden preference.
+        return;
+      }
       const defaultVisibleIds = columns.map(function(column) {
         return String(column.id || "");
       }).filter(function(columnId) {
@@ -15268,7 +15465,15 @@
         (state.history.availableDates.length
           ? "Доступно snapshots: " + state.history.availableDates.length + "."
           : valueOrDash(historical.empty_message));
-      historyPresetsNode.innerHTML = (historical.preset_options || []).map(function(preset) {
+      const windowPresets = [
+        {preset_id: "rolling_30", label: "Последние 30 дней"},
+        {preset_id: "rolling_90", label: "Последние 90 дней"},
+        {preset_id: "rolling_180", label: "Последние 180 дней (полгода)"},
+        {preset_id: "rolling_365", label: "Последние 365 дней"},
+        {preset_id: "all_history", label: "Вся история"}
+      ];
+      const windowV3Available = !!(payload.meta && payload.meta.window_v3_available === true);
+      historyPresetsNode.innerHTML = (historical.preset_options || []).concat(windowV3Available ? windowPresets : []).map(function(preset) {
         return (
           '<button class="button secondary history-preset-button" type="button" data-history-preset="' +
           escapeHtml(preset.preset_id) +
@@ -15444,11 +15649,21 @@
       if (state.history.draftDateFrom > state.history.draftDateTo) {
         return "Начало периода должно быть не позже конца.";
       }
-      if (!state.history.availableDateSet.has(state.history.draftDateFrom) || !state.history.availableDateSet.has(state.history.draftDateTo)) {
-        return "Выбранная дата вне доступного серверного периода.";
-      }
-      if (!isContinuousAvailableRange(state.history.draftDateFrom, state.history.draftDateTo)) {
-        return "Выбранный диапазон должен быть непрерывным.";
+      const windowV3Available = !!(state.composition && state.composition.meta && state.composition.meta.window_v3_available === true);
+      if (windowV3Available) {
+        const minDate = state.history.availableDates[0];
+        const maxDate = state.history.availableDates[state.history.availableDates.length - 1];
+        if (state.history.draftDateFrom < minDate || state.history.draftDateTo > maxDate) {
+          return "Выбранная дата вне доступного серверного периода.";
+        }
+      } else {
+        if (!state.history.availableDateSet.has(state.history.draftDateFrom)
+            || !state.history.availableDateSet.has(state.history.draftDateTo)) {
+          return "Выбранная дата вне доступного серверного периода.";
+        }
+        if (!isContinuousAvailableRange(state.history.draftDateFrom, state.history.draftDateTo)) {
+          return "Выбранный диапазон должен быть непрерывным.";
+        }
       }
       return "";
     }
@@ -15475,6 +15690,16 @@
         rawStart = shiftIsoDate(anchorDate, -6);
       } else if (presetId === "two_weeks") {
         rawStart = shiftIsoDate(anchorDate, -13);
+      } else if (presetId === "rolling_30") {
+        rawStart = shiftIsoDate(anchorDate, -29);
+      } else if (presetId === "rolling_90") {
+        rawStart = shiftIsoDate(anchorDate, -89);
+      } else if (presetId === "rolling_180") {
+        rawStart = shiftIsoDate(anchorDate, -179);
+      } else if (presetId === "rolling_365") {
+        rawStart = shiftIsoDate(anchorDate, -364);
+      } else if (presetId === "all_history") {
+        rawStart = minDate;
       } else if (presetId === "month") {
         rawStart = anchorDate.slice(0, 8) + "01";
       } else if (presetId === "quarter") {
@@ -15484,8 +15709,11 @@
       } else {
         return null;
       }
-      const dateFrom = nearestAvailableOnOrAfter(maxIsoDate(rawStart, minDate));
-      const dateTo = nearestAvailableOnOrBefore(anchorDate);
+      const windowV3Available = !!(state.composition && state.composition.meta && state.composition.meta.window_v3_available === true);
+      const dateFrom = windowV3Available
+        ? maxIsoDate(rawStart, minDate)
+        : nearestAvailableOnOrAfter(maxIsoDate(rawStart, minDate));
+      const dateTo = windowV3Available ? anchorDate : nearestAvailableOnOrBefore(anchorDate);
       if (!dateFrom || !dateTo || dateFrom > dateTo) {
         return null;
       }
@@ -15599,7 +15827,14 @@
       let dayCursor = new Date(monthStart.getTime());
       while (dayCursor.getUTCMonth() === monthIndex) {
         const isoDate = formatIsoDate(dayCursor);
-        const isAvailable = state.history.availableDateSet.has(isoDate);
+        const windowV3Available = !!(state.composition && state.composition.meta && state.composition.meta.window_v3_available === true);
+        const isAvailable = windowV3Available
+          ? isoDate >= state.history.availableDates[0]
+            && isoDate <= state.history.availableDates[state.history.availableDates.length - 1]
+          : state.history.availableDateSet.has(isoDate);
+        const dateCoverage = ((state.windowV3.manifest || {}).dates || []).find(function(item) {
+          return item.date === isoDate;
+        });
         const isSelectedStart = isoDate === state.history.draftDateFrom;
         const isSelectedEnd = isoDate === state.history.draftDateTo;
         const isRangeEdge = isSelectedStart || isSelectedEnd;
@@ -15617,6 +15852,10 @@
         const titleParts = [isoDate];
         if (!isAvailable) {
           titleParts.push("дата вне доступного серверного периода");
+        } else if (dateCoverage && dateCoverage.coverage === "covered") {
+          titleParts.push("данные покрыты снимком " + String(dateCoverage.source_as_of_date || ""));
+        } else if (dateCoverage && dateCoverage.coverage === "missing") {
+          titleParts.push("нет бизнес-факта за дату");
         } else if (isRangeEdge) {
           titleParts.push("граница периода");
         } else if (isInRange) {
@@ -16409,6 +16648,25 @@
       state.filters.sort = ((payload && payload.filter_surface && payload.filter_surface.default_sort_value) || "");
     }
 
+    function reconcileDeferredFilters(payload) {
+      const surface = (payload && payload.filter_surface) || {};
+      ["section", "group"].forEach(function(controlId) {
+        const control = (surface.controls || []).find(function(item) {
+          return String(item.control_id || "") === controlId;
+        }) || {};
+        const allowed = new Set((control.options || []).map(function(item) { return String(item.value || ""); }));
+        if (!allowed.has(String(state.filters[controlId] || ALL_VALUE))) {
+          state.filters[controlId] = ALL_VALUE;
+        }
+      });
+      const validSort = (surface.sort_options || []).some(function(item) {
+        return String(item.value || "") === String(state.filters.sort || "");
+      });
+      if (state.filters.sort && !validSort) {
+        state.filters.sort = String(surface.default_sort_value || "");
+      }
+    }
+
     function setStateBox(kind, title, body) {
       tableStateNode.classList.remove("is-hidden");
       tableShellNode.classList.add("is-hidden");
@@ -16650,7 +16908,7 @@
         }
         healthRecoveryResultNode.textContent = "Технический запуск завершён. Перечитываем серверное здоровье и витрину…";
         const refreshed = await refreshHealthSurface();
-        await loadPageComposition();
+        await loadPageComposition({awaitTable: true});
         const semantic = (refreshed.indicators || []).find(function(item) { return item.indicator_id === "yesterday_closed"; }) || {};
         healthRecoveryResultNode.hidden = false;
         healthRecoveryResultNode.textContent = "Серверная проверка «Вчера»: " + String(semantic.status_label || "не определено") + ". " + String(semantic.reason || "");
@@ -16670,6 +16928,8 @@
 
     function renderPage(payload, options) {
       const normalizedOptions = options || {};
+      const tableSurface = payload.table_surface || {};
+      const tableDataDeferred = String(tableSurface.table_data_state || "included") === "deferred";
       state.composition = payload;
       rememberBusinessProjection(payload);
       state.page.lastRenderedAt = new Date();
@@ -16680,8 +16940,12 @@
       applySellerSessionFromRuntimePayload(payload);
       renderActivitySurface(payload.activity_surface || {});
       renderHistoricalAccess(payload);
-      initializeMetricPresentation(payload);
-      initializeMetricSelection(payload);
+      if (!tableDataDeferred) {
+        // Presentation order and saved selection depend on the complete row
+        // catalog. A shell exposes metric definitions but cannot persist them.
+        initializeMetricPresentation(payload);
+        initializeMetricSelection(payload);
+      }
       renderFilterControls(payload);
       initializeColumnVisibility(payload);
       if (!state.filters.sort) {
@@ -16700,12 +16964,11 @@
         " · user config: " +
         (state.metricPresentation.serverConfig.available ? "server" : "local fallback");
       renderTable();
-      const tableSurface = payload.table_surface || {};
       const tableFreshness = normalizedOptions.tableFreshness || (
         String(tableSurface.table_data_state || "included") === "included" ? "fresh" : "hidden"
       );
       setTableFreshnessIndicator(tableFreshness, payload);
-      if (activityPanelNode && activityPanelNode.open && !state.sourceStatus.loaded && !state.sourceStatus.loading) {
+      if (!normalizedOptions.deferSourceStatusAutoLoad && activityPanelNode && activityPanelNode.open && !state.sourceStatus.loaded && !state.sourceStatus.loading) {
         window.setTimeout(ensureSourceStatusDetailsLoaded, 0);
       }
     }
@@ -16714,6 +16977,10 @@
       const payload = state.composition;
       if (!payload) {
         setStateBox("warning", "Payload не загружен", "Page composition пока не получен.");
+        return;
+      }
+      if (state.windowV3.manifest) {
+        renderWindowV3Table();
         return;
       }
       const currentState = (payload.meta && payload.meta.current_state) || "error";
@@ -16904,22 +17171,21 @@
     }
 
     function skuClusterIdentity(row) {
-      const values = (row && row.values) || {};
-      const nmIdCell = values.nm_id || {};
-      const scopeKeyCell = values.scope_key || {};
-      const scopeLabelCell = values.scope_label || {};
-      const nmIdValue = nmIdCell.value;
+      const nmIdValue = cellValue(row, "nm_id");
       if (nmIdValue !== null && typeof nmIdValue !== "undefined" && String(nmIdValue) !== "") {
         return String(nmIdValue);
       }
-      if (scopeKeyCell.value !== null && typeof scopeKeyCell.value !== "undefined" && String(scopeKeyCell.value) !== "") {
-        return String(scopeKeyCell.value);
+      const scopeKeyValue = cellValue(row, "scope_key");
+      if (scopeKeyValue !== null && typeof scopeKeyValue !== "undefined" && String(scopeKeyValue) !== "") {
+        return String(scopeKeyValue);
       }
-      if (scopeLabelCell.value !== null && typeof scopeLabelCell.value !== "undefined" && String(scopeLabelCell.value) !== "") {
-        return String(scopeLabelCell.value);
+      const scopeLabelValue = cellValue(row, "scope_label");
+      if (scopeLabelValue !== null && typeof scopeLabelValue !== "undefined" && String(scopeLabelValue) !== "") {
+        return String(scopeLabelValue);
       }
-      if (scopeLabelCell.display_text) {
-        return String(scopeLabelCell.display_text);
+      const scopeLabelDisplay = cellDisplay(row, "scope_label");
+      if (scopeLabelDisplay) {
+        return String(scopeLabelDisplay);
       }
       return String((row && row.row_id) || "");
     }
@@ -17280,12 +17546,12 @@
 
     function cellValue(row, columnId) {
       const cell = ((row.values || {})[columnId]) || {};
-      return cell.value;
+      return Array.isArray(cell) ? cell[0] : cell.value;
     }
 
     function cellDisplay(row, columnId) {
       const cell = ((row.values || {})[columnId]) || {};
-      return cell.display_text;
+      return Array.isArray(cell) ? cell[1] : cell.display_text;
     }
 
     function toComparableNumber(value) {
@@ -22384,7 +22650,7 @@
         );
         setStatusBadge({label: semanticLabel, tone: semanticTone, detail: semanticReason + "; перечитываем витрину"});
         showGlobalProgress(100, "Завершение");
-        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
+        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded, awaitTable: true});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -22499,7 +22765,7 @@
         );
         setStatusBadge({label: semanticLabel, tone: semanticTone, detail: semanticReason + "; перечитываем витрину"});
         clearGroupActionState(normalizedGroupId);
-        await loadPageComposition({includeSourceStatus: true});
+        await loadPageComposition({includeSourceStatus: true, awaitTable: true});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -23098,10 +23364,624 @@
       const merged = Object.assign({}, shellPayload, tablePayload);
       merged.meta = Object.assign({}, (shellPayload.meta || {}), (tablePayload.meta || {}));
       merged.table_surface = tablePayload.table_surface || {};
-      if (shellPayload.activity_surface) {
-        merged.activity_surface = shellPayload.activity_surface;
-      }
+      // The table read owns business status. Shell source details may refer to
+      // an older publication and must be requested again after this merge.
       return merged;
+    }
+
+    function decodeTableResponse(payload) {
+      const version = Number(payload && payload.response_schema_version || 1);
+      const table = (payload && payload.table_surface) || {};
+      if (version === 1 && !table.value_encoding) {
+        return payload; // Older server or legacy opened tab.
+      }
+      const encoding = table.value_encoding || {};
+      if (version !== 2 || encoding.format !== "indexed_cells_v2") {
+        throw new Error("Формат таблицы изменился. Обновите страницу.");
+      }
+      const fields = encoding.fields || [];
+      const defaults = encoding.defaults || [];
+      const expected = [
+        "value", "display_text", "cell_kind", "formatter_id", "renderer_id",
+        "presentation_state", "presentation_tone", "presentation_reason",
+        "quality_state", "quality_label", "quality_reason", "completeness_state",
+        "missing_sku_count", "quantity_semantic_kind", "quantity_source_observed_at",
+        "inventory_finalization_digest"
+      ];
+      if (fields.length !== expected.length || fields.some(function(field, index) { return field !== expected[index]; }) || defaults.length !== fields.length) {
+        throw new Error("Неизвестная версия ячеек. Обновите страницу.");
+      }
+      const defaultCell = Object.create(null);
+      fields.forEach(function(field, index) { defaultCell[field] = defaults[index]; });
+      Object.defineProperty(defaultCell, "toJSON", {value: function() {
+        const complete = {};
+        fields.forEach(function(field) { complete[field] = this[field]; }, this);
+        return complete;
+      }});
+      const columns = (table.columns || []).map(function(column) { return String(column.id || ""); });
+      (table.rows || []).forEach(function(row) {
+        if (!Array.isArray(row.values)) {
+          throw new Error("Некорректный компактный ответ. Обновите страницу.");
+        }
+        const packed = row.values;
+        const values = {};
+        packed.forEach(function(entry) {
+          const index = entry[0];
+          if (!Number.isInteger(index) || index < 0 || index >= columns.length || columns[index] in values) {
+            throw new Error("Некорректный индекс ячейки. Обновите страницу.");
+          }
+          const cell = Object.create(defaultCell);
+          for (let fieldIndex = 0; fieldIndex < entry.length - 1; fieldIndex += 1) {
+            cell[fields[fieldIndex]] = entry[fieldIndex + 1];
+          }
+          values[columns[index]] = cell;
+        });
+        row.values = values;
+      });
+      return payload;
+    }
+
+    function windowV3Period(shellPayload) {
+      const query = currentExplicitHistoryQuery();
+      const historical = shellPayload.historical_access || {};
+      const dateFrom = query.dateFrom || query.asOfDate || String(historical.default_date_from || "");
+      const dateTo = query.dateTo || query.asOfDate || String(historical.default_date_to || "");
+      if (!normalizeIsoDate(dateFrom) || !normalizeIsoDate(dateTo) || dateFrom > dateTo) {
+        throw new Error("Не определён диапазон дат для окна витрины.");
+      }
+      return {date_from: dateFrom, date_to: dateTo};
+    }
+
+    async function loadWindowV3Table(requestId, shellPayload, activeTabOnly, preservePosition) {
+      const windowState = state.windowV3;
+      const generation = windowState.generation;
+      const controller = new AbortController();
+      windowState.controllers.add(controller);
+      try {
+        const manifest = await windowV3Request("manifest", windowV3Period(shellPayload), controller.signal);
+        if (requestId !== state.requestSequence || generation !== windowState.generation || (activeTabOnly && !isVitrinaTabActive())) return;
+        if (!manifest.session_id || !manifest.content_token || !Array.isArray(manifest.rows) || !Array.isArray(manifest.dates)) {
+          throw new Error("Неполный каталог окна витрины. Обновите страницу.");
+        }
+        windowV3ValidateEncoding(manifest.static_value_encoding);
+        const columns = manifest.columns || ((manifest.table_surface || {}).columns) || [];
+        const dateColumns = columns.filter(function(column) { return dateFromColumnId(column.id); });
+        if (dateColumns.length !== manifest.dates.length || dateColumns.some(function(column, index) {
+          return dateFromColumnId(column.id) !== String(manifest.dates[index].date || "");
+        })) throw new Error("Каталог дат окна витрины не согласован.");
+        windowState.sessionId = String(manifest.session_id);
+        windowState.token = String(manifest.content_token);
+        windowState.manifest = manifest;
+        windowState.restorePosition = preservePosition || null;
+        windowState.catalogRows = manifest.rows.map(function(source, index) {
+          return Object.assign({}, source, {
+            rowIndex: index,
+            values: source.static_cells || {},
+            search_text: String(source.search_text || "")
+          });
+        });
+        const duplicateIds = new Set();
+        windowState.catalogRows.forEach(function(row) {
+          if (!row.row_id || duplicateIds.has(row.row_id)) throw new Error("Каталог строк окна содержит повторный row_id.");
+          duplicateIds.add(row.row_id);
+        });
+        const renderPayload = Object.assign({}, shellPayload, {
+          filter_surface: manifest.filter_surface || shellPayload.filter_surface,
+          table_surface: Object.assign({}, manifest.table_surface || {}, {
+            columns: columns,
+            rows: windowState.catalogRows,
+            total_row_count: Number(manifest.total_row_count || windowState.catalogRows.length),
+            table_data_state: "windowed"
+          })
+        });
+        renderPage(renderPayload, {tableFreshness: "fresh"});
+        markFreshTableDisplayed(renderPayload);
+        windowV3AcceptResult(manifest);
+      } finally {
+        windowState.controllers.delete(controller);
+      }
+    }
+
+    function windowV3GlobalKey() {
+      return String(state.filters.search || "").trim() + "\u0000" + String(state.filters.sort || "");
+    }
+
+    function windowV3SortIndexes(result, indexes) {
+      const option = sortOptionsByValue.get(state.filters.sort);
+      if (!option) return indexes.slice();
+      const inputs = new Map((result.sort_inputs || []).map(function(item) { return [Number(item.row_index), item]; }));
+      const directionFactor = option.direction === "desc" ? -1 : 1;
+      return indexes.slice().sort(function(leftIndex, rightIndex) {
+        const left = inputs.get(leftIndex) || {};
+        const right = inputs.get(rightIndex) || {};
+        const leftNumber = toComparableNumber(left.value);
+        const rightNumber = toComparableNumber(right.value);
+        let resultValue = 0;
+        if (leftNumber !== null && rightNumber !== null) {
+          resultValue = leftNumber < rightNumber ? -1 : leftNumber > rightNumber ? 1 : 0;
+        } else {
+          resultValue = String(left.display_text || "").localeCompare(String(right.display_text || ""), "ru");
+        }
+        if (resultValue === 0) {
+          const leftOrder = toComparableNumber(left.row_order) || 0;
+          const rightOrder = toComparableNumber(right.row_order) || 0;
+          resultValue = leftOrder < rightOrder ? -1 : leftOrder > rightOrder ? 1 : 0;
+        }
+        return resultValue * directionFactor;
+      });
+    }
+
+    function windowV3LocalFilter(row) {
+      return (state.filters.section === ALL_VALUE || String(row.section_id || "") === state.filters.section)
+        && (state.filters.group === ALL_VALUE || String(row.group_id || "") === state.filters.group)
+        && (state.filters.scope_kind === ALL_VALUE || String(row.row_kind || "") === state.filters.scope_kind)
+        && skuMetricFilterKeepsRow(row);
+    }
+
+    async function loadWindowV3Global(key) {
+      const windowState = state.windowV3;
+      const generation = windowState.generation;
+      const controller = new AbortController();
+      windowState.globalController = controller;
+      windowState.controllers.add(controller);
+      try {
+        const result = await windowV3Request("global", {
+          session_id: windowState.sessionId,
+          content_token: windowState.token,
+          search: String(state.filters.search || "").trim(),
+          sort: state.filters.sort || ""
+        }, controller.signal);
+        if (generation !== windowState.generation || key !== windowState.globalKey) return;
+        if (String(result.content_token || "") !== windowState.token || !Array.isArray(result.matched_row_indexes) || !result.global_handle) {
+          throw new Error("Глобальный результат окна не согласован с версией таблицы.");
+        }
+        windowState.globalResult = result;
+        windowState.globalPending = false;
+        windowState.error = "";
+        renderWindowV3Table();
+        windowV3AcceptResult(result);
+      } catch (error) {
+        if (generation !== windowState.generation || controller.signal.aborted) return;
+        windowState.globalPending = false;
+        windowState.stale = !!error.windowStale;
+        windowState.error = String(error.message || error);
+        renderWindowV3Table();
+      } finally {
+        windowState.controllers.delete(controller);
+        if (windowState.globalController === controller) windowState.globalController = null;
+      }
+    }
+
+    function renderWindowV3Table() {
+      const windowState = state.windowV3;
+      if (!windowState.manifest) return;
+      if (windowState.stale) {
+        filterSummaryNode.textContent = "Версия данных изменилась";
+        setStateBox("warning", "Данные устарели", escapeHtml(windowState.error) + " Обновите представление кнопкой «Загрузить».");
+        return;
+      }
+      const key = windowV3GlobalKey();
+      if (key !== windowState.globalKey) {
+        if (windowState.globalController) windowState.globalController.abort();
+        windowState.globalKey = key;
+        windowState.globalResult = null;
+        windowState.globalPending = true;
+        windowState.visibleCells.clear();
+        windowState.visibleBytes = 0;
+        windowState.visibleKey = "";
+        void loadWindowV3Global(key);
+      }
+      if (windowState.globalPending) {
+        // A useful initial window is allowed while the global result is pending;
+        // its row order is explicitly provisional and never claimed as a match.
+        const slots = [];
+        let previous = null;
+        windowState.catalogRows.forEach(function(row) {
+          if (shouldInsertSkuSeparator(previous, row)) slots.push({rowIndex: row.rowIndex, separator: true});
+          slots.push({rowIndex: row.rowIndex, separator: false});
+          previous = row;
+        });
+        windowState.displaySlots = slots;
+        filterSummaryNode.textContent = "Поиск и сортировка по всему периоду выполняются; порядок пока предварительный";
+        tableStateNode.classList.add("is-hidden");
+        tableShellNode.classList.remove("is-hidden");
+        if (windowState.restorePosition) {
+          tableScrollNode.scrollTop = windowState.restorePosition.top;
+          tableScrollNode.scrollLeft = windowState.restorePosition.left;
+          windowState.restorePosition = null;
+        }
+        scheduleWindowV3Viewport();
+        return;
+      }
+      if (!windowState.globalResult) {
+        setStateBox("error", "Не удалось подготовить окно", escapeHtml(windowState.error || "Глобальный результат недоступен."));
+        return;
+      }
+      const indexes = windowV3SortIndexes(windowState.globalResult, windowState.globalResult.matched_row_indexes.map(Number));
+      const rows = applyMetricPresentationToRows(indexes.map(function(index) {
+        return windowState.catalogRows[index];
+      }).filter(function(row) { return row && windowV3LocalFilter(row); }));
+      windowState.displayIndexes = rows.map(function(row) { return row.rowIndex; });
+      const slots = [];
+      let previous = null;
+      rows.forEach(function(row) {
+        if (shouldInsertSkuSeparator(previous, row)) slots.push({rowIndex: row.rowIndex, separator: true});
+        slots.push({rowIndex: row.rowIndex, separator: false});
+        previous = row;
+      });
+      windowState.displaySlots = slots;
+      filterSummaryNode.textContent = rows.length + " из " + windowState.catalogRows.length + " строк";
+      if (!rows.length) {
+        if (windowState.viewportController) windowState.viewportController.abort();
+        windowState.visibleCells.clear();
+        windowState.visibleBytes = 0;
+        windowState.visibleKey = "";
+        setStateBox("warning", "Пустой результат", "Фильтры не вернули строки во всём выбранном периоде.");
+        return;
+      }
+      tableStateNode.classList.add("is-hidden");
+      tableShellNode.classList.remove("is-hidden");
+      if (windowState.restorePosition) {
+        tableScrollNode.scrollTop = windowState.restorePosition.top;
+        tableScrollNode.scrollLeft = windowState.restorePosition.left;
+        windowState.restorePosition = null;
+      }
+      scheduleWindowV3Viewport();
+    }
+
+    function scheduleWindowV3Viewport() {
+      const windowState = state.windowV3;
+      if (!windowState.manifest || windowState.frame || document.visibilityState !== "visible" || !isVitrinaTabActive()) return;
+      windowState.frame = window.requestAnimationFrame(function() {
+        windowState.frame = 0;
+        if (windowState.manifest && !windowState.stale) renderWindowV3Viewport();
+      });
+    }
+
+    function windowV3ColumnWidth(column) {
+      return Math.max(24, Number(column.size || column.min_size || 180));
+    }
+
+    function windowV3Viewport() {
+      const allColumns = visibleColumns(((state.composition || {}).table_surface || {}).columns || []);
+      const staticColumns = allColumns.filter(function(column) { return !dateFromColumnId(column.id); });
+      const dateColumns = allColumns.filter(function(column) { return !!dateFromColumnId(column.id); });
+      const staticWidth = staticColumns.reduce(function(sum, column) { return sum + windowV3ColumnWidth(column); }, 0);
+      const left = Math.max(0, Number(tableScrollNode.scrollLeft || 0));
+      const right = left + Math.max(1, Number(tableScrollNode.clientWidth || 1200) - staticWidth);
+      let cursor = 0;
+      let firstDate = -1;
+      let lastDate = -1;
+      dateColumns.forEach(function(column, index) {
+        const next = cursor + windowV3ColumnWidth(column);
+        if (next >= left && cursor <= right) {
+          if (firstDate < 0) firstDate = index;
+          lastDate = index;
+        }
+        cursor = next;
+      });
+      if (firstDate < 0 && dateColumns.length) {
+        firstDate = left >= cursor ? dateColumns.length - 1 : 0;
+        lastDate = firstDate;
+      }
+      firstDate = Math.max(0, firstDate - 1);
+      lastDate = Math.min(dateColumns.length - 1, lastDate + 1);
+      const visibleDateColumns = dateColumns.slice(firstDate, lastDate + 1);
+      const dateIndexByIso = new Map((state.windowV3.manifest.dates || []).map(function(item, index) {
+        return [String(item.date || ""), index];
+      }));
+      const dateIndexes = visibleDateColumns.map(function(column) {
+        return dateIndexByIso.get(dateFromColumnId(column.id));
+      });
+      const leftWidth = dateColumns.slice(0, firstDate).reduce(function(sum, column) {
+        return sum + windowV3ColumnWidth(column);
+      }, 0);
+      const rightWidth = dateColumns.slice(lastDate + 1).reduce(function(sum, column) {
+        return sum + windowV3ColumnWidth(column);
+      }, 0);
+      const slots = state.windowV3.displaySlots;
+      const firstSlot = Math.min(Math.max(0, Math.floor(Number(tableScrollNode.scrollTop || 0) / 33 / 100) * 100), Math.max(0, slots.length - 1));
+      const lastSlot = Math.min(slots.length, firstSlot + 200);
+      const shownSlots = slots.slice(firstSlot, lastSlot);
+      const rowIndexes = Array.from(new Set(shownSlots.filter(function(slot) { return !slot.separator; }).map(function(slot) {
+        return slot.rowIndex;
+      })));
+      return {staticColumns: staticColumns, dateColumns: visibleDateColumns, dateIndexes: dateIndexes,
+        leftWidth: leftWidth, rightWidth: rightWidth, firstSlot: firstSlot, lastSlot: lastSlot,
+        slots: shownSlots, rowIndexes: rowIndexes, totalSlots: slots.length};
+    }
+
+    function windowV3CellKey(rowIndex, dateIndex) {
+      return String(rowIndex) + ":" + String(dateIndex);
+    }
+
+    function windowV3ExpectedCellFields() {
+      return ["value", "display_text", "cell_kind", "formatter_id", "renderer_id",
+        "presentation_state", "presentation_tone", "presentation_reason", "quality_state",
+        "quality_label", "quality_reason", "completeness_state", "missing_sku_count",
+        "quantity_semantic_kind", "quantity_source_observed_at", "inventory_finalization_digest"];
+    }
+
+    function windowV3ValidateEncoding(encoding) {
+      const expected = windowV3ExpectedCellFields();
+      if (!encoding || encoding.format !== "indexed_cells_v2" || !Array.isArray(encoding.fields)
+          || encoding.fields.length !== expected.length || encoding.fields.some(function(field, index) { return field !== expected[index]; })
+          || !Array.isArray(encoding.defaults) || encoding.defaults.length !== expected.length) {
+        throw new Error("Неизвестная версия ячеек окна. Обновите страницу.");
+      }
+    }
+
+    function windowV3StaticCell(packed) {
+      const encoding = state.windowV3.manifest.static_value_encoding;
+      if (!Array.isArray(packed) || packed.length < 2 || packed.length > encoding.fields.length) {
+        throw new Error("Некорректная статическая ячейка каталога окна.");
+      }
+      const cell = {};
+      encoding.fields.forEach(function(field, index) {
+        cell[field] = index < packed.length ? packed[index] : encoding.defaults[index];
+      });
+      return cell;
+    }
+
+    function windowV3CompactCell(fields, defaults, entry) {
+      const cell = {};
+      fields.forEach(function(field, index) {
+        cell[field] = index + 1 < entry.length ? entry[index + 1] : defaults[index];
+      });
+      return cell;
+    }
+
+    function windowV3CellForPaint(rowIndex, dateIndex) {
+      const entry = state.windowV3.visibleCells.get(windowV3CellKey(rowIndex, dateIndex));
+      if (entry && entry.status === "loaded") {
+        return entry.cell || {value: null, display_text: "—", cell_kind: "empty", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default"};
+      }
+      if (entry && entry.status === "error") {
+        return {value: null, display_text: "Ошибка чтения", cell_kind: "unknown", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default", presentation_reason: entry.message};
+      }
+      return {value: null, display_text: "Загрузка…", cell_kind: "unknown", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default", presentation_reason: "Ячейка ещё не загружена"};
+    }
+
+    function windowV3Spacer(width, header) {
+      if (!width) return "";
+      const tag = header ? "th" : "td";
+      return "<" + tag + ' class="window-v3-spacer-cell" aria-hidden="true" style="width:' + width + 'px;min-width:' + width + 'px;max-width:' + width + 'px"></' + tag + ">";
+    }
+
+    function windowV3Paint(viewport) {
+      const columns = viewport.staticColumns.concat(viewport.dateColumns);
+      const offsets = buildStickyOffsets(columns);
+      const allColumns = viewport.staticColumns.length + viewport.dateColumns.length
+        + (viewport.leftWidth ? 1 : 0) + (viewport.rightWidth ? 1 : 0) + 1;
+      const header = viewport.staticColumns.map(function(column) { return buildHeaderCell(column, offsets[column.id] || 0); });
+      if (viewport.leftWidth) header.push(windowV3Spacer(viewport.leftWidth, true));
+      viewport.dateColumns.forEach(function(column, index) {
+        const coverage = state.windowV3.manifest.dates[viewport.dateIndexes[index]] || {};
+        const label = coverage.coverage === "covered" ? " · покрыта снимком " + String(coverage.source_as_of_date || "")
+          : coverage.coverage === "missing" ? " · нет бизнес-факта" : "";
+        header.push(buildHeaderCell(Object.assign({}, column, {header: String(column.header || "") + label}), 0));
+      });
+      if (viewport.rightWidth) header.push(windowV3Spacer(viewport.rightWidth, true));
+      header.push(buildSpacerHeaderCell());
+      tableHeadNode.innerHTML = "<tr>" + header.join("") + "</tr>";
+      const body = [];
+      if (viewport.firstSlot) body.push('<tr class="window-v3-vertical-spacer" aria-hidden="true"><td colspan="' + allColumns + '" style="height:' + (viewport.firstSlot * 33) + 'px"></td></tr>');
+      viewport.slots.forEach(function(slot) {
+        const row = state.windowV3.catalogRows[slot.rowIndex];
+        if (slot.separator) {
+          body.push(buildSkuSeparatorRow(allColumns, row, columns));
+          return;
+        }
+        const values = {};
+        Object.entries(row.values || {}).forEach(function(item) {
+          values[item[0]] = windowV3StaticCell(item[1]);
+        });
+        viewport.dateColumns.forEach(function(column, index) {
+          values[column.id] = windowV3CellForPaint(slot.rowIndex, viewport.dateIndexes[index]);
+        });
+        const transient = Object.assign({}, row, {values: values});
+        const parts = [buildDataRow(transient, viewport.staticColumns, offsets)];
+        const dateParts = viewport.dateColumns.map(function(column, index) {
+          return buildDataCell(column, transient, values[column.id], 0);
+        });
+        let markup = parts[0];
+        const insertion = (viewport.leftWidth ? windowV3Spacer(viewport.leftWidth, false) : "")
+          + dateParts.join("") + (viewport.rightWidth ? windowV3Spacer(viewport.rightWidth, false) : "");
+        markup = markup.replace(buildSpacerBodyCell() + "</tr>", insertion + buildSpacerBodyCell() + "</tr>");
+        body.push(markup);
+      });
+      const bottom = (viewport.totalSlots - viewport.lastSlot) * 33;
+      if (bottom) body.push('<tr class="window-v3-vertical-spacer" aria-hidden="true"><td colspan="' + allColumns + '" style="height:' + bottom + 'px"></td></tr>');
+      tableBodyNode.innerHTML = body.join("");
+      updateTableObjectIndicator();
+    }
+
+    function renderWindowV3Viewport() {
+      const windowState = state.windowV3;
+      const viewport = windowV3Viewport();
+      const key = viewport.firstSlot + ":" + viewport.lastSlot + ":" + viewport.dateIndexes.join(",")
+        + ":" + viewport.rowIndexes.join(",");
+      if (key !== windowState.visibleKey) {
+        windowState.visibleKey = key;
+        windowState.viewportGeneration += 1;
+        if (windowState.viewportController) windowState.viewportController.abort();
+        const permitted = new Set();
+        viewport.rowIndexes.forEach(function(rowIndex) {
+          viewport.dateIndexes.forEach(function(dateIndex) {
+            permitted.add(windowV3CellKey(rowIndex, dateIndex));
+          });
+        });
+        windowState.visibleCells.forEach(function(_entry, cellKey) {
+          if (!permitted.has(cellKey)) windowState.visibleCells.delete(cellKey);
+        });
+        windowState.visibleBytes = Array.from(windowState.visibleCells.values()).reduce(function(sum, entry) { return sum + (entry.bytes || 0); }, 0);
+        windowState.lastViewport = viewport;
+        const controller = new AbortController();
+        windowState.viewportController = controller;
+        void windowV3FillViewport(viewport, windowState.generation, windowState.viewportGeneration, controller.signal);
+      }
+      windowV3Paint(viewport);
+    }
+
+    function windowV3RememberChunk(key, chunk) {
+      const windowState = state.windowV3;
+      const bytes = Number(chunk.decoded_bytes || 0);
+      if (!Number.isInteger(bytes) || bytes <= 0 || bytes > 8388608) {
+        throw new Error("Порция превысила лимит 8 MiB.");
+      }
+      if (windowState.transferChunks.has(key)) {
+        windowState.transferBytes -= windowState.transferChunks.get(key).bytes;
+        windowState.transferChunks.delete(key);
+      }
+      windowState.transferChunks.set(key, {chunk: chunk, bytes: bytes});
+      windowState.transferBytes += bytes;
+      while (windowState.transferChunks.size > 2 || windowState.transferBytes > 16777216) {
+        const oldest = windowState.transferChunks.keys().next().value;
+        windowState.transferBytes -= windowState.transferChunks.get(oldest).bytes;
+        windowState.transferChunks.delete(oldest);
+      }
+    }
+
+    function windowV3RememberCell(rowIndex, dateIndex, cell) {
+      const windowState = state.windowV3;
+      const key = windowV3CellKey(rowIndex, dateIndex);
+      const bytes = cell ? JSON.stringify(cell).length * 2 : 16;
+      const previous = windowState.visibleCells.get(key);
+      if (previous) windowState.visibleBytes -= previous.bytes || 0;
+      if (windowState.visibleBytes + bytes > 16777216) {
+        throw new Error("Видимое окно превысило лимит 16 MiB. Уменьшите число одновременно видимых строк или дат.");
+      }
+      windowState.visibleCells.set(key, {status: "loaded", cell: cell, bytes: bytes});
+      windowState.visibleBytes += bytes;
+    }
+
+    async function windowV3FillViewport(viewport, generation, viewportGeneration, signal) {
+      const windowState = state.windowV3;
+      const sessionId = windowState.sessionId;
+      const token = windowState.token;
+      const globalResult = windowState.globalResult;
+      const sortedIndexes = globalResult
+        ? windowV3SortIndexes(globalResult, globalResult.matched_row_indexes.map(Number)) : [];
+      const globalPosition = new Map(sortedIndexes.map(function(index, position) { return [index, position]; }));
+      const current = function() {
+        return !signal.aborted && generation === windowState.generation
+          && viewportGeneration === windowState.viewportGeneration && !windowState.stale;
+      };
+      let currentPair = [];
+      try {
+        for (let offset = 0; offset < viewport.dateIndexes.length && current();) {
+          currentPair = viewport.dateIndexes.slice(offset, offset + 2);
+          let coveredDateCount = currentPair.length;
+          let pending = viewport.rowIndexes.filter(function(rowIndex) {
+            return currentPair.some(function(dateIndex) {
+              return !windowState.visibleCells.has(windowV3CellKey(rowIndex, dateIndex));
+            });
+          });
+          while (pending.length && current()) {
+            let selection = pending.slice(0, 200);
+            let seekParams;
+            let seekUrl;
+            do {
+              seekParams = {
+                session_id: sessionId,
+                content_token: token,
+                date_index: currentPair[0],
+                row_start: globalResult ? (globalPosition.get(selection[0]) || 0) : selection[0],
+                row_count: selection.length,
+                global_handle: globalResult ? globalResult.global_handle : "",
+                selected_row_indexes: globalResult ? selection.join(",") : ""
+              };
+              seekUrl = windowV3Url("seek", seekParams);
+              if (seekUrl.search.length <= 4096) break;
+              selection = selection.slice(0, Math.floor(selection.length / 2));
+            } while (selection.length);
+            if (!selection.length) throw new Error("Параметры видимого окна превышают допустимый размер.");
+            const cacheKey = sessionId + ":" + token + ":" + currentPair[0] + ":" + selection.join(",");
+            const cached = windowState.transferChunks.get(cacheKey);
+            let chunk;
+            if (cached) {
+              windowState.transferChunks.delete(cacheKey);
+              windowState.transferChunks.set(cacheKey, cached);
+              chunk = cached.chunk;
+            } else {
+              const seek = await windowV3Request("seek", seekParams, signal);
+              if (!current()) return;
+              if (!seek.cursor) throw new Error("Сервер не выдал курсор окна.");
+              chunk = await windowV3Request("chunk", {
+                session_id: sessionId, content_token: token, cursor: seek.cursor
+              }, signal);
+              if (!current()) return;
+              windowV3RememberChunk(cacheKey, chunk);
+            }
+            if (String(chunk.session_id || "") !== sessionId || String(chunk.content_token || "") !== token) {
+              throw new Error("Порция принадлежит другой версии окна.");
+            }
+            const dates = chunk.dates || [];
+            if (!Array.isArray(dates) || !dates.length || dates.length > 2 || dates[0] !== windowState.manifest.dates[currentPair[0]].date) {
+              throw new Error("Порция вернула неверную область дат.");
+            }
+            const coveredIndexes = dates.map(function(date) {
+              return windowState.manifest.dates.findIndex(function(item) { return item.date === date; });
+            });
+            if (coveredIndexes.some(function(index, position) {
+              return index !== currentPair[0] + position;
+            })) throw new Error("Порция содержит несмежную дату.");
+            coveredDateCount = currentPair.filter(function(index) { return coveredIndexes.includes(index); }).length;
+            const encoding = chunk.value_encoding || {};
+            const fields = encoding.fields || [];
+            const defaults = encoding.defaults || [];
+            windowV3ValidateEncoding(encoding);
+            const returnedCount = Number(chunk.row_count);
+            if (!Number.isInteger(returnedCount) || returnedCount < 1 || returnedCount > selection.length
+                || !Array.isArray(chunk.rows) || chunk.rows.length !== returnedCount) {
+              throw new Error("Порция вернула неполную область строк.");
+            }
+            chunk.rows.forEach(function(packedRow, position) {
+              const rowIndex = selection[position];
+              if (Number(packedRow.row_index) !== rowIndex || !Array.isArray(packedRow.values)) {
+                throw new Error("Порядок строк порции не согласован.");
+              }
+              const byDate = new Map();
+              packedRow.values.forEach(function(entry) {
+                if (!Array.isArray(entry) || !Number.isInteger(entry[0]) || entry[0] < 0 || entry[0] >= dates.length || byDate.has(entry[0])) {
+                  throw new Error("Некорректный индекс ячейки окна.");
+                }
+                byDate.set(entry[0], windowV3CompactCell(fields, defaults, entry));
+              });
+              coveredIndexes.forEach(function(dateIndex, index) {
+                if (currentPair.includes(dateIndex)) {
+                  windowV3RememberCell(rowIndex, dateIndex,
+                    byDate.get(index) || windowV3CompactCell(fields, defaults, [index]));
+                }
+              });
+            });
+            windowV3AcceptResult(chunk);
+            pending = pending.slice(returnedCount);
+            if (current()) {
+              windowV3Paint(viewport);
+              await new Promise(function(resolve) { window.requestAnimationFrame(resolve); });
+            }
+          }
+          offset += coveredDateCount;
+        }
+      } catch (error) {
+        if (!current() || (error && error.name === "AbortError")) return;
+        if (error.windowStale) {
+          windowState.stale = true;
+          windowState.error = String(error.message || error);
+          renderWindowV3Table();
+          return;
+        }
+        windowState.error = String(error.message || error);
+        filterSummaryNode.textContent = "Ошибка видимого окна: " + windowState.error;
+        viewport.rowIndexes.forEach(function(rowIndex) {
+          currentPair.forEach(function(dateIndex) {
+            const key = windowV3CellKey(rowIndex, dateIndex);
+            if (!windowState.visibleCells.has(key)) windowState.visibleCells.set(key, {status: "error", message: windowState.error, bytes: 0});
+          });
+        });
+        windowV3Paint(viewport);
+      }
     }
 
     function businessProjectionMeta(payload) {
@@ -23191,6 +24071,17 @@
       if (!previousPayload || !isVitrinaTabActive()) {
         return;
       }
+      if (state.windowV3.manifest) {
+        const scrollTop = tableScrollNode.scrollTop;
+        const scrollLeft = tableScrollNode.scrollLeft;
+        await loadPageComposition({activeTabOnly: true, awaitTable: true, preserveWindowPosition: {top: scrollTop, left: scrollLeft}});
+        if (statusPayload) {
+          state.businessProjection.revisionNo = Number(statusPayload.revision_no || state.businessProjection.revisionNo);
+          state.businessProjection.revisionId = String(statusPayload.revision_id || state.businessProjection.revisionId);
+          state.businessProjection.publishedAt = String(statusPayload.published_at || state.businessProjection.publishedAt);
+        }
+        return;
+      }
       const scrollTop = tableScrollNode ? tableScrollNode.scrollTop : 0;
       const scrollLeft = tableScrollNode ? tableScrollNode.scrollLeft : 0;
       setBusinessProjectionStatus(
@@ -23200,7 +24091,8 @@
       );
       const response = await fetch(
         buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
-          includeTableData: true
+          includeTableData: true,
+          tableFormat: "indexed_cells_v2"
         }).toString(),
         {
           method: "GET",
@@ -23223,6 +24115,7 @@
       if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
         throw new Error("unexpected business projection table payload");
       }
+      decodeTableResponse(payload);
       if (!isVitrinaTabActive()) return;
       const tableSurface = payload.table_surface || {};
       if (String(tableSurface.table_data_state || "included") !== "included") {
@@ -23373,7 +24266,24 @@
       document.addEventListener("visibilitychange", function() {
         if (document.visibilityState === "visible") {
           pollBusinessProjectionRevision();
+          if (state.windowV3.manifest) renderWindowV3Table();
+        } else {
+          if (state.windowV3.viewportController) state.windowV3.viewportController.abort();
+          state.windowV3.visibleKey = "";
+          if (state.windowV3.globalController) {
+            state.windowV3.globalController.abort();
+            state.windowV3.globalKey = "";
+          }
         }
+      });
+      window.addEventListener("pagehide", function() {
+        const sessionId = state.windowV3.sessionId;
+        if (!sessionId) return;
+        // A closing tab has no following window request; cancel releases its
+        // session-owned job results. This is best effort during navigation.
+        void fetch(windowV3Url("cancel", {session_id: sessionId}).toString(), {
+          method: "GET", headers: {"Accept": "application/json"}, cache: "no-store", keepalive: true
+        }).catch(function() {});
       });
       scheduleBusinessProjectionPoll(1500);
     }
@@ -23383,17 +24293,24 @@
       shellPayload,
       performanceMetrics,
       shellPaintPromise,
-      activeTabOnly
+      activeTabOnly,
+      refreshSourceDetails,
+      preserveWindowPosition
     ) {
       try {
         if (activeTabOnly && !isVitrinaTabActive()) {
           vitrinaDeferredTableSkipped = true;
           return;
         }
+        if (shellPayload.meta && shellPayload.meta.window_v3_available === true) {
+          await loadWindowV3Table(requestId, shellPayload, activeTabOnly, preserveWindowPosition);
+          return;
+        }
         const tableRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
-            includeTableData: true
+            includeTableData: true,
+            tableFormat: "indexed_cells_v2"
           }).toString(),
           {
             method: "GET",
@@ -23426,6 +24343,7 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected table data payload");
         }
+        decodeTableResponse(payload);
         await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") !== "included") {
@@ -23433,8 +24351,8 @@
         }
         const tableRenderStartedAt = window.performance.now();
         const renderPayload = mergeDeferredShellWithFreshTable(shellPayload, payload);
-        resetFilterState(renderPayload);
-        renderPage(renderPayload, {tableFreshness: "fresh"});
+        reconcileDeferredFilters(renderPayload);
+        renderPage(renderPayload, {tableFreshness: "fresh", deferSourceStatusAutoLoad: refreshSourceDetails});
         markFreshTableDisplayed(renderPayload);
         const tableRenderFinishedAt = window.performance.now();
         if (performanceMetrics) {
@@ -23449,6 +24367,13 @@
           performanceMetrics.shell_double_raf_paint_ms = paintValues[0];
           performanceMetrics.table_double_raf_paint_ms = paintValues[1];
           sendWebVitrinaPerformanceEnvelope(performanceMetrics);
+        }
+        if (refreshSourceDetails) {
+          try {
+            await loadSourceStatusDetails({force: true});
+          } catch (_statusError) {
+            // The authoritative table has already rendered successfully.
+          }
         }
       } catch (error) {
         if (requestId !== state.requestSequence) {
@@ -23479,6 +24404,7 @@
       const requestKey = tableSnapshotRequestKey();
       const showingCachedTable = hasDisplayedCachedTableForRequest(requestKey);
       state.requestSequence = requestId;
+      clearWindowV3();
       let performanceMetrics = null;
       if (
         !webVitrinaPerformanceState.envelopeSent
@@ -23507,7 +24433,8 @@
         const shellRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
-            includeSourceStatus: !!normalizedOptions.includeSourceStatus
+            includeSourceStatus: !!normalizedOptions.includeSourceStatus,
+            shellFormat: "metadata_v2"
           }).toString(),
           {
           headers: {"Accept": "application/json"}
@@ -23531,6 +24458,9 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected page composition payload");
         }
+        if (payload.response_schema_version !== 2 || payload.shell_format !== "metadata_v2") {
+          throw new Error("Формат оболочки изменился. Обновите страницу.");
+        }
         if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
@@ -23538,7 +24468,7 @@
           let shellPaintPromise = null;
           if (!showingCachedTable) {
             const shellRenderStartedAt = window.performance.now();
-            resetFilterState(payload);
+            if (!normalizedOptions.preserveWindowPosition) resetFilterState(payload);
             renderPage(payload);
             const shellRenderFinishedAt = window.performance.now();
             if (performanceMetrics) {
@@ -23552,16 +24482,21 @@
             state.tableSnapshot.freshLoading = true;
             setTableFreshnessIndicator("stale_loading", state.composition);
           }
-          loadDeferredTableData(
+          const tablePromise = loadDeferredTableData(
             requestId,
             payload,
             performanceMetrics,
             shellPaintPromise,
-            !!normalizedOptions.activeTabOnly
+            !!normalizedOptions.activeTabOnly,
+            !!normalizedOptions.awaitTable && !!normalizedOptions.includeSourceStatus,
+            normalizedOptions.preserveWindowPosition || null
           );
+          if (normalizedOptions.awaitTable) {
+            await tablePromise;
+          }
         } else {
           const tableRenderStartedAt = window.performance.now();
-          resetFilterState(payload);
+          if (!normalizedOptions.preserveWindowPosition) resetFilterState(payload);
           renderPage(payload, {tableFreshness: "fresh"});
           markFreshTableDisplayed(payload);
           const tableRenderFinishedAt = window.performance.now();

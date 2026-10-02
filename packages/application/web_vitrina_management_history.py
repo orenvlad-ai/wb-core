@@ -349,11 +349,13 @@ def dated_parameters(conn: Any, day: str) -> tuple[Any, Any] | None:
     return tuple(results)
 
 
-def recalculate_current(plan: dict[str, Any], *, business_date: str, parameters: tuple[Any, Any] | None) -> dict[str, Any]:
+def recalculate_current(plan: dict[str, Any], *, business_date: str, parameters: tuple[Any, Any] | None,
+                        emit_row_ids: frozenset[str] | None = None) -> dict[str, Any]:
     """Current owned/missing proxy follows the same live cost and dated inputs."""
     from packages.application.vitrina_economics import EFFECTIVE_DATE, project_catalog_economics
     if business_date >= EFFECTIVE_DATE:
-        return project_catalog_economics(plan, day=business_date, parameters=parameters)
+        return project_catalog_economics(plan, day=business_date, parameters=parameters,
+                                         emit_row_ids=emit_row_ids)
     if business_date not in plan.get('date_columns', []):
         return plan
     cells = plan.get('metadata', {}).get('server_cell_presentation', {})
@@ -406,9 +408,54 @@ def recalculate_current_envelope(plan: Any, *, business_date: str, parameters: t
 
 
 def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, parameters: tuple[Any, Any] | None,
-                             original_presentation: dict[str, Any], snapshot_id: str) -> list[Any]:
+                             original_presentation: dict[str, Any], snapshot_id: str,
+                             output_row_ids: frozenset[str] | None = None,
+                             window_operands: dict[str, dict[str, Any]] | None = None) -> list[Any]:
     rows = list(rows)
     if not rows or business_date not in rows[0].values_by_date:
+        return rows
+    rows = ensure_current_proxy_rows(
+        rows, business_date=business_date, output_row_ids=output_row_ids,
+    )
+    dates = sorted({day for r in rows for day in r.values_by_date})
+    presentation = {
+        row_id: {day: dict((item.get('presentation_by_date') or {}).get(day, {})) for day in dates}
+        for row_id, item in (window_operands or {}).items()
+    }
+    presentation.update({r.row_id:{day:dict(r.presentation_by_date.get(day, {})) for day in dates} for r in rows})
+    # Read-time quality overlays may replace an owned proxy marker. Ownership
+    # comes from the saved plan; live costs come from the just-applied FBS view.
+    for row in rows:
+        original = original_presentation.get(row.row_id, {}).get(business_date, {})
+        if original.get('source') == SOURCE and presentation[row.row_id][business_date].get('source') != INVENTORY_SOURCE:
+            presentation[row.row_id][business_date] = original
+    from packages.application.daily_trading_pool import remembered_active
+    represented = {row.row_id for row in rows}
+    compact_rows = [
+        [item.get('label', ''), row_id, *[item['values_by_date'].get(day, '') for day in dates]]
+        for row_id, item in (window_operands or {}).items() if row_id not in represented
+    ]
+    pseudo = {'date_columns':dates, 'snapshot_id':snapshot_id,
+              'metadata':{'server_cell_presentation':presentation,
+                          'daily_trading_pool': {business_date: sorted(remembered_active(original_presentation, business_date))}},
+              'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key',*dates],
+                         'rows':[["",r.row_id,*[r.values_by_date.get(day,'') for day in dates]] for r in rows]
+                                + compact_rows}]}
+    revised = recalculate_current(pseudo, business_date=business_date, parameters=parameters,
+                                  emit_row_ids=output_row_ids)
+    return restore_rows(rows, presentation=revised['metadata']['server_cell_presentation'])
+
+
+def ensure_current_proxy_rows(
+    rows: Iterable[Any], *, business_date: str,
+    output_row_ids: frozenset[str] | None = None,
+    date_present: bool | None = None,
+) -> list[Any]:
+    """Use the same current-day Proxy row identities for full and metadata reads."""
+    rows = list(rows)
+    if not rows or (date_present is False) or (
+        date_present is None and business_date not in rows[0].values_by_date
+    ):
         return rows
     from packages.application.vitrina_economics import METRICS, EFFECTIVE_DATE
     specs = {
@@ -423,28 +470,13 @@ def recalculate_current_rows(rows: Iterable[Any], *, business_date: str, paramet
     for scope, anchor in anchors.items():
         for metric in METRICS:
             key = scope + '|' + metric
-            if key not in existing:
+            if key not in existing and (output_row_ids is None or key in output_row_ids):
                 label, cell_format = specs[metric]
                 rows.append(replace(anchor, row_id=key, row_order=len(rows) + 1,
                     metric_key=metric, metric_label=label, section='Экономика', format=cell_format,
                     values_by_date={day: '' for day in anchor.values_by_date}, presentation_by_date={}))
                 existing.add(key)
-    dates = sorted({day for r in rows for day in r.values_by_date})
-    presentation = {r.row_id:{day:dict(r.presentation_by_date.get(day, {})) for day in dates} for r in rows}
-    # Read-time quality overlays may replace an owned proxy marker. Ownership
-    # comes from the saved plan; live costs come from the just-applied FBS view.
-    for row in rows:
-        original = original_presentation.get(row.row_id, {}).get(business_date, {})
-        if original.get('source') == SOURCE and presentation[row.row_id][business_date].get('source') != INVENTORY_SOURCE:
-            presentation[row.row_id][business_date] = original
-    from packages.application.daily_trading_pool import remembered_active
-    pseudo = {'date_columns':dates, 'snapshot_id':snapshot_id,
-              'metadata':{'server_cell_presentation':presentation,
-                          'daily_trading_pool': {business_date: sorted(remembered_active(original_presentation, business_date))}},
-              'sheets':[{'sheet_name':'DATA_VITRINA','header':['label','key',*dates],
-                         'rows':[['',r.row_id,*[r.values_by_date.get(day,'') for day in dates]] for r in rows]}]}
-    revised = recalculate_current(pseudo, business_date=business_date, parameters=parameters)
-    return restore_rows(rows, presentation=revised['metadata']['server_cell_presentation'])
+    return rows
 
 
 # Ordinary refresh may correct yesterday's derived values, but cannot rewrite
@@ -459,7 +491,8 @@ PROXY_RECALCULATION_METRICS = frozenset({
 
 def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
                             parameters: tuple[Any, Any] | None,
-                            operation_id: str) -> dict[str, Any]:
+                            operation_id: str,
+                            emit_row_ids: frozenset[str] | None = None) -> dict[str, Any]:
     """Replace only four Proxy metrics from the accepted, same-column operands.
 
     Warehouse/history guards run before this final projection. Missing inputs
@@ -469,7 +502,9 @@ def recalculate_dated_proxy(plan: dict[str, Any], *, day: str,
     working = deepcopy(plan)
     from packages.application.vitrina_economics import EFFECTIVE_DATE, project_catalog_economics
     if day >= EFFECTIVE_DATE:
-        revised = project_catalog_economics(plan, day=day, parameters=parameters)
+        revised = project_catalog_economics(
+            plan, day=day, parameters=parameters, emit_row_ids=emit_row_ids,
+        )
         before_sheet, after_sheet = data_sheet(plan), data_sheet(revised)
         if day not in after_sheet['header']:
             return {'plan': revised, 'changes': [], 'remaining': []}
@@ -599,58 +634,86 @@ def recalculate_yesterday_envelope(plan: Any, *, business_date: str,
 
 def recalculate_yesterday_rows(rows: Iterable[Any], *, business_date: str,
                                parameters: tuple[Any, Any] | None,
-                               original_presentation: dict[str, Any], snapshot_id: str) -> list[Any]:
+                               original_presentation: dict[str, Any], snapshot_id: str,
+                               output_row_ids: frozenset[str] | None = None,
+                               window_operands: dict[str, dict[str, Any]] | None = None) -> list[Any]:
     rows = list(rows)
     day = yesterday_date(business_date)
     if not rows or day not in rows[0].values_by_date:
         return rows
-    presentation = {r.row_id: {day: dict(original_presentation.get(r.row_id, {}).get(day,
-                               r.presentation_by_date.get(day, {})))} for r in rows}
+    presentation = {
+        row_id: {day: dict(original_presentation.get(row_id, {}).get(day,
+                           (item.get('presentation_by_date') or {}).get(day, {})))}
+        for row_id, item in (window_operands or {}).items()
+    }
+    presentation.update({r.row_id: {day: dict(original_presentation.get(r.row_id, {}).get(day,
+                               r.presentation_by_date.get(day, {})))} for r in rows})
+    represented = {row.row_id for row in rows}
+    compact_rows = [
+        [item.get('label', ''), row_id, item['values_by_date'].get(day, '')]
+        for row_id, item in (window_operands or {}).items() if row_id not in represented
+    ]
     pseudo = {'date_columns': [day], 'snapshot_id': snapshot_id,
               'metadata': {'server_cell_presentation': presentation},
               'sheets': [{'sheet_name': 'DATA_VITRINA', 'header': ['label', 'key', day],
-                          'rows': [['', r.row_id, r.values_by_date.get(day, '')] for r in rows]}]}
+                          'rows': [['', r.row_id, r.values_by_date.get(day, '')] for r in rows]
+                                  + compact_rows}]}
     result = recalculate_dated_proxy(pseudo, day=day, parameters=parameters,
-                                     operation_id='yesterday-proxy:' + day)
+                                     operation_id='yesterday-proxy:' + day,
+                                     emit_row_ids=output_row_ids)
     target = {c['row_id']: {day: c['provenance']} for c in result['changes']}
     return restore_rows(rows, presentation=target)
 
 
-def corrected_proxy_dates(rows: Iterable[Any]) -> list[str]:
-    return sorted({day for row in rows if row.row_id.endswith('|proxy_profit_4_rub')
-                   for day, cell in row.presentation_by_date.items()
-                   if cell.get('calculation_contract') == 'dated_proxy_recalculation_v1'})
+def corrected_proxy_dates(rows: Iterable[Any], *,
+                          compact_operands: dict[str, dict[str, Any]] | None = None) -> list[str]:
+    dates = {day for row in rows if row.row_id.endswith('|proxy_profit_4_rub')
+             for day, cell in row.presentation_by_date.items()
+             if cell.get('calculation_contract') == 'dated_proxy_recalculation_v1'}
+    dates.update(
+        day for row_id, operand in (compact_operands or {}).items()
+        if row_id.endswith('|proxy_profit_4_rub')
+        for day, cell in operand.get('presentation_by_date', {}).items()
+        if cell.get('calculation_contract') == 'dated_proxy_recalculation_v1'
+    )
+    return sorted(dates)
 
 
 def recalculate_corrected_unit_margin_rows(rows: Iterable[Any], *,
-                                           parameters: dict[str, tuple[Any, Any] | None]) -> list[Any]:
+                                           parameters: dict[str, tuple[Any, Any] | None],
+                                           compact_operands: dict[str, dict[str, Any]] | None = None) -> list[Any]:
     """Read-only dependent display, for corrected dates only; no history write."""
     rows = list(rows)
     by_key = {r.row_id: r for r in rows}
+    compact = compact_operands or {}
+    def values(row_id: str) -> dict[str, Any]:
+        row = by_key.get(row_id)
+        return row.values_by_date if row is not None else compact.get(row_id, {}).get('values_by_date', {})
+    def presentation(row_id: str) -> dict[str, Any]:
+        row = by_key.get(row_id)
+        return row.presentation_by_date if row is not None else compact.get(row_id, {}).get('presentation_by_date', {})
     updates = {}
     for day, dated in parameters.items():
         p4 = dated[1] if dated else None
         results = []
-        for key, profit_row in by_key.items():
+        for key in by_key.keys() | compact.keys():
             if not key.startswith('SKU:') or not key.endswith('|proxy_profit_4_rub'):
                 continue
             scope = key.split('|')[0]
-            quantity_row = by_key.get(scope + '|orderCount')
-            revenue_row = by_key.get(scope + '|orderSum')
-            quantity = quantity_row.values_by_date.get(day) if quantity_row else None
-            revenue = revenue_row.values_by_date.get(day) if revenue_row else None
-            profit = profit_row.values_by_date.get(day)
+            quantity = values(scope + '|orderCount').get(day)
+            revenue = values(scope + '|orderSum').get(day)
+            profit = values(key).get(day)
             quantity = Decimal(str(quantity)) * p4.buyout_rate if quantity not in ('', None) and p4 else None
             revenue = Decimal(str(revenue)) * p4.buyout_rate if revenue not in ('', None) and p4 else None
             result = {'proxy_profit_4': profit, 'expected_buyout_qty': quantity, 'expected_buyout_revenue': revenue}
             results.append(result)
             updates[(scope + '|proxy_margin_per_unit_rub', day)] = (
                 calculate_proxy_v4_margin_per_unit(proxy_profit_4=profit, expected_buyout_qty=quantity),
-                profit_row.presentation_by_date.get(day, {}))
-        total = by_key.get('TOTAL|total_proxy_profit_4_rub')
-        if total:
-            number = aggregate_proxy_4(results).get('proxy_margin_per_unit') if total.values_by_date.get(day) not in ('', None) else None
-            updates[('TOTAL|proxy_margin_per_unit_rub_total', day)] = (number, total.presentation_by_date.get(day, {}))
+                presentation(key).get(day, {}))
+        total_key = 'TOTAL|total_proxy_profit_4_rub'
+        if total_key in by_key or total_key in compact:
+            number = aggregate_proxy_4(results).get('proxy_margin_per_unit') if values(total_key).get(day) not in ('', None) else None
+            updates[('TOTAL|proxy_margin_per_unit_rub_total', day)] = (number, presentation(total_key).get(day, {}))
     output = []
     for row in rows:
         values, cells = dict(row.values_by_date), dict(row.presentation_by_date)

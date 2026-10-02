@@ -46,7 +46,7 @@ def calculate(operands, parameters, *, version, day):
             'state': 'no_activity' if values['order_count'] == 0 and values['ads_sum'] == 0 else 'calculated'}
 
 
-def project_catalog_economics(plan, *, day, parameters):
+def project_catalog_economics(plan, *, day, parameters, emit_row_ids=None):
     working = deepcopy(plan)
     sheet = next(s for s in working['sheets'] if s['sheet_name'] == 'DATA_VITRINA')
     if day not in sheet['header']:
@@ -61,7 +61,7 @@ def project_catalog_economics(plan, *, day, parameters):
         anchor = next(r for key, r in rows.items() if key.startswith(scope + '|'))
         for metric in METRICS:
             key = scope + '|' + metric
-            if key not in rows:
+            if key not in rows and (emit_row_ids is None or key in emit_row_ids):
                 row = [anchor[0], key, *['' for _ in sheet['header'][2:]]]
                 sheet['rows'].append(row)
                 rows[key] = row
