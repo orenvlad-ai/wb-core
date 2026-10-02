@@ -3743,9 +3743,22 @@ def load_current_business_projection_metrics(
             "nm_id IN (" + ",".join("?" for _ in selected_ids) + ")"
         )
         parameters.extend(selected_ids)
-    with sqlite3.connect(runtime.db_path) as conn:
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    borrowed = borrowed_operational_connection(runtime.db_path)
+    with (borrowed if borrowed is not None else sqlite3.connect(runtime.db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        ensure_warehouse_business_projection_schema(conn)
+        if borrowed is None:
+            ensure_warehouse_business_projection_schema(conn)
+        else:
+            required = {CURRENT_ROW_TABLE, STATE_TABLE}
+            present = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+                    tuple(sorted(required)),
+                )
+            }
+            if present != required:
+                raise WarehouseBusinessProjectionError("window projection schema is incomplete")
         rows = conn.execute(
             f"""
             SELECT as_of_date,nm_id,metrics_json,presentation_json,

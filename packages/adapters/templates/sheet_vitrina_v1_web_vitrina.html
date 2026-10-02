@@ -3593,6 +3593,7 @@
     }
 
     .table-shell {
+      position: relative;
       border: 1px solid var(--border);
       border-radius: 6px;
       overflow: hidden;
@@ -3614,6 +3615,36 @@
       width: max-content;
       font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
     }
+
+    .vitrina-table.window-v3-table { min-width: 0; table-layout: fixed; }
+    .vitrina-table.window-v3-table th,
+    .vitrina-table.window-v3-table td { box-sizing: border-box; }
+    .vitrina-table.window-v3-table th[data-date-coverage="covered"]::after,
+    .vitrina-table.window-v3-table th[data-date-coverage="missing"]::after {
+      position: absolute;
+      right: 2px;
+      top: 1px;
+      font-size: 10px;
+      line-height: 1;
+      color: var(--muted);
+    }
+    .vitrina-table.window-v3-table th[data-date-coverage="covered"]::after { content: "↳"; }
+    .vitrina-table.window-v3-table th[data-date-coverage="missing"]::after { content: "!"; color: var(--warning-text); }
+    .window-v3-loading-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      display: grid;
+      place-items: center;
+      min-height: 120px;
+      padding: 20px;
+      background: var(--panel);
+      color: var(--text);
+      font-weight: 700;
+      text-align: center;
+    }
+    .window-v3-loading-overlay[hidden] { display: none; }
+    .table-shell[data-window-v3-loading="true"] .table-scroll { visibility: hidden; }
 
     .vitrina-table th,
     .vitrina-table td {
@@ -5892,8 +5923,10 @@
       </div>
 
       <div class="table-shell is-hidden" data-table-shell>
+        <div class="window-v3-loading-overlay" data-window-v3-loading-overlay role="status" aria-live="polite" hidden>Загружаем видимые даты…</div>
         <div class="table-scroll" data-table-scroll>
           <table class="vitrina-table">
+            <colgroup data-window-v3-cols></colgroup>
             <thead data-table-head></thead>
             <tbody data-table-body></tbody>
           </table>
@@ -7386,7 +7419,10 @@
     const stateTitleNode = document.querySelector("[data-state-title]");
     const stateBodyNode = document.querySelector("[data-state-body]");
     const tableShellNode = document.querySelector("[data-table-shell]");
+    const windowV3LoadingNode = document.querySelector("[data-window-v3-loading-overlay]");
     const tableScrollNode = document.querySelector("[data-table-scroll]");
+    const tableNode = tableScrollNode.querySelector(".vitrina-table");
+    const windowV3ColsNode = document.querySelector("[data-window-v3-cols]");
     const tableHeadNode = document.querySelector("[data-table-head]");
     const tableBodyNode = document.querySelector("[data-table-body]");
     const tableObjectLabelNode = document.querySelector("[data-table-object-label]");
@@ -8005,6 +8041,7 @@
         visibleCells: new Map(),
         visibleBytes: 0,
         visibleKey: "",
+        firstWindowReady: false,
         frame: 0,
         lastViewport: null,
         restorePosition: null,
@@ -8019,7 +8056,12 @@
         highlights: new Set(),
         highlightTimer: null,
         channel: null,
-        lastFailureRevisionId: ""
+        lastFailureRevisionId: "",
+        pendingStatus: null,
+        pendingEpoch: 0,
+        refreshInProgress: false,
+        retryAfterRefresh: false,
+        lastStaleRefreshRevision: 0
       },
       history: {
         availableDates: [],
@@ -9195,6 +9237,76 @@
       if (!state.windowV3.ackJobIds.includes(jobId)) state.windowV3.ackJobIds.push(jobId);
     }
 
+    function windowV3SetInitialLoading(loading) {
+      tableShellNode.dataset.windowV3Loading = loading ? "true" : "false";
+      tableShellNode.setAttribute("aria-busy", loading ? "true" : "false");
+      windowV3LoadingNode.hidden = !loading;
+    }
+
+    function windowV3QueuePendingProjection(status) {
+      if (!status) return;
+      const projection = state.businessProjection;
+      if (Number(status.revision_no || 0) <= Math.max(projection.revisionNo,
+          Number((projection.pendingStatus || {}).revision_no || 0))) return;
+      projection.pendingStatus = status;
+      projection.pendingEpoch += 1;
+    }
+
+    function windowV3AcceptPendingProjection(viewport) {
+      const projection = state.businessProjection;
+      const pending = projection.pendingStatus;
+      if (!pending) return true;
+      const checkedEpoch = projection.pendingEpoch;
+      const windowState = state.windowV3;
+      const checked = windowState.globalCheckedEpoch >= checkedEpoch
+        && (!viewport || viewport.rowIndexes.every(function(rowIndex) {
+          return viewport.dateIndexes.every(function(dateIndex) {
+            return (windowState.visibleCells.get(windowV3CellKey(rowIndex, dateIndex)) || {}).checkedEpoch >= checkedEpoch;
+          });
+        }));
+      if (!checked) {
+        windowV3RetryPendingProjection();
+        return false;
+      }
+      const revisionNo = Number(pending.revision_no || 0);
+      if (revisionNo > projection.revisionNo) {
+        projection.revisionNo = revisionNo;
+        projection.revisionId = String(pending.revision_id || "");
+        projection.publishedAt = String(pending.published_at || "");
+      }
+      projection.pendingStatus = null;
+      return true;
+    }
+
+    function windowV3RetryPendingProjection() {
+      const projection = state.businessProjection;
+      const pending = projection.pendingStatus;
+      const revisionNo = Number((pending || {}).revision_no || 0);
+      if (!pending || revisionNo <= projection.lastStaleRefreshRevision) return false;
+      if (projection.refreshInProgress) {
+        projection.retryAfterRefresh = true;
+        return true;
+      }
+      projection.lastStaleRefreshRevision = revisionNo;
+      projection.pendingStatus = null;
+      void reloadBusinessProjectionTable(pending);
+      return true;
+    }
+
+    function windowV3MaybeReveal(viewport) {
+      const windowState = state.windowV3;
+      if (windowState.firstWindowReady || windowState.globalPending || !windowState.globalResult || windowState.error || windowState.stale) return;
+      if (!viewport.rowIndexes.length || !viewport.dateIndexes.length || !viewport.rowIndexes.every(function(rowIndex) {
+        return viewport.dateIndexes.every(function(dateIndex) {
+          return windowState.visibleCells.get(windowV3CellKey(rowIndex, dateIndex))?.status === "loaded";
+        });
+      })) return;
+      if (!windowV3AcceptPendingProjection(viewport)) return;
+      windowState.firstWindowReady = true;
+      windowV3SetInitialLoading(false);
+      markFreshTableDisplayed(state.composition);
+    }
+
     function clearWindowV3(options) {
       const windowState = state.windowV3;
       windowState.generation += 1;
@@ -9214,6 +9326,7 @@
       windowState.displayIndexes = [];
       windowState.globalKey = "";
       windowState.globalResult = null;
+      windowState.globalCheckedEpoch = 0;
       windowState.globalPending = false;
       windowState.stale = false;
       windowState.error = "";
@@ -9222,10 +9335,15 @@
       windowState.visibleCells.clear();
       windowState.visibleBytes = 0;
       windowState.visibleKey = "";
+      windowState.firstWindowReady = false;
       windowState.lastViewport = null;
       windowState.restorePosition = null;
       if (windowState.globalController) windowState.globalController.abort();
       windowState.globalController = null;
+      windowV3SetInitialLoading(false);
+      tableNode.classList.remove("window-v3-table");
+      tableNode.style.removeProperty("width");
+      windowV3ColsNode.innerHTML = "";
       if (oldSession && !(options && options.keepServerSession)) {
         void windowV3Request("cancel", {session_id: oldSession}).catch(function() {});
       }
@@ -17203,8 +17321,9 @@
         '" style="' +
         columnStyle(column, stickyLeft) +
         '" title="' +
-        escapeHtml(column.header) +
-        '">' +
+        escapeHtml(column.header_title || column.header) +
+        '"' + (column.header_aria_label ? ' aria-label="' + escapeHtml(column.header_aria_label) + '"' : '') +
+        (column.date_coverage ? ' data-date-coverage="' + escapeHtml(column.date_coverage) + '"' : '') + '>' +
         escapeHtml(column.header) +
         "</th>"
       );
@@ -17321,6 +17440,8 @@
         escapeHtml(String(cell.presentation_state || "")) +
         '" data-quality-state="' +
         escapeHtml(String(cell.quality_state || "")) +
+        '" data-cell-load-state="' +
+        escapeHtml(String(cell.ui_load_state || "loaded")) +
         '" data-sku-metric-highlight-index="' +
         escapeHtml(skuHighlightIndex >= 0 ? String(skuHighlightIndex + 1) : "") +
         '" style="' +
@@ -17445,6 +17566,9 @@
     }
 
     function formatCellValue(cell) {
+      if (cell.ui_load_state === "not_loaded" || cell.ui_load_state === "error") {
+        return String(cell.display_text || "");
+      }
       const formatter = formattersById.get(cell.formatter_id) || null;
       if (cell.value === null || cell.value === "" || typeof cell.value === "undefined") {
         if (formatter && formatter.null_display) {
@@ -23474,8 +23598,8 @@
             table_data_state: "windowed"
           })
         });
-        renderPage(renderPayload, {tableFreshness: "fresh"});
-        markFreshTableDisplayed(renderPayload);
+        windowV3SetInitialLoading(true);
+        renderPage(renderPayload, {tableFreshness: "hidden"});
         windowV3AcceptResult(manifest);
       } finally {
         windowState.controllers.delete(controller);
@@ -23521,6 +23645,7 @@
     async function loadWindowV3Global(key) {
       const windowState = state.windowV3;
       const generation = windowState.generation;
+      const checkedEpoch = state.businessProjection.pendingEpoch;
       const controller = new AbortController();
       windowState.globalController = controller;
       windowState.controllers.add(controller);
@@ -23536,12 +23661,14 @@
           throw new Error("Глобальный результат окна не согласован с версией таблицы.");
         }
         windowState.globalResult = result;
+        windowState.globalCheckedEpoch = checkedEpoch;
         windowState.globalPending = false;
         windowState.error = "";
         renderWindowV3Table();
         windowV3AcceptResult(result);
       } catch (error) {
         if (generation !== windowState.generation || controller.signal.aborted) return;
+        if (error.windowStale && windowV3RetryPendingProjection()) return;
         windowState.globalPending = false;
         windowState.stale = !!error.windowStale;
         windowState.error = String(error.message || error);
@@ -23565,6 +23692,7 @@
         if (windowState.globalController) windowState.globalController.abort();
         windowState.globalKey = key;
         windowState.globalResult = null;
+        windowState.globalCheckedEpoch = 0;
         windowState.globalPending = true;
         windowState.visibleCells.clear();
         windowState.visibleBytes = 0;
@@ -23616,6 +23744,10 @@
         windowState.visibleCells.clear();
         windowState.visibleBytes = 0;
         windowState.visibleKey = "";
+        if (!windowV3AcceptPendingProjection(null)) return;
+        windowState.firstWindowReady = true;
+        windowV3SetInitialLoading(false);
+        markFreshTableDisplayed(state.composition);
         setStateBox("warning", "Пустой результат", "Фильтры не вернули строки во всём выбранном периоде.");
         return;
       }
@@ -23639,7 +23771,7 @@
     }
 
     function windowV3ColumnWidth(column) {
-      return Math.max(24, Number(column.size || column.min_size || 180));
+      return Math.max(24, Number(column.size || column.min_size || 180), Number(column.min_size || 0));
     }
 
     function windowV3Viewport() {
@@ -23737,9 +23869,9 @@
         return entry.cell || {value: null, display_text: "—", cell_kind: "empty", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default"};
       }
       if (entry && entry.status === "error") {
-        return {value: null, display_text: "Ошибка чтения", cell_kind: "unknown", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default", presentation_reason: entry.message};
+        return {value: null, display_text: "Ошибка чтения", ui_load_state: "error", cell_kind: "unknown", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default", presentation_reason: entry.message};
       }
-      return {value: null, display_text: "Загрузка…", cell_kind: "unknown", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default", presentation_reason: "Ячейка ещё не загружена"};
+      return {value: null, display_text: "Загрузка…", ui_load_state: "not_loaded", cell_kind: "unknown", formatter_id: "empty_default", renderer_id: "renderer:empty:empty_default", presentation_reason: "Ячейка ещё не загружена"};
     }
 
     function windowV3Spacer(width, header) {
@@ -23753,13 +23885,25 @@
       const offsets = buildStickyOffsets(columns);
       const allColumns = viewport.staticColumns.length + viewport.dateColumns.length
         + (viewport.leftWidth ? 1 : 0) + (viewport.rightWidth ? 1 : 0) + 1;
+      const widths = viewport.staticColumns.map(windowV3ColumnWidth);
+      if (viewport.leftWidth) widths.push(viewport.leftWidth);
+      viewport.dateColumns.forEach(function(column) { widths.push(windowV3ColumnWidth(column)); });
+      if (viewport.rightWidth) widths.push(viewport.rightWidth);
+      widths.push(28);
+      tableNode.classList.add("window-v3-table");
+      tableNode.style.width = widths.reduce(function(sum, width) { return sum + width; }, 0) + "px";
+      windowV3ColsNode.innerHTML = widths.map(function(width) { return '<col style="width:' + width + 'px">'; }).join("");
       const header = viewport.staticColumns.map(function(column) { return buildHeaderCell(column, offsets[column.id] || 0); });
       if (viewport.leftWidth) header.push(windowV3Spacer(viewport.leftWidth, true));
       viewport.dateColumns.forEach(function(column, index) {
         const coverage = state.windowV3.manifest.dates[viewport.dateIndexes[index]] || {};
         const label = coverage.coverage === "covered" ? " · покрыта снимком " + String(coverage.source_as_of_date || "")
           : coverage.coverage === "missing" ? " · нет бизнес-факта" : "";
-        header.push(buildHeaderCell(Object.assign({}, column, {header: String(column.header || "") + label}), 0));
+        header.push(buildHeaderCell(Object.assign({}, column, {
+          header_title: String(column.header || "") + label,
+          header_aria_label: String(column.header || "") + label,
+          date_coverage: coverage.coverage || "exact"
+        }), 0));
       });
       if (viewport.rightWidth) header.push(windowV3Spacer(viewport.rightWidth, true));
       header.push(buildSpacerHeaderCell());
@@ -23821,9 +23965,10 @@
         void windowV3FillViewport(viewport, windowState.generation, windowState.viewportGeneration, controller.signal);
       }
       windowV3Paint(viewport);
+      windowV3MaybeReveal(viewport);
     }
 
-    function windowV3RememberChunk(key, chunk) {
+    function windowV3RememberChunk(key, chunk, checkedEpoch) {
       const windowState = state.windowV3;
       const bytes = Number(chunk.decoded_bytes || 0);
       if (!Number.isInteger(bytes) || bytes <= 0 || bytes > 8388608) {
@@ -23833,7 +23978,7 @@
         windowState.transferBytes -= windowState.transferChunks.get(key).bytes;
         windowState.transferChunks.delete(key);
       }
-      windowState.transferChunks.set(key, {chunk: chunk, bytes: bytes});
+      windowState.transferChunks.set(key, {chunk: chunk, bytes: bytes, checkedEpoch: checkedEpoch});
       windowState.transferBytes += bytes;
       while (windowState.transferChunks.size > 2 || windowState.transferBytes > 16777216) {
         const oldest = windowState.transferChunks.keys().next().value;
@@ -23842,7 +23987,7 @@
       }
     }
 
-    function windowV3RememberCell(rowIndex, dateIndex, cell) {
+    function windowV3RememberCell(rowIndex, dateIndex, cell, checkedEpoch) {
       const windowState = state.windowV3;
       const key = windowV3CellKey(rowIndex, dateIndex);
       const bytes = cell ? JSON.stringify(cell).length * 2 : 16;
@@ -23851,7 +23996,7 @@
       if (windowState.visibleBytes + bytes > 16777216) {
         throw new Error("Видимое окно превысило лимит 16 MiB. Уменьшите число одновременно видимых строк или дат.");
       }
-      windowState.visibleCells.set(key, {status: "loaded", cell: cell, bytes: bytes});
+      windowState.visibleCells.set(key, {status: "loaded", cell: cell, bytes: bytes, checkedEpoch: checkedEpoch});
       windowState.visibleBytes += bytes;
     }
 
@@ -23899,19 +24044,22 @@
             const cacheKey = sessionId + ":" + token + ":" + currentPair[0] + ":" + selection.join(",");
             const cached = windowState.transferChunks.get(cacheKey);
             let chunk;
+            let checkedEpoch;
             if (cached) {
               windowState.transferChunks.delete(cacheKey);
               windowState.transferChunks.set(cacheKey, cached);
               chunk = cached.chunk;
+              checkedEpoch = cached.checkedEpoch;
             } else {
               const seek = await windowV3Request("seek", seekParams, signal);
               if (!current()) return;
               if (!seek.cursor) throw new Error("Сервер не выдал курсор окна.");
+              checkedEpoch = state.businessProjection.pendingEpoch;
               chunk = await windowV3Request("chunk", {
                 session_id: sessionId, content_token: token, cursor: seek.cursor
               }, signal);
               if (!current()) return;
-              windowV3RememberChunk(cacheKey, chunk);
+              windowV3RememberChunk(cacheKey, chunk, checkedEpoch);
             }
             if (String(chunk.session_id || "") !== sessionId || String(chunk.content_token || "") !== token) {
               throw new Error("Порция принадлежит другой версии окна.");
@@ -23951,7 +24099,7 @@
               coveredIndexes.forEach(function(dateIndex, index) {
                 if (currentPair.includes(dateIndex)) {
                   windowV3RememberCell(rowIndex, dateIndex,
-                    byDate.get(index) || windowV3CompactCell(fields, defaults, [index]));
+                    byDate.get(index) || windowV3CompactCell(fields, defaults, [index]), checkedEpoch);
                 }
               });
             });
@@ -23959,6 +24107,7 @@
             pending = pending.slice(returnedCount);
             if (current()) {
               windowV3Paint(viewport);
+              windowV3MaybeReveal(viewport);
               await new Promise(function(resolve) { window.requestAnimationFrame(resolve); });
             }
           }
@@ -23967,6 +24116,7 @@
       } catch (error) {
         if (!current() || (error && error.name === "AbortError")) return;
         if (error.windowStale) {
+          if (windowV3RetryPendingProjection()) return;
           windowState.stale = true;
           windowState.error = String(error.message || error);
           renderWindowV3Table();
@@ -23981,6 +24131,9 @@
           });
         });
         windowV3Paint(viewport);
+        if (!windowState.firstWindowReady) {
+          setStateBox("error", "Ошибка видимого окна", escapeHtml(windowState.error));
+        }
       }
     }
 
@@ -23991,6 +24144,12 @@
     function rememberBusinessProjection(payload) {
       const projection = businessProjectionMeta(payload);
       const revisionNo = Number(projection.revision_no || 0);
+      const tableState = String((((payload || {}).table_surface || {}).table_data_state) || "");
+      if (((payload || {}).meta || {}).window_v3_available === true
+          && (tableState === "deferred" || tableState === "windowed")) {
+        if (revisionNo > state.businessProjection.revisionNo) windowV3QueuePendingProjection(projection);
+        return;
+      }
       if (revisionNo >= state.businessProjection.revisionNo) {
         state.businessProjection.revisionNo = revisionNo;
         state.businessProjection.revisionId = String(projection.revision_id || "");
@@ -24071,14 +24230,29 @@
       if (!previousPayload || !isVitrinaTabActive()) {
         return;
       }
-      if (state.windowV3.manifest) {
+      if (previousPayload.meta && previousPayload.meta.window_v3_available === true) {
+        const projection = state.businessProjection;
+        if (statusPayload && Number((projection.pendingStatus || {}).revision_no || 0)
+            >= Number(statusPayload.revision_no || 0)) return;
+        if (!state.windowV3.manifest || projection.refreshInProgress) {
+          windowV3QueuePendingProjection(statusPayload);
+          return;
+        }
+        windowV3QueuePendingProjection(statusPayload);
+        projection.refreshInProgress = true;
         const scrollTop = tableScrollNode.scrollTop;
         const scrollLeft = tableScrollNode.scrollLeft;
-        await loadPageComposition({activeTabOnly: true, awaitTable: true, preserveWindowPosition: {top: scrollTop, left: scrollLeft}});
-        if (statusPayload) {
-          state.businessProjection.revisionNo = Number(statusPayload.revision_no || state.businessProjection.revisionNo);
-          state.businessProjection.revisionId = String(statusPayload.revision_id || state.businessProjection.revisionId);
-          state.businessProjection.publishedAt = String(statusPayload.published_at || state.businessProjection.publishedAt);
+        try {
+          await loadPageComposition({activeTabOnly: true, awaitTable: true, preserveWindowPosition: {top: scrollTop, left: scrollLeft}});
+        } finally {
+          projection.refreshInProgress = false;
+          const pending = projection.pendingStatus;
+          const retryAfterRefresh = projection.retryAfterRefresh;
+          projection.retryAfterRefresh = false;
+          if (pending && Number(pending.revision_no || 0) > projection.revisionNo
+              && (retryAfterRefresh || state.windowV3.firstWindowReady)) {
+            windowV3RetryPendingProjection();
+          }
         }
         return;
       }

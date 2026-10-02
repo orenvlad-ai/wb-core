@@ -20,10 +20,38 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import sys
 from threading import Event, RLock
 import time
+import traceback
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
+
+
+def _log_unexpected_window_error(operation: str, exc: Exception) -> None:
+    """Log only fixed diagnostic fields; worker exceptions may contain business data."""
+
+    try:
+        root = Path(__file__).resolve().parents[2]
+        frames = []
+        for frame in traceback.extract_tb(exc.__traceback__):
+            try:
+                relative = Path(frame.filename).resolve().relative_to(root)
+            except ValueError:
+                continue
+            frames.append({
+                "file": relative.as_posix(), "function": frame.name,
+                "line": frame.lineno,
+            })
+        print(json.dumps({
+            "event": "web_vitrina_window_v3_unexpected_error_v1",
+            "operation": operation if operation in {"manifest", "global", "chunk"} else "other",
+            "exception_class": type(exc).__name__,
+            "frames": frames[-8:],
+        }, ensure_ascii=True, separators=(",", ":")), file=sys.stderr, flush=True)
+    except Exception:
+        # Diagnostics must not change the public error or job lifecycle.
+        pass
 
 from packages.business_time import (
     business_date_from_timestamp, current_business_date_iso, default_business_as_of_date,
@@ -1253,16 +1281,19 @@ class WindowV3Service:
             job = _WindowJob(job_id, owner_key, operation, session_id,
                              cancelled, future, time.monotonic())
             self._jobs[job_id] = job
-            future.add_done_callback(lambda completed: self._job_done(job_id, completed))
+            future.add_done_callback(
+                lambda completed: self._job_done(job_id, operation, completed)
+            )
         return 202, self._pending_payload(job_id)
 
-    def _job_done(self, job_id: str, future: Future) -> None:
+    def _job_done(self, job_id: str, operation: str, future: Future) -> None:
         try:
             prepared = future.result()
             response: tuple[int, dict[str, Any] | WindowV3Prepared] = (200, prepared)
         except WindowV3Error as exc:
             response = (exc.status, exc.payload())
-        except Exception:
+        except Exception as exc:
+            _log_unexpected_window_error(operation, exc)
             # Do not retain a Future exception traceback with its worker locals.
             response = (500, WindowV3Error(
                 "window_internal_error", 500, "Не удалось построить окно витрины."
