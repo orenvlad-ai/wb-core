@@ -150,9 +150,11 @@ def main() -> None:
 
 
 class LocalWebVitrinaFixtureServer:
-    def __init__(self, *, with_ready_snapshot: bool, now: datetime | None = None) -> None:
+    def __init__(self, *, with_ready_snapshot: bool, now: datetime | None = None,
+                 advertise_window_v3: bool = False) -> None:
         self.with_ready_snapshot = with_ready_snapshot
         self.now = now or NOW
+        self.advertise_window_v3 = advertise_window_v3
         self.server = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
@@ -222,7 +224,9 @@ class LocalWebVitrinaFixtureServer:
             sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
-        self.server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        self.server = build_registry_upload_http_server(
+            config, entrypoint=entrypoint, advertise_window_v3=self.advertise_window_v3,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{config.port}"

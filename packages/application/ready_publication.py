@@ -48,6 +48,12 @@ class ExpectedReady:
 
 @contextmanager
 def readonly(db_path):
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    borrowed = borrowed_operational_connection(Path(db_path))
+    if borrowed is not None:
+        with borrowed as conn:
+            yield conn
+        return
     with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")

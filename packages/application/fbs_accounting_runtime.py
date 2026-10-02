@@ -75,7 +75,17 @@ def admit(conn):
 
 def load(runtime_dir, *, version=None, connection=None):
     file = path(runtime_dir)
-    if not file.exists():
+    if connection is None:
+        from packages.application.web_vitrina_window_read_context import active_window_read_context
+        window_context = active_window_read_context()
+        if window_context is not None:
+            connection = window_context.borrow_book(file)
+            # A missing book is pinned as absence for this whole window step.
+            if connection is None:
+                if version is not None:
+                    raise ValueError("fbs_accounting_bound_revision_missing")
+                return None, None
+    if connection is None and not file.exists():
         if version is not None:
             raise ValueError("fbs_accounting_bound_revision_missing")
         return None, None

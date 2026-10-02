@@ -1532,6 +1532,10 @@ def _ensure_columns(
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    borrowed = borrowed_operational_connection(path)
+    if borrowed is not None:
+        return borrowed
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")

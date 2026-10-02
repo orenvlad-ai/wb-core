@@ -23,13 +23,13 @@ from packages.adapters.registry_upload_http_entrypoint import (
 def main() -> None:
     template = (ROOT / "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html").read_text()
     match = re.search(
-        r"    function decodeTableResponse\(payload\) \{.*?\n    \}\n\n    function businessProjectionMeta",
+        r"    function decodeTableResponse\(payload\) \{.*?\n    \}\n\n    function windowV3Period",
         template,
         re.S,
     )
     if match is None:
         raise AssertionError("table decoder not found in served template")
-    decoder = match.group(0).rsplit("\n\n    function businessProjectionMeta", 1)[0]
+    decoder = match.group(0).rsplit("\n\n    function windowV3Period", 1)[0]
     with LocalWebVitrinaFixtureServer(with_ready_snapshot=True) as base_url:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)

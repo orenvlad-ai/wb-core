@@ -935,7 +935,12 @@ def load_supplier_line_cost_breakdown(
     selected_id = str(shipment_id or "").strip()
     if not selected_id:
         return {}
-    with _connect_readonly(runtime.db_path) as conn:
+    from packages.application.web_vitrina_window_read_context import (
+        active_window_read_context, borrowed_operational_connection,
+        WindowReadContextError,
+    )
+    borrowed = borrowed_operational_connection(runtime.db_path)
+    with (borrowed if borrowed is not None else _connect_readonly(runtime.db_path)) as conn:
         tables = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -948,13 +953,16 @@ def load_supplier_line_cost_breakdown(
             "sheet_vitrina_v1_supplier_financial_expense_lines",
         }
         if not required.issubset(tables):
+            if active_window_read_context() is not None:
+                raise WindowReadContextError("window supplier source schema is incomplete")
             return {}
         # Keep every primary-source row and the active certification pointer
         # in one SQLite read snapshot.  Without an explicit transaction a
         # concurrent document commit could make the explanation combine
         # revisions that the canonical warehouse calculation never observed
         # together.
-        conn.execute("BEGIN")
+        if borrowed is None:
+            conn.execute("BEGIN")
         sources = {
             "shipments": [dict(row) for row in conn.execute(
                 "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",

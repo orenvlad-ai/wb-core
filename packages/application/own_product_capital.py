@@ -100,10 +100,31 @@ class OwnProductCapitalBlock:
     ) -> None:
         self.runtime = runtime
         self.timestamp_factory = timestamp_factory or _default_timestamp_factory
-        self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+        from packages.application.web_vitrina_window_read_context import active_window_read_context
+        window_read = active_window_read_context() is not None
+        if window_read:
+            if not self.runtime.runtime_dir.is_dir():
+                raise ValueError("window runtime directory is missing")
+        else:
+            self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.runtime.db_path) as conn:
             _ensure_schema(conn)
-            _ensure_own_capital_schema(conn)
+            if not window_read:
+                _ensure_own_capital_schema(conn)
+            else:
+                required = {
+                    "sheet_vitrina_v1_own_capital_payment_layers",
+                    "sheet_vitrina_v1_own_capital_events",
+                    "sheet_vitrina_v1_own_capital_wb_outstanding",
+                    "sheet_vitrina_v1_own_capital_daily_state",
+                    "sheet_vitrina_v1_own_capital_blockers",
+                    "sheet_vitrina_v1_own_capital_expense_certifications",
+                }
+                present = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )}
+                if not required.issubset(present):
+                    raise ValueError("window product capital schema is incomplete")
 
     def functional_warehouse_cutover_date(self) -> str:
         """Return the canonical business date of the active warehouse boundary."""
@@ -2211,8 +2232,15 @@ class OwnProductCapitalBlock:
             from packages.application.warehouse_business_projection import (
                 ensure_functional_version_business_time_schema,
             )
-
-            ensure_functional_version_business_time_schema(conn)
+            from packages.application.web_vitrina_window_read_context import active_window_read_context
+            if active_window_read_context() is None:
+                ensure_functional_version_business_time_schema(conn)
+            else:
+                columns = {str(item[1]) for item in conn.execute(
+                    "PRAGMA table_info(sheet_vitrina_v1_warehouse_functional_versions)"
+                )}
+                if not {"business_effective_date", "published_at"}.issubset(columns):
+                    raise ValueError("window functional version schema is incomplete")
             cutover = conn.execute(
                 """SELECT cutover_at FROM sheet_vitrina_v1_warehouse_functional_cutovers
                    WHERE cutover_id='warehouse_functional_cutover_v1' AND status='posted'"""

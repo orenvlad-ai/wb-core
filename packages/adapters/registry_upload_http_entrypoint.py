@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from email.parser import BytesParser
@@ -77,6 +78,7 @@ from packages.application.web_vitrina_performance import (
 from packages.application.web_vitrina_page_composition import (
     build_web_vitrina_page_composition_probe,
 )
+from packages.application.web_vitrina_window_read_context import window_read_context
 from packages.application.sheet_vitrina_v1_ads import SheetVitrinaV1AdsError
 from packages.adapters import search_cluster_cleaner_http
 from packages.application.wb_prices_management import WbPricesManagementError
@@ -627,6 +629,8 @@ def load_registry_upload_http_entrypoint_config() -> RegistryUploadHttpEntrypoin
 def build_registry_upload_http_server(
     config: RegistryUploadHttpEntrypointConfig,
     entrypoint: RegistryUploadHttpEntrypoint | None = None,
+    *,
+    advertise_window_v3: bool = True,
 ) -> HTTPServer:
     runtime_entrypoint = entrypoint or RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
     handler_cls = _build_handler(
@@ -639,8 +643,18 @@ def build_registry_upload_http_server(
         sheet_status_path=config.sheet_status_path,
         sheet_job_path=DEFAULT_SHEET_JOB_PATH,
         sheet_operator_ui_path=config.sheet_operator_ui_path,
+        advertise_window_v3=advertise_window_v3,
     )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
+
+
+def _sheet_vitrina_control_read_context(entrypoint: RegistryUploadHttpEntrypoint):
+    runtime = entrypoint.runtime
+    if not os.path.lexists(runtime.db_path):
+        # Preserve first-run bootstrap for a truly absent operational store.
+        # An existing or damaged store must never fall back to a RW read.
+        return nullcontext()
+    return window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir)
 
 
 def _build_handler(
@@ -654,9 +668,11 @@ def _build_handler(
     sheet_status_path: str,
     sheet_job_path: str,
     sheet_operator_ui_path: str,
+    advertise_window_v3: bool = True,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         runtime_entrypoint = entrypoint
+        _window_v3_service = None
 
         def handle_one_request(self) -> None:
             try:
@@ -3987,6 +4003,11 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
+                if "window_format" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
+                    _handle_web_vitrina_window_v3_request(
+                        self, parsed.query, entrypoint, request_started_perf=request_started_perf,
+                    )
+                    return
                 try:
                     surface = _resolve_sheet_web_vitrina_surface_from_query(parsed.query)
                     include_source_status = _resolve_optional_query_bool(parsed.query, "include_source_status")
@@ -4032,6 +4053,8 @@ def _build_handler(
                             table_format=table_format,
                             shell_format=shell_format,
                         )
+                        if shell_format == "metadata_v2" and not include_table_data:
+                            payload.setdefault("meta", {})["window_v3_available"] = bool(advertise_window_v3)
                     except Exception as exc:  # pragma: no cover - last-resort public JSON guard
                         _write_web_vitrina_page_composition_response(
                             self,
@@ -4239,9 +4262,10 @@ def _build_handler(
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_USER_CONFIG_PATH:
                 try:
-                    payload = entrypoint.handle_sheet_web_vitrina_user_config_request(
-                        user_key=_current_web_user_config_key(self),
-                    )
+                    with _sheet_vitrina_control_read_context(entrypoint):
+                        payload = entrypoint.handle_sheet_web_vitrina_user_config_request(
+                            user_key=_current_web_user_config_key(self),
+                        )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -5780,21 +5804,21 @@ def _build_handler(
 
             if parsed.path == sheet_status_path:
                 try:
-                    payload = entrypoint.handle_sheet_status_request(
-                        as_of_date=_resolve_as_of_date_from_query(parsed.query) or None
-                    )
-                except ValueError as exc:
-                    _write_json_response(
-                        self,
-                        HTTPStatus.UNPROCESSABLE_ENTITY,
-                        {
-                            "error": str(exc),
-                            "server_context": entrypoint.build_sheet_server_context(),
-                            "manual_context": entrypoint.build_sheet_manual_context(),
-                            "load_context": entrypoint.build_sheet_load_context(),
-                        },
-                    )
-                    return
+                    with _sheet_vitrina_control_read_context(entrypoint):
+                        try:
+                            payload = entrypoint.handle_sheet_status_request(
+                                as_of_date=_resolve_as_of_date_from_query(parsed.query) or None
+                            )
+                        except ValueError as exc:
+                            payload = {
+                                "error": str(exc),
+                                "server_context": entrypoint.build_sheet_server_context(),
+                                "manual_context": entrypoint.build_sheet_manual_context(),
+                                "load_context": entrypoint.build_sheet_load_context(),
+                            }
+                            status = HTTPStatus.UNPROCESSABLE_ENTITY
+                        else:
+                            status = HTTPStatus.OK
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -5805,7 +5829,7 @@ def _build_handler(
 
                 _write_json_response(
                     self,
-                    HTTPStatus.OK,
+                    status,
                     payload,
                 )
                 return
@@ -6273,6 +6297,71 @@ def _build_handler(
     return RegistryUploadHandler
 
 
+def _handle_web_vitrina_window_v3_request(
+    handler: BaseHTTPRequestHandler,
+    query_string: str,
+    entrypoint: RegistryUploadHttpEntrypoint,
+    *,
+    request_started_perf: float,
+) -> None:
+    headers = {"Cache-Control": "private, no-store"}
+    if len(query_string.encode("utf-8")) > 4096:
+        _write_json_response(handler, HTTPStatus.REQUEST_URI_TOO_LONG,
+                             {"error": "window_v3 query exceeds 4096 bytes", "code": "window_query_too_large"},
+                             extra_headers=headers)
+        return
+    try:
+        pairs = urllib_parse.parse_qsl(query_string, keep_blank_values=True, strict_parsing=True, max_num_fields=32)
+        if not pairs or any(not key for key, _value in pairs):
+            raise ValueError("window_v3 query has an empty parameter")
+        if len({key for key, _value in pairs}) != len(pairs):
+            raise ValueError("window_v3 query has duplicate parameters")
+        query = dict(pairs)
+        if query.get("surface") != DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE:
+            raise ValueError("window_v3 requires surface=page_composition")
+        if query.get("window_format") != "window_v3":
+            raise ValueError("unsupported window_format")
+        operation = query.get("window_op", "")
+        if not operation:
+            raise ValueError("window_op is required")
+        params = {key: value for key, value in query.items()
+                  if key not in {"surface", "window_format", "window_op"}}
+    except ValueError as exc:
+        _write_json_response(handler, HTTPStatus.UNPROCESSABLE_ENTITY,
+                             {"error": str(exc), "code": "window_invalid_query"}, extra_headers=headers)
+        return
+
+    auth_config = _web_auth_config()
+    owner = (_authenticated_web_user(handler, auth_config) if auth_config["enabled"]
+             else {"username": "anonymous_local", "role": "local", "allowed_sections": ["vitrina"]})
+    if owner is None:
+        _write_json_response(handler, HTTPStatus.UNAUTHORIZED,
+                             {"error": "authentication_required", "code": "window_auth_required"},
+                             extra_headers=headers)
+        return
+    from packages.application.web_vitrina_window_v3 import WindowV3Error
+    prepared_type = ()
+    try:
+        from packages.application.web_vitrina_window_v3 import WindowV3Prepared, WindowV3Service
+
+        prepared_type = WindowV3Prepared
+        service = handler.__class__._window_v3_service
+        if service is None:
+            service = WindowV3Service(block=entrypoint.web_vitrina_block)
+            handler.__class__._window_v3_service = service
+        status, payload = service.request(operation, params, owner=owner)
+    except WindowV3Error as exc:
+        status, payload = exc.status, exc.payload()
+    except Exception as exc:  # pragma: no cover - bounded public JSON guard
+        status, payload = 500, {"error": f"window_v3 request failed: {exc}", "code": "window_internal_error"}
+    if isinstance(payload, prepared_type):
+        _write_web_vitrina_window_v3_prepared_response(
+            handler, HTTPStatus(status), payload, request_started_perf=request_started_perf,
+        )
+    else:
+        _write_json_response(handler, HTTPStatus(status), payload, extra_headers=headers)
+
+
 class RegistryUploadHttpServer(HTTPServer):
     """Минимальный HTTP server без reverse-DNS lookup на bind."""
 
@@ -6281,6 +6370,15 @@ class RegistryUploadHttpServer(HTTPServer):
         host, port = self.server_address[:2]
         self.server_name = host
         self.server_port = port
+
+    def server_close(self) -> None:
+        service = getattr(self.RequestHandlerClass, "_window_v3_service", None)
+        try:
+            if service is not None:
+                service.close()
+                self.RequestHandlerClass._window_v3_service = None
+        finally:
+            super().server_close()
 
 
 def _load_request_payload(
@@ -7685,6 +7783,73 @@ def _encode_web_vitrina_page_composition_body(
 
 def _bounded_http_timing_ms(value: float) -> float:
     return round(min(3_600_000.0, max(0.0, float(value))), 3)
+
+
+def _web_vitrina_client_accepts_gzip(header: str) -> bool:
+    explicit = None
+    wildcard = False
+    for item in str(header or "").split(","):
+        parts = [part.strip().lower() for part in item.split(";")]
+        coding = parts[0]
+        if coding not in {"gzip", "*"}:
+            continue
+        quality = 1.0
+        for parameter in parts[1:]:
+            if parameter.startswith("q="):
+                try:
+                    quality = float(parameter[2:])
+                except ValueError:
+                    quality = 0.0
+                break
+        accepted = 0.0 < quality <= 1.0
+        if coding == "gzip":
+            explicit = accepted
+        else:
+            wildcard = accepted
+    return explicit if explicit is not None else wildcard
+
+
+def _write_web_vitrina_window_v3_prepared_response(
+    handler: BaseHTTPRequestHandler,
+    status: HTTPStatus,
+    prepared: Any,
+    *,
+    request_started_perf: float,
+) -> None:
+    accepts_gzip = _web_vitrina_client_accepts_gzip(handler.headers.get("Accept-Encoding", ""))
+    body = prepared.gzip_bytes if accepts_gzip else prepared.json_bytes
+    handler.send_response(status.value)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("Vary", "Accept-Encoding")
+    if accepts_gzip:
+        handler.send_header("Content-Encoding", "gzip")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Server-Timing", ", ".join((
+        f"build;dur={_bounded_http_timing_ms(prepared.build_ms):.3f}",
+        f"encode;dur={_bounded_http_timing_ms(prepared.encode_ms):.3f}",
+        f"gzip;dur={_bounded_http_timing_ms(prepared.gzip_ms):.3f}",
+    )))
+    handler.end_headers()
+    write_started_perf = time.perf_counter()
+    disconnected = False
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):  # pragma: no cover - client disconnected
+        disconnected = True
+    print(json.dumps({
+        "event": "web_vitrina_window_v3_http_response_v1",
+        "kind": str(prepared.kind),
+        "status": int(status.value),
+        "request_ms": _bounded_http_timing_ms((time.perf_counter() - request_started_perf) * 1000),
+        "build_ms": _bounded_http_timing_ms(prepared.build_ms),
+        "encode_ms": _bounded_http_timing_ms(prepared.encode_ms),
+        "gzip_ms": _bounded_http_timing_ms(prepared.gzip_ms),
+        "write_ms": _bounded_http_timing_ms((time.perf_counter() - write_started_perf) * 1000),
+        "logical_bytes": len(prepared.json_bytes),
+        "wire_bytes": len(body),
+        "disconnected": disconnected,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
 
 
 def _write_web_vitrina_page_composition_response(

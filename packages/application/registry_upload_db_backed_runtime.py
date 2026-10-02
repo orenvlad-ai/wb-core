@@ -829,9 +829,12 @@ class RegistryUploadDbBackedRuntime:
         date_key = str(column_date or "").strip()
         if not date_key:
             raise ValueError("column_date is required for cross-bundle ready snapshot read")
-        with sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+        borrowed = borrowed_operational_connection(self.db_path)
+        with (borrowed if borrowed is not None else sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only=ON")
+            if borrowed is None:
+                conn.execute("PRAGMA query_only=ON")
             row = conn.execute(
                 """
                 SELECT snapshot.plan_json
@@ -11768,6 +11771,10 @@ def _to_namespace(value: Any) -> Any:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    borrowed = borrowed_operational_connection(db_path)
+    if borrowed is not None:
+        return borrowed
     timeout_ms = _SQLITE_BUSY_TIMEOUT_MS.get() or DEFAULT_SQLITE_BUSY_TIMEOUT_MS
     with _OPERATIONAL_STORE_REGISTRIES_LOCK:
         registry = _OPERATIONAL_STORE_REGISTRIES.get(Path(db_path).resolve())
@@ -11926,6 +11933,11 @@ def _cost_price_dataset_version_exists(conn: sqlite3.Connection, dataset_version
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    from packages.application.web_vitrina_window_read_context import active_window_read_context
+    if active_window_read_context() is not None:
+        # The short read context verified the required schema before BEGIN.
+        # Never bootstrap or commit an operational store from a window GET.
+        return
     schema_key = _schema_ready_key(conn)
     if schema_key in _SCHEMA_READY_KEYS:
         return
