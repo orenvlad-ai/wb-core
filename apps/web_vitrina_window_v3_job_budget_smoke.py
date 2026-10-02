@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import gc
+import io
+import json
+from contextlib import redirect_stderr
 from pathlib import Path
 import sys
 import time
@@ -89,9 +92,17 @@ class WindowJobBudgetSmoke(unittest.TestCase):
             retained.append(weakref.ref(large))
             raise RuntimeError("fixture failure")
 
-        status, pending = self.service._submit(OWNER, "chunk", "s1", fail)
-        self.assertEqual(status, 202)
-        wait_completed(self.service, pending["job_id"])
+        diagnostic = io.StringIO()
+        with redirect_stderr(diagnostic):
+            status, pending = self.service._submit(OWNER, "chunk", "s1", fail)
+            self.assertEqual(status, 202)
+            wait_completed(self.service, pending["job_id"])
+        logged = json.loads(diagnostic.getvalue().strip())
+        self.assertEqual(logged["event"], "web_vitrina_window_v3_unexpected_error_v1")
+        self.assertEqual(logged["operation"], "chunk")
+        self.assertEqual(logged["exception_class"], "RuntimeError")
+        self.assertTrue(logged["frames"])
+        self.assertNotIn("fixture failure", diagnostic.getvalue())
         self.assertEqual(self.service._poll(pending["job_id"], OWNER)[0], 500)
         gc.collect()
         self.assertIsNone(retained[0]())
