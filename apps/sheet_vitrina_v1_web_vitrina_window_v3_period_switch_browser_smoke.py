@@ -28,9 +28,10 @@ NEW_FROM = NEW_TO = "2026-04-21"
 class ControlledRoute:
     def __init__(self, mode: str) -> None:
         self.mode = mode
-        self.old_poll_started = asyncio.Event()
+        self.old_response_started = asyncio.Event()
         self.release_old = asyncio.Event()
         self.old_job_id = "delayed-old-" + mode
+        self.old_period_active = True
         self.intercepted = False
         self.late_attempted = False
         self.legacy_full = 0
@@ -50,10 +51,18 @@ class ControlledRoute:
             await route.fulfill(status=202, content_type="application/json", body=json.dumps(
                 {"state": "pending", "job_id": self.old_job_id, "retry_after_ms": 25}))
             return
-        if self.mode == "chunk" and operation == "chunk" and not self.intercepted:
+        if self.mode == "chunk_pending" and operation == "chunk" and self.old_period_active:
+            # A viewport redraw may abort this 202 before its first job poll.
+            # Keep holding old-period chunks until a poll is actually in flight.
             self.intercepted = True
             await route.fulfill(status=202, content_type="application/json", body=json.dumps(
                 {"state": "pending", "job_id": self.old_job_id, "retry_after_ms": 25}))
+            return
+        if self.mode == "chunk_ready" and operation == "chunk" and self.old_period_active:
+            self.intercepted = True
+            self.old_response_started.set()
+            await self.release_old.wait()
+            await self._fulfill_late_result(route, "chunk")
             return
         if self.mode == "chunk_error" and operation == "chunk" and not self.intercepted:
             self.intercepted = True
@@ -62,22 +71,25 @@ class ControlledRoute:
                 {"message": "one-shot chunk failure"}))
             return
         if operation == "job" and query.get("job_id") == [self.old_job_id]:
-            self.old_poll_started.set()
+            self.old_response_started.set()
             await self.release_old.wait()
-            self.late_attempted = True
             kind = "manifest" if self.mode == "manifest" else "chunk"
-            stale = {"response_schema_version": 3, "window_format": "window_v3", "kind": kind,
-                     "session_id": "delayed-old-session", "content_token": "delayed-old-token",
-                     "period": {"date_from": OLD_FROM, "date_to": OLD_TO},
-                     "rows": [], "dates": []}
-            try:
-                await route.fulfill(status=200, content_type="application/json", body=json.dumps(stale))
-            except Exception:
-                # An aborted fetch may already have closed its route. The old
-                # worker still attempted to publish after the new generation.
-                pass
+            await self._fulfill_late_result(route, kind)
             return
         await route.continue_()
+
+    async def _fulfill_late_result(self, route, kind: str) -> None:
+        self.late_attempted = True
+        stale = {"response_schema_version": 3, "window_format": "window_v3", "kind": kind,
+                 "session_id": "delayed-old-session", "content_token": "delayed-old-token",
+                 "period": {"date_from": OLD_FROM, "date_to": OLD_TO},
+                 "rows": [], "dates": []}
+        try:
+            await route.fulfill(status=200, content_type="application/json", body=json.dumps(stale))
+        except Exception:
+            # An aborted fetch may already have closed its route. The old
+            # worker still attempted to publish after the new generation.
+            pass
 
 
 async def wait_new_window(page, old_session: str = "") -> dict:
@@ -114,12 +126,13 @@ async def check_late_response(browser, base_url: str, mode: str) -> None:
         {"history_mode": "explicit", "date_from": OLD_FROM, "date_to": OLD_TO})
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=90000)
-        await asyncio.wait_for(route.old_poll_started.wait(), timeout=90)
+        await asyncio.wait_for(route.old_response_started.wait(), timeout=90)
         old_session = await page.evaluate("() => state.windowV3.sessionId")
         if mode == "manifest" and old_session:
             raise AssertionError("held old manifest unexpectedly became active")
-        if mode == "chunk" and not old_session:
+        if mode.startswith("chunk_") and not old_session:
             raise AssertionError("held old chunk had no active old session")
+        route.old_period_active = False
         await switch_period(page)
         fresh = await wait_new_window(page, old_session)
         route.release_old.set()
@@ -185,11 +198,12 @@ async def main() -> None:
             browser = await playwright.chromium.launch(headless=True)
             try:
                 await check_late_response(browser, base_url, "manifest")
-                await check_late_response(browser, base_url, "chunk")
+                await check_late_response(browser, base_url, "chunk_ready")
+                await check_late_response(browser, base_url, "chunk_pending")
                 await check_chunk_retry(browser, base_url)
             finally:
                 await browser.close()
-    print("window_v3_period_switch_browser: late manifest/chunk and explicit chunk retry ok")
+    print("window_v3_period_switch_browser: late manifest/ready+pending chunks and explicit chunk retry ok")
 
 
 if __name__ == "__main__":
