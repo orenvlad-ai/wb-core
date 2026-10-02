@@ -5,20 +5,23 @@ from __future__ import annotations
 import gc
 import io
 import json
+from datetime import date, timedelta
 from contextlib import redirect_stderr
 from pathlib import Path
 import sys
+from threading import Event
 import time
 import unittest
 import weakref
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.application.web_vitrina_window_v3 import (
-    MAX_JOB_RESULT_BYTES, WindowV3Error, WindowV3Prepared,
+    MAX_JOB_RESULT_BYTES, SESSION_TTL_SECONDS, WindowV3Error, WindowV3Prepared,
     WindowV3Service, _WindowSession,
 )
 
@@ -203,6 +206,84 @@ class WindowJobBudgetSmoke(unittest.TestCase):
                         "job", {"job_id": "none", "ack_job_ids": value}, owner=OWNER_INPUT,
                     )
                 self.assertEqual(caught.exception.status, 422)
+
+    def test_global_handle_lives_with_bounded_session(self) -> None:
+        current = time.monotonic()
+        selected = self.service._sessions["s1"]
+        selected.dates = [
+            (date(2026, 9, 20) + timedelta(days=offset)).isoformat()
+            for offset in range(14)
+        ]
+        selected.row_ids = ["SKU:1|stock_total"]
+        selected.static_search_texts = ["stock"]
+        selected.row_orders = [1]
+        # A former absolute 60-second lease would discard this result despite
+        # the still-live session and the next legitimate viewport seek.
+        selected.globals["global-old"] = {
+            "created_at": current - 61, "matched_set": {0},
+        }
+        selected.touched_at = current - 61
+        for date_index in range(14):
+            status, result = self.service.request(
+                "seek", {
+                    "session_id": "s1", "content_token": "token",
+                    "date_index": str(date_index), "row_start": "0", "row_count": "1",
+                    "selected_row_indexes": "0", "global_handle": "global-old",
+                }, owner=OWNER_INPUT,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                self.service._decode_cursor(result["cursor"], selected, OWNER)["g"],
+                "global-old",
+            )
+        self.assertIn("global-old", selected.globals)
+        self.assertGreater(selected.touched_at, current - 61)
+        with self.assertRaises(WindowV3Error) as foreign:
+            self.service.request(
+                "seek", {"session_id": "s1", "content_token": "token",
+                         "date_index": "0", "row_start": "0", "row_count": "1",
+                         "selected_row_indexes": "0", "global_handle": "global-old"},
+                owner=FOREIGN_INPUT,
+            )
+        self.assertEqual(foreign.exception.status, 404)
+        with self.assertRaises(WindowV3Error) as wrong_token:
+            self.service.request(
+                "seek", {"session_id": "s1", "content_token": "other",
+                         "date_index": "0", "row_start": "0", "row_count": "1",
+                         "selected_row_indexes": "0", "global_handle": "global-old"},
+                owner=OWNER_INPUT,
+            )
+        self.assertEqual(wrong_token.exception.status, 409)
+        self.assertIn("global-old", selected.globals)
+        selected.touched_at = time.monotonic() - SESSION_TTL_SECONDS - 1
+        with self.assertRaises(WindowV3Error) as expired:
+            self.service.request(
+                "seek", {"session_id": "s1", "content_token": "token",
+                         "date_index": "0", "row_start": "0", "row_count": "1",
+                         "selected_row_indexes": "0", "global_handle": "global-old"},
+                owner=OWNER_INPUT,
+            )
+        self.assertEqual(expired.exception.status, 409)
+        self.assertNotIn("s1", self.service._sessions)
+
+    def test_replacement_global_releases_previous_handle(self) -> None:
+        selected = self.service._sessions["s1"]
+        selected.row_ids = ["SKU:1|stock_total"]
+        selected.static_search_texts = ["stock"]
+        selected.row_orders = [1]
+        with patch.object(self.service, "_check_input_version"):
+            first = self.service._build_global(selected, {"search": "", "sort": ""}, Event())
+            second = self.service._build_global(selected, {"search": "", "sort": ""}, Event())
+        old = json.loads(first.json_bytes)["global_handle"]
+        new = json.loads(second.json_bytes)["global_handle"]
+        self.assertNotEqual(old, new)
+        self.assertEqual(list(selected.globals), [new])
+        with self.assertRaises(WindowV3Error) as stale:
+            self.service._seek(
+                selected, {"date_index": "0", "row_start": "0", "row_count": "1",
+                           "selected_row_indexes": "0", "global_handle": old}, OWNER,
+            )
+        self.assertEqual(stale.exception.status, 409)
 
 
 if __name__ == "__main__":
