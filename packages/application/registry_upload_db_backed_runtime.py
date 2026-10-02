@@ -1206,6 +1206,37 @@ class RegistryUploadDbBackedRuntime:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [str(row["as_of_date"]) for row in rows]
 
+    def list_default_sheet_vitrina_ready_date_columns(self, *, default_as_of_date: str) -> list[str]:
+        """Read only the default visible snapshot's date-column metadata.
+
+        SQLite extracts the small JSON array in place; Python never receives
+        the potentially large persisted plan_json or its row matrix.
+        """
+        bundle_version = self.load_current_state().bundle_version
+        with sqlite3.connect(self.db_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            row = conn.execute(
+                """
+                SELECT json_extract(plan_json, '$.date_columns') AS dates_json
+                FROM sheet_vitrina_v1_ready_snapshots
+                WHERE bundle_version = ? AND as_of_date = ?
+                """,
+                (bundle_version, default_as_of_date),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT json_extract(plan_json, '$.date_columns') AS dates_json
+                    FROM sheet_vitrina_v1_ready_snapshots
+                    WHERE bundle_version = ?
+                    ORDER BY as_of_date DESC, refreshed_at DESC
+                    LIMIT 1
+                    """,
+                    (bundle_version,),
+                ).fetchone()
+        return [str(value) for value in json.loads(row["dates_json"])] if row and row["dates_json"] else []
+
     def load_our_wb_cost_daily_state(self, *, as_of_date: str) -> dict[int, dict[str, Any]]:
         date_key = str(as_of_date or "").strip()
         if not date_key:

@@ -3991,6 +3991,16 @@ def _build_handler(
                     surface = _resolve_sheet_web_vitrina_surface_from_query(parsed.query)
                     include_source_status = _resolve_optional_query_bool(parsed.query, "include_source_status")
                     include_table_data = _resolve_optional_query_bool(parsed.query, "include_table_data")
+                    table_format = _resolve_single_query_param(parsed.query, "table_format") or "legacy"
+                    shell_format = _resolve_single_query_param(parsed.query, "shell_format") or "legacy"
+                    if table_format not in {"legacy", "indexed_cells_v2"}:
+                        raise ValueError("unsupported table_format; use indexed_cells_v2 or omit it")
+                    if shell_format not in {"legacy", "metadata_v2"}:
+                        raise ValueError("unsupported shell_format; use metadata_v2 or omit it")
+                    if table_format != "legacy" and not include_table_data:
+                        raise ValueError("table_format requires include_table_data=1")
+                    if shell_format != "legacy" and include_table_data:
+                        raise ValueError("shell_format is only valid for a deferred shell")
                     probe_shape = _resolve_optional_query_bool(parsed.query, "probe_shape")
                     as_of_date = _resolve_web_vitrina_as_of_date_from_query(
                         parsed.query,
@@ -4019,6 +4029,8 @@ def _build_handler(
                             date_to=date_to,
                             include_source_status=include_source_status,
                             include_table_data=include_table_data,
+                            table_format=table_format,
+                            shell_format=shell_format,
                         )
                     except Exception as exc:  # pragma: no cover - last-resort public JSON guard
                         _write_web_vitrina_page_composition_response(

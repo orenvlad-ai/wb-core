@@ -9112,13 +9112,20 @@
       if (normalizedOptions.includeTableData) {
         url.searchParams.set("include_table_data", "1");
       }
+      if (normalizedOptions.tableFormat) {
+        url.searchParams.set("table_format", String(normalizedOptions.tableFormat));
+      }
+      if (normalizedOptions.shellFormat) {
+        url.searchParams.set("shell_format", String(normalizedOptions.shellFormat));
+      }
       return url;
     }
 
     function buildSourceStatusDetailsUrl() {
       return buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
         includeSourceStatus: true,
-        asOfDate: visibleSnapshotAsOfDate()
+        asOfDate: visibleSnapshotAsOfDate(),
+        shellFormat: "metadata_v2"
       });
     }
 
@@ -14616,6 +14623,11 @@
 
     function initializeColumnVisibility(payload) {
       const columns = (payload && payload.table_surface && payload.table_surface.columns) || [];
+      if (!columns.length) {
+        // A metadata-only shell has no visibility catalog; persisting it would
+        // turn an unknown Section column into a saved hidden preference.
+        return;
+      }
       const defaultVisibleIds = columns.map(function(column) {
         return String(column.id || "");
       }).filter(function(columnId) {
@@ -16650,7 +16662,7 @@
         }
         healthRecoveryResultNode.textContent = "Технический запуск завершён. Перечитываем серверное здоровье и витрину…";
         const refreshed = await refreshHealthSurface();
-        await loadPageComposition();
+        await loadPageComposition({awaitTable: true});
         const semantic = (refreshed.indicators || []).find(function(item) { return item.indicator_id === "yesterday_closed"; }) || {};
         healthRecoveryResultNode.hidden = false;
         healthRecoveryResultNode.textContent = "Серверная проверка «Вчера»: " + String(semantic.status_label || "не определено") + ". " + String(semantic.reason || "");
@@ -16670,6 +16682,8 @@
 
     function renderPage(payload, options) {
       const normalizedOptions = options || {};
+      const tableSurface = payload.table_surface || {};
+      const tableDataDeferred = String(tableSurface.table_data_state || "included") === "deferred";
       state.composition = payload;
       rememberBusinessProjection(payload);
       state.page.lastRenderedAt = new Date();
@@ -16680,8 +16694,12 @@
       applySellerSessionFromRuntimePayload(payload);
       renderActivitySurface(payload.activity_surface || {});
       renderHistoricalAccess(payload);
-      initializeMetricPresentation(payload);
-      initializeMetricSelection(payload);
+      if (!tableDataDeferred) {
+        // Presentation order and saved selection depend on the complete row
+        // catalog. A shell exposes metric definitions but cannot persist them.
+        initializeMetricPresentation(payload);
+        initializeMetricSelection(payload);
+      }
       renderFilterControls(payload);
       initializeColumnVisibility(payload);
       if (!state.filters.sort) {
@@ -16700,12 +16718,11 @@
         " · user config: " +
         (state.metricPresentation.serverConfig.available ? "server" : "local fallback");
       renderTable();
-      const tableSurface = payload.table_surface || {};
       const tableFreshness = normalizedOptions.tableFreshness || (
         String(tableSurface.table_data_state || "included") === "included" ? "fresh" : "hidden"
       );
       setTableFreshnessIndicator(tableFreshness, payload);
-      if (activityPanelNode && activityPanelNode.open && !state.sourceStatus.loaded && !state.sourceStatus.loading) {
+      if (!normalizedOptions.deferSourceStatusAutoLoad && activityPanelNode && activityPanelNode.open && !state.sourceStatus.loaded && !state.sourceStatus.loading) {
         window.setTimeout(ensureSourceStatusDetailsLoaded, 0);
       }
     }
@@ -22384,7 +22401,7 @@
         );
         setStatusBadge({label: semanticLabel, tone: semanticTone, detail: semanticReason + "; перечитываем витрину"});
         showGlobalProgress(100, "Завершение");
-        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded});
+        await loadPageComposition({includeSourceStatus: state.sourceStatus.loaded, awaitTable: true});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -22499,7 +22516,7 @@
         );
         setStatusBadge({label: semanticLabel, tone: semanticTone, detail: semanticReason + "; перечитываем витрину"});
         clearGroupActionState(normalizedGroupId);
-        await loadPageComposition({includeSourceStatus: true});
+        await loadPageComposition({includeSourceStatus: true, awaitTable: true});
       } catch (error) {
         if (actionId !== state.actionSequence) {
           return;
@@ -23098,10 +23115,54 @@
       const merged = Object.assign({}, shellPayload, tablePayload);
       merged.meta = Object.assign({}, (shellPayload.meta || {}), (tablePayload.meta || {}));
       merged.table_surface = tablePayload.table_surface || {};
-      if (shellPayload.activity_surface) {
-        merged.activity_surface = shellPayload.activity_surface;
-      }
+      // The table read owns business status. Shell source details may refer to
+      // an older publication and must be requested again after this merge.
       return merged;
+    }
+
+    function decodeTableResponse(payload) {
+      const version = Number(payload && payload.response_schema_version || 1);
+      const table = (payload && payload.table_surface) || {};
+      if (version === 1 && !table.value_encoding) {
+        return payload; // Older server or legacy opened tab.
+      }
+      const encoding = table.value_encoding || {};
+      if (version !== 2 || encoding.format !== "indexed_cells_v2") {
+        throw new Error("Формат таблицы изменился. Обновите страницу.");
+      }
+      const fields = encoding.fields || [];
+      const defaults = encoding.defaults || [];
+      const expected = [
+        "value", "display_text", "cell_kind", "formatter_id", "renderer_id",
+        "presentation_state", "presentation_tone", "presentation_reason",
+        "quality_state", "quality_label", "quality_reason", "completeness_state",
+        "missing_sku_count", "quantity_semantic_kind", "quantity_source_observed_at",
+        "inventory_finalization_digest"
+      ];
+      if (fields.length !== expected.length || fields.some(function(field, index) { return field !== expected[index]; }) || defaults.length !== fields.length) {
+        throw new Error("Неизвестная версия ячеек. Обновите страницу.");
+      }
+      const columns = (table.columns || []).map(function(column) { return String(column.id || ""); });
+      (table.rows || []).forEach(function(row) {
+        if (!Array.isArray(row.values)) {
+          throw new Error("Некорректный компактный ответ. Обновите страницу.");
+        }
+        const packed = row.values;
+        const values = {};
+        packed.forEach(function(entry) {
+          const index = entry[0];
+          if (!Number.isInteger(index) || index < 0 || index >= columns.length || columns[index] in values) {
+            throw new Error("Некорректный индекс ячейки. Обновите страницу.");
+          }
+          const cell = {};
+          fields.forEach(function(field, fieldIndex) {
+            cell[field] = entry.length > fieldIndex + 1 ? entry[fieldIndex + 1] : defaults[fieldIndex];
+          });
+          values[columns[index]] = cell;
+        });
+        row.values = values;
+      });
+      return payload;
     }
 
     function businessProjectionMeta(payload) {
@@ -23200,7 +23261,8 @@
       );
       const response = await fetch(
         buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
-          includeTableData: true
+          includeTableData: true,
+          tableFormat: "indexed_cells_v2"
         }).toString(),
         {
           method: "GET",
@@ -23223,6 +23285,7 @@
       if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
         throw new Error("unexpected business projection table payload");
       }
+      decodeTableResponse(payload);
       if (!isVitrinaTabActive()) return;
       const tableSurface = payload.table_surface || {};
       if (String(tableSurface.table_data_state || "included") !== "included") {
@@ -23383,7 +23446,8 @@
       shellPayload,
       performanceMetrics,
       shellPaintPromise,
-      activeTabOnly
+      activeTabOnly,
+      refreshSourceDetails
     ) {
       try {
         if (activeTabOnly && !isVitrinaTabActive()) {
@@ -23393,7 +23457,8 @@
         const tableRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
-            includeTableData: true
+            includeTableData: true,
+            tableFormat: "indexed_cells_v2"
           }).toString(),
           {
             method: "GET",
@@ -23426,6 +23491,7 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected table data payload");
         }
+        decodeTableResponse(payload);
         await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
         if (String(tableSurface.table_data_state || "included") !== "included") {
@@ -23434,8 +23500,11 @@
         const tableRenderStartedAt = window.performance.now();
         const renderPayload = mergeDeferredShellWithFreshTable(shellPayload, payload);
         resetFilterState(renderPayload);
-        renderPage(renderPayload, {tableFreshness: "fresh"});
+        renderPage(renderPayload, {tableFreshness: "fresh", deferSourceStatusAutoLoad: refreshSourceDetails});
         markFreshTableDisplayed(renderPayload);
+        if (refreshSourceDetails) {
+          await loadSourceStatusDetails({force: true});
+        }
         const tableRenderFinishedAt = window.performance.now();
         if (performanceMetrics) {
           performanceMetrics.table_merge_render_ms = boundedPerformanceDuration(
@@ -23507,7 +23576,8 @@
         const shellRequestStartedAt = window.performance.now();
         const response = await fetch(
           buildReadUrl(WEB_VITRINA_CONFIG.page_composition_surface, {
-            includeSourceStatus: !!normalizedOptions.includeSourceStatus
+            includeSourceStatus: !!normalizedOptions.includeSourceStatus,
+            shellFormat: "metadata_v2"
           }).toString(),
           {
           headers: {"Accept": "application/json"}
@@ -23531,6 +23601,9 @@
         if (!payload || payload.composition_name !== "web_vitrina_page_composition") {
           throw new Error("unexpected page composition payload");
         }
+        if (payload.response_schema_version !== 2 || payload.shell_format !== "metadata_v2") {
+          throw new Error("Формат оболочки изменился. Обновите страницу.");
+        }
         if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         await ensureMetricPresentationUserConfigLoaded();
         const tableSurface = payload.table_surface || {};
@@ -23552,13 +23625,17 @@
             state.tableSnapshot.freshLoading = true;
             setTableFreshnessIndicator("stale_loading", state.composition);
           }
-          loadDeferredTableData(
+          const tablePromise = loadDeferredTableData(
             requestId,
             payload,
             performanceMetrics,
             shellPaintPromise,
-            !!normalizedOptions.activeTabOnly
+            !!normalizedOptions.activeTabOnly,
+            !!normalizedOptions.awaitTable && !!normalizedOptions.includeSourceStatus
           );
+          if (normalizedOptions.awaitTable) {
+            await tablePromise;
+          }
         } else {
           const tableRenderStartedAt = window.performance.now();
           resetFilterState(payload);

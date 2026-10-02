@@ -193,9 +193,16 @@ def main() -> None:
             if period_payload.get("meta", {}).get("date_columns") != ["2026-04-18", "2026-04-19", "2026-04-20"]:
                 raise AssertionError(f"web-vitrina period date columns mismatch, got {period_payload}")
 
-            composition_status, composition_raw, composition_headers = _get_raw(
-                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
-            )
+            original_build = entrypoint.web_vitrina_block.build
+            def forbidden_shell_build(**_kwargs):
+                raise AssertionError("shell invoked the full contract build")
+            entrypoint.web_vitrina_block.build = forbidden_shell_build
+            try:
+                composition_status, composition_raw, composition_headers = _get_raw(
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&shell_format=metadata_v2"
+                )
+            finally:
+                entrypoint.web_vitrina_block.build = original_build
             composition_payload = json.loads(composition_raw.decode("utf-8"))
             if composition_status != 200:
                 raise AssertionError(f"web-vitrina page composition surface must return 200, got {composition_status}")
@@ -220,10 +227,14 @@ def main() -> None:
                 raise AssertionError(f"page composition Server-Timing is invalid: {server_timing!r}")
             if composition_payload.get("composition_name") != "web_vitrina_page_composition":
                 raise AssertionError(f"web-vitrina page composition identity mismatch, got {composition_payload}")
-            if composition_payload.get("meta", {}).get("current_state") != "ready":
+            if composition_payload.get("response_schema_version") != 2 or composition_payload.get("shell_format") != "metadata_v2":
+                raise AssertionError("light shell must be explicitly versioned")
+            if composition_payload.get("meta", {}).get("current_state") != "loading":
                 raise AssertionError(f"web-vitrina page composition state mismatch, got {composition_payload}")
-            if composition_payload.get("table_surface", {}).get("total_row_count") != contract_row_count:
-                raise AssertionError(f"web-vitrina page composition row count mismatch, got {composition_payload}")
+            if composition_payload.get("table_surface", {}).get("total_row_count") is not None:
+                raise AssertionError("shell must not claim a row count before table read")
+            if composition_payload.get("meta", {}).get("snapshot_id"):
+                raise AssertionError("date-only shell must not claim a business content version")
             composition_table = composition_payload.get("table_surface") or {}
             if composition_table.get("table_data_state") != "deferred":
                 raise AssertionError(f"default page composition must defer heavy table rows, got {composition_table}")
@@ -264,8 +275,8 @@ def main() -> None:
                 "2026-04-20",
             ]:
                 raise AssertionError(f"default page composition must use rolling two-week range ending business today, got {composition_meta}")
-            if (composition_payload.get("status_summary") or {}).get("source_status_snapshot_as_of_date") != "2026-04-20":
-                raise AssertionError(f"source-status snapshot key mismatch, got {composition_payload.get('status_summary')}")
+            if (composition_payload.get("status_summary") or {}).get("refresh_status") != "pending_table":
+                raise AssertionError("shell must defer business freshness until the full table read")
             if composition_meta.get("business_timezone") != "Asia/Yekaterinburg":
                 raise AssertionError(f"business timezone mismatch in page time model, got {composition_meta}")
             historical_access = composition_payload.get("historical_access") or {}
@@ -343,9 +354,62 @@ def main() -> None:
                 or full_table_surface.get("returned_row_count") != contract_row_count
             ):
                 raise AssertionError(f"explicit table-data row shape mismatch, got {full_table_surface}")
+            def metric_keys(payload):
+                controls = (payload.get("filter_surface") or {}).get("controls") or []
+                metric = next(item for item in controls if item.get("control_id") == "metric")
+                return {item["value"] for item in metric["options"] if item["value"] != "__all__"}
+            missing_in_shell = metric_keys(full_table_payload) - metric_keys(composition_payload)
+            if missing_in_shell:
+                raise AssertionError(f"saved metric selection could be truncated before table load: {sorted(missing_in_shell)}")
+            legacy_shell_status, legacy_shell = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}"
+            )
+            if legacy_shell_status != 200 or legacy_shell.get("response_schema_version") != 1:
+                raise AssertionError("old open tabs must retain the v1 shell")
+            if legacy_shell["table_surface"]["total_row_count"] != contract_row_count or legacy_shell["meta"]["current_state"] != "ready":
+                raise AssertionError("legacy shell business fields changed")
+
+            compact_status, compact_payload = _get_json(
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_table_data=1&table_format=indexed_cells_v2"
+            )
+            if compact_status != 200 or compact_payload.get("response_schema_version") != 2:
+                raise AssertionError("opt-in compact response must explicitly declare schema v2")
+            compact_table = compact_payload["table_surface"]
+            encoding = compact_table.get("value_encoding") or {}
+            expected_fields = (
+                "value", "display_text", "cell_kind", "formatter_id", "renderer_id",
+                "presentation_state", "presentation_tone", "presentation_reason",
+                "quality_state", "quality_label", "quality_reason", "completeness_state",
+                "missing_sku_count", "quantity_semantic_kind", "quantity_source_observed_at",
+                "inventory_finalization_digest",
+            )
+            if encoding.get("format") != "indexed_cells_v2" or tuple(encoding.get("fields") or ()) != expected_fields:
+                raise AssertionError("compact cell schema drifted")
+            column_ids = [column["id"] for column in compact_table["columns"]]
+            decoded_rows = []
+            for row in compact_table["rows"]:
+                decoded_values = {}
+                for packed in row["values"]:
+                    column_index, *cell_values = packed
+                    expanded = cell_values + encoding["defaults"][len(cell_values):]
+                    decoded_values[column_ids[column_index]] = dict(zip(expected_fields, expanded))
+                decoded_rows.append({**row, "values": decoded_values})
+            if decoded_rows != full_table_surface["rows"]:
+                raise AssertionError("compact cells lost values, quality, provenance or missing/null semantics")
+            if compact_payload["filter_surface"] != full_table_payload["filter_surface"]:
+                raise AssertionError("compact table changed filter and saved-metric contract")
+            try:
+                _get_json(
+                    f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_table_data=1&table_format=unknown"
+                )
+                invalid_format_status = 200
+            except urllib_error.HTTPError as exc:
+                invalid_format_status = exc.code
+            if invalid_format_status != 422:
+                raise AssertionError("unknown compact schema must fail explicitly")
 
             details_status, details_payload = _get_json(
-                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1"
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1&shell_format=metadata_v2"
             )
             if details_status != 200:
                 raise AssertionError(f"web-vitrina source status details route must return 200, got {details_status}")
@@ -354,7 +418,7 @@ def main() -> None:
                 raise AssertionError(f"source status details route must keep table rows deferred, got {details_table}")
 
             missing_status, missing_payload = _get_json(
-                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1&as_of_date=2099-01-01"
+                f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_READ_PATH}?surface={DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE}&include_source_status=1&as_of_date=2099-01-01&shell_format=metadata_v2"
             )
             if missing_status != 200:
                 raise AssertionError(f"web-vitrina missing source-status snapshot must return page payload, got {missing_status}")
@@ -453,8 +517,8 @@ def main() -> None:
                 raise AssertionError(f"loading table must expose Russian metric labels, got {first_loading_row}")
             if first_loading_row.get("technical_endpoint") != "POST /api/v2/list/goods/filter":
                 raise AssertionError(f"loading table technical endpoint mismatch, got {first_loading_row}")
-            if details_payload.get("status_badge", {}).get("tone") != "error":
-                raise AssertionError(f"web-vitrina page composition must reflect semantic error tone, got {details_payload}")
+            if details_payload.get("status_badge", {}).get("tone") != "warning":
+                raise AssertionError("source details must not present row-derived business status")
 
             page_status, page_html = _get_text(f"{base_url}{DEFAULT_SHEET_WEB_VITRINA_UI_PATH}")
             if page_status != 200:

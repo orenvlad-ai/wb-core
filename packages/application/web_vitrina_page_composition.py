@@ -12,6 +12,9 @@ from packages.business_time import CANONICAL_BUSINESS_TIMEZONE_NAME, current_bus
 from packages.contracts.web_vitrina_contract import WebVitrinaContractV1
 from packages.contracts.web_vitrina_gravity_table_adapter import WebVitrinaGravityTableAdapterV1
 from packages.contracts.web_vitrina_view_model import WebVitrinaViewModelV1
+from packages.application.web_vitrina_compact_table import (
+    CELL_DEFAULTS, CELL_FIELDS, TABLE_WIRE_FORMAT, compact_adapter_payload,
+)
 
 WEB_VITRINA_PAGE_COMPOSITION_NAME = "web_vitrina_page_composition"
 WEB_VITRINA_PAGE_COMPOSITION_VERSION = "v1"
@@ -147,10 +150,32 @@ def build_web_vitrina_page_composition(
     activity_surface: Mapping[str, Any] | None = None,
     include_table_data: bool = True,
     metric_catalog: list[Mapping[str, Any]] | None = None,
+    compact_table: bool = False,
 ) -> dict[str, Any]:
-    contract_payload = _to_payload(contract)
-    view_model_payload = _to_payload(view_model)
-    adapter_payload = _to_payload(adapter)
+    if compact_table:
+        if not (is_dataclass(contract) and is_dataclass(view_model) and is_dataclass(adapter)):
+            raise TypeError("compact table requires typed contract, view model and adapter")
+        contract_payload = {
+            "contract_name": contract.contract_name,
+            "contract_version": contract.contract_version,
+            "meta": asdict(contract.meta),
+            "status_summary": asdict(contract.status_summary),
+            "capabilities": asdict(contract.capabilities),
+        }
+        view_model_payload = {
+            "view_model_name": view_model.view_model_name,
+            "view_model_version": view_model.view_model_version,
+            "sections": [asdict(item) for item in view_model.sections],
+            "groups": [asdict(item) for item in view_model.groups],
+            "formatters": [asdict(item) for item in view_model.formatters],
+        }
+        adapter_payload = compact_adapter_payload(adapter)
+        count_rows = adapter.rows
+    else:
+        contract_payload = _to_payload(contract)
+        view_model_payload = _to_payload(view_model)
+        adapter_payload = _to_payload(adapter)
+        count_rows = list(adapter_payload.get("rows") or [])
 
     rows = list(adapter_payload.get("rows") or [])
     table_rows = rows if include_table_data else []
@@ -162,11 +187,11 @@ def build_web_vitrina_page_composition(
         for column in columns
         if str(column["id"]).startswith("date:")
     ]
-    section_counts = _count_rows(rows, key="section_id")
-    group_counts = _count_rows(rows, key="group_id")
-    row_kind_counts = _count_rows(rows, key="row_kind")
+    section_counts = _count_rows_from_adapter(count_rows, key="section_id") if compact_table else _count_rows(rows, key="section_id")
+    group_counts = _count_rows_from_adapter(count_rows, key="group_id") if compact_table else _count_rows(rows, key="group_id")
+    row_kind_counts = _count_rows_from_adapter(count_rows, key="row_kind") if compact_table else _count_rows(rows, key="row_kind")
     metric_counts = _merge_metric_catalog(
-        _count_metric_rows(rows),
+        _count_metric_adapter_rows(count_rows) if compact_table else _count_metric_rows(rows),
         metric_catalog=metric_catalog,
     )
     metric_options = _build_metric_options(
@@ -186,6 +211,7 @@ def build_web_vitrina_page_composition(
     return {
         "composition_name": WEB_VITRINA_PAGE_COMPOSITION_NAME,
         "composition_version": WEB_VITRINA_PAGE_COMPOSITION_VERSION,
+        "response_schema_version": 2 if compact_table else 1,
         "meta": {
             "page_title": "Web-витрина",
             "page_route": page_route,
@@ -323,10 +349,136 @@ def build_web_vitrina_page_composition(
             "deferred_table_data_query": {"include_table_data": "1"} if not include_table_data else {},
             "date_column_ids": date_column_ids,
             "column_labels": column_labels,
+            **({"value_encoding": {
+                "format": TABLE_WIRE_FORMAT,
+                "fields": list(CELL_FIELDS),
+                "defaults": list(CELL_DEFAULTS),
+            }} if compact_table else {}),
         },
         "status_summary": dict(contract_payload["status_summary"]),
         "capabilities": dict(contract_payload["capabilities"]),
     }
+
+
+def build_web_vitrina_page_shell_composition(
+    *,
+    page_route: str,
+    read_route: str,
+    operator_route: str,
+    available_snapshot_dates: list[str],
+    default_as_of_date: str,
+    selected_as_of_date: str | None,
+    selected_date_from: str | None,
+    selected_date_to: str | None,
+    default_date_from: str,
+    default_date_to: str,
+    source_status_snapshot_as_of_date: str,
+    metric_catalog: list[Mapping[str, Any]],
+    activity_surface: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Render only metadata that is knowable without building table rows.
+
+    The date-only period ID is deliberately absent. The full table response is
+    the authoritative business read until the versioned chunk protocol exists.
+    """
+    selected_end = selected_date_to or selected_as_of_date or default_date_to
+    shell = build_web_vitrina_page_error_composition(
+        page_route=page_route,
+        read_route=read_route,
+        operator_route=operator_route,
+        as_of_date=selected_end,
+        error_message="Данные таблицы ещё не рассчитаны.",
+        available_snapshot_dates=available_snapshot_dates,
+        default_as_of_date=default_as_of_date,
+        selected_as_of_date=selected_as_of_date,
+        selected_date_from=selected_date_from,
+        selected_date_to=selected_date_to,
+        default_date_from=default_date_from,
+        default_date_to=default_date_to,
+        activity_surface=activity_surface,
+    )
+    shell["response_schema_version"] = 2
+    shell["shell_format"] = "metadata_v2"
+    meta = shell["meta"]
+    start = selected_date_from or selected_as_of_date or default_date_from
+    end = selected_date_to or selected_as_of_date or default_date_to
+    visible_dates = (
+        [(date.fromisoformat(start) + timedelta(days=offset)).isoformat()
+         for offset in range((date.fromisoformat(end) - date.fromisoformat(start)).days + 1)]
+        if start and end and end >= start else []
+    )
+    time_model = meta["time_model"]
+    time_model.update({
+        "snapshot_as_of_date": source_status_snapshot_as_of_date,
+        "yesterday_closed_date": default_as_of_date if default_as_of_date in visible_dates else "",
+        "today_current_date": default_date_to if default_date_to in visible_dates else "",
+        "visible_date_columns": visible_dates,
+    })
+    meta.update({
+        "snapshot_id": "",
+        "snapshot_as_of_date": source_status_snapshot_as_of_date,
+        "yesterday_closed_date": time_model["yesterday_closed_date"],
+        "today_current_date": time_model["today_current_date"],
+        "visible_date_columns": visible_dates,
+        "business_read_state": "pending_table",
+        "current_state": "loading",
+        "state_message": "Данные таблицы загружаются отдельным запросом.",
+    })
+    shell["status_badge"] = {
+        "label": "Загрузка", "tone": "warning", "detail": "Статус данных появится после чтения таблицы."
+    }
+    shell["summary_cards"][0].update({
+        "value": "Загрузка", "detail": "Статус данных появится после чтения таблицы.", "tone": "warning"
+    })
+    shell["summary_cards"][1].update({
+        "value": _period_label([selected_date_from or selected_as_of_date or default_date_from, selected_end]),
+        "detail": "Данные периода загружаются.",
+        "value_kind": "period",
+    })
+    shell["summary_cards"][2].update({
+        "value": "ожидается", "detail": "Свежесть определится после чтения таблицы.", "tone": "neutral"
+    })
+    shell["status_summary"].update({"refresh_status": "pending_table", "read_model": "pending_table"})
+
+    # The catalog is complete before the browser reconciles saved metric keys.
+    metrics = _merge_metric_catalog({}, metric_catalog=metric_catalog)
+    sections = [
+        {"section_id": key, "label": label, "order": index + 1}
+        for index, (key, label) in enumerate(dict.fromkeys(
+            (str(item["section_id"]), str(item["section_label"]))
+            for item in metrics.values()
+        ))
+    ]
+    metric_options = _build_metric_options(metrics, sections=sections)
+    for option in metric_options:
+        option["count"] = None
+    metric_groups = _build_metric_option_groups(metric_options, sections=sections)
+    for group in metric_groups:
+        group["row_count"] = None
+        for section in group["sections"]:
+            section["row_count"] = None
+    shell["filter_surface"].update({
+        "controls": [
+            {"control_id": "search", "kind": "search", "label": "Поиск", "default_value": "", "placeholder": "SKU, metric, group, nmId", "options": []},
+            {"control_id": "section", "kind": "select", "label": "Секция", "default_value": _ALL_OPTION_VALUE,
+             "options": [{"value": _ALL_OPTION_VALUE, "label": "Все секции", "count": None}] + [
+                 {"value": item["section_id"], "label": item["label"], "count": None} for item in sections
+             ]},
+            {"control_id": "group", "kind": "select", "label": "Группа", "default_value": _ALL_OPTION_VALUE,
+             "options": [{"value": _ALL_OPTION_VALUE, "label": "Все группы", "count": None}]},
+            {"control_id": "metric", "kind": "select", "label": "Метрика", "default_value": _ALL_OPTION_VALUE,
+             "options": metric_options, "option_groups": metric_groups},
+        ],
+    })
+    table = shell["table_surface"]
+    table["state_surface"].update({"current_state": "loading", "error_message": ""})
+    table.update({
+        "total_row_count": None,
+        "returned_row_count": 0,
+        "table_data_state": "deferred",
+        "deferred_table_data_query": {"include_table_data": "1"},
+    })
+    return shell
 
 
 def build_web_vitrina_page_error_composition(
@@ -525,6 +677,37 @@ def _count_rows(rows: list[Mapping[str, Any]], *, key: str) -> dict[str, int]:
         if not value:
             continue
         counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _count_rows_from_adapter(rows: list[Any], *, key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(getattr(row, key) or "")
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _count_metric_adapter_rows(rows: list[Any]) -> dict[str, dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        metric_cell = row.values.get("metric_key")
+        metric_key = str(metric_cell.value or "") if metric_cell is not None else ""
+        if not metric_key:
+            continue
+        label_cell = row.values.get("metric_label")
+        section_cell = row.values.get("section")
+        section_label = str(section_cell.display_text or "").strip() if section_cell else ""
+        bucket = counts.setdefault(metric_key, {
+            "label": str(label_cell.display_text or metric_key) if label_cell else metric_key,
+            "count": 0,
+            "section_id": row.section_id,
+            "section_label": section_label,
+            "row_kinds": set(),
+        })
+        bucket["count"] += 1
+        bucket["row_kinds"].add(str(row.row_kind).strip().lower())
     return counts
 
 

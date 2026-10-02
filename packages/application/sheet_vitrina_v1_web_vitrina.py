@@ -128,6 +128,31 @@ WEB_VITRINA_PERIOD_READ_MODEL = "persisted_ready_snapshot_window"
 WEB_VITRINA_SOURCE_SHEET_NAME = "DATA_VITRINA"
 WEB_VITRINA_PERIOD_PLAN_VERSION = "delivery_contract_v1__web_vitrina_period_window_v1"
 WEB_VITRINA_DEFAULT_PERIOD_DAYS = 14
+
+
+def _effective_web_vitrina_metrics(metrics: list[MetricV2Item]) -> list[MetricV2Item]:
+    """Keep the lightweight catalog and the full row builder in lockstep."""
+    return visible_authenticated_buyer_metrics(
+        extend_metrics_with_authenticated_buyer(
+            extend_metrics_with_buyout_percent(
+                extend_metrics_with_weighted_seller_price(
+                    extend_metrics_with_sku_action_metrics(
+                        extend_metrics_with_incident_stock_metrics(
+                            extend_metrics_with_own_product_capital_metrics(
+                                extend_metrics_with_proxy_v4(
+                                    extend_metrics_with_our_wb_cost_metrics(
+                                        extend_metrics_with_onec_stock_metrics(metrics)
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+
 FUNNEL_SECTION_LABEL = "Воронка"
 FUNNEL_VIEW_METRIC_KEY = "view_count"
 FUNNEL_TOTAL_VIEW_METRIC_KEY = "total_view_count"
@@ -247,6 +272,27 @@ class SheetVitrinaV1WebVitrinaBlock:
             descending=descending,
         )
 
+    def list_readable_dates_metadata(self, *, descending: bool = False) -> list[str]:
+        """Same shell calendar as the full read without decoding snapshot rows."""
+        default_columns = self.runtime.list_default_sheet_vitrina_ready_date_columns(
+            default_as_of_date=default_business_as_of_date(self.now_factory()),
+        )
+        return _merge_readable_dates(
+            exact_ready_dates=(
+                self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle()
+                + default_columns
+            ),
+            default_visible_snapshot=None,
+            business_week_dates=_default_business_period_dates(self.now_factory()),
+            date_from=None,
+            date_to=None,
+            descending=descending,
+        )
+
+    def metric_catalog_metadata(self) -> list[MetricV2Item]:
+        """The complete authorized metric definitions without reading table rows."""
+        return _effective_web_vitrina_metrics(self.runtime.load_current_state().metrics_v2)
+
     def build(
         self,
         *,
@@ -328,26 +374,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             int(item.nm_id): item
             for item in current_state.config_v2
         }
-        effective_metrics = extend_metrics_with_buyout_percent(
-            extend_metrics_with_weighted_seller_price(
-                extend_metrics_with_sku_action_metrics(
-                    extend_metrics_with_incident_stock_metrics(
-                        extend_metrics_with_own_product_capital_metrics(
-                            extend_metrics_with_proxy_v4(
-                                extend_metrics_with_our_wb_cost_metrics(
-                                    extend_metrics_with_onec_stock_metrics(
-                                        current_state.metrics_v2
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        effective_metrics = visible_authenticated_buyer_metrics(
-            extend_metrics_with_authenticated_buyer(effective_metrics)
-        )
+        effective_metrics = _effective_web_vitrina_metrics(current_state.metrics_v2)
         metrics_by_key = {
             str(item.metric_key): item
             for item in effective_metrics
