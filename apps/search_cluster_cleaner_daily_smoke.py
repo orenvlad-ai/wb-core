@@ -578,4 +578,6 @@ def integrated_flow() -> None:
 
 
 if __name__=='__main__':
-    check();deployment_blocked_flow();finite_retry_regressions();integrated_flow();print('search cluster cleaner daily smoke: ok')
+    from apps.search_cluster_cleaner_idle_smoke import main as idle_smoke
+    check();deployment_blocked_flow();finite_retry_regressions();integrated_flow();idle_smoke()
+    print('search cluster cleaner daily smoke: ok')

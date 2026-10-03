@@ -215,10 +215,11 @@ def fetch_current_card(nm_id:int) -> dict:
     card=found[0]
     if not isinstance(card.get('characteristics'),list):_fail('current_card_incomplete')
     return dict(nm_id=str(nm_id),title=card.get('title'),vendor_code=card.get('vendorCode'),
-                description=card.get('description'),characteristics=card['characteristics'])
+                description=card.get('description'),characteristics=card['characteristics'],
+                subject_id=card.get('subjectID',card.get('subjectId')))
 
 def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:KeywordCleaner) -> dict:
-    """Compare current business fields with the package-bound approved card."""
+    """Compare classifier-relevant card semantics with approved evidence."""
     try:
         source=_approved_card_source(package,admission_dir)
         approved=source.get(target.nm_id)
@@ -232,18 +233,38 @@ def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:Key
         if not isinstance(characteristics,list):_fail('current_card_incomplete')
         ids=[]
         for row in characteristics:
-            if not isinstance(row,dict) or set(row)!={'id','name','value'} or type(row['id']) is not int:_fail('current_card_incomplete')
+            if (not isinstance(row,dict) or not {'id','name','value'}.issubset(row)
+                    or type(row['id']) is not int or not isinstance(row['name'],str)):_fail('current_card_incomplete')
             ids.append(row['id'])
         if len(ids)!=len(set(ids)):_fail('current_card_duplicate_characteristic')
         return dict(nm_id=str(card.get('nm_id')),title=card.get('title'),vendor_code=card.get('vendor_code'),
-                    description=card.get('description'),characteristics=sorted(characteristics,key=lambda row:(row['id'],canonical(row))))
-    if canonical(business_fields(approved))!=canonical(business_fields(fresh)):
+                    description=card.get('description'),characteristics=sorted(
+                        ({key:row[key] for key in ('id','name','value')} for row in characteristics),
+                        key=lambda row:row['id']))
+    from packages.domain.search_cluster_card_semantics import PROJECTION_VERSION,project_card
+    approved_fields=business_fields(approved)
+    fresh_fields=business_fields(fresh)
+    if approved_fields['nm_id']!=str(target.nm_id) or fresh_fields['nm_id']!=str(target.nm_id):
         _fail('current_card_drift')
     approved_profile=next((Profile.parse(row) for row in package['profiles'] if row['nm_id']==target.nm_id),None)
     with service.store.read() as c:active_profile=service._profile(c,target.nm_id)
     if not approved_profile or not active_profile or active_profile.semantic_fingerprint!=approved_profile.semantic_fingerprint:
         _fail('manual_profile_mismatch')
-    return dict(nm_id=target.nm_id,approved_source_sha256=package['provenance']['fresh_cards_sha256'],verified_at=service_clock())
+    try:approved_semantics=project_card(approved_fields)
+    except CleanerError as exc:raise CleanerError('approved_card_source_mismatch',
+        'Утверждённая карточка не подтверждает профиль товара',409) from exc
+    if (approved_semantics['version']!=PROJECTION_VERSION
+            or approved_semantics['category']!=approved_profile.category
+            or approved_semantics['kind']!=approved_profile.kind
+            or approved_semantics['frame']!=approved_profile.frame
+            or not set(approved_semantics['models']).issubset(approved_profile.models)):
+        _fail('approved_card_source_mismatch')
+    fresh_fields['subject_id']=fresh.get('subject_id')
+    fresh_semantics=project_card(fresh_fields,require_subject=True)
+    if fresh_semantics!=approved_semantics:_fail('current_card_drift')
+    return dict(nm_id=target.nm_id,approved_source_sha256=package['provenance']['fresh_cards_sha256'],
+                semantic_projection_version=PROJECTION_VERSION,
+                semantic_fingerprint_sha256='sha256:'+digest(fresh_semantics),verified_at=service_clock())
 
 def service_clock() -> str:
     from packages.contracts.search_cluster_cleaner import utcnow

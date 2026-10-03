@@ -26,13 +26,68 @@ from packages.application.search_cluster_cleaner_admission import AdmissionGuard
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter,ManualCleanerCoordinator
 from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal, Target
+from packages.domain.search_cluster_card_semantics import project_card
+
+
+def semantic_projection_smoke():
+    traits=[dict(id=746,name='Совместимость',value=['Apple','iPhone 15','iPhone 16']),
+            dict(id=12223252,name='Производитель телефона',value=['Apple']),
+            dict(id=195594,name='Цвет рамки',value=['черный'])]
+    card=dict(nm_id='101',title='Защитное стекло iPhone 15 / 16 с автоустановкой',
+              vendor_code='(Clean) iPhone 15 / 16',description='Сравнение с не матовым стеклом. Прозрачность оптимизирована.',
+              characteristics=traits,subject_id=1571)
+    expected=project_card(card,require_subject=True)
+    assert expected['models']==['15','16'] and expected['kind']=='clean'
+    assert project_card(dict(card,description=None),require_subject=True)==expected
+    assert project_card(dict(card,title=card['title']+' Case Friendly'),require_subject=True)==expected
+    assert project_card(dict(card,description='Тип стекла: не матовое; сравнение с матовым стеклом'),require_subject=True)==expected
+    assert project_card(dict(card,description='Совместимость: iPhone 15'),require_subject=True)==expected
+    assert project_card(dict(card,title=card['title']+' без установочной рамки'),require_subject=True)==expected
+    assert project_card(dict(card,characteristics=[dict(row,wb_metadata=1) for row in traits]+[
+        dict(id=15000001,name='ТНВЭД',value=['7020008000'])]),require_subject=True)==expected
+    for changed in (dict(card,title='Защитное стекло iPhone 15 / 18'),
+                    dict(card,title='Защитное стекло iPhone 15 / 16 Pro Max Ultra'),
+                    dict(card,title='Защитное стекло анти-шпион iPhone 15 / 16'),
+                    dict(card,title='Защитное стекло Privacy iPhone 15 / 16'),
+                    dict(card,title='Защитное стекло iPhone 15 / 20 Pro'),
+                    dict(card,title='Защитное стекло iPhone 15 и iPhone Fold'),
+                    dict(card,description='Совместимость: iPhone 18 Pro'),
+                    dict(card,description='Совместимость: Samsung Galaxy'),
+                    dict(card,description='Совместимость: iPhone 15 и Samsung Galaxy'),
+                    dict(card,vendor_code='(Clean) iPhone 18 Pro Max'),
+                    dict(card,title=card['title']+' без рамки'),
+                    dict(card,description='Тип стекла: матовое стекло'),
+                    dict(card,characteristics=traits+[dict(id=999,name='Тип стекла',value=['Матовое стекло'])]),
+                    dict(card,characteristics=[dict(traits[0],name=123),*traits[1:]])):
+        try:project_card(changed,require_subject=True)
+        except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable',exc.code
+        else:raise AssertionError('changed product semantics admitted')
+    try:project_card({key:value for key,value in card.items() if key!='subject_id'},require_subject=True)
+    except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable'
+    else:raise AssertionError('missing official category admitted')
+    promax=dict(card,title='Защитное стекло iPhone 16 Pro Max',
+                vendor_code='(Clean) iPhone 16 Pro Max',characteristics=[
+                    dict(traits[0],value=['Apple','iPhone 16 Pro Max']),*traits[1:]])
+    assert project_card(promax,require_subject=True)['models']==['16 promax']
+    for title in ('Защитное стекло iPhone 16 Pro Max Case Friendly',
+                  'Защитное стекло iPhone 16 Pro Max with installation'):
+        assert project_card(dict(promax,title=title),require_subject=True)['models']==['16 promax']
+    for changed in (dict(promax,title='Защитное стекло iPhone 16 Pro Max Ultra'),
+                    dict(promax,vendor_code='(Clean) iPhone 16 Pro Max Ultra')):
+        try:project_card(changed,require_subject=True)
+        except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable'
+        else:raise AssertionError('unknown model suffix admitted')
 
 
 def main() -> None:
+    semantic_projection_smoke()
     with Sandbox() as box:
-        characteristics=[dict(id=1,name='Модель',value=['iPhone 16 Pro Max']),dict(id=2,name='Тип',value=['Обычное стекло'])]
-        card=dict(nm_id='101',title='Synthetic glass',vendor_code='synthetic',description='Approved synthetic card',characteristics=characteristics)
-        current_card=dict(card,characteristics=list(reversed(characteristics)))
+        characteristics=[dict(id=746,name='Совместимость',value=['Apple','iPhone 16 Pro Max']),
+                         dict(id=12223252,name='Производитель телефона',value=['Apple']),
+                         dict(id=195594,name='Цвет рамки',value=['черный'])]
+        card=dict(nm_id='101',title='Защитное стекло на iPhone 16 Pro Max',
+                  vendor_code='(Clean) iPhone 16 Pro Max',description='Защитное стекло для телефона',characteristics=characteristics)
+        current_card=dict(card,characteristics=list(reversed(characteristics)),subject_id=1571)
         raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
         card_path=box.admission/'card-source-approved.json';card_path.write_bytes(raw);card_path.chmod(0o600)
         box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest()
@@ -59,12 +114,33 @@ def main() -> None:
                     assert live._cleaner_contour_configured(SimpleNamespace(cleaner_web=web),box.runtime)
                 target=Target(11,101)
                 stage_e._verify_fresh_card(box.package,target,box.admission,service)
-                for changed in (dict(current_card,title='Changed title'),
-                                dict(current_card,vendor_code='changed'),
-                                dict(current_card,characteristics=[dict(id=1,name='Модель',value=['iPhone 15']),characteristics[1]])):
+                customs=dict(id=15000001,name='ТНВЭД',value=['7020008000'])
+                added=dict(current_card,characteristics=[*current_card['characteristics'],customs])
+                stage_e.fetch_current_card=lambda nm_id:added
+                stage_e._verify_fresh_card(box.package,target,box.admission,service)
+                cosmetic=dict(added,description=None,characteristics=[
+                    *[dict(row,wb_metadata='new') for row in current_card['characteristics']],
+                    customs,dict(id=99901,name='Размер упаковки',value=['20×10×2 см'],wb_metadata='new')])
+                stage_e.fetch_current_card=lambda nm_id:cosmetic
+                stage_e._verify_fresh_card(box.package,target,box.admission,service)
+                for unrelated in (dict(customs,value=['7020008001']),dict(customs,name='Иной ТН ВЭД'),
+                                  dict(customs,value='7020008000')):
+                    stage_e.fetch_current_card=lambda nm_id, row=unrelated:dict(added,characteristics=[*current_card['characteristics'],row])
+                    stage_e._verify_fresh_card(box.package,target,box.admission,service)
+                changed_kind=dict(added,characteristics=[*added['characteristics'],dict(id=999,name='Тип стекла',value=['Матовое стекло'])])
+                stage_e.fetch_current_card=lambda nm_id:changed_kind
+                try:stage_e._verify_fresh_card(box.package,target,box.admission,service)
+                except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable',exc.code
+                else:raise AssertionError('changed coating was admitted')
+                stage_e.fetch_current_card=lambda nm_id:dict(current_card)
+                stage_e.fetch_current_card=lambda nm_id:dict(current_card,title='Новая упаковка: защитное стекло iPhone 16 Pro Max')
+                stage_e._verify_fresh_card(box.package,target,box.admission,service)
+                for changed in (dict(current_card,title='Чехол на iPhone 16 Pro Max'),
+                                dict(current_card,vendor_code='(Matte) iPhone 16 Pro Max'),
+                                dict(current_card,characteristics=[dict(id=746,name='Совместимость',value=['Apple','iPhone 15']),*characteristics[1:]])):
                     stage_e.fetch_current_card=lambda nm_id, value=changed:value
                     try:stage_e._verify_fresh_card(box.package,target,box.admission,service)
-                    except CleanerError as exc:assert exc.code=='current_card_drift',exc.code
+                    except CleanerError as exc:assert exc.code in {'current_card_drift','current_card_semantics_unavailable'},exc.code
                     else:raise AssertionError('changed current card was admitted')
                 stage_e.fetch_current_card=lambda nm_id:dict(current_card)
                 owner=Principal('owner',True,True,True)

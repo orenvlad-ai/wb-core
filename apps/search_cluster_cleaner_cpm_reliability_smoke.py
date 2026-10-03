@@ -132,9 +132,13 @@ def main():
             assert c.execute("SELECT count(*) FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested'",(cleaner.key,)).fetchone()[0]==1
 
     with Sandbox() as box:
-        approved_card=dict(nm_id='102',title='Approved glass',vendor_code='approved-102',description='Approved card',characteristics=[])
-        source_bytes=json.dumps(dict(cards=[dict(nm_id='101',title='Approved baseline',vendor_code='approved-101',
-                                                description='Approved card',characteristics=[],card_digest='sha256:'+'1'*64),
+        semantic=dict(title='Защитное стекло iPhone 16 Pro Max',vendor_code='(Clean) iPhone 16 Pro Max',
+                      description='Защитное стекло для телефона',characteristics=[
+                          dict(id=746,name='Совместимость',value=['Apple','iPhone 16 Pro Max']),
+                          dict(id=12223252,name='Производитель телефона',value=['Apple']),
+                          dict(id=195594,name='Цвет рамки',value=['черный'])])
+        approved_card=dict(nm_id='102',**semantic)
+        source_bytes=json.dumps(dict(cards=[dict(nm_id='101',**semantic,card_digest='sha256:'+'1'*64),
                                            dict(approved_card,card_digest='sha256:'+'2'*64)]),sort_keys=True).encode()
         source_path=box.admission/'card-source-approved.json';source_path.write_bytes(source_bytes);source_path.chmod(0o600)
         profile=dict(box.package['profiles'][0],nm_id=102)
@@ -147,10 +151,10 @@ def main():
         projected=eligibility_rows(box.service(),'monolith',[Target(12,102,name='New CPM',contract_verified=True)],
                                    config_path=box.admission/'stage-e-config.json')
         assert len(projected)==1 and projected[0]['eligible'] and projected[0]['admitted'],projected
-        with patch.object(stage_e,'fetch_current_card',return_value=approved_card):
+        with patch.object(stage_e,'fetch_current_card',return_value=dict(approved_card,subject_id=1571)):
             verified=stage_e._verify_fresh_card(package,Target(12,102),box.admission,box.service())
             assert verified['nm_id']==102
-        with patch.object(stage_e,'fetch_current_card',return_value=dict(approved_card,title='Drift')):
+        with patch.object(stage_e,'fetch_current_card',return_value=dict(approved_card,subject_id=1571,vendor_code='(Matte) iPhone 16 Pro Max')):
             reject('current_card_drift',lambda:stage_e._verify_fresh_card(package,Target(12,102),box.admission,box.service()))
 
     with Sandbox() as box:
