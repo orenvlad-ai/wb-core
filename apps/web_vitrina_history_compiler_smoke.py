@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import gc
+from contextlib import closing
 import json
 import sqlite3
 import sys
@@ -51,7 +53,7 @@ def capture_inventory(conn, day: str, facility: str, *, revision: str = "origina
 
 
 def install_adversarial_source(runtime):
-    with sqlite3.connect(runtime.db_path) as conn:
+    with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
         history.ensure_inventory_history_schema(conn)
         capture_inventory(conn, "2026-04-15", "old")
         capture_inventory(conn, "2026-04-19", "new")
@@ -68,6 +70,38 @@ def install_adversarial_source(runtime):
                                "quality_reason": "dated legacy source"}}
         conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE rowid=?",
                      (json.dumps(plan), row_id))
+
+
+def finalize_owned_frozen_fixture(runtime_dir: Path) -> list[dict]:
+    """Finalize ONLY this synthetic temp fixture before its frozen byte proof.
+
+    Native fixture entrypoint also creates auxiliary supplier/autoanswers WAL
+    databases. Production source policy is untouched; this test owns all files.
+    """
+    root = runtime_dir.resolve()
+    if root.name != "runtime" or not root.parent.name.startswith("sheet-vitrina-web-vitrina-browser-"):
+        raise ValueError("not the owned synthetic fixture directory")
+    gc.collect()  # Release fixture setup's committed but unclosed SQLite handles.
+    files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        with path.open("rb") as file:
+            header = file.read(20)
+        if header[:16] != b"SQLite format 3\x00":
+            continue
+        with closing(sqlite3.connect(path)) as conn:
+            checkpoint = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            assert checkpoint[0] == 0, (path.name, "fixture checkpoint busy")
+            mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            assert mode == "delete", (path.name, mode)
+        with path.open("rb") as file:
+            finalized = file.read(20)
+        assert finalized[18:20] == b"\x01\x01", path.name
+        assert not any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")), path.name
+        files.append({"name": path.name, "before_header_versions": list(header[18:20]),
+                      "frozen_header_versions": list(finalized[18:20])})
+    return files
 
 
 def check_ranges(compiler, store, now):
@@ -135,6 +169,7 @@ def main():
     with fixture, tempfile.TemporaryDirectory(prefix="vitrina-dated-history-") as store_dir:
         runtime = fixture.entrypoint.runtime
         install_adversarial_source(runtime)
+        frozen_fixture = finalize_owned_frozen_fixture(runtime.runtime_dir)
         before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
         adapter = FrozenNativeAdapter(
             db_path=runtime.db_path, frozen_root=fixture.runtime_dir.parent, files=[], now=now,
@@ -162,7 +197,7 @@ def main():
         assert family_before == {str(p): p.stat().st_size for p in store.root.rglob("*") if p.is_file()}
 
         # Semantic-only correction uses actual capture/finalization producer writes.
-        with sqlite3.connect(runtime.db_path) as conn:
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
             capture_inventory(conn, "2026-04-15", "old", revision="corrected-same-quantity")
             row_id, encoded = conn.execute(
                 "SELECT rowid,plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date='2026-04-15'"
@@ -186,7 +221,7 @@ def main():
         assert store.edition()["consumed"] == vector  # correction not silently consumed
 
         # Current catalog-only source correction cannot reuse previous static labels.
-        with sqlite3.connect(runtime.db_path) as conn:
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
             conn.execute("UPDATE registry_upload_config_v2 SET display_name=display_name || ' corrected'")
         renamed = adapter.capture()
         assert renamed["epoch"] != corrected["epoch"]
@@ -205,7 +240,7 @@ def main():
             "DELETE FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date='2026-03-20'",
         ):
             previous = adapter.capture()
-            with sqlite3.connect(runtime.db_path) as conn:
+            with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
                 assert conn.execute(statement).rowcount == 1
             assert adapter.capture() != previous
 
@@ -215,7 +250,7 @@ def main():
             date_from="2026-03-22", date_to="2026-03-24", formula_epoch="test",
         )
         previous = historical.capture()
-        with sqlite3.connect(runtime.db_path) as conn:
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
             row_id, encoded = conn.execute(
                 "SELECT rowid,plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date='2026-04-20'"
             ).fetchone()
@@ -235,6 +270,7 @@ def main():
         (runtime.runtime_dir / "new-side-input.json").write_text("{}")
         assert adapter.capture() != before_rollover
         print(json.dumps({"status": "pass", "comparisons": comparisons, "no_change": no_change,
+                          "frozen_owned_fixture": frozen_fixture,
                           "native_semantic_correction": True, "pending_unconsumed": True,
                           "config_and_outside_range_catalog": True, "retro_update_delete_redate": True,
                           "business_timezone_rollover": True, "numeric_loss_fails_closed": True, "operational_read_unchanged": True,

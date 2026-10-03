@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import closing
 import json
 import os
 import secrets
@@ -58,16 +59,15 @@ def check_closed_wal_refusal():
     with tempfile.TemporaryDirectory(prefix="history-frozen-wal-") as directory:
         root = Path(directory)
         db = root / "native.sqlite3"
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn, conn:
             conn.execute("CREATE TABLE source(value TEXT)")
         arguments = {"db_path": db, "frozen_root": root, "files": [],
                      "now": datetime(2026, 4, 20, tzinfo=timezone.utc),
                      "date_from": DAYS[0], "date_to": DAYS[-1], "formula_epoch": "fixture"}
         adapter = FrozenNativeAdapter(**arguments)
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn, conn:
             conn.execute("PRAGMA journal_mode=WAL")
-        # Context managers commit but leave connection open; explicitly close it.
-        conn.close()
+        # The WAL version remains in the clean main header after explicit close.
         before = sorted(path.name for path in root.iterdir())
         assert before == ["native.sqlite3"]
         expect_error(lambda: FrozenNativeAdapter(**arguments), ValueError, "persistent WAL")
@@ -75,9 +75,8 @@ def check_closed_wal_refusal():
         assert sorted(path.name for path in root.iterdir()) == before
         # A supplied/automatically inventoried book is covered by the same guard.
         db.rename(root / "fbs-snapshot-accounting.sqlite3")
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn, conn:
             conn.execute("CREATE TABLE source(value TEXT)")
-        conn.close()
         book = root / "fbs-snapshot-accounting.sqlite3"
         expect_error(lambda: FrozenNativeAdapter(**{**arguments, "files": [book]}),
                      ValueError, "persistent WAL")
