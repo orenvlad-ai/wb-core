@@ -16,6 +16,17 @@ from packages.application.storage_registry import StoreRegistry
 class CleanerTransactionRolledBack(sqlite3.OperationalError):
     """A BUSY transaction was provably not committed; the same ID may recover."""
 
+
+def is_proven_local_contention(exc:BaseException) -> bool:
+    """Recognize a BUSY cause even when the storage registry wraps a read."""
+    seen=set()
+    while isinstance(exc,BaseException) and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc,CleanerTransactionRolledBack) or is_sqlite_contention_error(exc):
+            return True
+        exc=exc.__cause__ or exc.__context__
+    return False
+
 SCHEMA_VERSION = 3
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS cleaner_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);

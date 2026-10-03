@@ -27,6 +27,9 @@ from packages.application.search_cluster_cleaner_batch import READ_RETRY_DELAYS,
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter, ManualCleanerCoordinator
 from packages.application.search_cluster_cleaner_store import CleanerTransactionRolledBack
+from packages.application.search_cluster_cleaner_store import is_proven_local_contention
+from packages.application.sqlite_contention import SQLiteContentionExhausted
+from packages.application.storage_registry import StorageRegistryError
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal, Target
 
 
@@ -58,6 +61,93 @@ def prepared_fixture(box: Sandbox, *, extra_adverts=(12,)):
     box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
     ChangeRegistryRepository(box.runtime).initialize_schema()
     return card
+
+
+def contention_keeps_batch_intent():
+    """A local BUSY cannot finish the child or discard the batch tail."""
+    with Sandbox() as box:
+        card=prepared_fixture(box)
+        fake=FakeWB();fake.targets[12]=copy.deepcopy(fake.targets[11])
+        clock=Clock();clock.base=datetime.now(timezone.utc)+timedelta(seconds=1)
+        with fake.server() as url:
+            source=CleanerWbSource(account=box.service().account,
+                runtime=OfficialApiRuntimeConfig('synthetic',url,2),fixture=True,
+                clock=clock,monotonic=clock.monotonic,
+                limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
+            original_cleaner=stage_e.KeywordCleaner
+            with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571)), \
+                 patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
+                service=box.service();owner=Principal('owner',True,True,True)
+                catalog=source._adverts([11,12],source.monotonic()+120)
+                admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12)]
+                snapshot=eligibility_rows(service,'monolith',catalog,fixture_admission=admitted)
+                batch_id='synthetic-local-contention-0001'
+                service.start_manual_batch(dict(request_id=batch_id,selected_categories=['active'],
+                    targets=[dict(advert_id=aid,nm_id=101) for aid in (11,12)]),owner,snapshot=snapshot)
+                adapter=LocalStageEAdapter(runtime_dir=box.runtime,env_file=box.env,admission_dir=box.admission)
+                parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,
+                                               fixture_admission=admitted)
+                child=ManualCleanerCoordinator(service,adapter)
+
+                def blocked_identity(*_args,**_kwargs):
+                    try:raise SQLiteContentionExhausted(wait_ms=1000,retries=2,phase='read_statement')
+                    except SQLiteContentionExhausted as cause:
+                        raise StorageRegistryError('operational schema identity is unavailable') from cause
+                with patch.object(parent,'_exact_eligibility',side_effect=blocked_identity):
+                    try:parent.tick()
+                    except StorageRegistryError as exc:assert is_proven_local_contention(exc)
+                    else:raise AssertionError('blocked registry read finished the batch')
+                def wrapped_rollback(*_args,**_kwargs):
+                    try:raise CleanerTransactionRolledBack('commit_rolled_back')
+                    except CleanerTransactionRolledBack as cause:
+                        raise CleanerError('storage_rolled_back','Локальная запись не сохранена',503) from cause
+                with patch.object(parent,'_exact_eligibility',side_effect=wrapped_rollback):
+                    try:parent.tick()
+                    except CleanerError as exc:assert is_proven_local_contention(exc)
+                    else:raise AssertionError('wrapped rollback finished the batch')
+                assert service.manual_batch_snapshot(batch_id,owner)['state']=='queued'
+                assert not fake.writes
+
+                parent.tick();job_id=batch_child_id(batch_id,0)
+                for _ in range(20):
+                    current=service.manual_job(job_id,owner)
+                    if current['stage']=='prepare_previewed':break
+                    child.tick()
+                else:raise AssertionError('first child did not reach local prepare')
+                with patch.object(child,'_advance',side_effect=blocked_identity):
+                    try:child.tick()
+                    except StorageRegistryError as exc:assert is_proven_local_contention(exc)
+                    else:raise AssertionError('blocked child read became terminal')
+                assert service.manual_job(job_id,owner)['stage']=='prepare_previewed'
+                original_save=service.record_manual_job
+                hit=[]
+                def rolled_back_claim(request_id,**facts):
+                    if facts.get('stage')=='prepare_apply_claimed' and not hit:
+                        hit.append(True)
+                        raise CleanerTransactionRolledBack('commit_rolled_back')
+                    return original_save(request_id,**facts)
+                with patch.object(service,'record_manual_job',side_effect=rolled_back_claim):
+                    try:child.tick()
+                    except CleanerTransactionRolledBack:pass
+                    else:raise AssertionError('rolled-back prepare claim became terminal')
+                assert hit and service.manual_job(job_id,owner)['stage']=='prepare_previewed'
+                assert service.manual_batch_snapshot(batch_id,owner)['current_index']==0
+                assert not fake.writes
+
+                # The worker restarts from the same durable child and parent.
+                child=ManualCleanerCoordinator(service,adapter)
+                parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:source,
+                                               fixture_admission=admitted)
+                for _ in range(90):
+                    if child.pending_jobs():child.tick()
+                    if parent.pending_batches():parent.tick()
+                    status=batch_status(service,batch_id,owner)
+                    if status['state'] in {'complete','partial','failed'}:break
+                else:raise AssertionError('contended batch did not resume')
+                assert status['state']=='complete' and [row['state'] for row in status['items']]==['complete','complete'],status
+                assert [row['advert_id'] for row in fake.writes]==[11,12],fake.writes
+                assert not child.pending_jobs() and not parent.pending_batches()
 
 
 
@@ -540,6 +630,7 @@ def main():
     scan_finish_cases()
     return_only_finish_case()
     batch_write_deadlines()
+    contention_keeps_batch_intent()
     print('search cluster cleaner write recovery smoke: ok')
 
 

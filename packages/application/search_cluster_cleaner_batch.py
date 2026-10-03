@@ -7,6 +7,8 @@ from datetime import datetime,timezone
 
 from packages.application.search_cluster_cleaner import BATCH_TERMINAL_STATES, batch_child_id
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
+from packages.application.search_cluster_cleaner_store import is_proven_local_contention
+from packages.application.storage_registry import StorageRegistryError
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal
 
 CARD_EVIDENCE_CODES={'current_card_drift','current_card_semantics_unavailable','approved_card_source_mismatch'}
@@ -478,6 +480,7 @@ class BatchCleanerCoordinator:
                                 self.cleaner.batch_write_retry(batch['batch_id'],retry_index,update['job_id'],attempt=update['attempt'])
                             else:self.cleaner.retry_batch_scan(batch['batch_id'],retry_index,update['job_id'],update['attempt'])
                         except CleanerError as exc:
+                            if is_proven_local_contention(exc):raise
                             if exc.code!='manual_queue_blocked':
                                 if exc.code in GLOBAL_STOP_CODES:
                                     self._stop(batch,retry_index,code=exc.code,message=str(exc))
@@ -516,6 +519,7 @@ class BatchCleanerCoordinator:
             return batch_status(self.cleaner,batch['batch_id'],self.owner)
         try:child=_child(self.cleaner,self.owner,batch['batch_id'],index,item)
         except CleanerError as exc:
+            if is_proven_local_contention(exc):raise
             self._stop(batch,index,code=exc.code,message=str(exc))
             return batch_status(self.cleaner,batch['batch_id'],self.owner)
         if child:
@@ -544,6 +548,7 @@ class BatchCleanerCoordinator:
                         and child.get('local_retry_phase')=='write' and child.get('write_run_id')):
                     try:return self._defer_write(batch,index,child)
                     except CleanerError as exc:
+                        if is_proven_local_contention(exc):raise
                         self._stop(batch,index,code=exc.code,message=str(exc))
                         return batch_status(self.cleaner,batch['batch_id'],self.owner)
                 if child['state']=='failed' and child.get('error_code')=='local_not_submitted_retry':
@@ -586,13 +591,15 @@ class BatchCleanerCoordinator:
         try:
             row=self._exact_eligibility(item)
         except CleanerError as exc:
+            if is_proven_local_contention(exc):raise
             if exc.code in RETRYABLE_READ_CODES:
                 return self._defer_read(batch,index,code=exc.code,message=str(exc))
             if exc.code in GLOBAL_STOP_CODES:
                 self._stop(batch,index,code=exc.code,message=str(exc))
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             return self._advance_unavailable(batch,index,code=exc.code,message=str(exc))
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc,StorageRegistryError) or is_proven_local_contention(exc):raise
             self._stop(batch,index,code='campaign_catalog_unavailable',message='Не удалось проверить текущую кампанию WB')
             return batch_status(self.cleaner,batch['batch_id'],self.owner)
         if not row['eligible'] or row['status'] not in batch['selected_categories']:
@@ -606,5 +613,6 @@ class BatchCleanerCoordinator:
             self.cleaner.start_manual_clean(dict(request_id=batch_child_id(batch['batch_id'],index),advert_id=item['advert_id'],nm_id=item['nm_id']),
                                             self.owner,batch_id=batch['batch_id'],batch_index=index)
         except CleanerError as exc:
+            if is_proven_local_contention(exc):raise
             self._stop(batch,index,code=exc.code,message=str(exc))
         return batch_status(self.cleaner,batch['batch_id'],self.owner)
