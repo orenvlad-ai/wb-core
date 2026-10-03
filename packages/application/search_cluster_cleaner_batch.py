@@ -9,6 +9,7 @@ from packages.application.search_cluster_cleaner import BATCH_TERMINAL_STATES, b
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal
 
+CARD_EVIDENCE_CODES={'current_card_drift','current_card_semantics_unavailable','approved_card_source_mismatch'}
 RETRYABLE_READ_CODES={'source_temporarily_unavailable','rate_limited','read_budget','target_budget','local_not_submitted_retry'}
 GLOBAL_STOP_CODES={'unauthorized','forbidden','account_mismatch','generation_conflict',
                    'manual_job_authority_mismatch','batch_authority_mismatch','manual_not_ready','manual_run_not_ready'}
@@ -170,12 +171,16 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
         if job and job['state']=='failed':
             with cleaner.store.read() as c:proof=_drift_only_scan(c,cleaner,job,frozen)
         state=update.get('state') or (job['state'] if job else 'queued')
+        error_code=update.get('error_code') or (job.get('error_code') if job else None)
+        if error_code=='scan_incomplete' and update.get('error') in CARD_EVIDENCE_CODES:
+            # Old immutable events retain their code, while readback shows the cause.
+            error_code=update['error']
         row=dict(index=index,**frozen,selected_status=frozen['status'],state=state,
                  stage=update.get('stage') or (job.get('stage') if job else 'queued'),
                  job_id=job.get('job_id') if job else None,
                  write_run_id=job.get('write_run_id') if job else None,
                  error=(_drift_item_update(job,proof)['error'] if proof else update.get('error') or (job.get('error') if job else None)),
-                 error_code=('external_state_drift' if proof else update.get('error_code') or (job.get('error_code') if job else None)),
+                 error_code=('external_state_drift' if proof else error_code),
                  next_retry_at=(datetime.fromtimestamp(update['next_retry_at'],timezone.utc).isoformat()
                                 if update.get('state')=='retry_wait' and update.get('next_retry_at') else None),
                  retry_attempt=update.get('attempt') if update.get('state')=='retry_wait' else None,
@@ -312,12 +317,18 @@ class BatchCleanerCoordinator:
         with self.cleaner.store.read() as c:
             from packages.application.change_registry_search_cluster import bidirectional_ready
             if not bidirectional_ready(c):return []
-            rows=c.execute("SELECT json_extract(facts,'$.batch_id') AS batch_id FROM cleaner_events WHERE account=? AND kind='self_service_batch_requested' ORDER BY sequence",(self.cleaner.key,)).fetchall()
-            pending=[]
-            for row in rows:
-                latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_extract(facts,'$.batch_id')=? ORDER BY sequence DESC LIMIT 1",(self.cleaner.key,row['batch_id'])).fetchone()
-                if json.loads(latest['facts']).get('state','queued') not in BATCH_TERMINAL_STATES:pending.append(row['batch_id'])
-            return pending
+            rows=c.execute('''WITH ranked AS (
+                SELECT json_extract(facts,'$.batch_id') AS id,
+                    json_extract(facts,'$.state') AS state,
+                    ROW_NUMBER() OVER (PARTITION BY json_extract(facts,'$.batch_id') ORDER BY sequence DESC) AS newest,
+                    MIN(CASE WHEN kind='self_service_batch_requested' THEN sequence END)
+                        OVER (PARTITION BY json_extract(facts,'$.batch_id')) AS requested_at
+                FROM cleaner_events
+                WHERE account=? AND kind LIKE 'self_service_batch_%' AND json_type(facts,'$.batch_id') IS NOT NULL
+            ) SELECT id FROM ranked WHERE newest=1 AND requested_at IS NOT NULL
+                AND COALESCE(state,'queued') NOT IN ('complete','partial','failed')
+                ORDER BY requested_at''',(self.cleaner.key,)).fetchall()
+            return [row['id'] for row in rows]
 
     def waiting_only(self) -> bool:
         ids=self.pending_batches()
@@ -485,8 +496,18 @@ class BatchCleanerCoordinator:
                         current_index=index,error=None,error_code=None)
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             states=[batch['item_updates'].get(str(i),{}).get('state') for i in range(len(batch['items']))]
-            state='complete' if all(s in {'complete','no_change'} for s in states) else 'partial'
-            self.cleaner.record_manual_batch(batch['batch_id'],state=state,stage='finished',current_index=index,error=None,error_code=None)
+            if all(s in {'complete','no_change'} for s in states):
+                state='complete'
+            elif states and all(s=='partial' for s in states) and all(
+                    update.get('error_code') in CARD_EVIDENCE_CODES for update in batch['item_updates'].values()):
+                state='failed'
+            else:
+                state='partial'
+            reasons={update['error_code'] for update in batch['item_updates'].values()} if state=='failed' else set()
+            error_code=next(iter(reasons)) if len(reasons)==1 else 'card_evidence_unavailable' if reasons else None
+            error=('Все карточки изменились после утверждения исходной базы' if error_code=='current_card_drift' else
+                   'Ни одна карточка не прошла обязательную проверку товара' if error_code else None)
+            self.cleaner.record_manual_batch(batch['batch_id'],state=state,stage='finished',current_index=index,error=error,error_code=error_code)
             return batch_status(self.cleaner,batch['batch_id'],self.owner)
         item=batch['items'][index]
         if batch['item_updates'].get(str(index),{}).get('state') in {
@@ -553,7 +574,10 @@ class BatchCleanerCoordinator:
                         if reason in GLOBAL_STOP_CODES:
                             self._stop(batch,index,code=reason,message='Общая проверка WB остановлена')
                             return batch_status(self.cleaner,batch['batch_id'],self.owner)
-                        return self._advance_unavailable(batch,index,code='scan_incomplete',message=reason,job_id=child['job_id'])
+                        card_reason=reason in CARD_EVIDENCE_CODES
+                        message=(child.get('error') if card_reason and any('\u0400'<=ch<='\u04ff'
+                                for ch in str(child.get('error') or '')) else reason)
+                        return self._advance_unavailable(batch,index,code=reason if card_reason else 'scan_incomplete',message=message,job_id=child['job_id'])
                 self._stop(batch,index,code=child.get('error_code') or 'child_failed',message=child.get('error') or 'Проверка пары не завершилась')
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if batch['state']!='running' or batch['stage']!=child['stage']:

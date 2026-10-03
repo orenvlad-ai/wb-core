@@ -149,7 +149,32 @@ def drift_scan_admission():
             assert db.execute('SELECT count(*) FROM cleaner_write_operations').fetchone()[0]==0
 
 
+def all_card_drift_is_failed():
+    with Sandbox() as box:
+        preview=box.execute('preview')
+        box.execute('apply',expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+        service=ready_service(box);owner=Principal('owner',True,True,True)
+        targets=[Target(i,101,name='CPM '+str(i),contract_verified=True) for i in (11,12)]
+        admitted=[dict(advert_id=i,nm_id=101,state='verified') for i in (11,12)]
+        frozen=eligibility_rows(service,'monolith',targets,fixture_admission=admitted)
+        batch_id='synthetic-all-card-drift-0001'
+        service.start_manual_batch(dict(request_id=batch_id,selected_categories=['active'],
+            targets=[dict(advert_id=i,nm_id=101) for i in (11,12)]),owner,snapshot=frozen)
+        parent=BatchCleanerCoordinator(service,generation='monolith',source_factory=lambda:Source(targets),fixture_admission=admitted)
+        for index in range(2):
+            child=service.manual_job(parent.tick()['items'][index]['job_id'],owner)
+            assert service.stop_unsubmitted_manual_run(child['scan_run_id'])
+            service.record_manual_job(child['job_id'],state='failed',stage='finished',
+                                      error_code='current_card_drift',error='current_card_drift')
+            result=parent.tick()
+            assert result['items'][index]['error_code']=='current_card_drift',result
+        final=parent.tick()
+        assert final['state']=='failed' and final['error_code']=='current_card_drift',final
+        assert final['partial_count']==2 and final['completed_count']==0
+
+
 def main():
+    all_card_drift_is_failed()
     drift_scan_admission()
     technical_deferred_path()
     incomplete_scan_does_not_abort_other_pair()
@@ -373,8 +398,11 @@ def main():
         # two exact targets. Fake WB observes one submit per child, including
         # after both coordinators are reconstructed from their journals.
         box.package['manual_admission'].append(dict(box.package['manual_admission'][0],advert_id=12))
-        characteristics=[dict(id=1,name='Модель',value=['iPhone 16 Pro Max']),dict(id=2,name='Тип',value=['Обычное стекло'])]
-        card=dict(nm_id='101',title='Synthetic glass',vendor_code='synthetic',description='Approved synthetic card',characteristics=characteristics)
+        characteristics=[dict(id=746,name='Совместимость',value=['Apple','iPhone 16 Pro Max']),
+                         dict(id=12223252,name='Производитель телефона',value=['Apple']),
+                         dict(id=195594,name='Цвет рамки',value=['черный'])]
+        card=dict(nm_id='101',title='Защитное стекло iPhone 16 Pro Max',
+                  vendor_code='(Clean) iPhone 16 Pro Max',description='Защитное стекло для телефона',characteristics=characteristics)
         raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
         card_path=box.admission/'card-source-approved.json';card_path.write_bytes(raw);card_path.chmod(0o600)
         box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest()
@@ -389,7 +417,7 @@ def main():
                 clock=clock,monotonic=clock.monotonic,limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
             original_cleaner=stage_e.KeywordCleaner
             with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,characteristics=list(reversed(characteristics)))), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571,characteristics=list(reversed(characteristics)))), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=lambda *args,**kwargs:original_cleaner(*args,clock=clock,**kwargs)):
                 service=ready_service(box);owner=Principal('owner',True,True,True)
                 admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12)]

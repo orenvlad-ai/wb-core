@@ -284,10 +284,8 @@ def http_504_recovery_with_guarded_worker():
 
     with Sandbox() as box:
         box.package['manual_admission'].append(dict(box.package['manual_admission'][0],advert_id=12))
-        characteristics=[dict(id=1,name='Модель',value=['iPhone 16 Pro Max']),
-                         dict(id=2,name='Тип',value=['Обычное стекло'])]
-        card=dict(nm_id='101',title='Synthetic glass',vendor_code='synthetic',
-                  description='Approved synthetic card',characteristics=characteristics)
+        from apps.search_cluster_cleaner_stage_e_recovery_smoke import semantic_fixture_card
+        card=semantic_fixture_card();characteristics=card['characteristics']
         raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
         card_path=box.admission/'card-source-approved.json';card_path.write_bytes(raw);card_path.chmod(0o600)
         box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest()
@@ -303,7 +301,7 @@ def http_504_recovery_with_guarded_worker():
                 limiter=AccountLimiter(monotonic=wb_clock.monotonic,sleep=wb_clock.advance))
             original_cleaner=stage_e.KeywordCleaner
             with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,characteristics=list(reversed(characteristics)))), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571,characteristics=list(reversed(characteristics)))), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=lambda *args,**kwargs:original_cleaner(*args,clock=wb_clock,**kwargs)):
                 admitted=[dict(advert_id=aid,nm_id=101,state='verified') for aid in (11,12)]
                 catalog=source._adverts([11,12],source.monotonic()+120)

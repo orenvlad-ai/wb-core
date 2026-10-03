@@ -39,8 +39,11 @@ def main():
             state='verified' if verified else ('held_missing_kind' if index<31 else 'held_profile_mismatch')
             timestamp='2026-09-23T00:00:00Z' if verified else None
             evidence.append(dict(nm_id=nm,state=state,current_card_sha256=digest,verified_at=timestamp))
-            source.append(dict(nm_id=str(nm),title='Approved glass '+str(nm),vendor_code='approved-'+str(nm),
-                               description='Approved card',characteristics=[dict(id=1,name='kind',value='glass')],card_digest=digest))
+            source.append(dict(nm_id=str(nm),title='Защитное стекло iPhone 16 Pro Max '+str(nm),
+                               vendor_code='(Clean) iPhone 16 Pro Max '+str(nm),description='Защитное стекло для телефона',
+                               characteristics=[dict(id=746,name='Совместимость',value=['Apple','iPhone 16 Pro Max']),
+                                                dict(id=12223252,name='Производитель телефона',value=['Apple']),
+                                                dict(id=195594,name='Цвет рамки',value=['черный'])],card_digest=digest))
             profiles.append(dict(box.package['profiles'][0],nm_id=nm))
             if verified:
                 admission.append(dict(advert_id=10000+index,nm_id=nm,card_digest=digest,
@@ -68,9 +71,10 @@ def main():
         assert sum(row['status']=='active' for row in rows)==26
         assert sum(row['status']=='paused' for row in rows)==8
         fresh={key:value for key,value in source[23].items() if key!='card_digest'}
+        fresh['subject_id']=1571
         with patch.object(stage_e,'fetch_current_card',return_value=fresh):
             assert stage_e._verify_fresh_card(package,held,box.admission,box.service())['nm_id']==held.nm_id
-        with patch.object(stage_e,'fetch_current_card',return_value=dict(fresh,title='Drift')):
+        with patch.object(stage_e,'fetch_current_card',return_value=dict(fresh,vendor_code='(Matte) iPhone 16 Pro Max')):
             reject('current_card_drift',lambda:stage_e._verify_fresh_card(package,held,box.admission,box.service()))
         with box.service().store.transaction() as c:
             c.execute('INSERT INTO cleaner_target_holds VALUES(?,?,?,?)',

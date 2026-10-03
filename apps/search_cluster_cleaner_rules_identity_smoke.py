@@ -48,10 +48,8 @@ def source_for(url: str, clock: Clock) -> CleanerWbSource:
 
 
 def card_fixture(box: Sandbox) -> dict:
-    card=dict(nm_id='101',title='Synthetic glass',vendor_code='synthetic',
-              description='Approved synthetic card',characteristics=[
-                  dict(id=1,name='Модель',value=['iPhone 16 Pro Max']),
-                  dict(id=2,name='Тип',value=['Обычное стекло'])])
+    from apps.search_cluster_cleaner_stage_e_recovery_smoke import semantic_fixture_card
+    card=semantic_fixture_card()
     raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
     path=box.admission/'card-source-approved.json';path.write_bytes(raw);path.chmod(0o600)
     box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest()
@@ -90,7 +88,7 @@ def child_main() -> None:
     source=source_for(context['url'],clock)
     original_cleaner=stage_e.KeywordCleaner
     with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-         patch.object(stage_e,'fetch_current_card',side_effect=lambda _nm:context['card']), \
+         patch.object(stage_e,'fetch_current_card',side_effect=lambda _nm:dict(context['card'],subject_id=1571)), \
          patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
         service=KeywordCleaner(CleanerStore(StoreRegistry(Path(context['runtime']))),
                                Account('seller','scope'),owner_username='owner',clock=clock)
@@ -134,7 +132,7 @@ def resumed_old_run() -> None:
                 service.rules_digest=OLD_DECISION_MARSHAL_HASH if active and active['kind']=='scan' else OLD_MARSHAL_HASH
                 return service
             with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                 patch.object(stage_e,'fetch_current_card',side_effect=lambda _nm:dict(card)), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda _nm:dict(card,subject_id=1571)), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=old_cleaner):
                 service=box.service()
                 service.rules_digest=OLD_MARSHAL_HASH

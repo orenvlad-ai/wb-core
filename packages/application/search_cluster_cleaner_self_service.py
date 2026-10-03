@@ -101,13 +101,18 @@ class ManualCleanerCoordinator:
         with self.cleaner.store.read() as c:
             from packages.application.change_registry_search_cluster import bidirectional_ready
             if not bidirectional_ready(c):return []
-            rows=c.execute("SELECT json_extract(facts,'$.job_id') AS job_id FROM cleaner_events WHERE account=? AND kind='self_service_requested' ORDER BY sequence",(self.cleaner.key,)).fetchall()
-            pending=[]
-            for row in rows:
-                latest=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND kind LIKE 'self_service_%' AND json_extract(facts,'$.job_id')=? ORDER BY sequence DESC LIMIT 1",(self.cleaner.key,row['job_id'])).fetchone()
-                state=json.loads(latest['facts']).get('state','queued') if latest else 'queued'
-                if state not in {'complete','partial','failed','no_change'}:pending.append(row['job_id'])
-        return pending
+            rows=c.execute('''WITH ranked AS (
+                SELECT json_extract(facts,'$.job_id') AS id,
+                    json_extract(facts,'$.state') AS state,
+                    ROW_NUMBER() OVER (PARTITION BY json_extract(facts,'$.job_id') ORDER BY sequence DESC) AS newest,
+                    MIN(CASE WHEN kind='self_service_requested' THEN sequence END)
+                        OVER (PARTITION BY json_extract(facts,'$.job_id')) AS requested_at
+                FROM cleaner_events
+                WHERE account=? AND kind LIKE 'self_service_%' AND json_type(facts,'$.job_id') IS NOT NULL
+            ) SELECT id FROM ranked WHERE newest=1 AND requested_at IS NOT NULL
+                AND COALESCE(state,'queued') NOT IN ('complete','partial','failed','no_change')
+                ORDER BY requested_at''',(self.cleaner.key,)).fetchall()
+        return [row['id'] for row in rows]
 
     def tick(self) -> dict|None:
         jobs=self.pending_jobs()

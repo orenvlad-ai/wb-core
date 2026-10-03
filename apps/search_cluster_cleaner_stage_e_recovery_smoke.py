@@ -21,6 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from apps import search_cluster_cleaner_stage_e as stage_e
 from apps.search_cluster_cleaner_write_fixture import PROFILE
+
+
+def semantic_fixture_card(nm_id: int = 101) -> dict:
+    """Synthetic approved Content card with the same semantic sources as WB."""
+    return dict(nm_id=str(nm_id),title='Защитное стекло iPhone 16 Pro Max',
+                vendor_code='(Clean) iPhone 16 Pro Max',description='Защитное стекло для телефона',
+                characteristics=[dict(id=746,name='Совместимость',value=['Apple','iPhone 16 Pro Max']),
+                                 dict(id=12223252,name='Производитель телефона',value=['Apple']),
+                                 dict(id=195594,name='Цвет рамки',value=['черный'])])
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.storage_registry import _implicit_manifest, manifest_payload

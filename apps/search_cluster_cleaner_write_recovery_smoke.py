@@ -48,10 +48,8 @@ def held_commit(database: Path, call):
 def prepared_fixture(box: Sandbox, *, extra_adverts=(12,)):
     for advert_id in extra_adverts:
         box.package['manual_admission'].append(dict(box.package['manual_admission'][0], advert_id=advert_id))
-    card=dict(nm_id='101',title='Synthetic glass',vendor_code='synthetic',
-              description='Approved synthetic card',characteristics=[
-                  dict(id=1,name='Модель',value=['iPhone 16 Pro Max']),
-                  dict(id=2,name='Тип',value=['Обычное стекло'])])
+    from apps.search_cluster_cleaner_stage_e_recovery_smoke import semantic_fixture_card
+    card=semantic_fixture_card()
     raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
     path=box.admission/'card-source-approved.json';path.write_bytes(raw);path.chmod(0o600)
     box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest()
@@ -75,7 +73,7 @@ def scan_finish_cases():
                     limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
                 original_cleaner=stage_e.KeywordCleaner
                 with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                     patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card)), \
+                     patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571)), \
                      patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
                     service=box.service();owner=Principal('owner',True,True,True)
                     job_id='synthetic-scan-finish-'+('partial' if partial else 'complete')
@@ -135,7 +133,7 @@ def return_only_finish_case():
                 limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
             original_cleaner=stage_e.KeywordCleaner
             with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card)), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571)), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
                 service=box.service();owner=Principal('owner',True,True,True)
                 job_id='synthetic-return-finish-0001'
@@ -191,7 +189,7 @@ def batch_write_deadlines():
                     limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
                 original_cleaner=stage_e.KeywordCleaner
                 with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                     patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card)), \
+                     patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571)), \
                      patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
                     service=box.service();owner=Principal('owner',True,True,True)
                     ids=[11,12] if uncertain_submit else [11]
@@ -332,7 +330,7 @@ def main():
                 limiter=AccountLimiter(monotonic=clock.monotonic,sleep=clock.advance))
             original_cleaner=stage_e.KeywordCleaner
             with patch.object(stage_e.CleanerWbSource,'from_env',return_value=source), \
-                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card)), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571)), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=lambda *a,**kw:original_cleaner(*a,clock=clock,**kw)):
                 service=box.service();owner=Principal('owner',True,True,True)
                 catalog=source._adverts([11,12,13],source.monotonic()+120)
@@ -486,7 +484,7 @@ def main():
                 assert resumed['stage']=='write_previewing' and resumed['state']=='queued',resumed
                 assert resumed['write_run_id']==write_run
                 request=dict(mode='manual',run_id=write_run,targets=[dict(advert_id=12,nm_id=101)])
-                with patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,title='Unapproved drift')):
+                with patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571,vendor_code='(Matte) iPhone 16 Pro Max')):
                     try:adapter.preview(request,external_id)
                     except CleanerError as exc:assert exc.code=='current_card_drift',exc.code
                     else:raise AssertionError('recovered run bypassed fresh card verification')

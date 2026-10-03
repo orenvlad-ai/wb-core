@@ -49,8 +49,8 @@ def running_integration_fixture(port=0):
         row=dict(advert_id=11,nm_id=101,query='OLD',decision='allow',observed_state='excluded',provenance={'synthetic':True})
         box.package['rows'].append(row)
         box.package['rows_digest']='sha256:'+digest(box.package['rows'])
-        characteristics=[dict(id=1,name='Модель',value=['iPhone 16 Pro Max']),dict(id=2,name='Тип',value=['Обычное стекло'])]
-        card=dict(nm_id='101',title='Synthetic glass',vendor_code='synthetic',description='Approved synthetic card',characteristics=characteristics)
+        from apps.search_cluster_cleaner_stage_e_recovery_smoke import semantic_fixture_card
+        card=semantic_fixture_card();characteristics=card['characteristics']
         raw=json.dumps(dict(cards=[dict(card,card_digest='sha256:'+'1'*64)]),sort_keys=True).encode()
         card_path=box.admission/'card-source-approved.json';card_path.write_bytes(raw);card_path.chmod(0o600)
         box.package['provenance']['fresh_cards_sha256']='sha256:'+hashlib.sha256(raw).hexdigest()
@@ -94,7 +94,7 @@ def running_integration_fixture(port=0):
             env.update(WB_CORE_WEB_AUTH_REQUIRED='1',WB_CORE_WEB_AUTH_USERNAME='owner',WB_CORE_WEB_AUTH_PASSWORD_HASH=_password_hash(PASSWORD),WB_CORE_WEB_AUTH_SESSION_SECRET='synthetic-reconcile-integration-secret')
             with patch.dict(os.environ,env,clear=True), \
                  patch.object(CleanerWbSource,'from_env',return_value=source), \
-                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,characteristics=list(reversed(characteristics)))), \
+                 patch.object(stage_e,'fetch_current_card',side_effect=lambda nm_id:dict(card,subject_id=1571,characteristics=list(reversed(characteristics)))), \
                  patch.object(stage_e,'KeywordCleaner',side_effect=lambda *args,**kwargs:original_cleaner(*args,clock=clock,**kwargs)):
                 admitted=[dict(advert_id=11,nm_id=101,state='verified',campaign_name='Реальная тестовая кампания')]
                 web=CleanerWeb(service,generation='monolith',approved_targets=admitted)

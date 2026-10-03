@@ -7,10 +7,12 @@ apply claim only by readback of that exact Production Apply operation.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import threading
 import time
@@ -23,6 +25,7 @@ from packages.application.search_cluster_cleaner_web import CleanerWeb
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter,ManualCleanerCoordinator
 from packages.application.search_cluster_cleaner_batch import BatchCleanerCoordinator
 from packages.application.search_cluster_cleaner_daily import DailyCleanerScheduler
+from packages.application.search_cluster_cleaner_daily import ZONE
 
 
 def deployment_ready() -> bool:
@@ -56,9 +59,9 @@ def ready_cycle(coordinator, batch_coordinator, daily) -> bool:
     due=daily.tick()
     if jobs:coordinator.tick()
     if batches:batch_coordinator.tick()
-    daily.reconcile_finished()
+    reconciled=daily.reconcile_finished()
     waiting=bool(batches and hasattr(batch_coordinator,'waiting_only') and batch_coordinator.waiting_only())
-    return bool(jobs or batches and not waiting or due and due.get('state') not in {
+    return bool(reconciled or jobs or batches and not waiting or due and due.get('state') not in {
         'skipped','missed','no_targets','waiting_for_queue'})
 
 
@@ -67,6 +70,80 @@ def armed_cycle(coordinator, batch_coordinator, daily) -> None:
     coordinator.pending_jobs()
     batch_coordinator.pending_batches()
     daily.observe_deployment_blocked()
+
+
+class IdleWake:
+    """Watch cheap durable signals while no cleaner work is pending.
+
+    The event sequence is sampled before a full cycle. An enqueue racing with
+    that cycle therefore remains visible on the next probe.
+    """
+    def __init__(self, cleaner, runtime_dir:Path):
+        self.cleaner=cleaner
+        self.runtime_dir=runtime_dir
+        self.sequence=-1
+        self.environment=None
+        self.next_due=0.0
+
+    def event_sequence(self) -> int:
+        with self.cleaner.store.read() as c:
+            row=c.execute('SELECT MAX(sequence) FROM cleaner_events WHERE account=?',(self.cleaner.key,)).fetchone()
+        return int(row[0] or 0)
+
+    def environment_version(self) -> tuple:
+        paths=(ROOT/'.wb-core-runtime-sha',ROOT/'.wb-core-deploy.json',
+               self.runtime_dir/'.auto-updates-policy.json',
+               self.runtime_dir/'.business-data-maintenance.json',
+               self.runtime_dir/'.business-data-write-barrier.json')
+        return tuple((p.stat().st_mtime_ns,p.stat().st_size) if p.exists() else None for p in paths)
+
+    def refresh(self, sequence_before_cycle:int, environment_before_cycle:tuple) -> None:
+        self.sequence=sequence_before_cycle
+        self.environment=environment_before_cycle
+        now=datetime.now(timezone.utc)
+        local=now.astimezone(ZONE)
+        today=local.date().isoformat()
+        try:
+            with self.cleaner.store.read() as c:
+                schedules=c.execute('SELECT schedule_id,local_time FROM cleaner_daily_schedules WHERE account=? AND enabled=1',
+                                    (self.cleaner.key,)).fetchall()
+                occurrences={row['schedule_id']:row for row in c.execute(
+                    'SELECT schedule_id,state,details FROM cleaner_daily_occurrences WHERE account=? AND local_date=?',
+                    (self.cleaner.key,today))}
+                older=c.execute('''SELECT state,details FROM cleaner_daily_occurrences
+                    WHERE account=? AND local_date<? AND state IN ('pending','catalog_wait','start_wait','deployment_blocked')
+                    ORDER BY local_date DESC LIMIT 48''',(self.cleaner.key,today)).fetchall()
+        except sqlite3.OperationalError as exc:
+            if 'no such table' not in str(exc):raise
+            # The pre-release worker may start before the schedule migration.
+            self.next_due=now.timestamp()+30
+            return
+        deadlines=[]
+        for item in older:
+            retry=json.loads(item['details']).get('next_retry_at')
+            deadlines.append(datetime.fromisoformat(retry.replace('Z','+00:00')).timestamp() if retry else now.timestamp())
+        for schedule in schedules:
+            hour,minute=map(int,schedule['local_time'].split(':'))
+            due=local.replace(hour=hour,minute=minute,second=0,microsecond=0)
+            item=occurrences.get(schedule['schedule_id'])
+            if item is None:
+                if due.astimezone(timezone.utc)<now:
+                    # The full cycle just tried this slot. A paused policy or
+                    # unready baseline can deliberately leave no occurrence;
+                    # the policy/event signal wakes us if that changes.
+                    due+=timedelta(days=1)
+            elif item['state'] in {'pending','catalog_wait','start_wait','deployment_blocked'}:
+                retry=json.loads(item['details']).get('next_retry_at')
+                if retry:
+                    due=datetime.fromisoformat(retry.replace('Z','+00:00')).astimezone(ZONE)
+                else:deadlines.append(now.timestamp());continue
+            else:due+=timedelta(days=1)
+            deadlines.append(due.timestamp())
+        self.next_due=max(now.timestamp()+2,min(deadlines)) if deadlines else float('inf')
+
+    def changed(self) -> bool:
+        return (time.time()>=self.next_due or self.event_sequence()!=self.sequence
+                or self.environment_version()!=self.environment)
 
 
 def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2.0) -> None:
@@ -85,7 +162,21 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
         batch_coordinator=BatchCleanerCoordinator(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username)
         daily=DailyCleanerScheduler(cleaner,generation=web.generation,bootstrap_owner_username=bootstrap_owner_username,
                                     deployment_check=deployment_ready)
+        wake=IdleWake(cleaner,runtime_dir)
+        idle=False
         while True:
+            try:
+                if idle and not wake.changed():
+                    report_health(admission_dir,'ready' if deployment_ready() else 'armed')
+                    time.sleep(poll_seconds)
+                    continue
+                sequence_before_cycle=wake.event_sequence()
+                environment_before_cycle=wake.environment_version()
+            except Exception as exc:
+                report_health(admission_dir,'storage_wait',type(exc).__name__)
+                idle=False
+                time.sleep(poll_seconds)
+                continue
             if not deployment_ready():
                 try:
                     # The final deploy marker is still false. Prove that the
@@ -100,8 +191,10 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                         stop.set()
                         heartbeat.join()
                     report_health(admission_dir,'armed')
+                    idle=True
                 except Exception as exc:
                     report_health(admission_dir,'storage_wait',type(exc).__name__)
+                    idle=False
             else:
                 try:
                     waiting=batch_coordinator.waiting_only()
@@ -115,10 +208,17 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                         stop.set()
                         heartbeat.join()
                     report_health(admission_dir,'busy' if busy else 'waiting_wb' if batch_coordinator.waiting_only() else 'ready')
+                    idle=not busy and not batch_coordinator.pending_batches() and not coordinator.pending_jobs()
                 except Exception as exc:
                     # The exact intent stays durable. Report the failure while
                     # the supervisor keeps this process available for recovery.
                     report_health(admission_dir,'storage_wait',type(exc).__name__)
+                    idle=False
+            if idle:
+                try:wake.refresh(sequence_before_cycle,environment_before_cycle)
+                except Exception as exc:
+                    report_health(admission_dir,'storage_wait',type(exc).__name__)
+                    idle=False
             time.sleep(poll_seconds)
     finally:
         os.close(fd)
