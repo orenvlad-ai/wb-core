@@ -799,6 +799,101 @@ def _assert_users_access_picker_browser(
                 raise AssertionError("mobile Finance rights must expand")
             page.keyboard.press("Escape")
 
+            # The real settings page is embedded in a taller iframe inside a scrolled shell.
+            # Its own viewport includes an area already hidden above the outer viewport.
+            embedded_page = context.new_page()
+            embedded_page.set_viewport_size({"width": 387, "height": 752})
+            embedded_page.goto(f"{base_url}{DEFAULT_SETTINGS_UI_PATH}", wait_until="domcontentloaded")
+            embedded_page.set_content(
+                '<style>body { margin: 0; }</style>'
+                '<div style="height: 181px"></div>'
+                f'<iframe id="settings-embed-test" src="{base_url}{DEFAULT_SETTINGS_UI_PATH}?embedded=1" '
+                'style="display: block; border: 0; margin-left: 21px; width: 345px; height: 920px"></iframe>'
+                '<div style="height: 700px"></div>'
+            )
+            embedded_frame = embedded_page.frame_locator("#settings-embed-test")
+            embedded_frame.locator('[data-settings-group-button="users"]').click()
+            embedded_frame.locator(f'tr[data-user-id="{ui_user_id}"]').wait_for()
+            embedded_toggle = embedded_frame.locator(f'tr[data-user-id="{ui_user_id}"] [data-access-picker-toggle]')
+            embedded_toggle.evaluate("""el => {
+                const panel = document.querySelector('#usersGroupPanel');
+                if (el.getBoundingClientRect().top < 650) {
+                    panel.style.marginTop = (700 - el.getBoundingClientRect().top) + 'px';
+                }
+                document.body.style.paddingBottom = '1000px';
+                window.scrollBy(0, el.getBoundingClientRect().top - 650);
+            }""")
+            embedded_page.evaluate("window.scrollTo(0, 370)")
+            toggle_y = embedded_toggle.evaluate("el => el.getBoundingClientRect().top")
+            if not 580 <= toggle_y <= 720:
+                raise AssertionError(f"embedded fixture must place a lower-row toggle near the iframe bottom: {toggle_y}")
+            embedded_toggle.evaluate("el => el.click()")
+            embedded_popover = embedded_frame.locator("#" + embedded_toggle.get_attribute("aria-controls"))
+            if not embedded_popover.is_visible():
+                raise AssertionError("embedded lower-row access picker must open")
+
+            def assert_embedded_picker_visible(stage: str) -> None:
+                embedded_page.wait_for_function("""() => {
+                    const frame = document.querySelector('#settings-embed-test');
+                    const popup = frame?.contentWindow.document.querySelector('[data-access-picker-popover]:not([hidden])');
+                    if (!popup) return false;
+                    const frameRect = frame.getBoundingClientRect();
+                    const popupRect = popup.getBoundingClientRect();
+                    return frameRect.top + frame.clientTop + popupRect.top >= -1
+                        && frameRect.top + frame.clientTop + popupRect.bottom <= window.innerHeight + 1
+                        && frameRect.left + frame.clientLeft + popupRect.left >= -1
+                        && frameRect.left + frame.clientLeft + popupRect.right <= window.innerWidth + 1;
+                }""")
+                geometry = embedded_page.evaluate("""() => {
+                    const frame = document.querySelector('#settings-embed-test');
+                    const popup = frame.contentWindow.document.querySelector('[data-access-picker-popover]:not([hidden])');
+                    const frameRect = frame.getBoundingClientRect();
+                    const popupRect = popup.getBoundingClientRect();
+                    return {
+                        frameTop: frameRect.top,
+                        outerScrollY: window.scrollY,
+                        left: frameRect.left + frame.clientLeft + popupRect.left,
+                        top: frameRect.top + frame.clientTop + popupRect.top,
+                        right: frameRect.left + frame.clientLeft + popupRect.right,
+                        bottom: frameRect.top + frame.clientTop + popupRect.bottom,
+                        width: window.innerWidth,
+                        height: window.innerHeight,
+                    };
+                }""")
+                if geometry["frameTop"] >= 0 or geometry["outerScrollY"] < 370:
+                    raise AssertionError(f"fixture must hide the iframe top with outer scroll: {geometry}")
+                if (geometry["left"] < -1 or geometry["top"] < -1 or geometry["right"] > geometry["width"] + 1 or geometry["bottom"] > geometry["height"] + 1):
+                    raise AssertionError(f"embedded access picker must fit outer viewport after {stage}: {geometry}")
+
+            assert_embedded_picker_visible("opening")
+            embedded_popover.locator('[data-access-group="finance"] summary').evaluate("el => el.click()")
+            embedded_popover.locator('[data-access-group="sensitive"] summary').evaluate("el => el.click()")
+            assert_embedded_picker_visible("expanding Finance and special rights")
+            embedded_page.evaluate("window.scrollTo(0, 430)")
+            assert_embedded_picker_visible("outer scroll")
+            embedded_page.set_viewport_size({"width": 387, "height": 680})
+            assert_embedded_picker_visible("outer resize")
+            embedded_popover.evaluate("el => el.scrollTop = el.scrollHeight")
+            sensitive_bounds = embedded_page.evaluate("""() => {
+                const frame = document.querySelector('#settings-embed-test');
+                const popup = frame.contentWindow.document.querySelector('[data-access-picker-popover]:not([hidden])');
+                const target = popup.querySelector('[data-access-group="sensitive"] [value="finance_vlad_balance"]');
+                const frameRect = frame.getBoundingClientRect();
+                const targetRect = target.getBoundingClientRect();
+                return {
+                    top: frameRect.top + frame.clientTop + targetRect.top,
+                    bottom: frameRect.top + frame.clientTop + targetRect.bottom,
+                    height: window.innerHeight,
+                };
+            }""")
+            if sensitive_bounds["top"] < 0 or sensitive_bounds["bottom"] > sensitive_bounds["height"]:
+                raise AssertionError(f"special right must be reachable by scrolling inside the menu: {sensitive_bounds}")
+            embedded_popover.evaluate("el => el.scrollTop = 0")
+            embedded_screenshot = os.environ.get("WBC_UI_EMBED_SCREENSHOT_PATH")
+            if embedded_screenshot:
+                embedded_page.screenshot(path=embedded_screenshot)
+            embedded_page.close()
+
             owner_row = page.locator("#userRows tr").filter(has_text="owner").first
             if owner_row.locator(".access-picker-summary.is-readonly").count() != 1:
                 raise AssertionError("readonly env row must render compact access summary")

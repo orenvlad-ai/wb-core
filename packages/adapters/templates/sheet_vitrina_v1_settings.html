@@ -2814,22 +2814,55 @@
         if (manage?.checked) set("settings", true);
       }
 
+      function accessVisibleViewport(view = window) {
+        const visual = view.visualViewport;
+        const bounds = {
+          left: visual?.offsetLeft || 0,
+          top: visual?.offsetTop || 0,
+          right: (visual?.offsetLeft || 0) + (visual?.width || view.innerWidth),
+          bottom: (visual?.offsetTop || 0) + (visual?.height || view.innerHeight),
+        };
+        try {
+          if (view.parent !== view && view.frameElement) {
+            const frame = view.frameElement;
+            const rect = frame.getBoundingClientRect();
+            const parentBounds = accessVisibleViewport(view.parent);
+            const contentLeft = rect.left + frame.clientLeft;
+            const contentTop = rect.top + frame.clientTop;
+            bounds.left = Math.max(bounds.left, parentBounds.left - contentLeft);
+            bounds.top = Math.max(bounds.top, parentBounds.top - contentTop);
+            bounds.right = Math.min(bounds.right, parentBounds.right - contentLeft);
+            bounds.bottom = Math.min(bounds.bottom, parentBounds.bottom - contentTop);
+          }
+        } catch (_) {
+          // Cross-origin ancestors cannot provide a more precise visible rectangle.
+        }
+        return bounds;
+      }
+
       function positionAccessPopover(picker) {
         const popover = accessPopover(picker);
         const toggle = picker?.querySelector("[data-access-picker-toggle]");
         if (!popover || !toggle || popover.hidden) return;
         const rect = toggle.getBoundingClientRect();
         const margin = 8;
-        const viewportHeight = window.visualViewport?.height || window.innerHeight;
-        const viewportWidth = window.visualViewport?.width || window.innerWidth;
-        const below = viewportHeight - rect.bottom - margin * 2;
-        const above = rect.top - margin * 2;
+        const gap = 6;
+        const bounds = accessVisibleViewport();
+        const top = bounds.top + margin;
+        const bottom = bounds.bottom - margin;
+        const left = bounds.left + margin;
+        const right = bounds.right - margin;
+        const below = Math.max(0, bottom - rect.bottom - gap);
+        const above = Math.max(0, rect.top - top - gap);
         const openAbove = below < Math.min(popover.scrollHeight, 300) && above > below;
-        const space = Math.max(90, openAbove ? above : below);
+        const sideSpace = openAbove ? above : below;
+        const space = sideSpace >= 90 ? sideSpace : Math.max(0, bottom - top);
         popover.style.maxHeight = Math.floor(space) + "px";
-        const height = Math.min(popover.scrollHeight, space);
-        popover.style.top = Math.max(margin, Math.floor(openAbove ? rect.top - height - 6 : rect.bottom + 6)) + "px";
-        popover.style.left = Math.max(margin, Math.min(rect.left, viewportWidth - popover.offsetWidth - margin)) + "px";
+        popover.style.maxWidth = Math.floor(Math.max(0, right - left)) + "px";
+        const height = popover.offsetHeight;
+        const preferredTop = openAbove ? rect.top - height - gap : rect.bottom + gap;
+        popover.style.top = Math.floor(Math.max(top, Math.min(preferredTop, bottom - height))) + "px";
+        popover.style.left = Math.floor(Math.max(left, Math.min(rect.left, right - popover.offsetWidth))) + "px";
       }
 
       function closeAccessPickers(exceptPicker, restoreFocus = false) {
@@ -4171,12 +4204,32 @@
           closeAccessPickers(null, true);
         }
       });
-      window.addEventListener("resize", () => {
-        document.querySelectorAll("[data-access-picker]").forEach(positionAccessPopover);
+      const repositionAccessPickers = () => document.querySelectorAll("[data-access-picker]").forEach(positionAccessPopover);
+      window.addEventListener("resize", repositionAccessPickers);
+      document.addEventListener("scroll", repositionAccessPickers, true);
+      window.visualViewport?.addEventListener("resize", repositionAccessPickers);
+      window.visualViewport?.addEventListener("scroll", repositionAccessPickers);
+      const ancestorViewports = [];
+      try {
+        for (let ancestor = window.parent; ancestor !== window; ancestor = ancestor.parent) {
+          ancestor.addEventListener("resize", repositionAccessPickers);
+          ancestor.addEventListener("scroll", repositionAccessPickers, true);
+          ancestor.visualViewport?.addEventListener("resize", repositionAccessPickers);
+          ancestor.visualViewport?.addEventListener("scroll", repositionAccessPickers);
+          ancestorViewports.push(ancestor);
+          if (ancestor.parent === ancestor) break;
+        }
+      } catch (_) {
+        // A cross-origin parent is not available for scroll/resize observation.
+      }
+      window.addEventListener("pagehide", () => {
+        ancestorViewports.forEach((ancestor) => {
+          ancestor.removeEventListener("resize", repositionAccessPickers);
+          ancestor.removeEventListener("scroll", repositionAccessPickers, true);
+          ancestor.visualViewport?.removeEventListener("resize", repositionAccessPickers);
+          ancestor.visualViewport?.removeEventListener("scroll", repositionAccessPickers);
+        });
       });
-      document.addEventListener("scroll", () => {
-        document.querySelectorAll("[data-access-picker]").forEach(positionAccessPopover);
-      }, true);
       renderCreateUserAccessControls();
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
