@@ -44,6 +44,8 @@ test("use stage, not elapsed hours, separates crack routes", () => {
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Неделю пользовался телефоном, чехлом не пользовался, стекло треснуло")).route, "public_only");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "При первом осмотре до использования всё было целым, через неделю появилась трещина")).route, "seller_chat");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "При первом осмотре до использования всё было целым, через неделю использования появилась трещина")).route, "public_only");
+  assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "При установке трещин не было, через неделю использования появилась трещина", "wb_return")).route, "public_only");
+  assert.notEqual(guarded(classification("INSTALL_BREAKAGE", "При установке трещин не было, через неделю использования появилась трещина", "seller_chat")).route, "wb_return");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "При использовании на стекле появилась трещина", "seller_chat")).route, "public_only");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло треснуло после 5 минут использования", "seller_chat")).route, "public_only");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло пришло с трещиной в углу", "seller_chat")).route, "wb_return");
@@ -54,6 +56,8 @@ test("one public bubble answer changes only after a failed remedy", () => {
   assert.equal(guarded(classification("BUBBLES_DUST", "Стекло всё в пузырьках, делал всё по инструкции", "wb_return")).route, "public_only");
   assert.equal(guarded(classification("BUBBLES_DUST", "Пробовал приподнимать и разглаживать, сутки прошли, пузыри остались")).route, "wb_return");
   assert.equal(guarded(classification("BUBBLES_DUST", "Не пробовал приподнимать, пузыри остались")).route, "public_only");
+  assert.equal(guarded(classification("BUBBLES_DUST", "Не пробовал приподнимать, но разглаживал, пузыри остались")).route, "wb_return");
+  assert.equal(guarded(classification("BUBBLES_DUST", "Сначала не пробовал разглаживать, потом попробовал, пузыри остались")).route, "wb_return");
   assert.equal(guarded(classification("BUBBLES_DUST", "Попытался выдавить пузыри, не получается", "public_only")).route, "wb_return");
   assert.equal(guarded(classification("ADHESION", "Стекло вообще не фиксируется, сколько ни пытайся, ничего не получилось", "public_only")).route, "wb_return");
   const independentTouch = classification("BUBBLES_DUST", "После установки остались воздушные пузыри без пыли", "wb_return", {
@@ -70,6 +74,13 @@ test("one public bubble answer changes only after a failed remedy", () => {
     ]
   });
   assert.equal(guarded(mixedMechanism).route, "wb_return");
+  const intactMechanism = classification("SIZE_FIT", "Стекло слишком маленькое", "seller_chat", {
+    issues: [
+      {code: "SIZE_FIT", evidence: [{excerpt: "Стекло слишком маленькое"}]},
+      {code: "INSTALL_MECHANISM", evidence: [{excerpt: "Механизм не сломан, просто стекло слишком маленькое"}]}
+    ]
+  });
+  assert.notEqual(guarded(intactMechanism).route, "wb_return");
 });
 
 test("cleaning consumables do not hide a missing glass or another defect", () => {
@@ -86,6 +97,8 @@ test("cleaning consumables do not hide a missing glass or another defect", () =>
   assert.equal(result.route, "wb_return");
   assert.deepEqual(result.required_evidence, []);
   assert.equal(guarded(classification("BUBBLES_DUST", "Под уже наклеенным стеклом пылинка. Стикеров нет.", "seller_chat")).route, "wb_return");
+  assert.equal(guarded(classification("BUBBLES_DUST", "Не положили стикер от пыли, под стеклом осталась пылинка", "public_only")).route, "wb_return");
+  assert.equal(guarded(classification("MISSING_PARTS", "До установки не положили стикер от пыли, тряпочка есть", "wb_return")).route, "public_only");
 });
 
 test("unknown model uses one chat invitation while established mismatch can return", () => {

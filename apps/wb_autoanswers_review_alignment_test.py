@@ -42,20 +42,36 @@ class ReviewAlignmentTest(unittest.TestCase):
         self.assertNotIn("installation_breakage_before_use", negated["hard_return_reasons"])
         intact = classify_return_guard({"text": "При первом осмотре до использования всё было целым, через неделю появилась трещина"})
         self.assertFalse(intact["hard_return"])
+        absent = classify_return_guard({"text": "Трещин нет, только пузыри после установки."})
+        self.assertFalse(absent["post_use_breakage"])
+        self.assertFalse(absent["hard_return"])
+        later = classify_return_guard({"text": "При установке трещин не было, через неделю использования появилась трещина"})
+        self.assertNotIn("installation_breakage_before_use", later["hard_return_reasons"])
+        self.assertTrue(later["post_use_breakage"])
 
     def test_failed_bubble_remedy_does_not_downgrade_return(self) -> None:
         failed = classify_return_guard({"text": "Пробовал приподнимать и разглаживать, пузыри остались"})
         self.assertIn("failed_installation_remedy", failed["hard_return_reasons"])
         untried = classify_return_guard({"text": "Не пробовал приподнимать, пузыри остались"})
         self.assertNotIn("failed_installation_remedy", untried["hard_return_reasons"])
+        for wording in (
+            "Не пробовал приподнимать, но разглаживал, пузыри остались",
+            "Сначала не пробовал разглаживать, потом попробовал, пузыри остались",
+        ):
+            self.assertIn("failed_installation_remedy", classify_return_guard({"text": wording})["hard_return_reasons"])
         dust = classify_return_guard({"text": "Под уже наклеенным стеклом пылинка. Стикеров нет."})
         self.assertIn("installed_dust_without_sticker", dust["hard_return_reasons"])
+        missing_sticker = classify_return_guard({"text": "Не положили стикер от пыли, из-за чего под стеклом осталась пылинка, которую уже не убрать"})
+        self.assertIn("installed_dust_without_sticker", missing_sticker["hard_return_reasons"])
+        before_installation = classify_return_guard({"text": "До установки не положили стикер от пыли, тряпочка есть"})
+        self.assertNotIn("installed_dust_without_sticker", before_installation["hard_return_reasons"])
         self.assertIn("failed_installation_remedy", classify_return_guard({"text": "Попытался выдавить пузыри, не получается"})["hard_return_reasons"])
         self.assertIn("failed_installation_remedy", classify_return_guard({"text": "Стекло не клеилось, пытался наклеить повторно, ничего не получить"})["hard_return_reasons"])
 
     def test_mechanism_and_negated_damage_are_separate(self) -> None:
         self.assertIn("installation_mechanism_failure", classify_return_guard({"text": "Язычок установочного бокса не поддавался"})["hard_return_reasons"])
         self.assertIn("installation_mechanism_failure", classify_return_guard({"text": "Механизм установки не работает корректно"})["hard_return_reasons"])
+        self.assertNotIn("installation_mechanism_failure", classify_return_guard({"text": "Механизм не сломан, проблема только в размере стекла"})["hard_return_reasons"])
         for wording in (
             "Стекло хорошее, без трещин; стикера нет",
             "Сколько ни пытался приклеить, не держится",

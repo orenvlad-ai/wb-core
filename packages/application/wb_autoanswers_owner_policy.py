@@ -112,6 +112,9 @@ def _affirmative_damage_words(text: str, stems: Sequence[Any]) -> bool:
                 continue
             if any(token in {"не", "без", "нет"} for token in words[max(0, index - 2):index]):
                 continue
+            following = words[index + 1:index + 4]
+            if following[:1] == ["нет"] or following[:2] == ["не", "было"]:
+                continue
             return True
     return False
 
@@ -194,8 +197,10 @@ def _arrival_damage(text: str, signals: Mapping[str, Any]) -> bool:
             index
             for index, word in enumerate(words)
             if _has_stem([word], signals.get("arrival_damage_stems") or [])
-            and word != "сколько"
+            and not word.startswith("скольк")
             and not any(token in {"не", "без", "нет"} for token in words[max(0, index - 2):index])
+            and words[index + 1:index + 2] != ["нет"]
+            and words[index + 1:index + 3] != ["не", "было"]
         ]
         if _has_phrase(clause, signals.get("arrival_phrases") or []) and damage_indexes:
             return True
@@ -251,16 +256,19 @@ def _failed_installation_remedy(text: str, signals: Mapping[str, Any]) -> bool:
         r"не\s+(?:не\s+)?клеил", normalized
     ):
         return False
-    if re.search(r"\bне\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)\b", normalized):
-        return False
-    if re.search(r"сколько\s+ни\s+пытайся.{0,100}(?:не\s+прикле|не\s+фиксир|ничего\s+не\s+получ)", normalized):
+    attempts = re.sub(
+        r"\bне\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)\w*"
+        r"(?:\s+(?:приподнимат|разглаживат|протират|очищат|выдавливат|убират)\w*)?",
+        " ", normalized,
+    )
+    if re.search(r"сколько\s+ни\s+пытайся.{0,100}(?:не\s+прикле|не\s+фиксир|ничего\s+не\s+получ)", attempts):
         return True
     return bool(re.search(
         r"(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал|выдавливал|убирал|приглаживал)"
         r".{0,140}(?:не помог|остал|сохранил|все равно|по прежнему|не получ(?:ил|илось|ается|ить)|без результата)"
         r"|(?:не помог|остал|сохранил|все равно|по прежнему|без результата)"
         r".{0,140}(?:после|пробовал|пытал|приподнимал|разглаживал|протирал|очищал)",
-        normalized,
+        attempts,
     ))
 
 
@@ -269,7 +277,11 @@ def _installed_dust_without_sticker(text: str) -> bool:
     return bool(
         re.search(r"пылинк|соринк", normalized)
         and re.search(r"под.{0,30}(?:наклеенн|установленн|стекл)", normalized)
-        and re.search(r"(?:стикер|наклейк).{0,20}нет|нет.{0,20}(?:стикер|наклейк)", normalized)
+        and re.search(
+            r"(?:стикер|наклейк).{0,25}(?:нет|не положили)"
+            r"|(?:нет|не положили).{0,25}(?:стикер|наклейк)",
+            normalized,
+        )
     )
 
 
@@ -394,10 +406,11 @@ def classify_return_guard(content_json: Any) -> dict[str, Any]:
         reasons.append("failed_installation_remedy")
     if _installed_dust_without_sticker(text):
         reasons.append("installed_dust_without_sticker")
+    mechanism_text = re.sub(r"\bне\s+слом\w*", " ", normalized)
     if re.search(
         r"(?:механизм|язычок|аппликатор|платформа|установщик|фиксатор).{0,55}(?:заеда|слом|не\s+работа|не\s+фиксир|не\s+двига|не\s+поддава|не\s+вытягива)"
         r"|(?:заеда|слом|не\s+работа|не\s+фиксир|не\s+двига|не\s+поддава|не\s+вытягива).{0,55}(?:механизм|язычок|аппликатор|платформа|установщик|фиксатор)",
-        normalized,
+        mechanism_text,
     ):
         reasons.append("installation_mechanism_failure")
 

@@ -37,14 +37,15 @@ function isCleaningConsumable(classification) {
 
 function failedInstallationRemedy(classification) {
   const evidence = ["BUBBLES_DUST", "ADHESION", "MISSING_PARTS", "KIT_QUALITY"]
-    .map((code) => issueEvidence(classification, code)).join(" ");
-  if (/не\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence)) return false;
+    .map((code) => issueEvidence(classification, code)).join(" ")
+    .replace(/(?:^|[^\p{L}])не\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)\p{L}*(?:\s+(?:приподнимат|разглаживат|протират|очищат|выдавливат|убират)\p{L}*)?/giu, " ");
   if (/сколько\s+ни\s+пытайся.{0,100}(?:не\s+прикле|не\s+фиксир|ничего\s+не\s+получ)/iu.test(evidence)) return true;
   return /(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал|выдавливал|убирал|приглаживал).{0,140}(?:не помог|остал|сохранил|всё равно|по-прежнему|не получ(?:ил|илось|ается|ить)|без результата)|(?:не помог|остал|сохранил|всё равно|по-прежнему|без результата).{0,140}(?:после|пробовал|пытал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence);
 }
 
 function establishedIndependentReturn(classification) {
-  const mechanism = issueEvidence(classification, "INSTALL_MECHANISM");
+  const mechanism = issueEvidence(classification, "INSTALL_MECHANISM")
+    .replace(/(?:^|[^\p{L}])не\s+слом\p{L}*/giu, " ");
   const missing = issueEvidence(classification, "MISSING_PARTS");
   const adhesion = issueEvidence(classification, "ADHESION");
   const failedFunction = ["TOUCH_SENSITIVITY", "FRONT_CAMERA", "FACE_ID"]
@@ -80,7 +81,7 @@ function buyerConfirmedWrongVariant(classification) {
 function isInstallationBreakage(classification) {
   const evidence = issueEvidence(classification, "INSTALL_BREAKAGE");
   const stage = "(?:во время установк|при установк|пока устанавливал|во время (?:самой )?наклейк|при наклеиван|в процессе наклейк)";
-  const deniedDuringInstallation = new RegExp(`${stage}.{0,30}не\\s+(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(evidence);
+  const deniedDuringInstallation = new RegExp(`${stage}.{0,30}не\\s+(?:трес|трещ|разб|скол|лоп|повреж)|${stage}.{0,45}(?:трещин|скол|поврежден).{0,15}(?:нет|не\\s+было)`, "iu").test(evidence);
   const duringInstallation = Boolean(evidence) && !deniedDuringInstallation
     && new RegExp(`(?:трес|трещ|разб|скол|лоп|повреж).{0,45}${stage}|${stage}.{0,45}(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(evidence);
   return duringInstallation;
@@ -97,7 +98,7 @@ function installedDustWithoutSticker(classification) {
   const evidence = issueEvidence(classification, "BUBBLES_DUST");
   return /пылинк|соринк/iu.test(evidence)
     && /под.{0,30}(?:наклеенн|установленн|стекл)/iu.test(evidence)
-    && /(?:стикер|наклейк).{0,20}нет|нет.{0,20}(?:стикер|наклейк)/iu.test(evidence);
+    && /(?:стикер|наклейк).{0,25}(?:нет|не положили)|(?:нет|не положили).{0,25}(?:стикер|наклейк)/iu.test(evidence);
 }
 
 function isPostUseBreakage(classification) {

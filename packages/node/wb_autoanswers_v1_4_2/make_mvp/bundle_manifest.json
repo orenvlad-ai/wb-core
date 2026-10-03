@@ -30,7 +30,7 @@
     "schemas/writer_request.schema.json": "sha256:ab7304e4da942c8b87358307383d006e59e7654f91dd1d315eb9ab8b387ccb62",
     "tools/build_context.mjs": "sha256:98b0953647a4a73c2482db983f4b8423325d2effdb2ef15b4158c617ec6c3d5b",
     "tools/draft_guard.mjs": "sha256:bc562fa2d9cb061f16ecf02102bf978ddf5d0d3c90ee2a1afa9ba5aa3a1d7d41",
-    "tools/route_guard.mjs": "sha256:a16d03ff4ebd4e6bc9237fba5e9dbffc8d74670910ef53f812d6280b4052811f",
+    "tools/route_guard.mjs": "sha256:151c43ce4ae5ea461fc1822900555a115ece333ca00add4b3450267c50efbbe5",
     "tools/usage_metrics.mjs": "sha256:d542688847e7634549b3223decbd80f8dd53a7a20f7431c89790293baf8b0a34"
   }
 }
