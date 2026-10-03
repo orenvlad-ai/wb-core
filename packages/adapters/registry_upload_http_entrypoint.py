@@ -637,6 +637,7 @@ def build_registry_upload_http_server(
     entrypoint: RegistryUploadHttpEntrypoint | None = None,
     *,
     advertise_window_v3: bool = True,
+    snapshot_pilot_store: Path | None = None,
 ) -> HTTPServer:
     runtime_entrypoint = entrypoint or RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
     handler_cls = _build_handler(
@@ -650,6 +651,7 @@ def build_registry_upload_http_server(
         sheet_job_path=DEFAULT_SHEET_JOB_PATH,
         sheet_operator_ui_path=config.sheet_operator_ui_path,
         advertise_window_v3=advertise_window_v3,
+        snapshot_pilot_store=snapshot_pilot_store,
     )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
 
@@ -675,6 +677,7 @@ def _build_handler(
     sheet_job_path: str,
     sheet_operator_ui_path: str,
     advertise_window_v3: bool = True,
+    snapshot_pilot_store: Path | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         runtime_entrypoint = entrypoint
@@ -4100,6 +4103,9 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
+                if "snapshot_pilot" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
+                    _handle_web_vitrina_snapshot_pilot_request(self, parsed.query, snapshot_pilot_store)
+                    return
                 if "window_format" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
                     _handle_web_vitrina_window_v3_request(
                         self, parsed.query, entrypoint, request_started_perf=request_started_perf,
@@ -6392,6 +6398,48 @@ def _build_handler(
             return
 
     return RegistryUploadHandler
+
+
+def _handle_web_vitrina_snapshot_pilot_request(
+    handler: BaseHTTPRequestHandler,
+    query_string: str,
+    store: Path | None,
+) -> None:
+    """Explicit pilot reads only; normal Web Vitrina requests keep their route."""
+    headers = {"Cache-Control": "private, no-store"}
+    if store is None:
+        _write_json_response(handler, HTTPStatus.NOT_FOUND,
+                             {"error": "snapshot_pilot_disabled"}, extra_headers=headers)
+        return
+    try:
+        pairs = urllib_parse.parse_qsl(query_string, keep_blank_values=True, strict_parsing=True,
+                                       max_num_fields=8)
+        query = dict(pairs)
+        if len(query) != len(pairs) or set(query) - {
+            "surface", "snapshot_pilot", "part", "date_from", "date_to", "generation_id"
+        }:
+            raise ValueError("snapshot_pilot_invalid_query")
+        if query.get("surface") != DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE \
+                or query.get("snapshot_pilot") != "1" or query.get("part") not in {"summary", "sku"}:
+            raise ValueError("snapshot_pilot_invalid_query")
+        if (query["part"] == "summary" and "generation_id" in query) or (
+            query["part"] == "sku" and not query.get("generation_id")
+        ):
+            raise ValueError("snapshot_pilot_invalid_query")
+        from packages.application.web_vitrina_snapshot_pilot import read_finished
+        payload = read_finished(store, date_from=query.get("date_from", ""),
+                                date_to=query.get("date_to", ""), part=query["part"],
+                                generation_id=query.get("generation_id", ""))
+    except (ValueError, KeyError) as exc:
+        from packages.application.web_vitrina_snapshot_pilot import SnapshotPilotError
+        status = HTTPStatus.CONFLICT if isinstance(exc, SnapshotPilotError) else HTTPStatus.UNPROCESSABLE_ENTITY
+        _write_json_response(handler, status, {"error": str(exc)}, extra_headers=headers)
+        return
+    except Exception:
+        _write_json_response(handler, HTTPStatus.INTERNAL_SERVER_ERROR,
+                             {"error": "snapshot_pilot_read_failed"}, extra_headers=headers)
+        return
+    _write_json_response(handler, HTTPStatus.OK, payload, extra_headers=headers)
 
 
 def _handle_web_vitrina_window_v3_request(

@@ -43,6 +43,7 @@
         "apps/registry_upload_http_entrypoint_users_admin_smoke.py",
         "apps/sheet_vitrina_v1_stock_report_table_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
+        "apps/web_vitrina_snapshot_pilot_smoke.py",
         "apps/sheet_vitrina_v1_settings_lazy_browser_smoke.py",
         "apps/sheet_vitrina_v1_settings_sources_sessions_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
@@ -577,12 +578,14 @@
       "patterns": [
         "apps/*web_vitrina*.py",
         "packages/**/*web_vitrina*.py",
-        "packages/adapters/templates/sheet_vitrina_v1_operator.html"
+        "packages/adapters/templates/sheet_vitrina_v1_operator.html",
+        "packages/adapters/templates/sheet_vitrina_v1_web_vitrina.html"
       ],
       "commands": [
-        ["python3", "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"]
+        ["python3", "apps/sheet_vitrina_v1_web_vitrina_contract_smoke.py"],
+        ["python3", "apps/web_vitrina_snapshot_pilot_smoke.py"]
       ],
-      "pip": ["openpyxl==3.1.5"]
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
     "supply": {
       "patterns": [
