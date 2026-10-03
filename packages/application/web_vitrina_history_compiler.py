@@ -81,11 +81,20 @@ class NativeDatedCompiler:
     date_to: str
     existing_catalog: dict | None = None
     dependency_epoch: str = ""
+    prepared_context: dict | None = None
+    prepared_availability: dict | None = None
 
     def __post_init__(self) -> None:
         if self.now.tzinfo is None or active_window_read_context() is None:
             raise ValueError("dated compiler requires a pinned read context and timezone-aware clock")
         self.dates = dates_between(self.date_from, self.date_to)
+        if self.prepared_context is not None:
+            if set(self.prepared_availability or {}) != set(self.dates):
+                raise ValueError("prepared context availability differs from declared history")
+            self.context = self.prepared_context
+            self.availability = self.prepared_availability
+            self._initialize_catalog()
+            return
         default = _load_default_visible_snapshot(runtime=self.runtime,
             default_as_of_date=default_business_as_of_date(self.now))
         plan, bindings = _build_period_snapshot(runtime=self.runtime,
@@ -119,6 +128,10 @@ class NativeDatedCompiler:
         }
         self.context_epoch = digest(self.context)
         self.availability = {b.requested_date: not b.missing for b in bindings}
+        self._initialize_catalog()
+
+    def _initialize_catalog(self) -> None:
+        self.context_epoch = digest(self.context)
         self.block = SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,
             now_factory=lambda: self.now, dated_cell_context=self.context)
         self.natural_block = SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,

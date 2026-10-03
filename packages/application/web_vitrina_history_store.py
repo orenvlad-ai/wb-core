@@ -63,7 +63,7 @@ _HASH = re.compile(r"^[0-9a-f]{64}$")
 
 def validate_vector(vector: dict) -> None:
     # No automatic adapter may claim no-change with incomplete coverage.
-    if vector.get("coverage") != "complete_frozen_native_v1":
+    if vector.get("coverage") not in {"complete_frozen_native_v1", "complete_live_native_v1"}:
         raise HistoryUnavailable("source_dependency_coverage_unknown")
     if not vector.get("epoch") or not isinstance(vector.get("dates"), dict) or not vector["dates"]:
         raise HistoryUnavailable("invalid_dependency_vector")
@@ -182,8 +182,14 @@ class HistoryStore:
                 if current and current["consumed"]["epoch"] == vector["epoch"] and current["catalog"] == catalog_id:
                     refs = {day: ref for day, ref in current["days"].items()
                         if vector["dates"].get(day) == current["consumed"]["dates"].get(day)}
+                old_vector = pending.get("vector", {})
+                if (pending.get("base") == current_id and pending.get("catalog") == catalog_id
+                        and old_vector.get("epoch") == vector["epoch"]):
+                    refs.update({day: ref for day, ref in pending.get("refs", {}).items()
+                        if vector["dates"].get(day) == old_vector.get("dates", {}).get(day)
+                        and day in vector["dates"]})
                 pending = {"target": target_key, "base": current_pointer["current"] if current_pointer else None,
-                    "refs": refs}
+                    "refs": refs, "vector": vector, "catalog": catalog_id}
                 _atomic(pending_path, pending)
             self._collect()
             catalog_path = self.root / "catalogs" / (catalog_id + ".json")
