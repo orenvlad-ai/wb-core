@@ -20,6 +20,7 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 KNOWN_ROOTS = {".github", "apps", "artifacts", "ci", "docs", "gas", "packages", "registry"}
 KNOWN_ROOT_FILES = {".clasp.json", ".gitignore", "AGENTS.md", "README.md"}
 KNOWN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".py", ".service", ".timer", ".toml", ".yaml", ".yml"}
+AUTOANSWERS_MJS_PREFIX = "packages/node/wb_autoanswers_v1_4_2/make_mvp/"
 FINANCE_PILOT_ENV_PATH = "artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env"
 FINANCE_PILOT_ENV_COMMON = (
     "FINANCE_LIQUIDITY_ORIGIN=https://api.selleros.pro\n"
@@ -69,6 +70,7 @@ def safe_path(path: str, *, allow_legacy: bool = False) -> str:
         not allow_legacy
         and suffix not in KNOWN_SUFFIXES
         and normalized != FINANCE_PILOT_ENV_PATH
+        and not (suffix == ".mjs" and normalized.startswith(AUTOANSWERS_MJS_PREFIX))
     ):
         raise PlanError(f"unclassified file type: {normalized}")
     return normalized
