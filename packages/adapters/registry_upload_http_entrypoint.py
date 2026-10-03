@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 from email.parser import BytesParser
 from email.policy import default as default_email_policy
+import gzip
 import hashlib
 import hmac
 import html
@@ -6406,7 +6407,7 @@ def _handle_web_vitrina_snapshot_pilot_request(
     store: Path | None,
 ) -> None:
     """Explicit pilot reads only; normal Web Vitrina requests keep their route."""
-    headers = {"Cache-Control": "private, no-store"}
+    headers = {"Cache-Control": "private, no-store", "Vary": "Accept-Encoding"}
     if store is None:
         _write_json_response(handler, HTTPStatus.NOT_FOUND,
                              {"error": "snapshot_pilot_disabled"}, extra_headers=headers)
@@ -6439,7 +6440,26 @@ def _handle_web_vitrina_snapshot_pilot_request(
         _write_json_response(handler, HTTPStatus.INTERNAL_SERVER_ERROR,
                              {"error": "snapshot_pilot_read_failed"}, extra_headers=headers)
         return
-    _write_json_response(handler, HTTPStatus.OK, payload, extra_headers=headers)
+    _write_web_vitrina_snapshot_pilot_response(handler, payload)
+
+
+def _write_web_vitrina_snapshot_pilot_response(
+    handler: BaseHTTPRequestHandler,
+    payload: Mapping[str, Any],
+) -> None:
+    """Compress only an opt-in finished pilot read; normal routes keep their writer."""
+    logical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    accepts_gzip = _web_vitrina_client_accepts_gzip(handler.headers.get("Accept-Encoding", ""))
+    body = gzip.compress(logical, compresslevel=4, mtime=0) if accepts_gzip else logical
+    handler.send_response(HTTPStatus.OK.value)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("Vary", "Accept-Encoding")
+    if accepts_gzip:
+        handler.send_header("Content-Encoding", "gzip")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    _write_response_body(handler, body)
 
 
 def _handle_web_vitrina_window_v3_request(

@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import gzip
 import json
 from pathlib import Path
 import sys
 import time
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -69,6 +70,22 @@ def _url(base: str, start: str, end: str, *, pilot: bool) -> str:
 def _read_http(url: str) -> dict:
     with urlopen(url, timeout=30) as response:
         return json.load(response)
+
+
+def _check_pilot_transport(url: str, expected: dict) -> None:
+    for accepted, compressed in (
+        ("gzip", True), ("gzip;q=0", False),
+        ("*;q=1,gzip;q=0", False), ("*;q=0.5", True),
+        ("identity", False),
+    ):
+        with urlopen(Request(url, headers={"Accept-Encoding": accepted}), timeout=30) as response:
+            wire = response.read()
+            assert response.headers.get("Content-Encoding") == ("gzip" if compressed else None)
+            assert response.headers.get("Vary") == "Accept-Encoding"
+            assert response.headers.get("Cache-Control") == "private, no-store"
+            assert int(response.headers["Content-Length"]) == len(wire)
+            decoded = gzip.decompress(wire) if compressed else wire
+            assert json.loads(decoded) == expected
 
 
 def _prepare(server: LocalWebVitrinaFixtureServer) -> dict[tuple[str, str], dict]:
@@ -155,10 +172,14 @@ def test_contract() -> None:
             assert http_summary["snapshot_pilot"]["generation_id"] == generation
             assert http_summary["snapshot_pilot"]["assembled_at"] == summary["snapshot_pilot"]["assembled_at"]
             assert http_summary["table_surface"]["rows"] == summary["table_surface"]["rows"]
+            _check_pilot_transport(base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query,
+                                   summary)
             query_sku = urlencode({"surface": "page_composition", "snapshot_pilot": "1",
                                    "part": "sku", "date_from": start, "date_to": end,
                                    "generation_id": generation})
             assert _read_http(base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query_sku)["rows"] == sku["rows"]
+            _check_pilot_transport(base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query_sku,
+                                   sku)
 
         # The existing compact full response is accepted directly, without a
         # second dense matrix; its 16-field cells match the legacy evaluator.
