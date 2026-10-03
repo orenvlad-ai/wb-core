@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -453,7 +454,7 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(self.transport.write_calls, [])
         self.assertEqual(self.repo.get_feedback("publish")["ai_jobs"][0]["state"], "needs_review")
 
-    def test_seller_chat_is_transformed_to_safe_public_without_operator(self) -> None:
+    def test_seller_chat_invitation_is_preserved_for_publication_without_operator(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
         outcome = self.repo.upsert_feedback(feedback("chat"), source_stream="unanswered", run_kind="steady")
         job = self.repo.enqueue_processing("chat", trigger_source="steady_sync", actor_id="sync")
@@ -464,11 +465,57 @@ class PublicationTest(unittest.TestCase):
         stored = self.repo.complete_generation(job["processing_key"], result=result, worker_id="ai")
         self.assertEqual(stored["state"], "approved")
         self.assertEqual(stored["final_route"], "public_only")
-        self.assertIsNone(stored["case_code"])
-        self.assertNotIn("чат продавца", stored["final_reply"].casefold())
+        self.assertEqual(stored["case_code"], "А1234")
+        self.assertEqual(stored["final_reply"], result["final_reply"])
         publications = self.repo.get_feedback("chat")["publications"]
         self.assertEqual(len(publications), 1)
         self.assertEqual(publications[0]["state"], "approved")
+        claimed = self.repo.claim_publication_job(worker_id="publisher")
+        begun = self.repo.begin_publication_write(claimed["publication_key"], worker_id="publisher")
+        self.assertEqual(begun["exact_reply"], result["final_reply"])
+
+    def test_tampered_chat_metadata_blocks_prewrite(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(feedback("chat-tamper"), source_stream="unanswered", run_kind="steady")
+        job = self.repo.enqueue_processing("chat-tamper", trigger_source="automatic", actor_id="sync")
+        self.repo.claim_processing_job(worker_id="ai")
+        self.repo.complete_generation(job["processing_key"], result=successful_result(
+            "seller_chat", final_reply="Здравствуйте. Напишите в чат продавца по коду А1234.", case_code="А1234"
+        ), worker_id="ai")
+        claimed = self.repo.claim_publication_job(worker_id="publisher")
+        with self.repo.transaction() as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET case_code='А9999' WHERE processing_key=?",
+                (job["processing_key"],),
+            )
+        with self.assertRaisesRegex(AutoanswersRuntimeError, "chat invitation evidence"):
+            self.repo.begin_publication_write(claimed["publication_key"], worker_id="publisher")
+
+    def test_reconcile_does_not_readopt_tampered_public_chat_invitation(self) -> None:
+        self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        self.repo.upsert_feedback(feedback("chat-reconcile"), source_stream="unanswered", run_kind="steady")
+        job = self.repo.enqueue_processing("chat-reconcile", trigger_source="automatic", actor_id="sync")
+        self.repo.claim_processing_job(worker_id="ai")
+        self.repo.complete_generation(job["processing_key"], result=successful_result(
+            "seller_chat", final_reply="Здравствуйте. Напишите в чат с продавцом по коду А1234.", case_code="А1234"
+        ), worker_id="ai")
+        with self.repo.transaction() as conn:
+            row = conn.execute(
+                "SELECT result_json FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
+                (job["processing_key"],),
+            ).fetchone()
+            result = json.loads(row["result_json"])
+            result["server_policy_transform"]["source_route"] = "public_only"
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET result_json=? WHERE processing_key=?",
+                (json.dumps(result, ensure_ascii=False), job["processing_key"]),
+            )
+        preview = self.repo.preview_mode_transition("auto_safe", actor_id="admin", run_max_usd="1.00")
+        self.repo.apply_mode_transition("auto_safe", actor_id="admin", preview_id=preview["preview_id"])
+        self.repo.reconcile_policy_sweep_once(worker_id="reconcile")
+        detail = self.repo.get_feedback("chat-reconcile")
+        self.assertEqual(detail["ai_jobs"][0]["state"], "needs_review")
+        self.assertNotEqual(detail["publications"][0]["state"], "approved")
 
 
 if __name__ == "__main__":

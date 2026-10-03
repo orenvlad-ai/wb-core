@@ -39,7 +39,26 @@ function failedInstallationRemedy(classification) {
   const evidence = ["BUBBLES_DUST", "ADHESION", "MISSING_PARTS", "KIT_QUALITY"]
     .map((code) => issueEvidence(classification, code)).join(" ");
   if (/не\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence)) return false;
-  return /(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал|не получилось воспользоваться).{0,100}(?:не помог|остал|сохранил|всё равно|по-прежнему|не получилось|без результата)|(?:не помог|остал|сохранил|всё равно|по-прежнему|без результата).{0,100}(?:после|пробовал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence);
+  if (/сколько\s+ни\s+пытайся.{0,100}(?:не\s+прикле|не\s+фиксир|ничего\s+не\s+получ)/iu.test(evidence)) return true;
+  return /(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал|выдавливал|убирал|приглаживал).{0,140}(?:не помог|остал|сохранил|всё равно|по-прежнему|не получ(?:ил|илось|ается|ить)|без результата)|(?:не помог|остал|сохранил|всё равно|по-прежнему|без результата).{0,140}(?:после|пробовал|пытал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence);
+}
+
+function establishedIndependentReturn(classification) {
+  const mechanism = issueEvidence(classification, "INSTALL_MECHANISM");
+  const missing = issueEvidence(classification, "MISSING_PARTS");
+  const adhesion = issueEvidence(classification, "ADHESION");
+  const failedFunction = ["TOUCH_SENSITIVITY", "FRONT_CAMERA", "FACE_ID"]
+    .some((code) => /(?:после|уже).{0,60}(?:очист|протер|провер).{0,80}(?:всё равно|не работ|пропуска|не распозна)/iu.test(issueEvidence(classification, code)));
+  return /(?:механизм|язычок|аппликатор|платформа|установщик|фиксатор).{0,55}(?:заеда|слом|не\s+работа|не\s+фиксир|не\s+двига|не\s+поддава|не\s+вытягива)|(?:заеда|слом|не\s+работа|не\s+фиксир|не\s+двига|не\s+поддава|не\s+вытягива).{0,55}(?:механизм|язычок|аппликатор|платформа|установщик|фиксатор)/iu.test(mechanism)
+    || /(?:нет|не было|не положили|отсутствует).{0,35}(?:самого\s+)?стекла|(?:самого\s+)?стекла.{0,35}(?:нет|не было|не положили|отсутствует)/iu.test(missing)
+    || /(?:скол\s+с\s+клеев|пришл[оаи]?\s+с\s+браком)/iu.test(adhesion)
+    || failedFunction;
+}
+
+function receivedBeforeUseBreakage(classification) {
+  const evidence = issueEvidence(classification, "SPONTANEOUS_BREAKAGE");
+  return /(?:стекло|товар).{0,20}(?:пришл|приехал|получ).{0,35}(?:с\s+)?(?:трещин|треснут|скол|разбит|поврежден)|(?:при получении|из коробки).{0,35}(?:трещин|треснут|скол|разбит|поврежден)/iu.test(evidence)
+    && !/(?:пришл|приехал|получ).{0,35}(?:без\s+трещин|целым|не\s+треснут)/iu.test(evidence);
 }
 
 function isUnverifiedFit(classification) {
@@ -53,11 +72,17 @@ function isUnverifiedFit(classification) {
     && !confirmedSameModel;
 }
 
+function buyerConfirmedWrongVariant(classification) {
+  const evidence = issueEvidence(classification, "SIZE_FIT");
+  return /(?:перепутал[аи]?|ошиб(?:ся|лась)\s+с\s+(?:моделью|выбором)).{0,90}(?:взял[аи]?|заказал[аи]?)?.{0,90}(?:а\s+у\s+меня|мой\s+телефон).{0,90}(?:не\s+подош|про\s+макс|pro\s*max|просто\s+про)/iu.test(evidence);
+}
+
 function isInstallationBreakage(classification) {
   const evidence = issueEvidence(classification, "INSTALL_BREAKAGE");
-  const deniedDuringInstallation = /(?:во время установк|при установк|пока устанавливал).{0,30}не\s+(?:трес|трещ|разб|скол|лоп|повреж)/iu.test(evidence);
+  const stage = "(?:во время установк|при установк|пока устанавливал|во время (?:самой )?наклейк|при наклеиван|в процессе наклейк)";
+  const deniedDuringInstallation = new RegExp(`${stage}.{0,30}не\\s+(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(evidence);
   const duringInstallation = Boolean(evidence) && !deniedDuringInstallation
-    && /(?:трес|трещ|разб|скол|лоп|повреж).{0,45}(?:во время установк|при установк|пока устанавливал)|(?:во время установк|при установк|пока устанавливал).{0,45}(?:трес|трещ|разб|скол|лоп|повреж)/iu.test(evidence);
+    && new RegExp(`(?:трес|трещ|разб|скол|лоп|повреж).{0,45}${stage}|${stage}.{0,45}(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(evidence);
   return duringInstallation;
 }
 
@@ -77,7 +102,7 @@ function installedDustWithoutSticker(classification) {
 
 function isPostUseBreakage(classification) {
   const evidence = issueEvidence(classification, "SPONTANEOUS_BREAKAGE");
-  if (/после начала использован|после начала эксплуатац|(?:неделю|месяц|день)\s+пользовал|через (?:неделю|месяц|день) использования/iu.test(evidence)) return true;
+  if (/после начала использован|после начала эксплуатац|(?:неделю|месяц|день)\s+пользовал|через (?:неделю|месяц|день) использования|после\s+\d+\s+(?:минут|часов|дней)\s+использования|в течение\s+\d+\s+(?:минут|часов|дней)\s+использования|при использовании|в процессе эксплуатации/iu.test(evidence)) return true;
   return /пользовал/iu.test(evidence)
     && !/не\s+пользовал(?:ся|ась)?\s+(?:телефоном|стеклом)|(?:телефоном|стеклом)\s+не\s+пользовал/iu.test(evidence);
 }
@@ -90,7 +115,7 @@ function isClearInstallationResult(classification) {
     && [...issueCodes(classification)].some((item) => !relatedOnly.has(item))) return false;
   if (code === "BUBBLES_DUST") {
     if (installedDustWithoutSticker(classification)) return false;
-    return /воздушн.{0,25}пузыр|пузыр.{0,25}без пыли|пылинк/iu.test(evidence)
+    return /воздушн.{0,25}пузыр|пузыр.{0,25}без пыли|пузыр(?!.*(?:пылинк|соринк))|пылинк/iu.test(evidence)
       && !/непонятно|неясно|то ли|или пылинк/iu.test(evidence)
       && !/пылинк.{0,50}нет стикер|нет стикер.{0,50}пылинк/iu.test(evidence);
   }
@@ -143,7 +168,7 @@ export function applyRouteGuards(classification) {
     }
   }
 
-  if ([...RETURN_ISSUES].some((code) => codes.has(code)) && !isExplicitlyResolvedMixedPublic(guarded, codes)) {
+  if (([...RETURN_ISSUES].some((code) => codes.has(code)) || establishedIndependentReturn(guarded) || receivedBeforeUseBreakage(guarded)) && !isExplicitlyResolvedMixedPublic(guarded, codes)) {
     setRoute("wb_return", "G004/G-RETURN", "Высокоприоритетная товарная или безопасностная проблема требует официального возврата");
   } else if (isInstallationBreakage(guarded) && !hasExplicitlyResolvedMixedPublic(guarded)) {
     setRoute("wb_return", "G-INSTALL-BREAKAGE", "Повреждение при установке или первом осмотре до использования ведёт к возврату");
@@ -179,7 +204,12 @@ export function applyRouteGuards(classification) {
     } else {
       setRoute("wb_return", "G-KIT-RETURN", "Недостающий основной товар или сохраняющаяся проблема комплекта требует возврата");
     }
-  } else if (codes.has("SIZE_FIT") && isUnverifiedFit(guarded) && ![...RETURN_ISSUES].some((code) => codes.has(code)) && !hasExplicitlyResolvedMixedPublic(guarded)) {
+  } else if (codes.has("SIZE_FIT") && buyerConfirmedWrongVariant(guarded) && ![...RETURN_ISSUES].some((code) => codes.has(code)) && !establishedIndependentReturn(guarded)) {
+    guarded.seller_investigation_subject = false;
+    guarded.evidence_potential = false;
+    guarded.required_evidence = [];
+    setRoute("public_only", "G-BUYER-FIT", "Покупатель прямо указал, что сам выбрал вариант для другой модели");
+  } else if (codes.has("SIZE_FIT") && isUnverifiedFit(guarded) && ![...RETURN_ISSUES].some((code) => codes.has(code)) && !establishedIndependentReturn(guarded) && !hasExplicitlyResolvedMixedPublic(guarded)) {
     guarded.seller_investigation_subject = true;
     guarded.evidence_potential = true;
     guarded.required_evidence = [];
@@ -245,7 +275,7 @@ export function assertGuardInvariants(classification) {
   if (classification.primary_issue === "FRAME_OVERLAP" && classification.route === "wb_return" && !hasDirectFrameOverlapEvidence(classification)) {
     errors.push("G018: возврат по рамке назначен без прямого сообщения о перекрытии изображения");
   }
-  if (codes.has("SIZE_FIT") && isUnverifiedFit(classification) && ![...RETURN_ISSUES].some((code) => codes.has(code)) && !hasExplicitlyResolvedMixedPublic(classification) && classification.route !== "seller_chat") {
+  if (codes.has("SIZE_FIT") && isUnverifiedFit(classification) && !buyerConfirmedWrongVariant(classification) && ![...RETURN_ISSUES].some((code) => codes.has(code)) && !establishedIndependentReturn(classification) && !hasExplicitlyResolvedMixedPublic(classification) && classification.route !== "seller_chat") {
     errors.push("G023: неизвестная совместимость не направлена на уточнение в чат");
   }
   return errors;
