@@ -8851,7 +8851,6 @@
         ) {
           Promise.all([loadStatus(), loadDailyReport()]).catch(() => {});
         }
-        maybeAutoDownloadSellerRecoveryLauncher(normalized);
       }
 
       function renderSnapshotSummary(payload, intro) {

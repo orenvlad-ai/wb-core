@@ -583,10 +583,10 @@
         <p id="sourcesSessionsMessage" class="message">Читаем кешированный server-side status...</p>
         <div class="sources-grid">
           <article id="sellerSourceCard" class="source-card" data-source-card="seller">
-            <div class="source-card-header"><div><h3>Seller Portal</h3><p class="source-card-copy">Отдельный storage-state и кабинет продавца.</p></div><span id="sellerSourceBadge" class="pill warning">Неизвестно</span></div>
+            <div class="source-card-header"><div><h3>Seller Portal</h3><p class="source-card-copy">Вход в кабинет продавца Wildberries.</p></div><span id="sellerSourceBadge" class="pill warning">Неизвестно</span></div>
             <dl id="sellerSourceHealth" class="source-health"></dl>
             <div id="sellerRecoverySteps" class="recovery-steps"></div>
-            <div class="compact-actions"><button type="button" data-source-check="seller">Проверить</button><button class="primary" type="button" data-source-recover="seller">Восстановить</button><a id="sellerLauncherLink" class="button-link" hidden>Launcher / noVNC</a></div>
+            <div class="compact-actions"><button type="button" data-source-check="seller">Проверить</button><button class="primary" type="button" data-source-recover="seller">Войти в Seller Portal</button><a id="sellerLauncherLink" class="button-link" hidden></a></div>
             <p id="sellerSourceError" class="source-error"></p>
           </article>
           <article id="buyerSourceCard" class="source-card" data-source-card="buyer">
@@ -603,6 +603,10 @@
             <p id="publicSourceError" class="source-error"></p>
           </article>
         </div>
+        <dialog id="sellerViewerDialog" class="buyer-viewer-dialog" aria-labelledby="sellerViewerTitle">
+          <div class="toolbar" style="justify-content: space-between;"><div><h2 id="sellerViewerTitle">Вход в Seller Portal</h2><p id="sellerViewerStatus">Открываем серверный браузер…</p></div><div class="compact-actions"><button id="sellerViewerFinish" class="primary" type="button" hidden>Я вошёл</button><button id="sellerViewerReconnect" type="button" hidden>Переподключить экран</button><button id="sellerViewerCancel" class="danger" type="button">Отменить вход</button><button id="sellerViewerClose" type="button">Закрыть окно</button></div></div>
+          <iframe id="sellerViewerFrame" title="Страница Seller Portal в серверном браузере" referrerpolicy="same-origin" hidden></iframe>
+        </dialog>
         <dialog id="buyerViewerDialog" class="buyer-viewer-dialog" aria-labelledby="buyerViewerTitle">
           <div class="toolbar" style="justify-content: space-between;"><div><h2 id="buyerViewerTitle">Вход в Wildberries</h2><p id="buyerViewerStatus">Открываем браузер Wildberries…</p></div><div class="compact-actions"><button id="buyerViewerFinish" class="primary" type="button" hidden>Я вошёл</button><button id="buyerViewerReconnect" type="button" hidden>Переподключить экран</button><button id="buyerViewerCancel" class="danger" type="button">Отменить вход</button><button id="buyerViewerClose" type="button">Закрыть окно</button></div></div>
           <iframe id="buyerViewerFrame" title="Настоящая страница Wildberries в серверном браузере" referrerpolicy="same-origin" hidden></iframe>
@@ -704,6 +708,8 @@
           status: config.seller_recovery_status_path,
           start: config.seller_recovery_start_path,
           stop: config.seller_recovery_stop_path,
+          finish: config.seller_recovery_finish_path,
+          viewer: config.seller_recovery_viewer_path,
           launcher: config.seller_recovery_launcher_path
         },
         buyer: {
@@ -725,6 +731,11 @@
       let buyerViewerRunId = "";
       let buyerViewerStartPromise = null;
       let buyerViewerCancelRequested = false;
+      let sellerViewerStarting = false;
+      let sellerViewerRunId = "";
+      let sellerViewerRequestId = "";
+      let sellerViewerStartPromise = null;
+      let sellerViewerCancelRequested = false;
       const vitrinaAutoSchedulesPath = config.auto_schedules_path;
       const vitrinaAutoSchedulesRunNowPath = config.auto_schedules_run_now_path;
       const sheetJobPath = config.job_path;
@@ -1217,6 +1228,11 @@
       }
 
       function renderRecoverySteps(source, recovery) {
+        if (source === "seller") {
+          if (sellerViewerStarting) return;
+          const dialog = document.getElementById("sellerViewerDialog");
+          if (dialog.open && sellerViewerRunId && (!recovery || recovery.run_id !== sellerViewerRunId)) return;
+        }
         if (source === "buyer") {
           // A slow sources response or earlier poll can arrive after the user
           // opened a new run. Never close or replace that run's viewer.
@@ -1232,9 +1248,38 @@
         }).join("");
         const launcher = document.getElementById(source + "LauncherLink");
         const route = sourceRoutes[source] || {};
-        const ready = source !== "buyer" && Boolean(recovery && (recovery.can_download_launcher || recovery.launcher_ready));
+        const ready = false;
         launcher.hidden = !ready;
         launcher.href = ready ? (recovery.launcher_download_path || recovery.launcher_url || route.launcher || "") : "";
+        if (source === "seller") {
+          const button = document.querySelector('[data-source-recover="seller"]');
+          button.textContent = recovery && recovery.running ? "Продолжить вход" : "Войти в Seller Portal";
+          const dialog = document.getElementById("sellerViewerDialog");
+          const frame = document.getElementById("sellerViewerFrame");
+          const viewerReady = Boolean(recovery && recovery.running && recovery.run_status === "awaiting_login" && recovery.viewer_available);
+          if (dialog.open) {
+            document.getElementById("sellerViewerStatus").textContent = viewerReady
+              ? "Войдите в Seller Portal. Когда увидите кабинет, нажмите «Я вошёл» — система проверит сессию."
+              : recovery && recovery.running ? "Проверяем вход и сохраняем сессию…"
+              : recovery && recovery.run_status === "not_needed" ? "Сессия Seller Portal уже активна. Повторный вход не требуется."
+              : recovery && recovery.run_status === "completed" ? "Вход подтверждён и сохранён."
+              : recovery && recovery.run_status === "error" ? (recovery.summary || "Не удалось подтвердить вход. Действующая сессия сохранена.")
+              : recovery && recovery.run_status === "stopped" ? "Вход отменён."
+              : "Готовим серверный браузер…";
+            document.getElementById("sellerViewerReconnect").hidden = !viewerReady;
+            document.getElementById("sellerViewerFinish").hidden = !viewerReady;
+            document.getElementById("sellerViewerCancel").hidden = !Boolean(recovery && recovery.running);
+            if (viewerReady && frame.hidden) {
+              const runId = encodeURIComponent(String(recovery.run_id || ""));
+              const websocketPath = (route.viewer + "websockify?run_id=" + runId).replace(/^\/+/, "");
+              frame.src = route.viewer + "vnc.html?run_id=" + runId + "&autoconnect=1&resize=scale&reconnect=1&path=" + encodeURIComponent(websocketPath);
+              frame.hidden = false;
+            } else if (!viewerReady) {
+              frame.hidden = true;
+              frame.removeAttribute("src");
+            }
+          }
+        }
         if (source === "buyer") {
           const button = document.querySelector('[data-source-recover="buyer"]');
           button.textContent = recovery && recovery.running ? "Продолжить вход" : "Войти в Wildberries";
@@ -1266,21 +1311,25 @@
         sourcesSessionsState = payload || {};
         const seller = (payload.seller_portal || {});
         const sellerAuth = seller.authorization || {};
+        const sellerDialog = document.getElementById("sellerViewerDialog");
+        if (!sellerViewerStarting && !sellerDialog.open) {
         const coverage = ((seller.transit_cost || {}).coverage || {});
         const sellerAuthOk = ["session_valid", "session_valid_canonical"].includes(String(sellerAuth.session_status || "")) && sellerAuth.organization_confirmed === true;
         const sellerHealthy = sellerAuthOk && coverage.overall_status === "healthy";
-        setSourceBadge("seller", sellerHealthy ? "Готово" : sellerAuthOk ? "Есть ограничения" : "Нужен вход", sellerHealthy ? "success" : sellerAuthOk ? "warning" : "danger");
+        const sellerStopped = sellerAuth.run_status === "stopped";
+        setSourceBadge("seller", sellerAuth.running ? "Вход выполняется" : sellerStopped ? "Вход отменён" : sellerHealthy ? "Сессия активна" : sellerAuthOk ? "Есть ограничения" : "Нужен вход", sellerAuth.running || sellerStopped ? "warning" : sellerHealthy ? "success" : sellerAuthOk ? "warning" : "danger");
         renderHealthRows("sellerSourceHealth", [
-          ["Авторизация", sellerAuth.session_status_label || sellerAuth.session_status || "Не проверена"],
+          ["Авторизация", sellerAuthOk ? "Вход подтверждён" : (sellerAuth.session_status_label || "Не проверена")],
           ["Кабинет", sellerAuth.organization_confirmed === true ? (sellerAuth.expected_supplier_label || sellerAuth.current_supplier_id || "Подтверждён") : "Не подтверждён"],
-          ["Маршрут supply/cost", coverage.route_status || "unknown"],
-          ["Фоновый сборщик", coverage.collector_status || "unknown"],
+          ["Маршрут supply/cost", coverage.route_status === "valid" ? "Работает" : (coverage.route_status || "Не проверен")],
+          ["Фоновый сборщик", coverage.collector_status === "valid" ? "Работает" : (coverage.collector_status || "Не проверен")],
           ["Последний успех", formatSourceTime(coverage.last_success_at)],
           ["Покрытие", String(coverage.confirmed || 0) + "/" + String(coverage.eligible || 0) + " · ожидает " + String(coverage.pending || 0)],
           ["Сборщики", (seller.collectors || []).join(", ")]
         ]);
-        document.getElementById("sellerSourceError").textContent = coverage.last_error || sellerAuth.reason || "";
+        document.getElementById("sellerSourceError").textContent = sellerHealthy ? "" : (coverage.last_error || (sellerAuthOk ? "" : sellerAuth.reason === "valid" ? "" : sellerAuth.reason) || "");
         renderRecoverySteps("seller", sellerAuth);
+        }
 
         const buyer = payload.wb_buyer || {};
         const buyerAuth = buyer.authorization || {};
@@ -1456,7 +1505,119 @@
         document.getElementById("buyerSourceError").classList.toggle("buyer-auth-note", loginConfirmed);
       }
 
+      function renderSellerRunCard(recovery) {
+        const status = String((recovery || {}).run_status || (recovery || {}).status || "");
+        const running = Boolean(recovery && recovery.running);
+        const healthy = status === "completed" || status === "not_needed";
+        setSourceBadge("seller", running ? "Вход выполняется" : healthy ? "Сессия активна" : status === "stopped" ? "Вход отменён" : "Нужен вход", healthy ? "success" : running || status === "stopped" ? "warning" : "danger");
+        document.getElementById("sellerSourceError").textContent = running
+          ? "Войдите в Seller Portal в открытом серверном браузере."
+          : status === "not_needed" ? "Сессия уже действует; вход не требуется."
+          : status === "completed" ? "Вход подтверждён и сохранён."
+          : status === "error" ? (recovery.summary || "Вход не завершён; действующая сессия сохранена.")
+          : status === "stopped" ? "Вход отменён."
+          : "";
+      }
+
+      async function startSellerRecovery() {
+        const route = sourceRoutes.seller;
+        const dialog = document.getElementById("sellerViewerDialog");
+        sellerViewerStarting = true;
+        sellerViewerRunId = "";
+        sellerViewerRequestId = crypto.randomUUID().replace(/-/g, "");
+        sellerViewerCancelRequested = false;
+        if (!dialog.open) dialog.showModal();
+        document.getElementById("sellerViewerCancel").hidden = false;
+        document.getElementById("sellerViewerFinish").hidden = true;
+        document.getElementById("sellerViewerReconnect").hidden = true;
+        document.getElementById("sellerViewerStatus").textContent = "Открываем серверный браузер Seller Portal…";
+        try {
+          const request = fetchJson(route.start, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json", "X-Seller-Viewer-CSRF": "1"},
+            body: JSON.stringify({replace: false, request_id: sellerViewerRequestId})
+          });
+          sellerViewerStartPromise = request.then((result) => {
+            sellerViewerRunId = String(result.run_id || "");
+            return result;
+          });
+          const payload = await sellerViewerStartPromise;
+          sellerViewerStarting = false;
+          if (sellerViewerCancelRequested) return;
+          renderSellerRunCard(payload);
+          renderRecoverySteps("seller", payload);
+          if (payload.running) scheduleRecoveryPoll("seller", true, true);
+        } catch (error) {
+          if (sellerViewerCancelRequested) return;
+          sellerViewerStarting = false;
+          document.getElementById("sellerViewerStatus").textContent = "Проверяем, открылось ли окно входа…";
+          try {
+            const readback = await fetchJson(route.status + "?probe=0", {headers: {Accept: "application/json"}});
+            if (sellerViewerCancelRequested) return;
+            if (readback.running && readback.viewer_owned && readback.request_id === sellerViewerRequestId) {
+              sellerViewerRunId = String(readback.run_id || "");
+              renderSellerRunCard(readback);
+              renderRecoverySteps("seller", readback);
+              scheduleRecoveryPoll("seller", true, true);
+            } else {
+              document.getElementById("sellerViewerStatus").textContent = readback.running
+                ? "Вход открыт другим оператором. Попробуйте позже."
+                : (error.message || "Не удалось открыть вход.");
+            }
+          } catch (_readbackError) {
+            document.getElementById("sellerViewerStatus").textContent = "Не удалось проверить вход. Обновите страницу и повторите попытку.";
+          }
+        } finally {
+          sellerViewerStarting = false;
+          sellerViewerStartPromise = null;
+        }
+      }
+
+      async function cancelSellerRecovery() {
+        sellerViewerCancelRequested = true;
+        const cancelPayload = sellerViewerRunId ? {run_id: sellerViewerRunId} : {request_id: sellerViewerRequestId};
+        try {
+          const payload = await fetchJson(sourceRoutes.seller.stop, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json", "X-Seller-Viewer-CSRF": "1"},
+            body: JSON.stringify(cancelPayload)
+          });
+          if (payload.run_failure_code === "cancel_pending_start") {
+            document.getElementById("sellerViewerStatus").textContent = "Отмена входа запрошена.";
+            document.getElementById("sellerViewerDialog").close();
+            return;
+          }
+          renderSellerRunCard(payload);
+          renderRecoverySteps("seller", payload);
+          void loadSourcesSessions({refreshStale: false});
+        } catch (_error) {
+          document.getElementById("sellerViewerStatus").textContent = "Не удалось отменить вход. Проверьте статус и попробуйте снова.";
+        }
+      }
+
+      async function finishSellerRecovery() {
+        const runId = sellerViewerRunId;
+        if (!runId) return;
+        const button = document.getElementById("sellerViewerFinish");
+        button.disabled = true;
+        document.getElementById("sellerViewerStatus").textContent = "Проверяем вход и кабинет Seller Portal…";
+        try {
+          const payload = await fetchJson(sourceRoutes.seller.finish, {
+            method: "POST",
+            headers: {Accept: "application/json", "Content-Type": "application/json", "X-Seller-Viewer-CSRF": "1"},
+            body: JSON.stringify({run_id: runId})
+          });
+          renderRecoverySteps("seller", {...payload, viewer_available: true});
+          scheduleRecoveryPoll("seller", true, true);
+        } catch (_error) {
+          document.getElementById("sellerViewerStatus").textContent = "Вход пока не подтверждён. Проверьте страницу и нажмите «Я вошёл» ещё раз.";
+        } finally {
+          button.disabled = false;
+        }
+      }
+
       async function startRecovery(source) {
+        if (source === "seller") return startSellerRecovery();
         const route = sourceRoutes[source] || {};
         if (!route.start) return;
         const errorTarget = document.getElementById(source + "SourceError");
@@ -1571,9 +1732,11 @@
         recoveryPollGenerations.set(source, generation);
         const poll = async () => {
           try {
-            const payload = await fetchJson(sourceRoutes[source].status + "?probe=false", {headers: {Accept: "application/json"}});
+            const statusUrl = sourceRoutes[source].status + "?probe=0" + (source === "seller" && sellerViewerRunId ? "&run_id=" + encodeURIComponent(sellerViewerRunId) : "");
+            const payload = await fetchJson(statusUrl, {headers: {Accept: "application/json"}});
             if (recoveryPollGenerations.get(source) !== generation) return;
             if (source === "buyer" && !buyerViewerStarting && (!buyerViewerRunId || payload.run_id === buyerViewerRunId)) renderBuyerRunCard(payload);
+            if (source === "seller" && !sellerViewerStarting && (!sellerViewerRunId || payload.run_id === sellerViewerRunId)) renderSellerRunCard(payload);
             renderRecoverySteps(source, payload);
             if (payload.running) {
               recoveryPollTimers.set(source, window.setTimeout(poll, 2000));
@@ -1585,6 +1748,11 @@
             }
           } catch (error) {
             if (recoveryPollGenerations.get(source) !== generation) return;
+            if (source === "seller") {
+              document.getElementById("sellerViewerStatus").textContent = "Связь с окном прервалась. Проверяем состояние входа…";
+              recoveryPollTimers.set(source, window.setTimeout(poll, 3000));
+              return;
+            }
             if (source === "buyer") {
               document.getElementById("buyerViewerStatus").textContent = "Связь с окном прервалась. Проверяем состояние входа…";
               recoveryPollTimers.set(source, window.setTimeout(poll, 3000));
@@ -3865,6 +4033,18 @@
       });
       document.getElementById("buyerViewerDialog").addEventListener("close", () => {
         const frame = document.getElementById("buyerViewerFrame");
+        frame.hidden = true;
+        frame.removeAttribute("src");
+      });
+      document.getElementById("sellerViewerClose").addEventListener("click", () => document.getElementById("sellerViewerDialog").close());
+      document.getElementById("sellerViewerCancel").addEventListener("click", cancelSellerRecovery);
+      document.getElementById("sellerViewerFinish").addEventListener("click", finishSellerRecovery);
+      document.getElementById("sellerViewerReconnect").addEventListener("click", () => {
+        const frame = document.getElementById("sellerViewerFrame");
+        if (frame.src) frame.src = frame.src;
+      });
+      document.getElementById("sellerViewerDialog").addEventListener("close", () => {
+        const frame = document.getElementById("sellerViewerFrame");
         frame.hidden = true;
         frame.removeAttribute("src");
       });

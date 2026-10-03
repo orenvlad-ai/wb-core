@@ -232,7 +232,7 @@ def main() -> None:
             if response is None or response.status != 200:
                 raise AssertionError("settings page did not return HTTP 200")
             page.wait_for_function("() => document.documentElement.dataset.settingsReady === 'true'")
-            page.wait_for_function("() => document.querySelector('#sellerSourceBadge')?.innerText === 'Готово'")
+            page.wait_for_function("() => document.querySelector('#sellerSourceBadge')?.innerText === 'Сессия активна'")
             panel = page.locator('[data-settings-group-panel="sources-sessions"]')
             if panel.is_hidden() or page.locator('[data-settings-group-button="sources-sessions"]').get_attribute("aria-selected") != "true":
                 raise AssertionError("#sources-sessions must select the centralized group before localStorage")

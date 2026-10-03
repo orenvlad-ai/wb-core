@@ -22978,75 +22978,8 @@
       }
     }
 
-    async function runSellerRecoveryStart(options) {
-      const normalizedOptions = options || {};
-      const actionId = state.actionSequence + 1;
-      state.actionSequence = actionId;
-      if (activityPanelNode && normalizedOptions.openActivityPanel !== false) {
-        activityPanelNode.open = true;
-      }
-      setActionButtonsDisabled(true);
-      setStatusBadge({label: "Установка", tone: "warning", detail: "готовим launcher для ручной установки Seller Portal session"});
-      try {
-        const response = await fetch(WEB_VITRINA_CONFIG.seller_recovery_start_path, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json; charset=utf-8"
-          },
-          body: JSON.stringify({replace: true, async: true})
-        });
-        const payload = await readJsonResponse(response, "non-json response from seller recovery start route");
-        if (!response.ok) {
-          throw new Error((payload && payload.error) ? payload.error : "seller recovery start route returned " + response.status);
-        }
-        const resolvedJobPath = String(
-          (payload && payload.job_path) ||
-          ((payload && payload.job_id) ? (WEB_VITRINA_CONFIG.job_path + "?job_id=" + encodeURIComponent(payload.job_id)) : "")
-        );
-        const finalJob = resolvedJobPath ? await pollSheetJob(resolvedJobPath, actionId) : {status: "success", result: payload};
-        if (actionId !== state.actionSequence) {
-          return;
-        }
-        if (!finalJob || finalJob.status !== "success") {
-          throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller recovery start job failed");
-        }
-        const recoveryPayload = (finalJob && finalJob.result) || payload || {};
-        applySellerRecoveryPayload(recoveryPayload, {render: false, updateSession: false});
-        maybeAutoDownloadSellerRecoveryLauncher(recoveryPayload);
-        const runStatus = String(recoveryPayload.run_status || recoveryPayload.status || "");
-        if (runStatus === "starting") {
-          appendVisibleActionLogLine(
-            "Окно входа Seller Portal готовится. Launcher скачается автоматически после готовности.",
-            {statusLabel: "Готовим окно", tone: "warning", detail: String(recoveryPayload.summary || recoveryPayload.reason || "")}
-          );
-        } else if (Boolean(recoveryPayload.can_download_launcher || recoveryPayload.launcher_ready || recoveryPayload.launcher_enabled)) {
-          appendVisibleActionLogLine(
-            "Окно входа Seller Portal готово. Launcher скачивается автоматически.",
-            {statusLabel: "Нужно войти", tone: "warning", detail: String(recoveryPayload.summary || recoveryPayload.reason || "")}
-          );
-        } else if (Boolean(recoveryPayload.run_is_final)) {
-          appendVisibleActionLogLine(
-            String(recoveryPayload.summary || recoveryPayload.reason || "Recovery run завершён."),
-            {statusLabel: String(recoveryPayload.run_status_label || recoveryPayload.status_label || "Финал"), tone: normalizeTone(recoveryPayload.run_status_tone || recoveryPayload.status_tone || "neutral"), detail: String(recoveryPayload.final_marker || recoveryPayload.run_final_status || "")}
-          );
-        }
-        if (sellerRecoveryIsActive(recoveryPayload)) {
-          scheduleSellerRecoveryPoll(1200);
-        }
-        setStatusBadge({label: "Установка", tone: "warning", detail: "launcher запрошен"});
-        renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
-      } catch (error) {
-        if (actionId !== state.actionSequence) {
-          return;
-        }
-        const message = String(error && error.message ? error.message : error);
-        setStatusBadge({label: "Ошибка", tone: "error", detail: message});
-      } finally {
-        if (actionId === state.actionSequence) {
-          setActionButtonsDisabled(false);
-        }
-      }
+    async function runSellerRecoveryStart() {
+      window.location.assign((WEB_VITRINA_CONFIG.settings_path || "/sheet-vitrina-v1/settings") + "#sources-sessions");
     }
 
     function applySellerSessionResult(result, options) {
@@ -23361,7 +23294,6 @@
     async function refreshSellerRecoveryStatus(options) {
       try {
         const payload = await fetchSellerRecoveryStatus(Object.assign({updateSession: false}, options || {}));
-        maybeAutoDownloadSellerRecoveryLauncher(payload);
       } catch (error) {
         applySellerRecoveryPayload({launcher_enabled: false}, {render: true, updateSession: false});
       }

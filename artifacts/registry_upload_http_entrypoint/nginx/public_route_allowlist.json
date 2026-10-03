@@ -421,25 +421,49 @@
       "name": "sheet_vitrina_seller_recovery_status",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/status",
-      "methods": ["GET"]
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8778"
     },
     {
       "name": "sheet_vitrina_seller_recovery_start",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/start",
-      "methods": ["POST"]
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8779"
     },
     {
       "name": "sheet_vitrina_seller_recovery_stop",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/stop",
-      "methods": ["POST"]
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8778"
     },
     {
       "name": "sheet_vitrina_seller_recovery_launcher",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip",
       "methods": ["GET"]
+    },
+    {
+      "name": "sheet_vitrina_seller_recovery_finish",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/finish",
+      "methods": ["POST"],
+      "proxy_pass_url": "http://127.0.0.1:8778"
+    },
+    {
+      "name": "sheet_vitrina_seller_viewer_auth",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/viewer-auth",
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:8778"
+    },
+    {
+      "name": "sheet_vitrina_seller_viewer",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/seller-portal-recovery/viewer/",
+      "methods": ["GET"],
+      "proxy_pass_url": "http://127.0.0.1:46080/"
     },
     {
       "name": "sheet_vitrina_wb_buyer_session_check",

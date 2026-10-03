@@ -274,6 +274,10 @@ DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH = "/v1/sheet-vitrina-v1/seller-portal
 DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/start"
 DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH = "/v1/sheet-vitrina-v1/web-vitrina/seller-portal-recovery/start"
 DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/stop"
+DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/finish"
+DEFAULT_SELLER_PORTAL_VIEWER_PREFIX = "/v1/sheet-vitrina-v1/seller-portal-recovery/viewer/"
+DEFAULT_SELLER_PORTAL_VIEWER_AUTH_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/viewer-auth"
+SELLER_PORTAL_VIEWER_COOKIE_NAME = "seller_portal_viewer_run"
 DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH = "/v1/sheet-vitrina-v1/seller-portal-recovery/launcher.zip"
 DEFAULT_SHEET_OPERATOR_UI_PATH = "/sheet-vitrina-v1/operator"
 DEFAULT_SHEET_WEB_VITRINA_UI_PATH = "/sheet-vitrina-v1/vitrina"
@@ -2182,41 +2186,39 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_SELLER_RECOVERY_START_PATH:
-                try:
-                    payload = _load_optional_request_payload(self)
-                    replace = _resolve_replace_requested(payload)
-                    job_payload = entrypoint.start_seller_portal_recovery_start_job(
-                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
-                        replace_existing=replace,
-                    )
-                except ValueError as exc:
-                    _write_json_response(
-                        self,
-                        HTTPStatus.BAD_REQUEST,
-                        {"error": str(exc)},
-                    )
-                    return
-                except Exception as exc:  # pragma: no cover - bounded fallback
-                    _write_json_response(
-                        self,
-                        HTTPStatus.INTERNAL_SERVER_ERROR,
-                        {"error": f"seller portal recovery start failed: {exc}"},
-                    )
-                    return
                 _write_json_response(
                     self,
-                    HTTPStatus.ACCEPTED,
-                    _with_sheet_job_urls(job_payload, sheet_job_path),
+                    HTTPStatus.GONE,
+                    {
+                        "error": "Seller Portal login moved to Settings",
+                        "settings_url": f"{DEFAULT_SETTINGS_UI_PATH}#sources-sessions",
+                    },
                 )
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH:
+                viewer_owner = _seller_viewer_owner(self)
+                viewer_expires_at = _seller_viewer_session_expiry(self)
+                if not viewer_owner or not viewer_expires_at:
+                    _write_auth_forbidden(self, parsed.path)
+                    return
+                if not _ensure_seller_viewer_same_origin(self):
+                    return
+                if _seller_viewer_run_owned_by_other(self):
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "seller recovery is controlled by another operator"})
+                    return
                 try:
                     payload = _load_optional_request_payload(self)
-                    replace = _resolve_replace_requested(payload)
+                    replace = _resolve_replace_requested(payload, default=False)
+                    request_id = str(payload.get("request_id") or "")
+                    if request_id and not re.fullmatch(r"[0-9a-f]{32}", request_id):
+                        raise ValueError("invalid seller login request_id")
                     recovery_payload = entrypoint.handle_seller_portal_recovery_start_request(
                         launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
                         replace=replace,
+                        viewer_owner=viewer_owner,
+                        viewer_expires_at=viewer_expires_at,
+                        request_id=request_id,
                     )
                 except ValueError as exc:
                     _write_json_response(
@@ -2225,6 +2227,9 @@ def _build_handler(
                         {"error": str(exc)},
                     )
                     return
+                except PermissionError:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "seller recovery is controlled by another operator"})
+                    return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -2232,14 +2237,54 @@ def _build_handler(
                         {"error": f"seller portal recovery start failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, recovery_payload)
+                run_id = str(recovery_payload.get("run_id") or "")
+                if recovery_payload.get("running") and (not run_id or not _seller_viewer_run_matches(self, run_id)):
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"error": "seller recovery is controlled by another operator"})
+                    return
+                recovery_payload = {
+                    **recovery_payload,
+                    "viewer_available": bool(
+                        recovery_payload.get("running") and recovery_payload.get("run_status") == "awaiting_login"
+                    ),
+                }
+                headers = {"Set-Cookie": _seller_viewer_run_cookie(self, run_id)} if recovery_payload.get("running") else {}
+                _write_json_response(self, HTTPStatus.OK, recovery_payload, extra_headers=headers)
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH:
+                if not _seller_viewer_owner(self):
+                    _write_auth_forbidden(self, parsed.path)
+                    return
+                if not _ensure_seller_viewer_same_origin(self):
+                    return
                 try:
-                    recovery_payload = entrypoint.handle_seller_portal_recovery_stop_request(
-                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
-                    )
+                    payload = _load_optional_request_payload(self)
+                    run_id = payload.get("run_id")
+                    request_id = str(payload.get("request_id") or "")
+                    if request_id:
+                        if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+                            raise ValueError("invalid seller login request_id")
+                        recovery_payload = entrypoint.handle_seller_portal_recovery_cancel_request(
+                            launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                            request_id=request_id,
+                            viewer_owner=_seller_viewer_owner(self),
+                        )
+                    else:
+                        if not isinstance(run_id, str) or not run_id:
+                            raise ValueError("run_id or request_id required")
+                        if not _seller_viewer_run_matches(self, run_id):
+                            _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "seller recovery belongs to another operator"})
+                            return
+                        recovery_payload = entrypoint.handle_seller_portal_recovery_stop_request(
+                            launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+                            run_id=run_id,
+                        )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except PermissionError:
+                    _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "seller recovery belongs to another operator"})
+                    return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -2247,7 +2292,39 @@ def _build_handler(
                         {"error": f"seller portal recovery stop failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, recovery_payload)
+                if recovery_payload.get("run_failure_code") == "run_replaced":
+                    _write_json_response(self, HTTPStatus.CONFLICT, recovery_payload)
+                    return
+                _write_json_response(self, HTTPStatus.OK, recovery_payload, extra_headers={"Set-Cookie": _seller_viewer_run_cookie(self, "")})
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH:
+                if not _seller_viewer_owner(self):
+                    _write_auth_forbidden(self, parsed.path)
+                    return
+                if not _ensure_seller_viewer_same_origin(self):
+                    return
+                try:
+                    payload = _load_optional_request_payload(self)
+                    run_id = payload.get("run_id")
+                    if not isinstance(run_id, str) or not run_id:
+                        raise ValueError("run_id required")
+                    if not _seller_viewer_run_matches(self, run_id):
+                        _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "seller recovery belongs to another operator"})
+                        return
+                    result = entrypoint.handle_seller_portal_recovery_finish_request(
+                        launcher_download_path=DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH, run_id=run_id,
+                    )
+                except ValueError as exc:
+                    _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                except Exception:
+                    _write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "seller login confirmation failed"})
+                    return
+                if result.get("run_failure_code") in {"run_replaced", "finish_not_ready"}:
+                    _write_json_response(self, HTTPStatus.CONFLICT, result)
+                    return
+                _write_json_response(self, HTTPStatus.OK, result)
                 return
 
             if parsed.path == DEFAULT_SHEET_PLAN_REPORT_BASELINE_UPLOAD_PATH:
@@ -3916,7 +3993,25 @@ def _build_handler(
                         {"error": f"seller portal recovery status failed: {exc}"},
                     )
                     return
-                _write_json_response(self, HTTPStatus.OK, payload)
+                current_run_id = str(payload.get("run_id") or "")
+                viewer_owned = bool(
+                    current_run_id and payload.get("running")
+                    and (not run_id or run_id == current_run_id)
+                    and _seller_viewer_run_matches(self, current_run_id)
+                )
+                viewer_available = bool(
+                    viewer_owned and payload.get("run_status") == "awaiting_login"
+                )
+                payload = {**payload, "viewer_owned": viewer_owned, "viewer_available": viewer_available}
+                headers = {"Set-Cookie": _seller_viewer_run_cookie(self, current_run_id)} if viewer_available else {}
+                _write_json_response(self, HTTPStatus.OK, payload, extra_headers=headers)
+                return
+
+            if parsed.path == DEFAULT_SELLER_PORTAL_VIEWER_AUTH_PATH:
+                if _seller_viewer_auth_allowed(self):
+                    _write_json_response(self, HTTPStatus.OK, {"authorized": True}, extra_headers={"Cache-Control": "private, no-store"})
+                else:
+                    _write_json_response(self, HTTPStatus.FORBIDDEN, {"error": "viewer access denied"}, extra_headers={"Cache-Control": "private, no-store"})
                 return
 
             if parsed.path == DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH:
@@ -8800,6 +8895,99 @@ def _buyer_viewer_auth_allowed(handler: BaseHTTPRequestHandler) -> bool:
     return suffix in {"vnc.html", "package.json"} or suffix.startswith(("app/", "core/", "vendor/", "images/", "utils/"))
 
 
+def _seller_viewer_owner(handler: BaseHTTPRequestHandler) -> str:
+    # The authenticated Settings session owns the interactive Seller browser.
+    return _buyer_viewer_owner(handler)
+
+
+def _seller_viewer_session_expiry(handler: BaseHTTPRequestHandler) -> int | None:
+    return _buyer_viewer_session_expiry(handler)
+
+
+def _seller_viewer_raw_status() -> dict[str, Any]:
+    from apps import seller_portal_relogin_session as recovery
+    return recovery.read_session_status(recovery.load_relogin_session_config_from_env(), with_probe=False)
+
+
+def _seller_viewer_run_owned_by_other(handler: BaseHTTPRequestHandler) -> bool:
+    status = _seller_viewer_raw_status()
+    owner = str(status.get("viewer_owner") or "")
+    return bool(status.get("running") and (not owner or not hmac.compare_digest(owner, _seller_viewer_owner(handler))))
+
+
+def _seller_viewer_run_matches(handler: BaseHTTPRequestHandler, run_id: str) -> bool:
+    status = _seller_viewer_raw_status()
+    owner = str(status.get("viewer_owner") or "")
+    current = str(status.get("run_id") or "")
+    return bool(owner and current and hmac.compare_digest(current, run_id) and hmac.compare_digest(owner, _seller_viewer_owner(handler)))
+
+
+def _seller_viewer_run_cookie(handler: BaseHTTPRequestHandler, run_id: str) -> str:
+    from apps.seller_portal_relogin_session import DEFAULT_TIMEOUT_SEC
+    safe_run = run_id if re.fullmatch(r"seller-recovery-[A-Za-z0-9T-]+", run_id) else ""
+    parts = [
+        f"{SELLER_PORTAL_VIEWER_COOKIE_NAME}={safe_run}",
+        f"Path={DEFAULT_SELLER_PORTAL_VIEWER_PREFIX}",
+        "HttpOnly", "SameSite=Strict",
+        f"Max-Age={DEFAULT_TIMEOUT_SEC if safe_run else 0}",
+    ]
+    if _request_origin(handler).startswith("https://"):
+        parts.append("Secure")
+    return "; ".join(parts)
+
+
+def _ensure_seller_viewer_same_origin(handler: BaseHTTPRequestHandler) -> bool:
+    marker = str(handler.headers.get("X-Seller-Viewer-CSRF", "") or "")
+    origin = str(handler.headers.get("Origin", "") or "").rstrip("/")
+    fetch_site = str(handler.headers.get("Sec-Fetch-Site", "") or "").lower()
+    content_type = str(handler.headers.get("Content-Type", "") or "").split(";", 1)[0].lower()
+    if marker == "1" and content_type == "application/json" and origin and hmac.compare_digest(origin, _request_origin(handler).rstrip("/")) and fetch_site not in {"cross-site", "same-site"}:
+        return True
+    _write_json_response(handler, HTTPStatus.FORBIDDEN, {"error": "seller viewer CSRF validation failed"})
+    return False
+
+
+def _seller_viewer_auth_allowed(handler: BaseHTTPRequestHandler) -> bool:
+    """Check each noVNC asset and WebSocket handshake against the live run."""
+    owner = _seller_viewer_owner(handler)
+    if not owner:
+        return False
+    original_uri = str(handler.headers.get("X-Original-URI", "") or "")
+    if not original_uri.startswith(DEFAULT_SELLER_PORTAL_VIEWER_PREFIX):
+        return False
+    suffix = urllib_parse.urlsplit(original_uri).path.removeprefix(DEFAULT_SELLER_PORTAL_VIEWER_PREFIX)
+    if not suffix or ".." in suffix or "\\" in suffix or "%" in suffix:
+        return False
+    run_id = _request_cookie(handler, SELLER_PORTAL_VIEWER_COOKIE_NAME)
+    if suffix in {"vnc.html", "websockify"}:
+        requested_run = urllib_parse.parse_qs(urllib_parse.urlsplit(original_uri).query).get("run_id", [])
+        if len(requested_run) != 1 or not hmac.compare_digest(requested_run[0], run_id):
+            return False
+    status = _seller_viewer_raw_status()
+    current_run = str(status.get("run_id") or "")
+    current_owner = str(status.get("viewer_owner") or "")
+    if not run_id or not current_run or not current_owner or not hmac.compare_digest(run_id, current_run) or not hmac.compare_digest(owner, current_owner):
+        return False
+    if not status.get("running") or status.get("status") != "awaiting_login":
+        return False
+    try:
+        deadline = datetime.fromisoformat(str(status.get("deadline_at") or "").replace("Z", "+00:00"))
+        if deadline.tzinfo is None or datetime.now(timezone.utc) >= deadline:
+            return False
+        viewer_expiry = int(status.get("viewer_expires_at") or 0)
+        if viewer_expiry <= int(time.time()):
+            return False
+    except (ValueError, TypeError):
+        return False
+    if str(handler.headers.get("Sec-Fetch-Site", "") or "").lower() in {"cross-site", "same-site"}:
+        return False
+    if suffix == "websockify":
+        origin = str(handler.headers.get("X-Original-Origin", "") or "").rstrip("/")
+        upgrade = str(handler.headers.get("X-Original-Upgrade", "") or "").lower()
+        return upgrade == "websocket" and bool(origin) and hmac.compare_digest(origin, _request_origin(handler).rstrip("/"))
+    return suffix in {"vnc.html", "package.json"} or suffix.startswith(("app/", "core/", "vendor/", "images/", "utils/"))
+
+
 def _current_web_user_allowed_sections(handler: BaseHTTPRequestHandler) -> list[str]:
     config = _web_auth_config()
     if not config["enabled"]:
@@ -8873,8 +9061,8 @@ def _handle_web_auth_login(handler: BaseHTTPRequestHandler, query: str) -> None:
 
 
 def _handle_web_auth_logout(handler: BaseHTTPRequestHandler) -> None:
-    # WebCore logout revokes only this operator's live login viewer. The durable
-    # WB Chrome profile and any collector state remain untouched.
+    # Revoke this operator's interactive viewers before expiring the WebCore
+    # session. Durable browser state and collector state remain untouched.
     try:
         status = _buyer_viewer_raw_status()
         owner = _buyer_viewer_owner(handler)
@@ -8890,6 +9078,16 @@ def _handle_web_auth_logout(handler: BaseHTTPRequestHandler) -> None:
             # viewer auth_request while its owned process group closes.
             if stopped.get("running") and stopped.get("status") == "awaiting_human":
                 raise RuntimeError("buyer viewer did not stop")
+        seller_status = _seller_viewer_raw_status()
+        seller_owner = _seller_viewer_owner(handler)
+        if seller_owner and seller_status.get("running") and hmac.compare_digest(str(seller_status.get("viewer_owner") or ""), seller_owner):
+            from apps import seller_portal_relogin_session as seller_recovery
+            seller_stopped = seller_recovery.stop_relogin_session(
+                seller_recovery.load_relogin_session_config_from_env(),
+                requested_run_id=str(seller_status.get("run_id") or ""),
+            )
+            if seller_stopped.get("running"):
+                raise RuntimeError("seller viewer did not stop")
     except Exception:
         _write_json_response(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "buyer viewer could not be revoked"})
         return
@@ -10022,11 +10220,14 @@ def _user_can_access_path(user: Mapping[str, Any], path: str, *, query: str = ""
         DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
         DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
         DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH,
         DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
     }:
         return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS) or _user_has_section_access(
             user, WEB_AUTH_SECTION_VITRINA
         )
+    if normalized == DEFAULT_SELLER_PORTAL_VIEWER_AUTH_PATH or normalized.startswith(DEFAULT_SELLER_PORTAL_VIEWER_PREFIX):
+        return _user_has_section_access(user, WEB_AUTH_SECTION_SETTINGS)
     if normalized in {
         DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
         DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
@@ -10408,6 +10609,8 @@ def _render_sheet_vitrina_operator_ui(
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
         "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
         "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        "seller_recovery_finish_path": DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH,
+        "seller_recovery_viewer_path": DEFAULT_SELLER_PORTAL_VIEWER_PREFIX,
         "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "factory_order_status_path": DEFAULT_FACTORY_ORDER_STATUS_PATH,
         "factory_order_template_stock_ff_path": DEFAULT_FACTORY_ORDER_TEMPLATE_STOCK_FF_PATH,
@@ -10588,6 +10791,8 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
         "seller_recovery_status_path": DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
         "seller_recovery_start_path": DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
         "seller_recovery_stop_path": DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+        "seller_recovery_finish_path": DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH,
+        "seller_recovery_viewer_path": DEFAULT_SELLER_PORTAL_VIEWER_PREFIX,
         "seller_recovery_launcher_path": DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
         "wb_buyer_session_check_path": DEFAULT_WB_BUYER_SESSION_CHECK_PATH,
         "wb_buyer_recovery_status_path": DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
