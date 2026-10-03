@@ -13223,8 +13223,11 @@
           const processed = Number(run.processed_count || 0);
           const total = Number(run.candidate_count || 0);
           const sessionExpired = Number(run.session_expired_count || 0) > 0 || run.status === "session_expired";
+          const outcomeUnknown = run.status === "unknown";
           setWbSuppliesMessage(
-            sessionExpired
+            outcomeUnknown
+              ? "Стоимость транзита: исход прошлого запуска не установлен. Повторный сбор не запускаем; нужна проверка состояния."
+              : sessionExpired
               ? (afterOfficialSync
                   ? "Поставки: готово. Стоимость транзита: Seller-сессия протухла."
                   : "Стоимость транзита: нужна переавторизация Seller Portal. Восстановите сессию в Настройки → Источники и сессии.")
@@ -13232,7 +13235,7 @@
                 ", success " + valueOrDash(run.success_count) +
                 ", failed " + valueOrDash(run.failed_count) +
                 (run.last_error ? ". Ошибка: " + run.last_error : ""),
-            sessionExpired || run.status === "failed" || run.status === "partial" ? "warning" : ""
+            outcomeUnknown || sessionExpired || run.status === "failed" || run.status === "partial" ? "warning" : ""
           );
           if (run.status === "queued" || run.status === "running") {
             return await new Promise((resolve) => {
@@ -13245,7 +13248,7 @@
           wbSuppliesTransitCostRefreshing = false;
           updateWbSuppliesBusyState();
           await loadWbSupplies({ skipInitialSync: true, preserveMessage: true });
-          if (!afterOfficialSync && !sessionExpired) {
+          if (!afterOfficialSync && !sessionExpired && !outcomeUnknown) {
             const terminalKind = wbSuppliesTransitCostKind(run);
             setWbSuppliesMessage(
               terminalKind === "lock_busy"
@@ -15263,7 +15266,7 @@
             throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
           }
           renderSellerRecovery(mergeSellerRecoveryWithSessionCheck(payload));
-          setSellerRecoveryMessage("Проверка сессии завершена.", "success");
+          setSellerRecoveryMessage(payload.health_persistence_warning || "Проверка сессии завершена.", payload.health_persistence_warning ? "warning" : "success");
         } catch (error) {
           setSellerRecoveryMessage(
             "Не удалось проверить seller-сессию: " + (error instanceof Error ? error.message : String(error)),

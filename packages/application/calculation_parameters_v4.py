@@ -627,8 +627,9 @@ class ProxyV4ParametersBlock:
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.runtime.db_path) as conn:
-            ensure_proxy_v4_schema(conn)
-            conn.commit()
+            if not _proxy_v4_schema_ready(conn):
+                ensure_proxy_v4_schema(conn)
+                conn.commit()
 
     def parameters_for_date(self, effective_date: str) -> ProxyV4Parameters | None:
         return load_proxy_v4_parameters_for_date(
@@ -1114,6 +1115,21 @@ def ensure_proxy_v4_schema(conn: sqlite3.Connection) -> None:
     )
     from packages.application.ready_publication import ensure_material_revisions
     ensure_material_revisions(conn)
+
+
+def _proxy_v4_schema_ready(conn: sqlite3.Connection) -> bool:
+    from packages.application.ready_publication import material_revisions_schema_ready
+
+    expected = {
+        ("table", "sheet_vitrina_v1_proxy_v4_parameter_versions"),
+        ("index", "proxy_v4_parameters_by_effective_date"),
+        ("index", "proxy_v4_parameters_by_source_window"),
+    }
+    actual = {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute("SELECT type,name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+    return expected.issubset(actual) and material_revisions_schema_ready(conn)
 
 
 def _build_finance_window(

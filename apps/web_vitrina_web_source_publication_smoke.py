@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from apps.web_vitrina_web_source_publication import WebSourcePublicationAdapter, canonical, digest, project, validate_observations, non_target_digest
+from apps.web_vitrina_web_source_publication import WebSourcePublicationAdapter, canonical, digest, project, validate_observations, non_target_digest, source_date_pairs
 from apps.production_apply_launcher import execute
 
 
@@ -24,7 +24,8 @@ def observations():
         'detail_pages':[{'offset':0,'limit':50,'response':{'data':funnel_raw}}],
         'raw_report':{'error':False,'additionalErrors':{'errors':None},'data':{'groups':[{'itemsGroup':funnel_raw,'viewCount':{'current':100},'openCard':{'current':10}}]}}},
         {**common,'source_key':'web_source_snapshot','pages':1,'items':_search_items(search_raw),'detail_pages':[],
-        'raw_report':{'error':False,'additionalErrors':{'errors':None},'data':{'groups':[{'items':search_raw}],'commonInfo':{'totalProducts':2}}}}]
+        'raw_report':{'error':False,'additionalErrors':{'errors':None},'data':{'groups':[{'items':search_raw,
+            'metrics':{'views':{'current':400},'orders':{'current':3}}}],'commonInfo':{'totalProducts':2}}}}]
 
 
 def plan():
@@ -121,10 +122,123 @@ def source_recovery_checks(request):
             assert all(not rows for store in adapter.images.values() for rows in store.values())
 
 
+def sparse_scope_checks():
+    """A successful neighboring funnel day is captured but never rewritten."""
+    from types import ModuleType
+    from unittest.mock import patch
+    source=observations()
+    search_next=deepcopy(source[1])
+    search_next['snapshot_date']='2026-09-12'
+    search_next['request_period']={'start':'2026-09-12','end':'2026-09-12'}
+    search_next['source_fetched_at']='2026-09-13T22:00:00Z'
+    sparse=[*source,search_next]
+    request={'dates':['2026-09-11','2026-09-12'],'observations':sparse,'source_sha256':digest(sparse),
+        'supplier_identity_sha256':'fixture','source_date_pairs':[
+            {'source_key':'seller_funnel_snapshot','snapshot_date':'2026-09-11'},
+            {'source_key':'web_source_snapshot','snapshot_date':'2026-09-11'},
+            {'source_key':'web_source_snapshot','snapshot_date':'2026-09-12'}]}
+    assert source_date_pairs(request)=={('seller_funnel_snapshot','2026-09-11'),
+        ('web_source_snapshot','2026-09-11'),('web_source_snapshot','2026-09-12')}
+    bad=deepcopy(request)
+    bad['source_date_pairs'].append({'source_key':'seller_funnel_snapshot','snapshot_date':'2026-09-12'})
+    try:validate_observations(bad)
+    except ValueError as exc:assert str(exc)=='source-observation-scope-invalid'
+    else:raise AssertionError('unobserved successful funnel day entered write scope')
+
+    statements=[];batches=[]
+    class Cursor:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def execute(self,sql,params):statements.append((sql,params))
+    class Connection:
+        def cursor(self):return Cursor()
+    images={'sales_funnel_daily_raw':[
+            {'snapshot_date':'2026-09-11','nm_id':1},
+            {'snapshot_date':'2026-09-12','nm_id':2}],
+        'search_analytics_raw':[
+            {'date_from':'2026-09-11','date_to':'2026-09-11','nm_id':1},
+            {'date_from':'2026-09-12','date_to':'2026-09-12','nm_id':2}]}
+    # This transaction fixture must not require an installed PostgreSQL driver.
+    pg=ModuleType('psycopg2');extras=ModuleType('psycopg2.extras')
+    extras.Json=lambda value:value
+    extras.execute_batch=lambda cursor,sql,rows:batches.append((sql,rows))
+    pg.extras=extras
+    with patch.dict(sys.modules,{'psycopg2':pg,'psycopg2.extras':extras}):
+        WebSourcePublicationAdapter()._pg_replace(Connection(),request,
+            [('sales_funnel_daily_raw','snapshot_date'),('search_analytics_raw','date_to')],images)
+    assert [entry[1][0] for entry in statements]==[['2026-09-11'],['2026-09-11','2026-09-12']]
+    assert len(batches[0][1])==1 and len(batches[1][1])==2
+    source_recovery_checks(request)
+    with TemporaryDirectory() as tmp:
+        runtime=Path(tmp);db=runtime/'operational.sqlite3'
+        with sqlite3.connect(db) as conn:
+            conn.executescript('''CREATE TABLE registry_upload_current_state(slot INTEGER,bundle_version TEXT);
+                CREATE TABLE registry_upload_config_v2(bundle_version TEXT,nm_id INTEGER);
+                CREATE TABLE sheet_vitrina_v1_ready_snapshots(bundle_version TEXT,as_of_date TEXT,plan_json TEXT,PRIMARY KEY(bundle_version,as_of_date));
+                CREATE TABLE temporal_source_slot_snapshots(source_key TEXT,snapshot_date TEXT,snapshot_role TEXT,captured_at TEXT,payload_json TEXT,PRIMARY KEY(source_key,snapshot_date,snapshot_role));
+                CREATE TABLE temporal_source_closure_state(source_key TEXT,target_date TEXT,slot_kind TEXT,state TEXT,attempt_count INTEGER,next_retry_at TEXT,last_reason TEXT,last_attempt_at TEXT,last_success_at TEXT,accepted_at TEXT,PRIMARY KEY(source_key,target_date,slot_kind));''')
+            conn.execute("INSERT INTO registry_upload_current_state VALUES(1,'bundle')")
+            conn.executemany("INSERT INTO registry_upload_config_v2 VALUES('bundle',?)",[(1,),(2,),(3,)])
+            conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES('bundle','2026-09-11',?)",(canonical(plan()),))
+            conn.execute("INSERT INTO temporal_source_slot_snapshots VALUES('seller_funnel_snapshot','2026-09-12','accepted_closed_day_snapshot','2026-09-13T21:00:00Z','preserved')")
+            conn.execute("INSERT INTO temporal_source_closure_state VALUES('seller_funnel_snapshot','2026-09-12','yesterday_closed','success',1,NULL,'preserved','2026-09-13T21:00:00Z','2026-09-13T21:00:00Z','2026-09-13T21:00:00Z')")
+        class LocalAdapter(WebSourcePublicationAdapter):
+            def target(self,_):return runtime,db
+            def _materialized(self,r):validate_observations(r)
+        adapter=LocalAdapter();adapters={'fixture':adapter}
+        publication={**request,'phase':'publication','nm_ids':[1,2,3],'runtime_dir':str(runtime)}
+        preview=execute(action='preview',adapter_name='fixture',operation_id='sparse-publication',request=publication,adapters=adapters)
+        receipt=execute(action='apply',adapter_name='fixture',operation_id='sparse-publication',request=publication,
+            expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'],adapters=adapters)
+        assert receipt['state']=='applied'
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='seller_funnel_snapshot' AND snapshot_date='2026-09-12'").fetchone()[0]=='preserved'
+            assert conn.execute("SELECT last_reason FROM temporal_source_closure_state WHERE source_key='seller_funnel_snapshot' AND target_date='2026-09-12'").fetchone()[0]=='preserved'
+        assert adapter.rollback(publication,'sparse-publication')['state']=='restored'
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT payload_json FROM temporal_source_slot_snapshots WHERE source_key='seller_funnel_snapshot' AND snapshot_date='2026-09-12'").fetchone()[0]=='preserved'
+            assert conn.execute("SELECT last_reason FROM temporal_source_closure_state WHERE source_key='seller_funnel_snapshot' AND target_date='2026-09-12'").fetchone()[0]=='preserved'
+
+
+def search_batch_checks():
+    from packages.adapters.seller_portal_web_source_collector import _search_complete_items, CollectorError
+    raw=[{'nmId':nm,'views':{'current':nm},'ctr':{'current':10},'orders':{'current':1},
+          'avgPosition':{'current':2}} for nm in range(1,66)]
+    def response(rows,total):
+        return {'error':False,'additionalErrors':{'errors':None},'data':{
+            'groups':[{'items':rows,'metrics':{'views':{'current':sum(r['views']['current'] for r in rows)},
+                'orders':{'current':len(rows)}}}] if rows else [],'commonInfo':{'totalProducts':total}}}
+    global_report=response(raw[:50],65)
+    class Client:
+        def post(self,url,**kwargs):
+            wanted=set(json.loads(kwargs['data'])['nmIds'])
+            rows=[r for r in raw if r['nmId'] in wanted]
+            return type('Result',(),{'status':200,'json':lambda self:response(rows,len(rows))})()
+    items,batches=_search_complete_items(Client(),'https://seller-content.wildberries.ru/search-report/report',
+        {},{'currentPeriod':{'start':'2026-09-11','end':'2026-09-11'}},global_report,list(range(1,100)))
+    assert len(items)==65 and len(batches)==3
+    o=deepcopy(observations()[1]);o.update(pages=4,reported_count=65,raw_report=global_report,
+        items=items,search_batches=batches)
+    request={'dates':['2026-09-11'],'observations':[o],'source_sha256':digest([o]),
+        'supplier_identity_sha256':'fixture','source_date_pairs':[{'source_key':'web_source_snapshot','snapshot_date':'2026-09-11'}]}
+    validate_observations(request)
+    incomplete=deepcopy(request);incomplete['observations'][0]['search_batches'].pop(1)
+    incomplete['observations'][0]['pages']-=1;incomplete['source_sha256']=digest(incomplete['observations'])
+    try:validate_observations(incomplete)
+    except ValueError as exc:assert str(exc)=='search-source-product-count-incomplete'
+    else:raise AssertionError('missing last search batch accepted')
+    try:_search_complete_items(Client(),'https://seller-content.wildberries.ru/search-report/report',
+        {},{'currentPeriod':{'start':'2026-09-11','end':'2026-09-11'}},global_report,list(range(1,65)))
+    except CollectorError as exc:assert str(exc)=='search_report_product_count_incomplete'
+    else:raise AssertionError('incomplete search universe accepted')
+
+
 def main():
     obs=observations();request={'dates':['2026-09-11'],'nm_ids':[1,2,3],'observations':obs,'source_sha256':digest(obs),'supplier_identity_sha256':'fixture','phase':'publication'}
     validate_observations(request)
     source_recovery_checks(request)
+    sparse_scope_checks()
+    search_batch_checks()
     old=plan();new,changes=project(old,obs,[1,2,3],'op-fixture')
     assert non_target_digest(old,obs)==non_target_digest(new,obs)
     rows={r[1]:r for r in new['sheets'][0]['rows']}

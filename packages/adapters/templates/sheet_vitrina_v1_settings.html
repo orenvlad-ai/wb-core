@@ -1315,9 +1315,10 @@
         if (!sellerViewerStarting && !sellerDialog.open) {
         const coverage = ((seller.transit_cost || {}).coverage || {});
         const sellerAuthOk = ["session_valid", "session_valid_canonical"].includes(String(sellerAuth.session_status || "")) && sellerAuth.organization_confirmed === true;
-        const sellerHealthy = sellerAuthOk && coverage.overall_status === "healthy";
+        const sellerHealthUnconfirmed = ["unconfirmed", "probe_history", "stale_probe_history"].includes(String(sellerAuth.health_persistence_status || ""));
+        const sellerHealthy = sellerAuthOk && coverage.overall_status === "healthy" && !sellerHealthUnconfirmed;
         const sellerStopped = sellerAuth.run_status === "stopped";
-        setSourceBadge("seller", sellerAuth.running ? "Вход выполняется" : sellerStopped ? "Вход отменён" : sellerHealthy ? "Сессия активна" : sellerAuthOk ? "Есть ограничения" : "Нужен вход", sellerAuth.running || sellerStopped ? "warning" : sellerHealthy ? "success" : sellerAuthOk ? "warning" : "danger");
+        setSourceBadge("seller", sellerAuth.running ? "Вход выполняется" : sellerStopped ? "Вход отменён" : sellerHealthy ? "Сессия активна" : sellerHealthUnconfirmed ? (sellerAuthOk ? "Вход подтверждён · статус не сохранён" : "Нужна повторная проверка") : sellerAuthOk ? "Есть ограничения" : "Нужен вход", sellerAuth.running || sellerStopped || sellerHealthUnconfirmed ? "warning" : sellerHealthy ? "success" : sellerAuthOk ? "warning" : "danger");
         renderHealthRows("sellerSourceHealth", [
           ["Авторизация", sellerAuthOk ? "Вход подтверждён" : (sellerAuth.session_status_label || "Не проверена")],
           ["Кабинет", sellerAuth.organization_confirmed === true ? (sellerAuth.expected_supplier_label || sellerAuth.current_supplier_id || "Подтверждён") : "Не подтверждён"],
@@ -1327,7 +1328,9 @@
           ["Покрытие", String(coverage.confirmed || 0) + "/" + String(coverage.eligible || 0) + " · ожидает " + String(coverage.pending || 0)],
           ["Сборщики", (seller.collectors || []).join(", ")]
         ]);
-        document.getElementById("sellerSourceError").textContent = sellerHealthy ? "" : (coverage.last_error || (sellerAuthOk ? "" : sellerAuth.reason === "valid" ? "" : sellerAuth.reason) || "");
+        document.getElementById("sellerSourceError").textContent = sellerHealthUnconfirmed
+          ? (sellerAuth.health_persistence_warning || "Проверка входа завершена, но кеш статуса источника не обновлён.")
+          : sellerHealthy ? "" : (coverage.last_error || (sellerAuthOk ? "" : sellerAuth.reason === "valid" ? "" : sellerAuth.reason) || "");
         renderRecoverySteps("seller", sellerAuth);
         }
 
@@ -1410,8 +1413,15 @@
         const route = sourceRoutes[source] || {};
         if (!route.check) return;
         if (source === "seller") {
-          await fetchJson(route.check, {headers: {Accept: "application/json"}});
+          const checked = await fetchJson(route.check, {headers: {Accept: "application/json"}});
+          if (checked.health_persistence_warning) {
+            return {
+              ...checked,
+              health_persistence_warning: checked.health_persistence_warning + " Проверка маршрута supply/cost отложена; повторите её после восстановления записи статуса."
+            };
+          }
           await performSourceCheck("transit");
+          return checked;
         } else if (source === "buyer") {
           return fetchJson(route.check, {headers: {Accept: "application/json"}});
         } else if (source === "transit") {
@@ -1447,6 +1457,9 @@
               }
             }
             await loadSourcesSessions({refreshStale: false});
+            if (source === "seller" && result && result.health_persistence_warning && errorTarget) {
+              errorTarget.textContent = result.health_persistence_warning;
+            }
           } catch (error) {
             if (errorTarget) errorTarget.textContent = error.message || String(error);
           } finally {
