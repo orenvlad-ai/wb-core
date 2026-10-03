@@ -178,6 +178,7 @@ def main() -> None:
                     "finance",
                     "finance_operate",
                     "finance_admin",
+                    "finance_vlad_balance",
                 ]:
                     raise AssertionError(f"users API must expose available sections: {users_payload}")
                 if not _env_user_has_readonly_reason(users_payload, admin_username) or not _env_user_has_readonly_reason(users_payload, "hunshang"):
@@ -269,6 +270,17 @@ def main() -> None:
                     )
                     if denied_code != 400 or "supplier-only access" not in str(denied.get("error")):
                         raise AssertionError(f"supplier Finance grant must be rejected: {denied_code} {denied}")
+                denied_code, denied = _opener_patch_json(
+                    admin,
+                    f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}/{finance_user_id}",
+                    {"allowed_sections": ["finance_vlad_balance"]},
+                )
+                if denied_code != 400 or "requires finance read" not in str(denied.get("error")):
+                    raise AssertionError(f"sensitive grant without Finance read must be rejected: {denied_code} {denied}")
+                _patch_user(admin, base_url, finance_user_id, {"allowed_sections": ["finance", "finance_vlad_balance"]})
+                code, readback = _opener_json(admin, f"{base_url}{DEFAULT_SETTINGS_USERS_PATH}")
+                if code != 200 or _find_user(readback, "finance-grants-user").get("allowed_sections") != ["finance", "finance_vlad_balance"]:
+                    raise AssertionError(f"explicit sensitive grant must persist exactly: {readback}")
                 _delete_user(admin, base_url, finance_user_id)
 
                 operator_payload = _create_user(
@@ -696,34 +708,73 @@ def _assert_users_access_picker_browser(
                 raise AssertionError("create user access picker must render compact default summary")
 
             create_picker.locator("[data-access-picker-toggle]").click()
-            create_popover = create_picker.locator("[data-access-picker-popover]")
+            create_popover = page.locator("#" + create_picker.locator("[data-access-picker-toggle]").get_attribute("aria-controls"))
             if not create_popover.is_visible():
                 raise AssertionError("create user access picker must open on click")
-            create_labels = create_popover.inner_text()
-            for label in ("Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Инструкции", "Настройки", "Управление пользователями"):
+            if not create_popover.evaluate("el => el.parentElement === document.body"):
+                raise AssertionError("access picker must render above scrollable table")
+            bounds = create_popover.bounding_box()
+            viewport = page.viewport_size
+            if not bounds or bounds["x"] < 0 or bounds["y"] < 0 or bounds["x"] + bounds["width"] > viewport["width"] + 1 or bounds["y"] + bounds["height"] > viewport["height"] + 1:
+                raise AssertionError(f"access picker must stay inside viewport: {bounds}")
+            create_labels = create_popover.text_content() or ""
+            for label in ("Рабочие разделы", "Продажи и товары", "Витрина", "Поставки", "Отчёты", "Отзывы", "Исследования", "Финансы", "Особый доступ"):
                 if label not in create_labels:
                     raise AssertionError(f"create user access picker must include {label}")
-            create_picker.locator('[data-section-checkbox][value="vitrina"]').uncheck()
+            create_popover.locator('[data-section-checkbox][value="vitrina"]').uncheck()
             if "Доступы: 4 раздела" not in create_picker.locator("[data-access-summary]").inner_text():
                 raise AssertionError("create user access summary must update after section changes")
-            create_picker.locator("#newManageUsersInput").check()
-            if not create_picker.locator('[data-section-checkbox][value="settings"]').is_checked():
+            create_popover.locator('[data-access-group="settings"] summary').click()
+            create_popover.locator("#newManageUsersInput").check()
+            if not create_popover.locator('[data-section-checkbox][value="settings"]').is_checked():
                 raise AssertionError("manage_users checkbox must auto-check settings section")
             if "+ управление" not in create_picker.locator("[data-access-summary]").inner_text():
                 raise AssertionError("create user access summary must include manage-users state")
+            create_popover.locator('[data-section-checkbox][value="settings"]').uncheck()
+            if create_popover.locator("#newManageUsersInput").is_checked():
+                raise AssertionError("clearing settings must clear manage_users")
+            create_popover.locator('[data-access-group="finance"] summary').click()
+            create_popover.locator('[data-section-checkbox][value="finance_admin"]').check()
+            if not create_popover.locator('[data-section-checkbox][value="finance_operate"]').is_checked() or not create_popover.locator('[data-section-checkbox][value="finance"]').is_checked():
+                raise AssertionError("Finance admin must immediately include operate and read")
+            if create_popover.locator('[data-section-checkbox][value="finance_vlad_balance"]').is_checked():
+                raise AssertionError("Finance admin must not grant sensitive balance access")
+            create_popover.locator('[data-section-checkbox][value="finance"]').uncheck()
+            if create_popover.locator('[data-section-checkbox][value="finance_admin"]').is_checked() or create_popover.locator('[data-section-checkbox][value="finance_operate"]').is_checked():
+                raise AssertionError("clearing Finance read must clear higher Finance rights")
+            create_popover.locator('[data-access-group-toggle="finance"]').check()
+            if not create_popover.locator('[data-section-checkbox][value="finance_admin"]').is_checked() or create_popover.locator('[data-section-checkbox][value="finance_vlad_balance"]').is_checked():
+                raise AssertionError("Finance bulk toggle must exclude sensitive balance grant")
+            create_popover.locator('[data-section-checkbox][value="finance_operate"]').uncheck()
+            if not create_popover.locator('[data-access-group-toggle="finance"]').evaluate("el => el.indeterminate"):
+                raise AssertionError("partially selected group must show partial state")
+            create_popover.locator('[data-access-group="feedbacks"] summary').click()
+            create_popover.locator('[data-section-checkbox][value="feedbacks.ai_review"]').check()
+            create_popover.locator('[data-section-checkbox][value="feedbacks"]').uncheck()
+            if create_popover.locator('[data-section-checkbox][value="feedbacks.ai_review"]').is_checked():
+                raise AssertionError("clearing Feedbacks must clear dependent review right")
             page.keyboard.press("Escape")
             if create_popover.is_visible():
                 raise AssertionError("access picker must close on Escape")
+            if not create_picker.locator("[data-access-picker-toggle]").evaluate("el => el === document.activeElement"):
+                raise AssertionError("Escape must return focus to the access picker toggle")
 
             user_row = page.locator(f'tr[data-user-id="{ui_user_id}"]')
             if "Доступы: Поставки" not in user_row.locator("[data-access-summary]").inner_text():
                 raise AssertionError("table access picker must render compact row summary")
             user_row.locator("[data-access-picker-toggle]").click()
-            if not user_row.locator("[data-access-picker-popover]").is_visible():
+            row_popover = page.locator("#" + user_row.locator("[data-access-picker-toggle]").get_attribute("aria-controls"))
+            if not row_popover.is_visible():
                 raise AssertionError("table access picker must open on click")
-            user_row.locator('[data-section-checkbox][value="reports"]').check()
+            screenshot_path = os.environ.get("WBC_UI_SMOKE_SCREENSHOT_PATH")
+            if screenshot_path:
+                page.screenshot(path=screenshot_path, full_page=True)
+            row_popover.locator('[data-section-checkbox][value="reports"]').check()
             if "Доступы: 2 раздела" not in user_row.locator("[data-access-summary]").inner_text():
                 raise AssertionError("table access summary must update after section changes")
+            page.locator("#usersTitle").click()
+            if row_popover.is_visible():
+                raise AssertionError("outside click must close access picker")
             with page.expect_request(
                 lambda request: request.method == "PATCH"
                 and f"{DEFAULT_SETTINGS_USERS_PATH}/{urllib_parse.quote(ui_user_id)}" in request.url
@@ -734,6 +785,19 @@ def _assert_users_access_picker_browser(
             if patch_payload.get("allowed_sections") != ["supply", "reports"] or patch_payload.get("manage_users") is not False:
                 raise AssertionError(f"UI picker save must send selected access payload: {patch_payload}")
             page.wait_for_selector("#usersMessage.message.success")
+            page.set_viewport_size({"width": 390, "height": 720})
+            mobile_row = page.locator(f'tr[data-user-id="{ui_user_id}"]')
+            mobile_row.locator("[data-access-picker-toggle]").click()
+            mobile_popover = page.locator("#" + mobile_row.locator("[data-access-picker-toggle]").get_attribute("aria-controls"))
+            mobile_bounds = mobile_popover.bounding_box()
+            if not mobile_bounds or mobile_bounds["x"] < 0 or mobile_bounds["x"] + mobile_bounds["width"] > 391 or mobile_bounds["y"] < 0 or mobile_bounds["y"] + mobile_bounds["height"] > 721:
+                raise AssertionError(f"mobile picker must remain in viewport: {mobile_bounds}")
+            if not mobile_popover.is_visible():
+                raise AssertionError("mobile picker must be accessible")
+            mobile_popover.locator('[data-access-group="finance"] summary').click()
+            if not mobile_popover.locator('[data-section-checkbox][value="finance_admin"]').is_visible():
+                raise AssertionError("mobile Finance rights must expand")
+            page.keyboard.press("Escape")
 
             owner_row = page.locator("#userRows tr").filter(has_text="owner").first
             if owner_row.locator(".access-picker-summary.is-readonly").count() != 1:

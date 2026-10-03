@@ -20,6 +20,7 @@ from packages.adapters.finance_liquidity_auth import FixtureFinanceAuth
 from packages.adapters.finance_liquidity_http import (
     FinanceHttpApp,
     build_finance_http_server,
+    redact_vlad_balance,
 )
 from packages.application.finance_liquidity_cash import (
     FinanceCashService,
@@ -61,6 +62,12 @@ def request(
 
 
 def main() -> None:
+    redacted_negative = redact_vlad_balance({
+        "account_id": "cash_vladislav", "name": "Changed label", "balance": "-1.00",
+        "balance_minor": -100, "balance_state": "current", "negative_balance_warning": True,
+    }, permitted=False)
+    assert redacted_negative["balance"] is None and redacted_negative["negative_balance_warning"] is None
+    assert redacted_negative["name"] == "Changed label" and redacted_negative["balance_hidden"] is True
     with TemporaryDirectory() as directory:
         temporary = Path(directory)
         db_path = temporary / "finance.sqlite3"
@@ -76,6 +83,7 @@ def main() -> None:
                             "capabilities": ["finance_admin"],
                         },
                         "viewer": {"username": "fixture-viewer", "role": "operator", "capabilities": ["finance"]},
+                        "vlad_granted": {"username": "fixture-granted", "role": "operator", "capabilities": ["finance", "finance_vlad_balance"]},
                     }
                 }
             ),
@@ -181,8 +189,46 @@ def main() -> None:
             operation_id = posted["data"]["operation_id"]  # type: ignore[index]
             status, operation = request(base, f"/v1/finance/operations/{operation_id}")
             assert status == 200 and operation["data"]["operation_id"] == operation_id  # type: ignore[index]
+            status, vlad_draft = request(base, "/v1/finance/documents", payload={
+                "document_type": "opening", "target_account_id": "cash_vladislav",
+                "amount": "100.00", "occurred_at": "2026-09-21T10:00:00Z",
+                "opening_evidence_type": "manual_confirmation",
+            }, csrf=csrf)
+            assert status == 201, vlad_draft
+            vlad_doc = vlad_draft["data"]
+            status, vlad_post = request(
+                base, f"/v1/finance/documents/{vlad_doc['document_id']}/post",
+                payload={"base_revision": vlad_doc["revision"]}, csrf=csrf,
+            )
+            assert status == 200 and vlad_post["data"]["balances"]["cash_vladislav"]["balance"] is None, vlad_post
+            assert vlad_post["data"]["balances"]["cash_vladislav"]["balance_hidden"] is True
+            status, vlad_operation = request(base, f"/v1/finance/operations/{vlad_post['data']['operation_id']}")
+            assert status == 200 and vlad_operation["data"]["balances"]["cash_vladislav"]["balance_minor"] is None
+            status, vlad_accounts = request(base, "/v1/finance/accounts", actor="admin")
+            vlad = next(item for item in vlad_accounts["data"]["accounts"] if item["account_id"] == "cash_vladislav")
+            assert status == 200 and vlad["balance"] is None and vlad["balance_hidden"] is True
+            assert vlad["negative_balance_warning"] is None and vlad["balance_state"] == "current"
+            status, account_detail = request(base, "/v1/finance/accounts/cash_vladislav", actor="viewer")
+            assert status == 200 and account_detail["data"]["account"]["balance_minor"] is None
+            status, movements = request(base, "/v1/finance/accounts/cash_vladislav/movements", actor="viewer")
+            assert status == 200 and movements["data"]["balance"] is None and movements["data"]["movements"][0]["amount_minor"] == 10000
+            status, visible = request(base, "/v1/finance/accounts", actor="vlad_granted")
+            assert status == 200 and next(item for item in visible["data"]["accounts"] if item["account_id"] == "cash_vladislav")["balance"] == "100.00"
+            status, reconciliation = request(base, "/v1/finance/cash-reconciliations", payload={
+                "account_id": "cash_vladislav", "week_ending": "2026-09-27",
+                "actual_amount": "99.00", "comment": "fixture discrepancy",
+            }, csrf=csrf)
+            assert status == 201, reconciliation
+            assert all(reconciliation["data"][field] is None for field in ("expected_minor", "actual_minor", "difference_minor")), reconciliation
+            status, rec_operation = request(base, f"/v1/finance/operations/{reconciliation['data']['operation_id']}")
+            assert status == 200 and rec_operation["data"]["actual_minor"] is None and rec_operation["data"]["status"] == "hidden"
+            status, rec_list = request(base, "/v1/finance/cash-reconciliations", actor="viewer")
+            rec = next(item for item in rec_list["data"]["reconciliations"] if item["account_id"] == "cash_vladislav")
+            assert status == 200 and rec["status"] == "hidden" and rec["difference_amount"] is None and rec["actual_minor"] is None
+            status, rec_visible = request(base, "/v1/finance/cash-reconciliations", actor="vlad_granted")
+            assert status == 200 and rec_visible["data"]["reconciliations"][0]["difference_amount"] == "-1.00"
             status, documents = request(base, "/v1/finance/documents")
-            item = documents["data"]["documents"][0]  # type: ignore[index]
+            item = next(item for item in documents["data"]["documents"] if item["target_account_id"] == account_id)  # type: ignore[index]
             assert (
                 status == 200
                 and item["amount"] == "12.34"

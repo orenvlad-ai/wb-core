@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Mapping
 
 from packages.contracts.finance_liquidity import (
-    FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES,
+    FINANCE_LIQUIDITY_CAPABILITIES,
     expand_finance_capability_hierarchy,
 )
 
@@ -36,7 +36,7 @@ class FinanceBootstrapAccess:
         return tuple(
             item
             for item in expand_finance_capability_hierarchy([self.capability])
-            if item in FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES
+            if item in FINANCE_LIQUIDITY_CAPABILITIES
         )
 
 
@@ -125,7 +125,7 @@ def load_finance_bootstrap_access(
     store_id = str(payload.get("store_id") or "").strip()
     store_path = Path(str(payload.get("store_path") or "").strip())
     mode = str(payload.get("mode") or "").strip()
-    if not username or capability not in FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES:
+    if not username or capability not in FINANCE_LIQUIDITY_CAPABILITIES:
         raise FinanceBootstrapAccessUnavailable(
             "Finance bootstrap access config has invalid grant"
         )

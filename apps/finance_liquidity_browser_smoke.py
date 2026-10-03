@@ -676,6 +676,20 @@ def main() -> None:
                 finance_frame.locator('[data-action="opening"]').click()
                 expect(finance_frame.locator('[name="target_account_id"]')).to_have_value(uninitialized_card.get_attribute("data-account-id"))
                 finance_frame.get_by_role("button", name="Отмена").click()
+                vlad_opening = service.create_document({
+                    "document_type": "opening", "target_account_id": "cash_vladislav",
+                    "amount": "345.67", "occurred_at": "2026-09-21T10:00:00Z",
+                    "opening_evidence_type": "manual_confirmation",
+                }, "fixture-admin", *_operation(9001))
+                service.post_document(vlad_opening["document_id"], {"base_revision": vlad_opening["revision"]}, "fixture-admin", *_operation(9002))
+                finance_frame.locator('[data-action="reload"]').click()
+                hidden_card = finance_frame.locator('[data-accounts] .account-card', has_text="Касса Владислав")
+                expect(hidden_card.locator(".balance")).to_have_text("—")
+                expect(hidden_card.locator(".balance-note")).to_contain_text("Остаток скрыт")
+                hidden_card.click()
+                expect(finance_frame.locator('[data-action="income"]')).to_be_enabled()
+                expect(finance_frame.locator('[data-action="expense"]')).to_be_enabled()
+                shell.screenshot(path=evidence_dir / "cash-shell-vlad-hidden-balance.png", full_page=True)
                 cash_card = finance_frame.locator("[data-accounts] .account-card", has_text="Тестовая касса A")
                 cash_card.focus()
                 cash_card.press("Enter")

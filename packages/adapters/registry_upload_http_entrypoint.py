@@ -118,6 +118,8 @@ from packages.contracts.factory_order_supply import (
 )
 from packages.contracts.cost_price_upload import CostPriceUploadResult
 from packages.contracts.finance_liquidity import (
+    FINANCE_CAPABILITY_READ,
+    FINANCE_CAPABILITY_VLAD_BALANCE,
     FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS,
     expand_finance_capability_hierarchy,
     has_finance_capability,
@@ -9671,6 +9673,8 @@ def _ensure_runtime_access_consistent(role: str, allowed_sections: Sequence[str]
         raise ValueError("allowed_sections must include at least one section")
     if manage_users and WEB_AUTH_SECTION_SETTINGS not in sections:
         raise ValueError("manage_users requires settings access")
+    if FINANCE_CAPABILITY_VLAD_BALANCE in sections and FINANCE_CAPABILITY_READ not in sections:
+        raise ValueError("finance_vlad_balance requires finance read access")
 
 
 def _validate_runtime_password(value: Any) -> str:

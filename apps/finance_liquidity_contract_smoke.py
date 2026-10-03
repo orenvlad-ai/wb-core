@@ -33,6 +33,7 @@ from packages.contracts.finance_liquidity import (  # noqa: E402
     FINANCE_CAPABILITY_ADMIN,
     FINANCE_CAPABILITY_OPERATE,
     FINANCE_CAPABILITY_READ,
+    FINANCE_CAPABILITY_VLAD_BALANCE,
     FINANCE_LIQUIDITY_CAPABILITIES,
     FINANCE_LIQUIDITY_CAPABILITY_HIERARCHY,
     FINANCE_LIQUIDITY_CI_GROUP,
@@ -58,7 +59,7 @@ def main() -> None:
         raise AssertionError(FINANCE_LIQUIDITY_CI_GROUP)
     if FINANCE_LIQUIDITY_CAPABILITIES != expected:
         raise AssertionError(FINANCE_LIQUIDITY_CAPABILITIES)
-    if FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES != frozenset(expected):
+    if FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES != frozenset((*expected, FINANCE_CAPABILITY_VLAD_BALANCE)):
         raise AssertionError(FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES)
     if FINANCE_LIQUIDITY_CAPABILITY_HIERARCHY != {
         FINANCE_CAPABILITY_READ: (FINANCE_CAPABILITY_READ,),
@@ -78,6 +79,7 @@ def main() -> None:
             (FINANCE_CAPABILITY_READ, FINANCE_CAPABILITY_OPERATE),
         ),
         ([FINANCE_CAPABILITY_ADMIN], expected),
+        ([FINANCE_CAPABILITY_ADMIN, FINANCE_CAPABILITY_VLAD_BALANCE], (*expected, FINANCE_CAPABILITY_VLAD_BALANCE)),
         (
             ["reports", FINANCE_CAPABILITY_ADMIN, FINANCE_CAPABILITY_READ],
             ("reports", *expected),
@@ -92,19 +94,21 @@ def main() -> None:
         raise AssertionError("finance_admin must imply finance")
     if has_finance_capability([FINANCE_CAPABILITY_OPERATE], FINANCE_CAPABILITY_ADMIN):
         raise AssertionError("finance_operate must not imply finance_admin")
+    if has_finance_capability([FINANCE_CAPABILITY_ADMIN], FINANCE_CAPABILITY_VLAD_BALANCE):
+        raise AssertionError("finance_admin must not imply protected balance")
 
     definition_ids = tuple(
         str(item["section_id"])
         for item in WEB_AUTH_SECTION_DEFINITIONS
         if str(item["section_id"]) in FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES
     )
-    if definition_ids != expected:
+    if definition_ids != (*expected, FINANCE_CAPABILITY_VLAD_BALANCE):
         raise AssertionError(definition_ids)
     if tuple(
         item
         for item in _SHEET_VITRINA_USER_SECTION_IDS
         if item in FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES
-    ) != expected:
+    ) != (*expected, FINANCE_CAPABILITY_VLAD_BALANCE):
         raise AssertionError(_SHEET_VITRINA_USER_SECTION_IDS)
 
     for role in (
@@ -156,6 +160,14 @@ def main() -> None:
     )
     if validated != [FINANCE_CAPABILITY_READ, FINANCE_CAPABILITY_OPERATE]:
         raise AssertionError(validated)
+    try:
+        _ensure_runtime_access_consistent(
+            WEB_AUTH_ROLE_OPERATOR, [FINANCE_CAPABILITY_VLAD_BALANCE], False,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("protected balance requires Finance read")
     for capability in expected:
         try:
             _ensure_runtime_access_consistent(

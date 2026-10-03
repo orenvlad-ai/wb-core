@@ -21,7 +21,10 @@ from packages.adapters.finance_liquidity_access import (
     validate_finance_bootstrap_store,
 )
 from packages.application.storage_registry import StoreRegistry, StorageRegistryError
-from packages.contracts.finance_liquidity import expand_finance_capability_hierarchy
+from packages.contracts.finance_liquidity import (
+    FINANCE_CAPABILITY_VLAD_BALANCE,
+    expand_finance_capability_hierarchy,
+)
 
 
 class FinanceAuthUnavailable(ValueError):
@@ -238,7 +241,7 @@ class FinanceOperationalAuth:
             return {
                 "username": username,
                 "role": role,
-                "capabilities": list(access.capabilities),
+                "capabilities": [*access.capabilities, FINANCE_CAPABILITY_VLAD_BALANCE],
             }
         if row is None or not bool(row["is_active"]) or str(row["role"]) != role:
             raise FinanceAuthDenied("active session principal not found")
@@ -251,8 +254,10 @@ class FinanceOperationalAuth:
             for item in expand_finance_capability_hierarchy(
                 grants if isinstance(grants, list) else []
             )
-            if item in {"finance", "finance_operate", "finance_admin"}
+            if item in {"finance", "finance_operate", "finance_admin", FINANCE_CAPABILITY_VLAD_BALANCE}
         ]
+        if "finance" not in capabilities and FINANCE_CAPABILITY_VLAD_BALANCE in capabilities:
+            capabilities.remove(FINANCE_CAPABILITY_VLAD_BALANCE)
         return {"username": username, "role": role, "capabilities": capabilities}
 
 
@@ -279,8 +284,10 @@ class FixtureFinanceAuth:
                 if isinstance(actor.get("capabilities"), list)
                 else []
             )
-            if item in {"finance", "finance_operate", "finance_admin"}
+            if item in {"finance", "finance_operate", "finance_admin", FINANCE_CAPABILITY_VLAD_BALANCE}
         ]
+        if "finance" not in capabilities and FINANCE_CAPABILITY_VLAD_BALANCE in capabilities:
+            capabilities.remove(FINANCE_CAPABILITY_VLAD_BALANCE)
         return {
             "username": str(actor.get("username") or value),
             "role": role,

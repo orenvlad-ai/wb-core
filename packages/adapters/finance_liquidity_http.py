@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from packages.application.business_data_write_barrier import barrier_status
+from packages.contracts.finance_liquidity import FINANCE_CAPABILITY_VLAD_BALANCE
 
 from packages.adapters.finance_liquidity_auth import (
     FinanceAuthDenied,
@@ -27,6 +28,46 @@ from packages.contracts.finance_liquidity_cash import (
     FINANCE_CASH_CONTRACT,
     FINANCE_CASH_UI_PREFIX,
 )
+
+
+# Directory seed identity; names and responsible labels can change.
+PROTECTED_VLAD_CASH_ACCOUNT_ID = "cash_vladislav"
+_BALANCE_FIELDS = frozenset({
+    "balance", "balance_minor", "current_balance", "balance_amount",
+    "negative_balance_warning", "expected_minor", "expected_amount",
+    "actual_minor", "actual_amount", "difference_minor", "difference_amount",
+})
+
+
+def redact_vlad_balance(
+    value: Any, *, permitted: bool, account_context: str = ""
+) -> Any:
+    """Mask protected projections at the HTTP boundary, including command receipts.
+
+    Documents, ledger movements, and their individual amounts remain available.
+    This intentionally cannot prevent inference from a complete visible history.
+    """
+    if permitted:
+        return value
+    if isinstance(value, list):
+        return [redact_vlad_balance(item, permitted=False, account_context=account_context) for item in value]
+    if not isinstance(value, dict):
+        return value
+    context = str(value.get("account_id") or account_context)
+    protected = context == PROTECTED_VLAD_CASH_ACCOUNT_ID
+    result = {
+        key: redact_vlad_balance(item, permitted=False, account_context=context)
+        for key, item in value.items()
+    }
+    if protected:
+        for field in _BALANCE_FIELDS:
+            if field in result:
+                result[field] = None
+        if "balance_state" in result:
+            result["balance_hidden"] = True
+        if "expected_minor" in result and "status" in result:
+            result["status"] = "hidden"
+    return result
 
 
 class FinanceHttpApp:
@@ -97,6 +138,10 @@ def build_finance_http_server(
                 actor, capabilities = (
                     str(principal["username"]),
                     set(principal.get("capabilities") or []),
+                )
+                self._can_view_vlad_balance = (
+                    FINANCE_CAPABILITY_VLAD_BALANCE in capabilities
+                    and "finance" in capabilities
                 )
                 if mutation:
                     if not app.write_enabled:
@@ -243,11 +288,19 @@ def build_finance_http_server(
                     )
                     return
                 if suffix.startswith("/operations/"):
-                    self._ok(
-                        app.service.get_operation(
-                            suffix.split("/")[2], actor, "finance_admin" in caps
-                        )
+                    result = app.service.get_operation(
+                        suffix.split("/")[2], actor, "finance_admin" in caps
                     )
+                    if "reconciliation_id" in result and "expected_minor" in result:
+                        match = next(
+                            (item for item in app.service.list_reconciliations()
+                             if item["reconciliation_id"] == result["reconciliation_id"]),
+                            None,
+                        )
+                        if match is None:
+                            raise FinanceCashError("finance_integrity_unavailable", "Reconciliation receipt account unavailable", 503)
+                        self._balance_context_account_id = str(match["account_id"])
+                    self._ok(result)
                     return
                 raise FinanceCashError("not_found", "Route not found", 404)
             if suffix == "/accounts":
@@ -337,6 +390,7 @@ def build_finance_http_server(
                 return
             if suffix == "/cash-reconciliations":
                 need("finance_operate")
+                self._balance_context_account_id = str(payload.get("account_id") or "")
                 self._ok(
                     app.service.record_reconciliation(
                         payload, actor, operation_id, key
@@ -446,7 +500,12 @@ def build_finance_http_server(
 
         def _json(self, status: int, value: Mapping[str, Any]) -> None:
             raw = json.dumps(
-                value, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+                redact_vlad_balance(
+                    dict(value),
+                    permitted=getattr(self, "_can_view_vlad_balance", False),
+                    account_context=getattr(self, "_balance_context_account_id", ""),
+                ),
+                ensure_ascii=False, separators=(",", ":"), allow_nan=False
             ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")

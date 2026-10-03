@@ -198,7 +198,7 @@ def main() -> None:
             assert auth.authenticate(owner_headers) == {
                 "username": "owner",
                 "role": "admin",
-                "capabilities": ["finance", "finance_operate", "finance_admin"],
+                "capabilities": ["finance", "finance_operate", "finance_admin", "finance_vlad_balance"],
             }
             expect(
                 FinanceAuthDenied,
@@ -292,6 +292,18 @@ def main() -> None:
             "finance_operate",
             "finance_admin",
         ]
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_users SET allowed_sections_json=? WHERE username='operator'",
+                ('["finance", "finance_vlad_balance"]',),
+            )
+        assert auth.authenticate(headers)["capabilities"] == ["finance", "finance_vlad_balance"]
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE sheet_vitrina_v1_users SET allowed_sections_json=? WHERE username='operator'",
+                ('["finance_vlad_balance"]',),
+            )
+        assert auth.authenticate(headers)["capabilities"] == []
 
         # Move the exact grant-reading connection's underlying file after its
         # first descriptor check. The second connection-bound file-control and
