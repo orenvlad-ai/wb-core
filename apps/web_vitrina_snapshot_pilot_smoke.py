@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +110,7 @@ def _browser_flow(base: str) -> None:
         requests: list[str] = []
         errors: list[str] = []
         page.on("request", lambda request: requests.append(request.url)
-                if "/v1/sheet-vitrina-v1/web-vitrina" in request.url else None)
+                if urlsplit(request.url).path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH else None)
         page.on("pageerror", lambda error: errors.append(str(error)))
         for start, end in PERIODS:
             page.goto(_url(base, start, end, pilot=True), wait_until="domcontentloaded")
@@ -131,7 +131,7 @@ def _browser_flow(base: str) -> None:
             )
             assert page.locator("[data-table-body] tr").count() > 14
         assert not errors, errors
-        table_requests = [url for url in requests if "/v1/sheet-vitrina-v1/web-vitrina" in url]
+        table_requests = requests
         assert len(table_requests) == 4, table_requests
         assert all("snapshot_pilot=1" in url for url in table_requests), table_requests
         start, end = PERIODS[0]
@@ -172,14 +172,38 @@ def test_contract() -> None:
             assert http_summary["snapshot_pilot"]["generation_id"] == generation
             assert http_summary["snapshot_pilot"]["assembled_at"] == summary["snapshot_pilot"]["assembled_at"]
             assert http_summary["table_surface"]["rows"] == summary["table_surface"]["rows"]
+            # The HTTP adapter advertises its UI capability independently of
+            # the persisted business snapshot; all other content stays exact.
+            expected_http_summary = deepcopy(summary)
+            expected_http_summary["meta"]["window_v3_available"] = False
+            assert http_summary["meta"]["window_v3_available"] is False
             _check_pilot_transport(base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query,
-                                   summary)
+                                   expected_http_summary)
             query_sku = urlencode({"surface": "page_composition", "snapshot_pilot": "1",
                                    "part": "sku", "date_from": start, "date_to": end,
                                    "generation_id": generation})
             assert _read_http(base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query_sku)["rows"] == sku["rows"]
             _check_pilot_transport(base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query_sku,
                                    sku)
+
+        advertised_server = LocalWebVitrinaFixtureServer(
+            with_ready_snapshot=True, ready_days=31, snapshot_pilot=True,
+            advertise_window_v3=True,
+        )
+        with advertised_server as advertised_base:
+            start, end = PERIODS[0]
+            provision_store(advertised_server.snapshot_pilot_store)
+            publish_finished(advertised_server.snapshot_pilot_store, full[(start, end)],
+                             date_from=start, date_to=end)
+            expected_advertised = read_finished(advertised_server.snapshot_pilot_store,
+                                               date_from=start, date_to=end, part="summary")
+            expected_advertised["meta"]["window_v3_available"] = True
+            query = urlencode({"surface": "page_composition", "snapshot_pilot": "1",
+                               "part": "summary", "date_from": start, "date_to": end})
+            advertised_summary = _read_http(
+                advertised_base + DEFAULT_SHEET_WEB_VITRINA_READ_PATH + "?" + query)
+            assert advertised_summary["meta"]["window_v3_available"] is True
+            assert advertised_summary == expected_advertised
 
         # The existing compact full response is accepted directly, without a
         # second dense matrix; its 16-field cells match the legacy evaluator.
