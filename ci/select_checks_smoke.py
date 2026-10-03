@@ -672,7 +672,37 @@ def bounded_environment_checks() -> None:
             raise AssertionError("bounded reader failure did not fail closed")
 
 
+def autoanswers_mjs_checks() -> None:
+    for relative in ("frozen_bundle/tools/route_guard.mjs", "tests/review_alignment.test.mjs"):
+        plan = build_plan_from_paths(
+            pull_request=115, base=BASE, head=HEAD,
+            paths=[f"packages/node/wb_autoanswers_v1_4_2/make_mvp/{relative}"],
+            file_exists=lambda *_: True,
+        )
+        verify_plan(plan)
+        assert "autoanswers" in plan["groups"], plan
+        assert ["python3", "apps/wb_autoanswers_store_rollback_smoke.py"] in plan["commands"], plan
+        assert plan["release_kind"] == "live_runtime", plan
+    for path in (
+        "packages/node/other/tool.mjs",
+        "packages/node/wb_autoanswers_v1_4_2/tool.mjs",
+        "packages/node/wb_autoanswers_v1_4_2/make_mvp_other/tool.mjs",
+        "packages/node/wb_autoanswers_v1_4_2/make_mvp/../tool.mjs",
+        "packages/node/wb_autoanswers_v1_4_2/make_mvp/tool.bin",
+    ):
+        try:
+            build_plan_from_paths(
+                pull_request=115, base=BASE, head=HEAD, paths=[path],
+                file_exists=lambda *_: True,
+            )
+        except PlanError:
+            pass
+        else:
+            raise AssertionError(f"unclassified path accepted: {path}")
+
+
 def main() -> None:
+    autoanswers_mjs_checks()
     cleaner_command_checks()
     # The hosted system Python may install into user-site, which -I correctly
     # excludes. Dependency install, trusted harness and nested Python must share
