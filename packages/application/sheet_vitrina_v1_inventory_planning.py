@@ -185,13 +185,16 @@ def extend_rows_with_inventory_planning(
     enabled_config: list[ConfigV2Item],
     output_row_ids: frozenset[str] | None = None,
     legacy_wb_history_present: bool | None = None,
+    force_catalog: bool = False,
+    catalog_scope_keys: tuple[str, ...] = (),
+    catalog_scope_identities: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[WebVitrinaContractRow]:
     """Materialize current planning rows while preserving exact-date history."""
 
     source_rows = list(rows)
     history_payload = dict(history or {})
     current_applies = _planning_applies(planning, date_columns=date_columns)
-    history_applies = bool(dict(history_payload.get("dates") or {}))
+    history_applies = force_catalog or bool(dict(history_payload.get("dates") or {}))
     legacy_wb_applies = (
         _has_legacy_wb_history(source_rows, date_columns=date_columns)
         if legacy_wb_history_present is None else legacy_wb_history_present
@@ -221,6 +224,8 @@ def extend_rows_with_inventory_planning(
     history_scope_keys = {key for dated in history_payload.get("dates", {}).values()
                           for key, scope in dated.get("scopes", {}).items()
                           if scope.get("typed_quantity") or scope.get("diagnostic")}
+
+    history_scope_keys.update(catalog_scope_keys)
 
     scope_order: list[str] = []
     rows_by_scope: dict[str, list[WebVitrinaContractRow]] = {}
@@ -282,6 +287,8 @@ def extend_rows_with_inventory_planning(
             dated_identity = next((scope.get("wb", {}).get("provenance", {}).get("identity", {})
                 for dated in reversed(list(history_payload.get("dates", {}).values()))
                 if (scope := dated.get("scopes", {}).get(scope_id)) is not None), {})
+            if catalog_scope_identities is not None:
+                dated_identity = catalog_scope_identities.get(scope_id, {})
             if config is None and scope_id not in history_scope_keys:
                 result.extend(cluster)
                 continue

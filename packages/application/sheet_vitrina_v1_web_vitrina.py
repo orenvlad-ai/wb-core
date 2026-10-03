@@ -197,8 +197,11 @@ class SheetVitrinaV1WebVitrinaBlock:
         now_factory: Callable[[], datetime] | None = None,
         proxy_v4_parameters_resolver: Callable[[str], ProxyV4Parameters | None] | None = None,
         fbs_inventory_snapshot=None,
+        dated_cell_context=None,
     ) -> None:
         self.runtime = runtime
+        # Opt-in compiler context; ordinary HTTP reads retain their range rules.
+        self.dated_cell_context = dated_cell_context
         self._fbs_inventory_snapshot = fbs_inventory_snapshot
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.proxy_v4_parameters_resolver = proxy_v4_parameters_resolver or (
@@ -333,6 +336,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 default_visible_snapshot=default_visible_snapshot,
                 source_row_ids=source_row_ids,
                 output_row_ids=output_row_ids,
+                dated_cell_context=self.dated_cell_context,
             )
             from packages.application.web_vitrina_window_read_context import active_window_read_context
             window_status_loader = None
@@ -507,6 +511,9 @@ class SheetVitrinaV1WebVitrinaBlock:
             self.runtime.db_path, runtime_dir=self.runtime.runtime_dir, plan=snapshot,
             current_date=inventory_current_date, **history_arguments,
         )
+        if self.dated_cell_context is not None:
+            inventory_history = {**inventory_history,
+                "facilities": list(self.dated_cell_context["facilities"])}
         rows = extend_rows_with_inventory_planning(
             rows,
             planning=inventory_planning,
@@ -515,9 +522,17 @@ class SheetVitrinaV1WebVitrinaBlock:
             enabled_config=[item for item in current_state.config_v2 if item.enabled],
             output_row_ids=output_row_ids,
             legacy_wb_history_present=(
+                self.dated_cell_context["legacy_wb_present"]
+                if self.dated_cell_context is not None else
                 _window_legacy_wb_history_present(window_operands, snapshot.date_columns)
                 if window_operands is not None else None
             ),
+            force_catalog=(self.dated_cell_context is not None
+                           and self.dated_cell_context["inventory_catalog_present"]),
+            catalog_scope_keys=(tuple(self.dated_cell_context["history_scope_keys"])
+                                if self.dated_cell_context is not None else ()),
+            catalog_scope_identities=(self.dated_cell_context["history_scope_identities"]
+                                      if self.dated_cell_context is not None else None),
         )
         rows = apply_breakglass_last_good_overlay(
             rows,
@@ -931,6 +946,7 @@ def _build_period_snapshot(
     default_visible_snapshot: SheetVitrinaV1Envelope | None,
     source_row_ids: frozenset[str] | None = None,
     output_row_ids: frozenset[str] | None = None,
+    dated_cell_context=None,
 ) -> tuple[SheetVitrinaV1Envelope, list[_PeriodDateBinding]]:
     period_date_bindings = _resolve_period_date_bindings(
         runtime=runtime,
@@ -951,7 +967,7 @@ def _build_period_snapshot(
             or runtime.load_sheet_vitrina_ready_snapshot_any_bundle(as_of_date=binding.snapshot_as_of_date),
         )
     materialized_bindings = [binding for binding in period_date_bindings if not binding.missing]
-    if not materialized_bindings:
+    if not materialized_bindings and dated_cell_context is None:
         raise ValueError("web_vitrina period window has no materialized row template")
     if source_row_ids is not None and output_row_ids is not None:
         source_row_ids = _window_discovered_source_row_ids(
@@ -969,7 +985,11 @@ def _build_period_snapshot(
         default_visible_snapshot=default_visible_snapshot,
     )
     template_sheet = template_sheets[0]
-    template_rows = _merge_period_template_rows(template_sheets, source_row_ids=source_row_ids)
+    template_rows = (
+        [list(row) for row in dated_cell_context["template_rows"]]
+        if dated_cell_context is not None else
+        _merge_period_template_rows(template_sheets, source_row_ids=source_row_ids)
+    )
     value_maps = {
         binding.requested_date: _extract_snapshot_values_by_row_id(
             _require_data_sheet(snapshots_by_as_of_date[binding.storage_key]),
