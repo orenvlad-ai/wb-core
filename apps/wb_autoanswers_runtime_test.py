@@ -1938,7 +1938,7 @@ class RuntimeTest(unittest.TestCase):
             job["processing_key"], result=successful_result(route, **overrides), worker_id="worker"
         )
 
-    def test_three_modes_and_seller_chat_safe_public_policy(self) -> None:
+    def test_three_modes_and_complete_chat_invitation_policy(self) -> None:
         with self.subTest("draft_only"):
             row = self._claim_and_complete("draft_only", "public_only")
             self.assertEqual(row["state"], "generated")
@@ -1964,15 +1964,34 @@ class RuntimeTest(unittest.TestCase):
                         outcome["feedback_id"], trigger_source="automatic", actor_id="sync"
                     )
                     repo.claim_processing_job(worker_id="worker")
-                    stored = repo.complete_generation(
-                        job["processing_key"], result=successful_result(route), worker_id="worker"
-                    )
+                    result = successful_result(route)
+                    if route == "seller_chat":
+                        result.update(final_reply="Здравствуйте. Напишите в чат продавца по коду А1234.", case_code="А1234")
+                    stored = repo.complete_generation(job["processing_key"], result=result, worker_id="worker")
                     self.assertEqual(stored["state"], expected)
                     if route == "seller_chat":
                         self.assertEqual(stored["final_route"], "public_only")
-                        self.assertIsNone(stored["case_code"])
-                        self.assertNotIn("чат продавца", stored["final_reply"].casefold())
+                        self.assertEqual(stored["case_code"], "А1234")
+                        self.assertIn("чат продавца", stored["final_reply"].casefold())
                         self.assertEqual(len(repo.get_feedback(outcome["feedback_id"])["publications"]), 1)
+
+    def test_incomplete_chat_invitation_remains_review_only(self) -> None:
+        for reply, code in (
+            ("Здравствуйте. Напишите в чат продавца.", None),
+            ("Здравствуйте. Напишите в чат продавца по коду А1234. Пришлите фото.", "А1234"),
+            ("Здравствуйте. Напишите в чат продавца по коду А1234 А1234.", "А1234"),
+        ):
+            with self.subTest(reply=reply), TemporaryDirectory() as directory:
+                repo = AutoanswersRepository(runtime_dir=Path(directory), now_factory=MutableClock(), env={})
+                repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+                repo.upsert_feedback(feedback("invalid-chat"), source_stream="unanswered", run_kind="steady")
+                job = repo.enqueue_processing("invalid-chat", trigger_source="automatic", actor_id="sync")
+                repo.claim_processing_job(worker_id="worker")
+                result = successful_result("seller_chat", final_reply=reply, case_code=code)
+                stored = repo.complete_generation(job["processing_key"], result=result, worker_id="worker")
+                self.assertEqual(stored["state"], "needs_review")
+                self.assertEqual(stored["final_route"], "seller_chat")
+                self.assertEqual(repo.get_feedback("invalid-chat")["publications"], [])
 
     def test_five_selector_states_and_force_off_precedence(self) -> None:
         self.assertFalse(self.repo.settings().master_enabled)

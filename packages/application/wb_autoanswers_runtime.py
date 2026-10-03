@@ -74,6 +74,11 @@ from packages.application.wb_autoanswers_owner_policy import (
     OwnerPolicyUnsafePublicReplyError,
     apply_owner_policy,
 )
+from packages.application.wb_autoanswers_chat_public import (
+    has_chat_public_evidence,
+    promote_chat_invitation,
+    validate_promoted_chat_invitation,
+)
 
 
 SCHEMA_VERSION = 10
@@ -328,6 +333,22 @@ def normalized_reply(value: Any) -> str:
 
 def final_reply_hash(value: Any) -> str:
     return sha256_text(normalized_reply(value))
+
+
+def _automatic_chat_evidence_valid(job: Mapping[str, Any]) -> bool:
+    try:
+        result = json.loads(str(job["result_json"] or "{}"))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(result, dict):
+        return False
+    code = str(job["case_code"] or "")
+    if not has_chat_public_evidence(result, code, str(job["final_reply"] or "")):
+        return True
+    return validate_promoted_chat_invitation(
+        result=result, route=str(job["final_route"] or ""),
+        reply=str(job["final_reply"] or ""), case_code=code,
+    )
 
 
 def _clean_text(value: Any) -> str:
@@ -7369,27 +7390,8 @@ class AutoanswersRepository:
                 "media_uncertain": False,
                 "node_contract_valid": True,
             }
-            if settings.mode in {MODE_AUTO_SAFE, MODE_AUTO_ALL} and route == "seller_chat":
-                selected = safe_public_template(str(job["feedback_id"]), int(feedback["rating"] or 0))
-                result["server_policy_transform"] = {
-                    "contract": "wb_autoanswers_safe_public_policy_v1",
-                    "source_route": route,
-                    "source_reply_sha256": evidence["reply_sha256"],
-                    "source_case_code_present": False,
-                    "publication_route": selected["route"],
-                    "template_id": selected["template_id"],
-                    "operator_handoff": False,
-                    "model_calls": 0,
-                }
-                route = str(selected["route"])
-                reply = str(selected["reply"])
-                result["final_route"] = route
-                result["final_reply"] = reply
-                result["pipeline_result"] = {
-                    **dict(result["pipeline_result"]),
-                    "route": route,
-                    "source_route": "seller_chat",
-                }
+            # Append-only recovery has no case code. It must not manufacture a
+            # public invitation or turn a legacy generic draft into approval.
             try:
                 result = apply_owner_policy(
                     feedback_id=str(job["feedback_id"]),
@@ -7416,7 +7418,10 @@ class AutoanswersRepository:
             reply_sha = final_reply_hash(reply)
             next_state = STATE_GENERATED
             review_reasons: list[str] = []
-            if settings.mode == MODE_AUTO_ALL or (
+            if route == "seller_chat":
+                next_state = STATE_NEEDS_REVIEW
+                review_reasons.append("seller_chat_review_only")
+            elif settings.mode == MODE_AUTO_ALL or (
                 settings.mode == MODE_AUTO_SAFE and route in AUTO_SAFE_ROUTES
             ):
                 next_state = STATE_APPROVED
@@ -7714,47 +7719,6 @@ class AutoanswersRepository:
             stale = feedback is None or int(feedback["content_version"]) != int(job["content_version"])
             external_answer = _feedback_row_officially_resolved(feedback)
             stored_result = dict(result)
-            if (
-                settings.policy_version == DEFAULT_POLICY_VERSION
-                and settings.mode in {MODE_AUTO_SAFE, MODE_AUTO_ALL}
-                and route == "seller_chat"
-            ):
-                selected = safe_public_template(
-                    str(job["feedback_id"]),
-                    int(feedback["rating"] or 0) if feedback is not None else 0,
-                )
-                source_reply_sha = final_reply_hash(reply)
-                stored_result["server_policy_transform"] = {
-                    "contract": "wb_autoanswers_safe_public_policy_v1",
-                    "source_route": route,
-                    "source_reply_sha256": source_reply_sha,
-                    "source_case_code_present": bool(result.get("case_code")),
-                    "publication_route": selected["route"],
-                    "template_id": selected["template_id"],
-                    "operator_handoff": False,
-                    "model_calls": 0,
-                }
-                route = str(selected["route"])
-                reply = str(selected["reply"])
-                stored_result["final_route"] = route
-                stored_result["final_reply"] = reply
-                stored_result["case_code"] = None
-                stored_result["fallback_used"] = False
-                fallback_used = False
-                self._audit(
-                    conn,
-                    aggregate_type="processing_job",
-                    aggregate_id=processing_key_value,
-                    event_type="seller_chat_transformed_to_safe_public",
-                    actor_type="policy",
-                    actor_id=settings.policy_version,
-                    details={
-                        "source_reply_sha256": source_reply_sha,
-                        "template_id": selected["template_id"],
-                        "operator_handoff": False,
-                    },
-                    at=now,
-                )
             if settings.policy_version == DEFAULT_POLICY_VERSION and feedback is not None:
                 before_policy_route = route
                 before_policy_reply_sha = final_reply_hash(reply)
@@ -7802,6 +7766,25 @@ class AutoanswersRepository:
                     },
                     at=now,
                 )
+            if (
+                settings.policy_version == DEFAULT_POLICY_VERSION
+                and settings.mode in {MODE_AUTO_SAFE, MODE_AUTO_ALL}
+                and route == "seller_chat"
+            ):
+                try:
+                    stored_result = promote_chat_invitation(stored_result)
+                except ValueError:
+                    pass  # Unsafe or incomplete invitation remains review-only.
+                else:
+                    route = str(stored_result["final_route"])
+                    reply = str(stored_result["final_reply"])
+                    self._audit(
+                        conn, aggregate_type="processing_job", aggregate_id=processing_key_value,
+                        event_type="seller_chat_invitation_promoted_to_public",
+                        actor_type="policy", actor_id=settings.policy_version,
+                        details={"reply_sha256": final_reply_hash(reply), "operator_handoff": False},
+                        at=now,
+                    )
             result_json = canonical_json(stored_result)
             reply_sha = final_reply_hash(reply)
             conn.execute(
@@ -8698,6 +8681,21 @@ class AutoanswersRepository:
                     "seller_chat public reply mentions prohibited materials",
                     code="seller_chat_materials_prohibited",
                 )
+        if request_source == "automatic":
+            try:
+                stored_result = json.loads(str(processing["result_json"] or "{}"))
+            except (TypeError, ValueError):
+                stored_result = {}
+            if not isinstance(stored_result, dict):
+                stored_result = {}
+            code = str(processing["case_code"] or "")
+            if has_chat_public_evidence(stored_result, code, str(publication["exact_reply"] or "")) and not validate_promoted_chat_invitation(
+                result=stored_result,
+                route=str(processing["final_route"] or ""),
+                reply=str(publication["exact_reply"] or ""),
+                case_code=code,
+            ):
+                raise AutoanswersRuntimeError("public chat invitation evidence is invalid", code="chat_invitation_invalid")
 
     def begin_publication_write(self, publication_key_value: str, *, worker_id: str) -> dict[str, Any]:
         """Last durable gate immediately before the transport POST."""
@@ -9773,6 +9771,7 @@ class AutoanswersRepository:
                 and not bool(job["fallback_used"])
                 and not bool(job["media_uncertain"])
                 and str(job["final_route"] or "") != "seller_chat"
+                and _automatic_chat_evidence_valid(job)
             ):
                 # The immutable reply and zero-write publication evidence can
                 # be rebound to the new epoch without another AI call or WB
@@ -9910,10 +9909,12 @@ class AutoanswersRepository:
                 )
                 if ready:
                     route = str(job["final_route"] or "")
+                    chat_evidence_valid = _automatic_chat_evidence_valid(job)
                     manual_revalidation = bool(job["manual_reply"])
                     auto_allowed = (
                         target_mode != MODE_DRAFT_ONLY
                         and route != "seller_chat"
+                        and chat_evidence_valid
                         and not manual_revalidation
                         and (target_mode == MODE_AUTO_ALL or route in AUTO_SAFE_ROUTES)
                     )
@@ -9923,6 +9924,8 @@ class AutoanswersRepository:
                     reasons: list[str] = []
                     if route == "seller_chat":
                         reasons.append("seller_chat_review_only")
+                    if not chat_evidence_valid:
+                        reasons.append("chat_invitation_invalid")
                     if manual_revalidation:
                         reasons.append("manual_revalidation_required")
                     if target_mode == MODE_AUTO_SAFE and route not in AUTO_SAFE_ROUTES:
