@@ -1625,225 +1625,15 @@ class RegistryUploadHttpEntrypoint:
         table_format: str = "legacy",
         shell_format: str = "legacy",
     ) -> dict[str, Any]:
-        page_composition_started_perf = time.perf_counter()
-        now = self.now_factory()
-        default_period = resolve_web_vitrina_default_period(now)
-        canonical_default_range: tuple[str, str] = (default_period.date_from, default_period.date_to)
-        effective_as_of_date = as_of_date or default_period.date_to
-        default_as_of_date = default_business_as_of_date(now)
-        selected_date_from = date_from
-        selected_date_to = date_to
-        if not as_of_date and not date_from and not date_to:
-            selected_date_from, selected_date_to = canonical_default_range
-        if not include_table_data and shell_format == "metadata_v2":
-            # A shell has no row-derived business version, counts or quality.
-            # Keep its read strictly on indexed metadata and the current bundle.
-            available_snapshot_dates = self.web_vitrina_block.list_readable_dates_metadata(descending=True)
-            if selected_date_from and selected_date_to:
-                period_ready_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
-                    date_from=selected_date_from, date_to=selected_date_to,
-                )
-                source_date = period_ready_dates[-1] if period_ready_dates else ""
-            else:
-                source_date = as_of_date or default_as_of_date
-            group_dates = self.runtime.list_sheet_vitrina_ready_snapshot_dates(descending=False)
-            group_default = _default_group_refresh_date(
-                group_dates, preferred_date=current_business_date_iso(now)
-            )
-            activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
-                snapshot_as_of_date=source_date,
-                snapshot_id="",
-                refreshed_at="",
-                read_model="pending_table",
-                available_dates=group_dates,
-                default_refresh_date=group_default,
-            )
-            if include_source_status and source_date:
-                try:
-                    activity_surface = self._build_web_vitrina_activity_surface(
-                        snapshot_as_of_date=source_date,
-                        snapshot_id="",
-                        refreshed_at="",
-                        read_model="pending_table",
-                        job_path=job_path,
-                    )
-                except Exception as exc:
-                    activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
-                        requested_as_of_date=source_date,
-                        snapshot_as_of_date=source_date,
-                        technical_detail=str(exc),
-                        now=self.now_factory(),
-                    )
-            metric_catalog = [asdict(item) for item in self.web_vitrina_block.metric_catalog_metadata()]
-            metric_catalog.extend(_active_incident_metric_catalog())
-            return _with_page_composition_diagnostics(
-                {
-                    **build_web_vitrina_page_shell_composition(
-                        page_route=page_route,
-                        read_route=read_route,
-                        operator_route=operator_route,
-                        available_snapshot_dates=available_snapshot_dates,
-                        default_as_of_date=default_as_of_date,
-                        selected_as_of_date=as_of_date,
-                        selected_date_from=selected_date_from,
-                        selected_date_to=selected_date_to,
-                        default_date_from=canonical_default_range[0],
-                        default_date_to=canonical_default_range[1],
-                        source_status_snapshot_as_of_date=source_date,
-                        metric_catalog=metric_catalog,
-                        activity_surface=activity_surface,
-                    ),
-                    "health_surface": self.handle_sheet_web_vitrina_health_request(),
-                },
-                started_perf=page_composition_started_perf,
-                include_source_status=include_source_status,
-                include_table_data=False,
-            )
-
-        available_snapshot_dates = self.web_vitrina_block.list_readable_dates(descending=True)
-        try:
-            if not as_of_date and not date_from and not date_to:
-                selected_date_from, selected_date_to = canonical_default_range
-                contract = self.web_vitrina_block.build(
-                    page_route=page_route,
-                    read_route=read_route,
-                    as_of_date=None,
-                    date_from=selected_date_from,
-                    date_to=selected_date_to,
-                )
-            else:
-                contract = self.web_vitrina_block.build(
-                    page_route=page_route,
-                    read_route=read_route,
-                    as_of_date=as_of_date,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-            view_model = build_web_vitrina_view_model(contract)
-            adapter = build_web_vitrina_gravity_table_adapter(view_model)
-        except Exception as exc:
-            activity_surface = (
-                _web_vitrina_source_status_missing_snapshot_activity_surface(
-                    requested_as_of_date=effective_as_of_date,
-                    technical_detail=str(exc),
-                    now=self.now_factory(),
-                )
-                if include_source_status and _is_ready_snapshot_missing_error(exc)
-                else None
-            )
-            return _with_page_composition_diagnostics(
-                {
-                    **build_web_vitrina_page_error_composition(
-                        page_route=page_route,
-                        read_route=read_route,
-                        operator_route=operator_route,
-                        as_of_date=effective_as_of_date,
-                        error_message=str(exc),
-                        available_snapshot_dates=available_snapshot_dates,
-                        default_as_of_date=default_as_of_date,
-                        selected_as_of_date=as_of_date,
-                        selected_date_from=selected_date_from,
-                        selected_date_to=selected_date_to,
-                        default_date_from=canonical_default_range[0],
-                        default_date_to=canonical_default_range[1],
-                        activity_surface=activity_surface,
-                    ),
-                    "health_surface": self.handle_sheet_web_vitrina_health_request(),
-                },
-                started_perf=page_composition_started_perf,
-                include_source_status=include_source_status,
-                include_table_data=include_table_data,
-            )
-
-        incident_metric_catalog = _active_incident_metric_catalog()
-        source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
-        source_status_snapshot_id = _web_vitrina_source_status_snapshot_id(
-            self.runtime,
-            contract,
-            snapshot_as_of_date=source_status_snapshot_as_of_date,
-        )
-        group_refresh_available_dates = self.web_vitrina_block.list_materialized_readable_dates(descending=False)
-        group_refresh_default_date = _default_group_refresh_date(
-            group_refresh_available_dates,
-            preferred_date=current_business_date_iso(self.now_factory()),
-        )
-        metric_catalog = extend_metrics_with_sku_action_metrics(
-            extend_metrics_with_weighted_seller_price(
-                extend_metrics_with_own_product_capital_metrics(
-                    extend_metrics_with_proxy_v4(
-                        extend_metrics_with_our_wb_cost_metrics(
-                            extend_metrics_with_onec_stock_metrics(
-                                getattr(self.runtime.load_current_state(), "metrics_v2", [])
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        metric_labels_by_source = _build_activity_metric_labels_by_source(
-            visible_authenticated_buyer_metrics(extend_metrics_with_authenticated_buyer(metric_catalog))
-        )
-        activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
-            snapshot_as_of_date=source_status_snapshot_as_of_date,
-            snapshot_id=source_status_snapshot_id,
-            refreshed_at=str(contract.meta.refreshed_at),
-            read_model=str(contract.status_summary.read_model),
-            available_dates=group_refresh_available_dates,
-            default_refresh_date=group_refresh_default_date,
-            metric_labels_by_source=metric_labels_by_source,
-            group_last_updated_at=_source_group_last_updated_at_for_runtime_snapshot(
-                self.runtime,
-                snapshot_as_of_date=source_status_snapshot_as_of_date,
-                fallback_updated_at=str(contract.meta.refreshed_at),
-            ),
-        )
-        if include_source_status:
-            try:
-                activity_surface = self._build_web_vitrina_activity_surface(
-                    snapshot_as_of_date=source_status_snapshot_as_of_date,
-                    snapshot_id=source_status_snapshot_id,
-                    refreshed_at=str(contract.meta.refreshed_at),
-                    read_model=str(contract.status_summary.read_model),
-                    job_path=job_path,
-                )
-            except Exception as exc:  # pragma: no cover - bounded fallback
-                if _is_ready_snapshot_missing_error(exc):
-                    activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
-                        requested_as_of_date=source_status_snapshot_as_of_date,
-                        snapshot_as_of_date=source_status_snapshot_as_of_date,
-                        technical_detail=str(exc),
-                        now=self.now_factory(),
-                    )
-                else:
-                    activity_surface = _empty_web_vitrina_activity_surface(
-                        log_message=f"activity surface unavailable: {exc}",
-                        upload_message=f"upload summary unavailable: {exc}",
-                        update_message=f"update summary unavailable: {exc}",
-                    )
-
-        page_payload = build_web_vitrina_page_composition(
-                    page_route=page_route,
-                    read_route=read_route,
-                    operator_route=operator_route,
-                    available_snapshot_dates=available_snapshot_dates,
-                    selected_as_of_date=as_of_date,
-                    selected_date_from=selected_date_from,
-                    selected_date_to=selected_date_to,
-                    default_date_from=canonical_default_range[0],
-                    default_date_to=canonical_default_range[1],
-                    contract=contract,
-                    view_model=view_model,
-                    adapter=adapter,
-                    activity_surface=activity_surface,
-                    include_table_data=include_table_data,
-                    metric_catalog=incident_metric_catalog,
-                    compact_table=table_format == "indexed_cells_v2",
-                )
-        return _with_page_composition_diagnostics(
-            {**page_payload, "health_surface": self.handle_sheet_web_vitrina_health_request()},
-            started_perf=page_composition_started_perf,
-            include_source_status=include_source_status,
-            include_table_data=include_table_data,
+        return build_web_vitrina_page_read(
+            runtime=self.runtime, web_vitrina_block=self.web_vitrina_block,
+            now_factory=self.now_factory,
+            health_surface_factory=self.handle_sheet_web_vitrina_health_request,
+            activity_surface_factory=self._build_web_vitrina_activity_surface,
+            page_route=page_route, read_route=read_route, operator_route=operator_route,
+            job_path=job_path, as_of_date=as_of_date, date_from=date_from, date_to=date_to,
+            include_source_status=include_source_status, include_table_data=include_table_data,
+            table_format=table_format, shell_format=shell_format,
         )
 
     def handle_sheet_research_sku_group_comparison_options_request(
@@ -10404,6 +10194,15 @@ class SheetVitrinaV1OperatorJobStore:
         self._lock = threading.Lock()
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
+        self._snapshot_markers = None
+        self._snapshot_job_markers: dict[str, Any] = {}
+
+    def enable_snapshot_admission(self, runtime_dir: Path) -> None:
+        from packages.application.web_vitrina_snapshot_admission import ApiJobMarkers
+        with self._lock:
+            if any(job.status in {"accepted", "running"} for job in self._jobs.values()):
+                raise ValueError("cannot enable snapshot admission while API jobs are active")
+            self._snapshot_markers = ApiJobMarkers(runtime_dir)
 
     def resume_warehouse_pending(self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
                                  runner: Callable[..., dict[str, Any]]) -> threading.Thread | None:
@@ -10558,7 +10357,14 @@ class SheetVitrinaV1OperatorJobStore:
         with self._lock:
             self._jobs[job_id] = job
             self._threads[job_id] = thread
-        thread.start()
+            if self._snapshot_markers is not None:
+                self._snapshot_job_markers[job_id] = self._snapshot_markers.start(job_id, operation)
+        try:
+            thread.start()
+        except BaseException:
+            if self._snapshot_markers is not None:
+                self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
+            raise
         return self.get(job_id)
 
     def get(self, job_id: str) -> dict[str, Any]:
@@ -10685,27 +10491,32 @@ class SheetVitrinaV1OperatorJobStore:
         job_id: str,
         runner: Callable[[OperatorLogEmitter], dict[str, Any]],
     ) -> None:
-        token = SHEET_OPERATOR_JOB_ID.set(job_id)
         try:
-            result = runner(lambda message: self._append_log(job_id, message))
-        except Exception as exc:
-            self._append_log(job_id, f"Ошибка: {exc}")
+            token = SHEET_OPERATOR_JOB_ID.set(job_id)
+            try:
+                result = runner(lambda message: self._append_log(job_id, message))
+            except Exception as exc:
+                self._append_log(job_id, f"Ошибка: {exc}")
+                with self._lock:
+                    job = self._jobs[job_id]
+                    job.status = "error"
+                    job.finished_at = self.timestamp_factory()
+                    job.error = str(exc)
+                    if isinstance(exc, SheetVitrinaV1OperatorJobError) and exc.result_payload:
+                        job.result = dict(exc.result_payload)
+                SHEET_OPERATOR_JOB_ID.reset(token)
+                return
+
             with self._lock:
                 job = self._jobs[job_id]
-                job.status = "error"
+                job.status = "success"
                 job.finished_at = self.timestamp_factory()
-                job.error = str(exc)
-                if isinstance(exc, SheetVitrinaV1OperatorJobError) and exc.result_payload:
-                    job.result = dict(exc.result_payload)
+                job.result = result
             SHEET_OPERATOR_JOB_ID.reset(token)
-            return
 
-        with self._lock:
-            job = self._jobs[job_id]
-            job.status = "success"
-            job.finished_at = self.timestamp_factory()
-            job.result = result
-        SHEET_OPERATOR_JOB_ID.reset(token)
+        finally:
+            if self._snapshot_markers is not None:
+                self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
 
     def _append_log(self, job_id: str, message: str) -> None:
         timestamp = self.timestamp_factory()
@@ -10714,6 +10525,244 @@ class SheetVitrinaV1OperatorJobStore:
             job.log_lines.append(f"{timestamp} {message}")
             if len(job.log_lines) > 4000:
                 job.log_lines = job.log_lines[-4000:]
+
+
+def build_web_vitrina_page_read(
+    *, runtime, web_vitrina_block, now_factory, health_surface_factory,
+    activity_surface_factory=None,
+    page_route: str, read_route: str, operator_route: str,
+    job_path: str = "/v1/sheet-vitrina-v1/job",
+    as_of_date: str | None = None, date_from: str | None = None,
+    date_to: str | None = None, include_source_status: bool = False,
+    include_table_data: bool = False, table_format: str = "legacy",
+    shell_format: str = "legacy",
+) -> dict[str, Any]:
+    """Shared page evaluator for HTTP and the isolated finished-snapshot worker.
+
+    The caller owns its read transaction; this helper creates no entrypoint,
+    starts no workers, and retains the existing business/composition path.
+    """
+    page_composition_started_perf = time.perf_counter()
+    now = now_factory()
+    default_period = resolve_web_vitrina_default_period(now)
+    canonical_default_range: tuple[str, str] = (default_period.date_from, default_period.date_to)
+    effective_as_of_date = as_of_date or default_period.date_to
+    default_as_of_date = default_business_as_of_date(now)
+    selected_date_from = date_from
+    selected_date_to = date_to
+    if not as_of_date and not date_from and not date_to:
+        selected_date_from, selected_date_to = canonical_default_range
+    if not include_table_data and shell_format == "metadata_v2":
+        # A shell has no row-derived business version, counts or quality.
+        # Keep its read strictly on indexed metadata and the current bundle.
+        available_snapshot_dates = web_vitrina_block.list_readable_dates_metadata(descending=True)
+        if selected_date_from and selected_date_to:
+            period_ready_dates = runtime.list_sheet_vitrina_ready_snapshot_dates_any_bundle(
+                date_from=selected_date_from, date_to=selected_date_to,
+            )
+            source_date = period_ready_dates[-1] if period_ready_dates else ""
+        else:
+            source_date = as_of_date or default_as_of_date
+        group_dates = runtime.list_sheet_vitrina_ready_snapshot_dates(descending=False)
+        group_default = _default_group_refresh_date(
+            group_dates, preferred_date=current_business_date_iso(now)
+        )
+        activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
+            snapshot_as_of_date=source_date,
+            snapshot_id="",
+            refreshed_at="",
+            read_model="pending_table",
+            available_dates=group_dates,
+            default_refresh_date=group_default,
+        )
+        if include_source_status and source_date:
+            try:
+                activity_surface = activity_surface_factory(
+                    snapshot_as_of_date=source_date,
+                    snapshot_id="",
+                    refreshed_at="",
+                    read_model="pending_table",
+                    job_path=job_path,
+                )
+            except Exception as exc:
+                activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
+                    requested_as_of_date=source_date,
+                    snapshot_as_of_date=source_date,
+                    technical_detail=str(exc),
+                    now=now_factory(),
+                )
+        metric_catalog = [asdict(item) for item in web_vitrina_block.metric_catalog_metadata()]
+        metric_catalog.extend(_active_incident_metric_catalog())
+        return _with_page_composition_diagnostics(
+            {
+                **build_web_vitrina_page_shell_composition(
+                    page_route=page_route,
+                    read_route=read_route,
+                    operator_route=operator_route,
+                    available_snapshot_dates=available_snapshot_dates,
+                    default_as_of_date=default_as_of_date,
+                    selected_as_of_date=as_of_date,
+                    selected_date_from=selected_date_from,
+                    selected_date_to=selected_date_to,
+                    default_date_from=canonical_default_range[0],
+                    default_date_to=canonical_default_range[1],
+                    source_status_snapshot_as_of_date=source_date,
+                    metric_catalog=metric_catalog,
+                    activity_surface=activity_surface,
+                ),
+                "health_surface": health_surface_factory(),
+            },
+            started_perf=page_composition_started_perf,
+            include_source_status=include_source_status,
+            include_table_data=False,
+        )
+
+    available_snapshot_dates = web_vitrina_block.list_readable_dates(descending=True)
+    try:
+        if not as_of_date and not date_from and not date_to:
+            selected_date_from, selected_date_to = canonical_default_range
+            contract = web_vitrina_block.build(
+                page_route=page_route,
+                read_route=read_route,
+                as_of_date=None,
+                date_from=selected_date_from,
+                date_to=selected_date_to,
+            )
+        else:
+            contract = web_vitrina_block.build(
+                page_route=page_route,
+                read_route=read_route,
+                as_of_date=as_of_date,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        view_model = build_web_vitrina_view_model(contract)
+        adapter = build_web_vitrina_gravity_table_adapter(view_model)
+    except Exception as exc:
+        activity_surface = (
+            _web_vitrina_source_status_missing_snapshot_activity_surface(
+                requested_as_of_date=effective_as_of_date,
+                technical_detail=str(exc),
+                now=now_factory(),
+            )
+            if include_source_status and _is_ready_snapshot_missing_error(exc)
+            else None
+        )
+        return _with_page_composition_diagnostics(
+            {
+                **build_web_vitrina_page_error_composition(
+                    page_route=page_route,
+                    read_route=read_route,
+                    operator_route=operator_route,
+                    as_of_date=effective_as_of_date,
+                    error_message=str(exc),
+                    available_snapshot_dates=available_snapshot_dates,
+                    default_as_of_date=default_as_of_date,
+                    selected_as_of_date=as_of_date,
+                    selected_date_from=selected_date_from,
+                    selected_date_to=selected_date_to,
+                    default_date_from=canonical_default_range[0],
+                    default_date_to=canonical_default_range[1],
+                    activity_surface=activity_surface,
+                ),
+                "health_surface": health_surface_factory(),
+            },
+            started_perf=page_composition_started_perf,
+            include_source_status=include_source_status,
+            include_table_data=include_table_data,
+        )
+
+    incident_metric_catalog = _active_incident_metric_catalog()
+    source_status_snapshot_as_of_date = _web_vitrina_source_status_snapshot_as_of_date(contract)
+    source_status_snapshot_id = _web_vitrina_source_status_snapshot_id(
+        runtime,
+        contract,
+        snapshot_as_of_date=source_status_snapshot_as_of_date,
+    )
+    group_refresh_available_dates = web_vitrina_block.list_materialized_readable_dates(descending=False)
+    group_refresh_default_date = _default_group_refresh_date(
+        group_refresh_available_dates,
+        preferred_date=current_business_date_iso(now_factory()),
+    )
+    metric_catalog = extend_metrics_with_sku_action_metrics(
+        extend_metrics_with_weighted_seller_price(
+            extend_metrics_with_own_product_capital_metrics(
+                extend_metrics_with_proxy_v4(
+                    extend_metrics_with_our_wb_cost_metrics(
+                        extend_metrics_with_onec_stock_metrics(
+                            getattr(runtime.load_current_state(), "metrics_v2", [])
+                        )
+                    )
+                )
+            )
+        )
+    )
+    metric_labels_by_source = _build_activity_metric_labels_by_source(
+        visible_authenticated_buyer_metrics(extend_metrics_with_authenticated_buyer(metric_catalog))
+    )
+    activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
+        snapshot_as_of_date=source_status_snapshot_as_of_date,
+        snapshot_id=source_status_snapshot_id,
+        refreshed_at=str(contract.meta.refreshed_at),
+        read_model=str(contract.status_summary.read_model),
+        available_dates=group_refresh_available_dates,
+        default_refresh_date=group_refresh_default_date,
+        metric_labels_by_source=metric_labels_by_source,
+        group_last_updated_at=_source_group_last_updated_at_for_runtime_snapshot(
+            runtime,
+            snapshot_as_of_date=source_status_snapshot_as_of_date,
+            fallback_updated_at=str(contract.meta.refreshed_at),
+        ),
+    )
+    if include_source_status:
+        try:
+            activity_surface = activity_surface_factory(
+                snapshot_as_of_date=source_status_snapshot_as_of_date,
+                snapshot_id=source_status_snapshot_id,
+                refreshed_at=str(contract.meta.refreshed_at),
+                read_model=str(contract.status_summary.read_model),
+                job_path=job_path,
+            )
+        except Exception as exc:  # pragma: no cover - bounded fallback
+            if _is_ready_snapshot_missing_error(exc):
+                activity_surface = _web_vitrina_source_status_missing_snapshot_activity_surface(
+                    requested_as_of_date=source_status_snapshot_as_of_date,
+                    snapshot_as_of_date=source_status_snapshot_as_of_date,
+                    technical_detail=str(exc),
+                    now=now_factory(),
+                )
+            else:
+                activity_surface = _empty_web_vitrina_activity_surface(
+                    log_message=f"activity surface unavailable: {exc}",
+                    upload_message=f"upload summary unavailable: {exc}",
+                    update_message=f"update summary unavailable: {exc}",
+                )
+
+    page_payload = build_web_vitrina_page_composition(
+                page_route=page_route,
+                read_route=read_route,
+                operator_route=operator_route,
+                available_snapshot_dates=available_snapshot_dates,
+                selected_as_of_date=as_of_date,
+                selected_date_from=selected_date_from,
+                selected_date_to=selected_date_to,
+                default_date_from=canonical_default_range[0],
+                default_date_to=canonical_default_range[1],
+                contract=contract,
+                view_model=view_model,
+                adapter=adapter,
+                activity_surface=activity_surface,
+                include_table_data=include_table_data,
+                metric_catalog=incident_metric_catalog,
+                compact_table=table_format == "indexed_cells_v2",
+            )
+    return _with_page_composition_diagnostics(
+        {**page_payload, "health_surface": health_surface_factory()},
+        started_perf=page_composition_started_perf,
+        include_source_status=include_source_status,
+        include_table_data=include_table_data,
+    )
+
 
 
 def _build_supplier_order_documents_checklist(

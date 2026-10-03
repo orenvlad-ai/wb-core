@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 from email.parser import BytesParser
 from email.policy import default as default_email_policy
+import gzip
 import hashlib
 import hmac
 import html
@@ -637,6 +638,8 @@ def build_registry_upload_http_server(
     entrypoint: RegistryUploadHttpEntrypoint | None = None,
     *,
     advertise_window_v3: bool = True,
+    snapshot_pilot_store: Path | None = None,
+    finished_snapshots_default: bool = False,
 ) -> HTTPServer:
     runtime_entrypoint = entrypoint or RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
     handler_cls = _build_handler(
@@ -650,6 +653,8 @@ def build_registry_upload_http_server(
         sheet_job_path=DEFAULT_SHEET_JOB_PATH,
         sheet_operator_ui_path=config.sheet_operator_ui_path,
         advertise_window_v3=advertise_window_v3,
+        snapshot_pilot_store=snapshot_pilot_store,
+        finished_snapshots_default=finished_snapshots_default,
     )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
 
@@ -675,6 +680,8 @@ def _build_handler(
     sheet_job_path: str,
     sheet_operator_ui_path: str,
     advertise_window_v3: bool = True,
+    snapshot_pilot_store: Path | None = None,
+    finished_snapshots_default: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         runtime_entrypoint = entrypoint
@@ -3305,6 +3312,10 @@ def _build_handler(
                     HTTPStatus.OK,
                     _render_sheet_vitrina_web_vitrina_ui(
                         read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        finished_snapshots_enabled=bool(finished_snapshots_default and snapshot_pilot_store is not None
+                            and (os.path.lexists(snapshot_pilot_store) or
+                                 snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
+                        finished_snapshots_configured=snapshot_pilot_store is not None,
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
@@ -3360,6 +3371,10 @@ def _build_handler(
                     HTTPStatus.OK,
                     _render_sheet_vitrina_web_vitrina_ui(
                         read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        finished_snapshots_enabled=bool(finished_snapshots_default and snapshot_pilot_store is not None
+                            and (os.path.lexists(snapshot_pilot_store) or
+                                 snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
+                        finished_snapshots_configured=snapshot_pilot_store is not None,
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
@@ -3401,6 +3416,10 @@ def _build_handler(
                     HTTPStatus.OK,
                     _render_sheet_vitrina_web_vitrina_ui(
                         read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        finished_snapshots_enabled=bool(finished_snapshots_default and snapshot_pilot_store is not None
+                            and (os.path.lexists(snapshot_pilot_store) or
+                                 snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
+                        finished_snapshots_configured=snapshot_pilot_store is not None,
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
@@ -3507,6 +3526,10 @@ def _build_handler(
                         HTTPStatus.OK,
                         _render_sheet_vitrina_web_vitrina_ui(
                             read_path=DEFAULT_SHEET_WEB_VITRINA_READ_PATH,
+                        finished_snapshots_enabled=bool(finished_snapshots_default and snapshot_pilot_store is not None
+                            and (os.path.lexists(snapshot_pilot_store) or
+                                 snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
+                        finished_snapshots_configured=snapshot_pilot_store is not None,
                             operator_path=sheet_operator_ui_path,
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
@@ -4100,6 +4123,10 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
+                if "snapshot_pilot" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
+                    _handle_web_vitrina_snapshot_pilot_request(self, parsed.query, snapshot_pilot_store,
+                                                               advertise_window_v3=advertise_window_v3)
+                    return
                 if "window_format" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
                     _handle_web_vitrina_window_v3_request(
                         self, parsed.query, entrypoint, request_started_perf=request_started_perf,
@@ -6392,6 +6419,78 @@ def _build_handler(
             return
 
     return RegistryUploadHandler
+
+
+def _handle_web_vitrina_snapshot_pilot_request(
+    handler: BaseHTTPRequestHandler,
+    query_string: str,
+    store: Path | None,
+    *, advertise_window_v3: bool = True,
+) -> None:
+    """Explicit pilot reads only; normal Web Vitrina requests keep their route."""
+    headers = {"Cache-Control": "private, no-store", "Vary": "Accept-Encoding"}
+    if store is None:
+        _write_json_response(handler, HTTPStatus.NOT_FOUND,
+                             {"error": "snapshot_pilot_disabled"}, extra_headers=headers)
+        return
+    try:
+        pairs = urllib_parse.parse_qsl(query_string, keep_blank_values=True, strict_parsing=True,
+                                       max_num_fields=8)
+        query = dict(pairs)
+        if len(query) != len(pairs) or set(query) - {
+            "surface", "snapshot_pilot", "part", "date_from", "date_to", "generation_id", "period_days"
+        }:
+            raise ValueError("snapshot_pilot_invalid_query")
+        if query.get("surface") != DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE \
+                or query.get("snapshot_pilot") != "1" or query.get("part") not in {"summary", "sku"}:
+            raise ValueError("snapshot_pilot_invalid_query")
+        if (query["part"] == "summary" and "generation_id" in query) or (
+            query["part"] == "sku" and not query.get("generation_id")
+        ):
+            raise ValueError("snapshot_pilot_invalid_query")
+        from packages.application.web_vitrina_snapshot_pilot import read_finished, read_current_period
+        if "period_days" in query:
+            if "date_from" in query or "date_to" in query or query["period_days"] not in {"14", "31"}:
+                raise ValueError("snapshot_pilot_invalid_query")
+            from packages.business_time import current_business_date_iso
+            payload = read_current_period(store, period_days=int(query["period_days"]),
+                business_today=current_business_date_iso(), part=query["part"],
+                generation_id=query.get("generation_id", ""))
+        else:
+            payload = read_finished(store, date_from=query.get("date_from", ""),
+                                    date_to=query.get("date_to", ""), part=query["part"],
+                                    generation_id=query.get("generation_id", ""))
+    except (ValueError, KeyError) as exc:
+        from packages.application.web_vitrina_snapshot_pilot import SnapshotPilotError
+        status = HTTPStatus.CONFLICT if isinstance(exc, SnapshotPilotError) else HTTPStatus.UNPROCESSABLE_ENTITY
+        _write_json_response(handler, status, {"error": str(exc)}, extra_headers=headers)
+        return
+    except Exception:
+        _write_json_response(handler, HTTPStatus.INTERNAL_SERVER_ERROR,
+                             {"error": "snapshot_pilot_read_failed"}, extra_headers=headers)
+        return
+    if payload.get("composition_name") == "web_vitrina_page_composition":
+        payload.setdefault("meta", {})["window_v3_available"] = bool(advertise_window_v3)
+    _write_web_vitrina_snapshot_pilot_response(handler, payload)
+
+
+def _write_web_vitrina_snapshot_pilot_response(
+    handler: BaseHTTPRequestHandler,
+    payload: Mapping[str, Any],
+) -> None:
+    """Compress only an opt-in finished pilot read; normal routes keep their writer."""
+    logical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    accepts_gzip = _web_vitrina_client_accepts_gzip(handler.headers.get("Accept-Encoding", ""))
+    body = gzip.compress(logical, compresslevel=4, mtime=0) if accepts_gzip else logical
+    handler.send_response(HTTPStatus.OK.value)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("Vary", "Accept-Encoding")
+    if accepts_gzip:
+        handler.send_header("Content-Encoding", "gzip")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    _write_response_body(handler, body)
 
 
 def _handle_web_vitrina_window_v3_request(
@@ -11058,6 +11157,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
     finance_explicit_sections: Sequence[str] | None = None,
     active_tab: str = "",
     user_config_key: str = "local_operator",
+    finished_snapshots_enabled: bool = False,
+    finished_snapshots_configured: bool = False,
 ) -> str:
     normalized_role = _normalize_runtime_role(role) or WEB_AUTH_ROLE_ADMIN
     normalized_sections = (
@@ -11075,6 +11176,8 @@ def _render_sheet_vitrina_web_vitrina_ui(
     initial_tab = active_tab if active_tab in allowed_tabs else (allowed_tabs[0] if allowed_tabs else "vitrina")
     config_payload = {
         "page_title": "Web-витрина",
+        "finished_snapshots_enabled": finished_snapshots_enabled,
+        "finished_snapshots_configured": finished_snapshots_configured,
         "current_role": normalized_role,
         "user_config_key": user_config_key,
         "allowed_sections": normalized_sections,

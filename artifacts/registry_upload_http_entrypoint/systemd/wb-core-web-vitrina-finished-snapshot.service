@@ -1,0 +1,15 @@
+[Unit]
+Description=WB Core bounded finished Web Vitrina snapshot builder
+After=wb-core-registry-http.service
+RequiresMountsFor=/opt/wb-core-runtime/state/generations
+ConditionPathIsMountPoint=/opt/wb-core-runtime/state/generations
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wb-core-runtime/app
+ExecStart=/usr/bin/python3 apps/web_vitrina_finished_snapshot_build.py --runtime-dir /opt/wb-core-runtime/state --store /opt/wb-core-runtime/state/generations/web-vitrina-finished.sqlite3
+TimeoutStartSec=240
+KillMode=control-group
+User=root
+Group=wb-runtime-readers
+UMask=0027

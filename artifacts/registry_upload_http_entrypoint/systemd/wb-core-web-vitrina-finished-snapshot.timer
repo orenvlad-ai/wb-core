@@ -1,0 +1,12 @@
+[Unit]
+Description=WB Core finished Web Vitrina snapshots in quiet two-hour slots
+
+[Timer]
+OnCalendar=*-*-* 01/2:55:00 Asia/Tbilisi
+AccuracySec=15s
+RandomizedDelaySec=0
+Persistent=false
+Unit=wb-core-web-vitrina-finished-snapshot.service
+
+[Install]
+WantedBy=timers.target

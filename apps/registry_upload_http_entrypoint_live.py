@@ -300,9 +300,17 @@ def main() -> None:
             ),
         )
         bindings = FinanceCanonicalStoreBindings(config.runtime_dir)
+        finished_store_value = os.environ.get("WEB_VITRINA_FINISHED_SNAPSHOT_STORE", "").strip()
+        finished_store = Path(finished_store_value) if finished_store_value else None
+        if finished_store is not None:
+            if not finished_store.is_absolute():
+                raise ValueError("finished snapshot store must be an absolute configured path")
+            entrypoint.operator_jobs.enable_snapshot_admission(config.runtime_dir)
         server = build_registry_upload_http_server(
             config,
             entrypoint=entrypoint,
+            snapshot_pilot_store=finished_store,
+            finished_snapshots_default=os.environ.get("WEB_VITRINA_FINISHED_SNAPSHOT_DEFAULT", "0") == "1",
         )
         buyer_server, buyer_thread = start_buyer_login_contour(server)
         seller_control, seller_start = start_seller_login_contours(server)
