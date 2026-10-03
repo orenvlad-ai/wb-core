@@ -15,7 +15,8 @@ from apps import search_cluster_cleaner_stage_e as stage_e
 from apps.production_apply_contract import AmbiguousSubmit
 from apps.production_apply_launcher import execute as production_apply
 from packages.application.search_cluster_cleaner import KeywordCleaner
-from packages.application.search_cluster_cleaner_store import CleanerTransactionRolledBack
+from packages.application.search_cluster_cleaner_store import CleanerTransactionRolledBack,is_proven_local_contention
+from packages.application.storage_registry import StorageRegistryError
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal
 
 
@@ -120,6 +121,7 @@ class ManualCleanerCoordinator:
         job_id=jobs[0]
         try:self._advance(job_id)
         except CleanerError as exc:
+            if is_proven_local_contention(exc):raise
             job=self._job(job_id)
             if job.get('stage','').endswith('_apply_claimed'):
                 self._settle(job_id,job['stage'].split('_')[0],'ambiguous',{})
@@ -129,6 +131,11 @@ class ManualCleanerCoordinator:
         except (CleanerTransactionRolledBack,OSError,ValueError,RuntimeError) as exc:
             # Preserve an apply claim for readback-only recovery. Other stages
             # can be retried by a later worker tick with the same identity.
+            # A proved local rollback or blocked registry read cannot be a
+            # terminal failure: the durable intent still owns this queue slot.
+            storage_interruption=isinstance(exc,StorageRegistryError) or is_proven_local_contention(exc)
+            if storage_interruption and not isinstance(exc,CleanerTransactionRolledBack):
+                raise
             job=self._job(job_id)
             if job.get('stage','').endswith('_apply_claimed'):
                 if job.get('batch_id') and isinstance(exc,CleanerTransactionRolledBack):
@@ -138,6 +145,7 @@ class ManualCleanerCoordinator:
                     except CleanerTransactionRolledBack:pass
                 else:self._settle(job_id,job['stage'].split('_')[0],'ambiguous',{})
             else:
+                if isinstance(exc,CleanerTransactionRolledBack):raise
                 self._release_unsubmitted(job)
                 self._save(job_id,state='failed',stage='finished',error_code=type(exc).__name__,error='Не удалось завершить ручную чистку')
         return self._job(job_id)
