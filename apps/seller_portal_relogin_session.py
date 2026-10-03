@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -12,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -126,6 +128,21 @@ class ReloginSessionConfig:
         return self.state_dir / "candidate_storage_state.json"
 
     @property
+    def start_lock_path(self) -> Path:
+        return self.state_dir / "start.lock"
+
+    @property
+    def finish_request_path(self) -> Path:
+        return self.state_dir / "finish_request.json"
+
+    def cancel_request_path(self, request_id: str, viewer_owner: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            raise ValueError("invalid seller login request_id")
+        if not re.fullmatch(r"[0-9a-f]{64}", viewer_owner):
+            raise ValueError("invalid seller login owner")
+        return self.state_dir / f"cancel.{viewer_owner}.{request_id}.json"
+
+    @property
     def backup_state_path(self) -> Path:
         timestamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
         return self.state_dir / f"storage_state.backup.{timestamp}.json"
@@ -211,17 +228,75 @@ def main() -> None:
     raise SystemExit(f"unsupported command: {args.command}")
 
 
-def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False) -> dict[str, Any]:
+def start_relogin_session(
+    config: ReloginSessionConfig,
+    *,
+    replace: bool = False,
+    viewer_owner: str = "",
+    viewer_expires_at: int | None = None,
+    request_id: str = "",
+) -> dict[str, Any]:
+    if request_id:
+        config.cancel_request_path(request_id, viewer_owner)
     config.state_dir.mkdir(parents=True, exist_ok=True)
+    with config.start_lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        return _start_relogin_session_locked(
+            config, replace=replace, viewer_owner=viewer_owner, viewer_expires_at=viewer_expires_at,
+            request_id=request_id,
+        )
+
+
+def _start_relogin_session_locked(
+    config: ReloginSessionConfig, *, replace: bool, viewer_owner: str, viewer_expires_at: int | None,
+    request_id: str,
+) -> dict[str, Any]:
+    if request_id and _cancel_intent_matches(config, request_id=request_id, viewer_owner=viewer_owner):
+        config.cancel_request_path(request_id, viewer_owner).unlink(missing_ok=True)
+        return {"status": "stopped", "running": False, "run_id": "", "request_id": request_id,
+                "run_failure_code": "cancelled_before_start"}
     current = read_session_status(config, with_probe=False)
+    # This caller already owns the start lock. A pending record left by an
+    # earlier crashed request cannot still represent an in-flight start.
+    if current.get("start_pending") and _read_pid(config.pid_path) is None:
+        current = {**current, "running": False, "status": "error"}
+    if request_id and current.get("request_id") == request_id:
+        if not hmac.compare_digest(str(current.get("viewer_owner") or ""), viewer_owner):
+            raise PermissionError("seller recovery is controlled by another operator")
+        return current
     if current.get("running"):
+        current_owner = str(current.get("viewer_owner") or "")
+        if (viewer_owner or current_owner) and not hmac.compare_digest(current_owner, viewer_owner):
+            raise PermissionError("seller recovery is controlled by another operator")
         if not replace:
             return current
-        stop_relogin_session(config)
+        _stop_relogin_session_locked(config, requested_run_id=str(current.get("run_id") or ""))
 
     run_id = _new_recovery_run_id()
     started_at = _iso_now()
+    config.finish_request_path.unlink(missing_ok=True)
+    viewer_fields = {"viewer_owner": viewer_owner, "viewer_expires_at": viewer_expires_at, "request_id": request_id}
+    # Publish the owned run before the potentially slow canonical probe. A
+    # cancelled browser request can then discover its run and wait for the
+    # same start lock before stopping it, even when no supervisor PID exists.
+    _write_status(
+        config,
+        {
+            "run_id": run_id,
+            "status": "starting",
+            "start_pending": True,
+            "message": "checking the saved seller session before opening the browser",
+            "started_at": started_at,
+            **viewer_fields,
+        },
+    )
     current_probe = probe_storage_state(config.storage_state_path, wb_bot_python=config.wb_bot_python)
+    if request_id and _cancel_intent_matches(config, request_id=request_id, viewer_owner=viewer_owner):
+        _write_status(config, {"run_id": run_id, "status": "stopped", "started_at": started_at,
+                               "finished_at": _iso_now(), "message": "seller login cancelled during preflight",
+                               **viewer_fields})
+        config.cancel_request_path(request_id, viewer_owner).unlink(missing_ok=True)
+        return read_session_status(config, with_probe=False)
     if not config.canonical_supplier_configured:
         _write_status(
             config,
@@ -234,6 +309,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
                 "finished_at": started_at,
                 "current_storage_probe": current_probe,
                 "supplier_context": _probe_supplier_context(current_probe),
+                **viewer_fields,
             },
         )
         return read_session_status(config, with_probe=True)
@@ -248,6 +324,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
                 "finished_at": started_at,
                 "current_storage_probe": current_probe,
                 "supplier_context": _probe_supplier_context(current_probe),
+                **viewer_fields,
             },
         )
         return read_session_status(config, with_probe=True)
@@ -257,6 +334,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
         {
             "run_id": run_id,
             "status": "starting",
+            "start_pending": True,
             "message": "server-side seller relogin session is starting",
             "started_at": started_at,
             "novnc_url": config.novnc_url,
@@ -266,6 +344,7 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
             "state_dir": str(config.state_dir),
             "current_storage_probe": current_probe,
             "supplier_context": _probe_supplier_context(current_probe),
+            **viewer_fields,
         },
     )
 
@@ -288,7 +367,19 @@ def start_relogin_session(config: ReloginSessionConfig, *, replace: bool = False
     return read_session_status(config, with_probe=False)
 
 
-def stop_relogin_session(config: ReloginSessionConfig) -> dict[str, Any]:
+def stop_relogin_session(config: ReloginSessionConfig, *, requested_run_id: str | None = None) -> dict[str, Any]:
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    with config.start_lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        return _stop_relogin_session_locked(config, requested_run_id=requested_run_id)
+
+
+def _stop_relogin_session_locked(config: ReloginSessionConfig, *, requested_run_id: str | None) -> dict[str, Any]:
+    current = read_session_status(config, with_probe=False)
+    if requested_run_id and requested_run_id != current.get("run_id"):
+        return _build_requested_run_mismatch_payload(current, requested_run_id=requested_run_id)
+    if str(current.get("status") or "") in RECOVERY_RUN_FINAL_STATUSES:
+        return current
     pid = _read_pid(config.pid_path)
     was_running = bool(pid is not None and _pid_is_running(pid))
     if pid is not None and _pid_is_running(pid):
@@ -303,6 +394,7 @@ def stop_relogin_session(config: ReloginSessionConfig) -> dict[str, Any]:
             os.killpg(pid, signal.SIGKILL)
     if config.pid_path.exists():
         config.pid_path.unlink()
+    config.finish_request_path.unlink(missing_ok=True)
     payload = read_session_status(config, with_probe=False)
     if not was_running and str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES:
         return payload
@@ -312,6 +404,30 @@ def stop_relogin_session(config: ReloginSessionConfig) -> dict[str, Any]:
     payload["finished_at"] = _iso_now()
     _write_status(config, payload)
     return payload
+
+
+def request_login_finish(config: ReloginSessionConfig, *, requested_run_id: str) -> dict[str, Any]:
+    """Ask the live capture loop to probe its candidate; this is not proof of login."""
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    with config.start_lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        return _request_login_finish_locked(config, requested_run_id=requested_run_id)
+
+
+def _request_login_finish_locked(config: ReloginSessionConfig, *, requested_run_id: str) -> dict[str, Any]:
+    current = read_session_status(config, with_probe=False)
+    if requested_run_id != current.get("run_id"):
+        return _build_requested_run_mismatch_payload(current, requested_run_id=requested_run_id)
+    if not current.get("running") or current.get("status") != "awaiting_login":
+        return {**current, "run_failure_code": "finish_not_ready"}
+    staged = config.finish_request_path.with_suffix(".tmp")
+    staged.write_text(json.dumps({"run_id": requested_run_id}), encoding="utf-8")
+    staged.replace(config.finish_request_path)
+    latest = read_session_status(config, with_probe=False)
+    if latest.get("run_id") != requested_run_id or latest.get("status") != "awaiting_login" or not latest.get("running"):
+        config.finish_request_path.unlink(missing_ok=True)
+        return {**latest, "run_failure_code": "finish_not_ready"}
+    return {**latest, "finish_requested": True}
 
 
 def read_session_status(
@@ -334,7 +450,10 @@ def read_session_status(
     payload.setdefault("canonical_supplier_configured", config.canonical_supplier_configured)
     payload.setdefault("supplier_context", read_storage_state_supplier_context(config.storage_state_path))
     payload["supervisor_pid"] = pid
-    payload["running"] = bool(pid and _pid_is_running(pid))
+    # flock is released automatically if the start request process exits.
+    # A stale pending record therefore never becomes an immortal active run.
+    pending_start = bool(payload.get("start_pending") and _start_lock_is_held(config.start_lock_path))
+    payload["running"] = bool((pid and _pid_is_running(pid)) or pending_start)
     payload["requested_run_id"] = requested_run_id or ""
     if not payload["running"] and str(payload.get("status") or "").strip() in RECOVERY_RUN_ACTIVE_STATUSES:
         payload["status"] = "error"
@@ -543,6 +662,10 @@ def run_login_capture(
     probe = probe_fn or (lambda path: probe_storage_state(path, wb_bot_python=config.wb_bot_python))
     visual_ready = visual_ready_fn or _display_has_visible_content
     deadline = monotonic_fn() + config.timeout_sec
+    run_status = _read_status(config.status_path)
+    viewer_expires_at = run_status.get("viewer_expires_at")
+    if isinstance(viewer_expires_at, int):
+        deadline = min(deadline, monotonic_fn() + max(0, viewer_expires_at - int(time.time())))
     profile_dir = Path(tempfile.mkdtemp(prefix="seller-relogin-profile-", dir=str(config.state_dir)))
     previous_display = os.environ.get("DISPLAY")
     os.environ["DISPLAY"] = config.display
@@ -698,10 +821,25 @@ def run_login_capture(
                             "storage_state_path": str(config.storage_state_path),
                         },
                     )
-                    sleep_fn(config.poll_sec)
+                    # A human confirmation wakes the existing candidate/probe
+                    # loop; the click itself never marks authentication valid.
+                    if sleep_fn is time.sleep:
+                        wake_deadline = monotonic_fn() + config.poll_sec
+                        while monotonic_fn() < wake_deadline:
+                            try:
+                                finish = json.loads(config.finish_request_path.read_text(encoding="utf-8"))
+                            except (OSError, ValueError):
+                                finish = {}
+                            if finish.get("run_id") == run_status.get("run_id"):
+                                config.finish_request_path.unlink(missing_ok=True)
+                                break
+                            sleep_fn(min(0.2, max(0.0, wake_deadline - monotonic_fn())))
+                    else:
+                        sleep_fn(config.poll_sec)
             finally:
                 context.close()
     finally:
+        config.finish_request_path.unlink(missing_ok=True)
         shutil.rmtree(profile_dir, ignore_errors=True)
         if previous_display is None:
             os.environ.pop("DISPLAY", None)
@@ -1282,6 +1420,7 @@ def _write_status(config: ReloginSessionConfig, payload: dict[str, Any]) -> None
     existing = _read_status(config.status_path)
     payload = dict(payload)
     payload["status"] = _normalize_recovery_status(str(payload.get("status") or ""))
+    payload.setdefault("start_pending", False)
     if not str(payload.get("run_id") or "").strip():
         payload["run_id"] = str(existing.get("run_id") or "").strip()
     if not str(payload.get("started_at") or "").strip():
@@ -1292,6 +1431,9 @@ def _write_status(config: ReloginSessionConfig, payload: dict[str, Any]) -> None
         and not str(payload.get("deadline_at") or "").strip()
     ):
         payload["deadline_at"] = str(existing.get("deadline_at") or "").strip()
+    if str(existing.get("run_id") or "") == str(payload.get("run_id") or ""):
+        for key in ("viewer_owner", "viewer_expires_at", "request_id"):
+            payload.setdefault(key, existing.get(key))
     payload["run_is_final"] = str(payload.get("status") or "").strip() in RECOVERY_RUN_FINAL_STATUSES
     payload["run_final_status"] = (
         str(payload.get("status") or "").strip()
@@ -1327,6 +1469,58 @@ def _read_status(path: Path) -> dict[str, Any]:
     if str(payload.get("status") or "").strip() == "error":
         payload["run_failure_code"] = str(payload.get("run_failure_code") or "").strip()
     return payload
+
+
+def _start_lock_is_held(path: Path) -> bool:
+    if not path.exists():
+        return False
+    with path.open("rb") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        else:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            return False
+
+
+def _cancel_intent_matches(config: ReloginSessionConfig, *, request_id: str, viewer_owner: str) -> bool:
+    path = config.cancel_request_path(request_id, viewer_owner)
+    if not path.exists():
+        return False
+    try:
+        intent = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    owner = str(intent.get("viewer_owner") or "") if isinstance(intent, dict) else ""
+    return bool(owner and viewer_owner and hmac.compare_digest(owner, viewer_owner))
+
+
+def request_login_cancel(
+    config: ReloginSessionConfig, *, request_id: str, viewer_owner: str,
+) -> dict[str, Any]:
+    """Record cancellation before start admission, then stop its exact run if visible."""
+    if not viewer_owner:
+        raise PermissionError("seller login owner required")
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    path = config.cancel_request_path(request_id, viewer_owner)
+    if path.exists() and not _cancel_intent_matches(config, request_id=request_id, viewer_owner=viewer_owner):
+        raise PermissionError("seller login request belongs to another operator")
+    staged = config.state_dir / f"cancel.{request_id}.{uuid4().hex}.tmp"
+    staged.write_text(json.dumps({"request_id": request_id, "viewer_owner": viewer_owner}), encoding="utf-8")
+    staged.replace(path)
+    current = read_session_status(config, with_probe=False)
+    if str(current.get("request_id") or "") != request_id:
+        return {"status": "stopped", "running": False, "run_id": "", "request_id": request_id,
+                "run_failure_code": "cancel_pending_start"}
+    if not hmac.compare_digest(str(current.get("viewer_owner") or ""), viewer_owner):
+        raise PermissionError("seller login run belongs to another operator")
+    if current.get("running"):
+        result = stop_relogin_session(config, requested_run_id=str(current.get("run_id") or ""))
+    else:
+        result = current
+    path.unlink(missing_ok=True)
+    return result
 
 
 def _spawn(args: list[str], *, log_path: Path, env: dict[str, str] | None = None) -> subprocess.Popen[Any]:

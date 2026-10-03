@@ -1724,7 +1724,7 @@ def render_nginx_public_route_block(
             f"        proxy_read_timeout {read_timeout};",
             f"        proxy_send_timeout {send_timeout};",
         ]
-        if route["name"] == "sheet_vitrina_wb_buyer_viewer_auth":
+        if route["name"] in {"sheet_vitrina_wb_buyer_viewer_auth", "sheet_vitrina_seller_viewer_auth"}:
             route_lines.extend([
                 "        internal;",
                 "        proxy_pass_request_body off;",
@@ -1733,9 +1733,14 @@ def render_nginx_public_route_block(
                 "        proxy_set_header X-Original-Origin $http_origin;",
                 "        proxy_set_header X-Original-Upgrade $http_upgrade;",
             ])
-        if route["name"] == "sheet_vitrina_wb_buyer_viewer":
+        if route["name"] in {"sheet_vitrina_wb_buyer_viewer", "sheet_vitrina_seller_viewer"}:
+            viewer_auth_path = (
+                "/v1/sheet-vitrina-v1/seller-portal-recovery/viewer-auth"
+                if route["name"] == "sheet_vitrina_seller_viewer"
+                else "/v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth"
+            )
             route_lines.extend([
-                "        auth_request /v1/sheet-vitrina-v1/prices/spp-test/buyer-session/recovery/viewer-auth;",
+                f"        auth_request {viewer_auth_path};",
                 "        proxy_http_version 1.1;",
                 "        proxy_set_header Upgrade $http_upgrade;",
                 '        proxy_set_header Connection "upgrade";',

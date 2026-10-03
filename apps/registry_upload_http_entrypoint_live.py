@@ -24,6 +24,11 @@ from packages.adapters.registry_upload_http_entrypoint import (
     DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH,
     DEFAULT_WB_BUYER_RECOVERY_STOP_PATH,
     DEFAULT_WB_BUYER_VIEWER_AUTH_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH,
+    DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH,
+    DEFAULT_SELLER_PORTAL_VIEWER_AUTH_PATH,
     build_registry_upload_http_server,
     load_registry_upload_http_entrypoint_config,
     RegistryUploadHttpServer,
@@ -37,6 +42,52 @@ from packages.application.search_cluster_cleaner_web import STAGE_E_CONFIG_PATH
 BUYER_LOGIN_HTTP_PORT = 8777
 BUYER_LOGIN_GET_PATHS = frozenset({DEFAULT_WEB_AUTH_LOGIN_PATH, DEFAULT_WB_BUYER_RECOVERY_STATUS_PATH, DEFAULT_WB_BUYER_VIEWER_AUTH_PATH})
 BUYER_LOGIN_POST_PATHS = frozenset({DEFAULT_WEB_AUTH_LOGIN_PATH, DEFAULT_WB_BUYER_RECOVERY_START_PATH, DEFAULT_WB_BUYER_RECOVERY_STOP_PATH, DEFAULT_WB_BUYER_RECOVERY_FINISH_PATH})
+SELLER_LOGIN_HTTP_PORT = 8778
+SELLER_START_HTTP_PORT = 8779
+SELLER_LOGIN_GET_PATHS = frozenset({DEFAULT_SELLER_PORTAL_RECOVERY_STATUS_PATH, DEFAULT_SELLER_PORTAL_VIEWER_AUTH_PATH})
+SELLER_LOGIN_POST_PATHS = frozenset({DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH, DEFAULT_SELLER_PORTAL_RECOVERY_FINISH_PATH})
+
+
+def start_seller_login_contours(server, *, control_port: int = SELLER_LOGIN_HTTP_PORT, start_port: int = SELLER_START_HTTP_PORT):
+    """Keep slow login preflight off the serial status and viewer-auth listener."""
+    primary_handler = server.RequestHandlerClass
+
+    class SellerControlHandler(primary_handler):
+        def do_DELETE(self):  # noqa: N802
+            self.send_error(404)
+
+        def do_GET(self):  # noqa: N802
+            if urlsplit(self.path).path not in SELLER_LOGIN_GET_PATHS:
+                self.send_error(404)
+                return
+            super().do_GET()
+
+        def do_POST(self):  # noqa: N802
+            if urlsplit(self.path).path not in SELLER_LOGIN_POST_PATHS:
+                self.send_error(404)
+                return
+            super().do_POST()
+
+    class SellerStartHandler(primary_handler):
+        def do_DELETE(self):  # noqa: N802
+            self.send_error(404)
+
+        def do_GET(self):  # noqa: N802
+            self.send_error(404)
+
+        def do_POST(self):  # noqa: N802
+            if urlsplit(self.path).path != DEFAULT_SELLER_PORTAL_RECOVERY_START_PATH:
+                self.send_error(404)
+                return
+            super().do_POST()
+
+    control_server = RegistryUploadHttpServer(('127.0.0.1', control_port), SellerControlHandler)
+    start_server = RegistryUploadHttpServer(('127.0.0.1', start_port), SellerStartHandler)
+    control_thread = threading.Thread(target=control_server.serve_forever, name='seller-login-control-http', daemon=True)
+    start_thread = threading.Thread(target=start_server.serve_forever, name='seller-login-start-http', daemon=True)
+    control_thread.start()
+    start_thread.start()
+    return (control_server, control_thread), (start_server, start_thread)
 
 
 def start_buyer_login_contour(server, *, port: int = BUYER_LOGIN_HTTP_PORT):
@@ -237,6 +288,8 @@ def main() -> None:
     cleaner_worker = None
     buyer_server = None
     buyer_thread = None
+    seller_control = None
+    seller_start = None
     try:
         entrypoint = RegistryUploadHttpEntrypoint(
             runtime_dir=config.runtime_dir,
@@ -252,6 +305,7 @@ def main() -> None:
             entrypoint=entrypoint,
         )
         buyer_server, buyer_thread = start_buyer_login_contour(server)
+        seller_control, seller_start = start_seller_login_contours(server)
         # The legacy 8765 listener remains independent of this opt-in contour.
         cleaner_server,cleaner_thread,cleaner_worker=start_cleaner_contour(server,entrypoint,config.runtime_dir)
         host, port = server.server_address
@@ -272,6 +326,11 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        for contour in (seller_start, seller_control):
+            if contour is not None:
+                contour[0].shutdown()
+                contour[0].server_close()
+                contour[1].join(timeout=5)
         if buyer_server is not None:
             buyer_server.shutdown()
             buyer_server.server_close()

@@ -753,14 +753,20 @@ class SellerPortalRecoveryController:
         *,
         replace: bool,
         launcher_download_path: str,
+        viewer_owner: str = "",
+        viewer_expires_at: int | None = None,
+        request_id: str = "",
     ) -> dict[str, Any]:
         config = self._config()
         raw = (
             self._start_runner(config, replace)
             if self._start_runner is not None
-            else self._tool().start_relogin_session(config, replace=replace)
+            else self._tool().start_relogin_session(
+                config, replace=replace, viewer_owner=viewer_owner, viewer_expires_at=viewer_expires_at,
+                request_id=request_id,
+            )
         )
-        if not bool(raw.get("running")):
+        if not bool(raw.get("running")) and raw.get("run_failure_code") != "cancelled_before_start":
             raw = (
                 self._status_reader(config, True)
                 if self._status_reader is not None
@@ -772,17 +778,27 @@ class SellerPortalRecoveryController:
             launcher_download_path=launcher_download_path,
         )
 
+    def cancel_request(
+        self, *, launcher_download_path: str, request_id: str, viewer_owner: str,
+    ) -> dict[str, Any]:
+        config = self._config()
+        raw = self._tool().request_login_cancel(config, request_id=request_id, viewer_owner=viewer_owner)
+        return _build_seller_portal_recovery_payload(
+            raw, config=config, launcher_download_path=launcher_download_path,
+        )
+
     def stop(
         self,
         *,
         launcher_download_path: str,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         config = self._config()
         raw = dict(
             (
             self._stop_runner(config)
             if self._stop_runner is not None
-            else self._tool().stop_relogin_session(config)
+            else self._tool().stop_relogin_session(config, requested_run_id=run_id)
             )
             or {}
         )
@@ -803,6 +819,13 @@ class SellerPortalRecoveryController:
             raw,
             config=config,
             launcher_download_path=launcher_download_path,
+        )
+
+    def finish(self, *, launcher_download_path: str, run_id: str) -> dict[str, Any]:
+        config = self._config()
+        raw = self._tool().request_login_finish(config, requested_run_id=run_id)
+        return _build_seller_portal_recovery_payload(
+            raw, config=config, launcher_download_path=launcher_download_path,
         )
 
     def check_session(
@@ -3533,19 +3556,41 @@ class RegistryUploadHttpEntrypoint:
         *,
         launcher_download_path: str,
         replace: bool = True,
+        viewer_owner: str = "",
+        viewer_expires_at: int | None = None,
+        request_id: str = "",
     ) -> dict[str, Any]:
         return self.seller_portal_recovery.start(
             replace=replace,
             launcher_download_path=launcher_download_path,
+            viewer_owner=viewer_owner,
+            viewer_expires_at=viewer_expires_at,
+            request_id=request_id,
+        )
+
+    def handle_seller_portal_recovery_cancel_request(
+        self, *, launcher_download_path: str, request_id: str, viewer_owner: str,
+    ) -> dict[str, Any]:
+        return self.seller_portal_recovery.cancel_request(
+            launcher_download_path=launcher_download_path, request_id=request_id, viewer_owner=viewer_owner,
         )
 
     def handle_seller_portal_recovery_stop_request(
         self,
         *,
         launcher_download_path: str,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         return self.seller_portal_recovery.stop(
             launcher_download_path=launcher_download_path,
+            run_id=run_id,
+        )
+
+    def handle_seller_portal_recovery_finish_request(
+        self, *, launcher_download_path: str, run_id: str,
+    ) -> dict[str, Any]:
+        return self.seller_portal_recovery.finish(
+            launcher_download_path=launcher_download_path, run_id=run_id,
         )
 
     def handle_seller_portal_recovery_launcher_request(
@@ -8886,6 +8931,7 @@ def _build_seller_portal_recovery_payload(
         "deadline_at": _format_optional_business_timestamp(str(raw.get("deadline_at") or "") or None),
         "finished_at": _format_optional_business_timestamp(str(raw.get("finished_at") or "") or None),
         "run_id": run_id,
+        "request_id": str(raw.get("request_id") or ""),
         "current_run_id": current_run_id,
         "requested_run_id": requested_run_id,
         "requested_run_mismatch": requested_run_mismatch,
