@@ -167,6 +167,13 @@ def apply_test_account_retirement(
         with backup.open("rb") as backup_file:
             os.fsync(backup_file.fileno())
         os.chmod(backup, 0o400)
+        with backup.open("rb") as backup_file:
+            os.fsync(backup_file.fileno())
+        parent_descriptor = os.open(backup.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
         with service._connect(write=True) as conn:
             conn.execute("ROLLBACK")
             conn.execute("BEGIN EXCLUSIVE")

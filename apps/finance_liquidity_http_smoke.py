@@ -83,7 +83,7 @@ def main() -> None:
                             "capabilities": ["finance_admin"],
                         },
                         "viewer": {"username": "fixture-viewer", "role": "operator", "capabilities": ["finance"]},
-                        "vlad_granted": {"username": "fixture-granted", "role": "operator", "capabilities": ["finance", "finance_vlad_balance"]},
+                        "vlad_granted": {"username": "fixture-granted", "role": "operator", "capabilities": ["finance_admin", "finance_vlad_balance"]},
                     }
                 }
             ),
@@ -227,6 +227,18 @@ def main() -> None:
             assert status == 200 and rec["status"] == "hidden" and rec["difference_amount"] is None and rec["actual_minor"] is None
             status, rec_visible = request(base, "/v1/finance/cash-reconciliations", actor="vlad_granted")
             assert status == 200 and rec_visible["data"]["reconciliations"][0]["difference_amount"] == "-1.00"
+            status, ordinary_rec = request(base, "/v1/finance/cash-reconciliations", payload={
+                "account_id": account_id, "week_ending": "2026-09-27", "actual_amount": "12.34",
+            }, csrf=csrf)
+            assert status == 201 and ordinary_rec["data"]["actual_minor"] == 1234
+            status, audit_hidden = request(base, "/v1/finance/audit", actor="admin")
+            hidden_event = next(item for item in audit_hidden["data"]["events"] if item["object_id"] == reconciliation["data"]["reconciliation_id"])
+            assert status == 200 and hidden_event["payload_json"] == "{}", hidden_event
+            ordinary_event = next(item for item in audit_hidden["data"]["events"] if item["object_id"] == ordinary_rec["data"]["reconciliation_id"])
+            assert json.loads(ordinary_event["payload_json"])["actual_minor"] == 1234
+            status, audit_visible = request(base, "/v1/finance/audit", actor="vlad_granted")
+            visible_event = next(item for item in audit_visible["data"]["events"] if item["object_id"] == reconciliation["data"]["reconciliation_id"])
+            assert status == 200 and json.loads(visible_event["payload_json"]) == {"expected_minor": 10000, "actual_minor": 9900}
             status, documents = request(base, "/v1/finance/documents")
             item = next(item for item in documents["data"]["documents"] if item["target_account_id"] == account_id)  # type: ignore[index]
             assert (

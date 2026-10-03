@@ -264,7 +264,29 @@ def build_finance_http_server(
                     return
                 if suffix == "/audit":
                     need("finance_admin")
-                    self._ok({"events": app.service.list_audit_events(directory_only=(query.get("scope") == ["directories"]))})
+                    events = app.service.list_audit_events(
+                        directory_only=(query.get("scope") == ["directories"])
+                    )
+                    if not getattr(self, "_can_view_vlad_balance", False):
+                        reconciliation_ids = [
+                            str(event.get("object_id") or "") for event in events
+                            if event.get("event_type") == "cash.reconciliation.recorded"
+                        ]
+                        try:
+                            reconciliation_accounts = app.service.reconciliation_account_ids(
+                                reconciliation_ids
+                            )
+                        except FinanceCashError:
+                            reconciliation_accounts = {}
+                        for event in events:
+                            if event.get("event_type") != "cash.reconciliation.recorded":
+                                continue
+                            account_id = reconciliation_accounts.get(str(event.get("object_id") or ""))
+                            # A broken historical link must never reveal the
+                            # unparsed audit payload by default.
+                            if account_id is None or account_id == PROTECTED_VLAD_CASH_ACCOUNT_ID:
+                                event["payload_json"] = "{}"
+                    self._ok({"events": events})
                     return
                 if suffix == "/documents":
                     self._ok(
@@ -276,7 +298,12 @@ def build_finance_http_server(
                     )
                     return
                 if suffix.startswith("/documents/"):
-                    self._ok(app.service.get_document(suffix.split("/")[2]))
+                    include_retired = query.get("include_retired") == ["1"]
+                    if include_retired:
+                        need("finance_admin")
+                    self._ok(app.service.get_document(
+                        suffix.split("/")[2], include_retired=include_retired
+                    ))
                     return
                 if suffix == "/cash-reconciliations":
                     self._ok(
@@ -287,19 +314,22 @@ def build_finance_http_server(
                         }
                     )
                     return
+                if suffix.startswith("/cash-reconciliations/"):
+                    include_retired = query.get("include_retired") == ["1"]
+                    if include_retired:
+                        need("finance_admin")
+                    self._ok({"reconciliation": app.service.get_reconciliation(
+                        suffix.split("/")[2], include_retired=include_retired
+                    )})
+                    return
                 if suffix.startswith("/operations/"):
                     result = app.service.get_operation(
                         suffix.split("/")[2], actor, "finance_admin" in caps
                     )
                     if "reconciliation_id" in result and "expected_minor" in result:
-                        match = next(
-                            (item for item in app.service.list_reconciliations()
-                             if item["reconciliation_id"] == result["reconciliation_id"]),
-                            None,
+                        self._balance_context_account_id = app.service.reconciliation_account_id(
+                            str(result["reconciliation_id"])
                         )
-                        if match is None:
-                            raise FinanceCashError("finance_integrity_unavailable", "Reconciliation receipt account unavailable", 503)
-                        self._balance_context_account_id = str(match["account_id"])
                     self._ok(result)
                     return
                 raise FinanceCashError("not_found", "Route not found", 404)

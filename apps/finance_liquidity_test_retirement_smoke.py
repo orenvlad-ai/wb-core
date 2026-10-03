@@ -9,6 +9,9 @@ import shutil
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
+from threading import Thread
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from packages.adapters.finance_liquidity_access import FinanceBootstrapAccess
+from packages.adapters.finance_liquidity_http import FinanceHttpApp, build_finance_http_server
 from packages.application.finance_liquidity_cash import FinanceCashError, FinanceCashService, bootstrap_finance_cash_store
 from packages.application.finance_liquidity_test_retirement import (
     apply_test_account_retirement, preview_test_account_retirement, readback_test_account_retirement,
@@ -50,10 +54,10 @@ def run() -> None:
             posted({"document_type": "opening", "target_account_id": ident, "amount": "100.00",
                     "occurred_at": "2026-09-21T10:00:00Z", "opening_evidence_type": "manual_confirmation",
                     "opening_evidence_ref": "fixture"})
-        posted({"document_type": "transfer", "source_account_id": a, "target_account_id": b,
+        retired_document = posted({"document_type": "transfer", "source_account_id": a, "target_account_id": b,
                 "amount": "5.00", "occurred_at": "2026-09-21T11:00:00Z", "transfer_mode": "instant",
                 "purpose": "fixture transfer"})
-        command(service.record_reconciliation, {"account_id": a, "week_ending": "2026-09-21",
+        retired_reconciliation = command(service.record_reconciliation, {"account_id": a, "week_ending": "2026-09-21",
                                                 "actual_amount": "95.00"})
 
         def rows(table):
@@ -116,6 +120,53 @@ def run() -> None:
         assert a not in {item["account_id"] for item in service.list_accounts()}
         assert b not in {item["account_id"] for item in service.list_accounts()}
         assert len(service.list_documents()) == 1 and len(service.list_reconciliations()) == 0
+        try:
+            service.get_document(retired_document["document_id"])
+        except FinanceCashError as exc:
+            assert exc.status == 404
+        else:
+            raise AssertionError("retired document appeared in ordinary detail")
+        assert service.get_document(retired_document["document_id"], include_retired=True)["document"]["amount"] == "5.00"
+        assert service.get_reconciliation(retired_reconciliation["reconciliation_id"], include_retired=True)["account_id"] == a
+        assert service.reconciliation_account_id(retired_reconciliation["reconciliation_id"]) == a
+
+        class FixtureAuth:
+            def authenticate(self, headers):
+                admin = "finance_fixture_session=admin" in str(headers.get("Cookie") or "")
+                return {"username": "fixture" if admin else "viewer", "role": "operator",
+                        "capabilities": ["finance", "finance_operate", "finance_admin"] if admin else ["finance"]}
+
+        app = FinanceHttpApp(service, FixtureAuth(), read_enabled=True, write_enabled=False,
+                             csrf_secret="fixture", static_dir=ROOT / "packages/adapters/finance_liquidity_static",
+                             allowed_origin="", business_runtime_dir=Path(directory))
+        server = build_finance_http_server("127.0.0.1", 0, app)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            def get(path, *, admin=False):
+                request = Request(base + path, headers={"Cookie": "finance_fixture_session=" + ("admin" if admin else "viewer")})
+                try:
+                    with urlopen(request) as response:
+                        return response.status, json.loads(response.read())
+                except HTTPError as error:
+                    return error.code, json.loads(error.read())
+
+            document_path = f"/v1/finance/documents/{retired_document['document_id']}"
+            reconciliation_path = f"/v1/finance/cash-reconciliations/{retired_reconciliation['reconciliation_id']}"
+            assert get(document_path)[0] == 404
+            assert get(document_path + "?include_retired=1")[0] == 403
+            code, body = get(document_path + "?include_retired=1", admin=True)
+            assert code == 200 and body["data"]["document"]["amount"] == "5.00", (code, body)
+            assert get(reconciliation_path)[0] == 404
+            assert get(reconciliation_path + "?include_retired=1")[0] == 403
+            assert get(reconciliation_path + "?include_retired=1", admin=True)[1]["data"]["reconciliation"]["account_id"] == a
+            operation_path = f"/v1/finance/operations/{retired_reconciliation['operation_id']}"
+            assert get(operation_path, admin=True)[1]["data"]["actual_minor"] == 9500
+        finally:
+            server.shutdown()
+            server.server_close()
         assert service.get_account(real) == real_before
         for name, before in facts.items():
             assert rows(name) == before, name
