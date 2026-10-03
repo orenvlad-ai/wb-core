@@ -44,6 +44,16 @@
       "restart": false
     },
     {
+      "name": "wb-core-web-vitrina-finished-snapshot.service",
+      "enable": false,
+      "restart": false
+    },
+    {
+      "name": "wb-core-web-vitrina-finished-snapshot.timer",
+      "enable": true,
+      "restart": true
+    },
+    {
       "name": "wb-ai-api.service",
       "enable": true,
       "restart": true
@@ -257,6 +267,8 @@
     "REGISTRY_UPLOAD_HTTP_HOST": "127.0.0.1",
     "REGISTRY_UPLOAD_HTTP_PORT": "8765",
     "REGISTRY_UPLOAD_RUNTIME_DIR": "/opt/wb-core-runtime/state",
+    "WEB_VITRINA_FINISHED_SNAPSHOT_STORE": "/opt/wb-core-runtime/state/generations/web-vitrina-finished.sqlite3",
+    "WEB_VITRINA_FINISHED_SNAPSHOT_DEFAULT": "1",
     "REGISTRY_UPLOAD_HTTP_PATH": "/v1/registry-upload/bundle",
     "COST_PRICE_UPLOAD_HTTP_PATH": "/v1/cost-price/upload",
     "SHEET_VITRINA_HTTP_PATH": "/v1/sheet-vitrina-v1/plan",

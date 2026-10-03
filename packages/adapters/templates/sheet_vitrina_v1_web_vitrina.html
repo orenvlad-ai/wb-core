@@ -15605,7 +15605,11 @@
         {preset_id: "all_history", label: "Вся история"}
       ];
       const windowV3Available = !!(payload.meta && payload.meta.window_v3_available === true);
-      historyPresetsNode.innerHTML = (historical.preset_options || []).concat(windowV3Available ? windowPresets : []).map(function(preset) {
+      const finishedPresets = WEB_VITRINA_CONFIG.finished_snapshots_enabled ? [
+        {preset_id: "finished_14", label: "Последние 14 дней · готовый снимок"},
+        {preset_id: "finished_31", label: "Последний 31 день · готовый снимок"}
+      ] : [];
+      historyPresetsNode.innerHTML = finishedPresets.concat(historical.preset_options || []).concat(windowV3Available ? windowPresets : []).map(function(preset) {
         return (
           '<button class="button secondary history-preset-button" type="button" data-history-preset="' +
           escapeHtml(preset.preset_id) +
@@ -15616,7 +15620,16 @@
       }).join("");
       historyPresetsNode.querySelectorAll("[data-history-preset]").forEach(function(node) {
         node.addEventListener("click", function() {
-          applyHistoryPreset(String(node.getAttribute("data-history-preset") || ""));
+          const selectedPreset = String(node.getAttribute("data-history-preset") || "");
+          if (selectedPreset === "finished_14" || selectedPreset === "finished_31") {
+            const days = selectedPreset === "finished_14" ? 14 : 31;
+            const end = snapshotBusinessToday();
+            updatePageHistoryPeriod({dateFrom: shiftIsoDate(end, -(days - 1)), dateTo: end});
+            setHistoryPopoverOpen(false);
+            loadPageComposition();
+            return;
+          }
+          applyHistoryPreset(selectedPreset);
           syncVisibleMonthToHistoryDraft();
           syncHistoryFieldValues();
           renderHistoryCalendar(payload);
@@ -23443,10 +23456,28 @@
     // Explicit fixture/pilot mode. A page read gets only persisted TOTAL/GROUP
     // cells; SKU cells are fetched only after the user's expansion gesture.
     const snapshotPilotState = {summary: null, generation: "", requestId: 0};
+    function snapshotBusinessToday() {
+      const parts = new Intl.DateTimeFormat("en-CA", {timeZone: "Asia/Yekaterinburg",
+        year: "numeric", month: "2-digit", day: "2-digit"}).formatToParts(new Date());
+      const get = function(name) { return parts.find(function(part) { return part.type === name; }).value; };
+      return get("year") + "-" + get("month") + "-" + get("day");
+    }
+    function snapshotCurrentDays() {
+      const selected = currentExplicitHistoryQuery();
+      if (selected.mode === "default") return 14;
+      if (selected.mode !== "period" || selected.dateTo !== snapshotBusinessToday()) return 0;
+      const days = Math.round((Date.parse(selected.dateTo) - Date.parse(selected.dateFrom)) / 86400000) + 1;
+      return days === 14 || days === 31 ? days : 0;
+    }
     function snapshotPilotEnabled() {
-      return new URLSearchParams(window.location.search).get("snapshot_pilot") === "1";
+      const explicit = new URLSearchParams(window.location.search).get("snapshot_pilot");
+      return explicit === "1" || (explicit !== "0" && WEB_VITRINA_CONFIG.finished_snapshots_enabled === true
+        && snapshotCurrentDays() > 0);
     }
     function snapshotPilotPeriod() {
+      if (new URLSearchParams(window.location.search).get("snapshot_pilot") !== "1") {
+        return {period_days: snapshotCurrentDays()};
+      }
       const selected = currentExplicitHistoryQuery();
       if (selected.mode !== "period" || !selected.dateFrom || !selected.dateTo) {
         throw new Error("Для проверочного снимка укажите явный период дат.");
@@ -23458,8 +23489,12 @@
       url.searchParams.set("surface", WEB_VITRINA_CONFIG.page_composition_surface);
       url.searchParams.set("snapshot_pilot", "1");
       url.searchParams.set("part", part);
-      url.searchParams.set("date_from", period.date_from);
-      url.searchParams.set("date_to", period.date_to);
+      if (period.period_days) {
+        url.searchParams.set("period_days", String(period.period_days));
+      } else {
+        url.searchParams.set("date_from", period.date_from);
+        url.searchParams.set("date_to", period.date_to);
+      }
       if (generation) url.searchParams.set("generation_id", generation);
       return url;
     }
@@ -23471,7 +23506,8 @@
       if (!response.ok) throw new Error((payload && payload.error) || "Проверочный снимок недоступен.");
       const marker = payload && payload.snapshot_pilot;
       if (!marker || marker.schema_version !== 1 || marker.part !== part
-          || marker.date_from !== period.date_from || marker.date_to !== period.date_to
+          || (period.period_days ? marker.period_days !== period.period_days
+            : marker.date_from !== period.date_from || marker.date_to !== period.date_to)
           || (generation && marker.generation_id !== generation)) {
         throw new Error("Версия проверочного снимка изменилась. Обновите страницу.");
       }
@@ -23498,7 +23534,10 @@
           || (summary.table_surface || {}).table_data_state !== "included") {
         throw new Error("Снимок не содержит готовую таблицу.");
       }
+      await ensureMetricPresentationUserConfigLoaded();
+      if (requestId !== state.requestSequence) return;
       decodeTableResponse(summary);
+      if (summary.snapshot_pilot.business_today) summary.meta.today_current_date = summary.snapshot_pilot.business_today;
       const generation = summary.snapshot_pilot.generation_id;
       snapshotPilotState.summary = summary;
       snapshotPilotState.generation = generation;
@@ -23508,6 +23547,11 @@
       markFreshTableDisplayed(summary);
       setLoadStatusLamp("готовый снимок", "success");
       snapshotPilotControls(true);
+      if (summary.snapshot_pilot.stale_period) {
+        setLoadStatusLamp("предыдущий готовый снимок", "warning");
+        filterSummaryNode.textContent += " Показан период " + summary.snapshot_pilot.date_from + " — " +
+          summary.snapshot_pilot.date_to + "; сборка текущего периода ещё не завершена.";
+      }
     }
     snapshotPilotExpandNode.addEventListener("click", async function() {
       const summary = snapshotPilotState.summary;
@@ -23516,7 +23560,9 @@
       if (!summary || !generation || requestId !== state.requestSequence) return;
       snapshotPilotExpandNode.disabled = true;
       try {
-        const period = snapshotPilotPeriod();
+        const period = summary.snapshot_pilot.period_days
+          ? {period_days: summary.snapshot_pilot.period_days}
+          : {date_from: summary.snapshot_pilot.date_from, date_to: summary.snapshot_pilot.date_to};
         const sku = await snapshotPilotFetch("sku", period, generation);
         if (requestId !== state.requestSequence) return;
         if (!Array.isArray(sku.rows) || sku.rows.some(function(row) {
@@ -23543,8 +23589,12 @@
         });
         renderPage(full, {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
         markFreshTableDisplayed(full);
-        setLoadStatusLamp("готовый снимок", "success");
+        setLoadStatusLamp(summary.snapshot_pilot.stale_period ? "предыдущий готовый снимок" : "готовый снимок",
+          summary.snapshot_pilot.stale_period ? "warning" : "success");
         snapshotPilotControls(false);
+        if (summary.snapshot_pilot.stale_period) {
+          filterSummaryNode.textContent += " Показан период " + summary.snapshot_pilot.date_from + " — " + summary.snapshot_pilot.date_to + ".";
+        }
       } catch (error) {
         snapshotPilotExpandNode.disabled = false;
         filterSummaryNode.textContent = "SKU не загрузились: " + String(error && error.message || error);
@@ -24667,6 +24717,19 @@
         if (snapshotPilotEnabled()) {
           await loadSnapshotPilot(requestId);
           return;
+        }
+        snapshotPilotState.summary = null;
+        snapshotPilotState.generation = "";
+        snapshotPilotState.requestId = 0;
+        snapshotPilotToolbarNode.hidden = true;
+        loadRefreshButton.hidden = false;
+        if (WEB_VITRINA_CONFIG.finished_snapshots_configured && !snapshotPilotEnabled()) {
+          setLoadStatusLamp(WEB_VITRINA_CONFIG.finished_snapshots_enabled
+            ? "выбранный период рассчитывается обычным способом"
+            : "фоновые снимки готовятся; обычная загрузка", "warning");
+          filterSummaryNode.textContent = WEB_VITRINA_CONFIG.finished_snapshots_enabled
+            ? "Выбранный период загружается обычным способом."
+            : "Фоновые снимки готовятся; пока используется обычная загрузка.";
         }
         const shellRequestStartedAt = window.performance.now();
         const response = await fetch(
