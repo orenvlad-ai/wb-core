@@ -16,6 +16,7 @@ FINANCE_LIQUIDITY_CI_GROUP = "finance_liquidity"
 FINANCE_CAPABILITY_READ = "finance"
 FINANCE_CAPABILITY_OPERATE = "finance_operate"
 FINANCE_CAPABILITY_ADMIN = "finance_admin"
+FINANCE_CAPABILITY_VLAD_BALANCE = "finance_vlad_balance"
 
 FINANCE_LIQUIDITY_CAPABILITIES = (
     FINANCE_CAPABILITY_READ,
@@ -23,12 +24,13 @@ FINANCE_LIQUIDITY_CAPABILITIES = (
     FINANCE_CAPABILITY_ADMIN,
 )
 FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES = frozenset(
-    FINANCE_LIQUIDITY_CAPABILITIES
+    (*FINANCE_LIQUIDITY_CAPABILITIES, FINANCE_CAPABILITY_VLAD_BALANCE)
 )
 FINANCE_LIQUIDITY_CAPABILITY_DEFINITIONS = (
     (FINANCE_CAPABILITY_READ, "Финансы: просмотр"),
     (FINANCE_CAPABILITY_OPERATE, "Финансы: операции"),
     (FINANCE_CAPABILITY_ADMIN, "Финансы: администрирование"),
+    (FINANCE_CAPABILITY_VLAD_BALANCE, "Финансы: остаток кассы Владислава"),
 )
 FINANCE_LIQUIDITY_CAPABILITY_HIERARCHY = {
     FINANCE_CAPABILITY_READ: (FINANCE_CAPABILITY_READ,),
@@ -66,7 +68,7 @@ def expand_finance_capability_hierarchy(values: Iterable[object]) -> tuple[str, 
     expanded: list[str] = []
     finance_emitted = False
     for item in normalized:
-        if item in FINANCE_LIQUIDITY_EXPLICIT_ONLY_CAPABILITIES:
+        if item in FINANCE_LIQUIDITY_CAPABILITIES:
             if not finance_emitted:
                 expanded.extend(
                     capability

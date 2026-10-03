@@ -83,7 +83,7 @@
       const card = element("button", "account-card"); card.type = "button"; card.dataset.accountId = account.id; card.setAttribute("aria-pressed", String(account.id === state.selectedAccountId)); card.setAttribute("aria-label", `Выбрать ${account.account_type === "cash" ? "кассу" : "счёт"}: ${accountLabel(account)}`);
       const head = element("div", "account-head"); const heading = element("div"); heading.append(element("div", "account-name", account.name), element("div", "account-meta", [account.account_type === "cash" ? "Касса" : "Счёт", account.responsible_name, account.currency].filter(Boolean).join(" · "))); head.append(heading);
       const status = accountState(account); head.append(element("span", status === "current" ? "pill" : "pill warn", status === "uninitialized" ? "Не задан" : status === "in_transit" ? "В пути" : "Актуально")); card.append(head);
-      const value = accountBalance(account); const negative = account.negative_balance_warning || account.balance_state === "negative" || (typeof value === "string" && value.startsWith("-")); card.append(element("div", "balance", status === "uninitialized" ? "Не задан" : money(value, account.currency)), element("div", "balance-note", status === "uninitialized" ? "Укажите начальный остаток отдельной операцией" : negative ? "Отрицательный остаток · требуется разбор пояснения к расходу" : "Текущий остаток по данным сервера"));
+      const value = accountBalance(account); const negative = !account.balance_hidden && (account.negative_balance_warning || account.balance_state === "negative" || (typeof value === "string" && value.startsWith("-"))); card.append(element("div", "balance", account.balance_hidden ? "—" : status === "uninitialized" ? "Не задан" : money(value, account.currency)), element("div", "balance-note", account.balance_hidden ? "Остаток скрыт · операции доступны по вашим правам" : status === "uninitialized" ? "Укажите начальный остаток отдельной операцией" : negative ? "Отрицательный остаток · требуется разбор пояснения к расходу" : "Текущий остаток по данным сервера"));
       ui.accounts.append(card);
     }
     selectable.value = state.accounts.some(account => account.id === previousFilter && account.is_active) ? previousFilter : "";
@@ -141,11 +141,12 @@
     if (!state.reconciliations.length) { ui.reconciliations.append(element("p", "readonly", "Сверок ещё нет.")); return; }
     for (const rec of state.reconciliations) {
       const account = state.accounts.find(item => item.id === rec.account_id);
-      const stateLabel = rec.status === "matched" ? "Совпало" : rec.status === "resolved" ? "Разобрано" : "Есть расхождение";
-      const row = element("article", `reconciliation-row ${rec.status === "matched" ? "" : "has-difference"}`);
+      const stateLabel = rec.status === "hidden" ? "Результат скрыт" : rec.status === "matched" ? "Совпало" : rec.status === "resolved" ? "Разобрано" : "Есть расхождение";
+      const row = element("article", `reconciliation-row ${rec.status === "matched" || rec.status === "hidden" ? "" : "has-difference"}`);
       row.append(element("strong", "", `${businessDate(`${rec.week_ending}T18:59:59Z`)} · ${account?.name || "Касса"}`), element("div", "history-meta", stateLabel));
       const amounts = element("div", "reconciliation-amounts");
-      amounts.append(element("span", "", `Расчётный: ${money(rec.expected_amount, rec.currency || account?.currency || "RUB")}`), element("span", "", `Фактический: ${money(rec.actual_amount, rec.currency || account?.currency || "RUB")}`), element("span", "", `Разница: ${money(rec.difference_amount, rec.currency || account?.currency || "RUB")}`));
+      const recMoney = (value) => rec.status === "hidden" ? "—" : money(value, rec.currency || account?.currency || "RUB");
+      amounts.append(element("span", "", `Расчётный: ${recMoney(rec.expected_amount)}`), element("span", "", `Фактический: ${recMoney(rec.actual_amount)}`), element("span", "", `Разница: ${recMoney(rec.difference_amount)}`));
       row.append(amounts);
       if (rec.checked_at) row.append(element("div", "history-meta", `Зафиксировано: ${businessDateTime(rec.checked_at)}`));
       if (rec.comment) row.append(element("div", "history-meta", rec.comment));
@@ -154,7 +155,7 @@
   }
   function renderAttention() { clear(ui.attention); const items = []; for (const account of state.accounts) { const status = accountState(account); if (status === "uninitialized") items.push(["Нужен начальный остаток", accountLabel(account), "warn"]); if (account.negative_balance_warning || account.balance_state === "negative") items.push(["Отрицательный остаток", accountLabel(account), "danger"]); if (status === "in_transit") items.push(["Перевод в пути", accountLabel(account), "warn"]); }
     for (const doc of state.documents) if (doc.transfer_state === "in_transit") items.push(["Перевод в пути", documentAccounts(doc) || "Счета", "warn"]);
-    for (const rec of state.reconciliations) if (rec.status === "discrepancy" || Number(rec.difference_minor) !== 0) items.push(["Расхождение при сверке", rec.account_name || state.accounts.find(account => account.id === rec.account_id)?.name || "Касса", "warn"]);
+    for (const rec of state.reconciliations) if (rec.status !== "hidden" && (rec.status === "discrepancy" || Number(rec.difference_minor) !== 0)) items.push(["Расхождение при сверке", rec.account_name || state.accounts.find(account => account.id === rec.account_id)?.name || "Касса", "warn"]);
     if (!items.length) { ui.attention.append(element("p", "readonly", "Важных замечаний нет.")); return; }
     for (const [title, detail, level] of items) { const item = element("div", "attention-item"); item.append(element("strong", level === "danger" ? "pill danger" : "pill warn", title), element("p", "", detail)); ui.attention.append(item); }
   }

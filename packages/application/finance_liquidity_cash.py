@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import os
 import sqlite3
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from packages.domain.finance_liquidity import (
@@ -1823,11 +1823,12 @@ class FinanceCashService:
             self._assert_ledger_integrity(conn)
             sql = (
                 "SELECT r.*,a.currency FROM finance_liquidity_cash_reconciliations r "
-                "JOIN finance_liquidity_accounts a ON a.account_id=r.account_id"
+                "JOIN finance_liquidity_accounts a ON a.account_id=r.account_id "
+                "WHERE a.is_deleted=0"
             )
             args: list[Any] = []
             if account_id:
-                sql += " WHERE r.account_id=?"
+                sql += " AND r.account_id=?"
                 args.append(account_id)
             return [
                 self._reconciliation_view(item)
@@ -1836,10 +1837,51 @@ class FinanceCashService:
                 )
             ]
 
-    def get_document(self, document_id: str) -> dict[str, Any]:
+    def get_reconciliation(
+        self, reconciliation_id: str, *, include_retired: bool = False
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            self._assert_ledger_integrity(conn)
+            row = conn.execute(
+                "SELECT r.*,a.currency,a.is_deleted AS account_is_deleted "
+                "FROM finance_liquidity_cash_reconciliations r "
+                "JOIN finance_liquidity_accounts a ON a.account_id=r.account_id "
+                "WHERE r.reconciliation_id=?", (reconciliation_id,),
+            ).fetchone()
+            if row is None or (row["account_is_deleted"] and not include_retired):
+                raise FinanceCashError("reconciliation_not_found", "Reconciliation not found", 404)
+            result = self._reconciliation_view(row)
+            result.pop("account_is_deleted", None)
+            return result
+
+    def reconciliation_account_id(self, reconciliation_id: str) -> str:
+        """Resolve a receipt's account even after its TEST directory is retired."""
+        result = self.reconciliation_account_ids([reconciliation_id])
+        if reconciliation_id not in result:
+            raise FinanceCashError("reconciliation_not_found", "Reconciliation not found", 404)
+        return result[reconciliation_id]
+
+    def reconciliation_account_ids(self, reconciliation_ids: Sequence[str]) -> dict[str, str]:
+        if not reconciliation_ids:
+            return {}
+        with self._connect() as conn:
+            self._assert_ledger_integrity(conn)
+            placeholders = ",".join("?" for _ in reconciliation_ids)
+            return {
+                str(row["reconciliation_id"]): str(row["account_id"])
+                for row in conn.execute(
+                    "SELECT reconciliation_id,account_id FROM finance_liquidity_cash_reconciliations "
+                    f"WHERE reconciliation_id IN ({placeholders})",
+                    tuple(reconciliation_ids),
+                )
+            }
+
+    def get_document(self, document_id: str, *, include_retired: bool = False) -> dict[str, Any]:
         with self._connect() as conn:
             self._assert_ledger_integrity(conn)
             doc = self._document(conn, document_id)
+            if self._document_has_retired_account(conn, doc) and not include_retired:
+                raise FinanceCashError("document_not_found", "Document not found", 404)
             transactions = [
                 _row(row)
                 for row in conn.execute(
@@ -1870,11 +1912,12 @@ class FinanceCashService:
                 "FROM finance_liquidity_documents d "
                 "LEFT JOIN finance_liquidity_accounts a ON a.account_id=d.source_account_id "
                 "LEFT JOIN finance_liquidity_accounts b ON b.account_id=d.target_account_id "
-                "LEFT JOIN finance_liquidity_v2_directory_snapshots m ON m.document_id=d.document_id"
+                "LEFT JOIN finance_liquidity_v2_directory_snapshots m ON m.document_id=d.document_id "
+                "WHERE COALESCE(a.is_deleted,0)=0 AND COALESCE(b.is_deleted,0)=0"
             )
             args: list[Any] = []
             if account_id:
-                sql += " WHERE source_account_id=? OR target_account_id=?"
+                sql += " AND (d.source_account_id=? OR d.target_account_id=?)"
                 args = [account_id, account_id]
             return [
                 self._document_view(row)
@@ -2123,6 +2166,18 @@ class FinanceCashService:
         if row is None:
             raise FinanceCashError("document_not_found", "Document not found", 404)
         return row
+
+    def _document_has_retired_account(
+        self, conn: sqlite3.Connection, document: sqlite3.Row
+    ) -> bool:
+        return any(
+            conn.execute(
+                "SELECT is_deleted FROM finance_liquidity_accounts WHERE account_id=?",
+                (document[field],),
+            ).fetchone()[0]
+            for field in ("source_account_id", "target_account_id")
+            if document[field] is not None
+        )
 
     def _document_view(self, document: sqlite3.Row) -> dict[str, Any]:
         result = _row(document) or {}

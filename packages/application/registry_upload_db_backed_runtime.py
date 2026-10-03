@@ -63,6 +63,7 @@ from packages.contracts.cost_price_upload import (
     CostPriceUploadResult,
 )
 from packages.contracts.finance_liquidity import (
+    FINANCE_CAPABILITY_VLAD_BALANCE,
     FINANCE_LIQUIDITY_CAPABILITIES,
     expand_finance_capability_hierarchy,
     without_finance_explicit_only_capabilities,
@@ -14028,6 +14029,7 @@ _SHEET_VITRINA_USER_SECTION_IDS = (
     "instructions",
     "settings",
     *FINANCE_LIQUIDITY_CAPABILITIES,
+    FINANCE_CAPABILITY_VLAD_BALANCE,
 )
 
 

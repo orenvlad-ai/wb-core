@@ -72,7 +72,11 @@ def wait_terminal(entry, run_id):
     while time.monotonic() < deadline:
         value = entry.handle_warehouse_manual_sync_status_request(run_id)
         if value["status"] not in {"running", "busy", "accepted", "queued"}:
-            return value
+            # Durable status may precede the worker's effects and lock unwind.
+            worker = entry.operator_jobs._threads[run_id]
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+            assert not worker.is_alive(), "HTTP worker failed to terminate"
+            return entry.handle_warehouse_manual_sync_status_request(run_id)
         time.sleep(0.01)
     raise AssertionError("HTTP worker failed to terminate")
 
@@ -173,8 +177,33 @@ def http_races(root):
     def failure(**kw):
         raise ValueError("fixture upstream failure")
     entry.wb_supplies_block.sync_functional_sources = failure
+    before_record, allow_record = threading.Event(), threading.Event()
+    original_record = entry.warehouse_functional_block.record_failed_sync
+    def blocked_record(exc):
+        before_record.set()
+        assert allow_record.wait(5), "completion waiter did not await worker"
+        original_record(exc)
+    entry.warehouse_functional_block.record_failed_sync = blocked_record
     failed = entry.handle_warehouse_manual_sync_start_request()
-    result = wait_terminal(entry, failed["run_id"])
+    worker = entry.operator_jobs._threads[failed["run_id"]]
+    original_join = worker.join
+    def finish_on_join(timeout=None):
+        # Only the completion wait permits the final effect and lock unwind.
+        allow_record.set()
+        original_join(timeout)
+    try:
+        assert before_record.wait(5)
+        early = entry.handle_warehouse_manual_sync_status_request(failed["run_id"])
+        assert early["status"] == "failed" and effects.count("failed") == 0
+        assert worker.is_alive()
+        with patch.object(worker, "join", side_effect=finish_on_join):
+            result = wait_terminal(entry, failed["run_id"])
+            assert not worker.is_alive()
+    finally:
+        allow_record.set()
+        original_join(5)
+        assert not worker.is_alive()
+        entry.warehouse_functional_block.record_failed_sync = original_record
     assert result["status"] == "failed" and effects.count("failed") == 1
     assert result["technical_details"]["lock_metrics"]["outcome"] == "error"
     assert entry.warehouse_update_journal.public_status()["manual_updates"]["status"] == "failed"

@@ -149,13 +149,14 @@
     .pill.danger { background: rgba(251, 113, 133, .12); color: var(--danger); }
     .compact-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     .users-form { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(150px, 1fr) minmax(160px, 1fr) minmax(180px, .9fr) minmax(116px, .55fr) auto; gap: 10px; align-items: end; margin-top: 12px; }
-    .users-table { min-width: 1320px; }
-    .users-table th.col-user { width: 160px; }
-    .users-table th.col-display { width: 190px; }
-    .users-table th.col-access { width: 210px; }
-    .users-table th.col-status { width: 120px; }
-    .users-table th.col-date { width: 170px; }
-    .users-table th.col-user-actions { width: 320px; }
+    .users-table { min-width: 1050px; table-layout: fixed; }
+    .users-table th.col-user { width: 125px; }
+    .users-table th.col-display { width: 150px; }
+    .users-table th.col-access { width: 190px; }
+    .users-table th.col-status { width: 105px; }
+    .users-table th.col-date { width: 130px; }
+    .users-table th.col-user-actions { width: 220px; }
+    .users-table td { overflow-wrap: anywhere; }
     .readonly-row { opacity: .72; }
     .access-picker { position: relative; min-width: 0; }
     .access-picker-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
@@ -163,12 +164,20 @@
     .access-picker-summary { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
     .access-picker-summary.is-readonly { display: inline-flex; max-width: 100%; min-height: 34px; align-items: center; border: 1px solid rgba(177, 139, 255, 0.18); border-radius: 6px; padding: 7px 8px; background: rgba(16, 19, 27, .5); color: var(--muted); }
     .access-picker-chevron { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
-    .access-picker-popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 245px; max-width: calc(100vw - 48px); border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #171923; box-shadow: 0 18px 42px rgba(0, 0, 0, .38); }
+    .access-picker-popover { position: fixed; z-index: 10000; width: min(330px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #171923; box-shadow: 0 18px 42px rgba(0, 0, 0, .38); }
     .access-picker-popover[hidden] { display: none; }
-    .access-picker-options { display: grid; grid-template-columns: 1fr; gap: 7px; }
+    .access-picker-options { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .access-picker-group { position: relative; padding: 8px; border: 1px solid var(--border); border-radius: 7px; }
+    .access-picker-group-title { display: list-item; padding-right: 78px; cursor: pointer; font-size: 12px; font-weight: 800; }
+    .access-picker-group-all { position: absolute; top: 6px; right: 8px; display: inline-flex; gap: 4px; align-items: center; font-size: 11px; }
+    .access-picker-group-all input { width: auto; margin: 0; }
+    .access-picker-group-items { display: grid; gap: 5px; padding: 8px 0 0 16px; }
+    .access-picker-group small { display: block; padding: 5px 0 0 16px; color: var(--muted); font-size: 11px; }
+    .access-picker-sensitive { border-color: rgba(251, 113, 133, .42); }
+    .access-picker-sensitive .access-picker-group-title { color: var(--warning); }
     .section-checkbox { display: inline-flex; gap: 6px; align-items: center; min-width: 0; font-size: 12px; color: var(--text); }
     .section-checkbox input { width: auto; margin: 0; }
-    .manage-users-access { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+    .manage-users-access { margin-top: 3px; }
     .user-source-note { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.35; }
     .password-inline { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
     .password-inline input { min-width: 140px; }
@@ -644,10 +653,6 @@
             </button>
             <div class="access-picker-popover" data-access-picker-popover hidden>
               <div class="access-picker-options" data-new-user-sections></div>
-              <label class="section-checkbox manage-users-access">
-                <input type="checkbox" id="newManageUsersInput">
-                <span>Управление пользователями</span>
-              </label>
             </div>
           </div>
           <label class="field">
@@ -786,7 +791,7 @@
       const newDisplayNameInput = document.getElementById("newDisplayNameInput");
       const newPasswordInput = document.getElementById("newPasswordInput");
       const newUserSections = document.querySelector("[data-new-user-sections]");
-      const newManageUsersInput = document.getElementById("newManageUsersInput");
+      let newManageUsersInput = null;
       const newAccessPicker = document.querySelector('[data-access-picker="new"]');
       const newActiveSelect = document.getElementById("newActiveSelect");
       const calculationForm = document.getElementById("calculationParametersForm");
@@ -2662,19 +2667,41 @@
           });
       }
 
-      function renderSectionCheckboxes(name, selectedSections, disabled) {
+      const accessGroupDefinitions = [
+        {id: "work", label: "Рабочие разделы", ids: ["vitrina", "supply", "reports"]},
+        {id: "catalog", label: "Продажи и товары", ids: ["ads", "prices", "sku_management", "research"]},
+        {id: "feedbacks", label: "Отзывы", ids: ["feedbacks", "feedbacks.ai_review", "feedbacks.autoanswers_admin"]},
+        {id: "settings", label: "Настройки и сервис", ids: ["instructions", "settings"]},
+        {id: "finance", label: "Финансы", ids: ["finance", "finance_operate", "finance_admin"]},
+        {id: "sensitive", label: "Особый доступ", ids: ["finance_vlad_balance"], sensitive: true}
+      ];
+
+      function renderSectionCheckboxes(name, selectedSections, disabled, manageUsers = false) {
         const selected = new Set(normalizeAllowedSections(selectedSections));
-        return availableSections.map((section) => {
-          const sectionId = String(section.section_id || "");
-          return [
-            '<label class="section-checkbox access-picker-option">',
-            '<input type="checkbox" data-section-checkbox="' + escapeHtml(name) + '" value="' + escapeHtml(sectionId) + '"' +
-              (selected.has(sectionId) ? " checked" : "") +
-              (disabled ? " disabled" : "") +
-            '>',
-            '<span>' + escapeHtml(section.label || sectionId) + '</span>',
-            '</label>'
-          ].join("");
+        const known = new Set(accessGroupDefinitions.flatMap((group) => group.ids));
+        const groups = [...accessGroupDefinitions, {id: "other", label: "Другие права", ids: availableSections.map((item) => item.section_id).filter((id) => !known.has(id))}];
+        return groups.map((group) => {
+          const sections = group.ids.map((id) => availableSections.find((item) => item.section_id === id)).filter(Boolean);
+          if (!sections.length && group.id !== "settings") return "";
+          const groupIds = sections.map((section) => section.section_id);
+          if (group.id === "settings") groupIds.push("manage_users");
+          const title = '<summary class="access-picker-group-title">' + escapeHtml(group.label) + '</summary>';
+          const bulk = group.sensitive ? '' : '<label class="access-picker-group-all"><input type="checkbox" data-access-group-toggle="' + escapeHtml(group.id) + '"><span>Все</span></label>';
+          const items = sections.map((section) => {
+            const sectionId = String(section.section_id || "");
+            return '<label class="section-checkbox access-picker-option"><input type="checkbox" data-section-checkbox="' + escapeHtml(name) + '" value="' + escapeHtml(sectionId) + '"' +
+              (selected.has(sectionId) ? " checked" : "") + (disabled ? " disabled" : "") +
+              '><span>' + escapeHtml(section.label || sectionId) + '</span></label>';
+          });
+          if (group.id === "settings") {
+            items.push('<label class="section-checkbox manage-users-access"><input type="checkbox" ' +
+              (name === "new-user" ? 'id="newManageUsersInput"' : 'data-user-field="manage_users"') +
+              (manageUsers ? " checked" : "") + (disabled ? " disabled" : "") +
+              '><span>Управление пользователями</span></label>');
+          }
+          const hint = group.id === "finance" ? '<small>Администрирование включает операции и просмотр.</small>'
+            : group.sensitive ? '<small>Выдаётся отдельно от обычных прав на финансы.</small>' : '';
+          return '<details class="access-picker-group' + (group.sensitive ? ' access-picker-sensitive' : '') + '" data-access-group="' + escapeHtml(group.id) + '" data-group-ids="' + escapeHtml(groupIds.join(",")) + '"' + (group.id === "work" ? ' open' : '') + '>' + title + bulk + hint + '<div class="access-picker-group-items">' + items.join("") + '</div></details>';
         }).join("");
       }
 
@@ -2725,9 +2752,12 @@
         if (!newUserSections) {
           return;
         }
+        closeAccessPickers();
         newUserSections.innerHTML = renderSectionCheckboxes("new-user", ["vitrina", "supply", "reports", "feedbacks", "research"], false);
+        newManageUsersInput = document.getElementById("newManageUsersInput");
         newManageUsersInput.checked = false;
         initializeAccessPicker(newAccessPicker);
+        updateGroupToggles(newAccessPicker);
         updateAccessPickerSummary(newAccessPicker);
       }
 
@@ -2748,15 +2778,72 @@
         }
       }
 
-      function closeAccessPickers(exceptPicker) {
+      function accessPopover(picker) {
+        return picker && (picker._accessPopover || picker.querySelector("[data-access-picker-popover]"));
+      }
+
+      function accessInput(popover, id) {
+        return popover.querySelector('[data-section-checkbox][value="' + CSS.escape(id) + '"]');
+      }
+
+      function updateGroupToggles(picker) {
+        const popover = accessPopover(picker);
+        if (!popover) return;
+        popover.querySelectorAll("[data-access-group]").forEach((group) => {
+          const toggle = group.querySelector("[data-access-group-toggle]");
+          if (!toggle) return;
+          const inputs = Array.from(group.querySelectorAll('[data-section-checkbox], [data-user-field="manage_users"], #newManageUsersInput'));
+          toggle.checked = inputs.length > 0 && inputs.every((input) => input.checked);
+          toggle.indeterminate = inputs.some((input) => input.checked) && !toggle.checked;
+        });
+      }
+
+      function applyAccessDependencies(popover, changed) {
+        const checked = (id) => accessInput(popover, id)?.checked;
+        const set = (id, value) => { const input = accessInput(popover, id); if (input) input.checked = value; };
+        const manage = popover.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
+        const id = changed.value;
+        if (id === "finance_admin" && checked(id)) { set("finance_operate", true); set("finance", true); }
+        if (id === "finance_operate" && checked(id)) set("finance", true);
+        if (id === "finance_operate" && !checked(id)) set("finance_admin", false);
+        if (id === "finance_vlad_balance" && checked(id)) set("finance", true);
+        if (id === "finance" && !checked(id)) { set("finance_operate", false); set("finance_admin", false); set("finance_vlad_balance", false); }
+        if ((id === "feedbacks.ai_review" || id === "feedbacks.autoanswers_admin") && checked(id)) set("feedbacks", true);
+        if (id === "feedbacks" && !checked(id)) { set("feedbacks.ai_review", false); set("feedbacks.autoanswers_admin", false); }
+        if (id === "settings" && !checked(id) && manage) manage.checked = false;
+        if (manage?.checked) set("settings", true);
+      }
+
+      function positionAccessPopover(picker) {
+        const popover = accessPopover(picker);
+        const toggle = picker?.querySelector("[data-access-picker-toggle]");
+        if (!popover || !toggle || popover.hidden) return;
+        const rect = toggle.getBoundingClientRect();
+        const margin = 8;
+        const viewportHeight = window.visualViewport?.height || window.innerHeight;
+        const viewportWidth = window.visualViewport?.width || window.innerWidth;
+        const below = viewportHeight - rect.bottom - margin * 2;
+        const above = rect.top - margin * 2;
+        const openAbove = below < Math.min(popover.scrollHeight, 300) && above > below;
+        const space = Math.max(90, openAbove ? above : below);
+        popover.style.maxHeight = Math.floor(space) + "px";
+        const height = Math.min(popover.scrollHeight, space);
+        popover.style.top = Math.max(margin, Math.floor(openAbove ? rect.top - height - 6 : rect.bottom + 6)) + "px";
+        popover.style.left = Math.max(margin, Math.min(rect.left, viewportWidth - popover.offsetWidth - margin)) + "px";
+      }
+
+      function closeAccessPickers(exceptPicker, restoreFocus = false) {
         Array.from(document.querySelectorAll("[data-access-picker]")).forEach((picker) => {
           if (exceptPicker && picker === exceptPicker) {
             return;
           }
-          const popover = picker.querySelector("[data-access-picker-popover]");
+          const popover = accessPopover(picker);
           const toggle = picker.querySelector("[data-access-picker-toggle]");
           if (popover) {
+            const wasOpen = !popover.hidden;
             popover.hidden = true;
+            if (popover.parentNode !== picker) picker.append(popover);
+            if (wasOpen && restoreFocus && toggle) toggle.focus();
           }
           if (toggle) {
             toggle.setAttribute("aria-expanded", "false");
@@ -2769,8 +2856,9 @@
           return;
         }
         const summary = picker.querySelector("[data-access-summary]");
-        const sectionContainer = picker.querySelector("[data-new-user-sections], [data-user-sections]");
-        const manageInput = picker.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
+        const popover = accessPopover(picker);
+        const sectionContainer = popover?.querySelector("[data-new-user-sections], [data-user-sections]");
+        const manageInput = popover?.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
         if (!summary) {
           return;
         }
@@ -2788,33 +2876,50 @@
         }
         picker.dataset.accessPickerBound = "1";
         const toggle = picker.querySelector("[data-access-picker-toggle]");
-        const popover = picker.querySelector("[data-access-picker-popover]");
+        const popover = accessPopover(picker);
         if (!toggle || !popover) {
           return;
         }
+        picker._accessPopover = popover;
+        if (!popover.id) popover.id = "access-popover-" + Math.random().toString(36).slice(2);
+        toggle.setAttribute("aria-controls", popover.id);
         toggle.addEventListener("click", (event) => {
           event.stopPropagation();
           const nextOpen = popover.hidden;
           closeAccessPickers(picker);
+          if (nextOpen) document.body.append(popover);
           popover.hidden = !nextOpen;
           toggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+          if (nextOpen) {
+            positionAccessPopover(picker);
+            popover.querySelector("summary")?.focus();
+          }
         });
         popover.addEventListener("click", (event) => {
           event.stopPropagation();
         });
-        picker.addEventListener("change", (event) => {
+        popover.addEventListener("toggle", () => positionAccessPopover(picker), true);
+        popover.addEventListener("change", (event) => {
           const target = event.target;
           if (!(target instanceof HTMLInputElement)) {
             return;
           }
-          if (!target.matches('[data-section-checkbox], #newManageUsersInput, [data-user-field="manage_users"]')) {
+          if (target.matches("[data-access-group-toggle]")) {
+            const group = target.closest("[data-access-group]");
+            group?.querySelectorAll('[data-section-checkbox], [data-user-field="manage_users"], #newManageUsersInput').forEach((input) => { input.checked = target.checked; });
+            group?.querySelectorAll('[data-section-checkbox], [data-user-field="manage_users"], #newManageUsersInput').forEach((input) => applyAccessDependencies(popover, input));
+          } else if (target.matches('[data-section-checkbox], #newManageUsersInput, [data-user-field="manage_users"]')) {
+            applyAccessDependencies(popover, target);
+          } else {
             return;
           }
-          const sectionContainer = picker.querySelector("[data-new-user-sections], [data-user-sections]");
-          const manageInput = picker.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
+          const sectionContainer = popover.querySelector("[data-new-user-sections], [data-user-sections]");
+          const manageInput = popover.querySelector('#newManageUsersInput, [data-user-field="manage_users"]');
           ensureSettingsCheckedForManageUsers(sectionContainer, manageInput);
+          updateGroupToggles(picker);
           updateAccessPickerSummary(picker);
         });
+        updateGroupToggles(picker);
         updateAccessPickerSummary(picker);
       }
 
@@ -2837,12 +2942,8 @@
           '</button>',
           '<div class="access-picker-popover" data-access-picker-popover hidden>',
           '<div class="access-picker-options" data-user-sections="' + escapeHtml(userId) + '">',
-          renderSectionCheckboxes(userId, allowedSections, false),
+          renderSectionCheckboxes(userId, allowedSections, false, manageUsers),
           '</div>',
-          '<label class="section-checkbox manage-users-access">',
-          '<input type="checkbox" data-user-field="manage_users"' + (manageUsers ? " checked" : "") + '>',
-          '<span>Управление пользователями</span>',
-          '</label>',
           '</div>',
           '</div>'
         ].join("");
@@ -2938,6 +3039,7 @@
       }
 
       async function createUser() {
+        closeAccessPickers();
         ensureSettingsCheckedForManageUsers(newUserSections, newManageUsersInput);
         updateAccessPickerSummary(newAccessPicker);
         const payload = {
@@ -2969,6 +3071,7 @@
       }
 
       async function saveUser(userId) {
+        closeAccessPickers();
         const row = userRows.querySelector('tr[data-user-id="' + CSS.escape(userId) + '"]');
         if (!row) {
           setUsersMessage("Не удалось найти строку пользователя.", "error");
@@ -4065,9 +4168,15 @@
       document.addEventListener("click", () => closeAccessPickers());
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
-          closeAccessPickers();
+          closeAccessPickers(null, true);
         }
       });
+      window.addEventListener("resize", () => {
+        document.querySelectorAll("[data-access-picker]").forEach(positionAccessPopover);
+      });
+      document.addEventListener("scroll", () => {
+        document.querySelectorAll("[data-access-picker]").forEach(positionAccessPopover);
+      }, true);
       renderCreateUserAccessControls();
       if (logoutLink && config.logout_path) {
         logoutLink.href = config.logout_path;
