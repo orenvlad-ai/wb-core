@@ -5328,9 +5328,12 @@ class RegistryUploadDbBackedRuntime:
         phase: str,
         started_at: str,
         candidate_count: int,
+        completed_at: str | None = None,
         logs: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         _validate_timestamp(started_at, field_name="started_at")
+        if completed_at is not None:
+            _validate_timestamp(completed_at, field_name="completed_at")
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
@@ -5342,10 +5345,11 @@ class RegistryUploadDbBackedRuntime:
                     phase,
                     started_at,
                     updated_at,
+                    completed_at,
                     candidate_count,
                     logs_json
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(run_id),
@@ -5353,6 +5357,7 @@ class RegistryUploadDbBackedRuntime:
                     str(phase),
                     started_at,
                     started_at,
+                    completed_at,
                     int(candidate_count or 0),
                     json.dumps(list(logs or []), ensure_ascii=False),
                 ),

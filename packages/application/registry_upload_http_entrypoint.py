@@ -69,7 +69,7 @@ from packages.application.wb_autoanswers_runtime import (
     autoanswers_settings_revision,
 )
 from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge, NodeBoundaryError
-from packages.application.sqlite_contention import SQLiteContentionExhausted
+from packages.application.sqlite_contention import SQLiteContentionExhausted, is_sqlite_contention_error
 from packages.contracts.wb_autoanswers import AUTOANSWER_MODES, AUTOANSWERS_CONTRACT_VERSION
 from packages.application.sku_management import SkuManagementBlock
 from packages.application.sku_inventory_balance import (
@@ -3626,9 +3626,7 @@ class RegistryUploadHttpEntrypoint:
             )
         except (TypeError, ValueError):
             checked_at = self.activated_at_factory()
-        self.runtime.save_source_health_status(
-            "seller_portal_auth",
-            payload={
+        health_payload = {
                 "session_status": str(payload.get("status") or payload.get("session_status") or "unknown"),
                 "session_status_label": str(payload.get("status_label") or payload.get("session_status_label") or ""),
                 "organization_confirmed": bool(payload.get("organization_confirmed")),
@@ -3636,10 +3634,33 @@ class RegistryUploadHttpEntrypoint:
                 "expected_supplier_id": str(payload.get("expected_supplier_id") or ""),
                 "current_supplier_id": str(payload.get("current_supplier_id") or ""),
                 "reason": str(payload.get("reason") or payload.get("message") or ""),
-            },
-            checked_at=checked_at,
-        )
-        return payload
+        }
+        try:
+            self.runtime.save_source_health_status(
+                "seller_portal_auth", payload=health_payload, checked_at=checked_at,
+            )
+        except Exception as exc:
+            if not is_sqlite_contention_error(exc):
+                raise
+            # The live canonical-supplier probe already completed. A cache
+            # write failure must not turn that observed login into an auth
+            # failure or claim that an older health row is fresh.
+            same_probe_observed = False
+            try:
+                cached = self.runtime.load_source_health_status("seller_portal_auth") or {}
+                same_probe_observed = (
+                    str(cached.get("checked_at") or "") == checked_at
+                    and all(cached.get(key) == value for key, value in health_payload.items())
+                )
+            except Exception:
+                pass
+            if same_probe_observed:
+                return {**payload, "health_persistence_status": "saved_observed"}
+            return {
+                **payload, "health_persistence_status": "unconfirmed",
+                "health_persistence_warning": "Проверка входа завершена, но сохранение статуса источника не подтверждено.",
+            }
+        return {**payload, "health_persistence_status": "saved"}
 
     def handle_sources_sessions_status_request(
         self,
@@ -3657,6 +3678,57 @@ class RegistryUploadHttpEntrypoint:
             "seller_portal_auth"
         ) or {}
         seller = {**seller_run, **seller_cached}
+        recent_probe = _recent_seller_portal_probe_history(
+            getattr(self, "seller_portal_recovery", None)
+        )
+        if recent_probe is not None:
+            history_checked = str(recent_probe.get("checked_at") or "")
+            cached_checked = str(seller_cached.get("checked_at") or "")
+            try:
+                not_older_than_cache = not cached_checked or _timestamp_as_utc(history_checked) >= _timestamp_as_utc(cached_checked)
+            except (TypeError, ValueError):
+                not_older_than_cache = False
+            if not_older_than_cache:
+                expected_supplier_id = str(seller_run.get("expected_supplier_id") or "")
+                supplier_context = recent_probe.get("supplier_context")
+                if not isinstance(supplier_context, Mapping):
+                    supplier_context = {}
+                identity_matches = _seller_portal_recovery_context_matches_expected(
+                    supplier_context, expected_supplier_id=expected_supplier_id,
+                )
+                valid_storage = bool(recent_probe.get("storage_matches"))
+                fresh_probe = bool(recent_probe.get("fresh"))
+                recent_status = (
+                    _seller_portal_session_check_status(
+                        current_probe=recent_probe if valid_storage else None,
+                        canonical_configured=bool(expected_supplier_id),
+                        organization_confirmed=identity_matches and valid_storage,
+                    ) if fresh_probe else "session_probe_error"
+                )
+                recent_org_confirmed = bool(
+                    fresh_probe and identity_matches and valid_storage and recent_probe.get("ok")
+                )
+                same_second_confirmed_cache = (
+                    history_checked == cached_checked
+                    and str(seller_cached.get("session_status") or "") == recent_status
+                    and seller_cached.get("organization_confirmed") is recent_org_confirmed
+                )
+                if not same_second_confirmed_cache:
+                    seller.update({
+                    "session_status": recent_status,
+                    "session_status_label": (
+                        _seller_portal_session_check_status_label(recent_status)
+                        if fresh_probe else "Нужна повторная проверка"
+                    ),
+                    "organization_confirmed": recent_org_confirmed,
+                    "checked_at": history_checked,
+                    "health_persistence_status": "probe_history" if fresh_probe else "stale_probe_history",
+                    "health_persistence_warning": (
+                        "Проверка входа завершена, но кеш статуса источника не обновлён."
+                        if fresh_probe else "Последняя проверка входа устарела; запустите повторную проверку."
+                    ),
+                    "reason": str(recent_probe.get("reason") or "") if fresh_probe else "probe_history_stale",
+                    })
         buyer = self.handle_wb_buyer_session_recovery_status_request(
             launcher_download_path=buyer_launcher_download_path,
             with_probe=False,
@@ -9269,6 +9341,46 @@ def _seller_portal_recovery_supplier_context(raw: Mapping[str, Any]) -> dict[str
         ):
             return dict(value)
     return {}
+
+
+def _recent_seller_portal_probe_history(recovery: Any) -> dict[str, Any] | None:
+    """Read the bounded durable probe record without contacting WB or trusting old cookies."""
+    try:
+        config = recovery._config()
+        path = Path(config.probe_history_path)
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 262_144))
+            tail = handle.read()
+        lines = tail.splitlines()
+        if size > len(tail):
+            lines = lines[1:]  # The first line may be truncated.
+        if not lines:
+            return None
+        recent = json.loads(lines[-1])
+        if not isinstance(recent, dict):
+            return None
+        recent["ok"] = recent.get("ok") is True
+        checked_at = _timestamp_as_utc(str(recent.get("checked_at") or ""))
+        now = datetime.now(timezone.utc)
+        if checked_at > now + timedelta(seconds=30):
+            return None
+        recent["fresh"] = now - checked_at <= timedelta(minutes=5)
+        storage_meta = recent.get("storage_state_meta") or {}
+        if not isinstance(storage_meta, Mapping):
+            return None
+        current_meta = recovery._tool()._public_storage_state_metadata(config.storage_state_path)
+        recent["storage_matches"] = bool(
+            storage_meta.get("exists")
+            and storage_meta.get("sha256")
+            and storage_meta.get("sha256") == current_meta.get("sha256")
+            and storage_meta.get("size") == current_meta.get("size")
+            and storage_meta.get("mtime") == current_meta.get("mtime")
+        )
+        return recent
+    except Exception:  # noqa: BLE001 - optional cached evidence cannot break status GET.
+        return None
 
 
 def _seller_portal_recovery_context_matches_expected(

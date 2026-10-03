@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from apps.web_vitrina_management_history import WebVitrinaManagementHistoryAdapter, readonly, private_json
 from apps.seller_portal_automation_guard import seller_portal_automation_lock
 from apps.production_apply_contract import AmbiguousSubmit
-from packages.adapters.seller_portal_web_source_collector import _dedupe, _funnel_items, _search_items
+from packages.adapters.seller_portal_web_source_collector import _dedupe, _funnel_items, _search_items, _search_group_totals_match
 from packages.adapters.web_source_current_sync import ShellBackedWebSourceCurrentSync, _load_env_file, _closed_day_required_fetched_after
 from packages.application.ready_publication import ExpectedReady, replace_ready
 from packages.application.seller_funnel_snapshot_block import transform_legacy_payload as funnel_payload
@@ -65,11 +65,23 @@ def durable_json(path,value):
 def validate_observations(request):
     observations = request['observations']
     days = sorted(set(request['dates']))
-    if not days or len(days)>7 or any(date.fromisoformat(d).isoformat()!=d for d in days):
+    if not days or len(days)>7 or len(days)!=len(request['dates']) or any(date.fromisoformat(d).isoformat()!=d for d in days):
         raise ValueError('source-date-scope-invalid')
     if digest(observations)!=request['source_sha256']:
         raise ValueError('source-digest-mismatch')
-    if {(x['source_key'],x['snapshot_date']) for x in observations} != {(s,d) for s in SOURCE_KEYS for d in days} or len(observations)!=2*len(days):
+    pairs={(x['source_key'],x['snapshot_date']) for x in observations}
+    if 'source_date_pairs' in request:
+        declared=request['source_date_pairs']
+        if (not isinstance(declared,list) or not declared or len(declared)>2*len(days)
+            or any(not isinstance(x,dict) or set(x)!={'source_key','snapshot_date'} for x in declared)):
+            raise ValueError('source-observation-scope-invalid')
+        expected={(x['source_key'],x['snapshot_date']) for x in declared}
+        if (len(expected)!=len(declared) or any(s not in SOURCE_KEYS or d not in days for s,d in expected)
+            or {d for _,d in expected}!=set(days)):
+            raise ValueError('source-observation-scope-invalid')
+    else:
+        expected={(s,d) for s in SOURCE_KEYS for d in days}
+    if pairs!=expected or len(observations)!=len(expected):
         raise ValueError('source-observation-scope-invalid')
     for o in observations:
         day=o['snapshot_date']
@@ -97,9 +109,52 @@ def validate_observations(request):
             if reconstructed!=o['items'] or o['pages']<2 or any(sum(g[key]['current'] for g in groups)!=sum(i[field] for i in o['items'])
                 for key,field in [('viewCount','view_count'),('openCard','open_card_count')]):
                 raise ValueError('funnel-source-pages-or-totals-incomplete')
-        elif report['data']['commonInfo']['totalProducts']!=len(ids) or _dedupe(_search_items([r for g in groups for r in g['items']]))!=o['items']:
-            raise ValueError('search-source-product-count-incomplete')
+        else:
+            if report['data']['commonInfo']['totalProducts']!=len(ids):
+                raise ValueError('search-source-product-count-incomplete')
+            preview_rows=[r for g in groups for r in g['items']]
+            if not _search_group_totals_match(groups,preview_rows):
+                raise ValueError('search-source-group-totals-incomplete')
+            preview=_dedupe(_search_items(preview_rows))
+            batches=o.get('search_batches',[])
+            if not batches:
+                if preview!=o['items'] or o['pages']!=1:
+                    raise ValueError('search-source-pages-incomplete')
+                continue
+            if not isinstance(batches,list) or o['pages']!=len(batches)+1 or len(preview_rows)!=len(preview):
+                raise ValueError('search-source-pages-incomplete')
+            covered={i['nm_id']:i for i in preview};requested=set();seen=set()
+            for batch in batches:
+                nms=batch['requested_nm_ids'];answer=batch['response']
+                if (not isinstance(nms,list) or not 1<=len(nms)<=40 or any(type(n) is not int or n<=0 for n in nms)
+                    or nms!=sorted(set(nms)) or requested.intersection(nms)):
+                    raise ValueError('search-source-batch-scope-invalid')
+                requested.update(nms)
+                errors=answer.get('additionalErrors')
+                if answer.get('error') or (errors.get('errors') if isinstance(errors,dict) and set(errors)=={'errors'} else errors):
+                    raise ValueError('search-source-batch-error-envelope')
+                data=answer['data'];rows=[r for g in data['groups'] for r in g['items']]
+                if not _search_group_totals_match(data['groups'],rows):
+                    raise ValueError('search-source-batch-group-totals-incomplete')
+                items=_dedupe(_search_items(rows))
+                if (len(rows)!=len(items) or data['commonInfo']['totalProducts']!=len(items)
+                    or any(i['nm_id'] not in nms for i in items)):
+                    raise ValueError('search-source-batch-count-or-filter-invalid')
+                for item in items:
+                    nm=item['nm_id']
+                    if nm in seen or (nm in covered and covered[nm]!=item):
+                        raise ValueError('search-source-batch-overlap-or-value-drift')
+                    seen.add(nm);covered[nm]=item
+            if (not set(i['nm_id'] for i in preview).issubset(seen)
+                or [covered[nm] for nm in sorted(covered)]!=o['items']):
+                raise ValueError('search-source-product-count-incomplete')
     return observations
+
+
+def source_date_pairs(request):
+    """Validated exact write scope; captured neighboring rows remain CAS invariants."""
+    validate_observations(request)
+    return {(o['source_key'],o['snapshot_date']) for o in request['observations']}
 
 
 def source_result(o, nm_ids):
@@ -268,11 +323,15 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
 
     def _pg_replace(self,conn,request,tables,images):
         from psycopg2.extras import Json, execute_batch
+        pairs=source_date_pairs(request)
         with conn.cursor() as cur:
             for table,col in tables:
+                source=SOURCE_KEYS[0 if col=='snapshot_date' else 1]
+                days=sorted(d for s,d in pairs if s==source)
+                if not days:continue
                 exact=' AND date_from=date_to' if col=='date_to' else ''
-                cur.execute(f'DELETE FROM public.{table} WHERE {col}=ANY(%s::date[]){exact}',(request['dates'],))
-                rows=[r for r in images[table] if col!='date_to' or r['date_from']==r['date_to']]
+                cur.execute(f'DELETE FROM public.{table} WHERE {col}=ANY(%s::date[]){exact}',(days,))
+                rows=[r for r in images[table] if r[col] in days and (col!='date_to' or r['date_from']==r['date_to'])]
                 if rows:
                     columns=list(rows[0])
                     execute_batch(cur,f'INSERT INTO public.{table} ('+','.join(columns)+') VALUES ('+','.join('%s' for _ in columns)+')',
@@ -391,7 +450,8 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
             with readonly(db) as conn:
                 conn.execute('BEGIN');candidate=self.build(request,operation_id,conn)
         return {'operation_id':operation_id,'target':str(db),'scope':{'phase':request['phase'],'dates':request['dates'],
-                'source_keys':list(SOURCE_KEYS),'changed_cells':len(candidate.get('changes',[]))},
+                'source_date_pairs':[{'source_key':s,'snapshot_date':d} for s,d in sorted(source_date_pairs(request))],
+                'changed_cells':len(candidate.get('changes',[]))},
             'prestate_sha256':candidate['prestate_sha256'],'candidate_sha256':digest(candidate),'candidate':candidate,
             'recovery':{'kind':'exact-source-and-ready-before-images','path':str(backup)}}
 
@@ -488,14 +548,16 @@ class WebSourcePublicationAdapter(WebVitrinaManagementHistoryAdapter):
                     if state=='after':
                         for after,before in zip(candidate['updates'],candidate['before_images']['ready']):
                             replace_ready(conn,expected=ExpectedReady(after['bundle_version'],after['as_of_date'],after['after_plan_json']),plan_json=before['plan_json'])
-                        for source in SOURCE_KEYS:
-                            for day in request['dates']:
-                                conn.execute("DELETE FROM temporal_source_slot_snapshots WHERE source_key=? AND snapshot_date=? AND snapshot_role='accepted_closed_day_snapshot'",(source,day))
-                                conn.execute("DELETE FROM temporal_source_closure_state WHERE source_key=? AND target_date=? AND slot_kind='yesterday_closed'",(source,day))
+                        pairs=source_date_pairs(request)
+                        for source,day in pairs:
+                            conn.execute("DELETE FROM temporal_source_slot_snapshots WHERE source_key=? AND snapshot_date=? AND snapshot_role='accepted_closed_day_snapshot'",(source,day))
+                            conn.execute("DELETE FROM temporal_source_closure_state WHERE source_key=? AND target_date=? AND slot_kind='yesterday_closed'",(source,day))
                         for table,rows in [('temporal_source_slot_snapshots',candidate['before_images']['slots']),('temporal_source_closure_state',candidate['before_images']['closure'])]:
                             for row in rows:
                                 if table=='temporal_source_slot_snapshots' and row['snapshot_role']!='accepted_closed_day_snapshot':continue
                                 if table=='temporal_source_closure_state' and row['slot_kind']!='yesterday_closed':continue
+                                key=(row['source_key'],row.get('snapshot_date',row.get('target_date')))
+                                if key not in pairs:continue
                                 columns=list(row)
                                 conn.execute(f'INSERT INTO {table} ('+','.join(columns)+') VALUES ('+','.join('?' for _ in columns)+')',tuple(row[k] for k in columns))
                     if self._publication_state(request,operation_id,candidate,conn)!='before':raise ValueError('rollback-staged-state-mismatch')

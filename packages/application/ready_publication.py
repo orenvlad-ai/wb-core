@@ -288,6 +288,30 @@ def ensure_material_revisions(conn) -> None:
         conn.commit()  # Complete only this bootstrap; never commit its owner's write.
 
 
+def material_revisions_schema_ready(conn) -> bool:
+    """Read-only check before a constructor considers running schema DDL.
+
+    A present revisions table alone is insufficient: source tables added later
+    also need their revision row and three change triggers.
+    """
+    objects = {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute("SELECT type,name FROM sqlite_master WHERE type IN ('table','trigger')")
+    }
+    if ("table", REVISIONS) not in objects:
+        return False
+    revision_rows = {str(row[0]) for row in conn.execute(f"SELECT source_table FROM {REVISIONS}")}
+    for table in (*MATERIAL_TABLES, *INVENTORY_PREPARATION_TABLES):
+        if ("table", table) not in objects:
+            continue
+        if table not in revision_rows or any(
+            ("trigger", f"ready_input_{table}_{event}") not in objects
+            for event in ("insert", "update", "delete")
+        ):
+            return False
+    return True
+
+
 def capture_history(conn, bundle_version=None):
     if bundle_version is None:
         return [list(row) for row in conn.execute("SELECT * FROM sheet_vitrina_v1_ready_revisions ORDER BY bundle_version,as_of_date")]

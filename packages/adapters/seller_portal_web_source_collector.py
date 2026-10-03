@@ -18,6 +18,8 @@ ROUTES = {
     "web_source_snapshot": ("/search-analytics/my-search-queries", "/search-report/report"),
 }
 MAX_DETAIL_PAGES = 200
+SEARCH_BATCH_SIZE = 40
+MAX_SEARCH_UNIVERSE = 400
 
 
 class CollectorError(RuntimeError):
@@ -106,8 +108,75 @@ def _dedupe(rows):
     return [indexed[nm] for nm in sorted(indexed)]
 
 
+def _search_group_totals_match(groups, rows):
+    """Where WB supplies group metrics, require item sums for additive fields."""
+    if not groups:
+        return not rows
+    if not all(isinstance(g.get('metrics'), dict) for g in groups):
+        return False
+    for group_key, row_key in (('views', 'views'), ('orders', 'orders')):
+        totals = [_current(g['metrics'].get(group_key)) for g in groups]
+        values = [_current(r.get(row_key)) for r in rows]
+        if (any(type(v) not in (int, float) for v in totals + values)
+            or sum(totals) != sum(values)):
+            return False
+    return True
+
+
+def _search_complete_items(client, url, headers, body, report, candidate_nm_ids):
+    """Read the UI's bounded nmIds filter; bind every batch to the global count."""
+    data = report['data']
+    groups = data.get('groups') if isinstance(data, dict) else None
+    if not isinstance(groups, list):
+        raise CollectorError('seller_report_groups_missing')
+    preview_rows = [row for group in groups for row in group.get('items', [])]
+    if not _search_group_totals_match(groups, preview_rows):
+        raise CollectorError('search_report_group_totals_incomplete')
+    preview = _dedupe(_search_items(preview_rows))
+    reported = data.get('commonInfo', {}).get('totalProducts')
+    if not isinstance(reported, int) or isinstance(reported, bool) or reported <= 0:
+        raise CollectorError('search_report_product_count_invalid')
+    if len(preview) == reported:
+        return preview, []
+    if len(preview) > reported:
+        raise CollectorError('search_report_product_count_incomplete')
+    universe = sorted(set(candidate_nm_ids or ()) | {item['nm_id'] for item in preview})
+    if (not universe or len(universe) > MAX_SEARCH_UNIVERSE
+        or any(type(nm) is not int or nm <= 0 for nm in universe)):
+        raise CollectorError('search_report_universe_invalid')
+    all_items = {item['nm_id']: item for item in preview}
+    seen = set()
+    batches = []
+    for start in range(0, len(universe), SEARCH_BATCH_SIZE):
+        requested = universe[start:start + SEARCH_BATCH_SIZE]
+        response = _response_json(_post_report(client, url, headers=headers,
+            data=json.dumps({**body, 'nmIds': requested}), timeout=60000))
+        filtered_data = response['data']
+        filtered_groups = filtered_data.get('groups') if isinstance(filtered_data, dict) else None
+        if not isinstance(filtered_groups, list):
+            raise CollectorError('search_report_batch_groups_missing')
+        rows = [row for group in filtered_groups for row in group.get('items', [])]
+        if not _search_group_totals_match(filtered_groups, rows):
+            raise CollectorError('search_report_batch_group_totals_incomplete')
+        items = _dedupe(_search_items(rows))
+        filtered_count = filtered_data.get('commonInfo', {}).get('totalProducts')
+        if (type(filtered_count) is not int or filtered_count != len(items)
+            or len(rows) != len(items) or any(item['nm_id'] not in requested for item in items)):
+            raise CollectorError('search_report_batch_incomplete_or_unbound')
+        for item in items:
+            nm = item['nm_id']
+            if nm in seen or (nm in all_items and all_items[nm] != item):
+                raise CollectorError('search_report_batch_overlap_or_value_drift')
+            all_items[nm] = item
+            seen.add(nm)
+        batches.append({'requested_nm_ids': requested, 'response': response})
+    if len(all_items) != reported or not {item['nm_id'] for item in preview}.issubset(seen):
+        raise CollectorError('search_report_product_count_incomplete')
+    return [all_items[nm] for nm in sorted(all_items)], batches
+
+
 def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_path: str,
-                       canonical_supplier_id: str) -> dict:
+                       canonical_supplier_id: str, search_candidate_nm_ids=None) -> dict:
     """Read one exact date; callers own the shared browser lock and any writes."""
     from playwright.sync_api import sync_playwright
     day = date.fromisoformat(snapshot_date)
@@ -148,6 +217,7 @@ def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_pat
                 raise CollectorError('seller_report_groups_missing')
             pages = 1
             detail_pages = []
+            search_batches = []
             if source_key == 'seller_funnel_snapshot':
                 raw_rows = [row for group in groups for row in group.get('itemsGroup', [])]
                 items = _funnel_items(raw_rows)
@@ -173,8 +243,9 @@ def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_pat
                 else:
                     raise CollectorError('seller_funnel_pagination_bound_exceeded')
             else:
-                raw_rows = [row for group in groups for row in group.get('items', [])]
-                items = _search_items(raw_rows)
+                items, search_batches = _search_complete_items(context.request,template.url,headers,
+                    body,report,search_candidate_nm_ids)
+                pages += len(search_batches)
             items = _dedupe(items)
             if not items:
                 raise CollectorError('seller_report_empty_unqualified')
@@ -194,7 +265,8 @@ def collect_web_source(*, source_key: str, snapshot_date: str, storage_state_pat
                     'collection_finished_at': datetime.now(timezone.utc).isoformat(),
                     'supplier_identity_sha256': supplier_hash, 'request_period': body['currentPeriod'],
                     'header_names': sorted(headers), 'pages': pages, 'reported_count': reported_count, 'completeness': 'complete',
-                    'items': items, 'raw_report': report, 'detail_pages':detail_pages}
+                    'items': items, 'raw_report': report, 'detail_pages':detail_pages,
+                    'search_batches':search_batches}
         except CollectorError as exc:
             raise exc from None
         except Exception as exc:
