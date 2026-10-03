@@ -38,9 +38,17 @@ function isCleaningConsumable(classification) {
 function failedInstallationRemedy(classification) {
   const evidence = ["BUBBLES_DUST", "ADHESION", "MISSING_PARTS", "KIT_QUALITY"]
     .map((code) => issueEvidence(classification, code)).join(" ")
-    .replace(/(?:^|[^\p{L}])не\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)\p{L}*(?:\s+(?:приподнимат|разглаживат|протират|очищат|выдавливат|убират)\p{L}*)?/giu, " ");
+    .replace(/(?:как\s+бы|сколько(?:\s+бы)?)\s+н[ие]\s+(?:пытал|пробовал)\p{L}*/giu, " пытался ")
+    .replace(/(?:^|[^\p{L}])не\s+(?:пробовал|пытал|приподнимал|разглаживал(?!\p{L}*(?:ся|сь)(?!\p{L}))|протирал|очищал)\p{L}*(?:\s+(?:приподнимат|разглаживат|протират|очищат|выдавливат|убират)\p{L}*)?/giu, " ");
   if (/сколько\s+ни\s+пытайся.{0,100}(?:не\s+прикле|не\s+фиксир|ничего\s+не\s+получ)/iu.test(evidence)) return true;
-  return /(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал|выдавливал|убирал|приглаживал).{0,140}(?:не помог|остал|сохранил|всё равно|по-прежнему|не получ(?:ил|илось|ается|ить)|без результата)|(?:не помог|остал|сохранил|всё равно|по-прежнему|без результата).{0,140}(?:после|пробовал|пытал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence);
+  return /(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал|выдавливал|убирал|приглаживал).{0,140}(?:не помог|остал|сохранил|вс[её]\s+равно|по-прежнему|не получ(?:ил|илось|ается|ить)|не разглажива|без результата)|(?:не помог|остал|сохранил|вс[её]\s+равно|по-прежнему|не разглажива|без результата).{0,140}(?:после|пробовал|пытал|приподнимал|разглаживал|протирал|очищал)/iu.test(evidence);
+}
+
+function unavailableInstallationRemedy(classification) {
+  const evidence = ["ADHESION", "BUBBLES_DUST", "INSTALL_GENERAL"]
+    .map((code) => issueEvidence(classification, code)).join(" ");
+  return /не\s+прикле\p{L}*|откле\p{L}*|не\s+держ\p{L}*|пузыр\p{L}*/iu.test(evidence)
+    && /стекл\p{L}*.{0,70}(?:оба|обе|их|его)\s+(?:выброс|выкин|утилиз)\p{L}*|(?:выброс|выкин|утилиз)\p{L}*\s+стекл\p{L}*|стекл\p{L}*\s+(?:выброс|выкин|утилиз)\p{L}*/iu.test(evidence);
 }
 
 function establishedIndependentReturn(classification) {
@@ -78,9 +86,19 @@ function buyerConfirmedWrongVariant(classification) {
   return /(?:перепутал[аи]?|ошиб(?:ся|лась)\s+с\s+(?:моделью|выбором)).{0,90}(?:взял[аи]?|заказал[аи]?)?.{0,90}(?:а\s+у\s+меня|мой\s+телефон).{0,90}(?:не\s+подош|про\s+макс|pro\s*max|просто\s+про)/iu.test(evidence);
 }
 
+function unverifiedSensorAreaFit(classification) {
+  const evidence = ["SIZE_FIT", "EARPIECE", "FACE_ID", "FRONT_CAMERA"]
+    .map((code) => issueEvidence(classification, code)).join(" ");
+  const namedModels = [...evidence.matchAll(/(?:iphone|айфон)\s*\d{2}(?:\s*(?:pro|max|plus))?/giu)];
+  return /(?:динамик|вырез|отверст|остров|айленд|island|камер)/iu.test(evidence)
+    && /(?:не\s+совпад|несовпад|не\s+подход|смещен|смещён|не\s+по\s+центру)/iu.test(evidence)
+    && namedModels.length < 2
+    && !/(?:не\s+слыш|плохо\s+слыш|звук|громк|слышимость|разговор|не\s+работа|не\s+распозна|разблокировк)/iu.test(evidence);
+}
+
 function isInstallationBreakage(classification) {
   const evidence = issueEvidence(classification, "INSTALL_BREAKAGE");
-  const stage = "(?:во время установк|при установк|пока устанавливал|во время (?:самой )?наклейк|при наклеиван|в процессе наклейк)";
+  const stage = "(?:(?:во время|при|в процессе)\\s+(?:\\p{L}+\\s+){0,2}(?:установк\\p{L}*|наклейк\\p{L}*|наклеиван\\p{L}*|поклейк\\p{L}*)|пока\\s+устанавливал\\p{L}*)";
   const deniedDuringInstallation = new RegExp(`${stage}.{0,30}не\\s+(?:трес|трещ|разб|скол|лоп|повреж)|${stage}.{0,45}(?:трещин|скол|поврежден).{0,15}(?:нет|не\\s+было)`, "iu").test(evidence);
   const duringInstallation = Boolean(evidence) && !deniedDuringInstallation
     && new RegExp(`(?:трес|трещ|разб|скол|лоп|повреж).{0,45}${stage}|${stage}.{0,45}(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(evidence);
@@ -103,7 +121,7 @@ function installedDustWithoutSticker(classification) {
 
 function isPostUseBreakage(classification) {
   const evidence = issueEvidence(classification, "SPONTANEOUS_BREAKAGE");
-  if (/после начала использован|после начала эксплуатац|(?:неделю|месяц|день)\s+пользовал|через (?:неделю|месяц|день) использования|после\s+\d+\s+(?:минут|часов|дней)\s+использования|в течение\s+\d+\s+(?:минут|часов|дней)\s+использования|при использовании|в процессе эксплуатации/iu.test(evidence)) return true;
+  if (/(?:при|во время|в процессе)\s+(?:\p{L}+\s+){0,2}(?:использован|эксплуатац)\p{L}*|(?:в течени[еи]|через)\s+.{0,45}(?:использован|эксплуатац)\p{L}*|после(?![^.!?]{0,40}до\s+(?:начала\s+)?использован).{0,45}(?:использован|эксплуатац)\p{L}*|(?:неделю|месяц|день)\s+пользовал/iu.test(evidence)) return true;
   return /пользовал/iu.test(evidence)
     && !/не\s+пользовал(?:ся|ась)?\s+(?:телефоном|стеклом)|(?:телефоном|стеклом)\s+не\s+пользовал/iu.test(evidence);
 }
@@ -191,6 +209,8 @@ export function applyRouteGuards(classification) {
     }
   } else if ((codes.has("BUBBLES_DUST") || codes.has("ADHESION")) && failedInstallationRemedy(guarded) && !hasExplicitlyResolvedMixedPublic(guarded)) {
     setRoute("wb_return", "G-INSTALL-UNRESOLVED", "Уже описанная неудачная попытка устранить проблему установки ведёт к возврату");
+  } else if ((codes.has("ADHESION") || codes.has("BUBBLES_DUST") || codes.has("INSTALL_GENERAL")) && unavailableInstallationRemedy(guarded) && !hasExplicitlyResolvedMixedPublic(guarded)) {
+    setRoute("wb_return", "G-INSTALL-UNAVAILABLE", "Описанное стекло уже недоступно для повторной попытки исправления результата установки");
   } else if (isClearInstallationResult(guarded) && !hasExplicitlyResolvedMixedPublic(guarded)) {
     guarded.seller_investigation_subject = false;
     guarded.evidence_potential = false;
@@ -215,6 +235,11 @@ export function applyRouteGuards(classification) {
     guarded.evidence_potential = true;
     guarded.required_evidence = [];
     setRoute("seller_chat", "G023/G-SIZE-FIT", "Модель и соответствие заказу нельзя установить из отзыва");
+  } else if (unverifiedSensorAreaFit(guarded) && ![...RETURN_ISSUES].some((code) => codes.has(code)) && !establishedIndependentReturn(guarded) && !hasExplicitlyResolvedMixedPublic(guarded)) {
+    guarded.seller_investigation_subject = true;
+    guarded.evidence_potential = true;
+    guarded.required_evidence = [];
+    setRoute("seller_chat", "G-SENSOR-AREA-FIT", "Совпадение геометрии зоны выреза с заказанной моделью не установлено");
   } else if (guarded.primary_issue === "FRAME_OVERLAP" && guarded.route === "wb_return" && !hasDirectFrameOverlapEvidence(guarded)) {
     guarded.seller_investigation_subject = false;
     guarded.evidence_potential = false;

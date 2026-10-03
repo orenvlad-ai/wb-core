@@ -105,10 +105,16 @@ def _stage_segments(text: str) -> list[str]:
 def _affirmative_damage_words(text: str, stems: Sequence[Any]) -> bool:
     """Damage must be asserted, not merely named or negated in a clause."""
 
+    damage_word = re.compile(
+        r"(?:трес\w*|трещ\w*|потрес\w*|разб(?:ил|ит|ив|ь)\w*|"
+        r"бит(?:ый|ая|ое|ые|ого|ую|ым|ом|о)?|лоп(?:нул|нула|нуло|нули|а[ею]\w*)|"
+        r"скол(?:[аоеыу]\w*|ол\w*|от\w*)?|скалыва\w*|откол\w*|"
+        r"крош\w*|осып\w*|посып\w*|сып\w*|развал\w*|трусг\w*|труск\w*)"
+    )
     for clause in _clauses(text):
         words = _tokens(clause)
         for index, word in enumerate(words):
-            if word.startswith("скольк") or not _has_stem([word], stems):
+            if not _has_stem([word], stems) or not damage_word.fullmatch(word):
                 continue
             if any(token in {"не", "без", "нет"} for token in words[max(0, index - 2):index]):
                 continue
@@ -197,7 +203,10 @@ def _arrival_damage(text: str, signals: Mapping[str, Any]) -> bool:
             index
             for index, word in enumerate(words)
             if _has_stem([word], signals.get("arrival_damage_stems") or [])
-            and not word.startswith("скольк")
+            and (
+                _affirmative_damage_words(word, signals.get("breakage_stems") or [])
+                or bool(re.fullmatch(r"(?:слом\w*|неисправ\w*|повреж\w*|(?:по)?царап\w*|брак\w*)", word))
+            )
             and not any(token in {"не", "без", "нет"} for token in words[max(0, index - 2):index])
             and words[index + 1:index + 2] != ["нет"]
             and words[index + 1:index + 3] != ["не", "было"]
@@ -229,16 +238,18 @@ def _arrival_damage(text: str, signals: Mapping[str, Any]) -> bool:
 
 
 def _installation_breakage(text: str, signals: Mapping[str, Any]) -> bool:
+    stage = r"(?:во время|при|в процессе)\s+(?:\w+\s+){0,2}(?:установк\w*|наклейк\w*|наклеиван\w*|поклейк\w*)|пока\s+устанавливал\w*"
     for segment in _stage_segments(text):
         normalized = _normalize(segment)
         if not _affirmative_damage_words(segment, signals.get("breakage_stems") or []):
             continue
         denied_during = bool(re.search(
-            r"(?:во время установк|при установк|пока устанавливал|во время (?:самой )?наклейк|при наклеиван|в процессе наклейк).{0,30}не\s+(?:трес|трещ|разб|скол|лоп|повреж)", normalized
+            rf"(?:{stage}).{{0,30}}не\s+(?:трес|трещ|разб|скол|лоп|повреж)"
+            rf"|(?:{stage}).{{0,45}}(?:трещин|скол|поврежден).{{0,15}}(?:нет|не\s+было)", normalized
         ))
         during = not denied_during and bool(re.search(
-            r"(?:трес|трещ|разб|скол|лоп|повреж).{0,45}(?:во время установк|при установк|пока устанавливал|во время (?:самой )?наклейк|при наклеиван|в процессе наклейк)"
-            r"|(?:во время установк|при установк|пока устанавливал|во время (?:самой )?наклейк|при наклеиван|в процессе наклейк).{0,45}(?:трес|трещ|разб|скол|лоп|повреж)",
+            rf"(?:трес|трещ|разб|скол|лоп|повреж).{{0,45}}(?:{stage})"
+            rf"|(?:{stage}).{{0,45}}(?:трес|трещ|разб|скол|лоп|повреж)",
             normalized,
         ))
         at_first_inspection = bool(re.search(
@@ -256,10 +267,14 @@ def _failed_installation_remedy(text: str, signals: Mapping[str, Any]) -> bool:
         r"не\s+(?:не\s+)?клеил", normalized
     ):
         return False
+    concessive = re.sub(
+        r"(?:как\s+бы|сколько(?:\s+бы)?)\s+н[ие]\s+(?:пытал|пробовал)\w*",
+        " пытался ", normalized,
+    )
     attempts = re.sub(
-        r"\bне\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)\w*"
+        r"\bне\s+(?:пробовал|пытал|приподнимал|разглаживал(?!\w*(?:ся|сь)\b)|протирал|очищал)\w*"
         r"(?:\s+(?:приподнимат|разглаживат|протират|очищат|выдавливат|убират)\w*)?",
-        " ", normalized,
+        " ", concessive,
     )
     if re.search(r"сколько\s+ни\s+пытайся.{0,100}(?:не\s+прикле|не\s+фиксир|ничего\s+не\s+получ)", attempts):
         return True
@@ -269,6 +284,18 @@ def _failed_installation_remedy(text: str, signals: Mapping[str, Any]) -> bool:
         r"|(?:не помог|остал|сохранил|все равно|по прежнему|без результата)"
         r".{0,140}(?:после|пробовал|пытал|приподнимал|разглаживал|протирал|очищал)",
         attempts,
+    ))
+
+
+def _discarded_installation_result(text: str) -> bool:
+    normalized = _normalize(text)
+    if not re.search(r"не\s+прикле\w*|откле\w*|не\s+держ\w*|пузыр\w*", normalized):
+        return False
+    return bool(re.search(
+        r"стекл\w*\s+(?:выброс\w*|выкин\w*|утилиз\w*)"
+        r"|(?:выброс\w*|выкин\w*|утилиз\w*)\s+стекл\w*"
+        r"|стекл\w*.{0,70}(?:оба|обе|их|его)\s+(?:выброс\w*|выкин\w*|утилиз\w*)",
+        normalized,
     ))
 
 
@@ -404,6 +431,8 @@ def classify_return_guard(content_json: Any) -> dict[str, Any]:
         reasons.append("installation_breakage_before_use")
     if _failed_installation_remedy(text, signals):
         reasons.append("failed_installation_remedy")
+    if _discarded_installation_result(text):
+        reasons.append("installation_remedy_unavailable")
     if _installed_dust_without_sticker(text):
         reasons.append("installed_dust_without_sticker")
     mechanism_text = re.sub(r"\bне\s+слом\w*", " ", normalized)
@@ -442,17 +471,13 @@ def classify_return_guard(content_json: Any) -> dict[str, Any]:
     if _has_phrase(normalized, signals.get("device_or_injury_phrases") or []):
         reasons.append("device_damage_or_injury")
 
-    dangerous_edge = breakage and (
-        _same_clause_stems(
-            text,
-            signals.get("breakage_stems") or [],
-            signals.get("large_stems") or [],
+    dangerous_edge = breakage and any(
+        _affirmative_damage_words(clause, signals.get("breakage_stems") or [])
+        and (
+            _has_stem(_tokens(clause), signals.get("large_stems") or [])
+            or _has_stem(_tokens(clause), signals.get("danger_stems") or [])
         )
-        or _same_clause_stems(
-            text,
-            signals.get("breakage_stems") or [],
-            signals.get("danger_stems") or [],
-        )
+        for clause in _clauses(text)
     )
     if dangerous_edge:
         reasons.append("large_or_dangerous_chip")

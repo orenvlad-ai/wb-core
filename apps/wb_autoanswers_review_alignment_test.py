@@ -67,11 +67,20 @@ class ReviewAlignmentTest(unittest.TestCase):
         self.assertNotIn("installed_dust_without_sticker", before_installation["hard_return_reasons"])
         self.assertIn("failed_installation_remedy", classify_return_guard({"text": "Попытался выдавить пузыри, не получается"})["hard_return_reasons"])
         self.assertIn("failed_installation_remedy", classify_return_guard({"text": "Стекло не клеилось, пытался наклеить повторно, ничего не получить"})["hard_return_reasons"])
+        self.assertIn("failed_installation_remedy", classify_return_guard({"text": "Как бы не пыталсч, всё равно пузырь не разглаживался"})["hard_return_reasons"])
+        self.assertNotIn("failed_installation_remedy", classify_return_guard({"text": "Не разглаживал пузырь, он остался"})["hard_return_reasons"])
+
+    def test_discarded_product_is_unavailable_but_discarded_packaging_is_not(self) -> None:
+        self.assertIn("installation_remedy_unavailable", classify_return_guard({"text": "Стекло не приклеилось. Оба выбросил"})["hard_return_reasons"])
+        self.assertNotIn("installation_remedy_unavailable", classify_return_guard({"text": "Стекло не приклеилось, но выбросил только упаковку"})["hard_return_reasons"])
 
     def test_mechanism_and_negated_damage_are_separate(self) -> None:
         self.assertIn("installation_mechanism_failure", classify_return_guard({"text": "Язычок установочного бокса не поддавался"})["hard_return_reasons"])
         self.assertIn("installation_mechanism_failure", classify_return_guard({"text": "Механизм установки не работает корректно"})["hard_return_reasons"])
         self.assertNotIn("installation_mechanism_failure", classify_return_guard({"text": "Механизм не сломан, проблема только в размере стекла"})["hard_return_reasons"])
+        self.assertFalse(classify_return_guard({"text": "Не работает разблокировка Face ID после установки"})["post_use_breakage"])
+        self.assertFalse(classify_return_guard({"text": "Не работает разблокировка Face ID после установки"})["hard_return"])
+        self.assertTrue(classify_return_guard({"text": "Стекло разбилось при установке"})["hard_return"])
         for wording in (
             "Стекло хорошее, без трещин; стикера нет",
             "Сколько ни пытался приклеить, не держится",
