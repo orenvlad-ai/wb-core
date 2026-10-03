@@ -17,6 +17,9 @@ _OTHER_PRODUCT=re.compile(r'^\s*(?:защитн\w*\s+)?(?:чехол|пл[её]�
 _ANTI=re.compile(r'анти[\s-]*шпион|anti[\s-]*spy|\bprivacy\b',re.I)
 _MATTE=re.compile(r'матов\w*|\bmatte\b',re.I)
 _CLEAN=re.compile(r'(?:прозрачн\w*\s+(?:защитн\w*\s+)?стекл\w*|стекл\w*\s+прозрачн\w*|\bclear\s+glass\b)',re.I)
+_STRUCTURED_CLEAR=re.compile(r'\bпрозрачн(?:ый|ое|ая|ые|ого|ому|ым|ом|ую|ых|ыми)\b',re.I)
+_EXPLICIT_KIND_NAME=re.compile(r'^(?:(?:тип|вид)\s+(?:защитного\s+)?стекла|(?:тип|вид)\s+покрытия)$',re.I)
+_GENERIC_KIND_NAME=re.compile(r'^(?:покрытие|эффект)$',re.I)
 _NO_FRAME=re.compile(r'без\s+рамк\w*|\bno[\s-]*frame\b',re.I)
 _BLACK_FRAME=re.compile(r'(?:черн\w*|чёрн\w*|black)\s+рамк\w*|рамк\w*\s+(?:черн\w*|чёрн\w*|black)',re.I)
 _PHONE_TOKEN=r'(?:\d{1,2}\s*(?:pro\s*max|promax|pro|e|air)?|[A-Za-z][A-Za-z0-9]*)'
@@ -143,8 +146,9 @@ def project_card(card:dict, *, require_subject:bool=False) -> dict:
             claims.update(found)
     for row in card['characteristics']:
         name=row['name'].strip().casefold()
-        if not (re.search(r'(?:тип|вид).*(?:стекл|покрыт)|^(?:покрытие|эффект)',name)
-                and row['id'] not in {746,195594,12223252}):continue
+        explicit=bool(_EXPLICIT_KIND_NAME.fullmatch(name))
+        generic=bool(_GENERIC_KIND_NAME.fullmatch(name))
+        if row['id'] in {746,195594,12223252} or not (explicit or generic):continue
         values=row['value']
         if not isinstance(values,list) or not values or any(not isinstance(value,str) for value in values):
             _unresolved('Карточка WB: тип покрытия не подтверждён')
@@ -152,8 +156,10 @@ def project_card(card:dict, *, require_subject:bool=False) -> dict:
             found=set()
             if _ANTI.search(value):found.add('anti')
             if _MATTE.search(value):found.add('matte')
-            if _CLEAN.search(value) or re.search(r'обычн\w*\s+стекл\w*',value,re.I):found.add('clean')
-            if len(found)!=1:_unresolved('Карточка WB: тип покрытия не подтверждён')
+            if (_CLEAN.search(value) or _STRUCTURED_CLEAR.search(value)
+                    or re.search(r'обычн\w*\s+стекл\w*',value,re.I)):found.add('clean')
+            if len(found)>1 or explicit and len(found)!=1:
+                _unresolved('Карточка WB: тип покрытия не подтверждён')
             claims.update(found)
     if len(claims)!=1:_unresolved('Карточка WB: тип стекла не подтверждён или противоречив')
     return dict(version=PROJECTION_VERSION,category='phone_screen_glass',

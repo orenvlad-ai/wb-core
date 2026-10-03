@@ -45,6 +45,13 @@ def semantic_projection_smoke():
     assert project_card(dict(card,title=card['title']+' без установочной рамки'),require_subject=True)==expected
     assert project_card(dict(card,characteristics=[dict(row,wb_metadata=1) for row in traits]+[
         dict(id=15000001,name='ТНВЭД',value=['7020008000'])]),require_subject=True)==expected
+    for technical in (dict(id=99901,name='Покрытие',value=['Олеофобное']),
+                      dict(id=99902,name='Эффект',value=['Повышенная чувствительность']),
+                      dict(id=99903,name='Тип стекла',value=['Прозрачное']),
+                      dict(id=99904,name='Тип покрытия',value=['Прозрачный']),
+                      dict(id=99905,name='Покрытие корпуса',value=['Матовое']),
+                      dict(id=99906,name='Эффект упаковки',value=['Матовое'])):
+        assert project_card(dict(card,characteristics=traits+[technical]),require_subject=True)==expected
     for changed in (dict(card,title='Защитное стекло iPhone 15 / 18'),
                     dict(card,title='Защитное стекло iPhone 15 / 16 Pro Max Ultra'),
                     dict(card,title='Защитное стекло анти-шпион iPhone 15 / 16'),
@@ -58,6 +65,8 @@ def semantic_projection_smoke():
                     dict(card,title=card['title']+' без рамки'),
                     dict(card,description='Тип стекла: матовое стекло'),
                     dict(card,characteristics=traits+[dict(id=999,name='Тип стекла',value=['Матовое стекло'])]),
+                    dict(card,characteristics=traits+[dict(id=999,name='Покрытие',value=['Матовое'])]),
+                    dict(card,characteristics=traits+[dict(id=999,name='Тип покрытия',value=['Олеофобное'])]),
                     dict(card,characteristics=[dict(traits[0],name=123),*traits[1:]])):
         try:project_card(changed,require_subject=True)
         except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable',exc.code
