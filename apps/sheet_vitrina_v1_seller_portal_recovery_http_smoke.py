@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 import zipfile
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,7 +194,7 @@ class _FakeSellerRecoveryController:
             launcher_enabled=False,
         )
 
-    def start(self, *, replace: bool, launcher_download_path: str) -> dict[str, object]:
+    def start(self, *, replace: bool, launcher_download_path: str, viewer_owner: str = "", viewer_expires_at: int | None = None, request_id: str = "") -> dict[str, object]:
         self.calls.append(f"start:{replace}")
         self.run_counter += 1
         self.current_run_id = f"seller-recovery-run-{self.run_counter}"
@@ -220,7 +221,7 @@ class _FakeSellerRecoveryController:
             launcher_enabled=False,
         )
 
-    def stop(self, *, launcher_download_path: str) -> dict[str, object]:
+    def stop(self, *, launcher_download_path: str, run_id: str | None = None) -> dict[str, object]:
         self.calls.append("stop")
         self.running = False
         self.visual_ready = False
@@ -231,6 +232,17 @@ class _FakeSellerRecoveryController:
             instruction="Кнопка «Остановить восстановление» закрывает только временное окно входа.",
             running=False,
             launcher_enabled=False,
+        )
+
+    def finish(self, *, launcher_download_path: str, run_id: str) -> dict[str, object]:
+        self.calls.append("finish")
+        return self._build_run_payload(
+            status="awaiting_login",
+            launcher_download_path=launcher_download_path,
+            summary="Checking the candidate on the server",
+            instruction="Wait for the independent probe",
+            running=True,
+            launcher_enabled=True,
         )
 
     def build_launcher_archive(self, *, public_status_url: str, public_operator_url: str) -> tuple[bytes, str]:
@@ -314,6 +326,16 @@ def main() -> None:
             runtime_dir=runtime_dir,
         )
         server = build_registry_upload_http_server(config, entrypoint=entrypoint)
+        from packages.adapters import registry_upload_http_entrypoint as http_adapter
+        viewer_patches = [
+            patch.object(http_adapter, "_seller_viewer_owner", return_value="f" * 64),
+            patch.object(http_adapter, "_seller_viewer_session_expiry", return_value=2_000_000_000),
+            patch.object(http_adapter, "_ensure_seller_viewer_same_origin", return_value=True),
+            patch.object(http_adapter, "_seller_viewer_run_owned_by_other", return_value=False),
+            patch.object(http_adapter, "_seller_viewer_run_matches", return_value=True),
+        ]
+        for viewer_patch in viewer_patches:
+            viewer_patch.start()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -410,7 +432,7 @@ def main() -> None:
                 if "run_id=" + run_id not in launcher_text or "Восстановление завершено: ${STATUS:-unknown}" not in launcher_text:
                     raise AssertionError("launcher script must bind to the current run_id and print a final completion marker")
 
-            stop_code, stop_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH, {})
+            stop_code, stop_payload = _post_json(base_url + DEFAULT_SELLER_PORTAL_RECOVERY_STOP_PATH, {"run_id": run_id})
             if stop_code != 200 or stop_payload.get("status") != "stopped":
                 raise AssertionError(f"stop must cleanup recovery contour, got {stop_code} / {stop_payload}")
             if stop_payload.get("run_final_status") != "stopped":
@@ -431,6 +453,8 @@ def main() -> None:
             print("seller_portal_recovery_launcher_download: ok -> downloadable Mac launcher is attached")
             print("smoke-check passed")
         finally:
+            for viewer_patch in reversed(viewer_patches):
+                viewer_patch.stop()
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
