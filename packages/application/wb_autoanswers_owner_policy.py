@@ -93,6 +93,15 @@ def _clauses(text: str) -> list[str]:
     return [part for part in re.split(r"[.!?;:\n]+", str(text or "")) if _normalize(part)]
 
 
+def _stage_segments(text: str) -> list[str]:
+    return [
+        segment
+        for clause in _clauses(text)
+        for segment in re.split(r"\b(?=через\b|спустя\b|потом\b|позже\b)", clause, flags=re.IGNORECASE)
+        if _normalize(segment)
+    ]
+
+
 def _same_clause_stems(text: str, left: Sequence[Any], right: Sequence[Any]) -> bool:
     return any(
         _has_stem(_tokens(clause), left) and _has_stem(_tokens(clause), right)
@@ -160,7 +169,7 @@ def _sensor_failure(text: str, signals: Mapping[str, Any]) -> bool:
 
 
 def _arrival_damage(text: str, signals: Mapping[str, Any]) -> bool:
-    for clause in _clauses(text):
+    for clause in _stage_segments(text):
         words = _tokens(clause)
         arrival_indexes = [
             index
@@ -198,6 +207,52 @@ def _arrival_damage(text: str, signals: Mapping[str, Any]) -> bool:
                         continue
                 return True
     return False
+
+
+def _installation_breakage(text: str, signals: Mapping[str, Any]) -> bool:
+    for segment in _stage_segments(text):
+        normalized = _normalize(segment)
+        if not _has_stem(_tokens(segment), signals.get("breakage_stems") or []):
+            continue
+        denied_during = bool(re.search(
+            r"(?:во время установк|при установк|пока устанавливал).{0,30}не\s+(?:трес|трещ|разб|скол|лоп|повреж)", normalized
+        ))
+        during = not denied_during and bool(re.search(
+            r"(?:трес|трещ|разб|скол|лоп|повреж).{0,45}(?:во время установк|при установк|пока устанавливал)"
+            r"|(?:во время установк|при установк|пока устанавливал).{0,45}(?:трес|трещ|разб|скол|лоп|повреж)",
+            normalized,
+        ))
+        at_first_inspection = bool(re.search(
+            r"(?:перв\w*\s+осмотр|сразу\s+после\s+(?:наклей|поклей|установк)).{0,70}до\s+(?:начала\s+)?использования",
+            normalized,
+        ))
+        if during or at_first_inspection:
+            return True
+    return False
+
+
+def _failed_installation_remedy(text: str, signals: Mapping[str, Any]) -> bool:
+    normalized = _normalize(text)
+    if not _has_stem(_tokens(text), signals.get("installation_result_stems") or []):
+        return False
+    if re.search(r"\bне\s+(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал)\b", normalized):
+        return False
+    return bool(re.search(
+        r"(?:пробовал|пытал|приподнимал|разглаживал|протирал|очищал|выждал)"
+        r".{0,100}(?:не помог|остал|сохранил|все равно|по прежнему|не получилось|без результата)"
+        r"|(?:не помог|остал|сохранил|все равно|по прежнему|без результата)"
+        r".{0,100}(?:после|пробовал|приподнимал|разглаживал|протирал|очищал)",
+        normalized,
+    ))
+
+
+def _installed_dust_without_sticker(text: str) -> bool:
+    normalized = _normalize(text)
+    return bool(
+        re.search(r"пылинк|соринк", normalized)
+        and re.search(r"под.{0,30}(?:наклеенн|установленн|стекл)", normalized)
+        and re.search(r"(?:стикер|наклейк).{0,20}нет|нет.{0,20}(?:стикер|наклейк)", normalized)
+    )
 
 
 def _opened_or_incomplete(text: str, signals: Mapping[str, Any]) -> bool:
@@ -315,6 +370,12 @@ def classify_return_guard(content_json: Any) -> dict[str, Any]:
     breakage = _has_stem(words, signals.get("breakage_stems") or [])
     if _arrival_damage(text, signals):
         reasons.append("received_or_pre_use_damage")
+    if _installation_breakage(text, signals):
+        reasons.append("installation_breakage_before_use")
+    if _failed_installation_remedy(text, signals):
+        reasons.append("failed_installation_remedy")
+    if _installed_dust_without_sticker(text):
+        reasons.append("installed_dust_without_sticker")
 
     if _same_clause_stems(
         text,
