@@ -124,6 +124,7 @@ def source_recovery_checks(request):
 
 def sparse_scope_checks():
     """A successful neighboring funnel day is captured but never rewritten."""
+    from types import ModuleType
     from unittest.mock import patch
     source=observations()
     search_next=deepcopy(source[1])
@@ -157,7 +158,12 @@ def sparse_scope_checks():
         'search_analytics_raw':[
             {'date_from':'2026-09-11','date_to':'2026-09-11','nm_id':1},
             {'date_from':'2026-09-12','date_to':'2026-09-12','nm_id':2}]}
-    with patch('psycopg2.extras.execute_batch',side_effect=lambda cursor,sql,rows:batches.append((sql,rows))):
+    # This transaction fixture must not require an installed PostgreSQL driver.
+    pg=ModuleType('psycopg2');extras=ModuleType('psycopg2.extras')
+    extras.Json=lambda value:value
+    extras.execute_batch=lambda cursor,sql,rows:batches.append((sql,rows))
+    pg.extras=extras
+    with patch.dict(sys.modules,{'psycopg2':pg,'psycopg2.extras':extras}):
         WebSourcePublicationAdapter()._pg_replace(Connection(),request,
             [('sales_funnel_daily_raw','snapshot_date'),('search_analytics_raw','date_to')],images)
     assert [entry[1][0] for entry in statements]==[['2026-09-11'],['2026-09-11','2026-09-12']]
