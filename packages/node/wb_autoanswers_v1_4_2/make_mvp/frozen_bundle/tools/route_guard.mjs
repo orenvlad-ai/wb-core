@@ -47,8 +47,21 @@ function failedInstallationRemedy(classification) {
 function unavailableInstallationRemedy(classification) {
   const evidence = ["ADHESION", "BUBBLES_DUST", "INSTALL_GENERAL"]
     .map((code) => issueEvidence(classification, code)).join(" ");
-  return /не\s+прикле\p{L}*|откле\p{L}*|не\s+держ\p{L}*|пузыр\p{L}*/iu.test(evidence)
-    && /стекл\p{L}*.{0,70}(?:оба|обе|их|его)\s+(?:выброс|выкин|утилиз)\p{L}*|(?:выброс|выкин|утилиз)\p{L}*\s+стекл\p{L}*|стекл\p{L}*\s+(?:выброс|выкин|утилиз)\p{L}*/iu.test(evidence);
+  if (!/не\s+прикле\p{L}*|откле\p{L}*|не\s+держ\p{L}*|пузыр\p{L}*/iu.test(evidence)) return false;
+  const actions = evidence.matchAll(/(?:^|[^\p{L}])(выбросил[аи]?|выкинул[аи]?|утилизировал[аи]?|выброшен\p{L}*)(?!\p{L})/giu);
+  for (const action of actions) {
+    const start = action.index + action[0].lastIndexOf(action[1]);
+    const beforeClause = evidence.slice(0, start).split(/[.!?;:\n]/u).at(-1);
+    const afterClause = evidence.slice(start + action[1].length).split(/[.!?;:\n]/u)[0];
+    if (/(?:^|[^\p{L}])если(?!\p{L})|(?:^|[^\p{L}])не(?:\s+\p{L}+){0,2}\s*$/iu.test(beforeClause)) continue;
+    if (/^\s*бы(?:$|[^\p{L}])/iu.test(afterClause)) continue;
+    const nearby = evidence.slice(Math.max(0, start - 90), start);
+    const directlyNamed = /стекл\p{L}*\s*$/iu.test(nearby)
+      || /^\s*стекл\p{L}*(?!\p{L})/iu.test(evidence.slice(start + action[1].length));
+    const referenced = /(?:оба|обе|их|его)\s*$/iu.test(nearby) && /стекл\p{L}*/iu.test(nearby);
+    if (directlyNamed || referenced) return true;
+  }
+  return false;
 }
 
 function establishedIndependentReturn(classification) {
@@ -93,16 +106,16 @@ function unverifiedSensorAreaFit(classification) {
   return /(?:динамик|вырез|отверст|остров|айленд|island|камер)/iu.test(evidence)
     && /(?:не\s+совпад|несовпад|не\s+подход|смещен|смещён|не\s+по\s+центру)/iu.test(evidence)
     && namedModels.length < 2
-    && !/(?:не\s+слыш|плохо\s+слыш|звук|громк|слышимость|разговор|не\s+работа|не\s+распозна|разблокировк)/iu.test(evidence);
+    && !/(?:не\s+слыш|плохо\s+слыш|звук.{0,25}(?:не\s+работ|пропада|искаж|плох)|(?:пропада|искаж|плох).{0,25}звук|не\s+работа|не\s+распозна|разблокировк)/iu.test(evidence);
 }
 
 function isInstallationBreakage(classification) {
   const evidence = issueEvidence(classification, "INSTALL_BREAKAGE");
   const stage = "(?:(?:во время|при|в процессе)\\s+(?:\\p{L}+\\s+){0,2}(?:установк\\p{L}*|наклейк\\p{L}*|наклеиван\\p{L}*|поклейк\\p{L}*)|пока\\s+устанавливал\\p{L}*)";
-  const deniedDuringInstallation = new RegExp(`${stage}.{0,30}не\\s+(?:трес|трещ|разб|скол|лоп|повреж)|${stage}.{0,45}(?:трещин|скол|поврежден).{0,15}(?:нет|не\\s+было)`, "iu").test(evidence);
-  const duringInstallation = Boolean(evidence) && !deniedDuringInstallation
-    && new RegExp(`(?:трес|трещ|разб|скол|лоп|повреж).{0,45}${stage}|${stage}.{0,45}(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(evidence);
-  return duringInstallation;
+  return evidence.split(/[.!?;:]|(?:,\s*|\s+)но\s+/iu).some((segment) => {
+    const denied = new RegExp(`${stage}.{0,30}не\\s+(?:трес|трещ|разб|скол|лоп|повреж)|${stage}.{0,45}(?:трещин|скол|поврежден).{0,15}(?:нет|не\\s+было)`, "iu").test(segment);
+    return !denied && new RegExp(`(?:трес|трещ|разб|скол|лоп|повреж).{0,45}${stage}|${stage}.{0,45}(?:трес|трещ|разб|скол|лоп|повреж)`, "iu").test(segment);
+  });
 }
 
 function hasEarlyFirstInspection(classification) {
@@ -121,7 +134,7 @@ function installedDustWithoutSticker(classification) {
 
 function isPostUseBreakage(classification) {
   const evidence = issueEvidence(classification, "SPONTANEOUS_BREAKAGE");
-  if (/(?:при|во время|в процессе)\s+(?:\p{L}+\s+){0,2}(?:использован|эксплуатац)\p{L}*|(?:в течени[еи]|через)\s+.{0,45}(?:использован|эксплуатац)\p{L}*|после(?![^.!?]{0,40}до\s+(?:начала\s+)?использован).{0,45}(?:использован|эксплуатац)\p{L}*|(?:неделю|месяц|день)\s+пользовал/iu.test(evidence)) return true;
+  if (/(?:при|во время|в процессе)\s+(?:\p{L}+\s+){0,2}(?:использован|эксплуатац)\p{L}*|(?:в течени[еи]|через)(?![^.!?]{0,45}до\s+(?:начала\s+)?(?:использован|эксплуатац)).{0,45}(?:использован|эксплуатац)\p{L}*|после(?![^.!?]{0,45}до\s+(?:начала\s+)?(?:использован|эксплуатац)).{0,45}(?:использован|эксплуатац)\p{L}*|(?:неделю|месяц|день)\s+пользовал/iu.test(evidence)) return true;
   return /пользовал/iu.test(evidence)
     && !/не\s+пользовал(?:ся|ась)?\s+(?:телефоном|стеклом)|(?:телефоном|стеклом)\s+не\s+пользовал/iu.test(evidence);
 }

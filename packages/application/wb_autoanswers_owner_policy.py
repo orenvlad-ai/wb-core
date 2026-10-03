@@ -97,7 +97,7 @@ def _stage_segments(text: str) -> list[str]:
     return [
         segment
         for clause in _clauses(text)
-        for segment in re.split(r"\b(?=через\b|спустя\b|потом\b|позже\b)", clause, flags=re.IGNORECASE)
+        for segment in re.split(r"\b(?=через\b|спустя\b|потом\b|позже\b|но\b)", clause, flags=re.IGNORECASE)
         if _normalize(segment)
     ]
 
@@ -253,7 +253,7 @@ def _installation_breakage(text: str, signals: Mapping[str, Any]) -> bool:
             normalized,
         ))
         at_first_inspection = bool(re.search(
-            r"(?:перв\w*\s+осмотр|сразу\s+после\s+(?:наклей|поклей|установк)).{0,70}до\s+(?:начала\s+)?использования",
+            r"(?:перв\w*\s+осмотр|сразу\s+после\s+(?:наклей|поклей|установк)).{0,70}до\s+(?:начала\s+)?(?:использован\w*|эксплуатац\w*)",
             normalized,
         ))
         if during or at_first_inspection:
@@ -291,12 +291,20 @@ def _discarded_installation_result(text: str) -> bool:
     normalized = _normalize(text)
     if not re.search(r"не\s+прикле\w*|откле\w*|не\s+держ\w*|пузыр\w*", normalized):
         return False
-    return bool(re.search(
-        r"стекл\w*\s+(?:выброс\w*|выкин\w*|утилиз\w*)"
-        r"|(?:выброс\w*|выкин\w*|утилиз\w*)\s+стекл\w*"
-        r"|стекл\w*.{0,70}(?:оба|обе|их|его)\s+(?:выброс\w*|выкин\w*|утилиз\w*)",
-        normalized,
-    ))
+    source = str(text or "").lower()
+    for action in re.finditer(r"\b(?:выбросил[аи]?|выкинул[аи]?|утилизировал[аи]?|выброшен\w*)\b", source):
+        clause_before = re.split(r"[.!?;:\n]", source[:action.start()])[-1]
+        clause_after = re.split(r"[.!?;:\n]", source[action.end():], maxsplit=1)[0]
+        if re.search(r"\bесли\b|\bне(?:\s+\w+){0,2}\s*$", clause_before):
+            continue
+        if re.match(r"\s*бы\b", clause_after):
+            continue
+        nearby = source[max(0, action.start() - 90):action.start()]
+        direct = re.search(r"\bстекл\w*\s*$", nearby) or re.match(r"\s*стекл\w*\b", source[action.end():])
+        plural = re.search(r"\b(?:оба|обе|их|его)\s*$", nearby) and re.search(r"\bстекл\w*\b", nearby)
+        if direct or plural:
+            return True
+    return False
 
 
 def _installed_dust_without_sticker(text: str) -> bool:

@@ -24,6 +24,8 @@ class ReviewAlignmentTest(unittest.TestCase):
         self.assertIn("installation_breakage_before_use", later_use["hard_return_reasons"])
         for wording in ("Стекло треснуло в процессе наклейки", "При наклеивании стекло треснуло"):
             self.assertIn("installation_breakage_before_use", classify_return_guard({"text": wording})["hard_return_reasons"])
+        self.assertIn("installation_breakage_before_use", classify_return_guard({"text": "При первой наклейке трещин не было, но при повторной наклейке стекло треснуло"})["hard_return_reasons"])
+        self.assertNotIn("installation_breakage_before_use", classify_return_guard({"text": "При первой наклейке трещин не было"})["hard_return_reasons"])
 
     def test_week_of_use_is_explanation_and_first_inspection_is_return(self) -> None:
         post_use = classify_return_guard({"text": "Неделю пользовался, стекло треснуло"})
@@ -73,6 +75,8 @@ class ReviewAlignmentTest(unittest.TestCase):
     def test_discarded_product_is_unavailable_but_discarded_packaging_is_not(self) -> None:
         self.assertIn("installation_remedy_unavailable", classify_return_guard({"text": "Стекло не приклеилось. Оба выбросил"})["hard_return_reasons"])
         self.assertNotIn("installation_remedy_unavailable", classify_return_guard({"text": "Стекло не приклеилось, но выбросил только упаковку"})["hard_return_reasons"])
+        self.assertNotIn("installation_remedy_unavailable", classify_return_guard({"text": "Стекло не приклеилось. Я не выбросил стекло, могу разгладить край"})["hard_return_reasons"])
+        self.assertNotIn("installation_remedy_unavailable", classify_return_guard({"text": "Стекло не приклеилось. Если не получится разгладить, придётся выбросить стекло"})["hard_return_reasons"])
 
     def test_mechanism_and_negated_damage_are_separate(self) -> None:
         self.assertIn("installation_mechanism_failure", classify_return_guard({"text": "Язычок установочного бокса не поддавался"})["hard_return_reasons"])

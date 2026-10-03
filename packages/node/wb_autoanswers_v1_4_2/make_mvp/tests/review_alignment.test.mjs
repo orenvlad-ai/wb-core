@@ -35,6 +35,8 @@ test("installation damage returns without the retired guarantee video", () => {
   assert.equal(guarded(classification("INSTALL_BREAKAGE", "Стекло треснуло прямо в процессе наклейки", "seller_chat")).route, "wb_return");
   assert.equal(guarded(classification("INSTALL_BREAKAGE", "При наклеивании стекло треснуло", "seller_chat")).route, "wb_return");
   assert.equal(guarded(classification("INSTALL_BREAKAGE", "В процессе наклеивания появилась трещина", "seller_chat")).route, "wb_return");
+  assert.equal(guarded(classification("INSTALL_BREAKAGE", "При первой наклейке трещин не было, но при повторной наклейке стекло треснуло", "seller_chat")).route, "wb_return");
+  assert.notEqual(guarded(classification("INSTALL_BREAKAGE", "При первой наклейке трещин не было", "seller_chat")).route, "wb_return");
 });
 
 test("use stage, not elapsed hours, separates crack routes", () => {
@@ -51,6 +53,8 @@ test("use stage, not elapsed hours, separates crack routes", () => {
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло треснуло после 5 минут использования", "seller_chat")).route, "public_only");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло треснуло в течении 24 часов использования телефона", "seller_chat")).route, "public_only");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Треснуло при использование телефона", "seller_chat")).route, "public_only");
+  assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло треснуло после наклейки, до начала эксплуатации телефона", "public_only")).route, "seller_chat");
+  assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло треснуло после наклейки, до начала использования телефона", "public_only")).route, "seller_chat");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Треснуло спустя сутки, этап использования не описан", "seller_chat")).route, "seller_chat");
   assert.equal(guarded(classification("SPONTANEOUS_BREAKAGE", "Стекло пришло с трещиной в углу", "seller_chat")).route, "wb_return");
 });
@@ -92,6 +96,8 @@ test("one public bubble answer changes only after a failed remedy", () => {
 test("discarded glass cannot receive another installation remedy", () => {
   assert.equal(guarded(classification("ADHESION", "Стекло не приклеилось. Оба выбросил", "public_only")).route, "wb_return");
   assert.equal(guarded(classification("ADHESION", "Стекло не приклеилось, но выбросил только упаковку", "public_only")).route, "public_only");
+  assert.equal(guarded(classification("ADHESION", "Стекло не приклеилось. Я не выбросил стекло, могу разгладить край", "public_only")).route, "public_only");
+  assert.equal(guarded(classification("ADHESION", "Стекло не приклеилось. Если не получится разгладить, придётся выбросить стекло", "public_only")).route, "public_only");
 });
 
 test("cleaning consumables do not hide a missing glass or another defect", () => {
@@ -117,6 +123,7 @@ test("unknown model uses one chat invitation while established mismatch can retu
   assert.equal(guarded(classification("SIZE_FIT", "Стекло для iPhone 17, телефон iPhone 17, размер не подходит", "wb_return")).route, "wb_return");
   assert.equal(guarded(classification("SIZE_FIT", "Перепутала, взяла на Про Макс, а у меня просто Про и не подошло", "seller_chat")).route, "public_only");
   assert.equal(guarded(classification("EARPIECE", "Стекло хорошее, но область динамика и Айленд не совпадает", "public_only")).route, "seller_chat");
+  assert.equal(guarded(classification("SIZE_FIT", "Вырез динамика не совпадает, но звук нормальный. Модель телефона не указана", "public_only")).route, "seller_chat");
   assert.equal(guarded(classification("EARPIECE", "После установки разговорный динамик не слышно", "public_only")).route, "public_only");
   assert.equal(guarded(classification("SIZE_FIT", "Заказал для iPhone 17 Pro, на iPhone 17 Pro вырез не совпадает", "wb_return")).route, "wb_return");
 });
