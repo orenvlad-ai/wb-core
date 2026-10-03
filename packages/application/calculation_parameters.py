@@ -173,8 +173,9 @@ class CalculationParametersBlock:
         self.runtime = runtime
         self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.runtime.db_path) as conn:
-            ensure_calculation_parameters_schema(conn)
-            conn.commit()
+            if not _calculation_parameters_schema_ready(conn):
+                ensure_calculation_parameters_schema(conn)
+                conn.commit()
 
     def ensure_initial_version(
         self,
@@ -1195,6 +1196,21 @@ def ensure_calculation_parameters_schema(conn: sqlite3.Connection) -> None:
     )
     from packages.application.ready_publication import ensure_material_revisions
     ensure_material_revisions(conn)
+
+
+def _calculation_parameters_schema_ready(conn: sqlite3.Connection) -> bool:
+    from packages.application.ready_publication import material_revisions_schema_ready
+
+    expected = {
+        ("table", "sheet_vitrina_v1_calculation_parameter_versions"),
+        ("index", "calculation_parameters_by_effective_date"),
+        ("table", "sheet_vitrina_v1_proxy_targeted_recalc_queue"),
+    }
+    actual = {
+        (str(row[0]), str(row[1]))
+        for row in conn.execute("SELECT type,name FROM sqlite_master WHERE type IN ('table','index')")
+    }
+    return expected.issubset(actual) and material_revisions_schema_ready(conn)
 
 
 def _parameters_from_payload(payload: Mapping[str, Any]) -> ProxyParameters:

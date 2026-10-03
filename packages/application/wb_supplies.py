@@ -47,6 +47,7 @@ MAX_TRANSIT_COST_ENRICHMENT_LIMIT = 250
 MAX_FORCED_STATUS_REFRESH_ROWS = 12
 TRANSIT_COST_ENRICHMENT_FRESH_SECONDS = 24 * 60 * 60
 TRANSIT_COST_ACTIVE_RUN_STALE_SECONDS = 2 * 60 * 60
+TRANSIT_COST_WORKER_ADMISSION_STALE_SECONDS = 5 * 60
 TRANSIT_COST_RETRY_BACKOFF_SECONDS = {
     "lock_busy": 5 * 60,
     "session_expired": 30 * 60,
@@ -194,6 +195,8 @@ class WbSuppliesBlock:
         )
         self._run_lock = threading.Lock()
         self._transit_cost_run_lock = threading.Lock()
+        self._transit_cost_threads: dict[str, threading.Thread] = {}
+        self._transit_cost_uncertain_runs: dict[str, str] = {}
 
     def _ensure_ff_stock_wb_auto_writeoff_checkpoint(self, *, reason: str) -> dict[str, Any]:
         return self.ff_stock_ledger.ensure_wb_supply_auto_writeoff_checkpoint(
@@ -213,7 +216,9 @@ class WbSuppliesBlock:
         rows = [augment_supply_row_with_district(row, district_mapping) for row in rows]
         state = self.runtime.load_wb_supplies_sync_state()
         active_run = self.runtime.load_active_wb_supplies_sync_run()
-        active_transit_cost_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        active_transit_cost_run = self._effective_transit_cost_run(
+            self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        )
         cache_completeness = _cache_completeness(state, rows)
         after_non_size_filters = [
             row
@@ -799,7 +804,7 @@ class WbSuppliesBlock:
                     "contract_name": CONTRACT_NAME,
                     "contract_version": CONTRACT_VERSION,
                     "status": active_run.get("status") or "running",
-                    "accepted": True,
+                    "accepted": active_run.get("status") != "unknown",
                     "run_id": active_run.get("run_id"),
                     "candidate_count": active_run.get("candidate_count") or 0,
                     "started_at": active_run.get("started_at") or "",
@@ -808,37 +813,51 @@ class WbSuppliesBlock:
             candidates = self._select_transit_cost_enrichment_candidates(request)
             run_id = _new_transit_cost_run_id()
             queued_at = self.timestamp_factory()
-            run = self.runtime.create_wb_supply_transit_cost_enrichment_run(
-                run_id=run_id,
-                status="queued",
-                phase="queued",
-                started_at=queued_at,
-                candidate_count=len(candidates),
-                logs=[
-                    _run_log(
+            admitted = bool(candidates)
+            try:
+                run = self.runtime.create_wb_supply_transit_cost_enrichment_run(
+                    run_id=run_id,
+                    status="running" if admitted else "success",
+                    phase="worker_admitted" if admitted else "no_candidates",
+                    started_at=queued_at,
+                    candidate_count=len(candidates),
+                    completed_at=None if admitted else queued_at,
+                    logs=[_run_log(
                         queued_at,
-                        f"Seller Portal transit cost enrichment queued; candidates={len(candidates)}",
-                    )
-                ],
-            )
-            if not candidates:
-                completed = self.timestamp_factory()
-                run = self.runtime.update_wb_supply_transit_cost_enrichment_run(
-                    run_id,
-                    status="success",
-                    phase="no_candidates",
-                    updated_at=completed,
-                    completed_at=completed,
-                    logs=[_run_log(completed, "no missing transit cost candidates")],
+                        f"Seller Portal transit cost enrichment admitted; candidates={len(candidates)}",
+                    )],
                 )
-            else:
+            except Exception:
+                # A lost commit response is ambiguous. Read only this run_id;
+                # never submit another create or start a different WB operation.
+                existing = self.runtime.load_wb_supply_transit_cost_enrichment_run(run_id)
+                if not existing or str(existing.get("phase") or "") != (
+                    "worker_admitted" if admitted else "no_candidates"
+                ):
+                    raise
+                run = existing
+            if candidates:
                 thread = threading.Thread(
                     target=self._run_transit_cost_enrichment_guarded,
                     args=(run_id, candidates),
                     name=f"wb-transit-cost-{run_id[:8]}",
                     daemon=True,
                 )
-                thread.start()
+                self._transit_cost_threads[run_id] = thread
+                try:
+                    thread.start()
+                except Exception:
+                    self._transit_cost_threads.pop(run_id, None)
+                    failed_at = self.timestamp_factory()
+                    try:
+                        self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                            run_id, status="failed", phase="worker_start_failed",
+                            updated_at=failed_at, completed_at=failed_at,
+                            last_error="transit cost worker could not start",
+                        )
+                    except Exception:
+                        self._transit_cost_uncertain_runs[run_id] = "worker could not start; terminal status was not saved"
+                    raise
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -863,11 +882,12 @@ class WbSuppliesBlock:
         with self._transit_cost_run_lock:
             active_run = self._reconcile_stale_transit_cost_run()
             if active_run:
+                uncertain = active_run.get("status") == "unknown"
                 return {
                     "contract_name": CONTRACT_NAME,
                     "contract_version": CONTRACT_VERSION,
-                    "status": "single_flight_joined",
-                    "accepted": True,
+                    "status": "unknown" if uncertain else "single_flight_joined",
+                    "accepted": not uncertain,
                     "run_id": str(active_run.get("run_id") or ""),
                     "candidate_count": int(active_run.get("candidate_count") or 0),
                     "active_run": active_run,
@@ -878,10 +898,11 @@ class WbSuppliesBlock:
             queued_at = self.timestamp_factory()
             self.runtime.create_wb_supply_transit_cost_enrichment_run(
                 run_id=run_id,
-                status="queued",
-                phase="queued",
+                status="running" if candidates else "success",
+                phase="worker_admitted" if candidates else "no_candidates",
                 started_at=queued_at,
                 candidate_count=len(candidates),
+                completed_at=None if candidates else queued_at,
                 logs=[_run_log(queued_at, f"autonomous transit cost batch queued; candidates={len(candidates)}")],
             )
         if candidates:
@@ -900,15 +921,7 @@ class WbSuppliesBlock:
                     logs=[_run_log(failed_at, f"autonomous transit collector failed: {error}")],
                 )
         else:
-            completed_at = self.timestamp_factory()
-            run = self.runtime.update_wb_supply_transit_cost_enrichment_run(
-                run_id,
-                status="success",
-                phase="no_candidates",
-                updated_at=completed_at,
-                completed_at=completed_at,
-                logs=[_run_log(completed_at, "no due transit cost candidates")],
-            )
+            run = self.runtime.load_wb_supply_transit_cost_enrichment_run(run_id) or {}
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -966,26 +979,33 @@ class WbSuppliesBlock:
 
     def _reconcile_stale_transit_cost_run(self) -> dict[str, Any] | None:
         active_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
-        if not active_run:
-            return None
-        updated_at = str(active_run.get("updated_at") or active_run.get("started_at") or "")
-        if not _is_timestamp_older_than(
-            updated_at,
-            now_text=self.timestamp_factory(),
-            age_seconds=TRANSIT_COST_ACTIVE_RUN_STALE_SECONDS,
-        ):
-            return active_run
-        failed_at = self.timestamp_factory()
-        self.runtime.update_wb_supply_transit_cost_enrichment_run(
-            str(active_run.get("run_id") or ""),
-            status="failed",
-            phase="orphan_reconciled",
-            updated_at=failed_at,
-            completed_at=failed_at,
-            last_error="collector process ended before durable completion",
-            logs=[_run_log(failed_at, "stale active transit collector reconciled as failed")],
+        # A stale run may have received a WB response before its terminal DB
+        # write failed. Do not silently turn uncertain work into a new fetch.
+        return self._effective_transit_cost_run(active_run)
+
+    def _effective_transit_cost_run(self, run: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not run or str(run.get("status") or "") not in TRANSIT_COST_RUN_ACTIVE_STATUSES:
+            return run
+        run_id = str(run.get("run_id") or "")
+        uncertain = self._transit_cost_uncertain_runs.get(run_id)
+        thread = self._transit_cost_threads.get(run_id)
+        phase = str(run.get("phase") or "")
+        age_limit = (
+            TRANSIT_COST_WORKER_ADMISSION_STALE_SECONDS
+            if phase in {"queued", "worker_admitted"}
+            else TRANSIT_COST_ACTIVE_RUN_STALE_SECONDS
         )
-        return None
+        stale = (thread is None or not thread.is_alive()) and _is_timestamp_older_than(
+            str(run.get("updated_at") or run.get("started_at") or ""),
+            now_text=self.timestamp_factory(), age_seconds=age_limit,
+        )
+        if not uncertain and not stale:
+            return run
+        return {
+            **run, "durable_status": run.get("status"), "status": "unknown",
+            "phase": "collector_outcome_unknown",
+            "last_error": uncertain or "collector outcome is unknown; no WB operation was retried",
+        }
 
     def get_transit_cost_enrichment_status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
         run_id = str((params or {}).get("run_id") or "").strip()
@@ -997,6 +1017,7 @@ class WbSuppliesBlock:
                 or self.runtime.load_latest_wb_supply_transit_cost_enrichment_run()
             )
         )
+        run = self._effective_transit_cost_run(run)
         lock_status: dict[str, Any] = {}
         try:
             from apps.seller_portal_automation_guard import current_lock_status
@@ -1093,7 +1114,15 @@ class WbSuppliesBlock:
                 counters["waiting_backoff"] += 1
             else:
                 counters["retry_due"] += 1
-        active_run = self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        active_run = self._effective_transit_cost_run(
+            self.runtime.load_active_wb_supply_transit_cost_enrichment_run()
+        )
+        uncertain_run = bool(active_run and active_run.get("status") == "unknown")
+        running_run = bool(active_run and not uncertain_run)
+        if uncertain_run:
+            last_error_status = "collector_outcome_unknown"
+            last_error = str(active_run.get("last_error") or "")
+            last_error_at = str(active_run.get("updated_at") or active_run.get("started_at") or "")
         auth_status = "unknown"
         if last_error_status in {"session_expired", "auth_required"} and last_error_at >= last_success_at:
             auth_status = "invalid"
@@ -1101,7 +1130,7 @@ class WbSuppliesBlock:
             auth_status = "valid"
         route_status = (
             "checking"
-            if active_run
+            if running_run
             else "unavailable"
             if last_error_status == "route_unavailable" and last_error_at >= last_success_at
             else "degraded"
@@ -1111,11 +1140,16 @@ class WbSuppliesBlock:
             if last_success_at
             else "unknown"
         )
-        latest_run = self.runtime.load_latest_wb_supply_transit_cost_enrichment_run()
+        latest_run = self._effective_transit_cost_run(
+            self.runtime.load_latest_wb_supply_transit_cost_enrichment_run()
+        )
         latest_run_status = str((latest_run or {}).get("status") or "")
         collector_status = (
+            "unknown"
+            if uncertain_run or latest_run_status == "unknown"
+            else
             "running"
-            if active_run
+            if running_run
             else "unavailable"
             if last_error_status == "collector_unavailable" and last_error_at >= last_success_at
             else "error"
@@ -1140,7 +1174,7 @@ class WbSuppliesBlock:
             and collector_status == "healthy"
             and freshness_status == "fresh"
             and complete
-        ) else "checking" if active_run else "degraded"
+        ) else "checking" if running_run else "degraded"
         return {
             **counters,
             "complete": complete,
@@ -1355,19 +1389,33 @@ class WbSuppliesBlock:
         except Exception as exc:  # noqa: BLE001 - background job must persist controlled failure.
             failed_at = self.timestamp_factory()
             error = _safe_error_message(exc)
-            self.runtime.update_wb_supply_transit_cost_enrichment_run(
-                run_id,
-                status="failed",
-                phase="failed",
-                updated_at=failed_at,
-                completed_at=failed_at,
-                last_error=error,
-                logs=[_run_log(failed_at, error)],
-            )
+            try:
+                self.runtime.update_wb_supply_transit_cost_enrichment_run(
+                    run_id,
+                    status="failed",
+                    phase="failed",
+                    updated_at=failed_at,
+                    completed_at=failed_at,
+                    last_error=error,
+                    logs=[_run_log(failed_at, error)],
+                )
+            except Exception:
+                # The admission row remains visible as uncertain after a
+                # restart; a failed terminal write must not kill this worker
+                # with a misleading durable "running" success claim.
+                self._transit_cost_uncertain_runs[run_id] = (
+                    f"worker failed: {error}; terminal status was not saved"
+                )
+        finally:
+            with self._transit_cost_run_lock:
+                self._transit_cost_threads.pop(run_id, None)
 
     def _run_transit_cost_enrichment(self, run_id: str, candidates: list[Mapping[str, Any]]) -> dict[str, Any]:
         started_at = self.timestamp_factory()
         logs = [_run_log(started_at, f"Seller Portal transit cost enrichment started; candidates={len(candidates)}")]
+        # Persist the actual fetch phase before contacting WB. If this small
+        # write is locked, no browser request is made; the durable admission
+        # becomes an explicit unknown/orphan instead of a false queued job.
         self.runtime.update_wb_supply_transit_cost_enrichment_run(
             run_id,
             status="running",

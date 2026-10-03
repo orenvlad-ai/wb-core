@@ -460,16 +460,17 @@ def _check_runtime_merge_and_background_job() -> None:
             candidate_count=1,
         )
         block.timestamp_factory = lambda: "2026-06-29T03:00:01Z"
-        replacement = block.collect_transit_costs({"limit": 10, "force": False})
+        calls_before = len(block.transit_cost_source.calls)
+        blocked = block.collect_transit_costs({"limit": 10, "force": False})
         orphan = runtime.load_wb_supply_transit_cost_enrichment_run("orphaned-transit-run") or {}
         if (
-            orphan.get("status") != "failed"
-            or orphan.get("phase") != "orphan_reconciled"
-            or replacement.get("status") == "single_flight_joined"
+            blocked.get("status") != "unknown"
+            or blocked.get("accepted") is not False
+            or (blocked.get("active_run") or {}).get("durable_status") != "running"
+            or orphan.get("status") != "running"
+            or len(block.transit_cost_source.calls) != calls_before
         ):
-            raise AssertionError(
-                "stale process-owned runs must be reconciled before the next autonomous batch"
-            )
+            raise AssertionError("uncertain orphan must block automatic WB replay")
 
 
 def _wait_run(block: WbSuppliesBlock, run_id: str) -> dict[str, Any]:

@@ -22944,12 +22944,13 @@
         if (!finalJob || finalJob.status !== "success") {
           throw new Error((finalJob && (finalJob.error || finalJob.status)) || "seller session check job failed");
         }
-        applySellerSessionResult(finalJob.result || {});
+        const sessionResult = finalJob.result || {};
+        applySellerSessionResult(sessionResult);
         renderSellerSessionIndicator();
         setStatusBadge({
-          label: state.sellerSession.statusLabel || "Проверено",
-          tone: state.sellerSession.tone,
-          detail: "Seller Portal session check завершён"
+          label: sessionResult.health_persistence_warning ? "Проверено · статус не сохранён" : (state.sellerSession.statusLabel || "Проверено"),
+          tone: sessionResult.health_persistence_warning ? "warning" : state.sellerSession.tone,
+          detail: sessionResult.health_persistence_warning || "Seller Portal session check завершён"
         });
         renderLoadingTable(((state.composition || {}).activity_surface || {}).loading_table || {});
       } catch (error) {

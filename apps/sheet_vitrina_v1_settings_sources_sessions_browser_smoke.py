@@ -41,6 +41,7 @@ class _SettingsServer(AbstractContextManager):
     def __init__(self) -> None:
         self.calls: dict[tuple[str, str], int] = {}
         self.buyer_checked = False
+        self.seller_health_warning = False
         self.server = ThreadingHTTPServer(("127.0.0.1", _reserve_free_port()), self._handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
@@ -90,6 +91,11 @@ class _SettingsServer(AbstractContextManager):
         now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         if path == DEFAULT_SOURCES_SESSIONS_PATH:
             payload = _sources_payload(now)
+            if self.seller_health_warning:
+                payload["seller_portal"]["authorization"].update({
+                    "health_persistence_status": "probe_history",
+                    "health_persistence_warning": "Проверка входа завершена, но кеш статуса источника не обновлён.",
+                })
             if self.buyer_checked:
                 payload["wb_buyer"]["capability"] = {
                     "status": "observed", "valid": False, "wallet_price": 139,
@@ -98,7 +104,10 @@ class _SettingsServer(AbstractContextManager):
                 }
             return payload
         if path == DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH:
-            return {"status": "session_valid_canonical", "organization_confirmed": True, "checked_at": now}
+            result = {"status": "session_valid_canonical", "organization_confirmed": True, "checked_at": now}
+            if self.seller_health_warning:
+                result["health_persistence_warning"] = "Проверка входа завершена, но кеш статуса источника не обновлён."
+            return result
         if path == DEFAULT_WB_BUYER_SESSION_CHECK_PATH:
             self.buyer_checked = True
             return {"capability_status": "observed", "capability_valid": False,
@@ -263,6 +272,14 @@ def main() -> None:
                 raise AssertionError("identical Seller checks must be single-flight")
             if server.calls.get(("POST", DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH), 0) != 1:
                 raise AssertionError("Seller check must include one exact supply/cost route probe")
+
+            server.seller_health_warning = True
+            page.locator('[data-source-check="seller"]').click()
+            page.wait_for_function("() => document.querySelector('#sellerSourceBadge')?.innerText.includes('статус не сохранён')")
+            if "Проверка маршрута supply/cost отложена" not in page.locator("#sellerSourceError").inner_text():
+                raise AssertionError("a successful Seller probe with locked cache must show the deferred transit warning")
+            if server.calls.get(("POST", DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH), 0) != 1:
+                raise AssertionError("locked cache must not launch another transit collector")
 
             if page.locator('[data-source-check="buyer"]').is_disabled():
                 raise AssertionError("Buyer price check must use the isolated durable Chrome source")
