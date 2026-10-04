@@ -17,6 +17,7 @@ from .contracts import CaseState, ClaimSnapshot, Context, Event, PhotoObservatio
 from .core import decide, observe, PHOTO_TASKS
 from .extraction import EXTRACTION_SCHEMA, SYSTEM_PROMPT, validate_extraction, omit_empty_buyer_metadata
 from .wording import render
+from .repair import REPAIR_PROTOCOL, REPAIR_PROMPT, repair_schema, validate_delta
 
 
 def stable_json(value):
@@ -43,6 +44,7 @@ class ReceiptLedger:
         os.chmod(path, 0o600)
         self.db.execute("CREATE TABLE IF NOT EXISTS calls (key TEXT PRIMARY KEY, state TEXT NOT NULL, reserved REAL NOT NULL, charged REAL NOT NULL, result TEXT, error TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS checkpoints (key TEXT PRIMARY KEY, result TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS extraction_repairs (origin_key TEXT PRIMARY KEY, repair_key TEXT NOT NULL UNIQUE, metadata TEXT NOT NULL, validation_state TEXT NOT NULL DEFAULT 'pending', validation_error TEXT)")
         self.db.commit()
         self.lock = threading.RLock()
         self.max_calls, self.max_cost = max_calls, max_cost
@@ -73,6 +75,51 @@ class ReceiptLedger:
         with self.lock, self.db:
             self.db.execute("UPDATE calls SET state='done',charged=?,result=? WHERE key=?", (charged, stable_json(result), key))
 
+    def reserve_repair(self, key, estimate, binding):
+        """Atomically reserve the sole dispatch for an origin and the shared budget."""
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                origin = self.db.execute("SELECT state,result FROM calls WHERE key=?", (binding["origin_request_key"],)).fetchone()
+                if not origin or origin[0] != "done" or not origin[1]:
+                    raise BudgetStop("repair requires a known completed origin; do not resend")
+                origin_data = json.loads(origin[1]).get("data")
+                if not isinstance(origin_data, dict) or fingerprint(origin_data) != binding["invalid_response_sha256"]:
+                    raise ValueError("repair origin response binding mismatch")
+                existing = self.db.execute("SELECT repair_key,metadata FROM extraction_repairs WHERE origin_key=?", (binding["origin_request_key"],)).fetchone()
+                if existing:
+                    if json.loads(existing[1])["initial_input_sha256"] != binding["initial_input_sha256"]:
+                        raise ValueError("repair origin input binding mismatch")
+                    item = self.db.execute("SELECT state,result FROM calls WHERE key=?", (existing[0],)).fetchone()
+                    self.db.rollback()
+                    if item and item[0] == "done":
+                        return json.loads(item[1])
+                    raise BudgetStop("origin repair already started/unknown; read result only")
+                if self.db.execute("SELECT 1 FROM calls WHERE key=?", (key,)).fetchone():
+                    raise ValueError("repair key exists without origin marker")
+                count, charged = self.db.execute("SELECT COUNT(*),COALESCE(SUM(charged),0) FROM calls").fetchone()
+                if count >= self.max_calls or charged + estimate > self.max_cost:
+                    raise BudgetStop("call/cost cap reached before repair dispatch")
+                self.db.execute("INSERT INTO calls VALUES (?,?,?,?,NULL,NULL)", (key, "started", estimate, estimate))
+                self.db.execute("INSERT INTO extraction_repairs(origin_key,repair_key,metadata) VALUES (?,?,?)", (binding["origin_request_key"], key, stable_json(binding)))
+                self.db.commit()
+            except Exception:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                raise
+        return None
+
+    def repair_validation(self, origin_key, valid, error=None):
+        with self.lock, self.db:
+            self.db.execute("UPDATE extraction_repairs SET validation_state=?,validation_error=? WHERE origin_key=? AND validation_state='pending'", ("valid" if valid else "invalid", error, origin_key))
+
+    def repair_snapshot(self, origin_key):
+        with self.lock:
+            row = self.db.execute("SELECT r.repair_key,r.metadata,r.validation_state,r.validation_error,c.state,c.charged FROM extraction_repairs r JOIN calls c ON c.key=r.repair_key WHERE r.origin_key=?", (origin_key,)).fetchone()
+        if not row:
+            return None
+        return {"repair_request_key": row[0], "binding": json.loads(row[1]), "validation_state": row[2], "validation_error": row[3], "call_state": row[4], "charged_or_reserved_usd": row[5]}
+
     def fail(self, key, reason):
         with self.lock, self.db:
             self.db.execute("UPDATE calls SET state='unknown',error=? WHERE key=?", (reason, key))
@@ -84,13 +131,15 @@ class ReceiptLedger:
     def totals(self):
         with self.lock:
             rows = self.db.execute("SELECT state,charged,result FROM calls").fetchall()
+            repairs = self.db.execute("SELECT c.state,c.charged,c.result,r.validation_state FROM extraction_repairs r JOIN calls c ON c.key=r.repair_key").fetchall()
         usage = {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
         for _, _, data in rows:
             if data:
                 for key, value in json.loads(data).get("accounting", {}).items():
                     if key in usage:
                         usage[key] += value
-        return {"calls_reserved": len(rows), "calls_completed": sum(state == "done" for state, _, _ in rows), "calls_unknown": sum(state != "done" for state, _, _ in rows), "cache_write_breakdown_missing_calls": sum(bool(data) and not json.loads(data).get("accounting", {}).get("cache_write_reported", False) for _, _, data in rows), "standard_estimated_cost_usd": sum(json.loads(data).get("accounting", {}).get("standard_estimated_cost_usd", 0) for _, _, data in rows if data), "charged_or_reserved_usd": sum(amount for _, amount, _ in rows), **usage}
+        repair_usage = {"repair_calls_reserved": len(repairs), "repair_calls_completed": sum(state == "done" for state, _, _, _ in repairs), "repair_calls_unknown": sum(state != "done" for state, _, _, _ in repairs), "repair_validation_valid": sum(validation == "valid" for _, _, _, validation in repairs), "repair_validation_invalid": sum(validation == "invalid" for _, _, _, validation in repairs), "repair_validation_pending": sum(validation == "pending" for _, _, _, validation in repairs), "repair_charged_or_reserved_usd": sum(amount for _, amount, _, _ in repairs), "repair_usage": {key: sum(json.loads(data).get("accounting", {}).get(key, 0) for _, _, data, _ in repairs if data) for key in usage}}
+        return {"calls_reserved": len(rows), "calls_completed": sum(state == "done" for state, _, _ in rows), "calls_unknown": sum(state != "done" for state, _, _ in rows), "cache_write_breakdown_missing_calls": sum(bool(data) and not json.loads(data).get("accounting", {}).get("cache_write_reported", False) for _, _, data in rows), "standard_estimated_cost_usd": sum(json.loads(data).get("accounting", {}).get("standard_estimated_cost_usd", 0) for _, _, data in rows if data), "charged_or_reserved_usd": sum(amount for _, amount, _ in rows), **usage, **repair_usage}
 
 
 def account_usage(usage, rates):
@@ -120,7 +169,9 @@ class ResponsesClient:
         if not self.key:
             raise ValueError("OPENAI_API_KEY environment variable required")
 
-    def structured(self, kind, instructions, input_data, schema, image=None):
+    def structured(self, kind, instructions, input_data, schema, image=None, repair_binding=None):
+        if repair_binding is not None and kind != "buyer_facts_repair":
+            raise ValueError("repair reservation is only for buyer_facts_repair")
         serialized = stable_json(input_data)
         semantic_size = len(serialized.encode()) + len(instructions.encode())
         if semantic_size > self.max_input_bytes:
@@ -138,12 +189,15 @@ class ResponsesClient:
             "text": {"format": {"type": "json_schema", "name": kind, "strict": True, "schema": schema}},
         }
         identity = {"policy": POLICY_VERSION, "model": self.model, "reasoning": self.reasoning, "prompt": fingerprint(instructions), "schema": schema, "input": input_data, "image_sha256": hashlib.sha256(image[0]).hexdigest() if image else None, "max_output_tokens": self.max_output_tokens, "rates": self.rates}
+        if repair_binding is not None:
+            repair_binding = {**repair_binding, "repair_request_settings": {"model": self.model, "reasoning": self.reasoning, "prompt_sha256": fingerprint(instructions), "schema_sha256": fingerprint(schema), "rates": self.rates, "max_output_tokens": self.max_output_tokens}}
+            identity["repair_binding"] = repair_binding
         cache_key = fingerprint(identity)
         # UTF-8 byte count is conservative for text tokenization. Explicit image
         # reservation uses model-specific cap supplied by operator, never free media.
         reserved_input = semantic_size + len(stable_json(schema).encode()) + 4096 + image_tokens
         estimate = (reserved_input * max(self.rates["input"], self.rates["cache_write"], self.rates["cached"]) + self.max_output_tokens * self.rates["output"]) / 1_000_000
-        cached = self.ledger.reserve(cache_key, estimate)
+        cached = self.ledger.reserve_repair(cache_key, estimate, repair_binding) if repair_binding is not None else self.ledger.reserve(cache_key, estimate)
         if cached is not None:
             return cached
         body = json.dumps(request, ensure_ascii=False).encode()
@@ -306,15 +360,33 @@ def run_dialogue(record, client, ledger, media, settings):
             response = {"data": {"facts": [], "wording_variant": 0}, "cache_key": None,
                         "accounting": {"input_tokens": 0, "output_tokens": 0}, "cost_usd": 0}
             extraction_mode = "deterministic_metadata_only"
-        accepted_data, fact_omissions = omit_empty_buyer_metadata(response["data"], delta)
-        facts, variant = validate_extraction(accepted_data, delta, {key: value for key, value in known_events.items() if key in state.processed_events or key in {source.event_id for source in delta}})
+        eligible_events = {key: value for key, value in known_events.items() if key in state.processed_events or key in {source.event_id for source in delta}}
+        extraction_repair = None
+        try:
+            accepted_data, fact_omissions, facts, variant = validate_delta(response["data"], delta, eligible_events)
+        except ValueError as initial_error:
+            if extraction_mode != "llm_textual_sources" or not getattr(settings, "repair_invalid_extraction", False):
+                raise
+            binding = {"protocol": REPAIR_PROTOCOL, "origin_request_key": response["cache_key"], "invalid_response_sha256": fingerprint(response["data"]), "initial_input_sha256": fingerprint(payload)}
+            repair_payload = {**binding, "initial_request": payload, "invalid_response": response["data"], "validation_error": str(initial_error)}
+            audit = {**binding, "initial_validation_error": str(initial_error), "initial_answer_valid": False}
+            try:
+                repaired = client.structured("buyer_facts_repair", REPAIR_PROMPT, repair_payload, repair_schema(delta), repair_binding=binding)
+                try:
+                    # The repair enum contains delta IDs only; enforce it locally
+                    # as well instead of relying solely on provider strict mode.
+                    accepted_data, fact_omissions, facts, variant = validate_delta(repaired["data"], delta, {source.event_id: source for source in delta})
+                except ValueError as repair_error:
+                    ledger.repair_validation(response["cache_key"], False, str(repair_error))
+                    raise ValueError("one extraction repair remains invalid: " + str(repair_error)) from None
+            except Exception as repair_stop:
+                repair_stop.extraction_repair = {**audit, "origin_marker": ledger.repair_snapshot(response["cache_key"]), "repair_valid": False}
+                raise
+            ledger.repair_validation(response["cache_key"], True)
+            extraction_repair = {"initial_validation_error": str(initial_error), "initial_invalid_response_sha256": binding["invalid_response_sha256"], "initial_request_key": response["cache_key"], "initial_input_sha256": binding["initial_input_sha256"], "repaired_response_sha256": fingerprint(repaired["data"]), "repair_request_key": repaired["cache_key"], "repair_usage": repaired["accounting"], "repair_cost_usd": repaired["cost_usd"], "origin_marker": ledger.repair_snapshot(response["cache_key"]), "initial_answer_valid": False, "repair_valid": True, "semantic_correctness_verified": False}
         for source in delta:
             associated = [fact for fact in facts if any(ev.event_id == source.event_id for ev in fact.evidence)]
             state = observe(state, source, associated)
-        # Retain older-source re-extraction that is not attached to delta once only.
-        prior_only = [fact for fact in facts if all(ev.event_id not in {source.event_id for source in delta} for ev in fact.evidence)]
-        if prior_only:
-            raise ValueError("extractor must emit delta-supported facts; older evidence only for interpretation")
         context = context_from(item.get("context") or record.get("context"), observed_product=purchase_product)
         decision = decide(state, context)
         media_checks, media_missing = [], []
@@ -354,12 +426,12 @@ def run_dialogue(record, client, ledger, media, settings):
             "actual_prefix_sha256": fingerprint(prefix), "policy_version": POLICY_VERSION,
             "decision": decision.to_dict(), "candidate_reply": render(state, decision, context, variant),
             "purchase_scope": current_purchase, "purchase_ambiguous": purchase_ambiguous, "observed_product_context": purchase_product, "product_context_event_id": product_sources.get(current_purchase),
-            "state_before": state_before, "state": state.to_dict(), "extracted_facts": accepted_data["facts"], "extraction_mode": extraction_mode, "metadata_fact_omissions": fact_omissions, "metadata_fact_omission_count": len(fact_omissions), "extraction_usage": response["accounting"], "extraction_cost_usd": response["cost_usd"], "fact_extraction_cache_key": response["cache_key"],
+            "state_before": state_before, "state": state.to_dict(), "extracted_facts": accepted_data["facts"], "extraction_mode": extraction_mode, "metadata_fact_omissions": fact_omissions, "metadata_fact_omission_count": len(fact_omissions), "extraction_usage": response["accounting"], "extraction_cost_usd": response["cost_usd"], "fact_extraction_cache_key": response["cache_key"], "extraction_repair": extraction_repair, "initial_extraction_valid": extraction_mode == "llm_textual_sources" and extraction_repair is None,
             "media_checks": media_checks, "media_unavailable_ids": media_missing,
             "candidate_fingerprint": candidate_fingerprint(), "model": client.model, "reasoning": client.reasoning,
-            "no_counterfactual_followup": True, "external_actions_executed": 0,
+            "no_counterfactual_followup": True, "external_actions_executed": 0, "extraction_repair_enabled": bool(getattr(settings, "repair_invalid_extraction", False)),
         }
-        ledger.checkpoint(fingerprint({"prefix": prefix, "model": client.model, "reasoning": client.reasoning, "policy": POLICY_VERSION, "candidate": candidate_fingerprint()}), result)
+        ledger.checkpoint(fingerprint({"prefix": prefix, "model": client.model, "reasoning": client.reasoning, "policy": POLICY_VERSION, "candidate": candidate_fingerprint(), "extraction_repair_enabled": result["extraction_repair_enabled"]}), result)
         rows.append(result)
         states_by_purchase[current_purchase] = state
         queues_by_purchase[current_purchase] = []
@@ -373,6 +445,7 @@ def parser():
     result.add_argument("--output-dir", required=True)
     result.add_argument("--limit-dialogues", type=int, help="pilot subset; identical requests reuse the same receipt ledger")
     result.add_argument("--execute", action="store_true", help="otherwise validate/plan only, no network")
+    result.add_argument("--repair-invalid-extraction", action="store_true", help="one separately capped repair per known completed invalid extraction; no retries of unknown calls")
     result.add_argument("--allow-heldout", action="store_true")
     result.add_argument("--model", default="gpt-6-luna")
     result.add_argument("--reasoning", default="low", choices=("minimal", "low", "medium", "high"))
@@ -415,7 +488,7 @@ def main(argv=None):
         if args.limit_dialogues <= 0:
             raise ValueError("positive dialogue limit required")
         records = records[:args.limit_dialogues]
-    summary = {"policy_version": POLICY_VERSION, "candidate_fingerprint": candidate_fingerprint(), "model": args.model, "reasoning": args.reasoning, "dataset_sha256": hashlib.sha256(Path(args.dataset).read_bytes()).hexdigest(), "dialogues": len(records), "buyer_checkpoints": sum(event["role"] == "buyer" for record in records for event in record["events"]), "evaluation_mode": "actual_prefix_next_turn", "rates_usd_per_million": rates, "caps": {"calls": args.max_calls, "cost_usd": args.max_cost_usd}, "external_actions_executed": 0}
+    summary = {"policy_version": POLICY_VERSION, "candidate_fingerprint": candidate_fingerprint(), "model": args.model, "reasoning": args.reasoning, "dataset_sha256": hashlib.sha256(Path(args.dataset).read_bytes()).hexdigest(), "dialogues": len(records), "buyer_checkpoints": sum(event["role"] == "buyer" for record in records for event in record["events"]), "evaluation_mode": "actual_prefix_next_turn", "rates_usd_per_million": rates, "caps": {"calls": args.max_calls, "cost_usd": args.max_cost_usd}, "external_actions_executed": 0, "extraction_repair_enabled": args.repair_invalid_extraction, "extraction_repair_protocol": REPAIR_PROTOCOL if args.repair_invalid_extraction else None}
     if not args.execute:
         for record in records:
             if record.get("schema_version") != "wbc0115.dialogue.v1" or record.get("split") not in ("dev", "holdout"):
@@ -439,7 +512,7 @@ def main(argv=None):
         try:
             return run_dialogue(record, client, ledger, media, args), None
         except Exception as exc:
-            return [], {"dialogue_id": record["dialogue_id"], "error_type": type(exc).__name__, "message": str(exc) if isinstance(exc, (BudgetStop, ValueError)) else "inference/processing stopped; inspect private receipt", "external_actions_executed": 0}
+            return [], {"dialogue_id": record["dialogue_id"], "error_type": type(exc).__name__, "message": str(exc) if isinstance(exc, (BudgetStop, ValueError)) else "inference/processing stopped; inspect private receipt", "external_actions_executed": 0, "extraction_repair": getattr(exc, "extraction_repair", None)}
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         for completed, error in pool.map(run, records):
             rows.extend(completed)
@@ -450,11 +523,15 @@ def main(argv=None):
     with ledger.lock:
         journal_rows = [json.loads(value) for value, in ledger.db.execute("SELECT result FROM checkpoints")]
     current_ids = {record["dialogue_id"] for record in records}
-    rows = [row for row in journal_rows if row["dialogue_id"] in current_ids and row.get("candidate_fingerprint") == candidate_fingerprint() and row.get("model") == args.model and row.get("reasoning") == args.reasoning]
+    rows = [row for row in journal_rows if row["dialogue_id"] in current_ids and row.get("candidate_fingerprint") == candidate_fingerprint() and row.get("model") == args.model and row.get("reasoning") == args.reasoning and row.get("extraction_repair_enabled", False) == args.repair_invalid_extraction]
     (out / "results.jsonl").write_text("".join(stable_json(row) + "\n" for row in rows))
     ordinary = [row for row in rows if row["ordinary_accuracy_eligible"] and not row["historical_policy_conflict"]]
     full_completed = sum(sum(row["dialogue_id"] == record["dialogue_id"] for row in rows) == sum(event["role"] == "buyer" for event in record["events"]) for record in records)
+    summary["successful_initial_extraction_checkpoints"] = sum(row.get("initial_extraction_valid", False) for row in rows)
+    summary["repaired_extraction_checkpoints"] = sum(row.get("extraction_repair") is not None for row in rows)
+    summary["repair_stop_dialogues"] = sum(error.get("extraction_repair") is not None for error in errors)
     summary.update({"mode": "executed_offline", "completed_checkpoints": len(rows), "deterministic_metadata_only_checkpoints": sum(row.get("extraction_mode") == "deterministic_metadata_only" for row in rows), "metadata_fact_omissions": sum(row.get("metadata_fact_omission_count", 0) for row in rows), "checkpoints_with_metadata_fact_omissions": sum(row.get("metadata_fact_omission_count", 0) > 0 for row in rows), "ordinary_checkpoints": len(ordinary), "historical_conflict_checkpoints": len(rows) - len(ordinary), "fully_completed_dialogues": full_completed, "dialogues_with_any_checkpoint": len({row["dialogue_id"] for row in rows}), "errors": errors, "usage": ledger.totals(), "no_automatic_accuracy_claim": True})
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    ledger.db.close()
     return 1 if errors else 0
