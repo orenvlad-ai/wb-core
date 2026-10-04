@@ -10240,6 +10240,7 @@ class SheetVitrinaV1OperatorJobStore:
         self._lock = threading.Lock()
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
+        self._warehouse_pending_picker: threading.Thread | None = None
         self._snapshot_markers = None
         self._snapshot_job_markers: dict[str, Any] = {}
 
@@ -10252,17 +10253,51 @@ class SheetVitrinaV1OperatorJobStore:
 
     def resume_warehouse_pending(self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
                                  runner: Callable[..., dict[str, Any]]) -> threading.Thread | None:
-        from packages.application.business_data_procedure_admission import business_write_is_blocked
-        if business_write_is_blocked(runtime_dir) or not journal.needs_pickup():
-            return None
+        from packages.application.business_data_procedure_admission import (
+            MaintenanceAdmissionBlocked, business_write_is_blocked,
+        )
         def pick() -> None:
             # Busy live owners are never reclassified. Retry only admission, not effects.
-            while not business_write_is_blocked(runtime_dir) and journal.needs_pickup():
-                self.start_warehouse_if_idle(runtime_dir=runtime_dir, journal=journal, runner=runner)
-                time.sleep(5.0)
-        thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
-        thread.start()
-        return thread
+            try:
+                while True:
+                    if business_write_is_blocked(runtime_dir):
+                        # Keep startup/resume intent alive without touching the
+                        # journal or holding a writer lease during maintenance.
+                        time.sleep(5.0)
+                        continue
+                    with self._lock:
+                        if not journal.needs_pickup():
+                            # Retire atomically with resume's alive check so a
+                            # later acceptance cannot reuse an exiting picker.
+                            self._warehouse_pending_picker = None
+                            return
+                    try:
+                        self.start_warehouse_if_idle(runtime_dir=runtime_dir, journal=journal, runner=runner)
+                    except MaintenanceAdmissionBlocked as exc:
+                        if str(exc) != "skipped_maintenance":
+                            raise
+                        # A barrier may race the raw check before SH admission.
+                        # Keep this durable request's waiter alive for resume.
+                        time.sleep(5.0)
+                        continue
+                    time.sleep(5.0)
+            finally:
+                with self._lock:
+                    if self._warehouse_pending_picker is threading.current_thread():
+                        self._warehouse_pending_picker = None
+        with self._lock:
+            if self._warehouse_pending_picker is not None and self._warehouse_pending_picker.is_alive():
+                return self._warehouse_pending_picker
+            if not business_write_is_blocked(runtime_dir) and not journal.needs_pickup():
+                return None
+            thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
+            self._warehouse_pending_picker = thread
+            try:
+                thread.start()
+            except BaseException:
+                self._warehouse_pending_picker = None
+                raise
+            return thread
 
     def start_warehouse_if_idle(
         self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
