@@ -430,6 +430,24 @@ class IndependentReviewRegressions(unittest.TestCase):
 
 
 class PilotSemanticRegressions(unittest.TestCase):
+    def test_greeting_comes_from_seller_history_without_model_fact(self):
+        s = observe(CaseState("synthetic"), Event("b", "buyer", "Здравствуйте"), [])
+        self.assertFalse(s.greeted)
+        s = observe(s, Event("s", "seller", "Здравствуйте, поможем разобраться"), [])
+        self.assertTrue(s.greeted)
+        s = observe(s, Event("b2", "buyer", "Как изменить отзыв?"), [])
+        self.assertTrue(s.greeted)
+
+    def test_selection_question_intro_does_not_invent_physical_misfit(self):
+        s = state("size", ordered_model="iPhone 15 Pro", buyer_intent="selection_return", return_requested="true")
+        d = decide(s, ctx())
+        self.assertEqual(d.template, "phone_model")
+        reply = render(s, d, ctx())
+        self.assertTrue(reply.startswith("Здравствуйте."))
+        self.assertIn("модель телефона", reply)
+        self.assertNotIn("размер стекла не подошёл", reply)
+        self.assertNotIn("Очень жаль", reply)
+
     def test_past_video_inability_does_not_skip_current_alignment_photo(self):
         for scope in (None, "unknown", "past_video", "current_video", "past_photo"):
             with self.subTest(scope=scope):

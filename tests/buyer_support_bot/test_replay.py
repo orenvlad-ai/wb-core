@@ -9,7 +9,8 @@ from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 
 from packages.domain.buyer_support_bot.contracts import Event
-from packages.domain.buyer_support_bot.extraction import validate_extraction, EXTRACTION_SCHEMA
+from packages.domain.buyer_support_bot.extraction import (validate_extraction, EXTRACTION_SCHEMA,
+    SYSTEM_PROMPT, SELLER_FACT_KEYS, BUYER_FACT_KEYS)
 from packages.domain.buyer_support_bot.replay import (BudgetStop, ReceiptLedger, ResponsesClient,
     account_usage, context_from, image_input, load_media, main, run_dialogue)
 
@@ -68,6 +69,32 @@ class ExtractionBoundary(unittest.TestCase):
                 self.assertTrue(all(fact.evidence[0].quote == text for fact in facts))
                 with self.assertRaises(ValueError):
                     self.check([item("a", key, value, "b", text) for key, value in values], [Event("b", "seller", text)])
+
+    def test_greeting_is_outside_model_schema_and_validator(self):
+        keys = EXTRACTION_SCHEMA["properties"]["facts"]["items"]["properties"]["key"]["enum"]
+        self.assertNotIn("greeted", keys)
+        for role in ("buyer", "seller"):
+            with self.subTest(role=role), self.assertRaises(ValueError):
+                self.check([item("a", "greeted", "true", "e", "Здравствуйте")], [Event("e", role, "Здравствуйте")])
+        self.assertIn("Seller-only keys: " + json.dumps(SELLER_FACT_KEYS), SYSTEM_PROMPT)
+        self.assertIn(json.dumps(BUYER_FACT_KEYS), SYSTEM_PROMPT)
+
+    def test_product_title_cannot_supply_buyer_quote_but_order_text_can(self):
+        metadata_title = "Защитное стекло на iPhone 14 Pro с автоустановкой"
+        buyer = Event("b", "buyer", "Здравствуйте, стекло разбилось")
+        with self.assertRaisesRegex(ValueError, "exact observed quote"):
+            self.check([item("a", "ordered_model", "iPhone 14 Pro", "b", metadata_title)], [buyer])
+        text = "Купил стекло на iPhone 14 Pro"
+        facts, _ = self.check([item("a", "ordered_model", "iPhone 14 Pro", "b", text)], [Event("b", "buyer", text)])
+        self.assertEqual((facts[0].key, facts[0].value), ("ordered_model", "iPhone 14 Pro"))
+        self.assertIn("NOT event.text", SYSTEM_PROMPT)
+
+    def test_only_seller_can_supply_historical_action_quote(self):
+        for role in ("buyer", "system"):
+            with self.subTest(role=role), self.assertRaises(ValueError):
+                self.check([item("a", "photo_requested", "true", "e", "Пришлите фото")], [Event("e", role, "Пришлите фото")])
+        facts, _ = self.check([item("a", "photo_requested", "true", "e", "Пришлите фото")], [Event("e", "seller", "Пришлите фото")])
+        self.assertEqual(facts[0].key, "photo_requested")
 
 
 class LedgerAndResponses(unittest.TestCase):

@@ -119,7 +119,7 @@ def render(state: CaseState, decision: Decision, context: Context, variant: int 
         if topic == "bubbles" and facts.get("bubble_type") == "dust":
             topic = "dust"
         prefix = "Здравствуйте. "
-        if topic in SYMPATHY and decision.action not in ("complete", "request_review", "confirmed_return"):
+        if topic in SYMPATHY and facts.get("buyer_intent") != "selection_return" and decision.action not in ("complete", "request_review", "confirmed_return"):
             prefix += "Очень жаль, что " + SYMPATHY[topic] + ". "
         text = prefix + text
     # Variation changes politeness only; technical/confirmed templates stay fixed.
