@@ -76,5 +76,10 @@ def main() -> int:
     return 1 if result.get("status") == "failed" else 0
 
 
+from packages.application.business_data_procedure_admission import guard_cli
+
+main = guard_cli(default_runtime='.runtime/registry_upload')(main)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

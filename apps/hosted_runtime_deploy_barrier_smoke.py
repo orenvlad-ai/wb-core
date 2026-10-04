@@ -104,6 +104,15 @@ def main() -> None:
             else:
                 raise AssertionError("ambiguous FBS policy must block deploy")
 
+        observer = "wb-core-change-registry-observer.timer"
+        safety = "wb-core-root-storage-policy.timer"
+        _write_policy(runtime_dir, desired=True)
+        with patch("apps.hosted_runtime_deploy_barrier.barrier_status", return_value={"active": True, "window_kind": "maintenance_pause"}), \
+             patch("apps.hosted_runtime_deploy_barrier.unit_state", return_value={"UnitFileState": "disabled", "ActiveState": "inactive"}):
+            paused = reconcile(runtime_dir=runtime_dir, enable=[observer, safety, OTHER_UNIT], restart=[observer, safety, OTHER_UNIT], mutate=False)
+        assert paused["preserved_data_writer_timers"] == [observer]
+        assert paused["enabled_units"] == [safety, OTHER_UNIT]
+        assert paused["restarted_units"] == [safety, OTHER_UNIT]
     print("hosted_runtime_deploy_barrier_smoke: OK")
 
 

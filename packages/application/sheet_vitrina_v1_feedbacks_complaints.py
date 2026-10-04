@@ -7,6 +7,8 @@ path.
 
 from __future__ import annotations
 
+from packages.application.business_data_procedure_admission import admitted_thread
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -294,7 +296,7 @@ class JsonFileFeedbacksComplaintsStatusSyncJobStore:
             self._write_payload_unlocked(store_payload)
             started_snapshot = _public_sync_job(job, already_running=False)
 
-        thread = threading.Thread(
+        thread = admitted_thread(self.runtime_dir,
             target=self._run,
             args=(run_id, request_payload, runner),
             daemon=True,
@@ -512,7 +514,7 @@ class JsonFileFeedbacksComplaintsSubmitJobStore:
             self._write_payload_unlocked(store_payload)
             started_snapshot = _public_submit_job(job, already_running=False)
 
-        thread = threading.Thread(
+        thread = admitted_thread(self.runtime_dir,
             target=self._run,
             args=(run_id, request_payload, runner),
             daemon=True,

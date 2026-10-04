@@ -9,7 +9,7 @@ import json
 import re
 from packages.application.search_cluster_cleaner import new_id, timestamp, plus_seconds
 from packages.application.change_registry import ChangeRegistryRepository
-from packages.application.business_data_write_barrier import barrier_status
+from packages.application.business_data_procedure_admission import business_write_is_blocked
 from packages.contracts.search_cluster_cleaner import CleanerError, Target, canonical, digest, query_hash
 from packages.adapters.search_cluster_cleaner_wb import WriteResponse
 
@@ -51,7 +51,7 @@ class CleanerWriter:
                         from packages.application.search_cluster_cleaner_daily import policy_ready
                         permitted,reason=policy_ready(self.app.store.registry.runtime_dir)
                         if not permitted:raise CleanerError('schedule_paused',reason,423)
-        if barrier_status(self.app.store.registry.runtime_dir)['active']:raise CleanerError('maintenance','Обслуживание блокирует новые записи',423)
+        if business_write_is_blocked(self.app.store.registry.runtime_dir):raise CleanerError('maintenance','Обслуживание блокирует новые записи',423)
         self.session.check(c,self.app.account,self.generation)
         return s,run
 

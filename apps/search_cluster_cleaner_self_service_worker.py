@@ -203,7 +203,10 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                     heartbeat=threading.Thread(target=heartbeat_while_busy,args=(admission_dir,stop,
                                                 'waiting_wb' if waiting else 'busy'),daemon=True)
                     heartbeat.start()
-                    try:busy=ready_cycle(coordinator,batch_coordinator,daily)
+                    try:
+                        from packages.application.business_data_procedure_admission import admitted_write
+                        with admitted_write(runtime_dir):
+                            busy=ready_cycle(coordinator,batch_coordinator,daily)
                     finally:
                         stop.set()
                         heartbeat.join()
@@ -212,7 +215,8 @@ def run(*,runtime_dir:Path,env_file:Path,admission_dir:Path,poll_seconds:float=2
                 except Exception as exc:
                     # The exact intent stays durable. Report the failure while
                     # the supervisor keeps this process available for recovery.
-                    report_health(admission_dir,'storage_wait',type(exc).__name__)
+                    from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+                    report_health(admission_dir,'maintenance' if isinstance(exc,MaintenanceAdmissionBlocked) else 'storage_wait',type(exc).__name__)
                     idle=False
             if idle:
                 try:wake.refresh(sequence_before_cycle,environment_before_cycle)

@@ -697,11 +697,12 @@ def _build_handler(
                 if not is_sqlite_contention_error(exc):
                     raise
                 self.close_connection = True
-                _write_json_response(
-                    self,
-                    HTTPStatus.SERVICE_UNAVAILABLE,
-                    {"error": exc},
-                )
+                _write_json_response(self, HTTPStatus.SERVICE_UNAVAILABLE, {"error": exc})
+            finally:
+                admission = getattr(self, "_maintenance_admission", None)
+                if admission is not None:
+                    self._maintenance_admission = None
+                    admission.__exit__(None, None, None)
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urllib_parse.urlparse(self.path)
@@ -3227,6 +3228,19 @@ def _build_handler(
                 return
             if not _ensure_web_auth(self, parsed):
                 return
+            if parsed.path == "/v1/business-data-maintenance/activity":
+                if not _ensure_admin_role(self, parsed.path):
+                    return
+                _write_json_response(self, HTTPStatus.OK, entrypoint.handle_business_data_maintenance_activity_request())
+                return
+            if (parsed.path in {
+                DEFAULT_WB_BUYER_SESSION_CHECK_PATH, DEFAULT_SELLER_PORTAL_SESSION_CHECK_PATH,
+                DEFAULT_WB_BUYER_RECOVERY_LAUNCHER_PATH, DEFAULT_SELLER_PORTAL_RECOVERY_LAUNCHER_PATH,
+            } or parsed.path.startswith(DEFAULT_SHEET_PRICES_UPLOAD_TASK_PATH + "/")
+                or (parsed.path in {search_cluster_cleaner_http.PREFIX + "/targets", search_cluster_cleaner_http.PREFIX + "/manual-batches/eligibility"}
+                    and urllib_parse.parse_qs(parsed.query).get("refresh") == ["1"])):
+                if not _ensure_business_data_write_allowed(self, parsed.path):
+                    return
             if search_cluster_cleaner_http.handles(parsed.path):
                 search_cluster_cleaner_http.dispatch(
                     self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
@@ -6012,6 +6026,8 @@ def _build_handler(
             if not _ensure_web_auth(self, parsed):
                 return
             if search_cluster_cleaner_http.handles(parsed.path):
+                if not _ensure_business_data_write_allowed(self, parsed.path):
+                    return
                 search_cluster_cleaner_http.dispatch(
                     self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
                     authenticated_user=_authenticated_web_user,
@@ -6241,6 +6257,8 @@ def _build_handler(
             if not _ensure_web_auth(self, parsed):
                 return
             if search_cluster_cleaner_http.handles(parsed.path):
+                if not _ensure_business_data_write_allowed(self, parsed.path):
+                    return
                 search_cluster_cleaner_http.dispatch(
                     self, parsed, entrypoint.cleaner_web, auth_config=_web_auth_config,
                     authenticated_user=_authenticated_web_user,
@@ -8368,9 +8386,22 @@ def _ensure_business_data_write_allowed(
     handler: BaseHTTPRequestHandler,
     path: str,
 ) -> bool:
+    if getattr(handler, "_maintenance_admission", None) is not None:
+        return True
     status = _public_business_data_write_barrier_status(handler)
     if not status["active"]:
-        return True
+        from packages.application.business_data_procedure_admission import admitted_write
+        admission = admitted_write(_barrier_runtime_dir(handler))
+        try:
+            admission.__enter__()
+        except Exception:
+            status = _public_business_data_write_barrier_status(handler)
+            if not status["active"]:
+                status = {**status, "active": True, "phase": "invalid", "status": "invalid_fail_closed",
+                          "message": "Режим обслуживания: допуск к записи не подтверждён"}
+        else:
+            handler._maintenance_admission = admission
+            return True
     request_id = str(
         handler.headers.get("X-Request-ID", "") or f"wbcore-{uuid4().hex}"
     ).strip()[:160]
@@ -8437,7 +8468,7 @@ def _inject_business_data_write_barrier_ui(
     background: #fffbeb; color: #92400e; border-bottom: 1px solid #fcd34d;
   }}
   #wbCoreMaintenanceBarrier[data-tone="danger"] {{
-    background: #7f1d1d; color: #fff; border-bottom: 1px solid #450a0a;
+    background: #fffbeb; color: #92400e; border-bottom: 1px solid #fcd34d;
   }}
   body.wb-core-maintenance-held {{ padding-top: 52px !important; }}
   [data-wb-core-maintenance-disabled="1"] {{
@@ -8462,9 +8493,14 @@ def _inject_business_data_write_barrier_ui(
   let consecutiveFailures = 0;
   let timer = null;
   let controller = null;
-  const controls = () => document.querySelectorAll(
-    'button, input:not([type="hidden"]), select, textarea'
-  );
+  const controls = () => Array.from(document.querySelectorAll(
+    '[data-wb-core-write], form[method="post" i] button, form[method="post" i] input, form[method="post" i] textarea'
+  )).filter((element) => {{
+    const form = element.closest("form");
+    if (!form) return true;
+    const action = new URL(form.action || location.href, location.href).pathname;
+    return !["/login", "/logout"].includes(action);
+  }});
 
   const normalize = (payload) => {{
     if (!payload || payload.contract_name !== "wb_core_business_data_write_barrier_v1") {{
@@ -8475,7 +8511,7 @@ def _inject_business_data_write_barrier_ui(
     const phase = String(payload.phase || "");
     if (payload.active) {{
       if (status === "invalid_fail_closed" && phase === "invalid") {{
-        return {{active: true, tone: "danger", message: String(payload.message || "")}};
+        return {{active: true, tone: "warning", message: String(payload.message || "")}};
       }}
       if (status !== "active" || !["acquiring", "held", "restoring"].includes(phase)) {{
         return null;
@@ -8507,7 +8543,7 @@ def _inject_business_data_write_barrier_ui(
       banner.textContent = status.message || (
         status.tone === "danger"
           ? "Техническое обслуживание: состояние защиты не подтверждено, изменения временно заблокированы."
-          : "Короткое техническое обслуживание: чтение доступно, изменения временно заблокированы."
+          : "Режим обслуживания — доступен только просмотр. Изменения данных и запуск обработок временно отключены"
       );
     }} else {{
       delete banner.dataset.tone;
@@ -10307,7 +10343,7 @@ def _required_section_for_path(path: str) -> str:
         DEFAULT_PARTNER_REPORT_PREFIX + "/"
     ):
         return WEB_AUTH_SECTION_REPORTS
-    if normalized == DEFAULT_SETTINGS_UI_PATH:
+    if normalized in {DEFAULT_SETTINGS_UI_PATH, "/v1/business-data-maintenance/activity"}:
         return WEB_AUTH_SECTION_SETTINGS
     if normalized == DEFAULT_INSTRUCTIONS_UI_PATH:
         return WEB_AUTH_SECTION_INSTRUCTIONS
@@ -10440,7 +10476,7 @@ def _allowed_roles_for_path(path: str) -> set[str]:
         return supply_operator_roles
     if normalized == DEFAULT_SETTINGS_USERS_PATH or normalized.startswith(DEFAULT_SETTINGS_USERS_PATH + "/"):
         return {WEB_AUTH_ROLE_ADMIN}
-    if normalized == DEFAULT_SETTINGS_UI_PATH:
+    if normalized in {DEFAULT_SETTINGS_UI_PATH, "/v1/business-data-maintenance/activity"}:
         return full_operator_roles
     if normalized == DEFAULT_INSTRUCTIONS_UI_PATH:
         return full_operator_roles

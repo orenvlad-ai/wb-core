@@ -280,6 +280,8 @@ class FinanceCanonicalStoreBindings:
 
 def main() -> None:
     config = load_registry_upload_http_entrypoint_config()
+    from packages.application.business_data_procedure_admission import initialize_admission
+    initialize_admission(config.runtime_dir)
     activated_at_override = os.environ.get("REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE", "").strip()
     bindings: FinanceCanonicalStoreBindings | None = None
     server = None

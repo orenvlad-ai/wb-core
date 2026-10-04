@@ -1220,7 +1220,7 @@ class RegistryUploadHttpEntrypoint:
             writer_registry=writer_registry,
         )
         self.sheet_load_runner = sheet_load_runner or load_sheet_vitrina_ready_snapshot_via_clasp
-        self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory)
+        self.operator_jobs = SheetVitrinaV1OperatorJobStore(timestamp_factory=self.activated_at_factory, runtime_dir=self.runtime.runtime_dir)
         self.warehouse_update_journal = WarehouseUpdateJournal(
             db_path=self.runtime.db_path,
             runtime_dir=self.runtime.runtime_dir,
@@ -2233,7 +2233,12 @@ class RegistryUploadHttpEntrypoint:
         return self.spp_tester_block.start(payload, actor=actor)
 
     def handle_sheet_prices_spp_test_status_request(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        return self.spp_tester_block.status(params or {})
+        from packages.application.business_data_procedure_admission import admitted_status
+        return admitted_status(
+            self.runtime.runtime_dir,
+            live_reader=lambda: self.spp_tester_block.status(params or {}),
+            cached_reader=lambda: self.spp_tester_block.status(params or {}, reconcile=False),
+        )
 
     def handle_sheet_prices_spp_test_restore_request(self, payload: Mapping[str, Any], *, actor: str = "") -> dict[str, Any]:
         return self.spp_tester_block.restore(payload, actor=actor)
@@ -2283,11 +2288,14 @@ class RegistryUploadHttpEntrypoint:
         run_id: str | None = None,
         with_probe: bool = True,
     ) -> dict[str, Any]:
-        return self.buyer_session_recovery.read_status(
-            launcher_download_path=launcher_download_path,
-            run_id=run_id,
-            with_probe=with_probe,
-        )
+        from packages.application.business_data_procedure_admission import admitted_status
+        def read(probe):
+            return self.buyer_session_recovery.read_status(
+                launcher_download_path=launcher_download_path, run_id=run_id, with_probe=probe,
+            )
+        if not with_probe:
+            return read(False)
+        return admitted_status(self.runtime.runtime_dir, live_reader=lambda: read(True), cached_reader=lambda: read(False))
 
     def handle_wb_buyer_session_recovery_start_request(
         self,
@@ -2528,6 +2536,35 @@ class RegistryUploadHttpEntrypoint:
     def _business_maintenance_schedules(self) -> Any:
         return _EntrypointMaintenanceSchedules(self)
 
+    def handle_business_data_maintenance_activity_request(self) -> dict[str, Any]:
+        from packages.application.business_data_procedure_admission import admission_idle
+        from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import ACTIVE_RUN_STATUSES
+        from packages.contracts.wb_spp_tester import SPP_TEST_ACTIVE_STATUSES
+        web = self.handle_sheet_web_vitrina_auto_schedules_request()
+        feedback = self.handle_sheet_feedbacks_auto_complaints_schedules_request()
+        def intent(payload):
+            return {"schedules": [
+                {key: value for key, value in item.items() if not key.startswith(("last_", "next_")) and key not in {"updated_at", "created_at", "is_due", "due_at"}}
+                for item in payload.get("schedules", []) if isinstance(item, Mapping)
+            ], "schedule_policy": payload.get("schedule_policy", {})}
+        jobs = self.operator_jobs.maintenance_live_jobs()
+        jobs.extend({"operation": "feedback_complaints", "job_id": str(run.get("run_id") or "")}
+                    for run in feedback.get("recent_runs", [])
+                    if str(run.get("status") or "") in ACTIVE_RUN_STATUSES)
+        spp = self.spp_tester_block.status({}, reconcile=False)
+        for store in (self.feedbacks_complaints_block.status_sync_jobs, self.feedbacks_complaints_block.submit_jobs):
+            with store._lock:
+                active = store._active_job(store._read_payload_unlocked())
+            if active:
+                jobs.append({"operation": "feedback_manual", "job_id": str(active.get("run_id") or "")})
+        spp_job = spp.get("active_job") or spp.get("job") or {}
+        if isinstance(spp_job, Mapping) and spp_job.get("status") in SPP_TEST_ACTIVE_STATUSES:
+            jobs.append({"operation": "spp", "job_id": str(spp_job.get("job_id") or "")})
+        return {"contract_name": "business_data_maintenance_activity_v1", "complete": True,
+                "admission_ready": admission_idle(self.runtime.runtime_dir)["ready"],
+                "runtime_dir": str(self.runtime.runtime_dir.resolve()), "pid": os.getpid(), "uid": os.geteuid(),
+                "jobs": jobs, "feature_intent": {"web_vitrina": intent(web), "feedback": intent(feedback)}}
+
     def handle_auto_updates_status_request(self) -> dict[str, Any]:
         from apps.business_data_maintenance import (
             SystemdClient,
@@ -2552,6 +2589,7 @@ class RegistryUploadHttpEntrypoint:
             maintenance_hold,
             maintenance_restore,
             maintenance_status,
+            legacy_hold_preflight,
             update_direct_timer_process_desired_state,
             update_process_desired_state,
         )
@@ -2578,6 +2616,8 @@ class RegistryUploadHttpEntrypoint:
                 f"stale policy revision: expected {expected_revision}, "
                 f"current {current_revision}"
             )
+        if action == "set_process" or (action == "set_master" and payload.get("desired") is False):
+            legacy_hold_preflight(current)
         if action == "set_process":
             process_key = str(payload.get("process_key") or "").strip()
             desired = payload.get("desired")
@@ -3329,17 +3369,21 @@ class RegistryUploadHttpEntrypoint:
         run_id: str | None = None,
         with_probe: bool = True,
     ) -> dict[str, Any]:
-        try:
-            return self.seller_portal_recovery.read_status(
-                launcher_download_path=launcher_download_path,
-                run_id=run_id,
-                with_probe=with_probe,
-            )
-        except TypeError:
-            return self.seller_portal_recovery.read_status(
-                launcher_download_path=launcher_download_path,
-                run_id=run_id,
-            )
+        from packages.application.business_data_procedure_admission import admitted_status
+        def read(probe):
+            try:
+                return self.seller_portal_recovery.read_status(
+                    launcher_download_path=launcher_download_path, run_id=run_id, with_probe=probe,
+                )
+            except TypeError:
+                if not probe:
+                    raise RuntimeError("cached seller recovery status is unavailable during maintenance")
+                return self.seller_portal_recovery.read_status(
+                    launcher_download_path=launcher_download_path, run_id=run_id,
+                )
+        if not with_probe:
+            return read(False)
+        return admitted_status(self.runtime.runtime_dir, live_reader=lambda: read(True), cached_reader=lambda: read(False))
 
     def handle_seller_portal_recovery_start_request(
         self,
@@ -10187,13 +10231,16 @@ class SheetVitrinaV1OperatorJobError(RuntimeError):
 
 
 class SheetVitrinaV1OperatorJobStore:
-    def __init__(self, timestamp_factory: Callable[[], str]) -> None:
+    def __init__(self, timestamp_factory: Callable[[], str], runtime_dir: Path | None = None) -> None:
+        self.runtime_dir = runtime_dir
+        self._maintenance_leases: dict[str, Any] = {}
         self.timestamp_factory = timestamp_factory
         self._jobs: dict[str, SheetVitrinaV1OperatorJob] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
+        self._warehouse_pending_picker: threading.Thread | None = None
         self._snapshot_markers = None
         self._snapshot_job_markers: dict[str, Any] = {}
 
@@ -10206,16 +10253,51 @@ class SheetVitrinaV1OperatorJobStore:
 
     def resume_warehouse_pending(self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
                                  runner: Callable[..., dict[str, Any]]) -> threading.Thread | None:
-        if not journal.needs_pickup():
-            return None
+        from packages.application.business_data_procedure_admission import (
+            MaintenanceAdmissionBlocked, business_write_is_blocked,
+        )
         def pick() -> None:
             # Busy live owners are never reclassified. Retry only admission, not effects.
-            while journal.needs_pickup():
-                self.start_warehouse_if_idle(runtime_dir=runtime_dir, journal=journal, runner=runner)
-                time.sleep(5.0)
-        thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
-        thread.start()
-        return thread
+            try:
+                while True:
+                    if business_write_is_blocked(runtime_dir):
+                        # Keep startup/resume intent alive without touching the
+                        # journal or holding a writer lease during maintenance.
+                        time.sleep(5.0)
+                        continue
+                    with self._lock:
+                        if not journal.needs_pickup():
+                            # Retire atomically with resume's alive check so a
+                            # later acceptance cannot reuse an exiting picker.
+                            self._warehouse_pending_picker = None
+                            return
+                    try:
+                        self.start_warehouse_if_idle(runtime_dir=runtime_dir, journal=journal, runner=runner)
+                    except MaintenanceAdmissionBlocked as exc:
+                        if str(exc) != "skipped_maintenance":
+                            raise
+                        # A barrier may race the raw check before SH admission.
+                        # Keep this durable request's waiter alive for resume.
+                        time.sleep(5.0)
+                        continue
+                    time.sleep(5.0)
+            finally:
+                with self._lock:
+                    if self._warehouse_pending_picker is threading.current_thread():
+                        self._warehouse_pending_picker = None
+        with self._lock:
+            if self._warehouse_pending_picker is not None and self._warehouse_pending_picker.is_alive():
+                return self._warehouse_pending_picker
+            if not business_write_is_blocked(runtime_dir) and not journal.needs_pickup():
+                return None
+            thread = threading.Thread(target=pick, daemon=True, name="warehouse-pending-picker")
+            self._warehouse_pending_picker = thread
+            try:
+                thread.start()
+            except BaseException:
+                self._warehouse_pending_picker = None
+                raise
+            return thread
 
     def start_warehouse_if_idle(
         self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
@@ -10321,7 +10403,8 @@ class SheetVitrinaV1OperatorJobStore:
                         # handshake expires. Recover it in this process too.
                         self.resume_warehouse_pending(runtime_dir=runtime_dir, journal=journal, runner=runner)
 
-            thread = threading.Thread(target=worker, daemon=True)
+            from packages.application.business_data_procedure_admission import admitted_thread
+            thread = admitted_thread(runtime_dir, target=worker, daemon=True)
             thread.start()
             observed = ready.wait(timeout=max(0.0, deadline - time.monotonic()))
             with self._lock:
@@ -10342,6 +10425,8 @@ class SheetVitrinaV1OperatorJobStore:
         operation: str,
         runner: Callable[[OperatorLogEmitter], dict[str, Any]],
     ) -> dict[str, Any]:
+        from packages.application.business_data_procedure_admission import AdmissionLease
+        lease = AdmissionLease(self.runtime_dir, independent=True) if self.runtime_dir is not None else None
         job_id = uuid4().hex
         job = SheetVitrinaV1OperatorJob(
             job_id=job_id,
@@ -10355,15 +10440,24 @@ class SheetVitrinaV1OperatorJobStore:
             daemon=True,
         )
         with self._lock:
+            if lease is not None:
+                self._maintenance_leases[job_id] = lease
             self._jobs[job_id] = job
             self._threads[job_id] = thread
             if self._snapshot_markers is not None:
                 self._snapshot_job_markers[job_id] = self._snapshot_markers.start(job_id, operation)
         try:
             thread.start()
-        except BaseException:
+        except BaseException as exc:
+            with self._lock:
+                job.status = "error"
+                job.error = "thread start failed: " + type(exc).__name__
+                job.finished_at = self.timestamp_factory()
             if self._snapshot_markers is not None:
                 self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
+            failed_lease = self._maintenance_leases.pop(job_id, None)
+            if failed_lease is not None:
+                failed_lease.close()
             raise
         return self.get(job_id)
 
@@ -10452,6 +10546,17 @@ class SheetVitrinaV1OperatorJobStore:
         )[1]
         return selected.snapshot()
 
+    def maintenance_live_jobs(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {"job_id": job.job_id, "operation": job.operation, "status": job.status}
+                for job_id, job in self._jobs.items()
+                if job.status in {"accepted", "running"}
+                and (self._threads.get(job_id) is not None)
+                and (self._threads[job_id].is_alive() or
+                     (job.status == "running" and self._threads[job_id].ident is None))
+            ]
+
     def active_job(self, *, operations: tuple[str, ...]) -> dict[str, Any] | None:
         normalized_operations = {str(value).strip() for value in operations if str(value).strip()}
         with self._lock:
@@ -10494,7 +10599,10 @@ class SheetVitrinaV1OperatorJobStore:
         try:
             token = SHEET_OPERATOR_JOB_ID.set(job_id)
             try:
-                result = runner(lambda message: self._append_log(job_id, message))
+                from contextlib import nullcontext
+                lease = self._maintenance_leases.get(job_id)
+                with lease.entered() if lease is not None else nullcontext():
+                    result = runner(lambda message: self._append_log(job_id, message))
             except Exception as exc:
                 self._append_log(job_id, f"Ошибка: {exc}")
                 with self._lock:
@@ -10515,6 +10623,9 @@ class SheetVitrinaV1OperatorJobStore:
             SHEET_OPERATOR_JOB_ID.reset(token)
 
         finally:
+            lease = self._maintenance_leases.pop(job_id, None)
+            if lease is not None:
+                lease.close()
             if self._snapshot_markers is not None:
                 self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
 

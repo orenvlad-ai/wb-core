@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from apps.business_data_maintenance import (  # noqa: E402
     ALL_BUSINESS_TIMER_UNITS,
+    TIMER_ROLES,
     FBS_SHADOW_TIMER_UNIT,
     POLICY_FILENAME,
     POLICY_SCHEMA_VERSION,
@@ -51,7 +52,10 @@ def preserved_units(runtime_dir: Path, requested: set[str]) -> set[str]:
         return set()
     if barrier.get("active") is not True:
         raise DeployBarrierError("data-write barrier state is ambiguous")
-    preserved = requested & set(ALL_BUSINESS_TIMER_UNITS)
+    protected = set(ALL_BUSINESS_TIMER_UNITS)
+    if barrier.get("window_kind") == "maintenance_pause":
+        protected = {unit for unit, role in TIMER_ROLES.items() if role != "safety_monitor"}
+    preserved = requested & protected
     for timer in sorted(preserved):
         state = unit_state(timer)
         if state.get("UnitFileState") != "disabled" or state.get("ActiveState") != "inactive":

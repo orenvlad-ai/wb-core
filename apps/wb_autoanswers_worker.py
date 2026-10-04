@@ -90,5 +90,10 @@ def main() -> int:
     return 0 if not report["errors"] else 1
 
 
+from packages.application.business_data_procedure_admission import guard_cli
+
+main = guard_cli(default_runtime='.runtime/registry_upload')(main)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

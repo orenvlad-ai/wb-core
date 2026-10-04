@@ -120,6 +120,9 @@ def main() -> None:
             sheet_operator_ui_path=DEFAULT_SHEET_OPERATOR_UI_PATH,
             runtime_dir=runtime_dir,
         )
+        from packages.application.business_data_procedure_admission import initialize_admission
+        runtime_dir.mkdir()
+        initialize_admission(runtime_dir)
         with _patched_env(
             {
                 "WB_CORE_WEB_AUTH_REQUIRED": "1",
@@ -432,6 +435,26 @@ def main() -> None:
                     actor="smoke",
                     reason="HTTP write barrier smoke",
                 )
+                for method, path in (
+                    ("GET", DEFAULT_WB_BUYER_SESSION_CHECK_PATH),
+                    ("GET", "/v1/sheet-vitrina-v1/seller-portal-session/check"),
+                    ("GET", "/v1/sheet-vitrina-v1/prices/upload-task/owned-fixture"),
+                    ("GET", "/v1/sheet-vitrina-v1/ads/keyword-cleaner/targets?refresh=1"),
+                    ("PATCH", "/v1/sheet-vitrina-v1/ads/keyword-cleaner/daily-schedules/owned-fixture"),
+                    ("DELETE", "/v1/sheet-vitrina-v1/ads/keyword-cleaner/daily-schedules/owned-fixture"),
+                ):
+                    mutation = urllib_request.Request(base_url + path, method=method,
+                        data=b"{}" if method != "GET" else None,
+                        headers={"Accept": "application/json", "Content-Type": "application/json", "Origin": base_url})
+                    try:
+                        opener.open(mutation, timeout=5)
+                        raise AssertionError("held side-effect route admitted: " + path)
+                    except urllib_error.HTTPError as blocked:
+                        payload = json.loads(blocked.read())
+                        assert blocked.code == 423 and payload["code"] == "business_data_maintenance", (path, payload)
+                with opener.open(base_url + "/v1/business-data-maintenance/activity", timeout=5) as response:
+                    activity = json.loads(response.read())
+                    assert response.status == 200 and activity["complete"] and activity["admission_ready"]
                 barrier_request = urllib_request.Request(
                     f"{base_url}{DEFAULT_BUSINESS_DATA_WRITE_BARRIER_PATH}",
                     headers={"Accept": "application/json"},

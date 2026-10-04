@@ -31,7 +31,7 @@ def _status(*, active: bool, phase: str | None = None) -> dict[str, Any]:
         "active": active,
         "phase": resolved_phase,
         "message": (
-            "Короткое техническое обслуживание: изменения временно заблокированы."
+            "Режим обслуживания — доступен только просмотр. Изменения данных и запуск обработок временно отключены"
             if active
             else ""
         ),
@@ -118,6 +118,7 @@ def _fixture_html(
     <button id="appDynamic" type="button">Динамический</button>
     <button id="nativeDisabled" type="button" disabled>Недоступно приложению</button>
   </form>
+  <form method="get"><input id="readFilter"><button id="readApply">Просмотр</button></form>
   <script>
     window.__barrierClickCount = 0;
     document.getElementById("barrierOnly").addEventListener("click", () => {{
@@ -210,6 +211,9 @@ def _assert_active_and_error_preserve_closed_ui(browser: Browser) -> None:
         banner = page.locator("#wbCoreMaintenanceBarrier")
         assert banner.is_visible()
         assert banner.get_attribute("data-tone") == "warning"
+        assert banner.inner_text() == _status(active=True)["message"]
+        assert page.locator("#readFilter").is_enabled()
+        assert page.locator("#readApply").is_enabled()
         assert page.locator("#barrierOnly").get_attribute(
             "data-wb-core-maintenance-disabled"
         ) == "1"
@@ -223,7 +227,7 @@ def _assert_active_and_error_preserve_closed_ui(browser: Browser) -> None:
         page.close()
 
 
-def _assert_invalid_contract_is_danger_but_malformed_is_unknown(
+def _assert_invalid_contract_is_warning_but_malformed_is_unknown(
     browser: Browser,
 ) -> None:
     invalid = _new_page(
@@ -239,7 +243,7 @@ def _assert_invalid_contract_is_danger_but_malformed_is_unknown(
         )
         assert invalid.locator("#wbCoreMaintenanceBarrier").get_attribute(
             "data-tone"
-        ) == "danger"
+        ) == "warning"
     finally:
         invalid.close()
 
@@ -288,6 +292,7 @@ def _assert_released_transition_preserves_application_disabled_state(
             document.getElementById("appDynamic").disabled = true;
             const dynamic = document.createElement("button");
             dynamic.id = "addedWhileHeld";
+            dynamic.dataset.wbCoreWrite = "1";
             dynamic.textContent = "Добавлен во время обслуживания";
             document.body.appendChild(dynamic);
             """
@@ -392,7 +397,7 @@ def main() -> int:
             _assert_initial_unknown_and_delayed_inactive(browser)
             _assert_error_after_inactive_preserves_open_ui(browser)
             _assert_active_and_error_preserve_closed_ui(browser)
-            _assert_invalid_contract_is_danger_but_malformed_is_unknown(browser)
+            _assert_invalid_contract_is_warning_but_malformed_is_unknown(browser)
             _assert_released_transition_preserves_application_disabled_state(browser)
             _assert_stale_response_cannot_overwrite_newer_confirmation(browser)
             _assert_timeout_single_flight_and_hidden_tab_no_storm(browser)
