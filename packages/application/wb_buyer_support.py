@@ -6,7 +6,7 @@ judgement. Chat purchase evidence is retained per event, not copied to all event
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -255,27 +255,54 @@ class BuyerSupportRepository:
             'link_reason': 'cabinet + exact rid=srid; product conflicts and multiple chats block unique association' if evidence else 'no exact chat purchase evidence in this cabinet' if row['srid'] else 'claim purchase identifier is absent'}
 
     def _chat_public(self, db: sqlite3.Connection, row: sqlite3.Row) -> dict:
-        latest = db.execute('SELECT text,time FROM events WHERE cabinet=? AND chat_id=? ORDER BY timestamp DESC,id DESC LIMIT 1', (row['cabinet'], row['id'])).fetchone()
+        latest = db.execute('SELECT text,time,timestamp FROM events WHERE cabinet=? AND chat_id=? ORDER BY timestamp DESC,id DESC LIMIT 1', (row['cabinet'], row['id'])).fetchone()
         purchases = [dict(p) for p in db.execute('SELECT DISTINCT rid,nm,name FROM purchase_evidence WHERE cabinet=? AND chat_id=? ORDER BY rid', (row['cabinet'], row['id']))]
         purchase_conflict = any(len({p['nm'] for p in purchases if p['rid'] == rid and p['nm']}) > 1
                                 for rid in {p['rid'] for p in purchases})
         claims = [self._claim_public(db, c) for c in db.execute('SELECT * FROM claims WHERE cabinet=? AND srid IN (SELECT rid FROM purchase_evidence WHERE cabinet=? AND chat_id=?) ORDER BY seen_at DESC,id', (row['cabinet'], row['cabinet'], row['id']))]
         return {'kind': 'chat', 'id': row['id'], 'name': row['name'] or 'Покупатель',
                 'preview': latest['text'] if latest else '', 'time': latest['time'] if latest else '',
+                'last_message_timestamp': latest['timestamp'] if latest else None,
                 'purchases': purchases, 'claims': claims, 'seen_at': row['seen_at'], 'decision': None,
                 'link_state': 'ambiguous' if purchase_conflict or len({p['rid'] for p in purchases}) > 1 or any(c['link_state'] == 'ambiguous' for c in claims) else 'linked' if purchases else 'unlinked'}
 
-    def list_items(self, cabinet: str, *, query: str = '', filter_state: str = 'all', offset: int = 0, limit: int = 50) -> dict:
-        if filter_state not in ('all', 'active', 'archive', 'orphan', 'unlinked', 'ambiguous') or offset < 0 or not 1 <= limit <= 100 or len(query) > 256:
+    def list_items(self, cabinet: str, *, query: str = '', filter_state: str = 'all', period: str = '90d',
+                   offset: int = 0, limit: int = 50, now: datetime | None = None) -> dict:
+        if period not in ('90d', '30d', 'all') or filter_state not in ('all', 'active', 'archive', 'orphan', 'unlinked', 'ambiguous') or offset < 0 or not 1 <= limit <= 100 or len(query) > 256:
             raise BuyerSupportValidationError('invalid list query')
         base = {'mode': 'observation', 'automatic_actions': False, 'configured': bool(cabinet), 'items': [], 'total': 0,
-                'offset': offset, 'limit': limit, 'sync': []}
+                'offset': offset, 'limit': limit, 'period': period, 'sync': [],
+                'history': {'state': 'not_loaded', 'event_count': 0, 'chat_count': 0,
+                            'oldest_message_at': None, 'newest_message_at': None, 'last_sync_at': None,
+                            'coverage': 'available_local_history', 'undated_chat_count': 0}}
+        as_of = now or datetime.now(timezone.utc)
+        if as_of.tzinfo is None:
+            raise BuyerSupportValidationError('period clock must have a timezone')
+        cutoff = int((as_of - timedelta(days=90 if period == '90d' else 30)).timestamp() * 1000) if period != 'all' else None
         if not cabinet:
             return base
         with self._db() as db:
             if db is None:
                 return base
-            items = [self._chat_public(db, row) for row in db.execute('SELECT * FROM chats WHERE cabinet=?', (cabinet,))]
+            stats = db.execute('SELECT COUNT(*) AS count,MIN(timestamp) AS oldest,MAX(timestamp) AS newest,MAX(seen_at) AS last_received FROM events WHERE cabinet=?', (cabinet,)).fetchone()
+            sync = [dict(r) for r in db.execute('SELECT source,state,updated_at FROM sync_state WHERE cabinet=? ORDER BY source', (cabinet,))]
+            event_sync = next((r for r in sync if r['source'] == 'events'), None)
+            def message_time(value: int | None) -> str | None:
+                return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat() if value is not None else None
+            base['history'] = {'state': event_sync['state'] if event_sync else 'not_loaded',
+                               'event_count': stats['count'],
+                               'chat_count': db.execute('SELECT COUNT(*) FROM chats WHERE cabinet=?', (cabinet,)).fetchone()[0],
+                               'oldest_message_at': message_time(stats['oldest']),
+                               'newest_message_at': message_time(stats['newest']),
+                               'last_sync_at': event_sync['updated_at'] if event_sync and event_sync['state'] == 'complete' else stats['last_received'],
+                               'coverage': 'available_local_history',
+                               'undated_chat_count': db.execute('SELECT COUNT(*) FROM chats c WHERE cabinet=? AND NOT EXISTS(SELECT 1 FROM events e WHERE e.cabinet=c.cabinet AND e.chat_id=c.id)', (cabinet,)).fetchone()[0]}
+            chats_sql = 'SELECT * FROM chats c WHERE cabinet=?'
+            chats_params: tuple = (cabinet,)
+            if cutoff is not None:
+                chats_sql += ' AND EXISTS(SELECT 1 FROM events e WHERE e.cabinet=c.cabinet AND e.chat_id=c.id AND e.timestamp>=?)'
+                chats_params += (cutoff,)
+            items = [self._chat_public(db, row) for row in db.execute(chats_sql, chats_params)]
             for row in db.execute('SELECT * FROM claims WHERE cabinet=?', (cabinet,)):
                 claim = self._claim_public(db, row)
                 # Ambiguous claims stay independent; no chat is chosen arbitrarily.
@@ -290,8 +317,8 @@ class BuyerSupportRepository:
                 if filter_state == 'all': return True
                 if filter_state in ('orphan', 'unlinked', 'ambiguous'): return item['link_state'] == filter_state
                 return any(c['archive'] == (filter_state == 'archive') for c in item['claims'])
-            items = sorted((i for i in items if matches(i)), key=lambda i: (i['time'], i['id']), reverse=True)
-            base.update(items=items[offset:offset + limit], total=len(items), sync=[dict(r) for r in db.execute('SELECT source,state,updated_at FROM sync_state WHERE cabinet=? ORDER BY source', (cabinet,))])
+            items = sorted((i for i in items if matches(i)), key=lambda i: (i.get('last_message_timestamp') is not None, i.get('last_message_timestamp') or 0, i['time'], i['id']), reverse=True)
+            base.update(items=items[offset:offset + limit], total=len(items), sync=sync)
         return base
 
     def detail(self, cabinet: str, *, kind: str, item_id: str) -> dict:

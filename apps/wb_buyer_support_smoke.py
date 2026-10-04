@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -22,9 +23,12 @@ from packages.application.wb_buyer_support import BuyerSupportRepository, BuyerS
 from packages.adapters.wb_buyer_support import WbBuyerSupportReadAdapter, BuyerSupportApiError, _NoRedirect
 
 
+FIXTURE_TIME = datetime.now(timezone.utc)
+
+
 def event(eid='e1', chat='c1', rid='r1', nm=1, text='Question'):
     attachments = {'goodCard': {'rid': rid, 'nmID': nm, 'name': 'Glass'}} if rid else {}
-    return {'eventID': eid, 'chatID': chat, 'sender': 'client', 'addTimestamp': 100,
+    return {'eventID': eid, 'chatID': chat, 'sender': 'client', 'addTimestamp': int(FIXTURE_TIME.timestamp() * 1000),
             'addTime': '2026-10-04T01:02:03Z', 'clientName': 'Buyer', 'replySign': 'PRIVATE_SIGNATURE',
             'message': {'text': text, 'attachments': attachments}}
 
@@ -83,6 +87,42 @@ class RepositoryTest(unittest.TestCase):
         self.repo.save_claim_page('A',{'claims':[claim('conflict',nm=999)],'total':1},archive=False)
         self.assertEqual(self.repo.detail('A',kind='claim',item_id='conflict')['claims'][0]['link_state'],'ambiguous')
         with self.assertRaises(KeyError): self.repo.detail('B',kind='chat',item_id='c1')
+    def test_recent_period_uses_latest_message_and_detail_keeps_early_seller_history(self):
+        def dated(eid, chat, days, sender='client'):
+            e=event(eid,chat=chat)
+            timestamp=FIXTURE_TIME-timedelta(days=days)
+            e.update(addTimestamp=int(timestamp.timestamp()*1000),addTime=timestamp.isoformat(),sender=sender)
+            return e
+        self.seed([dated('early-manager','recent',150,'seller'),dated('recent-buyer','recent',10),
+                   dated('middle','middle',60),dated('old','old',110)])
+        self.repo.save_chats('A',{'result':[{'chatID':'undated'}]})
+        self.repo.save_claim_page('A',{'claims':[claim('orphan','other')],'total':1},archive=False)
+        ninety=self.repo.list_items('A',now=FIXTURE_TIME)
+        self.assertEqual(ninety['period'],'90d')
+        self.assertEqual({(i['kind'],i['id']) for i in ninety['items']},{('chat','recent'),('chat','middle'),('claim','orphan')})
+        thirty=self.repo.list_items('A',period='30d',now=FIXTURE_TIME)
+        self.assertEqual({i['id'] for i in thirty['items']},{'recent','orphan'})
+        self.assertEqual(self.repo.list_items('A',period='all',now=FIXTURE_TIME)['total'],5)
+        messages=self.repo.detail('A',kind='chat',item_id='recent')['messages']
+        self.assertEqual([m['id'] for m in messages],['early-manager','recent-buyer'])
+        self.assertEqual(messages[0]['sender'],'seller')
+        self.assertEqual(ninety['history']['state'],'partial')
+        self.assertEqual(ninety['history']['event_count'],4)
+        self.assertEqual(ninety['history']['undated_chat_count'],1)
+        self.assertEqual(self.repo.list_items('A',period='90d',filter_state='orphan',now=FIXTURE_TIME)['total'],1)
+        self.assertEqual(self.repo.list_items('A',period='30d',query='middle',now=FIXTURE_TIME)['total'],0)
+        with self.assertRaises(BuyerSupportValidationError):self.repo.list_items('A',period='365d')
+    def test_history_not_loaded_partial_error_and_complete_empty(self):
+        self.assertEqual(self.repo.list_items('A')['history']['state'],'not_loaded')
+        self.seed()
+        before=self.repo.list_items('A')['history']
+        self.repo.state('A','events','error')
+        error=self.repo.list_items('A')['history']
+        self.assertEqual(error['state'],'error')
+        self.assertEqual(error['last_sync_at'],before['last_sync_at'])
+        self.repo.save_event_page('B',page([],102),expected_cursor=None)
+        empty=self.repo.list_items('B')['history']
+        self.assertEqual(empty['state'],'complete');self.assertEqual(empty['event_count'],0)
     def test_orphan_and_missing_purchase_are_separate(self):
         self.repo.save_claim_page('A',{'claims':[claim(),claim('missing',srid=None)],'total':2},archive=False)
         self.assertEqual(self.repo.list_items('A',filter_state='orphan')['total'],1)
@@ -199,6 +239,8 @@ class HttpTest(unittest.TestCase):
                     self.assertEqual(fetch('/detail?kind=chat&id=other','feedbacks')[0],404)
                     self.assertEqual(fetch('/detail?kind=chat&id=c1','feedbacks')[0],200)
                     self.assertEqual(fetch('/list?limit=999','feedbacks')[0],422)
+                    self.assertEqual(fetch('/list?period=365d','feedbacks')[0],422)
+                    self.assertEqual(fetch('/list?period=all&filter=all','feedbacks')[0],200)
                     before=app.buyer_support_repository.path.read_bytes()
                     self.assertNotEqual(fetch('/list','feedbacks','POST')[0],200)
                     self.assertEqual(before,app.buyer_support_repository.path.read_bytes())
@@ -223,7 +265,10 @@ const attack='<img src=x onerror=alert(1)>';
 const result=r.renderDetail({name:attack,claims:[{id:attack,comment:attack,archive:false,status:0,status_ex:0,link_state:'unlinked'}],messages:[{sender:'seller',text:attack,media_count:1,time:attack,purchase_link_state:'unlinked'}]});
 assert(!result.includes('<img'));assert(result.includes('&lt;img'));assert(result.includes('Продавец · история WB'));assert(result.includes('Решения бота пока не рассчитаны'));
 assert(r.renderList({configured:false,items:[]},'').includes('ещё не настроен'));
-assert(r.renderList({configured:true,items:[]},'').includes('Обращений по выбранным условиям нет'));
+assert(r.renderList({configured:true,items:[]},'').includes('Обращений по выбранным условиям'));
+assert(r.renderList({configured:true,items:[],history:{state:'partial'}},'').includes('частично'));
+assert(r.renderList({configured:true,items:[],history:{state:'error'}},'').includes('ошибкой'));
+assert(r.renderList({configured:true,items:[],history:{state:'not_loaded'}},'').includes('ещё не загружена'));
 '''
         subprocess.run(['node','-e',node,str(script)],check=True)
     def test_template_has_isolated_module_and_acl_tab(self):
@@ -256,7 +301,7 @@ class BrowserTest(unittest.TestCase):
                 def do_GET(self):
                     url=urlparse(self.path); q=parse_qs(url.query)
                     if url.path.endswith('/buyer-support/list'):
-                        payload=repo.list_items('A',query=q.get('q',[''])[0],filter_state=q.get('filter',['all'])[0])
+                        payload=repo.list_items('A',query=q.get('q',[''])[0],filter_state=q.get('filter',['all'])[0],period=q.get('period',['90d'])[0])
                         body=json.dumps(payload).encode();mime='application/json'
                     elif url.path.endswith('/buyer-support/detail'):
                         body=json.dumps(repo.detail('A',kind=q['kind'][0],item_id=q['id'][0])).encode();mime='application/json'
@@ -284,6 +329,9 @@ class BrowserTest(unittest.TestCase):
                     tab.locator('[data-bs-detail] .bs-bubble').wait_for()
                     self.assertIn('<img src=x',tab.locator('[data-bs-detail]').inner_text())
                     self.assertEqual(tab.locator('[data-bs-detail] img').count(),0)
+                    tab.locator('[data-bs-period]').select_option('all')
+                    tab.locator('[data-bs-item]').wait_for()
+                    self.assertIn('Сохранённые сообщения',tab.locator('[data-bs-history]').inner_text())
                     tab.reload();tab.locator('[data-bs-item]').wait_for()
                     self.assertEqual(errors,[])
                     tab.route('**/buyer-support/list?*',lambda r:r.fulfill(status=503,content_type='application/json',body='{"error":"read_failed"}'))

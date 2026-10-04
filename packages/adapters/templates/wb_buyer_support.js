@@ -5,11 +5,11 @@
   const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const linkLabels = {linked:'Связь покупки подтверждена',orphan:'Заявка без связанного чата',unlinked:'Связь покупки не установлена',ambiguous:'Связь требует проверки'};
   const messageLabels = {inline:'Покупка указана в сообщении',observed_single_purchase:'В истории чата пока одна покупка; покупка сообщения не подтверждена',ambiguous:'В чате несколько покупок; покупка сообщения неизвестна',unlinked:'Покупка сообщения не установлена'};
-  function timeLabel(value) {
+  function timeLabel(value, withYear) {
     const text = String(value || '');
     if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
       const date = new Date(text);
-      if (!Number.isNaN(date.getTime())) return new Intl.DateTimeFormat('ru-RU', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(date);
+      if (!Number.isNaN(date.getTime())) return new Intl.DateTimeFormat('ru-RU', {day:'2-digit',month:'2-digit',year:withYear ? 'numeric' : undefined,hour:'2-digit',minute:'2-digit'}).format(date);
     }
     const naive = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
     return naive ? naive[3] + '.' + naive[2] + ' ' + naive[4] + ' · время WB' : text;
@@ -27,7 +27,14 @@
   }
   function renderList(payload, selected) {
     if (!payload.configured) return '<div class="bs-empty">Кабинет для наблюдения ещё не настроен.</div>';
-    if (!payload.items.length) return '<div class="bs-empty">Обращений по выбранным условиям нет. История сохраняется после отдельной загрузки WB.</div>';
+    if (!payload.items.length) {
+      const state = payload.history && payload.history.state;
+      const note = state === 'not_loaded' ? 'История сообщений ещё не загружена.' :
+        state === 'error' ? 'Загрузка истории завершилась ошибкой. Сохранённая часть не содержит обращений по этим условиям.' :
+        state === 'partial' || state === 'running' ? 'История загружена частично. В сохранённой части обращений по этим условиям нет.' :
+        'Обращений по выбранным условиям в сохранённой истории нет.';
+      return '<div class="bs-empty">' + note + '</div>';
+    }
     return payload.items.map(i => '<button type="button" class="bs-entry" data-bs-item="' + esc(i.id) + '" data-bs-kind="' + esc(i.kind) + '" aria-pressed="' + String(selected === i.kind + ':' + i.id) + '"><strong>' + esc(i.name) + '</strong><span class="bs-preview">' + esc(i.preview) + '</span><span class="bs-muted">' + esc(linkLabels[i.link_state]) + '</span><span class="bs-muted">' + esc(timeLabel(i.time)) + '</span></button>').join('');
   }
   // Pure renderers allow synthetic security/UI regression checks without a live account.
@@ -51,17 +58,24 @@
     node('list').innerHTML = '<div class="bs-empty">Загружаем локальную историю…</div>';
     node('prev').disabled = true; node('next').disabled = true;
     try {
-      const payload = await get('/list', {q:node('search').value,filter:node('filter').value,offset,limit:50});
+      const payload = await get('/list', {q:node('search').value,filter:node('filter').value,period:node('period').value,offset,limit:50});
       if (seq !== listSeq) return;
       if (!Array.isArray(payload.items) || !Array.isArray(payload.sync) || !Number.isInteger(payload.total)) throw new Error('invalid_payload');
       total = payload.total; loaded = true;
       node('list').innerHTML = renderList(payload, selected);
       node('count').textContent = total ? (offset + 1) + '–' + Math.min(offset + 50,total) + ' из ' + total : '0';
       node('prev').disabled = offset === 0; node('next').disabled = offset + 50 >= total;
+      const history = payload.history || {};
+      node('history').textContent = history.event_count ?
+        'Сохранённые сообщения: ' + timeLabel(history.oldest_message_at,true) + ' — ' + timeLabel(history.newest_message_at,true) +
+        ' · ' + history.event_count + ' сообщений · данные сохранены: ' + timeLabel(history.last_sync_at,true) :
+        history.state === 'complete' ? 'Загрузка сообщений завершена; сообщений нет.' : 'История сообщений ещё не загружена.';
       node('sync').textContent = payload.sync.map(s => ({chats:'Чаты',events:'Сообщения',claims_active:'Активные заявки',claims_archive:'Архив заявок'}[s.source] || 'Данные') + ': ' + ({complete:'загрузка завершена',partial:'частичная загрузка',error:'ошибка загрузки',running:'загрузка начата'}[s.state] || 'неизвестно') + ' · ' + timeLabel(s.updated_at)).join(' / ') || 'Загрузок WB ещё не было.';
     } catch (_) {
       if (seq !== listSeq) return;
       loaded = false; node('count').textContent = '';
+      node('history').textContent = 'Свежесть истории сейчас проверить не удалось.';
+      node('sync').textContent = '';
       node('list').innerHTML = '<div class="bs-error">Не удалось прочитать историю. Нажмите «Обновить экран» для повторной проверки.</div>';
     }
   }
@@ -83,6 +97,7 @@
   if (!root.closest('[data-unified-tab-panel]').hidden) list();
   node('refresh').addEventListener('click', () => {offset = 0; list();});
   node('search').addEventListener('input', () => {clearTimeout(timer); timer = setTimeout(() => {offset = 0; list();},250);});
+  node('period').addEventListener('change', () => {offset = 0; list();});
   node('filter').addEventListener('change', () => {offset = 0; list();});
   node('prev').addEventListener('click', () => {offset = Math.max(0, offset - 50); list();});
   node('next').addEventListener('click', () => {if (offset + 50 < total) {offset += 50; list();}});

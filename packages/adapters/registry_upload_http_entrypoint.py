@@ -3264,13 +3264,14 @@ def _build_handler(
                 cabinet = os.environ.get("WB_BUYER_SUPPORT_CABINET_ID", "").strip()
                 try:
                     query = urllib_parse.parse_qs(parsed.query, keep_blank_values=True)
-                    allowed = {"q", "filter", "offset", "limit"} if parsed.path.endswith("/list") else {"kind", "id"}
+                    allowed = {"q", "filter", "period", "offset", "limit"} if parsed.path.endswith("/list") else {"kind", "id"}
                     if set(query) - allowed or any(len(v) != 1 for v in query.values()):
                         raise ValueError("invalid buyer support query")
                     if parsed.path.endswith("/list"):
                         payload = entrypoint.buyer_support_repository.list_items(
                             cabinet, query=query.get("q", [""])[0],
                             filter_state=query.get("filter", ["all"])[0],
+                            period=query.get("period", ["90d"])[0],
                             offset=int(query.get("offset", ["0"])[0]), limit=int(query.get("limit", ["50"])[0]))
                     else:
                         payload = entrypoint.buyer_support_repository.detail(
