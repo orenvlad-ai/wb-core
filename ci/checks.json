@@ -689,6 +689,7 @@
         "packages/contracts/card_rating.py",
         "packages/application/sheet_vitrina_v1_card_rating.py",
         "apps/sheet_vitrina_v1_card_rating_smoke.py",
+        "apps/sheet_vitrina_v1_card_rating_history_smoke.py",
         "packages/application/sheet_vitrina_v1_live_plan.py",
         "packages/application/sheet_vitrina_v1_web_vitrina.py",
         "packages/application/web_vitrina_window_v3.py",
@@ -696,8 +697,11 @@
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/application/web_vitrina_view_model.py"
       ],
-      "commands": [["python3", "apps/sheet_vitrina_v1_card_rating_smoke.py"]],
-      "pip": ["openpyxl==3.1.5"]
+      "commands": [
+        ["python3", "apps/sheet_vitrina_v1_card_rating_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_card_rating_history_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
     "wb_buyer_authenticated_observations": {
       "patterns": [

@@ -51,3 +51,42 @@ TOTAL и сравнение групп используют обычное ар�
 из read model.
 
 Проверка: `python3 apps/sheet_vitrina_v1_card_rating_smoke.py`.
+## Совместимость с готовой историей
+
+Рейтинг добавляет строки в общий каталог; reviewed formula manifest охватывает
+новый helper, compiler и зависимости сохранённых cells/renderers. Manifest и
+epoch существующего builder service обновляются вместе. Подмена epoch старой
+edition или ручной перенос day refs не допускаются.
+
+После выпуска нового кода HTTP продолжает читать прежний immutable CURRENT,
+включая default UI и закреплённые SKU страницы: reader не требует нового formula
+epoch и не вызывает native fallback. Новая метрика появляется в готовой истории
+после публикации полного нового каталога, а не частичной порции. Штатный builder
+пересчитывает все объявленные дни в том же store; максимум 31 за порцию, manual
+process budget не более 180 секунд. Admission/shared lock, source proofs, fresh
+publication fence, storage caps и числовой compatibility guard сохраняются.
+Перерывы/ошибки сохраняют PENDING и old CURRENT; публикация всей связанной edition
+атомарна. Это не обещание production throughput: фактическое число порций и
+revalidation от одновременных источников измеряются в разрешённой подготовке.
+
+Catalog renderer/formatter `rating` объявлен независимо от наличия значения в
+дне, на котором материализуется каталог. Поэтому прошлое числовое наблюдение
+показывает сотые, даже если самый новый день пустой. Dated cells и остальные
+16 полей этим presentation helper не изменяются.
+
+До запуска пересборки фиксируются точные CURRENT/base edition, новый manifest,
+свободное место, ownership writer и read-only baseline. После публикации
+проверяются все прежние даты и 16 полей прежних строк, новый рейтинг, предыдущая
+edition/pins и default HTTP/UI. Старые source timestamps сохраняются. Для
+аварийного возврата прежней edition нужны точный CURRENT CAS под writer lock,
+atomic pointer replacement с сохранением обеих editions, согласованный rollback
+кода/manifest и readback до возобновления history builder. Полная business pause
+для пересчёта истории не требуется; новые schedules не создаются.
+
+`apps/sheet_vitrina_v1_card_rating_history_smoke.py` проверяет owned 219-дневную
+storage fixture, 31-day pending/resume, отказ compiler, полный atomic publish,
+все 16 полей/времена старых строк, old/new HTTP и default UI без evaluator,
+previous pins и pointer rollback. Это storage/HTTP proof, не native production
+parity или benchmark. Actual NativeDatedCompiler отдельно проверен в
+`apps/sheet_vitrina_v1_card_rating_smoke.py` для точности, stale/missing и
+числового прошлого дня при пустом catalog day.

@@ -27,6 +27,11 @@ from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1Aut
 from packages.application.web_vitrina_window_v3 import _HeaderScan, _catalog_core_rows, _catalog_finalize_rows, WindowV3Service
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+from packages.application.web_vitrina_history_compiler import NativeDatedCompiler, digest
+from packages.application.web_vitrina_history_store import HistoryStore
+from packages.application.web_vitrina_history_http_read import read_history_page
+from packages.application.web_vitrina_compact_table import CELL_FIELDS
+from packages.application.web_vitrina_window_read_context import window_read_context
 from threading import Event
 from packages.contracts.card_rating import CardRatingRequest
 
@@ -192,6 +197,15 @@ class CardRatingTests(unittest.TestCase):
                     self.assertEqual(row.presentation_by_date['2026-10-04']['quality_state'], quality)
                     self.assertEqual(row.presentation_by_date['2026-10-04']['source_observed_at'], NOW.isoformat())
                 self.assertEqual(next(row for row in actual.rows if row.row_id == f'SKU:{nm}|card_rating').values_by_date['2026-10-04'], value)
+                with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+                    compiler = NativeDatedCompiler(runtime, NOW, '2026-10-03', '2026-10-04', dependency_epoch='rating-history-fixture')
+                    current_unit = compiler.compile('2026-10-04')
+                    prior_unit = compiler.compile('2026-10-03')
+                for row_id in [f'SKU:{nm}|card_rating', 'TOTAL|avg_card_rating']:
+                    fields = dict(zip(CELL_FIELDS, current_unit['cells'][row_id]))
+                    self.assertEqual(fields['quality_state'], quality)
+                    self.assertEqual(prior_unit['cells'][row_id][0], '')
+                self.assertEqual(current_unit['cells'][f'SKU:{nm}|card_rating'][0], value)
                 service = WindowV3Service(reader)
                 try:
                     owner = service._owner_key({'username': 'fixture'})
@@ -231,6 +245,16 @@ class CardRatingTests(unittest.TestCase):
             past_contract = reader.build(page_route='/test', read_route='/test', date_from='2026-10-04', date_to='2026-10-04',
                 output_row_ids=frozenset([f'SKU:{nm}|card_rating', 'TOTAL|avg_card_rating']))
             self.assertEqual(next(row for row in past_contract.rows if row.row_id == f'SKU:{nm}|card_rating').values_by_date['2026-10-04'], 4.75123456789123)
+            # The catalog is materialized on the newest, all-missing day;
+            # another requested day still needs the numeric rating formatter.
+            with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+                compiler = NativeDatedCompiler(runtime, block.now_factory(), '2026-10-04', '2026-10-05', dependency_epoch='rating-history-fixture')
+                units = {day: compiler.compile(day) for day in ['2026-10-04', '2026-10-05']}
+            history = HistoryStore(Path(tmp) / 'history')
+            vector = {'coverage': 'complete_frozen_native_v1', 'epoch': 'rating-history-fixture', 'dates': {day: digest(unit) for day, unit in units.items()}}
+            history.update(vector=vector, catalog=compiler.catalog, compile_day=units.__getitem__, revalidate=lambda: vector)
+            history_page = read_history_page(history, date_from='2026-10-04', date_to='2026-10-05')
+            self.assertIn('rating', {item['formatter_id'] for item in history_page['table_surface']['formatters']})
             service = WindowV3Service(reader)
             try:
                 owner = service._owner_key({'username': 'fixture'})

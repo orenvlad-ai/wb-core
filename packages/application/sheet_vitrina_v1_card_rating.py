@@ -74,3 +74,31 @@ def include_card_rating_rows(rows, *, config, dates, metrics):
                 for day in dates},
         ))
     return result
+
+
+def include_card_rating_catalog_presentation(catalog):
+    """A missing catalog day still declares rendering for dated observations.
+
+    History reuses one static catalog across dates. Keep its rendering contract
+    independent of whether that one day's rating happened to be available.
+    Dated cells and their precision/quality are never changed here.
+    """
+    if not any(row_id.split("|", 1)[-1] in {SKU_METRIC_KEY, TOTAL_METRIC_KEY}
+               for row_id in catalog["rows"]):
+        return catalog
+    from dataclasses import asdict
+    from packages.application.web_vitrina_view_model import _FORMATTER_LIBRARY
+    from packages.application.web_vitrina_gravity_table_adapter import _renderer_id
+    from packages.contracts.web_vitrina_gravity_table_adapter import WebVitrinaGravityTableRenderer
+    presentation = catalog.setdefault("presentation", {})
+    formatters = presentation.setdefault("formatters", [])
+    if not any(item["formatter_id"] == "rating" for item in formatters):
+        formatters.append(asdict(_FORMATTER_LIBRARY["rating"]))
+    renderer_id = _renderer_id(cell_kind="number", formatter_id="rating")
+    renderers = presentation.setdefault("renderers", [])
+    if not any(item["renderer_id"] == renderer_id for item in renderers):
+        renderers.append(asdict(WebVitrinaGravityTableRenderer(
+            renderer_id=renderer_id, gravity_variant="text", formatter_id="rating",
+            align="end", placeholder_text=_FORMATTER_LIBRARY["rating"].null_display,
+        )))
+    return catalog
