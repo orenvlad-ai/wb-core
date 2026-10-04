@@ -98,10 +98,34 @@ def main():
                 assert cell.inner_text() == expected, (row["row_id"], cell.inner_text(), expected)
             assert page.locator("[data-table-summary-updated-at]").get_attribute("data-table-summary-updated-at") == saved.isoformat()
             assert "21:20" in page.locator("[data-table-summary-line]").inner_text()
-            assert page.locator("[data-table-summary-updated]").evaluate("""node => {
-                const r=node.getBoundingClientRect(), p=node.parentElement.getBoundingClientRect();
-                return r.right <= p.right && r.right <= window.innerWidth && r.width >= node.scrollWidth;
-            }""")
+            def assert_badge_visible():
+                geometry = page.locator("[data-table-summary-updated]").evaluate("""node => {
+                    const r=node.getBoundingClientRect(), range=document.createRange();
+                    range.selectNodeContents(node);
+                    const text=range.getBoundingClientRect(), clips=[];
+                    for (let parent=node.parentElement; parent; parent=parent.parentElement) {
+                        const style=getComputedStyle(parent), box=parent.getBoundingClientRect();
+                        if (['hidden','clip','auto','scroll'].includes(style.overflowX)) {
+                            clips.push({className:parent.className,left:box.left,right:box.right});
+                        }
+                    }
+                    return {left:r.left,right:r.right,width:r.width,scrollWidth:node.scrollWidth,
+                        clientWidth:node.clientWidth,textLeft:text.left,textRight:text.right,
+                        viewport:window.innerWidth,clips};
+                }""")
+                assert geometry["right"] <= geometry["viewport"], geometry
+                assert geometry["clientWidth"] >= geometry["scrollWidth"], geometry
+                assert geometry["textLeft"] >= geometry["left"] and geometry["textRight"] <= geometry["right"], geometry
+                assert all(geometry["textLeft"] >= clip["left"] and geometry["textRight"] <= clip["right"]
+                           for clip in geometry["clips"]), geometry
+
+            for width in (1280, 1600, 1440, 960):
+                page.set_viewport_size({"width": width, "height": 720})
+                for font in ("", "Arial, sans-serif", "monospace"):
+                    page.locator(".table-heading-row").evaluate("(node,font) => node.style.fontFamily=font", font)
+                    assert_badge_visible()
+            page.set_viewport_size({"width": 1280, "height": 720})
+            page.locator(".table-heading-row").evaluate("node => node.style.fontFamily=''")
             assert page.locator('[data-table-head] th[data-col-id="section"]').count() == 0
             # Seed an existing version5 config from the native UI's own schema.
             # It must apply on the first summary paint, before lazy SKU cells.

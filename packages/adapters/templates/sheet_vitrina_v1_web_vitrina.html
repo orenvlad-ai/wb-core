@@ -1981,6 +1981,14 @@
       overflow: hidden;
     }
 
+    .table-heading-row.is-history {
+      grid-template-columns: minmax(max-content, 1fr) minmax(0, 720px) auto;
+    }
+
+    .table-heading-row.is-history .table-heading-left {
+      flex-shrink: 0;
+    }
+
     .table-heading-right {
       display: flex;
       align-items: center;
@@ -15111,6 +15119,7 @@
       }
       tableSummaryLineNode.hidden = parts.length === 0;
       tableSummaryLineNode.innerHTML = parts.join("");
+      tableSummaryLineNode.closest(".table-heading-row").classList.toggle("is-history", historySnapshotEnabled());
       syncTableSnapshotSummaryVisibility();
     }
 
