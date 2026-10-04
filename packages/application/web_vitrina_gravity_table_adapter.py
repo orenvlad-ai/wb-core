@@ -443,6 +443,8 @@ def _observed_cell_text(cell: Mapping[str, Any], *, value_type: str) -> str:
     if number_value is None:
         return display_text
     cell_kind = str(cell.get("cell_kind") or "")
+    if cell.get("formatter_id") == "rating":
+        return _estimate_number_text(number_value, decimals=2, use_grouping=False, suffix="")
     if cell_kind == "percent":
         return _estimate_number_text(number_value * 100.0, decimals=2, use_grouping=False, suffix="%")
     if cell_kind == "money":

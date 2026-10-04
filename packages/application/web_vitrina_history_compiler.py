@@ -159,6 +159,8 @@ class NativeDatedCompiler:
             table = self._table(self.block, first, first)
             self.cached_tables[first] = table
             self.catalog, _ = unpack_table(table)
+            from packages.application.sheet_vitrina_v1_card_rating import include_card_rating_catalog_presentation
+            self.catalog = include_card_rating_catalog_presentation(self.catalog)
             self.catalog["order"] = [row["row_id"] for row in table["rows"]]
             self.catalog["context_epoch"] = self.context_epoch
 

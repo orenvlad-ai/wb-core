@@ -115,9 +115,18 @@ def main() -> None:
 
         if (
             payload.meta.snapshot_id != "web-vitrina-v1-fixture"
-            or payload.meta.row_count != 16 + (2 * len(enabled))
+            or payload.meta.row_count != len(payload.rows)
         ):
             raise AssertionError(f"meta mismatch, got {payload.meta}")
+        row_ids = {row.row_id for row in payload.rows}
+        if len(row_ids) != len(payload.rows):
+            raise AssertionError("contract row identities must remain unique")
+        rating_ids = {f"SKU:{item.nm_id}|card_rating" for item in enabled} | {"TOTAL|avg_card_rating"}
+        if {key for key in row_ids if key.endswith(("|card_rating", "|avg_card_rating"))} != rating_ids:
+            raise AssertionError("built-in rating must expose every enabled SKU and its TOTAL")
+        for row in payload.rows:
+            if row.row_id in rating_ids and any(value != "" for value in row.values_by_date.values()):
+                raise AssertionError("a pre-rating ready snapshot must preserve unknown past dates")
         if payload.meta.date_columns != ["2026-04-19", "2026-04-20"]:
             raise AssertionError(f"meta date columns mismatch, got {payload.meta}")
         if [slot.slot_key for slot in payload.meta.temporal_slots] != ["yesterday_closed", "today_current"]:

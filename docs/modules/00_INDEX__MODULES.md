@@ -60,6 +60,7 @@
 - [Отчёт партнёра](50_MODULE__PARTNER_REPORT_BLOCK.md)
 - [Восстановление складских данных](51_MODULE__WAREHOUSE_RECOVERY_POLICY.md)
 - [История остатков витрины](52_MODULE__WEB_VITRINA_INVENTORY_HISTORY.md)
+- [Рейтинг карточки по отзывам](61_MODULE__CARD_RATING.md)
 - [Баланс запасов SKU](53_MODULE__SKU_INVENTORY_BALANCE.md)
 - [Финансовая ликвидность](60_MODULE__FINANCE_LIQUIDITY.md)
 

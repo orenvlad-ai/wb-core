@@ -2,10 +2,10 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:e865b97b9c821d36890b8060e4febdf1e6da1b6ec60695151f807448b1056586",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:2f56bc1b3de9fbee92d569c2b08c14ab4211da89434f0499ecd19d26c54904d5",
   "formula_code_hashes": {
-    "packages/application/web_vitrina_history_compiler.py": "7a6b11a0eec0701359a49effbafdcc2e0f5acad4eae019da6027997ee1970957",
-    "packages/application/sheet_vitrina_v1_web_vitrina.py": "d2631ad7b1c41963cb2af6ce61861e29a7938c11a77a6b9207d592530f271e11",
+    "packages/application/web_vitrina_history_compiler.py": "89ecf68d87b4c163688027e19978ef3bc747efc44a8cd4519ca228819a62f56d",
+    "packages/application/sheet_vitrina_v1_web_vitrina.py": "e8f2857ae78cfef7289f62b4af0afd5b0ecf55cb836274a3bb0dc9c2db5a2c60",
     "packages/application/sheet_vitrina_v1_inventory_planning.py": "379b513e50bc13c4c4bc616e9c17a6b7d37ec5253bc08c303964fcc6d5ec1701",
     "packages/application/management_inventory_history.py": "bb1ea1c6d5fb873d0169bfe20a5e691cfc820d90eef3fc6b752ee4edf36aa2a4",
     "packages/application/inventory_planning_read_model.py": "b2b3be72731af1a730c949683c85931241d7a995a9a44679ab67985da22341bf",
@@ -19,6 +19,11 @@
     "packages/application/calculation_parameters.py": "3821cb4e22eaf858772f374cf88d3b8ac1f0159ae69f2d45a60d1d7290c2abcd",
     "packages/application/calculation_parameters_v4.py": "d535ca85a5eb1ca4ea64f02516c9e71ebb0393ccc9d5c7c1a16dc9a53cb1c640",
     "packages/application/fbs_snapshot_cost.py": "0c6c6e55bea5120ab169d2ba85de1f33108ab4b632b8aed945072c0d7edfa72c",
-    "packages/business_time.py": "66abe943518c88683f39d8670f9174cf4b31333ef3ee4f060431c21cb6eb92b2"
+    "packages/business_time.py": "66abe943518c88683f39d8670f9174cf4b31333ef3ee4f060431c21cb6eb92b2",
+    "packages/application/sheet_vitrina_v1_card_rating.py": "f045aca0bd5d063636ebb8f03e836526ba1a3de0ca4a5613dcc6416d313fe7af",
+    "packages/application/web_vitrina_view_model.py": "6111ca481b561d24f98a74cf1be075070318430408749985b18e81b21185e460",
+    "packages/application/web_vitrina_gravity_table_adapter.py": "1b971891e53a0ae468540db90b2d65814b26c603823e9f55e6390fbd3bdbf95e",
+    "packages/application/sheet_vitrina_v1_temporal_policy.py": "dbf20c46d57526a4c7db72f8dd089d99e2a12ac0fad9eb435c6cd854835e5e47",
+    "packages/application/sheet_vitrina_v1_live_plan.py": "d85963146c82ff843d9755fc892568baf2de1ad299db3f2bdc454324b83233f5"
   }
 }

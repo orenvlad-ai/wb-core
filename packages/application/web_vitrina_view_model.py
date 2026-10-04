@@ -53,6 +53,10 @@ _FORMATTER_LIBRARY: dict[str, WebVitrinaViewModelFormatter] = {
         decimals=None,
         thousands_separator=False,
     ),
+    "rating": WebVitrinaViewModelFormatter(
+        formatter_id="rating", cell_kind="number", rule_kind="number",
+        decimals=2, thousands_separator=False,
+    ),
     "number_default": WebVitrinaViewModelFormatter(
         formatter_id="number_default",
         cell_kind="number",
@@ -564,6 +568,8 @@ def _resolve_cell_kind_and_formatter(
     if column_id in {"scope_kind", "section"}:
         return "badge", "badge_default"
     if column_id.startswith("date:"):
+        if row_format == "rating":
+            return "number", "rating"
         if row_format == "rub":
             return "money", "money_rub"
         if row_format == "rub_per_unit":

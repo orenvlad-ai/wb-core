@@ -22377,6 +22377,9 @@
         return "—";
       }
       const metricFormat = String(metric.metric_format || "").toLowerCase();
+      if (metricFormat === "rating") {
+        return formatNumber(numberValue, 2, false);
+      }
       if (metricFormat === "percent") {
         return formatNumber(numberValue * 100, 2, true) + "%";
       }

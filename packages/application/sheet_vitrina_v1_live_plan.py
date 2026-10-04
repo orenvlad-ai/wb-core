@@ -20,6 +20,10 @@ from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
 from packages.adapters.fin_report_daily_block import HttpBackedFinReportDailySource
 from packages.adapters.wb_finance_api import FinanceApiError, FinanceRateLimited
 from packages.adapters.onec_stocks_block import HttpBackedOnecStocksSource
+from packages.adapters.card_rating import HttpBackedCardRatingSource
+from packages.application.card_rating import CardRatingBlock
+from packages.contracts.card_rating import CardRatingRequest
+from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating, card_rating_presentation
 from packages.adapters.prices_snapshot_block import HttpBackedPricesSnapshotSource
 from packages.adapters.sales_funnel_history_block import HttpBackedSalesFunnelHistorySource
 from packages.adapters.seller_funnel_snapshot_block import HttpBackedSellerFunnelSnapshotSource
@@ -268,8 +272,8 @@ HISTORICAL_CLOSED_DAY_SOURCE_KEYS = STRICT_CLOSED_DAY_SOURCE_KEYS | {
     ONEC_STOCKS_SOURCE_KEY,
     OWN_PRODUCT_CAPITAL_SOURCE_KEY,
 }
-CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "promo_by_price", SPP_PROXY_SOURCE_KEY}
-CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "spp", SPP_PROXY_SOURCE_KEY}
+CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS = {"card_rating", "prices_snapshot", "ads_bids", "promo_by_price", SPP_PROXY_SOURCE_KEY}
+CURRENT_SNAPSHOT_ONLY_ROLLOVER_SOURCE_KEYS = {"card_rating", "prices_snapshot", "ads_bids", "spp", SPP_PROXY_SOURCE_KEY}
 ACCEPTED_CURRENT_SOURCE_KEYS = HISTORICAL_CLOSED_DAY_SOURCE_KEYS | CURRENT_SNAPSHOT_ONLY_SOURCE_KEYS
 EXACT_DATE_RUNTIME_CACHE_SOURCE_KEYS = {"sales_funnel_history", "stocks", "promo_by_price", ONEC_STOCKS_SOURCE_KEY}
 TEMPORAL_ROLE_PROVISIONAL_CURRENT = "provisional_current_snapshot"
@@ -295,6 +299,7 @@ SOURCE_TEMPORAL_POLICIES = {
     SKU_ACTION_SOURCE_KEY: "dual_day_capable",
 }
 SOURCE_CLASSIFICATION_GROUPS = {
+    "card_rating": "C_wb_api_current_snapshot_only",
     "seller_funnel_snapshot": "A_bot_web_source_historical_closed_day_capable",
     "web_source_snapshot": "A_bot_web_source_historical_closed_day_capable",
     "sales_funnel_history": "B_wb_api_date_period_capable",
@@ -324,6 +329,8 @@ DECISION_SUMMARY = {
     "config_service_values": "CONFIG!H:I service block is preserved across prepare/reprepare",
 }
 SOURCE_DIAGNOSTIC_SPECS = {
+    "card_rating": {"module": "packages.application.card_rating", "block": "CardRatingBlock",
+        "adapter": "HttpBackedCardRatingSource", "endpoint": "POST /api/analytics/v2/item-rating"},
     OWN_PRODUCT_CAPITAL_SOURCE_KEY: {
         "module": "packages.application.own_product_capital",
         "block": "OwnProductCapitalBlock",
@@ -466,6 +473,7 @@ class SlotLookups:
     incident_stocks_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     incident_policy: dict[str, Any] = field(default_factory=dict)
     incident_projection_quality: dict[str, Any] = field(default_factory=dict)
+    card_rating_lookup: dict[int, Any] = field(default_factory=dict)
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     authenticated_buyer_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -1106,6 +1114,7 @@ class SheetVitrinaV1LivePlanBlock:
         current_web_source_sync: CurrentWebSourceSync | None = None,
         closed_day_web_source_sync: ClosedDayWebSourceSync | None = None,
         now_factory: Callable[[], datetime] | None = None,
+        card_rating_block: CardRatingBlock | None = None,
     ) -> None:
         self.runtime = runtime
         self.calculation_parameters_block = CalculationParametersBlock(runtime=runtime)
@@ -1117,6 +1126,7 @@ class SheetVitrinaV1LivePlanBlock:
         self.seller_funnel_block = seller_funnel_block or SellerFunnelSnapshotBlock(HttpBackedSellerFunnelSnapshotSource())
         self.sales_funnel_history_block = sales_funnel_history_block or SalesFunnelHistoryBlock(HttpBackedSalesFunnelHistorySource())
         self.prices_snapshot_block = prices_snapshot_block or PricesSnapshotBlock(HttpBackedPricesSnapshotSource())
+        self.card_rating_block = card_rating_block or CardRatingBlock(HttpBackedCardRatingSource(now_factory=now_factory))
         self.sf_period_block = sf_period_block or SfPeriodBlock(HttpBackedSfPeriodSource())
         self.spp_block = spp_block or SppBlock(HttpBackedSppSource())
         self.spp_proxy_block = spp_proxy_block or SppProxyBlock(HttpBackedPublicWbCardBuyerPriceSource())
@@ -1381,7 +1391,7 @@ class SheetVitrinaV1LivePlanBlock:
                 )
             )
         )
-        effective_metrics = extend_metrics_with_authenticated_buyer(effective_metrics)
+        effective_metrics = extend_metrics_with_card_rating(extend_metrics_with_authenticated_buyer(effective_metrics))
         metrics_by_key = {item.metric_key: item for item in effective_metrics}
         formulas_by_id = {item.formula_id: item for item in current_state.formulas_v2}
         public_metrics = (
@@ -1623,6 +1633,7 @@ class SheetVitrinaV1LivePlanBlock:
                 "server_cell_presentation": _merge_cell_presentations(
                     evaluator_scope_presentation(rows=data_rows, slots=temporal_slots,
                         evaluator=evaluator, current_date=current_date),
+                    card_rating_presentation(rows=data_rows, slots=temporal_slots, live_sources=live_sources),
                     _finance_daily_cell_presentation(rows=data_rows, slots=temporal_slots,
                         live_sources=live_sources, nm_ids=[item.nm_id for item in enabled_config]),
                     weighted_price_presentation(slots=temporal_slots,
@@ -1797,6 +1808,12 @@ class SheetVitrinaV1LivePlanBlock:
                             date_from=slot.column_date,
                             date_to=slot.column_date,
                         )
+                    ).result,
+                ),
+                (
+                    "card_rating",
+                    lambda slot=slot: self.card_rating_block.execute(
+                        CardRatingRequest(snapshot_date=slot.column_date, nm_ids=requested_nm_ids)
                     ).result,
                 ),
                 (
@@ -2050,6 +2067,8 @@ class SheetVitrinaV1LivePlanBlock:
                     current_lookups.order_price_lookup = index_daily_order_price(payload, slot.column_date)
                 elif source_key == "web_source_snapshot":
                     current_lookups.web_lookup = _index_items_by_nm_id(payload)
+                elif source_key == "card_rating":
+                    current_lookups.card_rating_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "prices_snapshot":
                     current_lookups.prices_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "sf_period":
@@ -2674,6 +2693,10 @@ class SheetVitrinaV1LivePlanBlock:
             requested_nm_ids=requested_nm_ids,
             loader=loader,
         )
+        if source_key == "card_rating" and temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT and current_business_date_iso(self.now_factory()) != column_date:
+            status = replace(status, kind="error", covered_count=0,
+                missing_nm_ids=sorted(set(requested_nm_ids)), note="item-rating crossed business-day boundary; candidate discarded")
+            payload = None
         if current_web_source_sync_note:
             status = _append_current_web_source_sync_note(status, current_web_source_sync_note)
         if source_state is not None and not serving_payload_matches(source_state,payload,requested_nm_ids if source_key=="seller_funnel_snapshot" else None):
@@ -4440,6 +4463,7 @@ class _MetricEvaluator:
             ("web_lookup", "ctr_current", 0.01),
             ("web_lookup", "orders_current", 1.0),
             ("web_lookup", "position_avg", 1.0),
+            ("card_rating_lookup", "card_rating", 1.0),
             ("prices_lookup", "price_seller", 1.0),
             ("prices_lookup", "price_seller_discounted", 1.0),
             ("sf_period_lookup", "localization_percent", 0.01),
@@ -4526,6 +4550,7 @@ def _build_metric_rows(
     evaluator: _MetricEvaluator,
     temporal_slots: list[SheetVitrinaV1TemporalSlot],
 ) -> list[list[Any]]:
+    sheet_value = (lambda value: "" if value is None else float(value)) if metric.format == "rating" else _to_sheet_value
     rows: list[list[Any]] = []
     if metric.scope == "TOTAL":
         rows.append(
@@ -4533,7 +4558,7 @@ def _build_metric_rows(
                 f"Итого: {metric.label_ru}",
                 f"TOTAL|{metric.metric_key}",
                 *[
-                    _to_sheet_value(evaluator.resolve_total(metric.metric_key, slot.slot_key))
+                    sheet_value(evaluator.resolve_total(metric.metric_key, slot.slot_key))
                     for slot in temporal_slots
                 ],
             ]
@@ -4548,7 +4573,7 @@ def _build_metric_rows(
                     f"Группа {group_name}: {metric.label_ru}",
                     f"GROUP:{group_name}|{metric.metric_key}",
                     *[
-                        _to_sheet_value(
+                        sheet_value(
                             evaluator.resolve_group(metric.metric_key, group_name, slot.slot_key)
                         )
                         for slot in temporal_slots
@@ -4563,7 +4588,7 @@ def _build_metric_rows(
                     f"{config_item.display_name}: {metric.label_ru}",
                     f"SKU:{config_item.nm_id}|{metric.metric_key}",
                     *[
-                        _to_sheet_value(
+                        sheet_value(
                             evaluator.resolve_sku(metric.metric_key, config_item.nm_id, slot.slot_key)
                         )
                         for slot in temporal_slots
@@ -4918,6 +4943,10 @@ def _capture_live_source(
         note=_status_note_from_payload(payload),
         diagnostics=payload_diagnostics,
     )
+    if source_key == "card_rating" and kind == "success":
+        available = {item.nm_id for item in items if getattr(item, "card_rating", None) is not None}
+        status = replace(status, covered_count=len(set(requested_nm_ids) & available),
+                         missing_nm_ids=sorted(set(requested_nm_ids) - available))
     if source_key == "stocks" and kind == "success":
         item_nm_ids = [getattr(item, "nm_id", None) for item in items]
         duplicate_nm_ids = sorted(nm_id for nm_id in covered_nm_ids if item_nm_ids.count(nm_id) > 1)

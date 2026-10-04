@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating, include_card_rating_rows
+
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -142,7 +144,7 @@ def _effective_web_vitrina_metrics(metrics: list[MetricV2Item]) -> list[MetricV2
                             extend_metrics_with_own_product_capital_metrics(
                                 extend_metrics_with_proxy_v4(
                                     extend_metrics_with_our_wb_cost_metrics(
-                                        extend_metrics_with_onec_stock_metrics(metrics)
+                                        extend_metrics_with_onec_stock_metrics(extend_metrics_with_card_rating(metrics))
                                     )
                                 )
                             )
@@ -630,6 +632,8 @@ class SheetVitrinaV1WebVitrinaBlock:
         from packages.application.sheet_vitrina_v1_inventory_planning import restore_finalized_inventory_history
         rows = restore_finalized_inventory_history(rows, history=inventory_history,
                                                   current_date=current_business_date_iso(now))
+        rows = include_card_rating_rows(rows, config=current_state.config_v2,
+            dates=snapshot.date_columns, metrics=metrics_by_key)
         rows = _apply_funnel_operator_presentation(rows, date_columns=snapshot.date_columns)
         from packages.application.metric_completeness import aggregate_counters
         rows = aggregate_counters(

@@ -101,7 +101,7 @@ def _prepare(server: LocalWebVitrinaFixtureServer) -> dict[tuple[str, str], dict
     return full
 
 
-def _browser_flow(base: str) -> None:
+def _browser_flow(base: str, full: dict[tuple[str, str], dict]) -> None:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
@@ -122,14 +122,21 @@ def _browser_flow(base: str) -> None:
             assert page.locator('[data-table-head] th[data-col-id^="date:"]').count() == (
                 14 if start == PERIODS[0][0] else 31
             )
-            assert page.locator("[data-table-body] tr").count() == 14
+            expected_rows = full[(start, end)]["table_surface"]["rows"]
+            expected_summary = [row for row in expected_rows if row["row_kind"].lower() != "sku"]
+            assert any(row["row_id"] == "TOTAL|avg_card_rating" for row in expected_summary)
+            assert page.locator("[data-table-body] tr").count() == len(expected_summary)
             assert page.locator("[data-load-refresh-button]").is_hidden()
             page.locator("[data-snapshot-pilot-expand]").click()
             page.wait_for_function(
                 "document.querySelector('[data-snapshot-pilot-toolbar]').hidden",
                 timeout=20000,
             )
-            assert page.locator("[data-table-body] tr").count() > 14
+            page.wait_for_function(
+                "expected => document.querySelectorAll('[data-table-body] tr:not([data-row-kind=separator])').length === expected",
+                arg=len(expected_rows), timeout=20000,
+            )
+            assert len(expected_rows) > len(expected_summary)
         assert not errors, errors
         table_requests = requests
         assert len(table_requests) == 4, table_requests
@@ -293,7 +300,7 @@ def test_contract() -> None:
                 pass
         assert read_finished(server.snapshot_pilot_store, date_from=start, date_to=end,
                              part="summary")["snapshot_pilot"]["generation_id"] == new_generation
-        _browser_flow(base)
+        _browser_flow(base, full)
         # A pilot GET must not call the business evaluator or mutate source DB.
         def forbidden_build(**_kwargs):
             raise AssertionError("business evaluator ran during pilot read")

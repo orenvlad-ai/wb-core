@@ -48,7 +48,7 @@ AS_OF_DATE = "2026-04-12"
 TODAY_CURRENT_DATE = "2026-04-13"
 MATURE_BUYOUT_BOUNDARY_DATE = "2026-04-07"
 SERVER_NOW = datetime(2026, 4, 13, 8, 0, tzinfo=timezone.utc)
-CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids"}
+CURRENT_ONLY_SOURCE_KEYS = {"prices_snapshot", "ads_bids", "card_rating"}
 ACCEPTED_CURRENT_CAPTURED_AT = "2026-04-12T15:05:00Z"
 
 
@@ -129,6 +129,8 @@ def _build_items(source_key: str) -> list[SimpleNamespace]:
         return [SimpleNamespace(nm_id=PROBE_NM_ID, add_to_cart_count=5, orders_count=2)]
     if source_key == "prices_snapshot":
         return [SimpleNamespace(nm_id=PROBE_NM_ID, price_seller=219.0, price_seller_discounted=199.0)]
+    if source_key == "card_rating":
+        return [SimpleNamespace(nm_id=PROBE_NM_ID, card_rating=4.75, card_rating_raw="4.75", observed_at=REFRESHED_AT)]
     if source_key == "ads_bids":
         return [SimpleNamespace(nm_id=PROBE_NM_ID, ads_bid_search=12.0, ads_bid_recommendations=9.0)]
     if source_key in {"sf_period", "spp", "stocks", "ads_compact", "fin_report_daily"}:
@@ -436,6 +438,7 @@ def _build_counting_blocks() -> dict[str, CountingBlock]:
         "seller_funnel_block": CountingBlock("seller_funnel_snapshot"),
         "sales_funnel_history_block": CountingBlock("sales_funnel_history"),
         "prices_snapshot_block": CountingBlock("prices_snapshot"),
+        "card_rating_block": CountingBlock("card_rating"),
         "sf_period_block": CountingBlock("sf_period"),
         "spp_block": CountingBlock("spp"),
         "ads_bids_block": CountingBlock("ads_bids"),
@@ -485,6 +488,7 @@ def _assert_counting_calls(counters: dict[str, CountingBlock]) -> None:
         "seller_funnel_snapshot": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "sales_funnel_history": [MATURE_BUYOUT_BOUNDARY_DATE, AS_OF_DATE, TODAY_CURRENT_DATE],
         "prices_snapshot": [TODAY_CURRENT_DATE],
+        "card_rating": [TODAY_CURRENT_DATE],
         "sf_period": [AS_OF_DATE, TODAY_CURRENT_DATE],
         "spp": [TODAY_CURRENT_DATE],
         "ads_bids": [TODAY_CURRENT_DATE],
