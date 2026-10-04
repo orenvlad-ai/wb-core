@@ -15,7 +15,7 @@ import urllib.request
 
 from .contracts import CaseState, ClaimSnapshot, Context, Event, PhotoObservation, ReviewSnapshot, POLICY_VERSION
 from .core import decide, observe, PHOTO_TASKS
-from .extraction import EXTRACTION_SCHEMA, SYSTEM_PROMPT, validate_extraction
+from .extraction import EXTRACTION_SCHEMA, SYSTEM_PROMPT, validate_extraction, omit_empty_buyer_metadata
 from .wording import render
 
 
@@ -296,9 +296,18 @@ def run_dialogue(record, client, ledger, media, settings):
         # metadata/tags possibly derived from future seller turns.
         conflict = conflict or any(token in source.text.lower() for source in delta if source.role == "seller" for token in ("новое стекло", "замену стекла", "компенсируем ремонт", "оплатим ремонт", "гарантия установки"))
         state_before = state.to_dict()
-        payload = {"evaluation_mode": "actual_prefix_next_turn", "actual_delta": [{**asdict(source), "observed_purchase_context": next((entry.get("context", {}) for entry in prefix if entry["event_id"] == source.event_id), {})} for source in delta], "saved_state": state.to_dict(), "known_purchase_context": {"product": purchase_product, "source_event_id": product_sources.get(current_purchase), "purchase_ambiguous": purchase_ambiguous}}
-        response = client.structured("buyer_facts", SYSTEM_PROMPT, payload, EXTRACTION_SCHEMA)
-        facts, variant = validate_extraction(response["data"], delta, {key: value for key, value in known_events.items() if key in state.processed_events or key in {source.event_id for source in delta}})
+        payload = {"evaluation_mode": "actual_prefix_next_turn", "actual_delta": [{**asdict(source), "observed_purchase_context": next((entry.get("context", {}) for entry in prefix if entry["event_id"] == source.event_id), {})} for source in delta], "saved_state": {key: value for key, value in state.to_dict().items() if key != "received_materials"}, "known_purchase_context": {"product": purchase_product, "source_event_id": product_sources.get(current_purchase), "purchase_ambiguous": purchase_ambiguous}}
+        if any(source.text.strip() for source in delta):
+            response = client.structured("buyer_facts", SYSTEM_PROMPT, payload, EXTRACTION_SCHEMA)
+            extraction_mode = "llm_textual_sources"
+        else:
+            # Attachment presence is already an observed event. There is no text
+            # to quote; no model, image inspection, facts or paid reservation.
+            response = {"data": {"facts": [], "wording_variant": 0}, "cache_key": None,
+                        "accounting": {"input_tokens": 0, "output_tokens": 0}, "cost_usd": 0}
+            extraction_mode = "deterministic_metadata_only"
+        accepted_data, fact_omissions = omit_empty_buyer_metadata(response["data"], delta)
+        facts, variant = validate_extraction(accepted_data, delta, {key: value for key, value in known_events.items() if key in state.processed_events or key in {source.event_id for source in delta}})
         for source in delta:
             associated = [fact for fact in facts if any(ev.event_id == source.event_id for ev in fact.evidence)]
             state = observe(state, source, associated)
@@ -345,7 +354,7 @@ def run_dialogue(record, client, ledger, media, settings):
             "actual_prefix_sha256": fingerprint(prefix), "policy_version": POLICY_VERSION,
             "decision": decision.to_dict(), "candidate_reply": render(state, decision, context, variant),
             "purchase_scope": current_purchase, "purchase_ambiguous": purchase_ambiguous, "observed_product_context": purchase_product, "product_context_event_id": product_sources.get(current_purchase),
-            "state_before": state_before, "state": state.to_dict(), "extracted_facts": response["data"]["facts"], "extraction_usage": response["accounting"], "extraction_cost_usd": response["cost_usd"], "fact_extraction_cache_key": response["cache_key"],
+            "state_before": state_before, "state": state.to_dict(), "extracted_facts": accepted_data["facts"], "extraction_mode": extraction_mode, "metadata_fact_omissions": fact_omissions, "metadata_fact_omission_count": len(fact_omissions), "extraction_usage": response["accounting"], "extraction_cost_usd": response["cost_usd"], "fact_extraction_cache_key": response["cache_key"],
             "media_checks": media_checks, "media_unavailable_ids": media_missing,
             "candidate_fingerprint": candidate_fingerprint(), "model": client.model, "reasoning": client.reasoning,
             "no_counterfactual_followup": True, "external_actions_executed": 0,
@@ -445,7 +454,7 @@ def main(argv=None):
     (out / "results.jsonl").write_text("".join(stable_json(row) + "\n" for row in rows))
     ordinary = [row for row in rows if row["ordinary_accuracy_eligible"] and not row["historical_policy_conflict"]]
     full_completed = sum(sum(row["dialogue_id"] == record["dialogue_id"] for row in rows) == sum(event["role"] == "buyer" for event in record["events"]) for record in records)
-    summary.update({"mode": "executed_offline", "completed_checkpoints": len(rows), "ordinary_checkpoints": len(ordinary), "historical_conflict_checkpoints": len(rows) - len(ordinary), "fully_completed_dialogues": full_completed, "dialogues_with_any_checkpoint": len({row["dialogue_id"] for row in rows}), "errors": errors, "usage": ledger.totals(), "no_automatic_accuracy_claim": True})
+    summary.update({"mode": "executed_offline", "completed_checkpoints": len(rows), "deterministic_metadata_only_checkpoints": sum(row.get("extraction_mode") == "deterministic_metadata_only" for row in rows), "metadata_fact_omissions": sum(row.get("metadata_fact_omission_count", 0) for row in rows), "checkpoints_with_metadata_fact_omissions": sum(row.get("metadata_fact_omission_count", 0) > 0 for row in rows), "ordinary_checkpoints": len(ordinary), "historical_conflict_checkpoints": len(rows) - len(ordinary), "fully_completed_dialogues": full_completed, "dialogues_with_any_checkpoint": len({row["dialogue_id"] for row in rows}), "errors": errors, "usage": ledger.totals(), "no_automatic_accuracy_claim": True})
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 1 if errors else 0

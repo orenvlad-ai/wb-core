@@ -149,6 +149,7 @@ class CaseState:
     revision: int = 0
     issues: dict[str, IssueState] = field(default_factory=dict)
     processed_events: dict[str, str] = field(default_factory=dict)
+    received_materials: dict[str, dict[str, Any]] = field(default_factory=dict)
     observations: list[PhotoObservation] = field(default_factory=list)
     operations: dict[str, OperationIntent] = field(default_factory=dict)
     greeted: bool = False

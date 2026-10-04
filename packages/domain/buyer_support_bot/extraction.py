@@ -74,3 +74,38 @@ def validate_extraction(data: dict, events: list[Event], saved_event_evidence: d
             ev.append(Evidence(event.event_id, quote))
         result.append(Fact(issue_id, key, value, tuple(ev)))
     return result, data["wording_variant"]
+
+
+def omit_empty_buyer_metadata(data: dict, events: list[Event]) -> tuple[dict, list[dict]]:
+    """Audit/drop only nonsemantic metadata guesses for truly empty buyer media.
+
+    This NEVER accepts an invented/empty quote as evidence. All semantic facts,
+    nonempty text quotes, seller facts and malformed shapes go to the unchanged
+    strict validator. The completed raw response remains in the receipt ledger.
+    """
+    if not isinstance(data, dict) or set(data) != {"facts", "wording_variant"} or not isinstance(data["facts"], list):
+        return data, []
+    index = {event.event_id: event for event in events}
+    kept, omitted = [], []
+    for item in data["facts"]:
+        eligible = (
+            isinstance(item, dict) and set(item) == {"issue_id", "key", "value", "evidence"}
+            and isinstance(item["issue_id"], str) and 0 < len(item["issue_id"]) <= 80
+            and ((item["key"] == "topic" and item["value"] == "general")
+                 or (item["key"] == "substantive" and item["value"] in ("true", "false")))
+            and isinstance(item["evidence"], list) and bool(item["evidence"])
+        )
+        if eligible:
+            for source in item["evidence"]:
+                if not isinstance(source, dict) or set(source) != {"event_id", "quote"} or not isinstance(source["quote"], str):
+                    eligible = False
+                    break
+                event = index.get(source["event_id"])
+                if event is None or event.role != "buyer" or event.text != "" or not event.attachments:
+                    eligible = False
+                    break
+        if eligible:
+            omitted.append({"reason": "empty_buyer_media_metadata_is_not_text_evidence", "rejected_fact": item})
+        else:
+            kept.append(item)
+    return {**data, "facts": kept}, omitted

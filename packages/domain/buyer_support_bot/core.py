@@ -39,7 +39,15 @@ def observe(state: CaseState, event: Event, facts: list[Fact], photos: tuple[Pho
     result = copy.deepcopy(state)
     result.processed_events[event.event_id] = digest
     result.revision += 1
-    result.last_substantive = bool(event.text.strip())
+    result.last_substantive = bool(event.text.strip()) or bool(event.attachments)
+    for index, attachment in enumerate(event.attachments):
+        material_key = event.event_id + ":" + str(index)
+        result.received_materials[material_key] = {
+            "event_id": event.event_id, "attachment_id": attachment.get("attachment_id", ""),
+            "kind": attachment.get("kind", "unknown"),
+            "availability": attachment.get("availability", "unknown"),
+            "sha256": attachment.get("sha256"),
+        }
     if event.role == "seller":
         result.greeted = True
     for fact in facts:

@@ -292,3 +292,91 @@ class PrefixMediaBindingRegressions(unittest.TestCase):
                 image_reader.assert_called_once_with(media["a"], 100, 20000)
             self.assertEqual(client.photo_calls, 1)
             self.assertEqual(rows[0]["state"]["observations"][0]["attachment_id"], "a")
+
+class EmptyMediaCitationRegressions(unittest.TestCase):
+    def test_photo_only_invented_image_is_omitted_never_validated_as_quote(self):
+        from packages.domain.buyer_support_bot.extraction import omit_empty_buyer_metadata
+        events = [Event("photo", "buyer", "", attachments=({"attachment_id": "a", "kind": "image"},))]
+        raw = {"facts": [item("general", "topic", "general", "photo", "image"), item("general", "substantive", "true", "photo", "image")], "wording_variant": 0}
+        with self.assertRaisesRegex(ValueError, "exact observed quote"):
+            validate_extraction(raw, events)
+        accepted, audit = omit_empty_buyer_metadata(raw, events)
+        self.assertEqual(accepted["facts"], [])
+        self.assertEqual(len(audit), 2)
+        self.assertEqual(validate_extraction(accepted, events)[0], [])
+        self.assertEqual(raw["facts"][0]["evidence"][0]["quote"], "image")
+
+    def test_mixed_actual_seller_quote_retained_empty_buyer_substantive_omitted(self):
+        from packages.domain.buyer_support_bot.extraction import omit_empty_buyer_metadata
+        events = [Event("seller", "seller", "Пришлите фото края"), Event("photo", "buyer", "", attachments=({"attachment_id": "a", "kind": "image", "availability": "available", "sha256": "a"*64},))]
+        raw = {"facts": [item("edge", "photo_requested", "true", "seller", "Пришлите фото края"), item("edge", "substantive", "false", "photo", "")], "wording_variant": 0}
+        accepted, audit = omit_empty_buyer_metadata(raw, events)
+        facts, _ = validate_extraction(accepted, events)
+        self.assertEqual([fact.key for fact in facts], ["photo_requested"])
+        self.assertEqual(len(audit), 1)
+        from packages.domain.buyer_support_bot import CaseState, observe
+        s = observe(CaseState("x"), events[0], facts)
+        s = observe(s, events[1], [])
+        self.assertEqual(s.issues["edge"].counters["photo_requests"], 1)
+        self.assertTrue(s.last_substantive)
+        self.assertEqual(s.received_materials["photo:0"]["attachment_id"], "a")
+        self.assertEqual(s.received_materials["photo:0"]["sha256"], "a"*64)
+        self.assertFalse(s.observations)  # actual receipt is not a visual conclusion
+        self.assertNotIn("substantive", s.issues["edge"].facts)
+
+    def test_semantic_or_nonempty_quote_errors_remain_fatal(self):
+        from packages.domain.buyer_support_bot.extraction import omit_empty_buyer_metadata
+        cases = [
+            ([Event("b", "buyer", "", attachments=({"kind": "image"},))], item("a", "stage", "in_use", "b", "image")),
+            ([Event("b", "buyer", "", attachments=({"kind": "image"},))], item("a", "resolved", "true", "b", "")),
+            ([Event("b", "buyer", "", attachments=({"kind": "image"},))], item("a", "return_requested", "true", "b", "image")),
+            ([Event("b", "buyer", "", attachments=({"kind": "image"},))], item("a", "topic", "fracture", "b", "image")),
+            ([Event("b", "buyer", "Настоящий текст", attachments=({"kind": "image"},))], item("a", "substantive", "true", "b", "image")),
+            ([Event("b", "buyer", "")], item("a", "topic", "general", "b", "image")),
+        ]
+        for events, fact in cases:
+            with self.subTest(key=fact["key"]):
+                accepted, audit = omit_empty_buyer_metadata({"facts": [fact], "wording_variant": 0}, events)
+                self.assertFalse(audit)
+                with self.assertRaises(ValueError):
+                    validate_extraction(accepted, events)
+
+    def test_nontext_delta_never_calls_model_and_records_received_photo(self):
+        class NoModel:
+            model, reasoning = "mock", "low"
+            def structured(self, *args, **kwargs):
+                raise AssertionError("there is no text to extract")
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = ReceiptLedger(Path(tmp) / "ledger.db", 1, 1)
+            record = {"schema_version": "wbc0115.dialogue.v1", "dialogue_id": "D", "split": "dev", "events": [{"event_id": "b", "role": "buyer", "text": "", "attachments": [{"attachment_id": "a", "kind": "image", "availability": "unavailable"}]}]}
+            settings = SimpleNamespace(allow_heldout=False, max_images_per_checkpoint=2, max_image_bytes=100, image_token_cap=20000)
+            rows = run_dialogue(record, NoModel(), ledger, {}, settings)
+            self.assertEqual(rows[0]["extraction_mode"], "deterministic_metadata_only")
+            self.assertIsNone(rows[0]["fact_extraction_cache_key"])
+            self.assertEqual(rows[0]["state"]["received_materials"]["b:0"]["attachment_id"], "a")
+            self.assertEqual(rows[0]["decision"]["template"], "problem_detail")
+            self.assertEqual(ledger.totals()["calls_reserved"], 0)
+
+    def test_mixed_replay_reports_omission_and_keeps_request_cache_contract(self):
+        class Client:
+            model, reasoning = "mock", "low"
+            def __init__(self): self.calls = []
+            def structured(self, kind, prompt, payload, schema, image=None):
+                self.calls.append(payload)
+                if len(self.calls) == 1:
+                    facts = [item("edge", "topic", "edge", "b1", "край не приклеился")]
+                else:
+                    facts = [item("edge", "photo_requested", "true", "s", "Пришлите фото"), item("edge", "substantive", "false", "b2", "")]
+                return {"data": {"facts": facts, "wording_variant": 0}, "cache_key": "completed-receipt", "accounting": {"input_tokens": 1, "output_tokens": 1}, "cost_usd": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = ReceiptLedger(Path(tmp) / "ledger.db", 10, 1)
+            client = Client()
+            record = {"schema_version": "wbc0115.dialogue.v1", "dialogue_id": "D", "split": "dev", "events": [{"event_id": "b1", "role": "buyer", "text": "край не приклеился"}, {"event_id": "s", "role": "seller", "text": "Пришлите фото"}, {"event_id": "b2", "role": "buyer", "text": "", "attachments": [{"attachment_id": "a", "kind": "image"}]}]}
+            settings = SimpleNamespace(allow_heldout=False, max_images_per_checkpoint=2, max_image_bytes=100, image_token_cap=20000)
+            rows = run_dialogue(record, client, ledger, {}, settings)
+            self.assertEqual(rows[1]["metadata_fact_omission_count"], 1)
+            self.assertEqual(rows[1]["extracted_facts"][0]["key"], "photo_requested")
+            self.assertEqual(rows[1]["state"]["issues"]["edge"]["counters"]["photo_requests"], 1)
+            self.assertEqual(rows[1]["state"]["received_materials"]["b2:0"]["event_id"], "b2")
+            self.assertNotIn("received_materials", client.calls[0]["saved_state"])
+            self.assertNotIn("received_materials", client.calls[1]["saved_state"])
