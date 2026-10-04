@@ -16,7 +16,7 @@ SCHEMA_VERSION = "business_data_write_barrier_v1"
 STATE_FILENAME = ".business-data-write-barrier.json"
 AUDIT_FILENAME = ".business-data-write-barrier-audit.jsonl"
 LOCK_FILENAME = ".business-data-write-barrier.lock"
-WINDOW_KINDS = frozenset({"snapshot", "final_cutover", "rollback_drill"})
+WINDOW_KINDS = frozenset({"snapshot", "final_cutover", "rollback_drill", "maintenance_pause"})
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,159}")
 
@@ -186,6 +186,8 @@ def _load_state(runtime_dir: Path) -> dict[str, Any] | None:
         raise BusinessDataWriteBarrierError(
             "write barrier state schema is unknown"
         )
+    if payload.get("phase") not in {"acquiring", "held", "restoring", "released"}:
+        raise BusinessDataWriteBarrierError("write barrier phase is unknown")
     return payload
 
 
@@ -240,8 +242,8 @@ def barrier_status(runtime_dir: Path) -> dict[str, Any]:
         "confirmed_at": _bounded(state.get("confirmed_at"), 64),
         "released_at": _bounded(state.get("released_at"), 64),
         "message": (
-            "Короткое техническое обслуживание: чтение доступно, "
-            "изменения временно заблокированы и будут включены автоматически."
+            "Режим обслуживания — доступен только просмотр. "
+            "Изменения данных и запуск обработок временно отключены"
             if active
             else ""
         ),
@@ -269,7 +271,7 @@ def acquire_barrier(
     normalized_kind = str(window_kind or "").strip()
     if normalized_kind not in WINDOW_KINDS:
         raise BusinessDataWriteBarrierError(
-            "window_kind must be snapshot, final_cutover, or rollback_drill"
+            "window_kind must be snapshot, final_cutover, rollback_drill, or maintenance_pause"
         )
     normalized_actor = _validate_actor(actor)
     normalized_reason = _bounded(reason, 1000)
@@ -345,7 +347,7 @@ def confirm_barrier_hold(
     exact_plan = _validate_fingerprint(plan_fingerprint)
     if (
         str(maintenance_state.get("schema_version") or "")
-        != "business_data_maintenance_v1"
+        not in {"business_data_maintenance_v1", "business_data_maintenance_pause_v1"}
         or str(maintenance_state.get("phase") or "") != "held"
         or not bool((maintenance_state.get("hold_readback") or {}).get("quiet"))
     ):
@@ -445,7 +447,11 @@ def release_barrier(
         if (
             str(state.get("window_id") or "") != exact_window_id
             or str(state.get("plan_fingerprint") or "") != exact_plan
-            or not bool(state.get("hold_confirmed"))
+            or (not bool(state.get("hold_confirmed")) and not (
+                state.get("window_kind") == "maintenance_pause"
+                and restore_readback.get("schema_version") == "business_data_maintenance_pause_v1"
+                and restore_readback.get("baseline_fingerprint") == exact_plan
+            ))
             or str(state.get("phase") or "") not in {"held", "restoring"}
         ):
             raise BusinessDataWriteBarrierError(
@@ -640,7 +646,8 @@ def mark_barrier_restoring(
             state is None
             or str(state.get("window_id") or "") != exact_window_id
             or str(state.get("plan_fingerprint") or "") != exact_plan
-            or str(state.get("phase") or "") not in {"held", "restoring"}
+            or (str(state.get("phase") or "") not in {"held", "restoring"}
+                and not (state.get("window_kind") == "maintenance_pause" and state.get("phase") == "acquiring"))
         ):
             raise BusinessDataWriteBarrierError(
                 "active barrier identity does not match restore transition"

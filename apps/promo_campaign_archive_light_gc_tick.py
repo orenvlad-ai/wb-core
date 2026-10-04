@@ -26,5 +26,10 @@ def main(argv: list[str] | None = None) -> int:
                summary.get("warning") != "time_budget_exhausted_with_pending_batch")
 
 
+from packages.application.business_data_procedure_admission import guard_cli
+
+main = guard_cli(default_runtime='.runtime/registry_upload')(main)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

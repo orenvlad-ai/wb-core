@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from packages.application.business_data_write_barrier import barrier_status
+from packages.application.business_data_procedure_admission import business_write_is_blocked
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
 from packages.contracts.search_cluster_cleaner import CleanerError, Principal, digest
 
@@ -62,7 +62,7 @@ def policy_ready(runtime_dir: Path) -> tuple[bool, str]:
             if phase!='restored':return False, 'Состояние обслуживания не подтверждено'
         except (OSError,ValueError):
             return False, 'Состояние обслуживания не подтверждено'
-    if barrier_status(runtime_dir)['active']:
+    if business_write_is_blocked(runtime_dir):
         return False, 'Техническое обслуживание блокирует новые записи'
     if not master_desired:return False, 'Общая пауза автообновлений'
     return True, ''

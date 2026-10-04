@@ -451,5 +451,10 @@ def _json_digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+from packages.application.business_data_procedure_admission import guard_cli
+
+main = guard_cli(default_runtime='.runtime/registry_upload')(main)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

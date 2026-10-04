@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages.application.business_data_procedure_admission import admitted_thread
+
 import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -331,10 +333,10 @@ class WbSppTesterBlock:
             "log_events": self._load_log_events(job_id=job_id),
         }
 
-    def status(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def status(self, params: Mapping[str, Any] | None = None, *, reconcile: bool = True) -> dict[str, Any]:
         params = params or {}
         requested_job_id = str(_single_param(params.get("job_id") or params.get("jobID")) or "").strip()
-        active_job = self._current_job_summary()
+        active_job = self._current_job_summary(reconcile=reconcile)
         if requested_job_id:
             job = self._load_job(requested_job_id)
         else:
@@ -1864,7 +1866,7 @@ class WbSppTesterBlock:
             if existing and existing.is_alive():
                 return
             self._execution_locks[job_id] = execution_lock
-            thread = threading.Thread(target=self._run_job_background, args=(job_id,), daemon=True)
+            thread = admitted_thread(self.runtime_dir, target=self._run_job_background, args=(job_id,), daemon=True)
             self._threads[job_id] = thread
             thread.start()
 

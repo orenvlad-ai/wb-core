@@ -121,6 +121,7 @@ def build_finance_http_server(
 
         def _handle(self, mutation: bool) -> None:
             parsed = urlparse(self.path)
+            admission = None
             try:
                 if parsed.path.startswith(FINANCE_CASH_UI_PREFIX):
                     if mutation:
@@ -171,8 +172,16 @@ def build_finance_http_server(
                             "Business-data write barrier is unavailable",
                         )
                         return
+                    from packages.application.business_data_procedure_admission import admitted_write, MaintenanceAdmissionBlocked
+                    try:
+                        admission = admitted_write(app.business_runtime_dir)
+                        admission.__enter__()
+                    except (MaintenanceAdmissionBlocked, OSError):
+                        admission = None
+                        self._fail(423, "business_data_maintenance", "Business-data maintenance is active")
+                        return
                     barrier = barrier_status(app.business_runtime_dir)
-                    if bool(barrier.get("active")):
+                    if bool(barrier.get("active")) and admission is None:
                         self._fail(
                             423,
                             "business_data_maintenance",
@@ -207,6 +216,10 @@ def build_finance_http_server(
                 self._fail(exc.status, exc.code, str(exc), exc.data)
             except ValueError as exc:
                 self._fail(400, "invalid_request", str(exc))
+
+            finally:
+                if admission is not None:
+                    admission.__exit__(None, None, None)
 
         def _route(
             self,
