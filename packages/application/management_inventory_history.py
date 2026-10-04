@@ -44,6 +44,8 @@ def legacy_wb_operands(plan):
             continue
         index = 2 + plan.date_columns.index(day)
         for key, row in rows.items():
+            if '|' not in key:
+                continue
             scope, metric = key.split('|', 1)
             prefix = 'total_' if scope == 'TOTAL' else ''
             if metric != prefix + 'wb_stock_fact_qty':

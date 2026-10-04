@@ -22,7 +22,7 @@ from packages.application import fbs_accounting_runtime as accounting
 from packages.application import sheet_vitrina_v1_inventory_history as history
 from packages.application.fbs_snapshot_cost import fingerprint
 from packages.application.inventory_quantity import CONTRACT, BOOK_SOURCE, bound_book_quantities
-from packages.application.management_inventory_history import read_management_inventory_history
+from packages.application.management_inventory_history import legacy_wb_operands, read_management_inventory_history
 from packages.application.ready_publication import ExpectedReady, record_intent, complete_publication, digest
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime, _serialize_sheet_vitrina_plan
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
@@ -36,6 +36,47 @@ from packages.application.web_vitrina_gravity_table_adapter import build_web_vit
 DAY = '2026-09-12'
 OBSERVED = DAY + 'T18:16:00Z'
 CAPTURED = DAY + 'T18:23:11Z'
+
+
+class LegacyWbOperandServiceRowsTests(unittest.TestCase):
+    def test_service_rows_preserve_exact_dated_wb_operands(self):
+        days = ['2026-07-24', '2026-07-25']
+        plan = plan_fixture([123, 456], days[0])
+        policy = {'policy_revision': 'fixture-incident-v1',
+                  'policy_effective_date': days[1]}
+        rows = []
+        presentation = {}
+        for scope, fact, incident in [('TOTAL', 120, 20), ('SKU:123', 90, 10),
+                                      ('SKU:456', 0, 0)]:
+            prefix = 'total_' if scope == 'TOTAL' else ''
+            for metric, value in [('wb_stock_fact_qty', fact),
+                                  ('wb_stock_incident_qty', incident),
+                                  ('wb_stock_effective_qty', fact - incident)]:
+                key = scope + '|' + prefix + metric
+                rows.append(['WB', key, value, value])
+                presentation[key] = {day: {'source': 'WebCore incident policy'}
+                                     for day in days}
+        sheet = next(sheet for sheet in plan.sheets if sheet.sheet_name == 'DATA_VITRINA')
+        plan = replace(plan, date_columns=days,
+            sheets=[replace(sheet, rows=rows, row_count=len(rows))],
+            metadata={**plan.metadata,
+                'incident_projection_quality_by_date': {day: policy for day in days},
+                'server_cell_presentation': presentation})
+        expected = legacy_wb_operands(plan)
+        self.assertEqual(set(expected), {'TOTAL|total_stock_total',
+                                        'SKU:123|stock_total', 'SKU:456|stock_total'})
+        self.assertTrue(all(set(cells) == {days[1]} for cells in expected.values()))
+        self.assertEqual(expected['TOTAL|total_stock_total'][days[1]]['value'], 120)
+        self.assertEqual(expected['SKU:456|stock_total'][days[1]]['value'], 0)
+        service_rows = [['Section', '', '', ''], ['Header', 'technical_header', '', ''],
+                        ['Placeholder', None, '', ''], ['Scope', 'SKU:123', '', '']]
+        with_service_rows = replace(plan,
+            sheets=[replace(plan.sheets[0], rows=service_rows + rows + service_rows,
+                            row_count=len(rows) + 2 * len(service_rows))])
+        self.assertEqual(legacy_wb_operands(with_service_rows), expected)
+        without_policy = replace(with_service_rows, metadata={
+            **with_service_rows.metadata, 'incident_projection_quality_by_date': {}})
+        self.assertEqual(legacy_wb_operands(without_policy), {})
 
 
 class ManagementInventoryTests(unittest.TestCase):
