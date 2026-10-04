@@ -15,6 +15,79 @@ from apps import web_vitrina_history_candidate_build as command
 from apps.web_vitrina_history_live_smoke import check_cli_guards
 
 
+
+def check_maintenance_seam():
+    from packages.application.business_data_procedure_admission import initialize_admission, admission_idle
+    from packages.application.business_data_write_barrier import STATE_FILENAME, SCHEMA_VERSION
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        runtime = root / "runtime"
+        runtime.mkdir()
+        initialize_admission(runtime)
+        (runtime / ".web-vitrina-finished-builder.lock").write_bytes(b"fixture")
+        arguments = ["candidate", "--runtime-dir", str(runtime), "--candidate-root", str(root / "derived"),
+                     "--date-from", "2026-03-01", "--date-to", "2026-10-04", "--formula-epoch", "fixture"]
+        def assert_parent_lease(command_line, seconds):
+            assert admission_idle(runtime) == {"ready": True, "idle": False, "reason": "admitted_writer_running"}
+            return {"status": "fixture_only"}
+        with patch.object(sys, "argv", [*arguments, "--manual"]), \
+                patch.object(command, "admission", return_value="idle"), \
+                patch.object(command, "bounded_worker", side_effect=assert_parent_lease), redirect_stdout(StringIO()):
+            assert command.main() == 0
+        assert admission_idle(runtime)["idle"] is True
+        window = "history-fixture-window-001"
+        state_path = runtime / STATE_FILENAME
+        state = {"schema_version": SCHEMA_VERSION, "phase": "held", "window_id": window,
+                 "window_kind": "maintenance_pause", "hold_confirmed": True}
+        def set_state(value):
+            state_path.write_text(json.dumps(value))
+            state_path.chmod(0o600)
+        set_state(state)
+        def snapshot():
+            return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in runtime.iterdir()}
+        before = snapshot()
+        # Both ordinary manual parent and a direct internal worker fail before
+        # source construction, candidate mkdir, capture or derived publication.
+        for suffix in (["--manual"], ["--manual", "--worker"],
+                       ["--manual", "--maintenance-window-id", "wrong-fixture-id"],
+                       ["--manual", "--maintenance-window-id", "wrong-fixture-id", "--worker"],
+                       ["--maintenance-window-id", window], ["--maintenance-window-id", window, "--worker"]):
+            output = StringIO()
+            with patch.object(sys, "argv", [*arguments, *suffix]), \
+                    patch.object(command, "candidate_singleflight") as candidate, \
+                    patch.object(command, "bounded_worker") as worker, \
+                    patch.object(command, "StoreRegistry") as registry, redirect_stdout(output):
+                command.main()
+                assert json.loads(output.getvalue())["status"] == "skipped_maintenance"
+                assert not candidate.called and not worker.called and not registry.called
+            assert snapshot() == before
+        allowed = [*arguments, "--manual", "--maintenance-window-id", window]
+        def assert_exception_propagated(argv, seconds):
+            assert argv[argv.index("--maintenance-window-id") + 1] == window
+            assert "--manual" in argv and argv[-1] == "--worker"
+            assert admission_idle(runtime)["idle"] is True
+            return {"status": "fixture_only"}
+        with patch.object(sys, "argv", allowed), patch.object(command, "admission", return_value="idle"), \
+                patch.object(command, "bounded_worker", side_effect=assert_exception_propagated), redirect_stdout(StringIO()):
+            assert command.main() == 0
+        with patch.object(sys, "argv", [*allowed, "--worker"]), \
+                patch.object(command, "StoreRegistry"), patch.object(command, "RegistryUploadDbBackedRuntime"), \
+                patch.object(command, "LiveNativeAdapter"), patch.object(command, "HistoryStore"), \
+                patch.object(command, "update_live_history", return_value={"status": "fixture_only"}) as update, \
+                redirect_stdout(StringIO()):
+            assert command.main() == 0 and update.called
+        assert snapshot() == before
+        for changed in ({"phase": "restoring"}, {"phase": "inactive"}, {"hold_confirmed": False},
+                        {"window_kind": "snapshot"}):
+            set_state({**state, **changed})
+            output = StringIO()
+            with patch.object(sys, "argv", allowed), patch.object(command, "bounded_worker") as worker, \
+                    redirect_stdout(output):
+                command.main()
+                assert json.loads(output.getvalue())["status"] == "skipped_maintenance"
+                assert not worker.called
+
+
 def main():
     repo = Path(__file__).resolve().parents[1]
     contract_path = repo / 'artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json'
@@ -98,7 +171,9 @@ def main():
                 patch.object(command, 'bounded_worker', return_value={'status': 'build_failed'}), \
                 redirect_stdout(StringIO()):
             assert command.main() == 1
+    check_maintenance_seam()
     print(json.dumps({'status': 'pass', 'fixture_only': True,
+        'maintenance_parent_worker_gate_and_exact_manual_exception': True,
         'mount_reserve_formula_guards': True, 'missing_mount_before_writes': True,
         'current_business_date_pinned': True, 'existing_admission_shared_lock_hard_budget': True,
         'failed_child_nonzero_service_exit': True,

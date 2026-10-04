@@ -18,6 +18,8 @@ from packages.application.storage_registry import StoreRegistry
 from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, update_live_history
 from packages.application.web_vitrina_history_store import HistoryStore
 from packages.business_time import current_business_date_iso
+from packages.application.business_data_procedure_admission import admitted_write, MaintenanceAdmissionBlocked
+from packages.application.business_data_write_barrier import barrier_status
 
 
 def runtime_storage_admission(root, contract_path, formula_epoch):
@@ -78,6 +80,23 @@ def finished_builder_slot(source):
             fcntl.flock(file, fcntl.LOCK_UN)
 
 
+@contextmanager
+def history_procedure_admission(args):
+    if args.maintenance_window_id:
+        status = barrier_status(args.runtime_dir)
+        if not (args.manual and status.get("active") is True
+                and status.get("phase") == "held" and status.get("hold_confirmed") is True
+                and status.get("window_kind") == "maintenance_pause"
+                and status.get("window_id") == args.maintenance_window_id):
+            raise MaintenanceAdmissionBlocked("history_maintenance_window_mismatch")
+        # Derived-only exception: the outer root harness still owns exact
+        # baseline/quiet/source/code receipts; this flag grants no business write.
+        yield
+    else:
+        with admitted_write(args.runtime_dir):
+            yield
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
@@ -92,7 +111,19 @@ def main():
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--runtime-contract", type=Path)
     parser.add_argument("--captured-now", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--maintenance-window-id", default="",
+                        help="exact confirmed held window for controlled manual derived build")
     args = parser.parse_args()
+    try:
+        with history_procedure_admission(args):
+            return run_admitted(args)
+    except MaintenanceAdmissionBlocked as exc:
+        print(json.dumps({"status": "skipped_maintenance", "reason": str(exc),
+                          "last_good_retained": True}))
+        return 0
+
+
+def run_admitted(args):
     source = args.runtime_dir.resolve()
     root = args.candidate_root.resolve()
     now = datetime.fromisoformat(args.captured_now) if args.captured_now else datetime.now(timezone.utc)
