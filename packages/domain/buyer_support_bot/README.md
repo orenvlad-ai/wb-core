@@ -45,7 +45,7 @@
 Бесплатная проверка схемы и количества:
 
 ```bash
-python3 tools/wbc_0115_offline_replay.py \
+python3 apps/wbc_0115_offline_replay.py \
   --dataset /private/dataset/dev.jsonl \
   --output-dir /tmp/wbc-0115-offline/results \
   --max-calls 2000 --max-cost-usd 20
@@ -54,7 +54,7 @@ python3 tools/wbc_0115_offline_replay.py \
 Технический пилот 12 диалогов (его результаты переиспользуются полным прогоном):
 
 ```bash
-python3 tools/wbc_0115_offline_replay.py \
+python3 apps/wbc_0115_offline_replay.py \
   --dataset /private/dataset/dev.jsonl \
   --output-dir /tmp/wbc-0115-offline/results \
   --execute --limit-dialogues 12 \
@@ -87,8 +87,8 @@ Repair schema разрешает только фактические delta event
 ## Бесплатные проверки
 
 ```bash
-python3 -m unittest discover -s tests/buyer_support_bot -v
-python3 -m py_compile packages/domain/buyer_support_bot/*.py tools/wbc_0115_offline_replay.py
+python3 apps/wbc_0115_offline_replay_smoke.py
+python3 -m py_compile packages/domain/buyer_support_bot/*.py apps/wbc_0115_offline_replay.py
 ```
 
 Проверки используют синтетические сценарии и заглушенный HTTP, никогда ключ/платные вызовы. Реальный dev/holdout не хранится в Git. Согласование кандидата, полный прогон и независимая оценка не означают разрешение интеграции или запуска бота на WB.

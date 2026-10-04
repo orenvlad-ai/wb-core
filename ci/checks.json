@@ -59,6 +59,16 @@
     }
   },
   "groups": {
+    "buyer_support_bot_offline": {
+      "patterns": [
+        "packages/domain/buyer_support_bot/**",
+        "apps/wbc_0115_offline_replay.py",
+        "apps/wbc_0115_offline_replay_smoke.py",
+        "apps/buyer_support_bot_tests/**"
+      ],
+      "commands": [["python3", "apps/wbc_0115_offline_replay_smoke.py"]],
+      "pip": []
+    },
     "search_cluster_cleaner": {
       "patterns": [
         "packages/contracts/search_cluster_cleaner.py",
