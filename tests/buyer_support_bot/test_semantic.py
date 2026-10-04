@@ -347,3 +347,66 @@ class GroundedEmpathyRegressions(unittest.TestCase):
             self.assertNotIn("Здравствуйте", render(s, d, Context()))
         neutral = subject(topic="product", buyer_intent="question_pending")
         self.assertNotIn("жаль", render(neutral, decide(neutral, Context()), Context()))
+
+
+class IndependentReviewEdgeRegressions(unittest.TestCase):
+    def test_visible_damage_never_weakens_sufficient_mechanism_photo(self):
+        for topic, task in (("tab", "torn_tab"), ("film", "stuck_film")):
+            for stage in ("unknown", "in_use", "installation"):
+                with self.subTest(topic=topic, stage=stage):
+                    s = subject(topic=topic, mechanism_kind=task, stage=stage, stage_basis="explicit_stage")
+                    s.observations.append(PhotoObservation("p", "a", task, "suitable", "buyer", True))
+                    c = Context(claim=ClaimSnapshot(availability="absent"))
+                    before = decide(s, c)
+                    s.observations.append(PhotoObservation("p", "a", "visible_glass_damage", "suitable", "buyer", True))
+                    after = decide(s, c)
+                    self.assertEqual((after.action, after.rule, after.method), (before.action, before.rule, before.method))
+                    self.assertEqual((after.action, after.method), ("request_claim", "keep_goods"))
+                    self.assertNotIn("asked_fracture_stage", after.missing)
+
+    def test_known_post_use_damage_is_not_unknown_stage_or_residual_approval(self):
+        for topic in ("tab", "film"):
+            for chat_available in (True, False):
+                for actions in (("approve2",), ("approve1", "approve2", "rejectcustom")):
+                    with self.subTest(topic=topic, chat_available=chat_available, actions=actions):
+                        s = subject(topic=topic, mechanism_kind="unknown", stage="in_use", stage_basis="explicit_stage", return_requested="true")
+                        s.observations.append(PhotoObservation("p", "a", "visible_glass_damage", "suitable", "buyer", True))
+                        c = Context(chat_available=chat_available, claim=ClaimSnapshot(availability="present", status="pending", claim_id="synthetic-claim", linked=True, fresh=True, source="authoritative_api", actions=actions))
+                        d = decide(s, c)
+                        self.assertEqual(d.rule, "post_use_fracture")
+                        self.assertNotIn(d.operation, ("approve1", "approve2"))
+                        self.assertNotIn("asked_fracture_stage", d.missing)
+                        self.assertEqual(d.method, "unknown")
+                        reply = render(s, d, c)
+                        self.assertNotIn("плёнка застряла", reply)
+                        self.assertNotIn("язычок оторвался", reply)
+        s.issues["a"].facts["return_requested"] = "false"
+        d = decide(s, c)
+        self.assertEqual((d.action, d.template), ("explain", "protection"))
+        self.assertFalse(d.operation)
+
+    def mixed_turn(self, resolved="true", reverse=False):
+        a = "Спасибо, край приклеился."
+        b = "Но экран теперь не реагирует; очистка не помогла."
+        aa = facts("current", a, "a", topic="edge", buyer_intent="acknowledgement", resolved=resolved)
+        bb = facts("current", b, "b", topic="touch", stage="installation", advice_status="tried_failed")
+        s = observe(CaseState("synthetic"), Event("current", "buyer", a + " " + b), bb + aa if reverse else aa + bb)
+        return s
+
+    def test_acknowledgement_for_one_issue_does_not_close_fresh_second_issue(self):
+        for resolved in ("true", "false"):
+            for reverse in (True, False):
+                s = self.mixed_turn(resolved, reverse)
+                c = Context(claim=ClaimSnapshot(availability="absent"))
+                d = decide(s, c)
+                self.assertEqual((d.issue_id, d.action, d.method), ("b", "request_claim", "keep_goods"))
+                self.assertEqual(s.issues["a"].facts["resolved"], resolved)
+                self.assertEqual(s.issues["b"].facts["advice_status"], "tried_failed")
+                self.assertNotIn(d.action, ("complete", "silent", "request_review"))
+                for op_state in ("dispatching", "unknown"):
+                    s.operations["same-operation"] = OperationIntent("same-operation", "synthetic-claim", "approve1", state=op_state, simulated=False)
+                    before = copy.deepcopy(s)
+                    guarded = decide(s, c)
+                    self.assertEqual(guarded.action, "verify_operation")
+                    self.assertFalse(guarded.operation)
+                    self.assertEqual(s, before)

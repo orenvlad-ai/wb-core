@@ -142,6 +142,8 @@ def render(state: CaseState, decision: Decision, context: Context, variant: int 
         prefix = "Здравствуйте. "
         neutral = intent in ("selection_return", "question_pending", "product_question", "review_edit", "review_find", "installation_help", "acknowledgement", "legacy_followup")
         sympathy = SYMPATHY.get(topic)
+        if decision.rule.startswith("post_use_fracture"):
+            sympathy = SYMPATHY["fracture"]
         if topic == "compensation" and facts.get("compensation_kind") != "phone_damage":
             sympathy = None
         if topic == "missing_glass" and facts.get("glass_status") != "missing_on_receipt":

@@ -317,10 +317,19 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
         if f.get("edge_kind") == "subjective":
             return _decision("explain", "edge_discomfort", issue_id, template="edge_discomfort")
         return _with_photo(state, context, issue_id, topic, "dangerous_edge_return")
+    if topic in ("tab", "film") and _photo(state, issue_id, PHOTO_TASKS[topic]) == "suitable":
+        # A second visible basis cannot weaken an already sufficient mechanism.
+        return _with_photo(state, context, issue_id, topic, topic + "_return")
     if topic in ("tab", "film") and _photo(state, issue_id, "visible_glass_damage") == "suitable":
-        if f.get("stage_basis") == "explicit_stage" and f.get("stage") in ("before_use", "installation", "initial_inspection"):
+        stage = f.get("stage", "unknown") if f.get("stage_basis") == "explicit_stage" else "unknown"
+        if stage in ("before_use", "installation", "initial_inspection"):
             return _return(state, context, issue_id, "keep_goods", "independent_glass_damage.evidence")
-        return _ask_or_physical(state, context, issue_id, "detail_requests", "fracture_stage", "independent_damage_stage_required")
+        if stage == "unknown":
+            return _ask_or_physical(state, context, issue_id, "detail_requests", "fracture_stage", "independent_damage_stage_required")
+        if f.get("mechanism_kind") != PHOTO_TASKS[topic]:
+            # Known exploitation is not residual uncertainty; damage alone is
+            # insufficient. An independently known mechanism continues below.
+            return _refuse(state, context, issue_id, "post_use_fracture", "fracture_use") if f.get("return_requested") == "true" else _decision("explain", "post_use_fracture", issue_id, template="protection")
     if topic in ("tab", "film") and f.get("mechanism_kind") != PHOTO_TASKS[topic]:
         return _ask_or_physical(state, context, issue_id, "detail_requests", "mechanism_detail", "mechanism_kind_required")
     if topic == "alignment" and f.get("installation_result") != "crooked_via_box":
@@ -415,8 +424,11 @@ def decide(state: CaseState, context: Context) -> Decision:
     if uncertain:
         return _decision("verify_operation", "unknown_operation_no_resend", template="status_unknown", unavailable=("operation_result",))
     if not context.timer_event:
+        fresh_unresolved = [(key, issue) for key, issue in state.issues.items() if issue.facts.get("resolved") != "true" and _current_intent(state, issue) != "acknowledgement"
+                            and any(source["event_id"] == state.current_buyer_event_id for fact_key, sources in issue.provenance.items() if fact_key not in ("substantive", "direct_insult") for source in sources)]
         focused = [(key, issue) for key, issue in state.issues.items()
-                   if _current_intent(state, issue) != "other"]
+                   if _current_intent(state, issue) != "other"
+                   and not (_current_intent(state, issue) == "acknowledgement" and any(other_id != key for other_id, _ in fresh_unresolved))]
         if focused:
             issue_id, issue = focused[-1]
             result = _subject(state, context, issue_id)
@@ -426,8 +438,6 @@ def decide(state: CaseState, context: Context) -> Decision:
             return Decision(**{**result.__dict__, "secondary_unavailable": tuple(sorted(set(result.secondary_unavailable) | set(_legacy_gaps(state)))), "facts_used": tuple(sorted(issue.facts))})
         fresh_resolved = [(key, issue) for key, issue in state.issues.items() if issue.facts.get("resolved") == "true"
                           and any(source["event_id"] == state.current_buyer_event_id for source in issue.provenance.get("resolved", []))]
-        fresh_unresolved = [issue for issue in state.issues.values() if issue.facts.get("resolved") != "true"
-                            and any(source["event_id"] == state.current_buyer_event_id for key, sources in issue.provenance.items() if key not in ("substantive", "direct_insult") for source in sources)]
         if fresh_resolved and not fresh_unresolved:
             return _resolved_response(state, context, fresh_resolved[-1][0])
     if claim.availability == "present" and claim.linked and claim.fresh and claim.source == "authoritative_api":
