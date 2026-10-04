@@ -306,10 +306,15 @@ def main() -> None:
             if not finished_store.is_absolute():
                 raise ValueError("finished snapshot store must be an absolute configured path")
             entrypoint.operator_jobs.enable_snapshot_admission(config.runtime_dir)
+        history_store_value = os.environ.get("WEB_VITRINA_HISTORY_STORE", "").strip()
+        history_store = Path(history_store_value) if history_store_value else None
+        if history_store is not None and not history_store.is_absolute():
+            raise ValueError("history snapshot store must be an absolute configured path")
         server = build_registry_upload_http_server(
             config,
             entrypoint=entrypoint,
             snapshot_pilot_store=finished_store,
+            history_snapshot_store=history_store,
             finished_snapshots_default=os.environ.get("WEB_VITRINA_FINISHED_SNAPSHOT_DEFAULT", "0") == "1",
         )
         buyer_server, buyer_thread = start_buyer_login_contour(server)

@@ -15605,11 +15605,14 @@
         {preset_id: "all_history", label: "Вся история"}
       ];
       const windowV3Available = !!(payload.meta && payload.meta.window_v3_available === true);
-      const finishedPresets = WEB_VITRINA_CONFIG.finished_snapshots_enabled ? [
+      const historyPresets = historySnapshotEnabled() ? [1,3,14,31,180].map(function(days) {
+        return {preset_id: "history_" + days, label: "Последние " + days + " дн. · готовая история"};
+      }) : [];
+      const finishedPresets = !historySnapshotEnabled() && WEB_VITRINA_CONFIG.finished_snapshots_enabled ? [
         {preset_id: "finished_14", label: "Последние 14 дней · готовый снимок"},
         {preset_id: "finished_31", label: "Последний 31 день · готовый снимок"}
       ] : [];
-      historyPresetsNode.innerHTML = finishedPresets.concat(historical.preset_options || []).concat(windowV3Available ? windowPresets : []).map(function(preset) {
+      historyPresetsNode.innerHTML = historyPresets.concat(finishedPresets).concat(historical.preset_options || []).concat(windowV3Available ? windowPresets : []).map(function(preset) {
         return (
           '<button class="button secondary history-preset-button" type="button" data-history-preset="' +
           escapeHtml(preset.preset_id) +
@@ -15621,6 +15624,11 @@
       historyPresetsNode.querySelectorAll("[data-history-preset]").forEach(function(node) {
         node.addEventListener("click", function() {
           const selectedPreset = String(node.getAttribute("data-history-preset") || "");
+          if (/^history_(1|3|14|31|180)$/.test(selectedPreset)) {
+            const days = Number(selectedPreset.slice(8)), end = snapshotBusinessToday();
+            updatePageHistoryPeriod({dateFrom: shiftIsoDate(end, -(days - 1)), dateTo: end});
+            setHistoryPopoverOpen(false); loadPageComposition(); return;
+          }
           if (selectedPreset === "finished_14" || selectedPreset === "finished_31") {
             const days = selectedPreset === "finished_14" ? 14 : 31;
             const end = snapshotBusinessToday();
@@ -23455,6 +23463,246 @@
 
     // Explicit fixture/pilot mode. A page read gets only persisted TOTAL/GROUP
     // cells; SKU cells are fetched only after the user's expansion gesture.
+    // All row pages repeat the full selected range and one edition. No column paging.
+    const historySnapshotState = {summary: null, edition: "", requestId: 0, next: 0,
+      limit: 64, loadedBytes: 0, skuRows: [], total: 0, groupId: "", viewId: 0,
+      offset: 0, pageIndex: -1, pages: []};
+    const HISTORY_CLIENT_BYTES = 64 * 1024 * 1024;
+    function historySnapshotEnabled() {
+      return WEB_VITRINA_CONFIG.history_snapshots_configured === true;
+    }
+    function historySnapshotPeriod() {
+      const selected = currentExplicitHistoryQuery();
+      if (new URLSearchParams(window.location.search).get("history_mode") === "explicit" && selected.mode === "default") {
+        throw new Error("Некорректный период истории. Укажите обе даты или одну дату среза.");
+      }
+      if (selected.mode === "period") return {date_from: selected.dateFrom, date_to: selected.dateTo};
+      if (selected.mode === "as_of_date") return {date_from: selected.asOfDate, date_to: selected.asOfDate};
+      const end = snapshotBusinessToday();
+      return {date_from: shiftIsoDate(end, -13), date_to: end};
+    }
+    async function historySnapshotFetch(scope, period, edition, offset, limit, groupId) {
+      const url = new URL(WEB_VITRINA_CONFIG.read_path, window.location.origin);
+      const params = {surface: WEB_VITRINA_CONFIG.page_composition_surface, history_snapshot: "1",
+        scope: scope, date_from: period.date_from, date_to: period.date_to,
+        offset: String(offset), limit: String(limit)};
+      if (edition) params.edition_id = edition;
+      if (groupId) params.group_id = groupId;
+      Object.keys(params).forEach(function(key) { url.searchParams.set(key, params[key]); });
+      const startedAt = window.performance.now();
+      const response = await fetch(url.toString(), {headers: {Accept: "application/json"}, cache: "no-store"});
+      const headersAt = window.performance.now();
+      const text = await response.text();
+      const downloadedAt = window.performance.now();
+      const payload = JSON.parse(text);
+      const parsedAt = window.performance.now();
+      if (!response.ok) {
+        const error = new Error(payload.error || "Готовая история недоступна.");
+        error.code = payload.error;
+        error.availableDates = payload.available_dates || [];
+        throw error;
+      }
+      const marker = payload.history_snapshot;
+      if (!marker || marker.scope !== scope || marker.date_from !== period.date_from
+          || marker.date_to !== period.date_to || marker.offset !== offset
+          || marker.group_id !== (groupId || "") || (edition && marker.edition_id !== edition)
+          || !/^[a-f0-9]{64}$/.test(marker.edition_id)
+          || (marker.next_offset !== null && marker.next_offset !== offset + payload.table_surface.rows.length)) {
+        throw new Error("Версия или страница истории изменилась. Обновите страницу.");
+      }
+      payload.historyReplyBytes = new TextEncoder().encode(text).length;
+      const metrics = createWebVitrinaPerformanceMetrics();
+      metrics.table_ttfb_ms = boundedPerformanceDuration(startedAt, headersAt);
+      metrics.table_download_ms = boundedPerformanceDuration(headersAt, downloadedAt);
+      metrics.table_json_parse_ms = boundedPerformanceDuration(downloadedAt, parsedAt);
+      webVitrinaResourceBytes(response.url, "table", metrics);
+      payload.historyReadMetrics = metrics;
+      const decodedAt = window.performance.now();
+      decodeTableResponse(payload);
+      payload.historyDecodeMs = boundedPerformanceDuration(decodedAt, window.performance.now());
+      return payload;
+    }
+    async function historySnapshotPage(scope, period, edition, offset, limit, groupId) {
+      for (;;) {
+        try {
+          return {payload: await historySnapshotFetch(scope, period, edition, offset, limit, groupId), limit: limit};
+        } catch (error) {
+          if (error.code !== "history_reply_limit" || limit <= 1) throw error;
+          limit = Math.max(1, Math.floor(limit / 2));
+        }
+      }
+    }
+    function historySnapshotControls() {
+      loadRefreshButton.hidden = true;
+      loadRefreshButton.disabled = true;
+      filterControlsNode.querySelectorAll("input,select,button").forEach(function(node) { node.disabled = true; });
+      snapshotPilotToolbarNode.hidden = false;
+      const h = historySnapshotState;
+      snapshotPilotExpandNode.textContent = h.pageIndex < 0 ? "Показать SKU" : "Следующая страница SKU";
+      snapshotPilotExpandNode.disabled = h.next === null || h.total === 0;
+      const previous = snapshotPilotToolbarNode.querySelector("[data-history-sku-previous]");
+      if (previous) previous.disabled = h.pageIndex <= 0;
+      filterSummaryNode.hidden = false;
+      filterSummaryNode.textContent = "TOTAL и группы загружены. SKU: " +
+        (h.skuRows.length ? (h.offset + 1) + " — " + (h.offset + h.skuRows.length) : "0") + " из " + h.total +
+        ". Поиск и сортировка по неполному списку отключены.";
+      if (h.summary && h.summary.history_snapshot.current_preliminary) {
+        filterSummaryNode.textContent += " Текущий день предварительный.";
+      }
+    }
+    function historySnapshotMerged() {
+      const h = historySnapshotState;
+      const rows = (h.summary.table_surface.rows || []).concat(h.skuRows).sort(function(a, b) {
+        return Number(a.values.row_order.value) - Number(b.values.row_order.value);
+      });
+      const groups = new Map();
+      rows.forEach(function(row) {
+        const id = row.section_id + "|" + row.group_id;
+        if (!groups.has(id)) groups.set(id, {grouping_id: id, section_id: row.section_id,
+          group_id: row.group_id, row_ids: []});
+        groups.get(id).row_ids.push(row.row_id);
+      });
+      return Object.assign({}, h.summary, {table_surface: Object.assign({}, h.summary.table_surface,
+        {rows: rows, groupings: Array.from(groups.values()), total_row_count: rows.length,
+          returned_row_count: rows.length})});
+    }
+    async function loadHistorySnapshot(requestId, performanceMetrics) {
+      const summaryStartedAt = window.performance.now();
+      window.performance.mark("wb-history-summary-start");
+      const period = historySnapshotPeriod();
+      let edition = "", offset = 0, limit = 64, summary = null, bytes = 0;
+      const rows = [], ids = new Set();
+      let pageCount = 0, decodeMs = 0;
+      const transportKeys = ["table_ttfb_ms", "table_download_ms", "table_json_parse_ms",
+        "table_transfer_bytes", "table_encoded_body_bytes", "table_decoded_body_bytes"];
+      const transport = Object.fromEntries(transportKeys.map(function(key) { return [key, 0]; }));
+      for (;;) {
+        const result = await historySnapshotPage("summary", period, edition, offset, limit, "");
+        if (requestId !== state.requestSequence) return;
+        const page = result.payload, marker = page.history_snapshot;
+        limit = result.limit;
+        if (summary && marker.total_rows !== summary.history_snapshot.total_rows) throw new Error("Каталог истории изменился.");
+        summary = summary || page;
+        edition = marker.edition_id;
+        bytes += page.historyReplyBytes;
+        pageCount += 1; decodeMs += page.historyDecodeMs;
+        transportKeys.forEach(function(key) { const value = page.historyReadMetrics[key];
+          transport[key] = value === null || transport[key] === null ? null : transport[key] + value; });
+        if (bytes > HISTORY_CLIENT_BYTES) throw new Error("Summary периода превышает лимит отображения. Выберите более короткий период.");
+        page.table_surface.rows.forEach(function(row) {
+          if (ids.has(row.row_id) || !["total", "group"].includes(row.row_kind)) throw new Error("Некорректные строки summary.");
+          ids.add(row.row_id); rows.push(row);
+        });
+        if (marker.next_offset === null) break;
+        offset = marker.next_offset;
+      }
+      if (rows.length !== summary.history_snapshot.total_rows) throw new Error("Summary истории неполон.");
+      summary.table_surface.rows = rows;
+      // Groupings are rebuilt across all pages, without any metric calculations.
+      historySnapshotState.viewId += 1;
+      Object.assign(historySnapshotState, {summary: summary, edition: edition, requestId: requestId,
+        next: 0, limit: 64, loadedBytes: bytes, skuRows: [], total: summary.history_snapshot.scope_totals.sku,
+        groupId: "", offset: 0, pageIndex: -1, pages: []});
+      await ensureMetricPresentationUserConfigLoaded();
+      if (requestId !== state.requestSequence) return;
+      const renderStartedAt = window.performance.now();
+      resetFilterState(summary);
+      renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
+      markFreshTableDisplayed(summary);
+      setLoadStatusLamp("готовая история", "success");
+      historySnapshotControls();
+      let previous = snapshotPilotToolbarNode.querySelector("[data-history-sku-previous]");
+      if (!previous) {
+        previous = document.createElement("button"); previous.type = "button";
+        previous.className = "button secondary"; previous.textContent = "Предыдущая страница SKU";
+        previous.setAttribute("data-history-sku-previous", "");
+        previous.addEventListener("click", function() { void loadHistorySnapshotSku("previous"); });
+        snapshotPilotToolbarNode.insertBefore(previous, snapshotPilotExpandNode);
+      }
+      previous.disabled = true;
+      // Group choice discards old SKU pages before loading another group.
+      let selector = snapshotPilotToolbarNode.querySelector("[data-history-sku-group]");
+      if (!selector) {
+        selector = document.createElement("select"); selector.setAttribute("data-history-sku-group", "");
+        selector.setAttribute("aria-label", "Группа SKU"); snapshotPilotToolbarNode.prepend(selector);
+        selector.addEventListener("change", function() {
+          const h = historySnapshotState;
+          h.viewId += 1;
+          h.groupId = selector.value; h.skuRows = []; h.next = 0;
+          h.offset = 0; h.pageIndex = -1; h.pages = [];
+          h.total = h.groupId ? h.summary.history_snapshot.sku_group_totals[h.groupId] : h.summary.history_snapshot.scope_totals.sku;
+          h.loadedBytes = h.summary.historySummaryBytes;
+          renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
+          historySnapshotControls();
+        });
+      }
+      summary.historySummaryBytes = bytes;
+      selector.innerHTML = '<option value="">Все SKU</option>';
+      const groupLabels = new Map();
+      rows.filter(function(row) { return row.row_kind === "group"; }).forEach(function(row) {
+        groupLabels.set(row.group_id, (row.values.group && row.values.group.display_text) || row.group_id);
+      });
+      Object.keys(summary.history_snapshot.sku_group_totals).forEach(function(id) {
+        if (id && !groupLabels.has(id)) groupLabels.set(id, id);
+      });
+      groupLabels.forEach(function(label, id) { const option = document.createElement("option"); option.value = id;
+        option.textContent = label; selector.append(option); });
+      selector.value = "";
+      const renderFinishedAt = window.performance.now();
+      const paintMs = await measureDoubleAnimationFrame(renderFinishedAt);
+      if (requestId !== state.requestSequence) return;
+      window.performance.mark("wb-history-summary-first-paint");
+      window.performance.measure("wb-history-summary-complete", "wb-history-summary-start", "wb-history-summary-first-paint");
+      tableShellNode.setAttribute("data-history-summary-load-ms", boundedPerformanceDuration(summaryStartedAt, window.performance.now()));
+      tableShellNode.setAttribute("data-history-summary-edition", edition);
+      tableShellNode.setAttribute("data-history-summary-pages", pageCount);
+      tableShellNode.setAttribute("data-history-summary-rows", rows.length);
+      if (performanceMetrics) {
+        transportKeys.forEach(function(key) { performanceMetrics[key] = transport[key]; });
+        performanceMetrics.table_merge_render_ms = decodeMs + boundedPerformanceDuration(renderStartedAt, renderFinishedAt);
+        performanceMetrics.table_double_raf_paint_ms = paintMs;
+        sendWebVitrinaPerformanceEnvelope(performanceMetrics);
+      }
+    }
+    async function loadHistorySnapshotSku(direction) {
+      const h = historySnapshotState, requestId = h.requestId, groupId = h.groupId, viewId = h.viewId;
+      const pageIndex = direction === "previous" ? h.pageIndex - 1 : h.pageIndex + 1;
+      if (!h.summary || requestId !== state.requestSequence || pageIndex < 0
+          || (direction !== "previous" && h.next === null) || h.total === 0) return;
+      const savedPage = h.pages[pageIndex];
+      const offset = savedPage ? savedPage.offset : h.next;
+      const limit = savedPage ? savedPage.limit : h.limit;
+      snapshotPilotExpandNode.disabled = true;
+      const previous = snapshotPilotToolbarNode.querySelector("[data-history-sku-previous]");
+      if (previous) previous.disabled = true;
+      try {
+        const marker = h.summary.history_snapshot;
+        const result = await historySnapshotPage("sku", marker, h.edition, offset, limit, groupId);
+        if (requestId !== state.requestSequence || h.groupId !== groupId || h.viewId !== viewId) return;
+        const page = result.payload;
+        if (h.summary.historySummaryBytes + page.historyReplyBytes > HISTORY_CLIENT_BYTES) throw new Error("Достигнут лимит отображения. Выберите более короткий период.");
+        if (page.history_snapshot.total_rows !== h.total) throw new Error("Каталог SKU версии изменился.");
+        const ids = new Set(h.summary.table_surface.rows.map(function(row) { return row.row_id; }));
+        page.table_surface.rows.forEach(function(row) {
+          if (row.row_kind !== "sku" || ids.has(row.row_id)) throw new Error("Некорректная страница SKU.");
+          ids.add(row.row_id);
+        });
+        h.skuRows = page.table_surface.rows; h.next = page.history_snapshot.next_offset;
+        h.offset = offset; h.pageIndex = pageIndex; h.pages[pageIndex] = {offset: offset, limit: result.limit};
+        h.limit = result.limit; h.loadedBytes = h.summary.historySummaryBytes + page.historyReplyBytes;
+        renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
+        historySnapshotControls();
+      } catch (error) {
+        if (requestId !== state.requestSequence || h.viewId !== viewId) return;
+        historySnapshotControls();
+        filterSummaryNode.textContent = "SKU не загрузились: " + String(error && error.message || error);
+        if (error.code === "snapshot_expired") {
+          h.summary = null; h.skuRows = []; snapshotPilotExpandNode.disabled = true;
+          filterSummaryNode.textContent += " Обновите всю витрину для новой версии.";
+        }
+      }
+    }
+
     const snapshotPilotState = {summary: null, generation: "", requestId: 0};
     function snapshotBusinessToday() {
       const parts = new Intl.DateTimeFormat("en-CA", {timeZone: "Asia/Yekaterinburg",
@@ -23470,6 +23718,7 @@
       return days === 14 || days === 31 ? days : 0;
     }
     function snapshotPilotEnabled() {
+      if (historySnapshotEnabled()) return true;
       const explicit = new URLSearchParams(window.location.search).get("snapshot_pilot");
       return explicit === "1" || (explicit !== "0" && WEB_VITRINA_CONFIG.finished_snapshots_enabled === true
         && snapshotCurrentDays() > 0);
@@ -23554,6 +23803,7 @@
       }
     }
     snapshotPilotExpandNode.addEventListener("click", async function() {
+      if (historySnapshotEnabled()) { await loadHistorySnapshotSku(); return; }
       const summary = snapshotPilotState.summary;
       const generation = snapshotPilotState.generation;
       const requestId = snapshotPilotState.requestId;
@@ -24714,6 +24964,10 @@
         setTableFreshnessIndicator("hidden");
       }
       try {
+        if (historySnapshotEnabled()) {
+          await loadHistorySnapshot(requestId, performanceMetrics);
+          return;
+        }
         if (snapshotPilotEnabled()) {
           await loadSnapshotPilot(requestId);
           return;
@@ -24824,6 +25078,21 @@
         }
         if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         const message = String(error && error.message ? error.message : error);
+        if (historySnapshotEnabled()) {
+          historySnapshotState.summary = null; historySnapshotState.skuRows = [];
+          historySnapshotState.next = null; historySnapshotState.viewId += 1;
+          state.composition = null; snapshotPilotToolbarNode.hidden = true;
+          loadRefreshButton.hidden = true;
+          setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));
+          setLoadStatusLamp("история недоступна", "warning");
+          let period;
+          try { period = historySnapshotPeriod(); } catch (_) { period = {date_from: "", date_to: ""}; }
+          renderHistoricalAccess({meta: {today_current_date: snapshotBusinessToday()}, historical_access: {
+            options: (error.availableDates || []).map(function(day) { return {value: day, label: day}; }),
+            current_mode: "period", selected_date_from: period.date_from, selected_date_to: period.date_to,
+            default_as_of_date: snapshotBusinessToday(), status_text: message, preset_options: []}});
+          return;
+        }
         if (hasDisplayedCachedTableForRequest(requestKey)) {
           state.tableSnapshot.freshLoading = false;
           setTableFreshnessIndicator("stale_error", state.composition);

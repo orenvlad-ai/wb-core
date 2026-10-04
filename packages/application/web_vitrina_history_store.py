@@ -278,7 +278,8 @@ class HistoryStore:
 
     def read(self, *, date_from: str, date_to: str, scope: str = "summary",
              row_ids: list[str] | None = None, group_id: str | None = None,
-             offset: int = 0, limit: int = 128, edition_id: str | None = None) -> dict:
+             offset: int = 0, limit: int = 128, edition_id: str | None = None,
+             deadline_monotonic: float | None = None) -> dict:
         days = dates_between(date_from, date_to, limit=self.max_days)
         if scope not in {"summary", "sku"} or not 1 <= limit <= self.max_rows or offset < 0:
             raise ValueError("invalid history read scope")
@@ -291,9 +292,14 @@ class HistoryStore:
         catalog = _read(self.root / "catalogs" / (edition["catalog"] + ".json"))
         if digest(catalog) != edition["catalog"]:
             raise HistoryUnavailable("history_catalog_corrupt")
+        def check_deadline():
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise HistoryUnavailable("history_read_deadline")
+        check_deadline()
         members, availability = set(), {}
         # One connection at a time; metadata is bounded by the shared catalog.
         for day in days:
+            check_deadline()
             with closing(self._open_day(self.root / "objects" / (edition["days"][day] + ".sqlite3"))) as conn:
                 meta = json.loads(conn.execute("SELECT payload FROM metadata").fetchone()[0])
             if meta["date"] != day or meta["context_epoch"] != catalog["context_epoch"]:
@@ -302,6 +308,16 @@ class HistoryStore:
             availability[day] = meta["accepted_ready_available"]
         selected = [rid for rid in catalog["order"] if rid in members]
         order_by_id = {rid: i for i, rid in enumerate(selected, 1)}
+        scope_totals = {"summary": 0, "sku": 0}
+        sku_group_totals = {}
+        for rid in selected:
+            row = catalog["rows"][rid]
+            if row["row_kind"] == "sku":
+                scope_totals["sku"] += 1
+                group = row.get("group_id", "")
+                sku_group_totals[group] = sku_group_totals.get(group, 0) + 1
+            elif row["row_kind"] in {"total", "group"}:
+                scope_totals["summary"] += 1
         selected = [rid for rid in selected if (
             catalog["rows"][rid]["row_kind"] in {"total", "group"} if scope == "summary"
             else catalog["rows"][rid]["row_kind"] == "sku")]
@@ -316,6 +332,7 @@ class HistoryStore:
                       "cells": {}} for rid in selected}
         response_bytes = len(_json(rows))
         for day in days:
+            check_deadline()
             if not selected:
                 break
             with closing(self._open_day(self.root / "objects" / (edition["days"][day] + ".sqlite3"))) as conn:
@@ -323,6 +340,7 @@ class HistoryStore:
                 cells = conn.execute("SELECT row_id,payload FROM cells WHERE row_id IN (" + placeholders + ")", selected)
                 found = 0
                 for rid, payload in cells:
+                    check_deadline()
                     decoder = zlib.decompressobj()
                     decoded = decoder.decompress(payload, 65537)
                     if len(decoded) > 65536 or not decoder.eof:
@@ -347,6 +365,7 @@ class HistoryStore:
             row["search_text"] = " ".join(v for v in terms + displays if v not in {"", "—"})
         result = {"contract": CONTRACT, "edition_id": actual_id, "scope": scope,
             "dates": days, "availability": availability, "total_rows": total,
+            "scope_totals": scope_totals, "sku_group_totals": sku_group_totals,
             "offset": offset, "rows": list(rows.values()), "next_offset": (
                 offset + len(selected) if offset + len(selected) < total else None)}
         if len(_json(result)) > self.max_reply_bytes:

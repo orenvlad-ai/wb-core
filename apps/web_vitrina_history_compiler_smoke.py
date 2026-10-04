@@ -18,7 +18,7 @@ from packages.application.sheet_vitrina_v1_inventory_planning import extend_rows
 from packages.contracts.web_vitrina_contract import WebVitrinaContractRow
 from packages.application.inventory_quantity import CONTRACT as INVENTORY_CONTRACT
 from packages.application.web_vitrina_history_compiler import (
-    NativeDatedCompiler, unpack_table, assert_numeric_compatibility, DatedCompilerUnsupported,
+    NativeDatedCompiler, unpack_table, assert_numeric_compatibility, DatedCompilerUnsupported, digest,
 )
 from packages.application.web_vitrina_history_frozen_adapter import FrozenNativeAdapter, update_frozen_history
 from packages.application.web_vitrina_history_store import HistoryStore
@@ -163,6 +163,52 @@ def check_numeric_loss_guard(store):
     assert store.edition() == current
 
 
+def check_cached_presentation_stability(compiler):
+    """A compiler-chosen day and observed clock must not dirty structural metadata."""
+    table = compiler._table(compiler.block, "2026-04-20", "2026-04-20")
+    original, _ = unpack_table(table)
+    changed = json.loads(json.dumps(table, ensure_ascii=False).replace("2026-04-20", "2026-04-21"))
+    changed.setdefault("meta", {}).update(generated_at="2099-01-01T00:00:00Z",
+                                         snapshot_id="new-observation", row_count=999999)
+    for row in changed["rows"]:
+        for cell in row["values"]:
+            if changed["columns"][cell[0]]["id"].startswith("date:"):
+                cell[1] = 123456
+                cell[2] = "123456"
+    updated, _ = unpack_table(changed)
+    assert digest(original) == digest(updated), "presentation contains day/clock/value volatility"
+    cached = {key: original[key] for key in ("presentation", "date_column_template", "row_order_cell_template")}
+    text = json.dumps(cached, ensure_ascii=False)
+    assert "2026-04-20" not in text and "generated_at" not in text and "snapshot_id" not in text
+    # Same stable catalog plus exactly one changed dated token reuses all other day objects.
+    with tempfile.TemporaryDirectory(prefix="history-presentation-stability-") as directory:
+        local = HistoryStore(Path(directory))
+        catalog = {**original, "order": [row["row_id"] for row in table["rows"]], "context_epoch": "fixture"}
+        _, cells = unpack_table(table)
+        days = ["2026-04-19", "2026-04-20"]
+        units = {day: {"contract": "web_vitrina_dated_history_v1", "date": day,
+            "context_epoch": "fixture", "accepted_ready_available": True,
+            "members": catalog["order"], "cells": {rid: values["2026-04-20"] for rid, values in cells.items()}} for day in days}
+        # Use the existing compiler contract rather than any source revision claim.
+        from packages.application.web_vitrina_history_compiler import CONTRACT
+        for unit in units.values(): unit["contract"] = CONTRACT
+        vector = {"coverage": "complete_frozen_native_v1", "epoch": "fixture", "dates": {d: digest(units[d]) for d in days}}
+        local.update(vector=vector, catalog=catalog, compile_day=units.__getitem__, revalidate=lambda: vector)
+        old = local.edition()
+        unchanged = local.update(vector=vector, catalog=catalog,
+            compile_day=lambda _: (_ for _ in ()).throw(AssertionError("unchanged compiled")), revalidate=lambda: vector)
+        assert unchanged["status"] == "unchanged" and unchanged["recomputes"] == 0
+        units[days[-1]] = json.loads(json.dumps(units[days[-1]]))
+        row = catalog["order"][0]
+        units[days[-1]]["cells"][row][0:2] = [123456, "123456"]
+        vector["dates"][days[-1]] = digest(units[days[-1]])
+        changed_result = local.update(vector=vector, catalog=catalog, compile_day=units.__getitem__, revalidate=lambda: vector)
+        assert changed_result["status"] == "published" and changed_result["recomputes"] == 1
+        assert local.edition()["days"][days[0]] == old["days"][days[0]]
+    return {"stable_catalog_on_clock_day_values": True, "unchanged_recomputes": 0,
+            "single_dated_change_recomputes": 1, "source_adapter_invalidation_not_claimed": True}
+
+
 def main():
     now = datetime(2026, 4, 20, 12, tzinfo=timezone.utc)
     fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=31, now=now)
@@ -180,6 +226,7 @@ def main():
         with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
             compiler = NativeDatedCompiler(runtime, now, adapter.days[0], adapter.days[-1],
                                             dependency_epoch=vector["epoch"])
+            presentation_stability = check_cached_presentation_stability(compiler)
             result = store.update(vector=vector, catalog=compiler.catalog, compile_day=compiler.compile,
                                   revalidate=adapter.capture)
             assert result["status"] == "published", result
@@ -270,6 +317,7 @@ def main():
         (runtime.runtime_dir / "new-side-input.json").write_text("{}")
         assert adapter.capture() != before_rollover
         print(json.dumps({"status": "pass", "comparisons": comparisons, "no_change": no_change,
+                          "presentation_stability": presentation_stability,
                           "frozen_owned_fixture": frozen_fixture,
                           "native_semantic_correction": True, "pending_unconsumed": True,
                           "config_and_outside_range_catalog": True, "retro_update_delete_redate": True,

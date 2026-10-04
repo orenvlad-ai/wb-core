@@ -70,7 +70,17 @@ def unpack_table(table: dict) -> tuple[dict, dict[str, dict[str, list]]]:
             elif field != "row_order":
                 structural["values"][field] = cell
         rows[row["row_id"]] = structural
-    return {"contract": CONTRACT, "columns": static_columns, "rows": rows}, dated
+    date_column = next(c for c in columns if c["id"].startswith("date:"))
+    # Cache structure, not the chosen catalog day's ID/header/filter/sort keys.
+    prototype_day = date_column["id"][5:]
+    date_column = json.loads(json.dumps(date_column, ensure_ascii=False).replace(prototype_day, "{date}"))
+    # Presentation assets are produced by the compiler, never by a GET evaluator.
+    presentation = {k: table[k] for k in ("adapter_name", "adapter_version", "formatters", "renderers",
+        "use_table_options", "table_props", "state_model") if k in table}
+    order_cell = next(v for v in table["rows"][0]["values"] if columns[v[0]]["id"] == "row_order")
+    return {"contract": CONTRACT, "columns": static_columns, "rows": rows,
+            "date_column_template": date_column, "presentation": presentation,
+            "row_order_cell_template": order_cell[1:] + list(CELL_DEFAULTS[len(order_cell)-1:])}, dated
 
 
 @dataclass
