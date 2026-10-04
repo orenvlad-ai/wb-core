@@ -1981,6 +1981,14 @@
       overflow: hidden;
     }
 
+    .table-heading-row.is-history {
+      grid-template-columns: minmax(max-content, 1fr) minmax(0, 720px) auto;
+    }
+
+    .table-heading-row.is-history .table-heading-left {
+      flex-shrink: 0;
+    }
+
     .table-heading-right {
       display: flex;
       align-items: center;
@@ -3437,12 +3445,14 @@
 
     .history-preset-list {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 4px;
     }
 
     .history-preset-button {
       width: 100%;
+      min-width: 0;
+      white-space: normal;
       min-height: 28px;
       padding: 4px 6px;
       font-size: 11px;
@@ -15109,6 +15119,7 @@
       }
       tableSummaryLineNode.hidden = parts.length === 0;
       tableSummaryLineNode.innerHTML = parts.join("");
+      tableSummaryLineNode.closest(".table-heading-row").classList.toggle("is-history", historySnapshotEnabled());
       syncTableSnapshotSummaryVisibility();
     }
 
@@ -15437,6 +15448,14 @@
     }
 
     function buildPageRefreshCard() {
+      if (historySnapshotEnabled() && state.composition && state.composition.history_snapshot) {
+        const savedAt = String(state.composition.history_snapshot.saved_at || "");
+        if (!savedAt) return null;
+        return {
+          card_id: "page_refresh", label: "Снимок сохранён", value: savedAt,
+          value_kind: "timestamp", updated_at: savedAt, tone: "neutral"
+        };
+      }
       if (snapshotPilotEnabled() && state.composition && state.composition.snapshot_pilot) {
         const assembledAt = String(state.composition.snapshot_pilot.assembled_at || "");
         if (!assembledAt) return null;
@@ -17203,6 +17222,14 @@
         return;
       }
       if (!filteredRows.length) {
+        const history = payload.history_snapshot;
+        const today = String((payload.meta || {}).today_current_date || "");
+        if (history && history.current_preliminary && history.date_from === today
+            && history.date_to === today && (history.availability || {})[today] === false) {
+          setStateBox("warning", "За текущий день ещё нет сохранённых данных",
+            "Текущий день предварительный. Выберите завершённый день или дождитесь обновления истории.");
+          return;
+        }
         setStateBox(
           currentState === "empty" ? "warning" : "warning",
           "Пустой результат",
