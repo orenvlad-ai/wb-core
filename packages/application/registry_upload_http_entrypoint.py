@@ -12357,15 +12357,21 @@ def _merge_source_group_ready_snapshot(
     previous_metadata = dict(getattr(previous_plan, "metadata", {}) or {})
     # The changed cell and its dated coverage travel together in a group refresh.
     previous_metadata.pop("weighted_seller_price_history_preserved_dates", None)
-    if WEIGHTED_PRICE_ROW_ID in merged_row_ids:
+    presentation_row_ids = {
+        row_id for row_id in merged_row_ids
+        if row_id == WEIGHTED_PRICE_ROW_ID
+        or _metric_key_from_row_id(row_id) in {"card_rating", "avg_card_rating"}
+    }
+    if presentation_row_ids:
         presentation = deepcopy(previous_metadata.get("server_cell_presentation", {}))
-        cells = presentation.setdefault(WEIGHTED_PRICE_ROW_ID, {})
-        partial_cells = partial_plan.metadata.get("server_cell_presentation", {}).get(WEIGHTED_PRICE_ROW_ID, {})
-        for day in ([selected_date] if selected_date else previous_plan.date_columns):
-            if day in partial_cells:
-                cells[day] = deepcopy(partial_cells[day])
-            else:
-                cells.pop(day, None)
+        for row_id in presentation_row_ids:
+            cells = presentation.setdefault(row_id, {})
+            partial_cells = partial_plan.metadata.get("server_cell_presentation", {}).get(row_id, {})
+            for day in ([selected_date] if selected_date else previous_plan.date_columns):
+                if day in partial_cells:
+                    cells[day] = deepcopy(partial_cells[day])
+                else:
+                    cells.pop(day, None)
         previous_metadata["server_cell_presentation"] = presentation
     if "weighted_seller_price_formula" in partial_plan.metadata:
         previous_metadata["weighted_seller_price_formula"] = deepcopy(partial_plan.metadata["weighted_seller_price_formula"])

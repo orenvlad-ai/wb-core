@@ -770,7 +770,6 @@ def _catalog_core_rows(
             total_metric=metrics[PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY],
             parameters_for_date=block.proxy_v4_parameters_resolver,
         )
-    rows = include_card_rating_rows(rows, config=enabled, dates=[], metrics=metrics)
     rows = _include_buyout_percent_rows(
         rows, runtime=block.runtime, date_columns=[], source_snapshot_dates=[],
         enabled_config=enabled, metric=metrics[BUYOUT_PERCENT_METRIC_KEY],
@@ -965,6 +964,7 @@ def _catalog_finalize_rows(
             block.runtime.load_current_state().metrics_v2
         )
     }
+    rows = include_card_rating_rows(rows, config=block.runtime.load_current_state().config_v2, dates=[], metrics=metrics)
     rows = _apply_funnel_operator_presentation(rows, date_columns=[])
     return _include_authenticated_discount_total_row(
         rows, date_columns=[], metric=metrics[AVG_EFFECTIVE_DISCOUNT_METRIC_KEY],

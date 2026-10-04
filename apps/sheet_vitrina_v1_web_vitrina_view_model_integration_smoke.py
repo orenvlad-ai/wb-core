@@ -80,14 +80,14 @@ def main() -> None:
             raise AssertionError(f"source contract identity mismatch, got {view_model.meta}")
         if (
             view_model.meta.snapshot_id != "web-vitrina-view-model-integration"
-            or view_model.meta.row_count != 6 + (2 * len(enabled))
+            or view_model.meta.row_count != len(contract.rows)
         ):
             raise AssertionError(f"view_model meta mismatch, got {view_model.meta}")
         expected_group_count = 1 + len({item.group for item in enabled})
         if (
             len(view_model.columns) != 11
             or len(view_model.groups) != expected_group_count
-            or len(view_model.sections) != 3
+            or {section.label for section in view_model.sections} != {row.section for row in contract.rows}
         ):
             raise AssertionError(f"view_model schema counts mismatch, got {view_model}")
         column_ids = [column.id for column in view_model.columns]
@@ -95,6 +95,17 @@ def main() -> None:
             raise AssertionError(f"view_model must not expose row update timestamp as a visible table column, got {column_ids}")
 
         rows = {row.row_id: row for row in view_model.rows}
+        if set(rows) != {row.row_id for row in contract.rows}:
+            raise AssertionError("view model must preserve every contract row identity")
+        rating_ids = {f"SKU:{item.nm_id}|card_rating" for item in enabled} | {"TOTAL|avg_card_rating"}
+        if {key for key in rows if key.endswith(("|card_rating", "|avg_card_rating"))} != rating_ids:
+            raise AssertionError("built-in review-rating catalog must expose exactly one SKU/TOTAL pair")
+        for row_id in rating_ids:
+            for day in contract.meta.date_columns:
+                cell = _cell(rows[row_id], "date:" + day)
+                if cell.cell_kind != "empty" or cell.display_text != "—":
+                    raise AssertionError("legacy ready snapshot must not invent a historical card rating")
+
         money_row = rows[f"SKU:{enabled[0].nm_id}|price_seller_discounted"]
         percent_row = rows[f"SKU:{enabled[1].nm_id}|avg_addToCartConversion"]
         total_row = rows["TOTAL|total_view_count"]

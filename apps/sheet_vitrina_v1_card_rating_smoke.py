@@ -18,13 +18,13 @@ from packages.application.card_rating import CardRatingBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating, include_card_rating_rows
 from packages.application.sheet_vitrina_v1_live_plan import SheetVitrinaV1LivePlanBlock, _MetricEvaluator
-from packages.application.sheet_vitrina_v1_research import _aggregation_method
+from packages.application.sheet_vitrina_v1_research import _aggregation_method, SheetVitrinaV1ResearchBlock
 from packages.application.sheet_vitrina_v1_source_groups import WEB_VITRINA_SOURCE_GROUPS
 from packages.application.sheet_vitrina_v1_web_vitrina import _effective_web_vitrina_metrics
 from packages.application.web_vitrina_view_model import _resolve_cell_kind_and_formatter, _FORMATTER_LIBRARY
-from packages.application.registry_upload_http_entrypoint import _metric_keys_for_source_keys
+from packages.application.registry_upload_http_entrypoint import _metric_keys_for_source_keys, _merge_source_group_ready_snapshot
 from packages.application.sheet_vitrina_v1_auto_refresh import SheetVitrinaV1AutoRefreshSchedulesBlock
-from packages.application.web_vitrina_window_v3 import _HeaderScan, _catalog_core_rows, WindowV3Service
+from packages.application.web_vitrina_window_v3 import _HeaderScan, _catalog_core_rows, _catalog_finalize_rows, WindowV3Service
 from packages.application.sheet_vitrina_v1_web_vitrina import SheetVitrinaV1WebVitrinaBlock
 from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
 from threading import Event
@@ -136,6 +136,13 @@ class CardRatingTests(unittest.TestCase):
             contract = reader.build(page_route='/test', read_route='/test', as_of_date='2026-10-03',
                 output_row_ids=frozenset([f'SKU:{nm}|card_rating', 'TOTAL|avg_card_rating']))
             read_rows = {row.row_id: row for row in contract.rows}
+            research = SheetVitrinaV1ResearchBlock(runtime=runtime, web_vitrina_block=reader, now_factory=lambda: NOW)
+            options = research.build_sku_group_comparison_options(page_route='/test', read_route='/test')
+            rating_option = next(item for item in options['metric_options'] if item['metric_key'] == 'card_rating')
+            self.assertEqual(rating_option['aggregation_method'], 'mean_observed_values')
+            self.assertEqual(rating_option['metric_format'], 'rating')
+            self.assertEqual(rating_option['metric_label'], 'Рейтинг карточки')
+
             self.assertEqual(read_rows[f'SKU:{nm}|card_rating'].values_by_date['2026-10-04'], 4.75123456789123)
             self.assertEqual(read_rows['TOTAL|avg_card_rating'].values_by_date['2026-10-03'], '')
             service = WindowV3Service(reader)
@@ -157,11 +164,59 @@ class CardRatingTests(unittest.TestCase):
             failed = block.build_plan(as_of_date='2026-10-03', source_keys=['card_rating'], metric_keys=KEYS, execution_mode="manual_operator")
             self.assertEqual(failed.sheets[0].rows, plan.sheets[0].rows)
             self.assertEqual(failed.metadata['server_cell_presentation'][f'SKU:{nm}|card_rating']['2026-10-04']['quality_state'], 'stale')
+            # Group refresh must move only the selected cell's value and quality,
+            # including preserved observation time, through persisted ready reads.
+            sentinel = {'quality_state': 'missing', 'reason': 'untouched old date'}
+            plan.metadata['server_cell_presentation'][f'SKU:{nm}|card_rating']['2026-10-03'] = dict(sentinel)
+            plan.metadata['server_cell_presentation']['TOTAL|unrelated'] = {'2026-10-04': {'reason': 'untouched metric'}}
+            def verify_group_merge(partial, quality, value):
+                merged, _ = _merge_source_group_ready_snapshot(
+                    previous_plan=plan, partial_plan=partial, source_group_id='wb_api',
+                    source_keys=['card_rating'], metric_keys=KEYS,
+                    refreshed_at='2026-10-04T12:01:00Z', previous_refreshed_at='2026-10-04T12:00:00Z',
+                    selected_as_of_date='2026-10-04', business_date='2026-10-04')
+                presentation = merged.metadata['server_cell_presentation']
+                self.assertEqual(presentation[f'SKU:{nm}|card_rating']['2026-10-03'], sentinel)
+                self.assertEqual(presentation['TOTAL|unrelated'], plan.metadata['server_cell_presentation']['TOTAL|unrelated'])
+                for row in merged.sheets[0].rows:
+                    self.assertEqual(row[2], rows[row[1]][2])
+                    self.assertEqual(presentation[row[1]]['2026-10-04'], partial.metadata['server_cell_presentation'][row[1]]['2026-10-04'])
+                state = runtime.load_current_state()
+                expected = runtime.prepare_sheet_vitrina_ready_publication(bundle_version=state.bundle_version, as_of_date=merged.as_of_date)
+                state, expected = bind_local_derive_publication(runtime, partial, state, expected)
+                runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at='2026-10-04T12:01:00Z',
+                    plan=merged, expected=expected, build_inputs=merged.metadata.get('publication_inputs'))
+                actual = reader.build(page_route='/test', read_route='/test', as_of_date='2026-10-03',
+                    output_row_ids=frozenset([f'SKU:{nm}|card_rating', 'TOTAL|avg_card_rating']))
+                for row in actual.rows:
+                    self.assertEqual(row.presentation_by_date['2026-10-04']['quality_state'], quality)
+                    self.assertEqual(row.presentation_by_date['2026-10-04']['source_observed_at'], NOW.isoformat())
+                self.assertEqual(next(row for row in actual.rows if row.row_id == f'SKU:{nm}|card_rating').values_by_date['2026-10-04'], value)
+                service = WindowV3Service(reader)
+                try:
+                    owner = service._owner_key({'username': 'fixture'})
+                    manifest = json.loads(service._build_manifest(['2026-10-04'], owner, Event()).json_bytes)
+                    session = service._sessions[manifest['session_id']]
+                    indices = [session.row_ids.index(f'SKU:{nm}|card_rating'), session.row_ids.index('TOTAL|avg_card_rating')]
+                    days, scoped = service._slice_rows(session, 0, Event(), indices)
+                    self.assertEqual(days, ['2026-10-04'])
+                    for row in scoped.values():
+                        self.assertEqual(row.presentation_by_date['2026-10-04']['quality_state'], quality)
+                        self.assertEqual(row.presentation_by_date['2026-10-04']['source_observed_at'], NOW.isoformat())
+                    chunk = json.loads(service._build_chunk(session, {'d': 0, 'r': 0, 'n': 2, 'i': indices, 'g': ''}, Event()).json_bytes)
+                    self.assertEqual(chunk['rows'][0]['values'][0][1], value)
+                    quality_index = chunk['value_encoding']['fields'].index('quality_state') + 1
+                    for row in chunk['rows']:
+                        self.assertEqual(row['values'][0][quality_index], quality)
+                finally:
+                    service.close()
+            verify_group_merge(failed, 'stale', 4.75123456789123)
             # A successful all-missing response supersedes the old observation.
             source.fail = False
             source.values = [None]
             missing = block.build_plan(as_of_date='2026-10-03', source_keys=['card_rating'], metric_keys=KEYS, execution_mode="manual_operator")
             self.assertTrue(all(row[3] == '' for row in missing.sheets[0].rows))
+            verify_group_merge(missing, 'missing', '')
             # Restore first observation to prove immutable rollover and history.
             runtime.save_temporal_source_slot_snapshot(source_key='card_rating', snapshot_date='2026-10-04', snapshot_role='accepted_current_snapshot', captured_at="2026-10-04T12:00:00Z", payload=stored)
             block.now_factory = lambda: datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
@@ -198,6 +253,7 @@ class CardRatingTests(unittest.TestCase):
             self.assertEqual({row.metric_key for row in old_rows}, set(KEYS))
             catalog = _catalog_core_rows(_HeaderScan([], frozenset(['2026-10-01']), False),
                 block=SimpleNamespace(runtime=runtime), business_date='2026-10-04', selected_dates=['2026-10-01'])
+            catalog = _catalog_finalize_rows(catalog, block=SimpleNamespace(runtime=runtime))
             self.assertTrue(set(KEYS) <= {row.metric_key for row in catalog})
             self.assertTrue(all(not row.values_by_date for row in catalog if row.metric_key in KEYS))
             # Persisted schedules contain timings, never a frozen API source list.

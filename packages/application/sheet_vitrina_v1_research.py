@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
+from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.sheet_vitrina_v1_archived_metrics import ARCHIVED_PUBLIC_METRIC_KEYS
 from packages.application.sheet_vitrina_v1_authenticated_buyer import (
@@ -124,7 +125,7 @@ class SheetVitrinaV1ResearchBlock:
         sku_metric_keys = self._current_sku_metric_keys(page_route=page_route, read_route=read_route)
         metric_options = _selectable_metric_options(
             visible_authenticated_buyer_metrics(
-                extend_metrics_with_authenticated_buyer(current_state.metrics_v2)
+                extend_metrics_with_card_rating(extend_metrics_with_authenticated_buyer(current_state.metrics_v2))
             ),
             sku_metric_keys=sku_metric_keys,
         )
