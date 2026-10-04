@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 from .contracts import CaseState, Context, Decision
+from .core import _current_intent
 
 TEMPLATES = {
     "supplies": "",
@@ -16,8 +17,21 @@ TEMPLATES = {
     "display_artifact": "Пришлите фото, на котором видно стойкое искажение изображения, — поможем рассмотреть возврат.",
     "scratch_wear": "Защитное стекло не обладает абсолютной устойчивостью к царапинам: в эксплуатации абразивные частицы могут оставлять следы. Одна царапина, появившаяся при использовании, сама по себе не подтверждает дефект. Если есть другие обстоятельства, напишите — рассмотрим их.",
     "edge_discomfort": "Ощущение края стекла само по себе не подтверждает дефект. Если есть острый скол или опасная кромка, сообщите об этом — такую проблему рассмотрим отдельно.",
+    "product_question": "Подскажите, пожалуйста, какой вопрос по товару вас интересует?",
+    "product_unknown": "Для ответа на ваш вопрос нужны подтверждённые сведения о конкретном товаре. Сейчас этих данных нет, поэтому пока не можем уверенно подсказать его свойства.",
+    "installation_detail": "Подскажите, что именно получилось при установке: остались пузыри, отходит край или стекло расположилось неровно?",
+    "mechanism_detail": "Подскажите, что именно произошло: оторвался язычок или плёнка осталась в боксе и стекло не перенеслось на экран?",
+    "geometry_detail": "Подскажите, смещено само стекло после установки через бокс или его рамка относительно экрана?",
+    "compensation_subject": "Уточните, пожалуйста, о какой выплате идёт речь: возврате стоимости стекла, начислении Wildberries или оплате ремонта телефона?",
+    "missing_component": "Подскажите, в полученном комплекте не было самого стекла или отсутствовал другой элемент?",
+    "compatibility_unknown": "Совместимость заказанного варианта с вашей моделью телефона пока не подтверждена. Нужно проверить её, прежде чем выбирать дальнейший способ решения.",
+    "legacy_unknown": "Ваш вопрос о ранее обещанном решении учтён. Нужно проверить прежнее обещание и порядок его исполнения; сейчас подтвердить исполнение не можем.",
+    "discarded_unknown": "Учли, что стекло уже выброшено. Это не означает, что его не было в полученном комплекте. Доступный порядок возврата в этой ситуации нужно отдельно проверить; сейчас он не подтверждён.",
+    "media_unknown": "Полученный материал учтён, но его содержание сейчас нельзя достоверно оценить. Для решения нужно проверить уже полученный материал; повторно присылать его сейчас не требуется.",
+    "photo_detail": "Полученное фото относится к вашей проблеме, но нужная деталь на нём не различима достаточно ясно. Пришлите, пожалуйста, один более ясный снимок нужного участка; снимать стекло или разбирать бокс ради фото не нужно.",
+    "review_find_unknown": "Ваш вопрос о том, где найти отзыв, учтён. Сейчас нет подтверждённой актуальной инструкции Wildberries, поэтому конкретные шаги пока подсказать не можем.",
     "problem_detail": "Подскажите, пожалуйста, что произошло со стеклом и с чем нужна помощь.",
-    "fracture_stage": "Подскажите, трещина появилась при установке или первом осмотре результата до использования телефона либо уже после начала использования?",
+    "fracture_stage": "Подскажите, трещина обнаружилась при установке или первом осмотре результата до использования телефона либо уже после начала использования?",
     "phone_model": "Поможем разобраться. Подскажите точную модель телефона, включая Pro, Max или Plus, если они есть в названии. Проверим совместимость заказанного варианта.",
     "selection_condition": "Подскажите, стекло уже устанавливалось или оно не использовалось и сохранило товарный вид?",
     "onset": "Подскажите, проблема появилась сразу после установки или уже при дальнейшем использовании?",
@@ -79,7 +93,7 @@ TEMPLATES = {
     "resolved": "Рады, что удалось решить вопрос.",
 }
 SYMPATHY = {
-    "fracture": "стекло треснуло", "bubbles": "после установки остались пузыри", "dust": "под стеклом осталась пылинка",
+    "fracture": "стекло повреждено", "bubbles": "после установки остались пузыри", "dust": "под стеклом осталась пылинка",
     "edge": "край стекла не приклеивается", "tab": "язычок оторвался и установить стекло не получилось",
     "film": "плёнка застряла и завершить установку не получилось", "size": "размер стекла не подошёл",
     "supplies": "возникли сложности с комплектом", "missing_glass": "в комплекте не оказалось стекла",
@@ -88,6 +102,8 @@ SYMPATHY = {
     "touch": "экран стал хуже реагировать на касания", "camera": "изображение с камеры стало мутным",
     "faceid": "возникли сложности с Face ID", "alignment": "стекло установилось неровно",
     "compensation": "экран вашего телефона повреждён",
+    "scratch": "на стекле обнаружилась царапина", "delivery": "возникли сложности с получением заказа",
+    "payment": "возникли сложности с выплатой", "opened_used": "возник вопрос о состоянии полученного комплекта",
 }
 
 
@@ -97,8 +113,13 @@ def render(state: CaseState, decision: Decision, context: Context, variant: int 
     text = TEMPLATES[decision.template]
     issue = state.issues.get(decision.issue_id)
     facts = issue.facts if issue else {}
+    intent = _current_intent(state, issue) if issue else "other"
+    if intent == "replacement":
+        text = "Отправка нового стекла вместо возврата не предусмотрена. " + text
     if decision.rule == "injury_return":
         text = "Прекратите использование и не касайтесь осколков руками. " + text
+    if decision.template == "photo_detail":
+        text = "Полученное фото относится к вашей проблеме, но нужная деталь на нём не различима достаточно ясно. " + TEMPLATES[decision.missing[0]]
     if decision.template == "supplies":
         option = facts.get("cleaning_option")
         text = {"microfibre": "Протрите экран пригодной тряпочкой или микрофиброй из комплекта; подготовить экран можно без стикеров.", "wet_dry_wipes": "Подготовьте экран имеющейся пригодной влажной салфеткой, затем сухой.", "own_soft_cloth": "Подготовьте экран имеющейся сухой мягкой салфеткой."}.get(option, "")
@@ -119,8 +140,22 @@ def render(state: CaseState, decision: Decision, context: Context, variant: int 
         if topic == "bubbles" and facts.get("bubble_type") == "dust":
             topic = "dust"
         prefix = "Здравствуйте. "
-        if topic in SYMPATHY and facts.get("buyer_intent") != "selection_return" and decision.action not in ("complete", "request_review", "confirmed_return"):
-            prefix += "Очень жаль, что " + SYMPATHY[topic] + ". "
+        neutral = intent in ("selection_return", "question_pending", "product_question", "review_edit", "review_find", "installation_help", "acknowledgement", "legacy_followup")
+        sympathy = SYMPATHY.get(topic)
+        if topic == "compensation" and facts.get("compensation_kind") != "phone_damage":
+            sympathy = None
+        if topic == "missing_glass" and facts.get("glass_status") != "missing_on_receipt":
+            sympathy = None
+        if decision.template == "mechanism_detail":
+            sympathy = "возникли сложности с установочным комплектом"
+        if decision.template == "geometry_detail":
+            sympathy = "возник вопрос о положении стекла"
+        if facts.get("problem_context") in ("installation", "mechanism") and topic in ("general", "other", "product"):
+            sympathy = "возникли сложности при установке стекла"
+        if facts.get("problem_context") == "complaint" and topic in ("general", "other", "product"):
+            sympathy = "возникла проблема со стеклом"
+        if sympathy and not neutral and decision.action not in ("complete", "request_review", "confirmed_return"):
+            prefix += "Очень жаль, что " + sympathy + ". "
         text = prefix + text
     # Variation changes politeness only; technical/confirmed templates stay fixed.
     if variant is None:

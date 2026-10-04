@@ -301,9 +301,9 @@ class PrefixMediaBindingRegressions(unittest.TestCase):
             def structured(self, kind, prompt, payload, schema, image=None):
                 if kind == "buyer_photo":
                     self.photo_calls += 1
-                    data = {"result": "suitable"}
+                    data = {"result": "suitable", "visible_glass_damage": "unknown"}
                 else:
-                    data = {"facts": [item("a", "topic", "tab", "b", "язычок оторвался")], "wording_variant": 0}
+                    data = {"facts": [item("a", "topic", "tab", "b", "язычок оторвался"), item("a", "mechanism_kind", "torn_tab", "b", "язычок оторвался")], "wording_variant": 0}
                 return {"data": data, "cache_key": "mock-" + kind, "accounting": {"input_tokens": 1, "output_tokens": 1}, "cost_usd": 0}
         client = Client()
         attachment = {"attachment_id": "a", "kind": "image"}

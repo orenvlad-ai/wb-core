@@ -292,7 +292,8 @@ class ReplayRepairBoundary(ClosingLedgerTestCase):
             self.assertNotIn("extraction_repair", last["saved_state"])
             repair_payload = json.loads(provider.requests[2]["input"][0]["content"][0]["text"])
             self.assertEqual([e["event_id"] for e in repair_payload["initial_request"]["actual_delta"]], ["b2"])
-            self.assertNotIn("b3", json.dumps(repair_payload))
+            self.assertNotIn("b3", repair_payload["initial_request"]["saved_state"]["processed_events"])
+            self.assertNotIn("Третий вопрос", json.dumps(repair_payload, ensure_ascii=False))
 
     def test_missing_followup_remains_partial_after_successful_repair(self):
         with tempfile.TemporaryDirectory() as tmp:

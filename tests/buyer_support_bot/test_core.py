@@ -5,6 +5,16 @@ from packages.domain.buyer_support_bot.core import PHOTO_TASKS
 
 
 def state(topic, **facts):
+    if "stage" in facts and facts["stage"] != "unknown":
+        facts.setdefault("stage_basis", "explicit_stage")
+    if topic == "missing_glass":
+        facts.setdefault("glass_status", "missing_on_receipt")
+    if topic in ("tab", "film"):
+        facts.setdefault("mechanism_kind", PHOTO_TASKS[topic])
+    if topic == "alignment":
+        facts.setdefault("installation_result", "crooked_via_box")
+    if topic == "compensation":
+        facts.setdefault("compensation_kind", "phone_damage")
     return CaseState("synthetic", issues={"a": IssueState(facts={"topic": topic, **facts})})
 
 
@@ -171,13 +181,13 @@ class CoreScenarios(unittest.TestCase):
 
     def test_one_ground_not_every_issue_photo(self):
         s = state("touch", stage="installation", advice_status="tried_failed")
-        s.issues["b"] = IssueState(facts={"topic": "tab"})
+        s.issues["b"] = IssueState(facts={"topic": "tab", "mechanism_kind": "torn_tab"})
         d = decide(s, ctx())
         self.assertEqual((d.issue_id, d.action), ("a", "request_claim"))
 
     def test_compensation_kept_separate_and_open(self):
         s = state("touch", stage="installation", advice_status="tried_failed")
-        s.issues["damage"] = IssueState(facts={"topic": "compensation", "compensation_materials": "true"})
+        s.issues["damage"] = IssueState(facts={"topic": "compensation", "compensation_materials": "true", "compensation_kind": "phone_damage"})
         d = decide(s, ctx())
         self.assertEqual(d.action, "request_claim")
         self.assertIn("damage_final_process", d.secondary_unavailable)

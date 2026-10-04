@@ -69,6 +69,8 @@ def observe(state: CaseState, event: Event, facts: list[Fact], photos: tuple[Pho
             if fact.value not in values:
                 values.append(fact.value)
             issue.facts[fact.key] = "unknown"
+        elif fact.key == "stage_basis" and old_value == "explicit_stage" and fact.value == "elapsed_discovery":
+            pass  # a weaker later discovery statement does not erase known use stage
         elif fact.value != "unknown" or old_value is None:
             issue.facts[fact.key] = fact.value
         old_sources.extend({"event_id": source.event_id, "quote": source.quote, "value": fact.value} for source in new_sources)
@@ -116,7 +118,9 @@ def _photo(state: CaseState, issue_id: str, task: str) -> str:
         return "suitable"
     if any(item.result == "irrelevant" for item in photos):
         return "irrelevant"
-    if any(item.result in ("unavailable", "unassessable") for item in photos):
+    if any(item.result == "unassessable" for item in photos):
+        return "unassessable"
+    if any(item.result == "unavailable" for item in photos):
         return "technical_unknown"
     return "none"
 
@@ -176,7 +180,9 @@ def _with_photo(state: CaseState, context: Context, issue_id: str, topic: str, r
     if (issue.facts.get("cannot_photo") == "true" and issue.facts.get("photo_limit_scope") == "current_photo") or issue.counters.get("photo_requests", 0) >= 2 or not context.chat_available:
         return _return(state, context, issue_id, "return_goods", rule + ".photo_missing")
     if photo == "technical_unknown":
-        return _decision("media_unavailable", rule, issue_id, missing=(task,), unavailable=("media_analysis",))
+        return _decision("media_unavailable", rule, issue_id, missing=(task,), template="media_unknown", unavailable=("media_analysis",))
+    if photo == "unassessable":
+        return _decision("request_photo", rule, issue_id, missing=(task,), template="photo_detail")
     return _decision("request_photo", rule, issue_id, missing=(task,), template=task)
 
 
@@ -196,23 +202,75 @@ def _refuse(state: CaseState, context: Context, issue_id: str, rule: str, templa
     return _decision("explain", rule, issue_id, template={"post_use_fracture": "fracture_objection", "buyer_selection_used": "selection_objection", "scratch_in_use": "scratch_objection"}.get(rule, template) if count else template)
 
 
+def _current_intent(state: CaseState, issue: IssueState) -> str:
+    # Historical intent is evidence, not a request being repeated forever.
+    if not state.current_buyer_event_id or any(source["event_id"] == state.current_buyer_event_id for source in issue.provenance.get("buyer_intent", [])):
+        return issue.facts.get("buyer_intent", "other")
+    return "other"
+
+
+def _legacy_gaps(state: CaseState) -> tuple[str, ...]:
+    return ("legacy_obligation_resolution",) if any(issue.facts.get("historical_obligation") in ("replacement_glass", "compensation") for issue in state.issues.values()) else ()
+
+
+def _resolved_response(state: CaseState, context: Context, issue_id: str) -> Decision:
+    review = context.review
+    if all(issue.facts.get("resolved") == "true" for issue in state.issues.values()) and review.linked and review.fresh and review.source == "authoritative_api" and review.negative is True and not state.review_requested:
+        return _decision("request_review", "resolved_negative_review", issue_id, template="review")
+    return _decision("complete", "explicit_resolution", issue_id, template="resolved", secondary_unavailable=_legacy_gaps(state))
+
+
+def _current_return(state: CaseState, context: Context, issue_id: str) -> Decision:
+    # Read the existing purchase-linked status/method, not a new inferred ground.
+    claim = context.claim
+    if claim.availability == "present" and claim.linked and claim.fresh and claim.source == "authoritative_api":
+        if claim.status == "approved" and claim.return_method != "unknown":
+            return _decision("confirmed_return", "authoritative_approved", issue_id, method=claim.return_method, template="confirmed_" + claim.return_method)
+        if claim.status == "rejected":
+            return _decision("explain", "rejected_no_reconsideration", issue_id, template="rejected_known" if claim.rejection_reason else "rejected_unknown")
+    return _decision("restore_read", "current_return_status", issue_id, template="status_unknown", unavailable=("linked_claim_status_and_method",))
+
+
 def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
     issue = state.issues[issue_id]
     f = issue.facts
     topic = f.get("topic", "general")
-    if f.get("buyer_intent") == "review_edit" or topic == "review":
+    intent = _current_intent(state, issue)
+    if intent in ("review_edit", "review_find"):
         legacy = ("legacy_obligation_resolution",) if f.get("historical_obligation") in ("replacement_glass", "compensation") else ()
         return _decision("technical_pause", "buyer_review_edit_instructions", issue_id,
-                         template="review_instructions_unknown", unavailable=("current_wb_review_instructions",), secondary_unavailable=legacy)
-    if f.get("buyer_intent") == "selection_return":
+                         template="review_find_unknown" if intent == "review_find" else "review_instructions_unknown", unavailable=("current_wb_review_instructions",), secondary_unavailable=legacy)
+    if intent == "question_pending":
+        return _decision("clarify", "product_question_pending", issue_id, template="product_question", missing=("asked_product_question",))
+    if intent == "product_question":
+        return _decision("data_unavailable", "product_answer_grounding", issue_id, template="product_unknown", unavailable=("product_answer_contract",))
+    if intent == "installation_help":
+        return _decision("explain", "installation_instruction", issue_id, template="instruction")
+    if intent in ("return_status", "return_logistics"):
+        return _current_return(state, context, issue_id)
+    if intent == "legacy_followup":
+        return _decision("technical_pause", "legacy_promise_followup", issue_id, template="legacy_unknown", unavailable=("legacy_obligation_resolution",))
+    if intent == "acknowledgement":
+        return _decision("silent", "conversation_close", issue_id, secondary_unavailable=_legacy_gaps(state))
+    if intent == "selection_return" or (intent == "other" and f.get("buyer_intent") == "selection_return"):
         topic = "size"
+    if intent == "replacement" and topic == "compensation" and f.get("compensation_kind") != "phone_damage":
+        topic = "general"
+    if topic == "supplies" and f.get("problem_context") == "mechanism":
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "mechanism_detail", "mechanism_kind_required")
     if topic == "bubbles" and f.get("bubble_type") == "dust":
         topic = "dust"
     tried = f.get("advice_status") in ("tried_failed", "refused")
-    if f.get("historical_obligation") in ("replacement_glass", "compensation"):
+    if f.get("historical_obligation") in ("replacement_glass", "compensation") and intent == "other":
         return _decision("policy_unavailable", "legacy_obligation", issue_id, unavailable=("legacy_obligation_resolution",))
     if topic in ("delivery", "payment"):
         return _decision("explain", "wb_platform_boundary", issue_id, template=topic)
+    if topic == "compensation" and f.get("compensation_kind") == "wb_reward":
+        return _decision("explain", "wb_platform_boundary", issue_id, template="payment")
+    if topic == "compensation" and f.get("compensation_kind") == "glass_refund":
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "problem_detail", "glass_refund_problem_unknown")
+    if topic == "compensation" and f.get("compensation_kind") != "phone_damage":
+        return _decision("clarify", "compensation_subject_unknown", issue_id, template="compensation_subject", missing=("asked_compensation_subject",))
     if topic == "compensation":
         return _decision("policy_unavailable", "phone_damage_separate", issue_id, template="compensation" if f.get("compensation_materials") != "true" else "", unavailable=("damage_final_process",))
     if topic == "giveaway":
@@ -221,15 +279,20 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
         return _decision("explain", "giveaway_temporary_help", issue_id, template="giveaway")
     if issue.conflicts:
         return _ask_or_physical(state, context, issue_id, "contradiction_requests", "contradiction", "fact_conflict")
-    if topic in ("general", "other"):
-        return _ask_or_physical(state, context, issue_id, "detail_requests", "problem_detail", "general_complaint")
+    if topic in ("general", "other", "review") or (topic == "product" and f.get("problem_context") in ("installation", "mechanism", "geometry", "complaint")):
+        detail = {"installation": "installation_detail", "mechanism": "mechanism_detail", "geometry": "geometry_detail"}.get(f.get("problem_context"), "problem_detail")
+        return _ask_or_physical(state, context, issue_id, "detail_requests", detail, "general_complaint")
     if topic == "fracture":
-        stage = f.get("stage", "unknown")
+        stage = f.get("stage", "unknown") if f.get("stage_basis") == "explicit_stage" else "unknown"
         if stage == "unknown":
             return _ask_or_physical(state, context, issue_id, "detail_requests", "fracture_stage", "fracture_stage_required")
         if stage == "in_use":
             return _refuse(state, context, issue_id, "post_use_fracture", "fracture_use") if f.get("return_requested") == "true" else _decision("explain", "post_use_fracture", issue_id, template="protection")
         return _with_photo(state, context, issue_id, topic, "pre_use_fracture")
+    if topic == "missing_glass" and f.get("glass_status") != "missing_on_receipt":
+        if f.get("glass_status") == "discarded":
+            return _decision("technical_pause", "discarded_glass_not_missing", issue_id, template="discarded_unknown", unavailable=("applicable_disposed_goods_process",))
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "missing_component", "missing_component_unknown")
     if topic == "missing_glass":
         return _return(state, context, issue_id, "keep_goods", "missing_glass_return")
     if topic == "instruction":
@@ -237,6 +300,11 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
     if topic == "injury":
         decision = _return(state, context, issue_id, "keep_goods", "injury_return")
         return Decision(**{**decision.__dict__, "secondary_unavailable": ("injury_medical_compensation_not_bot",)})
+    if topic == "wrong_item" and f.get("problem_context") == "fit":
+        if not f.get("phone_model"):
+            return _ask_or_physical(state, context, issue_id, "detail_requests", "phone_model", "size_phone_required")
+        if context.compatibility == "unknown":
+            return _decision("data_unavailable", "compatibility_unknown", issue_id, template="compatibility_unknown", unavailable=("verified_product_compatibility",))
     if topic in ("opened_used", "wrong_item"):
         return _with_photo(state, context, issue_id, topic, topic + "_return")
     if topic == "scratch":
@@ -249,6 +317,14 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
         if f.get("edge_kind") == "subjective":
             return _decision("explain", "edge_discomfort", issue_id, template="edge_discomfort")
         return _with_photo(state, context, issue_id, topic, "dangerous_edge_return")
+    if topic in ("tab", "film") and _photo(state, issue_id, "visible_glass_damage") == "suitable":
+        if f.get("stage_basis") == "explicit_stage" and f.get("stage") in ("before_use", "installation", "initial_inspection"):
+            return _return(state, context, issue_id, "keep_goods", "independent_glass_damage.evidence")
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "fracture_stage", "independent_damage_stage_required")
+    if topic in ("tab", "film") and f.get("mechanism_kind") != PHOTO_TASKS[topic]:
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "mechanism_detail", "mechanism_kind_required")
+    if topic == "alignment" and f.get("installation_result") != "crooked_via_box":
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "geometry_detail", "alignment_kind_required")
     if topic in ("tab", "film", "alignment"):
         return _with_photo(state, context, issue_id, topic, topic + "_return")
     if topic == "earpiece":
@@ -263,7 +339,7 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
         if not f.get("phone_model"):
             return _ask_or_physical(state, context, issue_id, "detail_requests", "phone_model", "size_phone_required")
         if context.compatibility == "unknown":
-            return _decision("data_unavailable", "compatibility_unknown", issue_id, unavailable=("verified_product_compatibility",))
+            return _decision("data_unavailable", "compatibility_unknown", issue_id, template="compatibility_unknown", unavailable=("verified_product_compatibility",))
         if context.compatibility == "verified_mismatch" and context.received_matches_order is True:
             if f.get("stage") == "before_use" and f.get("pristine") == "true":
                 return _return(state, context, issue_id, "return_goods", "buyer_selection_unused")
@@ -297,14 +373,14 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
             return _ask_or_physical(state, context, issue_id, "detail_requests", "coating_manifestation", "matte_manifestation")
     if topic == "dust" and f.get("missing_sticker") == "true":
         return _with_photo(state, context, issue_id, topic, "dust_no_sticker")
-    if topic in ("touch", "camera", "faceid", "marks") and f.get("stage", "unknown") == "unknown":
+    if topic in ("touch", "camera", "faceid") and f.get("stage", "unknown") == "unknown":
         return _ask_or_physical(state, context, issue_id, "detail_requests", "onset", topic + "_onset")
     if topic == "touch" and f.get("stage") == "in_use":
         return _decision("policy_unavailable", topic + "_late", issue_id, unavailable=("late_device_issue_rule",))
     if topic == "marks":
         if f.get("marks_kind") == "wipeable":
             return _decision("explain", "fingerprints_normal", issue_id, template="fingerprints")
-        if f.get("marks_kind") == "late_wear":
+        if f.get("marks_kind") == "late_wear" and f.get("stage_basis") != "elapsed_discovery":
             return _decision("policy_unavailable", "marks_late_wear", issue_id, unavailable=("late_marks_rule",))
     if topic == "display" and f.get("display_kind") == "subjective_discomfort":
         return _decision("data_unavailable", "display_subjective_property", issue_id, unavailable=("verified_product_line",))
@@ -328,26 +404,32 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
             return _ask_or_physical(state, context, issue_id, "detail_requests", "marks_manifestation", "marks_manifestation")
         return _with_photo(state, context, issue_id, topic, topic + "_persistent")
     if topic == "product":
-        return _decision("data_unavailable", "product_answer_grounding", issue_id, unavailable=("product_answer_contract",))
+        return _decision("clarify", "product_question_pending", issue_id, template="product_question", missing=("asked_product_question",))
     return _decision("policy_unavailable", "unmapped_subject", issue_id, unavailable=("subject_rule",))
 
 
 def decide(state: CaseState, context: Context) -> Decision:
     """Select next intent, without mutating state or asserting an external result."""
     claim = context.claim
-    # A fresh, separate review question does not erase or wait on a legacy glass
-    # obligation. It is not an unsolicited request to edit a review.
-    review_questions = [(key, issue) for key, issue in state.issues.items()
-                        if issue.facts.get("buyer_intent") == "review_edit"
-                        and any(source["event_id"] == state.current_buyer_event_id for source in issue.provenance.get("buyer_intent", []))]
-    if review_questions:
-        issue_id, _ = review_questions[-1]
-        result = _subject(state, context, issue_id)
-        legacy = tuple(sorted(set(result.secondary_unavailable) | {"legacy_obligation_resolution" for issue in state.issues.values() if issue.facts.get("historical_obligation") in ("replacement_glass", "compensation")}))
-        return Decision(**{**result.__dict__, "secondary_unavailable": legacy, "facts_used": tuple(sorted(state.issues[issue_id].facts))})
     uncertain = [op for op in state.operations.values() if op.state in ("dispatching", "unknown")]
     if uncertain:
         return _decision("verify_operation", "unknown_operation_no_resend", template="status_unknown", unavailable=("operation_result",))
+    if not context.timer_event:
+        focused = [(key, issue) for key, issue in state.issues.items()
+                   if _current_intent(state, issue) != "other"]
+        if focused:
+            issue_id, issue = focused[-1]
+            result = _subject(state, context, issue_id)
+            if _current_intent(state, issue) == "acknowledgement" and issue.facts.get("resolved") == "true" and any(source["event_id"] == state.current_buyer_event_id for source in issue.provenance.get("resolved", [])):
+                result = _resolved_response(state, context, issue_id)
+            # A current request/closure does not cancel unresolved old obligations.
+            return Decision(**{**result.__dict__, "secondary_unavailable": tuple(sorted(set(result.secondary_unavailable) | set(_legacy_gaps(state)))), "facts_used": tuple(sorted(issue.facts))})
+        fresh_resolved = [(key, issue) for key, issue in state.issues.items() if issue.facts.get("resolved") == "true"
+                          and any(source["event_id"] == state.current_buyer_event_id for source in issue.provenance.get("resolved", []))]
+        fresh_unresolved = [issue for issue in state.issues.values() if issue.facts.get("resolved") != "true"
+                            and any(source["event_id"] == state.current_buyer_event_id for key, sources in issue.provenance.items() if key not in ("substantive", "direct_insult") for source in sources)]
+        if fresh_resolved and not fresh_unresolved:
+            return _resolved_response(state, context, fresh_resolved[-1][0])
     if claim.availability == "present" and claim.linked and claim.fresh and claim.source == "authoritative_api":
         if claim.status == "approved":
             if not context.return_discussed:
@@ -357,17 +439,14 @@ def decide(state: CaseState, context: Context) -> Decision:
                 return _decision("silent", "approved_no_unsolicited_notice")
             if claim.return_method == "unknown":
                 return _decision("restore_read", "approved_method_unknown", unavailable=("confirmed_return_method",))
-            separate = tuple("damage_final_process" for item in state.issues.values() if item.facts.get("topic") == "compensation")
+            separate = tuple("damage_final_process" for item in state.issues.values() if item.facts.get("topic") == "compensation" and item.facts.get("compensation_kind") == "phone_damage")
             return _decision("confirmed_return", "authoritative_approved", method=claim.return_method, template="confirmed_" + claim.return_method, secondary_unavailable=separate)
         if claim.status == "rejected" and context.return_discussed:
             return _decision("explain", "rejected_no_reconsideration", template="rejected_known" if claim.rejection_reason else "rejected_unknown")
     active = {key: value for key, value in state.issues.items() if value.facts.get("resolved") != "true"}
     for issue_id, issue in state.issues.items():
         if issue.facts.get("resolved") == "true" and not active:
-            review = context.review
-            if review.linked and review.fresh and review.source == "authoritative_api" and review.negative is True and not state.review_requested:
-                return _decision("request_review", "resolved_negative_review", issue_id, template="review")
-            return _decision("complete", "explicit_resolution", issue_id, template="resolved")
+            return _resolved_response(state, context, issue_id)
     if context.timer_event:
         waiting = [item for item in state.issues.values() if item.waiting_since]
         if not waiting or not context.now:
@@ -385,6 +464,12 @@ def decide(state: CaseState, context: Context) -> Decision:
         context = Context(**{**context.__dict__, "chat_available": False, "timer_event": False})
     if not state.issues:
         return _decision("clarify", "unknown_problem", "general", missing=("detail_requests",), template="problem_detail")
+    fresh = [(key, issue) for key, issue in active.items() if any(source["event_id"] == state.current_buyer_event_id for fact_key, sources in issue.provenance.items() if fact_key not in ("substantive", "direct_insult") for source in sources)]
+    if fresh:
+        fresh_candidates = [_subject(state, context, key) for key, issue in fresh]
+        result = next((item for item in fresh_candidates if item.method == "keep_goods"), next((item for item in fresh_candidates if item.method == "return_goods"), fresh_candidates[-1]))
+        issue = state.issues[result.issue_id]
+        return Decision(**{**result.__dict__, "facts_used": tuple(sorted(issue.facts)), "secondary_unavailable": tuple(sorted(set(result.secondary_unavailable) | set(_legacy_gaps(state))))})
     candidates = [_subject(state, context, issue_id) for issue_id in active]
     returns = [item for item in candidates if item.method in ("keep_goods", "return_goods")]
     if returns:
