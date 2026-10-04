@@ -1,5 +1,6 @@
 """Lossless presentation of finished daystore pages; no business runtime dependency."""
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timezone
 import time
 import json
@@ -8,6 +9,10 @@ from packages.business_time import current_business_date_iso
 from packages.application.web_vitrina_compact_table import CELL_DEFAULTS, CELL_FIELDS
 from packages.application.web_vitrina_history_compiler import digest
 from packages.application.web_vitrina_history_store import HistoryUnavailable, _read, _json
+from packages.application.web_vitrina_view_model import _FORMATTER_LIBRARY
+from packages.application.web_vitrina_page_composition import (
+    WEB_VITRINA_PAGE_STATE_NAMESPACE, _build_metric_options, _count_metric_rows,
+)
 
 
 def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=None,
@@ -62,20 +67,44 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
     marker.update(date_from=date_from, date_to=date_to, group_id=group_id or "",
                   current_preliminary=today in page["dates"], saved_at=saved_at)
     dates = sorted(edition["days"])
+    presentation = deepcopy(catalog["presentation"])
+    # Gravity adapter catalogs carry renderer IDs, but not formatter rules.
+    # Resolve presentation rules without evaluating or changing stored cells.
+    formatters = {item["formatter_id"]: item for item in presentation.get("formatters", [])}
+    for renderer in presentation.get("renderers", []):
+        formatter_id = renderer.get("formatter_id")
+        if formatter_id not in formatters and formatter_id in _FORMATTER_LIBRARY:
+            formatters[formatter_id] = asdict(_FORMATTER_LIBRARY[formatter_id])
+    presentation["formatters"] = list(formatters.values())
+    # Full structural metric metadata keeps normal TOTAL/SKU logical IDs stable
+    # before any lazy SKU cells are requested.
+    metric_rows = []
+    for row in catalog["rows"].values():
+        values = {}
+        for key in ("metric_key", "metric_label", "section"):
+            cell = row.get("values", {}).get(key, [])
+            values[key] = {"value": cell[0] if cell else None,
+                           "display_text": cell[1] if len(cell) > 1 else ""}
+        metric_rows.append({"row_kind": row["row_kind"], "section_id": row.get("section_id", ""),
+                            "values": values})
+    metric_options = _build_metric_options(_count_metric_rows(metric_rows), sections=[])
     payload = {
         "composition_name": "web_vitrina_page_composition", "response_schema_version": 2,
         "history_snapshot": marker,
         "meta": {"current_state": "ready", "state_message": "Готовая история; качество указано в ячейках.",
-                 "today_current_date": today, "state_namespace": "web_vitrina_history",
+                 "today_current_date": today, "state_namespace": WEB_VITRINA_PAGE_STATE_NAMESPACE,
                  "browser_state_persistence": "local", "history_snapshot": True},
         "summary_cards": [{"card_id": "period", "detail": date_from + " — " + date_to},
             {"card_id": "page_refresh", "value": saved_at, "updated_at": saved_at}],
-        "historical_access": {"options": [{"value": d, "label": d} for d in dates],
+        "filter_surface": {"controls": [{"control_id": "metric", "options": metric_options}],
+                           "sort_options": [], "default_sort_value": ""},
+        "historical_access": {"options": [{"value": d, "label": d} for d in reversed(dates)],
+            "available_date_min": dates[0], "available_date_max": dates[-1],
             "current_mode": "period", "selected_date_from": date_from, "selected_date_to": date_to,
             "default_as_of_date": today, "default_date_from": date_from, "default_date_to": date_to,
             "status_text": "Готовая история. Качество и полнота указаны в ячейках; текущий день предварительный.",
             "preset_options": [], "supported_query_mode": "history_mode_explicit_date_window"},
-        "table_surface": {**catalog["presentation"], "columns": columns, "rows": rows,
+        "table_surface": {**presentation, "columns": columns, "rows": rows,
             "groupings": groupings, "total_row_count": page["total_rows"], "returned_row_count": len(rows),
             "table_data_state": "included", "value_encoding": {
                 "format": "indexed_cells_v2", "fields": list(CELL_FIELDS), "defaults": list(CELL_DEFAULTS)}},
