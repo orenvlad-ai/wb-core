@@ -148,7 +148,7 @@ def _ask_or_physical(state: CaseState, context: Context, issue_id: str, key: str
     count = issue.counters.get(key, 0) if key == "contradiction_requests" else issue.counters.get("asked_" + template, 0)
     if template == "problem_detail":
         count = max(count, issue.counters.get("detail_requests", 0))
-    if not context.chat_available or (count >= 1 and (key == "contradiction_requests" or template == "problem_detail")):
+    if not context.chat_available or (count >= 1 and (key == "contradiction_requests" or template in ("problem_detail", "bubble_kind"))):
         return _return(state, context, issue_id, "return_goods", rule + ".residual_uncertainty")
     if count >= 1:
         return _decision("policy_unavailable", rule + ".clarification_limit_open", issue_id, unavailable=("substantive_clarification_limit",))
@@ -183,13 +183,15 @@ def _refuse(state: CaseState, context: Context, issue_id: str, rule: str, templa
         if "rejectcustom" not in claim.actions:
             return _decision("action_unavailable", rule, issue_id, template=template, unavailable=("rejectcustom",))
         return _decision("prepare_operation", rule, issue_id, template=template, operation="rejectcustom")
-    return _decision("explain", rule, issue_id, template="fracture_objection" if count else template)
+    return _decision("explain", rule, issue_id, template={"post_use_fracture": "fracture_objection", "buyer_selection_used": "selection_objection", "scratch_in_use": "scratch_objection"}.get(rule, template) if count else template)
 
 
 def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
     issue = state.issues[issue_id]
     f = issue.facts
     topic = f.get("topic", "general")
+    if topic == "bubbles" and f.get("bubble_type") == "dust":
+        topic = "dust"
     tried = f.get("advice_status") in ("tried_failed", "refused")
     if f.get("historical_obligation") in ("replacement_glass", "compensation"):
         return _decision("policy_unavailable", "legacy_obligation", issue_id, unavailable=("legacy_obligation_resolution",))
@@ -290,6 +292,8 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
             return _decision("policy_unavailable", "marks_late_wear", issue_id, unavailable=("late_marks_rule",))
     if topic == "display" and f.get("display_kind") == "subjective_discomfort":
         return _decision("data_unavailable", "display_subjective_property", issue_id, unavailable=("verified_product_line",))
+    if topic == "bubbles" and not tried and f.get("bubble_type", "unknown") == "unknown":
+        return _ask_or_physical(state, context, issue_id, "detail_requests", "bubble_kind", "bubbles_kind_required")
     if topic in TIPS:
         tip = TIPS[topic]
         if topic == "supplies" and not tried and f.get("cleaning_option", "unknown") == "unknown":

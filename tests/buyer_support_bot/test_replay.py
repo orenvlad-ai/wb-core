@@ -168,11 +168,11 @@ class HistoricalReplay(unittest.TestCase):
                 def structured(self, kind, prompt, payload, schema, image=None):
                     self.inputs.append(payload)
                     delta = payload["actual_delta"]
-                    facts = [item("a", "topic", "bubbles", "b1", "пузыри")] if len(self.inputs) == 1 else [item("a", "advice_given", "bubbles", "s1", "приподнимите край"), item("a", "advice_status", "tried_failed", "b2", "попробовал, не помогло")]
+                    facts = [item("a", "topic", "bubbles", "b1", "воздушные пузыри"), item("a", "bubble_type", "air", "b1", "воздушные пузыри")] if len(self.inputs) == 1 else [item("a", "advice_given", "bubbles", "s1", "приподнимите край"), item("a", "advice_status", "tried_failed", "b2", "попробовал, не помогло")]
                     return {"data": {"facts": facts, "wording_variant": 0}, "cache_key": str(len(self.inputs)), "accounting": {"input_tokens": 1, "output_tokens": 1}, "cost_usd": 0}
             client = Client()
             record = {"schema_version": "wbc0115.dialogue.v1", "dialogue_id": "D1", "split": "dev", "metadata": {"future_hint": "must ignore"}, "events": [
-                {"event_id": "b1", "role": "buyer", "text": "пузыри", "context": {"product": {"name": "unverified title"}}},
+                {"event_id": "b1", "role": "buyer", "text": "воздушные пузыри", "context": {"product": {"name": "unverified title"}}},
                 {"event_id": "s1", "role": "seller", "text": "приподнимите край"},
                 {"event_id": "b2", "role": "buyer", "text": "попробовал, не помогло"},
                 {"event_id": "s2", "role": "seller", "text": "FUTURE-SECRET"},
@@ -250,3 +250,45 @@ class ConservativeMissingCacheWrite(unittest.TestCase):
         self.assertFalse(accounting["cache_write_reported"])
         self.assertAlmostEqual(charged, (700*.125 + 300*.01 + 200*.50)/1e6)
         self.assertAlmostEqual(accounting["standard_estimated_cost_usd"], (700*.10 + 300*.01 + 200*.50)/1e6)
+
+class PrefixMediaBindingRegressions(unittest.TestCase):
+    def scenario(self, prefix_sha, manifest_sha):
+        class Client:
+            model, reasoning = "mock", "low"
+            def __init__(self): self.photo_calls = 0
+            def structured(self, kind, prompt, payload, schema, image=None):
+                if kind == "buyer_photo":
+                    self.photo_calls += 1
+                    data = {"result": "suitable"}
+                else:
+                    data = {"facts": [item("a", "topic", "tab", "b", "язычок оторвался")], "wording_variant": 0}
+                return {"data": data, "cache_key": "mock-" + kind, "accounting": {"input_tokens": 1, "output_tokens": 1}, "cost_usd": 0}
+        client = Client()
+        attachment = {"attachment_id": "a", "kind": "image"}
+        if prefix_sha is not None:
+            attachment["sha256"] = prefix_sha
+        record = {"schema_version": "wbc0115.dialogue.v1", "dialogue_id": "D", "split": "dev", "events": [{"event_id": "b", "role": "buyer", "text": "язычок оторвался", "attachments": [attachment]}]}
+        media = {"a": {"sha256": manifest_sha, "resolved_path": "/never/read/unrelated.jpg"}}
+        settings = SimpleNamespace(allow_heldout=False, max_images_per_checkpoint=2, max_image_bytes=100, image_token_cap=20000)
+        return client, record, media, settings
+
+    def test_wrong_or_missing_prefix_hash_stops_before_file_read_or_photo_call(self):
+        for prefix_sha in ("a" * 64, None):
+            with self.subTest(prefix_sha=prefix_sha), tempfile.TemporaryDirectory() as tmp:
+                client, record, media, settings = self.scenario(prefix_sha, "b" * 64)
+                ledger = ReceiptLedger(Path(tmp) / "ledger.db", 10, 1)
+                with patch("packages.domain.buyer_support_bot.replay.image_input") as image_reader:
+                    with self.assertRaisesRegex(ValueError, "prefix attachment hash"):
+                        run_dialogue(record, client, ledger, media, settings)
+                    image_reader.assert_not_called()
+                self.assertEqual(client.photo_calls, 0)
+
+    def test_matching_hash_allows_only_the_bound_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, record, media, settings = self.scenario("b" * 64, "b" * 64)
+            ledger = ReceiptLedger(Path(tmp) / "ledger.db", 10, 1)
+            with patch("packages.domain.buyer_support_bot.replay.image_input", return_value=(b"mock", "image/jpeg", 20000)) as image_reader:
+                rows = run_dialogue(record, client, ledger, media, settings)
+                image_reader.assert_called_once_with(media["a"], 100, 20000)
+            self.assertEqual(client.photo_calls, 1)
+            self.assertEqual(rows[0]["state"]["observations"][0]["attachment_id"], "a")

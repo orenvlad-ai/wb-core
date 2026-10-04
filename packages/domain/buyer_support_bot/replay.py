@@ -323,6 +323,8 @@ def run_dialogue(record, client, ledger, media, settings):
                 if len(media_checks) >= settings.max_images_per_checkpoint:
                     break
                 selected = media[attachment_id]
+                if attachment.get("sha256") != selected["sha256"]:
+                    raise ValueError("prefix attachment hash does not match selected media manifest")
                 image = image_input(selected, settings.max_image_bytes, settings.image_token_cap)
                 photo_payload = {"task": task, "claimed_topic": state.issues[decision.issue_id].facts.get("topic"), "verified_compatibility": context.compatibility}
                 photo_response = client.structured("buyer_photo", PHOTO_PROMPT, photo_payload, PHOTO_SCHEMA, image)

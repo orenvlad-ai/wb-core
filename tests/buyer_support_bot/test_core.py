@@ -23,14 +23,14 @@ def photo(s, result="suitable", task=None):
 
 class CoreScenarios(unittest.TestCase):
     def test_air_bubbles_help_first(self):
-        s = state("bubbles")
+        s = state("bubbles", bubble_type="air_small")
         d = decide(s, ctx())
         self.assertEqual(d.action, "advise")
         self.assertNotIn("возврат", render(s, d, ctx()))
         self.assertIn("суток после установки", render(s, d, ctx()))
 
     def test_elapsed_installation_day_is_not_restarted(self):
-        s = state("bubbles", installation_age="over_day")
+        s = state("bubbles", bubble_type="air_small", installation_age="over_day")
         self.assertNotIn("суток", render(s, decide(s, ctx()), ctx()))
 
     def test_known_failed_tip_not_repeated(self):
@@ -301,7 +301,7 @@ class CoreScenarios(unittest.TestCase):
         self.assertEqual(s.issues["a"].counters["photo_requests"], 1)
 
     def test_actual_historical_advice_not_repeated(self):
-        s = state("bubbles")
+        s = state("bubbles", bubble_type="air_large")
         e = Event("s", "seller", "Приподнимите край")
         s = observe(s, e, [Fact("a", "advice_given", "bubbles", (Evidence("s", "Приподнимите край"),))])
         self.assertEqual(decide(s, ctx()).action, "wait_buyer")
@@ -366,3 +366,64 @@ class InheritedAndOpenScenarios(unittest.TestCase):
     def test_new_instruction_after_approval_is_helped(self):
         c = Context(claim=ClaimSnapshot(availability="present", status="approved", linked=True, fresh=True, source="authoritative_api", return_method="keep_goods"))
         self.assertEqual(decide(state("instruction"), c).template, "instruction")
+
+class IndependentReviewRegressions(unittest.TestCase):
+    def test_bare_bubbles_one_text_clarification_then_no_guess(self):
+        s = state("bubbles")
+        d = decide(s, ctx())
+        self.assertEqual((d.action, d.template), ("clarify", "bubble_kind"))
+        text = render(s, d, ctx())
+        self.assertIn("пылинка", text)
+        self.assertNotIn("фото", text)
+        self.assertNotIn("приподнимите", text)
+        after = simulate(s, d, ctx())
+        second = decide(after, pending())
+        self.assertEqual((second.action, second.method, second.operation), ("prepare_operation", "return_goods", "approve2"))
+        self.assertNotEqual(second.action, "clarify")
+
+    def test_known_air_and_dust_skip_kind_question(self):
+        for kind in ("air", "air_small", "air_large"):
+            with self.subTest(kind=kind):
+                s = state("bubbles", bubble_type=kind)
+                d = decide(s, ctx())
+                self.assertEqual((d.action, d.template), ("advise", "bubbles"))
+        s = state("bubbles", bubble_type="dust")
+        d = decide(s, ctx())
+        self.assertEqual((d.action, d.template), ("advise", "dust"))
+        self.assertNotIn("выпустите воздух", render(s, d, ctx()))
+        s.issues["a"].facts["missing_sticker"] = "true"
+        self.assertEqual(decide(s, ctx()).template, "dust_under_glass")
+
+    def test_known_failed_bubble_attempt_skips_kind_and_tip(self):
+        for status in ("tried_failed", "refused"):
+            s = state("bubbles", advice_status=status)
+            d = decide(s, ctx())
+            self.assertEqual(d.action, "request_photo")
+            self.assertNotEqual(d.template, "bubble_kind")
+
+    def test_edge_never_asks_time_or_bubble_type(self):
+        for stage in ("unknown", "installation", "in_use"):
+            s = state("edge", stage=stage)
+            d = decide(s, ctx())
+            self.assertEqual((d.action, d.template), ("advise", "edge"))
+            self.assertNotIn("появ", render(s, d, ctx()))
+
+    def test_repeat_refusal_uses_established_ground(self):
+        cases = [
+            (state("fracture", stage="in_use", return_requested="true"), ctx(), "fracture_objection", "трещин"),
+            (state("size", stage="in_use", phone_model="iPhone 17", return_requested="true"), ctx(compatibility="verified_mismatch", received_matches_order=True), "selection_objection", "несовместим"),
+            (state("scratch", stage="in_use", return_requested="true"), ctx(), "scratch_objection", "царапин"),
+        ]
+        for s, context, template, phrase in cases:
+            with self.subTest(topic=s.issues["a"].facts["topic"]):
+                s.greeted = True
+                s.issues["a"].counters["refusal_replies"] = 1
+                d = decide(s, context)
+                self.assertEqual(d.template, template)
+                text = render(s, d, context)
+                self.assertIn(phrase, text)
+                if template != "fracture_objection":
+                    self.assertNotIn("трещин", text)
+                s.issues["a"].counters["refusal_replies"] = 2
+                s.last_substantive = False
+                self.assertEqual(decide(s, context).action, "silent")
