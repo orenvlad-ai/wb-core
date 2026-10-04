@@ -12,6 +12,7 @@ EnvironmentFile=/opt/wb-ai/.env
 EnvironmentFile=/opt/wb-core-runtime/app/artifacts/finance_liquidity_cash/pilot/finance-liquidity-pilot.env
 Environment=WEB_VITRINA_FINISHED_SNAPSHOT_STORE=/opt/wb-core-runtime/state/generations/web-vitrina-finished.sqlite3
 Environment=WEB_VITRINA_FINISHED_SNAPSHOT_DEFAULT=1
+Environment=WEB_VITRINA_HISTORY_STORE=/mnt/wb-core-extra100/web-vitrina-history/history
 Environment=CHANGE_REGISTRY_OBSERVER_ENABLED=true
 Environment=CHANGE_REGISTRY_ACCOUNT_SCOPE=seller-portal-primary
 Environment=WB_BUYER_SUPPORT_CABINET_ID=seller-portal-primary

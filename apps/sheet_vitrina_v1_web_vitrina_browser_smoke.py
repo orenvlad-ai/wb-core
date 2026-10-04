@@ -152,12 +152,13 @@ def main() -> None:
 class LocalWebVitrinaFixtureServer:
     def __init__(self, *, with_ready_snapshot: bool, now: datetime | None = None,
                  advertise_window_v3: bool = False, ready_days: int = 7,
-                 snapshot_pilot: bool = False) -> None:
+                 snapshot_pilot: bool = False, history_snapshot: bool = False) -> None:
         self.with_ready_snapshot = with_ready_snapshot
         self.now = now or NOW
         self.advertise_window_v3 = advertise_window_v3
         self.ready_days = ready_days
         self.snapshot_pilot = snapshot_pilot
+        self.history_snapshot = history_snapshot
         self.server = None
         self.thread: threading.Thread | None = None
         self.base_url = ""
@@ -168,6 +169,7 @@ class LocalWebVitrinaFixtureServer:
         self.runtime_dir_obj = TemporaryDirectory(prefix="sheet-vitrina-web-vitrina-browser-")
         runtime_dir = Path(self.runtime_dir_obj.name) / "runtime"
         self.snapshot_pilot_store = runtime_dir / "web_vitrina_pilot.sqlite3"
+        self.history_snapshot_store = runtime_dir / "web_vitrina_history"
         runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
         accepted = runtime.ingest_bundle(bundle, activated_at="2026-04-21T15:00:00Z")
         if accepted.status != "accepted":
@@ -231,6 +233,7 @@ class LocalWebVitrinaFixtureServer:
         self.server = build_registry_upload_http_server(
             config, entrypoint=entrypoint, advertise_window_v3=self.advertise_window_v3,
             snapshot_pilot_store=self.snapshot_pilot_store if self.snapshot_pilot else None,
+            history_snapshot_store=self.history_snapshot_store if self.history_snapshot else None,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -982,7 +985,7 @@ def _check_operator_link(page: object, base_url: str) -> dict[str, str]:
         "nodes => nodes.map(node => ({id: node.getAttribute('data-unified-tab-button') || '', text: (node.textContent || '').trim(), active: node.classList.contains('is-active')}))"
     )
     tab_texts = [item["text"] for item in tabs]
-    if tab_texts != ["Витрина", "Поставки", "Остатки", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
+    if tab_texts != ["Витрина", "Поставки", "Остатки", "Отчёты", "Отзывы", "Чаты и возвраты", "Реклама", "Цены", "Управление SKU", "Исследования"]:
         raise AssertionError(f"operator route must expose the unified top tabs, got {tabs}")
     shell_actions = page.locator(".shell-actions").evaluate(
         "node => Array.from(node.querySelectorAll('button, a')).map(item => (item.textContent || '').trim())"
@@ -3012,7 +3015,7 @@ def _check_operator_screen_layout(page: object) -> dict[str, object]:
           };
         }"""
     )
-    if payload["unified_tabs"] != ["Витрина", "Поставки", "Остатки", "Отчёты", "Отзывы", "Реклама", "Цены", "Управление SKU", "Исследования"]:
+    if payload["unified_tabs"] != ["Витрина", "Поставки", "Остатки", "Отчёты", "Отзывы", "Чаты и возвраты", "Реклама", "Цены", "Управление SKU", "Исследования"]:
         raise AssertionError(f"web-vitrina must expose the unified top tabs, got {payload}")
     if payload["shell_actions"] != ["Инструкции", "Настройки", "Выйти"]:
         raise AssertionError(f"web-vitrina must expose Instructions and Settings next to logout, got {payload}")

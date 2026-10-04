@@ -643,6 +643,7 @@ def build_registry_upload_http_server(
     advertise_window_v3: bool = True,
     snapshot_pilot_store: Path | None = None,
     finished_snapshots_default: bool = False,
+    history_snapshot_store: Path | None = None,
 ) -> HTTPServer:
     runtime_entrypoint = entrypoint or RegistryUploadHttpEntrypoint(runtime_dir=config.runtime_dir)
     handler_cls = _build_handler(
@@ -658,6 +659,7 @@ def build_registry_upload_http_server(
         advertise_window_v3=advertise_window_v3,
         snapshot_pilot_store=snapshot_pilot_store,
         finished_snapshots_default=finished_snapshots_default,
+        history_snapshot_store=history_snapshot_store,
     )
     return RegistryUploadHttpServer((config.host, config.port), handler_cls)
 
@@ -685,6 +687,7 @@ def _build_handler(
     advertise_window_v3: bool = True,
     snapshot_pilot_store: Path | None = None,
     finished_snapshots_default: bool = False,
+    history_snapshot_store: Path | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class RegistryUploadHandler(BaseHTTPRequestHandler):
         runtime_entrypoint = entrypoint
@@ -3364,6 +3367,7 @@ def _build_handler(
                             and (os.path.lexists(snapshot_pilot_store) or
                                  snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
                         finished_snapshots_configured=snapshot_pilot_store is not None,
+                        history_snapshots_configured=history_snapshot_store is not None,
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
@@ -3423,6 +3427,7 @@ def _build_handler(
                             and (os.path.lexists(snapshot_pilot_store) or
                                  snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
                         finished_snapshots_configured=snapshot_pilot_store is not None,
+                        history_snapshots_configured=history_snapshot_store is not None,
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
@@ -3468,6 +3473,7 @@ def _build_handler(
                             and (os.path.lexists(snapshot_pilot_store) or
                                  snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
                         finished_snapshots_configured=snapshot_pilot_store is not None,
+                        history_snapshots_configured=history_snapshot_store is not None,
                         operator_path=sheet_operator_ui_path,
                         refresh_path=sheet_refresh_path,
                         job_path=sheet_job_path,
@@ -3578,6 +3584,7 @@ def _build_handler(
                             and (os.path.lexists(snapshot_pilot_store) or
                                  snapshot_pilot_store.with_name(snapshot_pilot_store.name + ".initialized").exists())),
                         finished_snapshots_configured=snapshot_pilot_store is not None,
+                        history_snapshots_configured=history_snapshot_store is not None,
                             operator_path=sheet_operator_ui_path,
                             refresh_path=sheet_refresh_path,
                             job_path=sheet_job_path,
@@ -4171,9 +4178,17 @@ def _build_handler(
                 return
 
             if parsed.path == DEFAULT_SHEET_WEB_VITRINA_READ_PATH:
+                if "history_snapshot" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
+                    _handle_web_vitrina_history_snapshot_request(self, parsed.query, history_snapshot_store)
+                    return
                 if "snapshot_pilot" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
                     _handle_web_vitrina_snapshot_pilot_request(self, parsed.query, snapshot_pilot_store,
                                                                advertise_window_v3=advertise_window_v3)
+                    return
+                if history_snapshot_store is not None:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                                         {"error": "history_snapshot_required"},
+                                         extra_headers={"Cache-Control": "private, no-store"})
                     return
                 if "window_format" in urllib_parse.parse_qs(parsed.query, keep_blank_values=True):
                     _handle_web_vitrina_window_v3_request(
@@ -6471,6 +6486,52 @@ def _build_handler(
             return
 
     return RegistryUploadHandler
+
+
+def _handle_web_vitrina_history_snapshot_request(handler, query_string, store):
+    """Derived-only reads: errors terminate here, never fall through to native GET."""
+    headers = {"Cache-Control": "private, no-store", "Vary": "Accept-Encoding"}
+    if store is None:
+        _write_json_response(handler, HTTPStatus.NOT_FOUND,
+                             {"error": "history_snapshot_disabled"}, extra_headers=headers)
+        return
+    from packages.application.web_vitrina_history_store import HistoryStore, HistoryUnavailable
+    from packages.application.web_vitrina_history_http_read import read_history_page
+    try:
+        if len(query_string.encode("utf-8")) > 4096:
+            raise ValueError("history_invalid_query")
+        pairs = urllib_parse.parse_qsl(query_string, keep_blank_values=True,
+                                       strict_parsing=True, max_num_fields=10)
+        query = dict(pairs)
+        if len(query) != len(pairs) or set(query) - {
+            "surface", "history_snapshot", "scope", "date_from", "date_to", "edition_id",
+            "offset", "limit", "group_id"
+        } or query.get("history_snapshot") != "1" or query.get("surface") != DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE:
+            raise ValueError("history_invalid_query")
+        if query.get("scope") == "sku" and not query.get("edition_id"):
+            raise ValueError("history_edition_required")
+        payload = read_history_page(HistoryStore(store), date_from=query.get("date_from", ""),
+            date_to=query.get("date_to", ""), scope=query.get("scope", "summary"),
+            edition_id=query.get("edition_id"), offset=int(query.get("offset", "0")),
+            limit=int(query.get("limit", "64")), group_id=query.get("group_id") or None)
+    except HistoryUnavailable as exc:
+        error = {"error": str(exc)}
+        if str(exc) == "history_date_unavailable":
+            try:
+                error["available_dates"] = sorted(HistoryStore(store).edition(query.get("edition_id"))["days"])
+            except (OSError, ValueError, KeyError):
+                pass
+        _write_json_response(handler, HTTPStatus.CONFLICT, error, extra_headers=headers)
+        return
+    except (ValueError, KeyError):
+        _write_json_response(handler, HTTPStatus.UNPROCESSABLE_ENTITY,
+                             {"error": "history_invalid_query"}, extra_headers=headers)
+        return
+    except Exception:
+        _write_json_response(handler, HTTPStatus.INTERNAL_SERVER_ERROR,
+                             {"error": "history_snapshot_read_failed"}, extra_headers=headers)
+        return
+    _write_web_vitrina_snapshot_pilot_response(handler, payload)
 
 
 def _handle_web_vitrina_snapshot_pilot_request(
@@ -11229,6 +11290,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
     user_config_key: str = "local_operator",
     finished_snapshots_enabled: bool = False,
     finished_snapshots_configured: bool = False,
+    history_snapshots_configured: bool = False,
 ) -> str:
     normalized_role = _normalize_runtime_role(role) or WEB_AUTH_ROLE_ADMIN
     normalized_sections = (
@@ -11248,6 +11310,7 @@ def _render_sheet_vitrina_web_vitrina_ui(
         "page_title": "Web-витрина",
         "finished_snapshots_enabled": finished_snapshots_enabled,
         "finished_snapshots_configured": finished_snapshots_configured,
+        "history_snapshots_configured": history_snapshots_configured,
         "current_role": normalized_role,
         "user_config_key": user_config_key,
         "allowed_sections": normalized_sections,
