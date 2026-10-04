@@ -1,13 +1,14 @@
 [Unit]
-Description=WB Core bounded finished Web Vitrina snapshot builder
+Description=WB Core bounded finished Web Vitrina history builder
 After=wb-core-registry-http.service
-RequiresMountsFor=/opt/wb-core-runtime/state/generations
+RequiresMountsFor=/opt/wb-core-runtime/state/generations /mnt/wb-core-extra100
 ConditionPathIsMountPoint=/opt/wb-core-runtime/state/generations
+ConditionPathIsMountPoint=/mnt/wb-core-extra100
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/wb-core-runtime/app
-ExecStart=/usr/bin/python3 apps/web_vitrina_finished_snapshot_build.py --runtime-dir /opt/wb-core-runtime/state --store /opt/wb-core-runtime/state/generations/web-vitrina-finished.sqlite3
+ExecStart=/usr/bin/python3 apps/web_vitrina_history_candidate_build.py --runtime-dir /opt/wb-core-runtime/state --candidate-root /mnt/wb-core-extra100/web-vitrina-history --date-from 2026-03-01 --date-to business-today --formula-epoch wbc0069k16-reviewed-native-v1:d45490c31a6bebd9a9bd99a8372b06c84276fe67e3442a45038a7892387c46a6 --runtime-contract artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json --budget-seconds 240 --max-recomputes 31
 TimeoutStartSec=240
 KillMode=control-group
 User=root
