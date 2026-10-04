@@ -50,6 +50,15 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
     saved_at = datetime.fromtimestamp((store.root / "editions" /
         (page["edition_id"] + ".json")).stat().st_mtime, timezone.utc).isoformat()
     marker = {k: page[k] for k in ("edition_id", "scope", "offset", "next_offset", "total_rows", "availability", "scope_totals", "sku_group_totals")}
+    group_labels = {}
+    for row in catalog["rows"].values():
+        catalog_group_id = row.get("group_id", "")
+        if catalog_group_id in page["sku_group_totals"] and catalog_group_id not in group_labels:
+            cell = row.get("values", {}).get("group", [])
+            label = (cell[1] or cell[0]) if len(cell) >= 2 else ""
+            if label:
+                group_labels[catalog_group_id] = str(label)
+    marker["sku_group_labels"] = group_labels
     marker.update(date_from=date_from, date_to=date_to, group_id=group_id or "",
                   current_preliminary=today in page["dates"], saved_at=saved_at)
     dates = sorted(edition["days"])

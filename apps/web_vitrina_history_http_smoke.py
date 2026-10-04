@@ -56,7 +56,11 @@ def _browser(base, edition, expected_summary):
         start = (date(2026, 4, 20) - timedelta(days=179)).isoformat()
         page.goto(base + "/sheet-vitrina-v1/vitrina?history_mode=explicit&date_from="
                   + start + "&date_to=2026-04-20", wait_until="domcontentloaded")
-        page.wait_for_selector("[data-snapshot-pilot-toolbar]:visible", timeout=30000)
+        try:
+            page.wait_for_selector("[data-snapshot-pilot-toolbar]:visible", timeout=30000)
+        except Exception as error:
+            raise AssertionError({"initial_history_load": str(error), "page_errors": errors,
+                                  "requests": requests, "body": page.locator("body").inner_text()[:4000]}) from error
         assert page.locator('[data-table-head] th[data-col-id^="date:"]').count() == 180, {
             "headers": page.locator("[data-table-head]").inner_text(), "errors": errors,
             "summary": page.locator("[data-filter-summary]").inner_text(), "requests": requests}
@@ -72,19 +76,53 @@ def _browser(base, edition, expected_summary):
         assert len(requests) > 1
         assert all(parse_qs(urlsplit(url).query).get("scope") == ["summary"] for url in requests)
         assert all(parse_qs(urlsplit(url).query).get("edition_id") == [edition] for url in requests[1:])
+        def total_order():
+            return page.locator('[data-table-body] tr[data-row-kind="total"]').evaluate_all(
+                "rows => rows.map(row => row.querySelector('[data-metric-key]').getAttribute('data-metric-key'))")
+
+        original_order = total_order()
+        assert len(original_order) > 3 and len(set(original_order)) == len(original_order)
+        # Exercise the existing user controls before any SKU page. Both these
+        # settings must survive TOTAL-only <-> TOTAL/SKU logical-ID changes.
+        page.locator("[data-metrics-settings-open]").click()
+        hidden_key, moved_key, first_key = original_order[1], original_order[-1], original_order[0]
+        page.locator('[data-metric-config-row][data-total-metric-key="' + hidden_key + '"] [data-metric-display-select]').select_option("hidden")
+        page.evaluate("""({moved, first}) => {
+          const rows = [...document.querySelectorAll('[data-metric-config-row]')];
+          const source = rows.find(row => row.dataset.totalMetricKey === moved);
+          const target = rows.find(row => row.dataset.totalMetricKey === first);
+          const transfer = new DataTransfer();
+          source.querySelector('[data-metric-drag-handle]').dispatchEvent(new DragEvent('dragstart',
+            {bubbles: true, dataTransfer: transfer}));
+          target.dispatchEvent(new DragEvent('drop', {bubbles: true, cancelable: true,
+            dataTransfer: transfer, clientY: target.getBoundingClientRect().top}));
+        }""", {"moved": moved_key, "first": first_key})
+        page.locator("[data-metrics-settings-close]").last.click()
+        expected_order = [moved_key] + [key for key in original_order if key not in {moved_key, hidden_key}]
+        assert total_order() == expected_order, "user hide/reorder controls did not change TOTAL as intended"
+
+        def assert_total_preserved(stage):
+            assert total_order() == expected_order, {"stage": stage, "expected": expected_order,
+                                                   "actual": total_order(), "hidden": hidden_key}
+
         evidence = os.environ.get("WBC_HISTORY_UI_EVIDENCE_DIR")
         if evidence:
             page.screenshot(path=str(Path(evidence) / "history-summary-fixture-180.png"))
         page.locator("[data-snapshot-pilot-expand]").click()
         page.wait_for_function("/SKU: [1-9]/.test(document.querySelector('[data-filter-summary]').textContent)", timeout=30000)
+        assert_total_preserved("first SKU page")
         assert len(requests) >= 2
         assert parse_qs(urlsplit(requests[-1]).query)["edition_id"] == [edition]
         # Group choice clears old pages and requests the same edition/range.
         selector = page.locator("[data-history-sku-group]")
         if selector.locator("option").count() > 1:
+            assert selector.locator("option").nth(1).inner_text() == "Clean"
+            assert selector.locator("option").nth(1).get_attribute("value") == "group:Clean"
             selector.select_option(index=1)
+            assert_total_preserved("group selected, before SKU")
             page.locator("[data-snapshot-pilot-expand]").click()
             page.wait_for_function("/SKU: [1-9]/.test(document.querySelector('[data-filter-summary]').textContent)", timeout=30000)
+            assert_total_preserved("group first SKU page")
             assert parse_qs(urlsplit(requests[-1]).query)["edition_id"] == [edition]
         # A group larger than the displayed-page budget remains fully reachable.
         group_value = selector.input_value()
@@ -97,6 +135,7 @@ def _browser(base, edition, expected_summary):
             page.wait_for_function("old => document.querySelector('[data-filter-summary]').textContent !== old",
                                    arg=before_text, timeout=30000)
             assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() <= 2
+            assert_total_preserved("Next SKU page")
         tail = page.locator("[data-filter-summary]").inner_text()
         matched = re.search(r"SKU: (\d+) — (\d+) из (\d+)", tail)
         assert matched and int(matched.group(2)) == total and int(matched.group(3)) == total, tail
@@ -110,6 +149,7 @@ def _browser(base, edition, expected_summary):
         previous = page.locator("[data-filter-summary]").inner_text()
         assert int(re.search(r"SKU: (\d+)", previous).group(1)) < int(matched.group(1)), previous
         assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() <= 2
+        assert_total_preserved("Previous SKU page")
         assert not errors, errors
         if evidence:
             page.screenshot(path=str(Path(evidence) / "history-sku-fixture-180.png"))
@@ -157,6 +197,7 @@ def main(browser_only=False):
             print(json.dumps({"status": "pass", "fixture_only": True,
                 "synthetic_180_transport_only": True, "replacement_sku_tail_and_previous": True,
                 "displayed_sku_page_cap_override": 2, "same_edition_full_range": True,
+                "total_order_and_user_hidden_preserved": True, "cached_group_human_label": True,
                 "no_heavy_fallback": True}))
             return
         for count in (1, 3, 14, 31, 180):

@@ -13676,6 +13676,20 @@
 
     function initializeMetricPresentation(payload, options) {
       const forceDefault = !!(options && options.forceDefault);
+      // A bounded SKU page can turn a TOTAL-only logical metric into a pair
+      // (and back). Preserve user settings by semantic key across that change.
+      const previousPresentation = new Map();
+      if (options && options.preserveExistingPresentation) {
+        state.metricPresentation.unifiedOrder.forEach(function(id, rank) {
+          const record = state.metricPresentation.logicalById.get(id) || {};
+          ["total", "sku"].forEach(function(scope) {
+            const key = record[scope + "Key"];
+            if (key) previousPresentation.set(scopedMetricLookupKey(scope, key), {
+              rank: rank, display: state.metricPresentation.unifiedDisplay[id]
+            });
+          });
+        });
+      }
       const model = buildMetricPresentationModel(payload);
       const storageKey = buildMetricPresentationStorageKey(payload);
       const persistedCandidate = resolveMetricPresentationPersistedCandidate(storageKey, forceDefault);
@@ -13824,6 +13838,22 @@
         return String(metricKey || "").indexOf(INVENTORY_PLANNING_FACILITY_METRIC_PREFIX) !== 0;
       }));
       ensureDefaultSkuMetricPreset();
+      if (previousPresentation.size) {
+        const preservedById = new Map();
+        state.metricPresentation.unifiedOrder.forEach(function(id) {
+          const record = model.logicalById.get(id) || {};
+          const setting = previousPresentation.get(scopedMetricLookupKey("total", record.totalKey))
+            || previousPresentation.get(scopedMetricLookupKey("sku", record.skuKey));
+          if (setting) {
+            preservedById.set(id, setting);
+            state.metricPresentation.unifiedDisplay[id] = normalizeMetricDisplayStatus(setting.display);
+          }
+        });
+        state.metricPresentation.unifiedOrder.sort(function(a, b) {
+          const left = preservedById.get(a), right = preservedById.get(b);
+          return (left ? left.rank : Infinity) - (right ? right.rank : Infinity) || 0;
+        });
+      }
       pruneExpandedMetricPresentationAnchors();
       persistMetricPresentation({skipServer: true});
       if (
@@ -17096,7 +17126,9 @@
       if (!tableDataDeferred) {
         // Presentation order and saved selection depend on the complete row
         // catalog. A shell exposes metric definitions but cannot persist them.
-        initializeMetricPresentation(payload);
+        initializeMetricPresentation(payload, {
+          preserveExistingPresentation: !!normalizedOptions.preserveExistingMetricPresentation
+        });
         initializeMetricSelection(payload);
       }
       renderFilterControls(payload);
@@ -23632,7 +23664,8 @@
           h.offset = 0; h.pageIndex = -1; h.pages = [];
           h.total = h.groupId ? h.summary.history_snapshot.sku_group_totals[h.groupId] : h.summary.history_snapshot.scope_totals.sku;
           h.loadedBytes = h.summary.historySummaryBytes;
-          renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
+          renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true,
+            preserveExistingMetricPresentation: true});
           historySnapshotControls();
         });
       }
@@ -23643,7 +23676,8 @@
         groupLabels.set(row.group_id, (row.values.group && row.values.group.display_text) || row.group_id);
       });
       Object.keys(summary.history_snapshot.sku_group_totals).forEach(function(id) {
-        if (id && !groupLabels.has(id)) groupLabels.set(id, id);
+        if (id && !groupLabels.has(id)) groupLabels.set(id,
+          (summary.history_snapshot.sku_group_labels || {})[id] || "Группа SKU");
       });
       groupLabels.forEach(function(label, id) { const option = document.createElement("option"); option.value = id;
         option.textContent = label; selector.append(option); });
@@ -23690,7 +23724,8 @@
         h.skuRows = page.table_surface.rows; h.next = page.history_snapshot.next_offset;
         h.offset = offset; h.pageIndex = pageIndex; h.pages[pageIndex] = {offset: offset, limit: result.limit};
         h.limit = result.limit; h.loadedBytes = h.summary.historySummaryBytes + page.historyReplyBytes;
-        renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
+        renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true,
+          preserveExistingMetricPresentation: true});
         historySnapshotControls();
       } catch (error) {
         if (requestId !== state.requestSequence || h.viewId !== viewId) return;
