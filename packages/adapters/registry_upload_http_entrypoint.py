@@ -342,6 +342,7 @@ WEB_AUTH_UNIFIED_TAB_SECTIONS = {
     "warehouses": WEB_AUTH_SECTION_SUPPLY,
     "reports": WEB_AUTH_SECTION_REPORTS,
     "feedbacks": WEB_AUTH_SECTION_FEEDBACKS,
+    "buyer-support": WEB_AUTH_SECTION_FEEDBACKS,
     "ads": WEB_AUTH_SECTION_ADS,
     "prices": WEB_AUTH_SECTION_PRICES,
     "sku-management": WEB_AUTH_SECTION_SKU_MANAGEMENT,
@@ -536,7 +537,9 @@ def _web_vitrina_ui_base_template() -> str:
 
     template = WEB_VITRINA_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     for marker, filename in (("<!-- KEYWORD_CLEANER_PANEL -->", "sheet_vitrina_v1_keyword_cleaner.html"),
-                             ("/* KEYWORD_CLEANER_SCRIPT */", "sheet_vitrina_v1_keyword_cleaner.js")):
+                             ("/* KEYWORD_CLEANER_SCRIPT */", "sheet_vitrina_v1_keyword_cleaner.js"),
+                             ("<!-- BUYER_SUPPORT_PANEL -->", "wb_buyer_support.html"),
+                             ("/* BUYER_SUPPORT_SCRIPT */", "wb_buyer_support.js")):
         template = template.replace(marker, WEB_VITRINA_UI_TEMPLATE_PATH.with_name(filename).read_text(encoding="utf-8"))
     return _inject_sheet_vitrina_ui_system(template)
 
@@ -3252,6 +3255,36 @@ def _build_handler(
                     HTTPStatus.OK,
                     _public_business_data_write_barrier_status(self),
                 )
+                return
+            if parsed.path in {DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/list",
+                                DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/detail"}:
+                if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+                    return
+                # Single trusted cabinet context, never taken from a browser/query parameter.
+                cabinet = os.environ.get("WB_BUYER_SUPPORT_CABINET_ID", "").strip()
+                try:
+                    query = urllib_parse.parse_qs(parsed.query, keep_blank_values=True)
+                    allowed = {"q", "filter", "offset", "limit"} if parsed.path.endswith("/list") else {"kind", "id"}
+                    if set(query) - allowed or any(len(v) != 1 for v in query.values()):
+                        raise ValueError("invalid buyer support query")
+                    if parsed.path.endswith("/list"):
+                        payload = entrypoint.buyer_support_repository.list_items(
+                            cabinet, query=query.get("q", [""])[0],
+                            filter_state=query.get("filter", ["all"])[0],
+                            offset=int(query.get("offset", ["0"])[0]), limit=int(query.get("limit", ["50"])[0]))
+                    else:
+                        payload = entrypoint.buyer_support_repository.detail(
+                            cabinet, kind=query.get("kind", [""])[0], item_id=query.get("id", [""])[0])
+                except ValueError:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid_buyer_support_query"})
+                    return
+                except KeyError:
+                    _write_json_response(self, HTTPStatus.NOT_FOUND, {"error": "buyer_support_item_not_found"})
+                    return
+                except Exception:
+                    _write_json_response(self, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "buyer_support_read_unavailable"})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload, extra_headers={"Cache-Control": "private, no-store"})
                 return
             if parsed.path == DEFAULT_SHEET_FEEDBACKS_LOCAL_PATH:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
