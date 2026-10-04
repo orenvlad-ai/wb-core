@@ -33,6 +33,41 @@ class Store:
     def read(self):yield self.connection
 
 
+
+@contextmanager
+def frozen_worker_clock(now):
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    with patch.object(worker, 'datetime', FrozenDateTime), patch.object(worker.time, 'time', return_value=now.timestamp()):
+        yield
+
+
+def next_due_floor_regressions():
+    # Existing two-second anti-spin floor is intentional. It may cross the
+    # minute boundary; a fixture must not expect an exact slot less than 2s away.
+    for hour, minute, second in ((16, 2, 57), (16, 2, 58), (16, 2, 59), (23, 59, 59)):
+        local = datetime(2026, 10, 4, hour, minute, second, 900000, tzinfo=worker.ZONE)
+        slot = (local + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            store = Store()
+            try:
+                cleaner = SimpleNamespace(store=store, key='seller:scope')
+                store.connection.execute('INSERT INTO cleaner_daily_schedules VALUES(?,?,?,?,1)',
+                    (cleaner.key, 'default', slot.strftime('%H:%M'), (local-timedelta(days=1)).isoformat()))
+                wake = worker.IdleWake(cleaner, root)
+                with frozen_worker_clock(local), patch.object(worker, 'ROOT', root):
+                    wake.refresh(wake.event_sequence(), wake.environment_version())
+                    assert abs(wake.next_due-max(local.timestamp()+2, slot.timestamp())) < 0.001
+                    assert not wake.changed()
+                    with patch.object(worker.time, 'time', return_value=wake.next_due):
+                        assert wake.changed()
+            finally:
+                store.connection.close()
+
+
 def main():
     with tempfile.TemporaryDirectory() as raw:
         root=Path(raw)
@@ -71,25 +106,25 @@ def main():
         assert json.loads((admission/'self-service-worker-health.json').read_text())['state']=='ready'
 
         wake=worker.IdleWake(cleaner,runtime)
-        local=datetime.now(worker.ZONE)
+        local=datetime(2026, 10, 4, 16, 2, 10, tzinfo=worker.ZONE)
         next_slot=(local+timedelta(minutes=1)).replace(second=0,microsecond=0)
         store.connection.execute('INSERT INTO cleaner_daily_schedules VALUES(?,?,?,?,1)',
             (cleaner.key,'default',next_slot.strftime('%H:%M'),(local-timedelta(days=1)).isoformat()))
         past_slot=(local-timedelta(minutes=1)).strftime('%H:%M')
         store.connection.execute('INSERT INTO cleaner_daily_schedules VALUES(?,?,?,?,1)',
             (cleaner.key,'paused-slot',past_slot,(local-timedelta(days=1)).isoformat()))
-        with patch.object(worker,'ROOT',root):
+        with patch.object(worker,'ROOT',root), frozen_worker_clock(local):
             wake.refresh(wake.event_sequence(),wake.environment_version())
             assert abs(wake.next_due-next_slot.timestamp())<1
             assert not wake.changed()
             with patch.object(worker.time,'time',return_value=wake.next_due):assert wake.changed()
             today=local.date().isoformat()
-            retry=(datetime.now(timezone.utc)+timedelta(minutes=15)).isoformat()
+            retry=(local.astimezone(timezone.utc)+timedelta(minutes=15)).isoformat()
             store.connection.execute('INSERT INTO cleaner_daily_occurrences VALUES(?,?,?,?,?)',
                 (cleaner.key,'default',today,'start_wait',json.dumps({'next_retry_at':retry})))
             wake.refresh(wake.event_sequence(),wake.environment_version())
             assert abs(wake.next_due-datetime.fromisoformat(retry).timestamp())<1
-            rollover=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat()
+            rollover=(local.astimezone(timezone.utc)+timedelta(minutes=5)).isoformat()
             prior=(local-timedelta(days=1)).date().isoformat()
             store.connection.execute('INSERT INTO cleaner_daily_occurrences VALUES(?,?,?,?,?)',
                 (cleaner.key,'late',prior,'start_wait',json.dumps({'next_retry_at':rollover})))
@@ -103,6 +138,7 @@ def main():
         assert worker.ready_cycle(child,batch,daily)
         assert not worker.ready_cycle(child,batch,daily)
         store.connection.close()
+    next_due_floor_regressions()
     print('search cluster cleaner idle smoke: ok')
 
 
