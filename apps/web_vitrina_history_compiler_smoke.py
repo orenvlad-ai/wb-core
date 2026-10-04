@@ -21,11 +21,14 @@ from packages.application.web_vitrina_history_compiler import (
     NativeDatedCompiler, unpack_table, assert_numeric_compatibility, DatedCompilerUnsupported, digest,
 )
 from packages.application.web_vitrina_history_frozen_adapter import FrozenNativeAdapter, update_frozen_history
+from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter
+import time
 from packages.application.web_vitrina_history_store import HistoryStore
+from packages.application.web_vitrina_compact_table import CELL_FIELDS
 from packages.application.web_vitrina_window_read_context import window_read_context
 
 
-def capture_inventory(conn, day: str, facility: str, *, revision: str = "original"):
+def capture_inventory(conn, day: str, facility: str, *, revision: str = "original", typed=True):
     roster = [{"facility_id": facility, "name": facility, "active": True, "applicable": True}]
     components = []
     for kind, key, nm_id in (("TOTAL", "TOTAL", None), ("SKU", "SKU:999", 999), ("SKU", "SKU:777", 777)):
@@ -42,7 +45,8 @@ def capture_inventory(conn, day: str, facility: str, *, revision: str = "origina
     capture = history.append_inventory_history_capture(
         conn, business_date=day, capture_kind="historical_backfill",
         formula_version=INVENTORY_CONTRACT, facility_roster=roster,
-        source_manifest={"contract": INVENTORY_CONTRACT, "case": "native-history-fixture", "revision": revision},
+        source_manifest={"contract": INVENTORY_CONTRACT if typed else "owned_untyped_capture_v1",
+                         "case": "native-history-fixture", "revision": revision},
         components=components, captured_at=day + "T12:00:00Z",
     )
     history.append_inventory_history_finalization(
@@ -70,6 +74,140 @@ def install_adversarial_source(runtime):
                                "quality_reason": "dated legacy source"}}
         conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE rowid=?",
                      (json.dumps(plan), row_id))
+
+
+
+HISTORICAL_MARGIN_IDS = [f"SKU:{900000000 + index}|proxy_margin_per_unit_rub" for index in range(61)]
+
+
+def install_historical_margin_rows(runtime, *, later_day="2026-04-19"):
+    """Latest canonical ready data has inactive SKUs absent in the old day."""
+    enabled = [item for item in runtime.load_current_state().config_v2 if item.enabled]
+    assert not {item.nm_id for item in enabled} & set(range(900000000, 900000061))
+    with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
+        row_id, encoded = conn.execute(
+            "SELECT rowid,plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?",
+            (later_day,),
+        ).fetchone()
+        plan = json.loads(encoded)
+        sheet = plan["sheets"][0]
+        presentation = plan.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
+        # The real newest catalog's canonical margin branch retains materialized
+        # rows, while its legacy predecessor regenerates only enabled SKUs.
+        margins = [(row_id, 25 + index) for index, row_id in enumerate(HISTORICAL_MARGIN_IDS)]
+        margins += [(f"SKU:{item.nm_id}|proxy_margin_per_unit_rub", None) for item in enabled]
+        margins += [("TOTAL|proxy_margin_per_unit_rub_total", None)]
+        for key, value in margins:
+            sheet["rows"].append(["Historical margin", key, value])
+            presentation[key] = {later_day: {
+                "calculation_contract": "catalog_economics_v1",
+                "source_as_of_date": later_day,
+                "quality_state": "partial",
+                "quality_reason": "accepted historical margin proof",
+            }}
+        sheet["row_count"] = len(sheet["rows"])
+        conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE rowid=?",
+                     (json.dumps(plan), row_id))
+
+
+def check_historical_margin_rows(compiler):
+    catalog_ids = set(compiler.catalog["rows"])
+    assert set(HISTORICAL_MARGIN_IDS) <= catalog_ids
+    old_day = "2026-03-21"
+    old_unit = compiler.compile(old_day)
+    later_day = compiler.date_to
+    latest_unit = compiler.compile(later_day)
+    assert set(old_unit["cells"]) == catalog_ids == set(latest_unit["cells"]), {
+        "old_missing": sorted(catalog_ids - set(old_unit["cells"])),
+        "old_extra": sorted(set(old_unit["cells"]) - catalog_ids),
+        "latest_missing": sorted(catalog_ids - set(latest_unit["cells"])),
+        "latest_extra": sorted(set(latest_unit["cells"]) - catalog_ids),
+    }
+    assert not set(HISTORICAL_MARGIN_IDS) & set(old_unit["members"])
+    assert set(HISTORICAL_MARGIN_IDS) <= set(latest_unit["members"])
+    old_expected = compiler._table(compiler.block, old_day, old_day)
+    latest_expected = compiler._table(compiler.natural_block, later_day, later_day)
+    _, old_cells = unpack_table(old_expected)
+    _, latest_cells = unpack_table(latest_expected)
+    for index, row_id in enumerate(HISTORICAL_MARGIN_IDS):
+        assert len(old_unit["cells"][row_id]) == len(CELL_FIELDS) == 16
+        assert old_unit["cells"][row_id] == old_cells[row_id][old_day]
+        assert old_unit["cells"][row_id][0] in (None, ""), "missing old date became a fact"
+        assert old_unit["cells"][row_id][1] in ("", "—"), "latest display leaked into old day"
+        assert latest_unit["cells"][row_id] == latest_cells[row_id][later_day]
+        assert latest_unit["cells"][row_id][0] == 25 + index
+        assert latest_unit["cells"][row_id][10] == "accepted historical margin proof"
+    assert_numeric_compatibility(
+        {row_id: latest_unit["cells"][row_id] for row_id in HISTORICAL_MARGIN_IDS},
+        {row_id: latest_cells[row_id][later_day] for row_id in HISTORICAL_MARGIN_IDS}, later_day)
+    return {"inactive_materialized_margin_rows": 61, "catalog_rowset_stable": True,
+            "all16_exact": True, "natural_membership_unchanged": True,
+            "no_catalog_day_values_in_old_day": True, "accepted_later_facts_preserved": True}
+
+
+
+def check_inactive_margin_compiler(now):
+    fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=31, now=now)
+    with fixture, tempfile.TemporaryDirectory(prefix="history-inactive-margin-") as directory:
+        runtime = fixture.entrypoint.runtime
+        install_adversarial_source(runtime)
+        install_historical_margin_rows(runtime)
+        finalize_owned_frozen_fixture(runtime.runtime_dir)
+        before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+        with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+            compiler = NativeDatedCompiler(runtime, now, "2026-03-21", "2026-04-19",
+                                            dependency_epoch="inactive-margin-fixture")
+            checked = check_historical_margin_rows(compiler)
+            store = HistoryStore(Path(directory), max_rows=512, max_reply_bytes=32 * 1024**2)
+            vector = {"coverage": "complete_frozen_native_v1", "epoch": "inactive-margin-fixture",
+                      "dates": {day: digest(day) for day in compiler.dates}}
+            result = store.update(vector=vector, catalog=compiler.catalog, compile_day=compiler.compile,
+                                  revalidate=lambda: vector)
+            assert result["status"] == "published", result
+            read = store.read(date_from="2026-03-21", date_to="2026-04-19", scope="sku",
+                              row_ids=HISTORICAL_MARGIN_IDS, limit=128)
+            assert {row["row_id"] for row in read["rows"]} == set(HISTORICAL_MARGIN_IDS)
+            later_unit = compiler.compile("2026-04-19")
+            for row in read["rows"]:
+                assert row["cells"]["2026-03-21"][0] in (None, "")
+                assert row["cells"]["2026-04-19"] == later_unit["cells"][row["row_id"]]
+        assert before == hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+        return {**checked, "actual_store_published": True, "days": len(compiler.dates)}
+
+
+
+def check_mixed_margin_presentation(now):
+    """Legacy margin calculation must not erase another metric's dated proof."""
+    fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=31, now=now)
+    with fixture:
+        runtime = fixture.entrypoint.runtime
+        install_adversarial_source(runtime)
+        install_historical_margin_rows(runtime, later_day="2026-04-20")
+        finalize_owned_frozen_fixture(runtime.runtime_dir)
+        before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+        with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+            compiler = NativeDatedCompiler(runtime, now, "2026-04-18", "2026-04-20",
+                                            dependency_epoch="mixed-margin-presentation-fixture")
+            table = compiler._table(compiler.block, "2026-04-18", "2026-04-20")
+            _, expected_cells = unpack_table(table)
+            assert set(expected_cells) == set(compiler.catalog["rows"])
+            for day in compiler.dates:
+                unit = compiler.compile(day)
+                assert set(unit["cells"]) == set(expected_cells)
+                for row_id, cells in unit["cells"].items():
+                    assert cells == expected_cells[row_id][day], ("mixed margin", row_id, day, [
+                        (field, actual, wanted) for field, actual, wanted in
+                        zip(CELL_FIELDS, cells, expected_cells[row_id][day]) if actual != wanted
+                    ])
+            wb_row = "TOTAL|total_inventory_wb_total_qty_v1"
+            assert expected_cells[wb_row]["2026-04-20"][0] == 15
+            assert expected_cells[wb_row]["2026-04-20"][8] == "inventory_history_partial"
+            assert expected_cells[HISTORICAL_MARGIN_IDS[0]]["2026-04-20"][0] == 25
+            assert expected_cells[HISTORICAL_MARGIN_IDS[0]]["2026-04-18"][0] in (None, "")
+        assert before == hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
+        return {"mixed_dates": 3, "all16_range_parity": True,
+                "current_wb_fact_and_partial_quality_preserved": True,
+                "canonical_margin_fact_preserved": True, "legacy_missing_not_zero": True}
 
 
 def finalize_owned_frozen_fixture(runtime_dir: Path) -> list[dict]:
@@ -124,7 +262,10 @@ def check_ranges(compiler, store, now):
                              if key not in {"cells", "row_order", "search_text"}}
             assert actual_static == expected_catalog["rows"][row_id], (count, row_id, "static fields")
             for day, cell in row["cells"].items():
-                assert cell == expected_cells[row_id][day], (count, row_id, day)
+                assert cell == expected_cells[row_id][day], (count, row_id, day, [
+                    (field, actual, wanted) for field, actual, wanted in zip(CELL_FIELDS, cell, expected_cells[row_id][day])
+                    if actual != wanted
+                ])
         for native_row in expected["rows"]:
             assert got[native_row["row_id"]]["search_text"] == native_row["search_text"], (
                 count, native_row["row_id"])
@@ -211,10 +352,14 @@ def check_cached_presentation_stability(compiler):
 
 def main():
     now = datetime(2026, 4, 20, 12, tzinfo=timezone.utc)
+    historical_margins = check_inactive_margin_compiler(now)
+    mixed_margin_presentation = check_mixed_margin_presentation(now)
     fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=31, now=now)
     with fixture, tempfile.TemporaryDirectory(prefix="vitrina-dated-history-") as store_dir:
         runtime = fixture.entrypoint.runtime
         install_adversarial_source(runtime)
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
+            capture_inventory(conn, "2026-04-16", "old", typed=False)
         frozen_fixture = finalize_owned_frozen_fixture(runtime.runtime_dir)
         before = hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
         adapter = FrozenNativeAdapter(
@@ -223,9 +368,31 @@ def main():
         )
         vector = adapter.capture()
         store = HistoryStore(Path(store_dir), max_rows=512, max_reply_bytes=32 * 1024**2)
-        with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+        quality_calls = []
+        with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir) as context:
+            bridge = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir,
+                cache_dir=Path(store_dir) / "proofs", now=now,
+                date_from=adapter.days[0], date_to=adapter.days[-1], formula_epoch="compiler-quality-test")
+            bridge.cache_dir.mkdir()
+            bridge.stats, bridge.deadline = {"bytes": 0, "queries": 0}, time.monotonic() + 20
+            bridge_cache = {"quality_scopes": {}}
+            bridge._quality_cache = bridge_cache
+            bridge._bind_quality_resolver(context.borrow(runtime.db_path), context, bridge_cache)
+            resolve = bridge.lifecycle_quality_resolver
+            def quality(day, requested_nm_ids=None):
+                quality_calls.append((day, tuple(requested_nm_ids or ())))
+                return resolve(day, requested_nm_ids)
             compiler = NativeDatedCompiler(runtime, now, adapter.days[0], adapter.days[-1],
-                                            dependency_epoch=vector["epoch"])
+                dependency_epoch=vector["epoch"], lifecycle_quality_resolver=quality)
+            assert compiler.block.lifecycle_quality_resolver is quality
+            assert compiler.natural_block.lifecycle_quality_resolver is quality
+            baseline = NativeDatedCompiler(runtime, now, adapter.days[0], adapter.days[-1],
+                dependency_epoch=vector["epoch"])
+            for block_name in ("block", "natural_block"):
+                actual = compiler._table(getattr(compiler, block_name), "2026-04-18", "2026-04-20")
+                expected = baseline._table(getattr(baseline, block_name), "2026-04-18", "2026-04-20")
+                assert unpack_table(actual) == unpack_table(expected), (block_name, "all sixteen quality fields")
+            bridge.deadline = float("inf")
             presentation_stability = check_cached_presentation_stability(compiler)
             result = store.update(vector=vector, catalog=compiler.catalog, compile_day=compiler.compile,
                                   revalidate=adapter.capture)
@@ -236,6 +403,8 @@ def main():
             assert historic["rows"][0]["values"]["scope_label"][0] == "HistoricalOnlyName"
             assert "HistoricalOnlyName" in historic["rows"][0]["search_text"]
             old_cell = compiler.compile("2026-04-15")["cells"]["TOTAL|total_view_count"]
+            assert quality_calls, "native consumers did not receive shared resolver"
+            bridge.finish_quality_portion(prune=True)
         assert before == hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
         no_change = update_frozen_history(adapter=adapter, runtime=runtime, store=store)
         assert no_change["status"] == "unchanged" and not no_change["compiler_constructed"]
@@ -318,6 +487,11 @@ def main():
         assert adapter.capture() != before_rollover
         print(json.dumps({"status": "pass", "comparisons": comparisons, "no_change": no_change,
                           "presentation_stability": presentation_stability,
+                          "historical_margins": historical_margins,
+                          "mixed_margin_presentation": mixed_margin_presentation,
+                          "reusable_quality_consumers": {"calls": len(quality_calls),
+                              "dates": sorted({day for day, _ in quality_calls}),
+                              "same_callable_both_blocks": True, "all16_native_baseline_equal": True},
                           "frozen_owned_fixture": frozen_fixture,
                           "native_semantic_correction": True, "pending_unconsumed": True,
                           "config_and_outside_range_catalog": True, "retro_update_delete_redate": True,

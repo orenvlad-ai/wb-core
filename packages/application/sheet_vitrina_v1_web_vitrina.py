@@ -198,10 +198,12 @@ class SheetVitrinaV1WebVitrinaBlock:
         proxy_v4_parameters_resolver: Callable[[str], ProxyV4Parameters | None] | None = None,
         fbs_inventory_snapshot=None,
         dated_cell_context=None,
+        lifecycle_quality_resolver=None,
     ) -> None:
         self.runtime = runtime
         # Opt-in compiler context; ordinary HTTP reads retain their range rules.
         self.dated_cell_context = dated_cell_context
+        self.lifecycle_quality_resolver = lifecycle_quality_resolver
         self._fbs_inventory_snapshot = fbs_inventory_snapshot
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self.proxy_v4_parameters_resolver = proxy_v4_parameters_resolver or (
@@ -314,7 +316,7 @@ class SheetVitrinaV1WebVitrinaBlock:
         lifecycle_quality_resolver = (
             fbs_lifecycle_fallback.resolve
             if fbs_lifecycle_fallback is not None
-            else None
+            else self.lifecycle_quality_resolver
         )
         current_state = self.runtime.load_current_state()
         source_row_ids = (
@@ -467,6 +469,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             parameters_for_date=self.proxy_v4_parameters_resolver,
             output_row_ids=output_row_ids,
             window_operands=window_operands,
+            preserve_materialized_sku_rows=self.dated_cell_context is not None,
             )
         if output_row_ids is None or any(
             row_id.endswith("|" + BUYOUT_PERCENT_METRIC_KEY)
@@ -1984,6 +1987,7 @@ def _include_proxy_v4_unit_margin_rows(
     parameters_for_date: Callable[[str], ProxyV4Parameters | None],
     output_row_ids: frozenset[str] | None = None,
     window_operands: Mapping[str, Mapping[str, Any]] | None = None,
+    preserve_materialized_sku_rows: bool = False,
 ) -> list[WebVitrinaContractRow]:
     """Complete the additive V4 unit-margin pair from exact read-side operands."""
 
@@ -2012,10 +2016,12 @@ def _include_proxy_v4_unit_margin_rows(
             return rows
         projected = _include_proxy_v4_unit_margin_rows(
             [replace(row, presentation_by_date={d: c for d, c in row.presentation_by_date.items()
-                     if d not in canonical_dates}) for row in rows],
+                     if d not in canonical_dates}) if row.metric_key in target_keys else row
+             for row in rows],
             runtime=runtime, date_columns=legacy_dates, enabled_config=enabled_config,
             sku_metric=sku_metric, total_metric=total_metric, parameters_for_date=parameters_for_date,
-            output_row_ids=output_row_ids, window_operands=window_operands)
+            output_row_ids=output_row_ids, window_operands=window_operands,
+            preserve_materialized_sku_rows=preserve_materialized_sku_rows)
         originals = {row.row_id: row for row in rows if row.metric_key in target_keys}
         restored = []
         for row in projected:
@@ -2225,6 +2231,17 @@ def _include_proxy_v4_unit_margin_rows(
         scope_key="TOTAL",
         metric_key=PROXY_V4_TOTAL_MARGIN_PCT_METRIC_KEY,
     )
+    if preserve_materialized_sku_rows:
+        # The canonical history catalog also contains inactive historical SKUs.
+        # Keep their exact selected-day materialized cells; never borrow values
+        # from the catalog day or recalculate them with current enabled config.
+        regenerated = {row.row_id for row in sku_rows}
+        sku_rows.extend(
+            row for row in original_by_id.values()
+            if row.scope_kind == "SKU"
+            and row.metric_key == PROXY_V4_MARGIN_PER_UNIT_RUB_METRIC_KEY
+            and row.row_id not in regenerated
+        )
     for sku_row in sku_rows:
         _insert_metric_row_after(
             result,

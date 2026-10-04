@@ -13,7 +13,7 @@ from decimal import Decimal, localcontext
 import hashlib
 import json
 import sqlite3
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, MutableMapping
 
 from packages.application.ff_pool_foundation import (
     BALANCES_TABLE,
@@ -28,6 +28,7 @@ from packages.application.ff_pool_foundation import (
 )
 from packages.application.ff_pool_fbs_applicability import (
     FbsApplicabilityError,
+    NOMENCLATURE_TABLE,
     current_business_date,
     fbs_physical_component,
     nomenclature_sku_active_or_unmanaged,
@@ -2312,9 +2313,23 @@ def fbs_lifecycle_quality_coverage(
     """
 
     target_date = str(as_of_date or "")[:10]
-    requested = {
-        int(value) for value in (requested_nm_ids or []) if int(value) > 0
-    }
+    requested = {int(value) for value in (requested_nm_ids or []) if int(value) > 0}
+    source = _load_lifecycle_quality_source(conn)
+    return _materialize_lifecycle_quality_coverage(
+        source, as_of_date=target_date, requested_nm_ids=requested,
+        scope_resolver=lambda row, retry: _lifecycle_quality_scopes(
+            conn, manifest=source["manifest"], row=row, pending_retry=retry),
+    )
+
+
+def _load_lifecycle_quality_source(
+    conn: sqlite3.Connection, *, read_rows=None,
+) -> dict[str, Any]:
+    """Load fresh unresolved membership, source rows, manifest and cursor once."""
+    def read(sql, args=()):
+        return (list(read_rows(sql, args)) if read_rows is not None
+                else conn.execute(sql, args).fetchall())
+
     required = {
         IDENTITY_PENDING_TABLE,
         IDENTITY_PENDING_RESOLUTIONS_TABLE,
@@ -2328,42 +2343,25 @@ def fbs_lifecycle_quality_coverage(
     }
     tables = {
         str(row[0])
-        for row in conn.execute(
+        for row in read(
             "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        )
     }
     if not required.issubset(tables):
-        material = {
-            "contract": "fbs_lifecycle_quality_coverage_v1",
-            "as_of_date": target_date,
-            "status": "not_applicable",
-            "groups": [],
-        }
-        return {**material, "digest": _fingerprint(material)}
-    manifest_row = conn.execute(
+        return {"kind": "not_applicable"}
+    manifest_rows = read(
         """SELECT manifest_json FROM sheet_vitrina_v1_ff_pool_cutover_manifests
            ORDER BY cutover_at DESC,cutover_id DESC LIMIT 1"""
-    ).fetchone()
+    )
+    manifest_row = manifest_rows[0] if manifest_rows else None
     if manifest_row is None:
-        material = {
-            "contract": "fbs_lifecycle_quality_coverage_v1",
-            "as_of_date": target_date,
-            "status": "not_applicable",
-            "groups": [],
-        }
-        return {**material, "digest": _fingerprint(material)}
+        return {"kind": "not_applicable"}
     manifest = json.loads(str(manifest_row[0]))
     if not isinstance(manifest, Mapping) or not str(manifest.get("cutover_id") or ""):
-        material = {
-            "contract": "fbs_lifecycle_quality_coverage_v1",
-            "as_of_date": target_date,
-            "status": "not_applicable",
-            "groups": [],
-        }
-        return {**material, "digest": _fingerprint(material)}
+        return {"kind": "not_applicable"}
     cutover_id = str(manifest["cutover_id"])
 
-    pending_rows = conn.execute(
+    pending_rows = read(
         f"""SELECT status.observation_sequence,status.order_id,
                    status.order_revision,status.status_digest,
                    status.supplier_status,status.wb_status,
@@ -2385,26 +2383,12 @@ def fbs_lifecycle_quality_coverage(
             WHERE pending.cutover_id=? AND resolution.pending_id IS NULL
             ORDER BY status.observation_sequence LIMIT 100001""",
         (cutover_id,),
-    ).fetchall()
+    )
     if len(pending_rows) > 100_000:
-        material = {
-            "contract": "fbs_lifecycle_quality_coverage_v1",
-            "as_of_date": target_date,
-            "status": "partial",
-            "groups": [
-                {
-                    "facility_id": "",
-                    "nm_id": None,
-                    "earliest_business_date": "",
-                    "reason_codes": ["lifecycle_quality_scope_too_large"],
-                    "status_sequence_digest": _fingerprint(["over_limit"]),
-                }
-            ],
-        }
-        return {**material, "digest": _fingerprint(material)}
+        return {"kind": "pending_overflow"}
 
     cursor = _lifecycle_quality_cursor(conn, cutover_id=cutover_id, tables=tables)
-    new_rows = conn.execute(
+    new_rows = read(
         f"""SELECT status.observation_sequence,status.order_id,
                    status.order_revision,status.status_digest,
                    status.supplier_status,status.wb_status,
@@ -2425,7 +2409,7 @@ def fbs_lifecycle_quality_coverage(
             WHERE status.observation_sequence>? AND pending.pending_id IS NULL
             ORDER BY status.observation_sequence LIMIT 100001""",
         (cutover_id, cursor),
-    ).fetchall()
+    )
     if len(new_rows) > 100_000:
         new_rows = []
         pending_rows = []
@@ -2433,11 +2417,47 @@ def fbs_lifecycle_quality_coverage(
     else:
         overflow = False
 
+    return {"kind": "rows", "manifest": manifest, "tables": tables,
+            "pending": pending_rows, "new": new_rows, "overflow": overflow}
+
+
+def _materialize_lifecycle_quality_coverage(
+    source: Mapping[str, Any], *, as_of_date: str,
+    requested_nm_ids: Iterable[int] | None,
+    scope_resolver: Callable[[Any, bool], list[tuple[str, int | None]]],
+) -> dict[str, Any]:
+    target_date = str(as_of_date or "")[:10]
+    requested = {int(value) for value in (requested_nm_ids or []) if int(value) > 0}
+    if source["kind"] == "not_applicable":
+        material = {
+            "contract": "fbs_lifecycle_quality_coverage_v1",
+            "as_of_date": target_date,
+            "status": "not_applicable",
+            "groups": [],
+        }
+        return {**material, "digest": _fingerprint(material)}
+    if source["kind"] == "pending_overflow":
+        material = {
+            "contract": "fbs_lifecycle_quality_coverage_v1",
+            "as_of_date": target_date,
+            "status": "partial",
+            "groups": [
+                {
+                    "facility_id": "",
+                    "nm_id": None,
+                    "earliest_business_date": "",
+                    "reason_codes": ["lifecycle_quality_scope_too_large"],
+                    "status_sequence_digest": _fingerprint(["over_limit"]),
+                }
+            ],
+        }
+        return {**material, "digest": _fingerprint(material)}
+
     grouped: dict[tuple[str, int | None], dict[str, Any]] = {}
     quality_rows = [
-        (item, "identity_or_lifecycle_pending", True) for item in pending_rows
+        (item, "identity_or_lifecycle_pending", True) for item in source["pending"]
     ] + [
-        (item, "lifecycle_status_not_materialized", False) for item in new_rows
+        (item, "lifecycle_status_not_materialized", False) for item in source["new"]
     ]
     for row, reason, retry in quality_rows:
         # A quarantined order can affect FBS from its source creation date;
@@ -2446,12 +2466,7 @@ def fbs_lifecycle_quality_coverage(
         observed_business_date = current_business_date(str(row[11] or row[7]))
         if target_date and observed_business_date > target_date:
             continue
-        scopes = _lifecycle_quality_scopes(
-            conn,
-            manifest=manifest,
-            row=row,
-            pending_retry=retry,
-        )
+        scopes = scope_resolver(row, retry)
         for facility_id, nm_id in scopes:
             if requested and nm_id is not None and int(nm_id) not in requested:
                 continue
@@ -2471,7 +2486,7 @@ def fbs_lifecycle_quality_coverage(
             )
             item["reason_codes"].add(reason)
             item["status_sequences"].append(int(row[0]))
-    if overflow:
+    if source["overflow"]:
         grouped[("", None)] = {
             "facility_id": "",
             "nm_id": None,
@@ -2504,6 +2519,189 @@ def fbs_lifecycle_quality_coverage(
         "groups": groups,
     }
     return {**material, "digest": _fingerprint(material)}
+
+
+def reusable_fbs_lifecycle_quality_resolver(
+    conn: sqlite3.Connection, *,
+    scope_cache: MutableMapping[str, Any],
+    max_cache_bytes: int,
+    read_rows: Callable[..., Iterable[Any]] | None = None,
+) -> Callable[..., dict[str, Any]]:
+    """Reuse native scopes within a pinned read and across caller-owned proofs.
+
+    The caller owns persistence, source identity/formula-version separation,
+    pruning and the allocation from its existing proof-cache budget. Construct
+    a fresh resolver for each pinned portion: unresolved membership and cursor
+    are never cached. No source or filesystem writes occur here.
+    Optional read_rows(sql,args) charges bulk loader/proof reads to the caller's
+    existing capture byte/deadline limits. Its errors propagate unchanged.
+    Native compact cursor and canonical mapper reads retain the pinned reader's
+    SQL progress deadline; they do not use this bulk accounting hook.
+    """
+    if not conn.in_transaction or not conn.execute("PRAGMA query_only").fetchone()[0]:
+        raise ValueError("lifecycle quality reuse requires a pinned query-only transaction")
+    return _ReusableLifecycleQuality(conn, scope_cache, max_cache_bytes, read_rows)
+
+
+class _ReusableLifecycleQuality:
+    def __init__(self, conn, cache, budget, read_rows):
+        self.conn, self.cache = conn, cache
+        self.read_rows = read_rows
+        self.budget = max(0, int(budget))
+        self.source = _load_lifecycle_quality_source(conn, read_rows=read_rows)
+        self.local: dict[str, list[tuple[str, int | None]]] = {}
+        self.local_bytes = 0
+        self.used_scope_keys: set[str] = set()
+        self.identities: dict[tuple[Any, ...], list[tuple[Any, ...]]] | None = None
+        self.identities_loaded = False
+        self.semantic: dict[tuple[int, int, int, int], str | None] = {}
+        self.proof_bytes = 0
+        self.cache_bytes = len(json.dumps(cache, separators=(",", ":")).encode()) if cache else 0
+        if self.cache_bytes > self.budget:
+            raise ValueError("lifecycle quality scope cache exceeds caller budget")
+
+    def __call__(self, as_of_date, requested_nm_ids=None):
+        return _materialize_lifecycle_quality_coverage(
+            self.source, as_of_date=as_of_date, requested_nm_ids=requested_nm_ids,
+            scope_resolver=self._scopes,
+        )
+
+    def _rows(self, query, args=()):
+        # A proof limit disables cross-portion reuse, never changes native
+        # coverage or hides a source error/deadline from the caller.
+        if self.proof_bytes > self.budget:
+            return None
+        result = (self.read_rows(query + " LIMIT 100001", args) if self.read_rows is not None
+                  else self.conn.execute(query + " LIMIT 100001", args))
+        rows = [tuple(row) for row in result]
+        self.proof_bytes += len(json.dumps(rows, separators=(",", ":")).encode())
+        if len(rows) > 100_000 or self.proof_bytes > self.budget:
+            return None
+        return rows
+
+    def _load_identities(self):
+        keys = sorted({self._identity_key(row, retry) for rows, retry in
+                       ((self.source["pending"], True), (self.source["new"], False))
+                       for row in rows if row[8] is not None})
+        grouped = {key: [] for key in keys}
+        for offset in range(0, len(keys), 150):
+            batch = keys[offset:offset + 150]
+            args = tuple(value for index, key in enumerate(batch) for value in (index, *key))
+            rows = self._rows(
+                f"WITH requested(slot,order_id,revision,floor,retry) AS (VALUES "
+                f"{','.join('(?,?,?,?,?)' for _ in batch)}) "
+                "SELECT requested.slot,evidence.evidence_sequence,evidence.evidence_id,"
+                "evidence.order_revision,evidence.outcome,evidence.warehouse_id,evidence.nm_id,"
+                "evidence.chrt_id,evidence.warehouse_mapping_id,evidence.identity_mapping_id,"
+                f"evidence.barcode,evidence.seller_sku FROM requested JOIN {IDENTITY_EVIDENCE_TABLE} evidence "
+                "ON evidence.order_id=requested.order_id AND "
+                "((requested.retry=1 AND evidence.evidence_sequence>requested.floor) OR "
+                "(requested.retry=0 AND evidence.order_revision=requested.revision)) "
+                "ORDER BY requested.slot,evidence.evidence_sequence", args)
+            if rows is None:
+                return None
+            for row in rows:
+                grouped[batch[int(row[0])]].append(row[1:])
+        return grouped
+
+    @staticmethod
+    def _identity_key(row, retry):
+        return (int(row[1]), str(row[10]), int(row[18]) if retry else 0, int(retry))
+
+    def _semantic_proof(self, row):
+        key = (int(row[13] or 0), int(row[14] or 0),
+               int(row[15] or 0), int(row[17] or 0))
+        if key in self.semantic:
+            return self.semantic[key]
+        warehouse, nm, chrt, office = key
+        tables = self.source["tables"]
+        extra = {MAPPING_EXTENSIONS_TABLE, MAPPING_EXTENSION_ALLOCATIONS_TABLE, BALANCES_TABLE}
+        if not extra.issubset(tables):
+            self.semantic[key] = None
+            return None
+        manifest = self.source["manifest"]
+        # Supersets of the canonical mapper's predicates preserve ambiguity,
+        # deletions and admission membership, while ignoring quantity/WAC and
+        # routine timestamps/counters. The canonical mapper still decides scopes.
+        queries = [
+            (f"SELECT mapping.mapping_id,mapping.facility_id FROM {WAREHOUSE_MAPPINGS_TABLE} mapping "
+             f"JOIN {FACILITIES_TABLE} facility ON facility.facility_id=mapping.facility_id "
+             "WHERE mapping.seller_warehouse_id=? AND mapping.active=1 AND facility.active=1 "
+             "ORDER BY mapping.mapping_id,mapping.facility_id", (warehouse,)),
+            (f"SELECT mapping_id,source_barcode,source_sku,target_nm_id FROM {IDENTITY_MAPPINGS_TABLE} "
+             "WHERE source_nm_id=? AND source_chrt_id=? AND active=1 "
+             "ORDER BY mapping_id,source_barcode,source_sku,target_nm_id", (nm, chrt)),
+            (f"SELECT extension_id,facility_id,warehouse_mapping_id FROM {MAPPING_EXTENSIONS_TABLE} "
+             "WHERE cutover_id=? AND seller_warehouse_id=? AND official_office_id=? "
+             "ORDER BY extension_id,facility_id,warehouse_mapping_id",
+             (str(manifest["cutover_id"]), warehouse, office)),
+        ]
+        parts = [self._rows(query, args) for query, args in queries]
+        if any(part is None for part in parts):
+            self.semantic[key] = None
+            return None
+        facilities = sorted({str(item[1]) for item in parts[0]})
+        targets = sorted({int(item[3]) for item in parts[1]})
+        extensions = sorted({str(item[0]) for item in parts[2]})
+        if len(facilities) + len(targets) + len(extensions) > 900:
+            self.semantic[key] = None
+            return None
+        fs, ns, es = (','.join('?' for _ in values) for values in (facilities, targets, extensions))
+        parts.append(self._rows(
+            f"SELECT facility_id,nm_id,projection_epoch FROM {BALANCES_TABLE} "
+            f"WHERE pool='FBS' AND projection_epoch=? AND facility_id IN ({fs}) AND nm_id IN ({ns}) "
+            "ORDER BY facility_id,nm_id,projection_epoch",
+            (int(manifest.get("feature_epoch") or 0), *facilities, *targets)))
+        parts.append(self._rows(
+            f"SELECT extension_id,nm_id FROM {MAPPING_EXTENSION_ALLOCATIONS_TABLE} "
+            f"WHERE extension_id IN ({es}) AND nm_id IN ({ns}) ORDER BY extension_id,nm_id",
+            (*extensions, *targets)))
+        parts.append(self._rows(
+            f"SELECT nm_id,is_active,is_hidden FROM {NOMENCLATURE_TABLE} "
+            f"WHERE nm_id IN ({ns}) ORDER BY nm_id,is_active,is_hidden", tuple(targets))
+            if NOMENCLATURE_TABLE in tables else ["unmanaged_registry_absent"])
+        # SQL collation/schema changes must not turn an old proof into a hit.
+        names = sorted(extra | {WAREHOUSE_MAPPINGS_TABLE, IDENTITY_MAPPINGS_TABLE,
+                                FACILITIES_TABLE, NOMENCLATURE_TABLE, IDENTITY_EVIDENCE_TABLE})
+        parts.append(self._rows(
+            f"SELECT name,sql FROM sqlite_master WHERE type='table' AND name IN "
+            f"({','.join('?' for _ in names)}) ORDER BY name", tuple(names)))
+        proof = None if any(part is None for part in parts) else _fingerprint(parts)
+        self.semantic[key] = proof
+        return proof
+
+    def _scopes(self, row, retry):
+        source_key = _fingerprint([int(row[1]), list(row[8:]), retry])
+        if source_key in self.local:
+            return self.local[source_key]
+        if not self.identities_loaded:
+            self.identities = self._load_identities()
+            self.identities_loaded = True
+        identities = (None if self.identities is None else
+                      self.identities.get(self._identity_key(row, retry), []))
+        semantic = self._semantic_proof(row)
+        proof = (_fingerprint(["native_lifecycle_scope_v1", source_key,
+                               self.source["manifest"], identities, semantic])
+                 if identities is not None and semantic is not None else None)
+        if proof:
+            self.used_scope_keys.add(proof)
+        cached = self.cache.get(proof) if proof else None
+        if isinstance(cached, list):
+            scopes = [(str(item[0]), None if item[1] is None else int(item[1])) for item in cached]
+        else:
+            scopes = _lifecycle_quality_scopes(
+                self.conn, manifest=self.source["manifest"], row=row, pending_retry=retry)
+            size = len(json.dumps({proof: scopes}, separators=(",", ":")).encode())
+            if self.cache:
+                size -= 1  # Remove braces, add the joining comma.
+            if proof and self.cache_bytes + size <= self.budget:
+                self.cache[proof] = scopes
+                self.cache_bytes += size
+        local_size = len(json.dumps({source_key: scopes}, separators=(",", ":")).encode())
+        if self.local_bytes + local_size <= self.budget:
+            self.local[source_key] = scopes
+            self.local_bytes += local_size
+        return scopes
 
 
 def fbs_lifecycle_group_blocked(

@@ -13,6 +13,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 import json
 import sqlite3
+import sys
 import time
 import zlib
 
@@ -34,7 +35,7 @@ from packages.application.registry_upload_db_backed_runtime import _deserialize_
 from packages.application.calculation_parameters import PROXY_BLOCK_KEY
 from packages.application.calculation_parameters_v4 import PROXY_V4_BLOCK_KEY
 from packages.application import ff_pool_fbs_lifecycle as lifecycle
-from packages.application.ff_pool_fbs_lifecycle import fbs_lifecycle_quality_coverage
+from packages.application.web_vitrina_fbs_lifecycle_last_good import load_owner_paused_fallback
 from packages.business_time import current_business_date_iso
 
 PREFIX = "sheet_vitrina_v1_"
@@ -132,6 +133,8 @@ class LiveNativeAdapter:
         self.fence = None
         self.stats = {}
         self.capture_calls = 0
+        self.lifecycle_quality_resolver = None
+        self._quality_native = self._quality_cache = None
 
     def _rows(self, conn, sql, args=()):
         rows = []
@@ -163,8 +166,10 @@ class LiveNativeAdapter:
         if cache.get("source") != identity:
             cache = {"source": identity, "headers": {}, "slices": {}, "book": {}}
         conn = None
+        active = active_window_read_context()
+        self.lifecycle_quality_resolver = self._quality_native = None
+        self._quality_cache = cache
         try:
-            active = active_window_read_context()
             with (nullcontext(active) if active else window_read_context(self.db_path, runtime_dir=self.runtime_dir)) as context:
                 conn = context.borrow(self.db_path)
                 check_pinned_authority(conn, authority)
@@ -283,7 +288,9 @@ class LiveNativeAdapter:
                         per_day[day]["clock"]["bucket"] = self.now.strftime("%Y-%m-%dT%H")
                     if day == business_day:
                         per_day[day]["supplier_certification"] = supplier
-                # Untyped inventory actually depends on unresolved lifecycle quality.
+                # The same fresh, pinned resolver serves source proofs and the
+                # following compiler portion, including its natural guard.
+                self._bind_quality_resolver(conn, context, cache)
                 self._quality(conn, cache, captures, per_day, alarms)
                 static = {name: digest(self._rows(conn, "SELECT * FROM " + name +
                     (" WHERE bundle_version=? ORDER BY 1" if name.startswith("registry_upload_") else " ORDER BY 1"),
@@ -324,6 +331,8 @@ class LiveNativeAdapter:
             # Cache progress is NOT a consumed watermark or a published edition.
             self._cache_reserve(len(json.dumps(cache, ensure_ascii=False).encode()), replacing=cache_file)
             _atomic(cache_file, cache)
+            if active is None:
+                self.lifecycle_quality_resolver = self._quality_native = None
 
     def _publication_proofs(self, conn, tables, bindings):
         if PREFIX + "ready_publications" not in tables:
@@ -495,30 +504,60 @@ class LiveNativeAdapter:
                         record["verified"].append(ref)
                 per_day[day]["book"] = [version, refs]
 
-    def _quality(self, conn, cache, captures, per_day, alarms):
-        quality_sources = {*INVENTORY_PREPARATION_TABLES,
-                           lifecycle.WAREHOUSE_MAPPINGS_TABLE, lifecycle.FACILITIES_TABLE}
-        alarm = digest({k: alarms.get(k) for k in quality_sources})
-        days = sorted({day for _, day, _, manifest, _ in captures if json.loads(manifest).get("contract") != "bound_inventory_quantity_v1"})
-        if not days:
-            return
-        floor_key = "quality_floor:" + alarm
-        self.used_slices.add(floor_key)
-        if floor_key not in cache["slices"]:
-            cache["slices"][floor_key] = self._quality_floor(conn)
-        floor = cache["slices"][floor_key]
-        for day in days:
-            if floor is not None and day < floor:
-                # Exact native early-skip: no unresolved status can affect this date.
+    def _bind_quality_resolver(self, conn, context, cache):
+        fallback = load_owner_paused_fallback(self.runtime_dir)
+        scopes = cache.setdefault("quality_scopes", {})
+        floor = None
+        floor_loaded = False
+
+        def resolve(as_of_date, requested_nm_ids=None):
+            if active_window_read_context() is not context or not conn.in_transaction:
+                raise LiveSourceUnavailable("lifecycle_quality_pin_closed")
+            if fallback is not None:
+                # Same pinned owner policy as the renderer. Its complete content
+                # enters POLICIES, and coverage is projected afresh, not cached
+                # under unrelated native lifecycle revision alarms.
+                return fallback.resolve(as_of_date, requested_nm_ids)
+            nonlocal floor, floor_loaded
+            if not floor_loaded:
+                floor = self._quality_floor(conn)
+                floor_loaded = True
+            if floor is not None and str(as_of_date)[:10] < floor:
+                # Same proven native early-skip, computed once on this fresh pin.
                 material = {"contract": "fbs_lifecycle_quality_coverage_v1",
-                    "as_of_date": day, "status": "exact", "groups": []}
-                per_day[day]["lifecycle_quality"] = digest({**material, "digest": lifecycle._fingerprint(material)})
-                continue
-            key = "quality:" + day + ":" + alarm
-            self.used_slices.add(key)
-            if key not in cache["slices"]:
-                cache["slices"][key] = digest(fbs_lifecycle_quality_coverage(conn, as_of_date=day))
-            per_day[day]["lifecycle_quality"] = cache["slices"][key]
+                            "as_of_date": str(as_of_date)[:10], "status": "exact", "groups": []}
+                return {**material, "digest": lifecycle._fingerprint(material)}
+            if self._quality_native is None:
+                cache_file = self.cache_dir / "source-proofs.json"
+                outside = sum(p.stat().st_size for p in self.cache_dir.iterdir()
+                              if p.is_file() and p != cache_file)
+                other = {key: value for key, value in cache.items() if key != "quality_scopes"}
+                remaining = max(0, self.max_cache_bytes - outside -
+                                len(json.dumps(other, ensure_ascii=False).encode()) - 64)
+                self._quality_native = lifecycle.reusable_fbs_lifecycle_quality_resolver(
+                    conn, scope_cache=scopes, max_cache_bytes=remaining,
+                    read_rows=lambda sql, args=(): self._rows(conn, sql, args))
+            return self._quality_native(as_of_date, requested_nm_ids)
+
+        self.lifecycle_quality_resolver = resolve
+
+    def finish_quality_portion(self, *, prune=False):
+        cache = self._quality_cache
+        if cache is not None:
+            if prune and self._quality_native is not None:
+                used = self._quality_native.used_scope_keys
+                cache["quality_scopes"] = {key: value for key, value in
+                    cache.get("quality_scopes", {}).items() if key in used}
+            path = self.cache_dir / "source-proofs.json"
+            self._cache_reserve(len(json.dumps(cache, ensure_ascii=False).encode()), replacing=path)
+            _atomic(path, cache)
+        self.lifecycle_quality_resolver = self._quality_native = None
+
+    def _quality(self, conn, cache, captures, per_day, alarms):
+        days = sorted({day for _, day, _, manifest, _ in captures
+                       if json.loads(manifest).get("contract") != "bound_inventory_quantity_v1"})
+        for day in days:
+            per_day[day]["lifecycle_quality"] = digest(self.lifecycle_quality_resolver(day))
 
     def _quality_floor(self, conn):
         """Bounded native joins, without resolving each order's identity scopes.
@@ -624,18 +663,36 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
         batch.enter_context(window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir))
         if adapter.capture() != vector or adapter.fence != initial_fence:
             return {"status": "superseded", "recomputes": 0, "compiler_constructed": False}
-        compiler = NativeDatedCompiler(runtime, adapter.now, adapter.days[0], adapter.days[-1],
-            existing_catalog=catalog, prepared_context=adapter.context,
-            prepared_availability=adapter.availability)
-        def revalidate():
-            # Close the entire bounded portion before obtaining a fresh fence.
-            # Pending/error paths also close through ExitStack's finally.
-            batch.close()
-            current = adapter.capture()
-            return current if adapter.fence == initial_fence else {**current, "publication_fence": "changed"}
-        result = store.update(vector=vector, catalog=compiler.catalog, compile_day=compiler.compile,
-            revalidate=revalidate, max_recomputes=max_recomputes,
-            deadline_monotonic=deadline_monotonic, expected_base=pointer["current"] if pointer else None)
+        # Capture-only bulk reads retain their 20s bound. Extra compiler
+        # consumers use the remaining portion budget, never a stale capture
+        # deadline; the same accumulated byte cap remains in force.
+        adapter.deadline = deadline_monotonic if deadline_monotonic is not None else float("inf")
+        try:
+            compiler = NativeDatedCompiler(runtime, adapter.now, adapter.days[0], adapter.days[-1],
+                existing_catalog=catalog, prepared_context=adapter.context,
+                prepared_availability=adapter.availability,
+                lifecycle_quality_resolver=adapter.lifecycle_quality_resolver)
+            def revalidate():
+                # Close the entire bounded portion before obtaining a fresh fence.
+                # Pending/error paths also close through ExitStack's finally.
+                adapter.finish_quality_portion(prune=True)
+                batch.close()
+                current = adapter.capture()
+                return current if adapter.fence == initial_fence else {**current, "publication_fence": "changed"}
+            result = store.update(vector=vector, catalog=compiler.catalog, compile_day=compiler.compile,
+                revalidate=revalidate, max_recomputes=max_recomputes,
+                deadline_monotonic=deadline_monotonic, expected_base=pointer["current"] if pointer else None)
+        finally:
+            # Partial/error portions preserve complete scope proofs. They are
+            # validated against fresh inputs before reuse by a later pin.
+            original = sys.exception()
+            if original is None:
+                adapter.finish_quality_portion()
+            else:
+                try:
+                    adapter.finish_quality_portion()
+                except Exception as cache_error:
+                    original.add_note("quality_cache_persistence_failed:" + type(cache_error).__name__)
     return {**result, "compiler_constructed": True, "source_reads": adapter.stats,
             "bootstrap_source_reads": bootstrap_reads,
             "capture_calls": adapter.capture_calls - calls_before}

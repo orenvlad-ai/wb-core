@@ -16,6 +16,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer
 from apps.web_vitrina_history_store_smoke import setup_units, vector_for
+from apps.ff_pool_fbs_lifecycle_quality_reuse_smoke import fixture as quality_fixture
+from packages.application.web_vitrina_window_read_context import window_read_context
+from packages.application.web_vitrina_fbs_lifecycle_last_good import load_owner_paused_fallback, build_and_publish_cache
+from packages.application.storage_registry import MONOLITH_FILENAME
 from packages.application.ready_publication import ensure_publication_schema
 from packages.application.web_vitrina_history_live_adapter import (
     LiveNativeAdapter, LiveSourceUnavailable, update_live_history,
@@ -291,10 +295,6 @@ def check_quality_floor(root):
         assert adapter._quality_floor(conn) == "2026-07-02"  # Actual business TZ, not UTC substring.
         native = lifecycle.fbs_lifecycle_quality_coverage(conn, as_of_date="2026-07-01")
         assert native["status"] == "exact" and native["groups"] == []
-        adapter.used_slices = set()
-        cache, days = {"slices": {}}, {"2026-07-01": {}}
-        adapter._quality(conn, cache, [("capture", "2026-07-01", "[]", "{}", "digest")], days, {})
-        assert days["2026-07-01"]["lifecycle_quality"] == digest(native)
         conn.execute("UPDATE " + lifecycle.OBSERVATIONS_TABLE + " SET source_created_at='2026-06-25T00:00:00Z'")
         assert adapter._quality_floor(conn) == "2026-06-25"
         conn.execute("UPDATE " + lifecycle.DRAIN_STATE_TABLE + " SET last_status_observation_sequence=5")
@@ -395,6 +395,146 @@ def check_source_guards(root):
     assert before == {p.name: p.read_bytes() for p in runtime_dir.iterdir()}
 
 
+def check_quality_scope_bridge(root):
+    root.mkdir()
+    runtime_dir, cache_dir = root / "runtime", root / "proofs"
+    runtime_dir.mkdir()
+    cache_dir.mkdir()
+    source = root / "source.sqlite3"
+    with closing(quality_fixture()) as fixture_conn, closing(sqlite3.connect(source)) as output:
+        fixture_conn.backup(output)  # Only owned synthetic source, never business DB.
+        output.execute("CREATE TABLE registry_upload_current_state(unused TEXT)")
+        output.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(unused TEXT)")
+        output.commit()
+    adapter = LiveNativeAdapter(db_path=source, runtime_dir=runtime_dir, cache_dir=cache_dir,
+        now=datetime(2026, 8, 20, tzinfo=timezone.utc), date_from="2026-08-15",
+        date_to="2026-08-20", formula_epoch="quality-bridge")
+    cache = {"source": "owned-fixture", "quality_scopes": {}}
+    adapter._quality_cache = cache
+    before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+    days = ("2026-08-01", "2026-08-15", "2026-08-18", "2026-08-20")
+    with window_read_context(source, runtime_dir=runtime_dir) as context:
+        conn = context.borrow(source)
+        expected = {(day, requested): lifecycle.fbs_lifecycle_quality_coverage(
+            conn, as_of_date=day, requested_nm_ids=requested)
+            for day in days for requested in (None, (101, 102))}
+    calls = lifecycle._lifecycle_quality_scopes
+    portion_reads = []
+    with patch.object(lifecycle, "_lifecycle_quality_scopes", wraps=calls) as scopes:
+        for portion, expected_calls in ((0, 5), (1, 0)):
+            scopes.reset_mock()
+            adapter.stats = {"bytes": 0, "queries": 0}
+            adapter.deadline = time.monotonic() + 20
+            with window_read_context(source, runtime_dir=runtime_dir) as context, \
+                    patch.object(adapter, "_cache_reserve", wraps=adapter._cache_reserve) as quota_checks:
+                conn = context.borrow(source)
+                adapter._bind_quality_resolver(conn, context, cache)
+                resolver = adapter.lifecycle_quality_resolver
+                assert resolver(days[0]) == expected[(days[0], None)]
+                assert adapter._quality_native is None  # Native proven floor skips loader.
+                for day in days:
+                    for requested in (None, (101, 102)):
+                        assert resolver(day, requested) == expected[(day, requested)]
+                assert scopes.call_count == expected_calls, (portion, scopes.call_count)
+                assert quota_checks.call_count == 0, "whole-cache checks in per-date hot path"
+                portion_reads.append(dict(adapter.stats))
+                assert adapter.stats["bytes"] > 0 and adapter.stats["queries"] > 0
+                adapter.finish_quality_portion(prune=True)
+                assert quota_checks.call_count == 1
+            try:
+                resolver("2026-08-20")
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == "lifecycle_quality_pin_closed"
+            else:
+                raise AssertionError("closed pinned resolver reused")
+    # New bulk loader reads are charged to the original source byte/time caps.
+    for byte_cap, deadline, reason in ((1, time.monotonic() + 20, "live_source_resource_limit"),
+            (32 * 1024**2, time.monotonic() - 1, "live_source_resource_limit")):
+        adapter.max_read_bytes, adapter.deadline = byte_cap, deadline
+        adapter.stats = {"bytes": 0, "queries": 0}
+        with window_read_context(source, runtime_dir=runtime_dir) as context:
+            adapter._bind_quality_resolver(context.borrow(source), context, cache)
+            try:
+                adapter.lifecycle_quality_resolver("2026-08-20")
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == reason
+            else:
+                raise AssertionError("unaccounted quality bulk reads")
+    adapter.max_read_bytes, adapter.deadline = 32 * 1024**2, time.monotonic() + 20
+    adapter.max_cache_bytes = 1
+    adapter.stats = {"bytes": 0, "queries": 0}
+    try:
+        adapter.finish_quality_portion()
+    except LiveSourceUnavailable as exc:
+        assert str(exc) == "source_cache_resource_limit"
+    else:
+        raise AssertionError("unbounded whole proof cache")
+    adapter.max_cache_bytes = 128 * 1024**2
+    # Real pinned policy files change the selected resolver, without native reads.
+    policy = runtime_dir / ".auto-updates-policy.json"
+    variants = ("{}", json.dumps({"schema_version": "auto_updates_owner_policy_v2",
+        "revision": 1, "processes": {"fbs_shadow": {"desired": True}}}))
+    results = []
+    for value in variants:
+        policy.write_text(value)
+        adapter.stats, adapter.deadline = {"bytes": 0, "queries": 0}, time.monotonic() + 20
+        with window_read_context(source, runtime_dir=runtime_dir) as context:
+            adapter._bind_quality_resolver(context.borrow(source), context, cache)
+            expected = load_owner_paused_fallback(runtime_dir).resolve("2026-08-20")
+            actual = adapter.lifecycle_quality_resolver("2026-08-20")
+            assert actual == expected and adapter._quality_native is None
+            assert adapter.stats == {"bytes": 0, "queries": 0}
+            results.append(actual)
+    assert results[0] != results[1]
+    policy.unlink()
+    with window_read_context(source, runtime_dir=runtime_dir) as context:
+        conn = context.borrow(source)
+        adapter._bind_quality_resolver(conn, context, cache)
+        assert adapter.lifecycle_quality_resolver("2026-08-20") == lifecycle.fbs_lifecycle_quality_coverage(
+            conn, as_of_date="2026-08-20")
+        adapter.finish_quality_portion(prune=True)
+    assert before == {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+    # Actual supported last-good writer on a separate owned fully drained source.
+    fallback_root = root / "last-good"
+    fallback_root.mkdir()
+    fallback_db = fallback_root / MONOLITH_FILENAME
+    with closing(quality_fixture()) as fixture_conn, closing(sqlite3.connect(fallback_db)) as output:
+        fixture_conn.backup(output)
+        output.execute("CREATE TABLE registry_upload_current_state(unused TEXT)")
+        output.execute("CREATE TABLE sheet_vitrina_v1_ready_snapshots(unused TEXT)")
+        output.execute("DELETE FROM " + lifecycle.IDENTITY_PENDING_TABLE)
+        output.execute("DELETE FROM " + lifecycle.STATUS_OBSERVATIONS_TABLE)
+        output.execute("UPDATE " + lifecycle.DRAIN_STATE_TABLE + " SET last_status_observation_sequence=5")
+        output.commit()
+    (fallback_root / ".auto-updates-policy.json").write_text(json.dumps({
+        "schema_version": "auto_updates_owner_policy_v2", "revision": 1,
+        "processes": {"fbs_shadow": {"desired": False}}}))
+    fallback_adapter = LiveNativeAdapter(db_path=fallback_db, runtime_dir=fallback_root,
+        cache_dir=cache_dir, now=adapter.now, date_from="2026-08-20", date_to="2026-08-20",
+        formula_epoch="last-good-fixture")
+    results, cache_proofs = [], []
+    for timestamp in ("2026-08-20T00:00:00Z", "2026-08-20T01:00:00Z"):
+        build_and_publish_cache(fallback_root, db_path=fallback_db,
+            generated_at=timestamp, source_as_of_date="2026-08-20")
+        fallback_adapter.stats = {"bytes": 0, "queries": 0}
+        fallback_adapter.deadline = time.monotonic() + 20
+        with window_read_context(fallback_db, runtime_dir=fallback_root) as context:
+            fallback_adapter._bind_quality_resolver(context.borrow(fallback_db), context, {})
+            result = fallback_adapter.lifecycle_quality_resolver("2026-08-20")
+            assert result["source_mode"] == "last_good_owner_paused"
+            assert result["last_good_at"] == timestamp
+            assert fallback_adapter._quality_native is None
+            assert fallback_adapter.stats == {"bytes": 0, "queries": 0}
+            cache_proofs.append(digest(context.read_file_once(
+                fallback_root / ".web-vitrina-fbs-lifecycle-last-good.json").hex()))
+            results.append(digest(result))
+    assert results[0] != results[1] and cache_proofs[0] != cache_proofs[1]
+    return {"cold_native_scope_calls": 5, "warm_native_scope_calls": 0, "portion_reads": portion_reads,
+            "all_native_coverage_fields": True, "fresh_pin_and_closed_refusal": True,
+            "native_floor_skip": True, "bulk_byte_deadline_and_whole_cache_caps": True,
+            "owner_policy_switch_and_lastgood_content_change": True}
+
+
 def check_quality_cache_and_temporal(root):
     adapter = LiveNativeAdapter(db_path=root / "native.sqlite3", runtime_dir=root / "runtime",
         cache_dir=root / "proofs", now=datetime(2026, 4, 20, tzinfo=timezone.utc),
@@ -404,24 +544,6 @@ def check_quality_cache_and_temporal(root):
     cache = {"slices": {}}
     captures = [("capture", "2026-04-18", "[]", "{}", "proof")]
     with closing(sqlite3.connect(":memory:")) as conn:
-        conn.execute("CREATE TABLE mappings(facility_id TEXT)")
-        conn.execute("INSERT INTO mappings VALUES('old-facility')")
-        # Only cache invalidation is isolated here; the resolver's real joins
-        # and scopes are the native lifecycle implementation, not this double.
-        def resolver(connection, **kwargs):
-            return {"groups": [row[0] for row in connection.execute("SELECT facility_id FROM mappings")]}
-        with patch.object(adapter, "_quality_floor", return_value="2026-04-01"), \
-                patch("packages.application.web_vitrina_history_live_adapter.fbs_lifecycle_quality_coverage", side_effect=resolver) as resolve:
-            first = {"2026-04-18": {}}
-            alarms = {lifecycle.WAREHOUSE_MAPPINGS_TABLE: 1, lifecycle.FACILITIES_TABLE: 1}
-            adapter._quality(conn, cache, captures, first, alarms)
-            conn.execute("UPDATE mappings SET facility_id='corrected-facility'")
-            second = {"2026-04-18": {}}
-            adapter._quality(conn, cache, captures, second, {**alarms, lifecycle.WAREHOUSE_MAPPINGS_TABLE: 2})
-            assert first != second and resolve.call_count == 2
-            third = {"2026-04-18": {}}
-            adapter._quality(conn, cache, captures, third, {**alarms, lifecycle.FACILITIES_TABLE: 2})
-            assert resolve.call_count == 3
         conn.execute("CREATE TABLE temporal_source_snapshots(source_key TEXT,snapshot_date TEXT,captured_at TEXT,payload_json TEXT)")
         conn.execute("CREATE TABLE sheet_vitrina_v1_ready_temporal_revisions(source_key TEXT,snapshot_date TEXT,snapshot_role TEXT,revision INTEGER)")
         conn.execute("INSERT INTO temporal_source_snapshots VALUES(?,?,?,?)", (SOURCES[1], "2026-04-18", "capture", '{"quality":"old"}'))
@@ -596,6 +718,7 @@ def main():
         check_quality_floor(root / "quality-test")
         check_source_guards(root / "family-test")
         check_quality_cache_and_temporal(root / "cache-test")
+        quality_bridge = check_quality_scope_bridge(root / "quality-bridge-test")
         publication_projection = check_publication_projection(root / "publication-test")
         dated_slice_progress = check_dated_slice_progress(root / "dated-proof-test")
         cli_root = root / "cli-test"
@@ -609,7 +732,7 @@ def main():
                           "historic_delete_dirty_dates": 1, "pending_rollover_reused": True,
                           "source_aba_superseded": True, "parameter_suffix_days": 3,
                           "cost_july_backward_days": 7, "finance_first_duplicate_days": 1,
-                          "native_quality_floor": True, "portion_capture_calls": 3,
+                          "native_quality_floor": True, "reusable_quality_bridge": quality_bridge, "portion_capture_calls": 3,
                           "publication_projection": publication_projection,
                           "dated_slice_progress": dated_slice_progress,
                           "native_initial_warming": warming,

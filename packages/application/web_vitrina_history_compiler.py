@@ -93,6 +93,7 @@ class NativeDatedCompiler:
     dependency_epoch: str = ""
     prepared_context: dict | None = None
     prepared_availability: dict | None = None
+    lifecycle_quality_resolver: Any = None
 
     def __post_init__(self) -> None:
         if self.now.tzinfo is None or active_window_read_context() is None:
@@ -110,7 +111,8 @@ class NativeDatedCompiler:
         plan, bindings = _build_period_snapshot(runtime=self.runtime,
             date_from=self.date_from, date_to=self.date_to, default_visible_snapshot=default)
         history = read_management_inventory_history(self.runtime.db_path,
-            runtime_dir=self.runtime.runtime_dir, plan=plan, current_date="")
+            runtime_dir=self.runtime.runtime_dir, plan=plan, current_date="",
+            lifecycle_quality_resolver=self.lifecycle_quality_resolver)
         identities = {}
         for day in reversed(sorted(history.get("dates", {}))):
             for scope_key, scope in history["dates"][day].get("scopes", {}).items():
@@ -143,9 +145,11 @@ class NativeDatedCompiler:
     def _initialize_catalog(self) -> None:
         self.context_epoch = digest(self.context)
         self.block = SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,
-            now_factory=lambda: self.now, dated_cell_context=self.context)
+            now_factory=lambda: self.now, dated_cell_context=self.context,
+            lifecycle_quality_resolver=self.lifecycle_quality_resolver)
         self.natural_block = SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,
-            now_factory=lambda: self.now)
+            now_factory=lambda: self.now,
+            lifecycle_quality_resolver=self.lifecycle_quality_resolver)
         self.cached_tables = {}
         if self.existing_catalog and self.existing_catalog["context_epoch"] == self.context_epoch:
             self.catalog = self.existing_catalog
