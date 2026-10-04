@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -123,6 +124,10 @@ class RepositoryTest(unittest.TestCase):
         self.repo.save_event_page('B',page([],102),expected_cursor=None)
         empty=self.repo.list_items('B')['history']
         self.assertEqual(empty['state'],'complete');self.assertEqual(empty['event_count'],0)
+        self.assertIsNone(empty['last_sync_at'])
+        self.repo.save_event_page('A',page([],102),expected_cursor=101)
+        complete=self.repo.list_items('A')['history']
+        self.assertEqual(complete['last_sync_at'],before['last_sync_at'])
     def test_orphan_and_missing_purchase_are_separate(self):
         self.repo.save_claim_page('A',{'claims':[claim(),claim('missing',srid=None)],'total':2},archive=False)
         self.assertEqual(self.repo.list_items('A',filter_state='orphan')['total'],1)
@@ -184,6 +189,40 @@ class RepositoryTest(unittest.TestCase):
         adapter.fetch_events.side_effect=None; adapter.fetch_events.return_value=page([],102)
         adapter.fetch_claims.side_effect=[{'claims':[claim()],'total':2},{'claims':[claim()],'total':2}]
         with self.assertRaises(BuyerSupportValidationError): BuyerSupportSync(self.repo,adapter,page_pause_seconds=0).run('A')
+
+
+class BootstrapTest(unittest.TestCase):
+    def test_cli_maintenance_barrier_blocks_before_adapter_and_storage(self):
+        from packages.application.business_data_procedure_admission import initialize_admission
+        from packages.application.business_data_write_barrier import acquire_barrier
+        with TemporaryDirectory() as tmp:
+            runtime=Path(tmp)
+            initialize_admission(runtime)
+            acquire_barrier(runtime,window_id='buyer-support-test',window_kind='maintenance_pause',
+                            plan_fingerprint='sha256:'+'a'*64,approval_reference='synthetic-approval',
+                            actor='synthetic-test',reason='blocked bootstrap regression')
+            before={p.relative_to(runtime) for p in runtime.rglob('*')}
+            marker=runtime/'adapter-was-constructed'
+            code="""from pathlib import Path
+import apps.wb_buyer_support_sync as cli
+import sys
+def forbidden_adapter(**kwargs):
+    Path(sys.argv[sys.argv.index('--runtime-dir')+1],'adapter-was-constructed').write_text('unexpected')
+    raise RuntimeError('network boundary was reached')
+cli.WbBuyerSupportReadAdapter=forbidden_adapter
+raise SystemExit(cli.main())
+"""
+            result=subprocess.run([sys.executable,'-c',code,'--runtime-dir',str(runtime),'--cabinet','fixture',
+                                   '--token-rate-class','personal-service'],cwd=ROOT,
+                                  env={**os.environ,'WB_API_TOKEN':''},capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(json.loads(result.stdout)['status'],'skipped_maintenance')
+            self.assertFalse(marker.exists());self.assertFalse((runtime/'buyer-support').exists())
+            self.assertEqual({p.relative_to(runtime) for p in runtime.rglob('*')},before)
+    def test_hosted_unit_uses_the_existing_account_scope(self):
+        unit=(ROOT/'artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service').read_text()
+        self.assertIn('Environment=WB_BUYER_SUPPORT_CABINET_ID=seller-portal-primary',unit)
+        self.assertIn('Environment=CHANGE_REGISTRY_ACCOUNT_SCOPE=seller-portal-primary',unit)
 
 
 class AdapterTest(unittest.TestCase):

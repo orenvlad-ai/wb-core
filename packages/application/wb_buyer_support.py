@@ -294,7 +294,7 @@ class BuyerSupportRepository:
                                'chat_count': db.execute('SELECT COUNT(*) FROM chats WHERE cabinet=?', (cabinet,)).fetchone()[0],
                                'oldest_message_at': message_time(stats['oldest']),
                                'newest_message_at': message_time(stats['newest']),
-                               'last_sync_at': event_sync['updated_at'] if event_sync and event_sync['state'] == 'complete' else stats['last_received'],
+                               'last_sync_at': stats['last_received'],
                                'coverage': 'available_local_history',
                                'undated_chat_count': db.execute('SELECT COUNT(*) FROM chats c WHERE cabinet=? AND NOT EXISTS(SELECT 1 FROM events e WHERE e.cabinet=c.cabinet AND e.chat_id=c.id)', (cabinet,)).fetchone()[0]}
             chats_sql = 'SELECT * FROM chats c WHERE cabinet=?'
