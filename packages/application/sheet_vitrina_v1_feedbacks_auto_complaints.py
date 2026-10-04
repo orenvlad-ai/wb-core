@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages.application.business_data_procedure_admission import admitted_thread
+
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import json
@@ -461,7 +463,7 @@ class SheetVitrinaV1FeedbacksAutoComplaintsBlock:
         )
         self.store.update_schedule_after_run(str(schedule.get("id") or ""), run)
         if async_run:
-            thread = threading.Thread(
+            thread = admitted_thread(self.runtime_dir,
                 target=self._run_and_persist,
                 args=(run_id, schedule),
                 daemon=True,

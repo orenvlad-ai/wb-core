@@ -403,5 +403,10 @@ def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+from packages.application.business_data_procedure_admission import guard_cli
+
+main = guard_cli(default_runtime='/opt/wb-core-runtime/state')(main)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

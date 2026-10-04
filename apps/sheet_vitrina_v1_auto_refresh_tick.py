@@ -797,5 +797,10 @@ def _print(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+from packages.application.business_data_procedure_admission import guard_cli
+
+main = guard_cli(default_runtime='.runtime/registry_upload')(main)
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import shlex
 import sys
 import tempfile
 import time
@@ -78,6 +79,9 @@ INDEPENDENT_WRITER_TIMER_UNITS = (
     "wb-core-sheet-vitrina-health-candidate.timer",
     "wb-core-sheet-vitrina-health-confirmation.timer",
     "wb-core-fbs-shadow-collector.timer",
+    "wb-core-buyer-authenticated-collect.timer",
+    "wb-core-promo-light-gc.timer",
+    "wb-core-web-vitrina-finished-snapshot.timer",
 )
 # This projection is deliberately version-stable.  Pause ownership for the
 # FBS shadow writer is recorded in the full baseline/readback and restore plan,
@@ -117,6 +121,12 @@ CONTINUOUS_INFRASTRUCTURE_SERVICE_UNITS = (
 CLASSIFIED_WB_CORE_TIMER_UNITS = (
     ALL_BUSINESS_TIMER_UNITS + CONTINUOUS_OBSERVER_TIMER_UNITS
 )
+TIMER_ROLES = {
+    **{unit: "business" for unit in ALL_BUSINESS_TIMER_UNITS},
+    "wb-core-change-registry-observer.timer": "source_observer",
+    "wb-core-root-storage-policy.timer": "safety_monitor",
+}
+
 
 
 class _ExclusiveRestoreLock:
@@ -163,6 +173,10 @@ WRITER_PROCESS_MARKERS = (
     "sheet_vitrina_v1_temporal_closure_retry_live.py",
     "sheet_vitrina_v1_feedbacks_auto_complaints_tick.py",
     "wb_finance_weekly.py",
+    "wb_finance_daily.py",
+    "wb_buyer_authenticated_collect.py",
+    "promo_campaign_archive_light_gc_tick.py",
+    "web_vitrina_finished_snapshot_build.py",
     "finance_storage_backup_rotation.py",
     "warehouse_functional_runner.py",
     "wb_autoanswers_readonly.py",
@@ -320,7 +334,7 @@ class SystemdClient:
             [
                 "show",
                 unit,
-                "--property=LoadState,UnitFileState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,ExecMainStartTimestamp,LastTriggerUSec,NextElapseUSecRealtime",
+                "--property=LoadState,UnitFileState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,ExecMainStartTimestamp,LastTriggerUSec,NextElapseUSecRealtime,FragmentPath,DropInPaths,ExecStart,Triggers,Persistent,TimersCalendar,TimersMonotonic,AccuracyUSec,RandomizedDelayUSec,RemainAfterElapse",
                 "--no-pager",
             ]
         )
@@ -334,6 +348,16 @@ class SystemdClient:
             if "=" in line:
                 key, value = line.split("=", 1)
                 properties[key] = value
+        fragments = [properties.get("FragmentPath", "")] + shlex.split(properties.get("DropInPaths", ""))
+        content = []
+        for fragment in fragments:
+            if not fragment:
+                continue
+            path = Path(fragment)
+            if not path.is_absolute() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+                raise RuntimeError("systemd unit content cannot be safely proven: " + unit)
+            content.append({"path": fragment, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        properties["UnitContentDigest"] = _stable_fingerprint(content)
         return {
             "unit": unit,
             "is_enabled": str(properties.get("UnitFileState") or ""),
@@ -571,7 +595,7 @@ def _flock_snapshot(path: Path) -> dict[str, Any]:
     result: dict[str, Any] = {"path": str(path), "exists": path.exists(), "held": False}
     if not path.exists():
         return result
-    handle = path.open("a+", encoding="utf-8")
+    handle = path.open("rb")
     try:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -4034,6 +4058,16 @@ def _resume_prepared_nonquiet(
     }
 
 
+def legacy_hold_preflight(status: Mapping[str, Any]) -> None:
+    """Reject an unrestorable legacy hold before policy/warehouse mutation."""
+    if status.get("unknown_wb_core_timers") or status.get("cron_entries"):
+        raise RuntimeError("legacy maintenance has unclassified procedures")
+    _independent_writer_timer_restore_plan(status)
+    for unit, value in dict(status.get("timers") or {}).items():
+        if (value.get("is_enabled"), value.get("is_active")) not in {("enabled", "active"), ("disabled", "inactive")}:
+            raise RuntimeError("unsupported exact legacy timer baseline: " + unit)
+
+
 def maintenance_prepare(
     runtime_dir: Path,
     *,
@@ -4110,6 +4144,7 @@ def maintenance_prepare(
             schedules=schedules,
             proc_root=proc_root,
         )
+    legacy_hold_preflight(before)
     prior_auto_updates = (
         owner_policy_readback(runtime_dir, status=before)
         if owner_policy_existed

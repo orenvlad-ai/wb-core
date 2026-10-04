@@ -10,6 +10,7 @@ from pathlib import Path
 import threading
 import time
 
+from packages.application.business_data_procedure_admission import admitted_thread, business_write_is_blocked, MaintenanceAdmissionBlocked
 from packages.application.search_cluster_cleaner import KeywordCleaner
 from packages.application.search_cluster_cleaner_store import CleanerStore
 from packages.application.storage_registry import StoreRegistry
@@ -62,9 +63,12 @@ class CleanerWeb:
     def _campaign_catalog(self,ids:list[int],refresh:bool=False) -> tuple[dict,str|None,bool]:
         if self._fixture_approved_targets is not None:return {},None,False
         with self._catalog_lock:
-            if not self._catalog_loading and (refresh or (not self._catalog_names and self._catalog_error is None)):
+            if not business_write_is_blocked(self.require_service().store.registry.runtime_dir) and not self._catalog_loading and (refresh or (not self._catalog_names and self._catalog_error is None)):
                 self._catalog_loading=True
-                threading.Thread(target=self._refresh_campaign_names,args=(ids,),daemon=True,name='cleaner-campaign-catalog').start()
+                try:
+                    admitted_thread(self.require_service().store.registry.runtime_dir, target=self._refresh_campaign_names,args=(ids,),daemon=True,name='cleaner-campaign-catalog').start()
+                except MaintenanceAdmissionBlocked:
+                    self._catalog_loading=False
             return dict(self._catalog_names),self._catalog_error,self._catalog_loading
 
     @classmethod
@@ -245,10 +249,13 @@ class CleanerWeb:
             return dict(items=[],counts=empty_counts,loading=False,error='registry_upgrade_required',categories=category_contract())
         with self._catalog_lock:
             stale=time.monotonic()-self._batch_catalog_at>120
-            if not self._batch_catalog_loading and (refresh or stale) and self._fixture_approved_targets is None:
+            if not business_write_is_blocked(self.require_service().store.registry.runtime_dir) and not self._batch_catalog_loading and (refresh or stale) and self._fixture_approved_targets is None:
                 self._batch_catalog_loading=True
                 self._batch_catalog_targets=None
-                threading.Thread(target=self._refresh_batch_catalog,daemon=True,name='cleaner-batch-catalog').start()
+                try:
+                    admitted_thread(self.require_service().store.registry.runtime_dir,target=self._refresh_batch_catalog,daemon=True,name='cleaner-batch-catalog').start()
+                except MaintenanceAdmissionBlocked:
+                    self._batch_catalog_loading=False
             targets=self._batch_catalog_targets
             unknown=self._batch_catalog_unknown
             loading=self._batch_catalog_loading
