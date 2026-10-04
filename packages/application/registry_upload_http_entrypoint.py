@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating
+
 from copy import deepcopy
 
 import hashlib
@@ -471,6 +473,7 @@ WEB_VITRINA_ACTIVITY_TONE_RANK = {
     "neutral": 3,
 }
 WEB_VITRINA_ACTIVITY_ITEM_COPY = {
+    "card_rating": {"label_ru": "Рейтинг карточки", "description_ru": "Текущий рейтинг по отзывам WB из 5; TOTAL — среднее доступных рейтингов SKU."},
     OWN_PRODUCT_CAPITAL_SOURCE_KEY: {
         "label_ru": "WebCore",
         "description_ru": "Наш оплаченный товарный капитал по пяти физическим стадиям.",
@@ -541,6 +544,7 @@ WEB_VITRINA_ACTIVITY_ITEM_COPY = {
     },
 }
 WEB_VITRINA_SOURCE_METRIC_KEYS = {
+    "card_rating": ("card_rating", "avg_card_rating"),
     "seller_funnel_snapshot": (
         "total_view_count",
         "total_open_card_count",
@@ -3798,7 +3802,7 @@ class RegistryUploadHttpEntrypoint:
             )
         )
         metric_labels_by_source = _build_activity_metric_labels_by_source(
-            visible_authenticated_buyer_metrics(extend_metrics_with_authenticated_buyer(metric_catalog))
+            visible_authenticated_buyer_metrics(extend_metrics_with_card_rating(extend_metrics_with_authenticated_buyer(metric_catalog)))
         )
         upload_summary = _build_web_vitrina_endpoint_summary_block(
             title="Загрузка данных",
@@ -8075,7 +8079,7 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 metric_keys = _metric_keys_for_source_keys(
-                    extend_metrics_with_authenticated_buyer(metric_catalog),
+                    extend_metrics_with_card_rating(extend_metrics_with_authenticated_buyer(metric_catalog)),
                     source_keys=source_keys,
                     column_date=selected_as_of_date,
                 )
@@ -10811,7 +10815,7 @@ def build_web_vitrina_page_read(
         )
     )
     metric_labels_by_source = _build_activity_metric_labels_by_source(
-        visible_authenticated_buyer_metrics(extend_metrics_with_authenticated_buyer(metric_catalog))
+        visible_authenticated_buyer_metrics(extend_metrics_with_card_rating(extend_metrics_with_authenticated_buyer(metric_catalog)))
     )
     activity_surface = _web_vitrina_source_status_not_loaded_activity_surface(
         snapshot_as_of_date=source_status_snapshot_as_of_date,

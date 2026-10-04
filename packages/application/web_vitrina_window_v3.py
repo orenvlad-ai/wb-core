@@ -81,6 +81,7 @@ from packages.application.sheet_vitrina_v1_inventory_planning import extend_rows
 from packages.application.web_vitrina_management_history import (
     ensure_current_proxy_rows, has_complete_recovery,
 )
+from packages.application.sheet_vitrina_v1_card_rating import include_card_rating_rows, extend_metrics_with_card_rating
 from packages.application.web_vitrina_window_read_context import window_read_context
 from packages.application.web_vitrina_ready_header_cache import ReadyHeaderCache
 from packages.application.web_vitrina_page_composition import (
@@ -632,6 +633,7 @@ def _input_material(
         "current_bundle": [bundle, activated_at],
         "registry_config": _hash_query(conn,
             "SELECT * FROM registry_upload_config_v2 WHERE bundle_version=? ORDER BY display_order,nm_id", (bundle,)),
+        "builtin_card_rating_catalog": [asdict(item) for item in extend_metrics_with_card_rating([])],
         "registry_metrics": _hash_query(conn,
             "SELECT * FROM registry_upload_metrics_v2 WHERE bundle_version=? ORDER BY metric_key", (bundle,)),
         "registry_formulas": _hash_query(conn,
@@ -768,6 +770,7 @@ def _catalog_core_rows(
             total_metric=metrics[PROXY_V4_TOTAL_MARGIN_PER_UNIT_RUB_METRIC_KEY],
             parameters_for_date=block.proxy_v4_parameters_resolver,
         )
+    rows = include_card_rating_rows(rows, config=enabled, dates=[], metrics=metrics)
     rows = _include_buyout_percent_rows(
         rows, runtime=block.runtime, date_columns=[], source_snapshot_dates=[],
         enabled_config=enabled, metric=metrics[BUYOUT_PERCENT_METRIC_KEY],
@@ -1024,7 +1027,7 @@ def _catalog_surface(
         )
         for kind, formatter in (
             ("empty", "empty_default"), ("unknown", "unknown_default"),
-            ("number", "number_default"), ("money", "money_rub"),
+            ("number", "number_default"), ("number", "rating"), ("money", "money_rub"),
             ("money", "money_rub_per_unit"), ("percent", "percent_default"),
         )
     ]

@@ -958,7 +958,7 @@ def _operator_expectation_reason(cell: Mapping[str, Any]) -> str:
         return "Проверка выполнена: подтверждённых изменений цены или ставки не было."
     if state == "accepted_fallback":
         return "Использовано последнее подтверждённое значение по разрешённому правилу."
-    if source_key in {"spp", "spp_proxy"}:
+    if source_key in {"spp", "spp_proxy", "card_rating"}:
         return "Источнику нужно новое текущее наблюдение; исторический повтор недоступен."
     if state == "partial":
         return "Покрыта только часть обязательного набора."
@@ -980,7 +980,7 @@ def _operator_recovery_preview(
         hook = str(raw.get("hook") or "none")
         exact_apply_allowed = bool(raw.get("apply_allowed")) and hook == "group_refresh"
         group_id = str(raw.get("source_group_id") or "")
-        unsupported_current_only = bool(set(source_keys) & {"spp", "spp_proxy"})
+        unsupported_current_only = bool(set(source_keys) & {"spp", "spp_proxy", "card_rating"})
         if exact_apply_allowed and morning_pair_complete:
             reason = "Доступно одно точечное обновление этой группы с повторной проверкой результата."
         elif exact_apply_allowed:

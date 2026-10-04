@@ -27,6 +27,7 @@ WEB_VITRINA_SOURCE_GROUPS: dict[str, dict[str, Any]] = {
             "stocks",
             "ads_compact",
             "fin_report_daily",
+            "card_rating",
             "prices_snapshot",
             "ads_bids",
         ),

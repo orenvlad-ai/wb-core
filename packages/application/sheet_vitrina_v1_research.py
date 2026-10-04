@@ -668,7 +668,7 @@ def _aggregation_method(metric: Mapping[str, Any]) -> str:
             str(metric.get("section") or ""),
         ]
     ).lower()
-    if metric_format == "percent" or any(token in combined for token in _MEAN_TOKENS):
+    if metric_format in {"percent", "rating"} or any(token in combined for token in _MEAN_TOKENS):
         return "mean_observed_values"
     return "sum_observed_values"
 
