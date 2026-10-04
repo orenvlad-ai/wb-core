@@ -146,7 +146,8 @@ class LiveNativeAdapter:
 
     def capture(self) -> dict:
         self.capture_calls += 1
-        self.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0, "reasons": []}
+        self.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0,
+                      "dated_days_loaded": 0, "reasons": []}
         self.deadline = time.monotonic() + self.max_capture_seconds
         self.require_source_families()
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -359,20 +360,31 @@ class LiveNativeAdapter:
     def _slice(self, conn, tables, cache, alarms, name, column, days):
         if name not in tables:
             return {}
-        key = digest([name, alarms.get(name), days])
-        self.used_slices.add(key)
-        # Sources with no native revision are always read, never silently cached.
-        if name not in alarms or key not in cache["slices"]:
-            columns = [r[1] for r in conn.execute("PRAGMA table_info(" + name + ")")]
-            grouped = {}
-            rows = self._rows(conn, "SELECT * FROM " + name + " WHERE " + column + " IN (" + ",".join("?" for _ in days) + ") ORDER BY " + ",".join(_quoted(c) for c in columns), days)
-            for row in rows:
-                grouped.setdefault(row[columns.index(column)], []).append(row)
-            result = {day: digest(grouped.get(day, [])) for day in days}
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(" + name + ")")]
+        result = {}
+        for day in days:
+            key = digest([name, alarms.get(name), day])
+            self.used_slices.add(key)
+            if name in alarms and key in cache["slices"]:
+                result[day] = cache["slices"][key]
+                continue
+            try:
+                rows = self._rows(conn, "SELECT * FROM " + name + " WHERE " + column +
+                                  "=? ORDER BY " + ",".join(_quoted(c) for c in columns), (day,))
+            except LiveSourceUnavailable as exc:
+                # Only complete day proofs are resumable. Without new durable
+                # progress, the same over-budget day must remain terminal.
+                if (str(exc) == "live_source_resource_limit" and
+                        self.stats["bytes"] > self.max_read_bytes and
+                        (self.stats.get("dated_days_loaded", 0) or self.stats.get("plans_loaded", 0))):
+                    raise LiveSourceUnavailable("live_dated_bootstrap_pending") from exc
+                raise
+            result[day] = digest(rows)
+            # Missing native alarms require fresh reads on every capture.
             if name in alarms:
-                cache["slices"][key] = result
-            return result
-        return cache["slices"][key]
+                cache["slices"][key] = result[day]
+                self.stats["dated_days_loaded"] = self.stats.get("dated_days_loaded", 0) + 1
+        return result
 
     def _temporal(self, conn, tables, cache, per_day, business_day):
         if "sheet_vitrina_v1_ready_temporal_revisions" not in tables:
@@ -564,7 +576,32 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
     if store.root.resolve().is_relative_to(adapter.runtime_dir):
         raise ValueError("derived store must be separate from native runtime")
     calls_before = adapter.capture_calls
-    vector = adapter.capture()
+    bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0}
+    configured_capture_seconds = adapter.max_capture_seconds
+    while True:
+        if deadline_monotonic is not None:
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                raise LiveSourceUnavailable("live_bootstrap_deadline")
+            adapter.max_capture_seconds = min(configured_capture_seconds, remaining)
+        try:
+            vector = adapter.capture()
+        except LiveSourceUnavailable as exc:
+            # Only initial proof warming continues, inside the existing hard
+            # worker budget. Compiler/portion/fresh publication capture do not
+            # retry. A no-progress or terminal source error stays a refusal.
+            if (deadline_monotonic is None or str(exc) not in {
+                    "live_ready_bootstrap_pending", "live_dated_bootstrap_pending"} or
+                    not (adapter.stats.get("plans_loaded", 0) or
+                         adapter.stats.get("dated_days_loaded", 0))):
+                raise
+        else:
+            break
+        finally:
+            bootstrap_reads["captures"] += 1
+            bootstrap_reads["bytes"] += adapter.stats.get("bytes", 0)
+            bootstrap_reads["queries"] += adapter.stats.get("queries", 0)
+            adapter.max_capture_seconds = configured_capture_seconds
     initial_fence = adapter.fence
     pointer = store._current()
     old = store.edition() if pointer else None
@@ -579,7 +616,8 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
                     raise LiveSourceUnavailable("accepted_ready_source_disappeared:" + day)
     if old and old["consumed"] == vector:
         return {"status": "unchanged", "recomputes": 0, "compiler_constructed": False,
-                "edition_id": pointer["current"], "source_reads": adapter.stats}
+                "edition_id": pointer["current"], "source_reads": adapter.stats,
+                "bootstrap_source_reads": bootstrap_reads}
     catalog = _read(store.root / "catalogs" / (old["catalog"] + ".json")) if old else None
     with ExitStack() as batch:
         adapter.require_source_families()
@@ -599,4 +637,5 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             revalidate=revalidate, max_recomputes=max_recomputes,
             deadline_monotonic=deadline_monotonic, expected_base=pointer["current"] if pointer else None)
     return {**result, "compiler_constructed": True, "source_reads": adapter.stats,
+            "bootstrap_source_reads": bootstrap_reads,
             "capture_calls": adapter.capture_calls - calls_before}

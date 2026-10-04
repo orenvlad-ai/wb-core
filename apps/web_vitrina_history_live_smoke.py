@@ -108,6 +108,102 @@ def check_publication_projection(root):
                 "fresh_consumed_mutation_delete_redate": True, "retention_inputs": True}
 
 
+def check_dated_slice_progress(root):
+    adapter = LiveNativeAdapter(db_path=root / "native.sqlite3", runtime_dir=root / "runtime",
+        cache_dir=root / "proofs", now=datetime(2026, 4, 20, tzinfo=timezone.utc),
+        date_from="2026-04-14", date_to="2026-04-18", formula_epoch="dated-proof",
+        max_read_bytes=2400)
+    table = "owned_dated_source"
+    days = adapter.days
+    cache = {"slices": {}}
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE owned_dated_source(day TEXT,row_id INTEGER,payload TEXT)")
+        conn.executemany("INSERT INTO owned_dated_source VALUES(?,?,?)",
+                         [(day, i, "x" * 1000) for i, day in enumerate(days)])
+
+        def begin():
+            adapter.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0,
+                             "dated_days_loaded": 0}
+            adapter.deadline = time.monotonic() + 4
+            adapter.used_slices = set()
+
+        def expected():
+            grouped = {day: [] for day in days}
+            for row in conn.execute("SELECT * FROM owned_dated_source ORDER BY day,row_id,payload"):
+                grouped[row[0]].append(list(row))
+            return {day: digest(rows) for day, rows in grouped.items()}
+
+        baseline = expected()
+        passes = 0
+        while True:
+            begin()
+            previous = dict(cache["slices"])
+            passes += 1
+            try:
+                full = adapter._slice(conn, {table}, cache, {table: 1}, table, "day", days)
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == "live_dated_bootstrap_pending"
+                assert len(cache["slices"]) > len(previous)
+                assert adapter.stats["dated_days_loaded"] == 2
+                # The partial third day has no reusable proof.
+                assert len(cache["slices"]) == 2 * passes
+                assert all(proof == baseline[day] for day in days
+                           for key, proof in cache["slices"].items()
+                           if key == digest([table, 1, day]))
+                assert passes < 3
+            else:
+                assert full == baseline and passes == 3
+                assert adapter.stats["queries"] == 1
+                assert adapter.stats["dated_days_loaded"] == 1
+                break
+        begin()
+        assert adapter._slice(conn, {table}, cache, {table: 1}, table, "day", days) == baseline
+        assert adapter.stats["queries"] == 0 and adapter.stats["bytes"] == 0
+        # A changed native alarm invalidates the old keys. Every field remains
+        # in the independently ordered digest, including semantic-only payload.
+        adapter.max_read_bytes = 16384
+        conn.execute("UPDATE owned_dated_source SET payload='semantic-correction' WHERE day=?", (days[0],))
+        begin()
+        corrected = adapter._slice(conn, {table}, cache, {table: 2}, table, "day", days)
+        assert corrected == expected() and adapter.stats["queries"] == len(days)
+        assert {day for day in days if corrected[day] != baseline[day]} == {days[0]}
+        conn.execute("UPDATE owned_dated_source SET day=? WHERE day=?", (days[3], days[1]))
+        begin()
+        redated = adapter._slice(conn, {table}, cache, {table: 3}, table, "day", days)
+        assert redated == expected() and adapter.stats["queries"] == len(days)
+        assert {day for day in days if redated[day] != corrected[day]} == {days[1], days[3]}
+        assert redated[days[1]] == digest([])  # Missing source evidence, not a numeric zero.
+        conn.execute("DELETE FROM owned_dated_source WHERE day=?", (days[2],))
+        begin()
+        deleted = adapter._slice(conn, {table}, cache, {table: 4}, table, "day", days)
+        assert deleted == expected()
+        assert {day for day in days if deleted[day] != redated[day]} == {days[2]}
+        # No revision means no cache reuse, even within the same adapter.
+        unversioned = {"slices": {}}
+        begin()
+        first = adapter._slice(conn, {table}, unversioned, {}, table, "day", days)
+        conn.execute("UPDATE owned_dated_source SET payload='fresh-unversioned' WHERE day=?", (days[0],))
+        begin()
+        second = adapter._slice(conn, {table}, unversioned, {}, table, "day", days)
+        assert first != second and second == expected() and unversioned["slices"] == {}
+        assert adapter.stats["queries"] == len(days)
+        # An over-cap first day must not produce endless warming outcomes.
+        adapter.max_read_bytes = 100
+        oversized = {"slices": {}}
+        begin()
+        try:
+            adapter._slice(conn, {table}, oversized, {table: 5}, table, "day", [days[3]])
+        except LiveSourceUnavailable as exc:
+            assert str(exc) == "live_source_resource_limit"
+        else:
+            raise AssertionError("one over-cap day must be refused")
+        assert oversized["slices"] == {} and adapter.stats["dated_days_loaded"] == 0
+        return {"passes": passes, "completed_day_proofs": len(days),
+                "unchanged_queries": 0, "exact_ordered_digest": True,
+                "alarm_mutation_delete_redate": True, "unversioned_fresh": True,
+                "over_cap_day_terminal": True}
+
+
 def check_pending_rollover(root):
     store = HistoryStore(root)
     catalog, units = setup_units()
@@ -126,6 +222,47 @@ def check_pending_rollover(root):
                          revalidate=lambda: new)
     assert final["status"] == "published" and calls == ["2026-04-19", "2026-04-20"]
     assert store.edition()["days"]["2026-04-18"] == refs["2026-04-18"]
+
+
+def check_initial_warming_failures(adapter, runtime, store):
+    """Control-flow failures only; actual native warming is checked in main."""
+    previous = store.edition()
+    configured = adapter.max_capture_seconds
+    for reason, progress, deadline in (
+            ("live_source_resource_limit", 1, time.monotonic() + 1),
+            ("live_dated_bootstrap_pending", 0, time.monotonic() + 1),
+            ("live_ready_bootstrap_pending", 1, None)):
+        def refused():
+            adapter.stats = {"plans_loaded": progress, "dated_days_loaded": 0,
+                             "bytes": 1, "queries": 1}
+            raise LiveSourceUnavailable(reason)
+        with patch.object(adapter, "capture", side_effect=refused) as capture:
+            try:
+                update_live_history(adapter=adapter, runtime=runtime, store=store,
+                                    deadline_monotonic=deadline)
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == reason
+            else:
+                raise AssertionError("terminal/no-progress/unbounded call must not retry")
+            assert capture.call_count == 1
+        assert adapter.max_capture_seconds == configured and store.edition() == previous
+    seen_seconds = []
+    def expired():
+        seen_seconds.append(adapter.max_capture_seconds)
+        adapter.stats = {"plans_loaded": 0, "dated_days_loaded": 1,
+                         "bytes": 1, "queries": 1}
+        time.sleep(0.02)
+        raise LiveSourceUnavailable("live_dated_bootstrap_pending")
+    with patch.object(adapter, "capture", side_effect=expired) as capture:
+        try:
+            update_live_history(adapter=adapter, runtime=runtime, store=store,
+                                deadline_monotonic=time.monotonic() + 0.01)
+        except LiveSourceUnavailable as exc:
+            assert str(exc) == "live_bootstrap_deadline"
+        else:
+            raise AssertionError("deadline must terminate initial warming")
+        assert capture.call_count == 1 and 0 < seen_seconds[0] <= 0.01
+    assert adapter.max_capture_seconds == configured and store.edition() == previous
 
 
 def check_quality_floor(root):
@@ -323,10 +460,28 @@ def main():
         vector = adapter.capture()
         assert adapter.stats["plans_loaded"] == 7
         assert adapter.capture() == vector and adapter.stats["plans_loaded"] == 0
+        # Actual native source + compiler + store: bulk exceeds one capture,
+        # while each completed source day remains inside the same budget.
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS sheet_vitrina_v1_warehouse_business_projection_current_rows(
+                as_of_date TEXT NOT NULL,nm_id INTEGER NOT NULL,revision_id TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,presentation_json TEXT NOT NULL,provenance_json TEXT NOT NULL,
+                row_fingerprint TEXT NOT NULL,published_at TEXT NOT NULL,PRIMARY KEY(as_of_date,nm_id))""")
+            conn.executemany("""INSERT INTO sheet_vitrina_v1_warehouse_business_projection_current_rows
+                VALUES(?,999,'proof-fixture','{}','{}',?,'proof-fixture','2026-04-20')""",
+                [(day, json.dumps({"unconsumed_fixture_padding": "x" * 128 * 1024}))
+                 for day in ("2026-04-18", "2026-04-19")])
+            ensure_publication_schema(conn)
+        adapter.max_read_bytes = 224 * 1024
         store = HistoryStore(root / "history", max_reply_bytes=32 * 1024**2)
-        built = update_live_history(adapter=adapter, runtime=runtime, store=store)
+        built = update_live_history(adapter=adapter, runtime=runtime, store=store,
+                                    deadline_monotonic=time.monotonic() + 30)
         assert built["status"] == "published", built
-        assert built["capture_calls"] == 3, built
+        assert built["bootstrap_source_reads"]["captures"] == 2 and built["capture_calls"] == 4, built
+        warming = built["bootstrap_source_reads"]
+        vector = store.edition()["consumed"]
+        check_initial_warming_failures(adapter, runtime, store)
+        adapter.max_read_bytes = 32 * 1024**2
         with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
             conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?,inputs_json=? WHERE operation_id='bridge-diagnostics'",
                          ('{"diagnostic_only":"updated"}', '{"ordinary_intent":"not_rendered"}'))
@@ -442,6 +597,7 @@ def main():
         check_source_guards(root / "family-test")
         check_quality_cache_and_temporal(root / "cache-test")
         publication_projection = check_publication_projection(root / "publication-test")
+        dated_slice_progress = check_dated_slice_progress(root / "dated-proof-test")
         cli_root = root / "cli-test"
         cli_root.mkdir()
         check_cli_guards(cli_root)
@@ -455,6 +611,9 @@ def main():
                           "cost_july_backward_days": 7, "finance_first_duplicate_days": 1,
                           "native_quality_floor": True, "portion_capture_calls": 3,
                           "publication_projection": publication_projection,
+                          "dated_slice_progress": dated_slice_progress,
+                          "native_initial_warming": warming,
+                          "warming_no_progress_terminal_deadline_retains_lastgood": True,
                           "publication_diagnostic_nochange_before_compiler": True,
                           "cli_guards": True, "existing_process_wrapper_kill": True}))
 
