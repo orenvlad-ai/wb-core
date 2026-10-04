@@ -5779,6 +5779,7 @@
         <button class="unified-tab-button" type="button" data-unified-tab-button="warehouses" role="tab" aria-selected="false">Остатки</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="reports" role="tab" aria-selected="false">Отчёты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="feedbacks" role="tab" aria-selected="false">Отзывы</button>
+        <button class="unified-tab-button" type="button" data-unified-tab-button="buyer-support" role="tab" aria-selected="false">Чаты и возвраты</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="ads" role="tab" aria-selected="false">Реклама</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="prices" role="tab" aria-selected="false">Цены</button>
         <button class="unified-tab-button" type="button" data-unified-tab-button="sku-management" role="tab" aria-selected="false">Управление SKU</button>
@@ -6347,6 +6348,7 @@
       <iframe class="operator-embed-frame" title="Отчёты" data-operator-embed-frame="reports" scrolling="no"></iframe>
     </section>
 
+<!-- BUYER_SUPPORT_PANEL -->
 	    <section class="unified-tab-panel" data-unified-tab-panel="feedbacks" hidden>
 	      <section class="panel research-panel feedbacks-panel" data-feedbacks-panel>
 	        <div class="panel-top">
@@ -7892,7 +7894,7 @@
     const SETTINGS_UNIFIED_TAB = "settings";
     const FINANCE_UNIFIED_TAB = "finance";
     const EMBEDDED_UNIFIED_TABS = new Set(["factory-order", "reports"]);
-    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", WAREHOUSES_UNIFIED_TAB, "reports", FEEDBACKS_UNIFIED_TAB, ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB, FINANCE_UNIFIED_TAB]);
+    const VALID_UNIFIED_TABS = new Set(["vitrina", "factory-order", WAREHOUSES_UNIFIED_TAB, "reports", FEEDBACKS_UNIFIED_TAB, "buyer-support", ADS_UNIFIED_TAB, PRICES_UNIFIED_TAB, SKU_MANAGEMENT_UNIFIED_TAB, RESEARCH_UNIFIED_TAB, INSTRUCTIONS_UNIFIED_TAB, SETTINGS_UNIFIED_TAB, FINANCE_UNIFIED_TAB]);
     const CONFIG_ALLOWED_UNIFIED_TABS = Array.isArray(WEB_VITRINA_CONFIG.allowed_tabs) ? WEB_VITRINA_CONFIG.allowed_tabs : [];
     const ALLOWED_UNIFIED_TABS = new Set(
       CONFIG_ALLOWED_UNIFIED_TABS.filter(function(tabName) {
@@ -9933,6 +9935,9 @@
       }
       if (activeTab === RESEARCH_UNIFIED_TAB) {
         ensureResearchOptionsLoaded();
+      }
+      if (activeTab === "buyer-support") {
+        if (window.wbcBuyerSupportLoad) window.wbcBuyerSupportLoad();
       }
       if (activeTab === FEEDBACKS_UNIFIED_TAB) {
         ensureFeedbacksInitialized();
@@ -28244,5 +28249,8 @@
     nodes.form.addEventListener("submit",submitAction); nodes.template.addEventListener("click",downloadTemplate);
   }());
   </script>
+<script>
+/* BUYER_SUPPORT_SCRIPT */
+</script>
 </body>
 </html>
