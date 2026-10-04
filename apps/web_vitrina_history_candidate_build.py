@@ -59,13 +59,16 @@ def main():
     parser.add_argument("--formula-epoch", required=True)
     parser.add_argument("--budget-seconds", type=float, default=180)
     parser.add_argument("--max-recomputes", type=int, default=31)
+    parser.add_argument("--manual", action="store_true",
+                        help="explicit bounded manual trial; bypass calendar window only")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     source = args.runtime_dir.resolve()
     root = args.candidate_root.resolve()
     if root.is_relative_to(source) or not 0 < args.budget_seconds <= 240:
         raise ValueError("separate candidate root and bounded budget required")
-    seconds = min(args.budget_seconds, deadline_seconds(datetime.now(timezone.utc)))
+    seconds = (min(args.budget_seconds, 180) if args.manual else
+               min(args.budget_seconds, deadline_seconds(datetime.now(timezone.utc))))
     if seconds <= 0:
         print(json.dumps({"status": "skipped_window", "last_good_retained": True}))
         return
@@ -88,7 +91,8 @@ def main():
                     result = {"status": "skipped_" + slot, "last_good_retained": True}
                 else:
                     with candidate_singleflight(root) as acquired:
-                        seconds = min(args.budget_seconds, deadline_seconds(datetime.now(timezone.utc)))
+                        seconds = (min(args.budget_seconds, 180) if args.manual else
+                                   min(args.budget_seconds, deadline_seconds(datetime.now(timezone.utc))))
                         result = bounded_worker([sys.executable, str(Path(__file__).resolve()),
                             *sys.argv[1:], "--worker"], seconds) if acquired and seconds > 0 else {
                                 "status": "skipped_busy", "last_good_retained": True}

@@ -115,6 +115,35 @@ def check_cli_guards(root):
             patch.object(command, "StoreRegistry") as registry, redirect_stdout(StringIO()):
         command.main()
         assert not registry.called
+    manual = [*arguments, "--manual", "--budget-seconds", "240"]
+    with patch.object(sys, "argv", manual), \
+            patch.object(command, "deadline_seconds", side_effect=AssertionError("manual uses no calendar")), \
+            patch.object(command, "admission", return_value="idle"), \
+            patch.object(command, "bounded_worker", return_value={"status": "fixture_only"}) as worker, redirect_stdout(StringIO()):
+        command.main()
+        assert worker.call_args.args[1] == 180
+        assert "--manual" in worker.call_args.args[0] and worker.call_args.args[0][-1] == "--worker"
+    with patch.object(sys, "argv", manual), \
+            patch.object(command, "admission", return_value="busy"), \
+            patch.object(command, "bounded_worker") as worker, redirect_stdout(StringIO()):
+        command.main()
+        assert not worker.called
+    with lock.open("rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with patch.object(sys, "argv", manual), \
+                patch.object(command, "admission", return_value="idle"), \
+                patch.object(command, "bounded_worker") as worker, redirect_stdout(StringIO()):
+            command.main()
+            assert not worker.called
+    started = time.monotonic()
+    with patch.object(sys, "argv", [*manual, "--worker"]), \
+            patch.object(command, "deadline_seconds", side_effect=AssertionError("manual worker uses no calendar")), \
+            patch.object(command, "StoreRegistry"), \
+            patch.object(command, "RegistryUploadDbBackedRuntime"), \
+            patch.object(command, "LiveNativeAdapter"), patch.object(command, "HistoryStore"), \
+            patch.object(command, "update_live_history", return_value={"status": "fixture_only"}) as update, redirect_stdout(StringIO()):
+        command.main()
+        assert started + 180 <= update.call_args.kwargs["deadline_monotonic"] <= time.monotonic() + 180
     assert (lock.read_bytes(), lock.stat().st_mtime_ns) == before
 
 
