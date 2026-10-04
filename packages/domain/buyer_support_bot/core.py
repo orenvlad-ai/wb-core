@@ -48,6 +48,8 @@ def observe(state: CaseState, event: Event, facts: list[Fact], photos: tuple[Pho
             "availability": attachment.get("availability", "unknown"),
             "sha256": attachment.get("sha256"),
         }
+    if event.role == "buyer":
+        result.current_buyer_event_id = event.event_id
     if event.role == "seller":
         result.greeted = True
     for fact in facts:
@@ -171,7 +173,7 @@ def _with_photo(state: CaseState, context: Context, issue_id: str, topic: str, r
         return _return(state, context, issue_id, "keep_goods", rule + ".evidence")
     if photo == "contradiction" or issue.conflicts:
         return _ask_or_physical(state, context, issue_id, "contradiction_requests", "contradiction", rule)
-    if issue.facts.get("cannot_photo") == "true" or issue.counters.get("photo_requests", 0) >= 2 or not context.chat_available:
+    if (issue.facts.get("cannot_photo") == "true" and issue.facts.get("photo_limit_scope") == "current_photo") or issue.counters.get("photo_requests", 0) >= 2 or not context.chat_available:
         return _return(state, context, issue_id, "return_goods", rule + ".photo_missing")
     if photo == "technical_unknown":
         return _decision("media_unavailable", rule, issue_id, missing=(task,), unavailable=("media_analysis",))
@@ -198,6 +200,12 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
     issue = state.issues[issue_id]
     f = issue.facts
     topic = f.get("topic", "general")
+    if f.get("buyer_intent") == "review_edit" or topic == "review":
+        legacy = ("legacy_obligation_resolution",) if f.get("historical_obligation") in ("replacement_glass", "compensation") else ()
+        return _decision("technical_pause", "buyer_review_edit_instructions", issue_id,
+                         template="review_instructions_unknown", unavailable=("current_wb_review_instructions",), secondary_unavailable=legacy)
+    if f.get("buyer_intent") == "selection_return":
+        topic = "size"
     if topic == "bubbles" and f.get("bubble_type") == "dust":
         topic = "dust"
     tried = f.get("advice_status") in ("tried_failed", "refused")
@@ -327,6 +335,16 @@ def _subject(state: CaseState, context: Context, issue_id: str) -> Decision:
 def decide(state: CaseState, context: Context) -> Decision:
     """Select next intent, without mutating state or asserting an external result."""
     claim = context.claim
+    # A fresh, separate review question does not erase or wait on a legacy glass
+    # obligation. It is not an unsolicited request to edit a review.
+    review_questions = [(key, issue) for key, issue in state.issues.items()
+                        if issue.facts.get("buyer_intent") == "review_edit"
+                        and any(source["event_id"] == state.current_buyer_event_id for source in issue.provenance.get("buyer_intent", []))]
+    if review_questions:
+        issue_id, _ = review_questions[-1]
+        result = _subject(state, context, issue_id)
+        legacy = tuple(sorted(set(result.secondary_unavailable) | {"legacy_obligation_resolution" for issue in state.issues.values() if issue.facts.get("historical_obligation") in ("replacement_glass", "compensation")}))
+        return Decision(**{**result.__dict__, "secondary_unavailable": legacy, "facts_used": tuple(sorted(state.issues[issue_id].facts))})
     uncertain = [op for op in state.operations.values() if op.state in ("dispatching", "unknown")]
     if uncertain:
         return _decision("verify_operation", "unknown_operation_no_resend", template="status_unknown", unavailable=("operation_result",))

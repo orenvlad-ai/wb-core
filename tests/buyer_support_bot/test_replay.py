@@ -54,6 +54,21 @@ class ExtractionBoundary(unittest.TestCase):
         self.assertEqual(c.compatibility, "unknown")
         self.assertFalse(c.product_verified)
 
+    def test_scoped_pilot_facts_keep_exact_buyer_evidence(self):
+        cases = [
+            ("Телефона не было под рукой снять на видео", [("photo_limit_scope", "past_video")]),
+            ("По ошибке заказал на 15 про, можно оформить возврат?", [("ordered_model", "iPhone 15 Pro"), ("buyer_intent", "selection_return")]),
+            ("Хотел изменить отзыв, но не знаю как", [("topic", "review"), ("buyer_intent", "review_edit")]),
+        ]
+        for text, values in cases:
+            with self.subTest(values=values):
+                facts, _ = self.check([item("a", key, value, "b", text) for key, value in values], [Event("b", "buyer", text)])
+                self.assertEqual([(fact.key, fact.value) for fact in facts], values)
+                self.assertNotIn("phone_model", [fact.key for fact in facts])
+                self.assertTrue(all(fact.evidence[0].quote == text for fact in facts))
+                with self.assertRaises(ValueError):
+                    self.check([item("a", key, value, "b", text) for key, value in values], [Event("b", "seller", text)])
+
 
 class LedgerAndResponses(unittest.TestCase):
     def test_cache_cost_count_and_unknown_no_resend(self):

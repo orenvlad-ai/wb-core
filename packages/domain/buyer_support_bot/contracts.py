@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 
 POLICY_VERSION = "wbc0115.chat.2026-10-04.v1"
-TOPICS = ("general", "fracture", "bubbles", "dust", "edge", "tab", "film", "size", "supplies", "missing_glass", "privacy", "privacy_dark", "matte", "marks", "touch", "camera", "faceid", "alignment", "frame", "case", "delivery", "payment", "giveaway", "compensation", "product", "instruction", "wrong_item", "opened_used", "scratch", "earpiece", "dangerous_edge", "injury", "display", "other")
+TOPICS = ("general", "fracture", "bubbles", "dust", "edge", "tab", "film", "size", "supplies", "missing_glass", "privacy", "privacy_dark", "matte", "marks", "touch", "camera", "faceid", "alignment", "frame", "case", "delivery", "payment", "giveaway", "compensation", "product", "review", "instruction", "wrong_item", "opened_used", "scratch", "earpiece", "dangerous_edge", "injury", "display", "other")
 FACT_VALUES = {
     "topic": TOPICS,
     "stage": ("before_use", "installation", "initial_inspection", "in_use", "unknown"),
@@ -14,6 +14,8 @@ FACT_VALUES = {
     "correction": ("stage", "phone_model", "privacy_effect", "fit_kind"),
     "advice_status": ("not_tried", "tried_failed", "refused", "tried_success", "unknown"),
     "phone_model": None,
+    "ordered_model": None,
+    "buyer_intent": ("selection_return", "review_edit", "other"),
     "bubble_type": ("air", "air_small", "air_large", "dust", "unknown"),
     "missing_sticker": ("true", "false", "unknown"),
     "cleaning_option": ("microfibre", "wet_dry_wipes", "own_soft_cloth", "unknown"),
@@ -30,6 +32,7 @@ FACT_VALUES = {
     "claim_number": None,
     "resolved": ("true", "false", "unknown"),
     "cannot_photo": ("true", "false", "unknown"),
+    "photo_limit_scope": ("current_photo", "past_photo", "current_video", "past_video", "unknown"),
     "photo_requested": ("true",),
     "detail_requested": ("true",),
     "contradiction_asked": ("true",),
@@ -147,6 +150,7 @@ class CaseState:
     case_id: str
     policy_version: str = POLICY_VERSION
     revision: int = 0
+    current_buyer_event_id: str = ""
     issues: dict[str, IssueState] = field(default_factory=dict)
     processed_events: dict[str, str] = field(default_factory=dict)
     received_materials: dict[str, dict[str, Any]] = field(default_factory=dict)

@@ -109,7 +109,7 @@ class CoreScenarios(unittest.TestCase):
         self.assertEqual(s.issues["a"].counters.get("photo_requests", 0), 0)
 
     def test_no_photo_possible_physical_not_refusal(self):
-        d = decide(state("tab", cannot_photo="true"), pending())
+        d = decide(state("tab", cannot_photo="true", photo_limit_scope="current_photo"), pending())
         self.assertEqual(d.operation, "approve2")
 
     def test_suitable_chat_photo_survives_irrelevant_claim_photo(self):
@@ -427,3 +427,83 @@ class IndependentReviewRegressions(unittest.TestCase):
                 s.issues["a"].counters["refusal_replies"] = 2
                 s.last_substantive = False
                 self.assertEqual(decide(s, context).action, "silent")
+
+
+class PilotSemanticRegressions(unittest.TestCase):
+    def test_past_video_inability_does_not_skip_current_alignment_photo(self):
+        for scope in (None, "unknown", "past_video", "current_video", "past_photo"):
+            with self.subTest(scope=scope):
+                s = state("alignment", cannot_photo="true")
+                if scope:
+                    s.issues["a"].facts["photo_limit_scope"] = scope
+                d = decide(s, pending())
+                self.assertEqual((d.action, d.template), ("request_photo", "installation_alignment"))
+                self.assertFalse(d.operation)
+                self.assertIn("фото результата установки", render(s, d, pending()))
+
+    def test_explicit_current_photo_inability_uses_physical_return(self):
+        s = state("alignment", cannot_photo="true", photo_limit_scope="current_photo")
+        d = decide(s, pending())
+        self.assertEqual((d.method, d.operation), ("return_goods", "approve2"))
+        s.issues["a"].facts["cannot_photo"] = "false"
+        self.assertEqual(decide(s, pending()).action, "request_photo")
+
+    def test_current_received_photo_is_checked_despite_past_video_limit(self):
+        s = state("alignment", cannot_photo="true", photo_limit_scope="past_video")
+        s = observe(s, Event("new-photo", "buyer", "", attachments=({"kind": "image", "attachment_id": "photo"},)), [],
+                    (PhotoObservation("photo", "a", "installation_alignment", "suitable", "new-photo", True),))
+        d = decide(s, pending())
+        self.assertEqual((d.method, d.operation), ("keep_goods", "approve1"))
+        self.assertEqual(len(s.received_materials), 1)
+
+    def test_ordered_model_never_fills_actual_phone_and_refund_intent_routes(self):
+        text = "По ошибке заказал на 15 про, можно оформить возврат?"
+        facts = [Fact("a", key, value, (Evidence("b", text),)) for key, value in
+                 (("topic", "product"), ("ordered_model", "iPhone 15 Pro"),
+                  ("buyer_intent", "selection_return"), ("return_requested", "true"))]
+        s = observe(CaseState("synthetic"), Event("b", "buyer", text), facts)
+        self.assertNotIn("phone_model", s.issues["a"].facts)
+        d = decide(s, ctx())
+        self.assertEqual((d.action, d.template), ("clarify", "phone_model"))
+        self.assertTrue(render(s, d, ctx()))
+        self.assertFalse(d.operation)
+        phone_text = "У меня телефон iPhone 14"
+        s = observe(s, Event("b2", "buyer", phone_text), [Fact("a", "phone_model", "iPhone 14", (Evidence("b2", phone_text),))])
+        self.assertEqual(s.issues["a"].facts["ordered_model"], "iPhone 15 Pro")
+        self.assertEqual(s.issues["a"].facts["phone_model"], "iPhone 14")
+        unknown = decide(s, ctx())
+        self.assertEqual(unknown.action, "data_unavailable")
+        self.assertIn("verified_product_compatibility", unknown.unavailable)
+        self.assertFalse(unknown.operation)
+
+    def test_new_review_question_preserves_separate_legacy_obligation(self):
+        for text in ("Спасибо, стекло забрал, хотел изменить отзыв, но не знаю как", "Как я могу отзыв исправить?"):
+            with self.subTest(text=text):
+                s = state("alignment", historical_obligation="replacement_glass")
+                legacy_before = s.issues["a"].facts.copy()
+                facts = [Fact("review", key, value, (Evidence("b", text),)) for key, value in
+                         (("topic", "review"), ("buyer_intent", "review_edit"), ("substantive", "true"))]
+                s = observe(s, Event("b", "buyer", text), facts)
+                d = decide(s, ctx())
+                self.assertEqual((d.action, d.rule, d.issue_id), ("technical_pause", "buyer_review_edit_instructions", "review"))
+                self.assertEqual(d.unavailable, ("current_wb_review_instructions",))
+                self.assertIn("legacy_obligation_resolution", d.secondary_unavailable)
+                self.assertEqual(s.issues["a"].facts, legacy_before)
+                reply = render(s, d, ctx())
+                self.assertIn("инструкции Wildberries", reply)
+                for invented in ("что произошло", "нажмите", "кнопк", "положительный", "оценку", "новое стекло"):
+                    self.assertNotIn(invented, reply.lower())
+                self.assertFalse(d.operation)
+                self.assertFalse(s.review_requested)
+
+    def test_review_question_on_legacy_issue_keeps_obligation_and_avoids_review_request(self):
+        s = state("alignment", historical_obligation="replacement_glass", resolved="true")
+        text = "Как изменить отзыв?"
+        s = observe(s, Event("b", "buyer", text), [Fact("a", "buyer_intent", "review_edit", (Evidence("b", text),))])
+        context = Context(claim=ClaimSnapshot(availability="present", linked=True, fresh=True, source="authoritative_api", status="approved", return_method="keep_goods"),
+                          review=ReviewSnapshot(linked=True, fresh=True, source="authoritative_api", negative=True), return_discussed=True)
+        d = decide(s, context)
+        self.assertEqual(d.action, "technical_pause")
+        self.assertEqual(s.issues["a"].facts["historical_obligation"], "replacement_glass")
+        self.assertIn("legacy_obligation_resolution", d.secondary_unavailable)
+        self.assertNotEqual(d.action, "request_review")
