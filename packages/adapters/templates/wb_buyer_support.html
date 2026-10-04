@@ -1,0 +1,33 @@
+<section class="unified-tab-panel" data-unified-tab-panel="buyer-support" hidden>
+<style>
+#buyer-support {--bs-line:var(--line,#dce1e8);--bs-muted:var(--muted,#687382);--bs-panel:var(--panel-bg,#fff);--bs-soft:var(--control-bg,#f3f6fa);color:var(--text,#162132);padding:16px}
+#buyer-support [hidden]{display:none!important}
+#buyer-support button,#buyer-support input,#buyer-support select{font:inherit;color:inherit}
+#buyer-support button{cursor:pointer}
+#buyer-support .bs-heading,#buyer-support .bs-controls{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+#buyer-support h2{margin:0;font-size:24px}#buyer-support p{margin:6px 0}
+#buyer-support .bs-muted{color:var(--bs-muted);font-size:12px}#buyer-support .bs-mode{background:var(--bs-soft);padding:6px 10px;border-radius:20px;font-size:12px}
+#buyer-support .bs-button{background:var(--bs-panel);border:1px solid var(--bs-line);border-radius:8px;padding:7px 11px}
+#buyer-support .bs-settings{margin:16px 0;padding:16px;border:1px solid var(--bs-line);border-radius:10px;background:var(--bs-panel)}
+#buyer-support .bs-workspace{display:grid;grid-template-columns:minmax(240px,32%) minmax(0,1fr);margin-top:18px;border:1px solid var(--bs-line);border-radius:12px;overflow:hidden;background:var(--bs-panel)}
+#buyer-support .bs-inbox{border-right:1px solid var(--bs-line);min-width:0}#buyer-support .bs-search{width:100%;box-sizing:border-box;padding:9px;border:1px solid var(--bs-line);border-radius:8px;background:var(--bs-soft)}
+#buyer-support .bs-filters{padding:14px;display:grid;gap:10px}#buyer-support select{padding:8px;background:var(--bs-panel);border:1px solid var(--bs-line);border-radius:8px}
+#buyer-support .bs-entry{display:block;width:100%;text-align:left;border:0;border-top:1px solid var(--bs-line);padding:14px 16px;background:var(--bs-panel);overflow-wrap:anywhere}#buyer-support .bs-entry:hover,#buyer-support .bs-entry[aria-pressed=true]{background:var(--bs-soft)}
+#buyer-support .bs-entry strong,#buyer-support .bs-entry span{display:block}#buyer-support .bs-preview{font-size:12px;margin:5px 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#buyer-support .bs-detail{padding:22px;min-width:0}#buyer-support .bs-summary,#buyer-support .bs-claim{padding:12px 14px;background:var(--bs-soft);border-radius:9px;margin:14px 0;overflow-wrap:anywhere}
+#buyer-support .bs-conversation{display:flex;flex-direction:column;gap:15px}#buyer-support .bs-message{max-width:88%;align-self:flex-start;overflow-wrap:anywhere}#buyer-support .bs-message.seller{align-self:flex-end}
+#buyer-support .bs-bubble{border:1px solid var(--bs-line);border-radius:12px;padding:11px 14px;white-space:pre-wrap}#buyer-support .seller .bs-bubble{background:var(--bs-soft)}
+#buyer-support .bs-proof{margin-top:20px;padding-top:12px;border-top:1px solid var(--bs-line);font-size:12px}#buyer-support summary{cursor:pointer}
+#buyer-support .bs-empty{padding:24px 16px;color:var(--bs-muted)}#buyer-support .bs-error{padding:14px;color:var(--error-text,#b42318)}
+#buyer-support .bs-pages{display:flex;justify-content:space-between;padding:12px;gap:8px}#buyer-support .bs-back{display:none;margin-bottom:12px}
+@media(max-width:650px){#buyer-support{padding:12px}#buyer-support .bs-workspace{grid-template-columns:1fr}#buyer-support .bs-detail{display:none;padding:17px}#buyer-support[data-mobile-detail=true] .bs-detail{display:block}#buyer-support[data-mobile-detail=true] .bs-inbox{display:none}#buyer-support .bs-back{display:block}#buyer-support .bs-message{max-width:95%}#buyer-support .bs-inbox{border:0}}
+</style>
+<div id="buyer-support" data-mobile-detail="false">
+ <div class="bs-heading"><div><h2>Чаты и возвраты</h2><p class="bs-muted">Переписка покупателей и фактическое состояние заявок WB</p></div><div class="bs-controls"><span class="bs-mode">Наблюдение · без отправки</span><button class="bs-button" type="button" data-bs-settings-toggle aria-expanded="false">Настройки</button><button class="bs-button" type="button" data-bs-refresh>Обновить экран</button></div></div>
+ <section class="bs-settings" data-bs-settings hidden><strong>Режим наблюдения</strong><p>Автоматические действия отключены. Решения и ответы бота не рассчитываются.</p><p class="bs-muted">Экран читает локальную историю. Загрузка WB выполняется отдельно. Точные сроки заявок не подтверждены.</p></section>
+ <p class="bs-muted" data-bs-history aria-live="polite"></p>
+ <p class="bs-muted" data-bs-sync aria-live="polite"></p>
+ <p class="bs-muted">Период определяется по последнему сообщению чата. Открытая переписка показывается целиком; заявки без чата остаются видимыми.</p>
+ <div class="bs-workspace"><aside class="bs-inbox" aria-label="Обращения"><div class="bs-filters"><input class="bs-search" type="search" data-bs-search placeholder="Покупатель, покупка или сообщение" aria-label="Поиск обращения"><select data-bs-period aria-label="Период истории"><option value="90d">Последние 90 дней</option><option value="30d">Последние 30 дней</option><option value="all">Вся сохранённая история</option></select><select data-bs-filter aria-label="Состояние обращения"><option value="all">Все обращения</option><option value="active">Активные заявки WB</option><option value="archive">Архив WB</option><option value="orphan">Заявки без чата</option><option value="unlinked">Без связи с покупкой</option><option value="ambiguous">Неоднозначная связь</option></select></div><div data-bs-list aria-live="polite"><div class="bs-empty">Откройте раздел для загрузки локальной истории.</div></div><div class="bs-pages"><button class="bs-button" type="button" data-bs-prev disabled>Назад</button><span class="bs-muted" data-bs-count></span><button class="bs-button" type="button" data-bs-next disabled>Далее</button></div></aside><section class="bs-detail" aria-label="Карточка обращения" aria-live="polite"><button class="bs-button bs-back" type="button" data-bs-back>К обращениям</button><div data-bs-detail><div class="bs-empty">Выберите обращение слева.</div></div></section></div>
+</div>
+</section>

@@ -62,6 +62,7 @@ from packages.application.wb_spp_tester import WbSppTesterBlock
 from packages.application.wb_buyer_session import WbBuyerChromeAuthController, WbBuyerSessionBlock, WbBuyerSessionRecoveryController
 from packages.adapters.wb_buyer_chrome_price import WbBuyerChromePriceAdapter
 from packages.contracts.spp_proxy_block import SppProxyRequest
+from packages.application.wb_buyer_support import BuyerSupportRepository
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
@@ -1167,6 +1168,7 @@ class RegistryUploadHttpEntrypoint:
             runtime_dir=self.runtime.runtime_dir,
             now_factory=self.now_factory,
         )
+        self.buyer_support_repository = BuyerSupportRepository(self.runtime.runtime_dir)
         self.autoanswers_lifecycle = autoanswers_lifecycle
         self.autoanswers_node_bridge = autoanswers_node_bridge or NodeAutoanswersBridge()
         self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(
