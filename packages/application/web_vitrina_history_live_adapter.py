@@ -220,12 +220,11 @@ class LiveNativeAdapter:
                             labels.append(row)
                             seen.add(row[1])
                 per_day = {day: {} for day in self.days}
+                publications = self._publication_proofs(conn, tables, bindings)
                 for binding in bindings:
                     per_day[binding.date]["ready"] = asdict(by_key[binding.source_key]) if binding.source_key else None
-                    if binding.source_key and PREFIX + "ready_publications" in tables:
-                        per_day[binding.date]["publications"] = digest(self._rows(conn,
-                            "SELECT * FROM " + PREFIX + "ready_publications WHERE bundle_version=? AND as_of_date=? AND state='complete' AND ready_required=1 ORDER BY operation_id,attempt_id",
-                            binding.source_key))
+                    if binding.source_key in publications:
+                        per_day[binding.date]["publications"] = publications[binding.source_key]
                 # All selected material slices retain semantic fields, not just numbers.
                 source_dates = sorted(set(self.days) | {"2026-07-01"})
                 for name, column in DATED_TABLES.items():
@@ -324,6 +323,27 @@ class LiveNativeAdapter:
             # Cache progress is NOT a consumed watermark or a published edition.
             self._cache_reserve(len(json.dumps(cache, ensure_ascii=False).encode()), replacing=cache_file)
             _atomic(cache_file, cache)
+
+    def _publication_proofs(self, conn, tables, bindings):
+        if PREFIX + "ready_publications" not in tables:
+            return {}
+        proofs = {}
+        for binding in bindings:
+            key = binding.source_key
+            if key is None or key in proofs:
+                continue
+            # These are the fields consumed by the native accepted inventory
+            # receipt. Ordinary intent inputs and mutable finalize diagnostics
+            # are not renderer inputs. Retention pointers are consumed in full.
+            # Read each selected group afresh within this pinned capture; no
+            # cross-capture identity cache can hide update/delete/re-date.
+            proofs[key] = digest(self._rows(conn,
+                "SELECT operation_id,attempt_id,kind,bundle_version,as_of_date,"
+                "book_version,finished_at,after_digest,"
+                "CASE WHEN kind='inventory_retention' THEN inputs_json ELSE NULL END "
+                "FROM " + PREFIX + "ready_publications WHERE bundle_version=? AND as_of_date=? "
+                "AND state='complete' AND ready_required=1 ORDER BY operation_id,attempt_id", key))
+        return proofs
 
     def _cache_reserve(self, size, *, replacing=None):
         usage = sum(p.stat().st_size for p in self.cache_dir.iterdir() if p.is_file() and p != replacing)

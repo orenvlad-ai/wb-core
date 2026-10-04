@@ -28,10 +28,84 @@ from apps.web_vitrina_finished_snapshot_build import bounded_worker
 from apps import web_vitrina_history_candidate_build as command
 from packages.application import ff_pool_fbs_lifecycle as lifecycle
 from packages.application.web_vitrina_history_compiler import digest
+from packages.application.web_vitrina_window_v3 import _DateBinding
 
 
 def changed(old, new):
     return {d for d in old["dates"] if old["dates"][d] != new["dates"][d]}
+
+
+def check_publication_projection(root):
+    """Fresh consumed proofs, including shared bindings, under unchanged caps."""
+    adapter = LiveNativeAdapter(db_path=root / "native.sqlite3", runtime_dir=root / "runtime",
+        cache_dir=root / "proofs", now=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        date_from="2026-01-01", date_to="2026-06-29", formula_epoch="publication-proof",
+        max_read_bytes=4096)
+    first_key, second_key = ("bundle", "2026-06-28"), ("bundle", "2026-06-29")
+    bindings = [_DateBinding(day, "covered", first_key[1], first_key)
+                for day in adapter.days[:-1]]
+    bindings.append(_DateBinding(adapter.days[-1], "exact", second_key[1], second_key))
+    tables = {"sheet_vitrina_v1_ready_publications"}
+    with closing(sqlite3.connect(":memory:")) as conn:
+        ensure_publication_schema(conn)
+        ordinary_inputs = json.dumps({"unconsumed": "i" * 192 * 1024})
+        diagnostics = json.dumps({"unconsumed": "d" * 192 * 1024})
+        retention_inputs = '{"contract":"accepted_inventory_retention_v1","dates":{}}'
+        for operation, kind, key, inputs in (
+                ("ordinary", "book_ready", first_key, ordinary_inputs),
+                ("retention", "inventory_retention", second_key, retention_inputs)):
+            conn.execute("""INSERT INTO sheet_vitrina_v1_ready_publications
+                (operation_id,attempt_id,kind,bundle_version,as_of_date,expected_digest,
+                 inputs_json,book_required,ready_required,state,book_version,after_digest,
+                 created_at,finished_at,diagnostics_json)
+                VALUES(?,?,?,?,?,'expected',?,1,1,'complete','book','after','created','finished',?)""",
+                (operation, "attempt", kind, *key, inputs, diagnostics))
+
+        def snapshot():
+            adapter.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0}
+            adapter.deadline = time.monotonic() + 4
+            proofs = adapter._publication_proofs(conn, tables, bindings)
+            assert adapter.stats["queries"] == 2  # 180 days, only two selected groups.
+            return proofs, {b.date: proofs[b.source_key] for b in bindings}
+
+        proofs, baseline = snapshot()
+        expected = [["ordinary", "attempt", "book_ready", *first_key,
+                     "book", "finished", "after", None]]
+        assert proofs[first_key] == digest(expected)
+        expected = [["retention", "attempt", "inventory_retention", *second_key,
+                     "book", "finished", "after", retention_inputs]]
+        assert proofs[second_key] == digest(expected)
+        measured = dict(adapter.stats)
+        assert measured["bytes"] < 4096
+        # These supported finalize changes are not business renderer dependencies.
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json='{}'")
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json='{}' WHERE operation_id='ordinary'")
+        assert snapshot()[1] == baseline
+        affected = set(adapter.days[:-1])
+        for column, value in (("operation_id", "changed-operation"), ("attempt_id", "changed-attempt"),
+                              ("kind", "other-kind"), ("book_version", "changed-book"),
+                              ("after_digest", "changed-digest"), ("finished_at", "changed-time"),
+                              ("state", "prepared"), ("ready_required", 0)):
+            old = conn.execute("SELECT " + column + " FROM sheet_vitrina_v1_ready_publications WHERE kind<>'inventory_retention'").fetchone()[0]
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET " + column + "=? WHERE kind<>'inventory_retention'", (value,))
+            current = snapshot()[1]
+            assert {day for day in baseline if current[day] != baseline[day]} == affected, column
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET " + column + "=? WHERE kind<>'inventory_retention'", (old,))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE kind='inventory_retention'",
+                     ('{"corrected":true}',))
+        corrected = snapshot()[1]
+        assert {day for day in baseline if corrected[day] != baseline[day]} == {adapter.days[-1]}
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET inputs_json=? WHERE kind='inventory_retention'", (retention_inputs,))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET as_of_date=? WHERE operation_id='ordinary'", (second_key[1],))
+        assert {day for day, proof in snapshot()[1].items() if proof != baseline[day]} == set(adapter.days)
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET as_of_date=? WHERE operation_id='ordinary'", (first_key[1],))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET bundle_version='other' WHERE operation_id='ordinary'")
+        assert {day for day, proof in snapshot()[1].items() if proof != baseline[day]} == affected
+        conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET bundle_version=? WHERE operation_id='ordinary'", (first_key[0],))
+        conn.execute("DELETE FROM sheet_vitrina_v1_ready_publications WHERE operation_id='ordinary'")
+        assert {day for day, proof in snapshot()[1].items() if proof != baseline[day]} == affected
+        return {"days": len(bindings), "unique_groups": 2, "stats": measured,
+                "fresh_consumed_mutation_delete_redate": True, "retention_inputs": True}
 
 
 def check_pending_rollover(root):
@@ -235,6 +309,12 @@ def main():
         with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
             conn.execute("PRAGMA journal_mode=WAL")  # Owned synthetic fixture only.
             ensure_publication_schema(conn)
+            bundle = conn.execute("SELECT bundle_version FROM registry_upload_current_state WHERE slot=1").fetchone()[0]
+            conn.execute("""INSERT INTO sheet_vitrina_v1_ready_publications
+                (operation_id,attempt_id,kind,bundle_version,as_of_date,expected_digest,
+                 inputs_json,book_required,ready_required,state,after_digest,created_at,finished_at)
+                VALUES('bridge-diagnostics','attempt','book_ready',?,'2026-04-20',
+                       'expected','{}',0,1,'complete','after','created','finished')""", (bundle,))
         keeper = resources.enter_context(closing(sqlite3.connect(runtime.db_path)))
         keeper.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()  # Own fixture provisions live WAL sidecars.
         adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir,
@@ -247,6 +327,10 @@ def main():
         built = update_live_history(adapter=adapter, runtime=runtime, store=store)
         assert built["status"] == "published", built
         assert built["capture_calls"] == 3, built
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
+            conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?,inputs_json=? WHERE operation_id='bridge-diagnostics'",
+                         ('{"diagnostic_only":"updated"}', '{"ordinary_intent":"not_rendered"}'))
+        assert adapter.capture() == vector
         nochange = update_live_history(adapter=adapter, runtime=runtime, store=store)
         assert nochange["status"] == "unchanged" and not nochange["compiler_constructed"]
         previous = store.edition()
@@ -357,6 +441,7 @@ def main():
         check_quality_floor(root / "quality-test")
         check_source_guards(root / "family-test")
         check_quality_cache_and_temporal(root / "cache-test")
+        publication_projection = check_publication_projection(root / "publication-test")
         cli_root = root / "cli-test"
         cli_root.mkdir()
         check_cli_guards(cli_root)
@@ -369,6 +454,8 @@ def main():
                           "source_aba_superseded": True, "parameter_suffix_days": 3,
                           "cost_july_backward_days": 7, "finance_first_duplicate_days": 1,
                           "native_quality_floor": True, "portion_capture_calls": 3,
+                          "publication_projection": publication_projection,
+                          "publication_diagnostic_nochange_before_compiler": True,
                           "cli_guards": True, "existing_process_wrapper_kill": True}))
 
 
