@@ -241,7 +241,7 @@ class LiveNativeAdapter:
                 components = PREFIX + "inventory_history_components"
                 # Components are immutable under the supported native producer.
                 # A changed component alarm forces exact affected capture content proof.
-                captures = self._rows(conn, "SELECT capture_id,business_date,facility_roster_json,source_manifest_json,source_digest FROM " + PREFIX + "inventory_history_captures WHERE business_date>=? AND business_date<=? ORDER BY capture_sequence", (self.days[0], self.days[-1])) if components in tables else []
+                captures = self._inventory_captures(conn) if components in tables else []
                 facilities, scope_ids, history_identities = {}, set(), {}
                 for capture_id, day, roster, manifest, source_digest in captures:
                     for facility in json.loads(roster):
@@ -365,6 +365,28 @@ class LiveNativeAdapter:
         book = self.runtime_dir / "fbs-snapshot-accounting.sqlite3"
         if book.exists():
             _require_live_sqlite_family(book)
+
+    def _inventory_captures(self, conn):
+        # _slice already proves EVERY field of every capture row under its
+        # native alarm. These consumers only classify the manifest contract;
+        # transferring its other content again can exceed the capture budget.
+        # Keep all captures, full roster/digest and their original sequence.
+        # json_each's last root entry matches json.loads for duplicate keys.
+        rows = self._rows(conn, """SELECT capture_id,business_date,facility_roster_json,
+            CASE WHEN json_valid(source_manifest_json) THEN
+                CASE WHEN json_type(source_manifest_json)='object' THEN
+                    json_object('contract', CASE WHEN COALESCE((
+                        SELECT entry.type='text' AND entry.value='bound_inventory_quantity_v1'
+                        FROM json_each(capture.source_manifest_json) entry
+                        WHERE entry.key='contract' ORDER BY entry.rowid DESC LIMIT 1
+                    ),0) THEN 'bound_inventory_quantity_v1' ELSE NULL END)
+                END
+            END,source_digest FROM """ + PREFIX + """inventory_history_captures capture
+            WHERE business_date>=? AND business_date<=? ORDER BY capture_sequence""",
+            (self.days[0], self.days[-1]))
+        if any(row[3] is None for row in rows):
+            raise LiveSourceUnavailable("live_inventory_capture_manifest_invalid")
+        return rows
 
     def _slice(self, conn, tables, cache, alarms, name, column, days):
         if name not in tables:
