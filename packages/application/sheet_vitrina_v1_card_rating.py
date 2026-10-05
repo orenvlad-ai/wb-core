@@ -1,4 +1,5 @@
 """One logical SKU/TOTAL review-rating metric in the runtime catalog."""
+from datetime import date
 from packages.contracts.registry_upload_bundle_v1 import MetricV2Item
 
 SOURCE_KEY = "card_rating"
@@ -29,20 +30,32 @@ def card_rating_presentation(*, rows, slots, live_sources):
         if status is None:
             continue
         stale = "preserved_after_invalid_attempt" in status.note
-        lookup = live_sources.slot_lookups[slot.slot_key].card_rating_lookup
-        measured = max((getattr(item, "observed_at", "") for item in lookup.values()), default="")
+        source = live_sources.slot_lookups[slot.slot_key]
+        lookup = source.card_rating_lookup
+        measured = source.card_rating_observed_at or max((getattr(item, "observed_at", "") for item in lookup.values()), default="")
+        period = source.card_rating_request_period
+        provenance = (f"Период запроса: {period['start']} — {period['end']}. " if period else
+                      "Период запроса старого наблюдения неизвестен. ")
+        if period and source.card_rating_request_period_policy == "last_7_completed_business_days_v1":
+            provenance += "Последние 7 завершённых дней на момент наблюдения. "
+        provenance += f"Наблюдение источника: {measured}. " if measured else "Время наблюдения источника неизвестно. "
         for row in rows:
             if row[1].split("|", 1)[-1] not in {SKU_METRIC_KEY, TOTAL_METRIC_KEY}:
                 continue
             value = row[2 + list(slots).index(slot)]
             missing = value in (None, "")
-            reason = ("Рейтинг по отзывам WB из 5. " +
+            reason = ("Рейтинг по отзывам из отчёта WB «Оценка товара», из 5. " + provenance +
                 ("Последнее подтверждённое наблюдение; текущее обновление не удалось. " if stale else "") +
                 ("Рейтинг для этой даты не подтверждён; отсутствие не равно нулю." if missing else
-                 "TOTAL — арифметическое среднее SKU с доступным рейтингом."))
+                 "TOTAL — арифметическое среднее SKU с доступным рейтингом." if row[1].startswith("TOTAL|") else
+                 "Исходное значение рейтинга из отчёта WB."))
+            requested = getattr(source, "card_rating_requested_count", None)
+            covered = getattr(source, "card_rating_covered_count", None)
+            if row[1].startswith("TOTAL|") and type(requested) is int and type(covered) is int and 0 <= covered <= requested:
+                reason += f" В ответе WB доступен рейтинг {covered} из {requested} запрошенных SKU."
             result.setdefault(row[1], {})[slot.column_date] = {
                 "source": SOURCE_KEY, "source_as_of_date": slot.column_date,
-                "source_observed_at": measured,
+                "source_observed_at": measured, "source_request_period": period,
                 "quality_state": "missing" if missing else "stale" if stale else "exact",
                 "quality_reason": reason, "reason": reason,
             }
@@ -70,7 +83,7 @@ def include_card_rating_rows(rows, *, config, dates, metrics):
             group=item.group if item else None, nm_id=item.nm_id if item else None,
             format=metric.format, values_by_date={day: "" for day in dates},
             presentation_by_date={day: {"source": SOURCE_KEY, "quality_state": "missing",
-                "reason": "Рейтинг по отзывам WB из 5: для этой даты нет сохранённого наблюдения."}
+                "reason": "Рейтинг по отзывам из отчёта WB «Оценка товара», из 5: для этой даты нет сохранённого наблюдения."}
                 for day in dates},
         ))
     return result
@@ -102,3 +115,16 @@ def include_card_rating_catalog_presentation(catalog):
             align="end", placeholder_text=_FORMATTER_LIBRARY["rating"].null_display,
         )))
     return catalog
+
+
+def normalize_request_period(period):
+    """Preserve explicit provenance, including deserialized legacy namespaces."""
+    if period is None:
+        return None
+    start = period.get("start") if isinstance(period, dict) else getattr(period, "start", None)
+    end = period.get("end") if isinstance(period, dict) else getattr(period, "end", None)
+    if not isinstance(start, str) or not isinstance(end, str):
+        raise ValueError("item-rating request_period requires start/end dates")
+    if date.fromisoformat(start).isoformat() != start or date.fromisoformat(end).isoformat() != end or start > end:
+        raise ValueError("item-rating request_period requires ordered ISO dates")
+    return {"start": start, "end": end}

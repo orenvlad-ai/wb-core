@@ -1,4 +1,4 @@
-"""Current WB review-rating observations, distinct from content/seller ratings."""
+"""WB review-report observations, distinct from content/seller ratings."""
 from dataclasses import dataclass
 
 
@@ -26,7 +26,11 @@ class CardRatingSnapshot:
     covered_count: int
     missing_nm_ids: list[int]
     observed_at: str
-    detail: str = "WB feedbackRating.current; current observation, not period history"
+    request_period: dict[str, str] | None = None
+    request_period_policy: str | None = None
+    source_endpoint: str | None = None
+    source_field: str | None = None
+    detail: str = "WB item-rating report feedbackRating.current; dated report observation"
 
 
 @dataclass(frozen=True)

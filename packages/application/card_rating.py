@@ -3,6 +3,7 @@ from decimal import Decimal
 import math
 
 from packages.contracts.card_rating import CardRatingEnvelope, CardRatingItem, CardRatingSnapshot
+from packages.application.sheet_vitrina_v1_card_rating import normalize_request_period
 
 
 class CardRatingBlock:
@@ -30,7 +31,7 @@ class CardRatingBlock:
                 if not math.isfinite(number) or not 0 <= number <= 5:
                     raise ValueError("feedbackRating.current must be finite within 0..5")
                 raw_text = str(raw)
-                # WB uses zero before a card has a review rating.
+                # Zero means no usable rating in this report, even for rated cards.
                 value = number if number > 0 else None
             items.append(CardRatingItem(nm_id, value, raw_text, payload["observed_at"]))
         available = {item.nm_id for item in items if item.card_rating is not None}
@@ -38,4 +39,7 @@ class CardRatingBlock:
             kind="success", snapshot_date=payload["snapshot_date"], items=items,
             requested_count=len(requested), covered_count=len(available),
             missing_nm_ids=sorted(requested - available), observed_at=payload["observed_at"],
+            request_period=normalize_request_period(payload.get("request_period")),
+            request_period_policy=payload.get("request_period_policy"),
+            source_endpoint=payload.get("source_endpoint"), source_field=payload.get("source_field"),
         ))
