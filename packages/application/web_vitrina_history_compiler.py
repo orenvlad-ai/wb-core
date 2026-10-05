@@ -94,6 +94,7 @@ class NativeDatedCompiler:
     prepared_context: dict | None = None
     prepared_availability: dict | None = None
     lifecycle_quality_resolver: Any = None
+    group_blocks: bool = False
 
     def __post_init__(self) -> None:
         if self.now.tzinfo is None or active_window_read_context() is None:
@@ -143,13 +144,15 @@ class NativeDatedCompiler:
         self._initialize_catalog()
 
     def _initialize_catalog(self) -> None:
+        if self.group_blocks:
+            self.context = {**self.context, "group_blocks": True}
         self.context_epoch = digest(self.context)
         self.block = SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,
             now_factory=lambda: self.now, dated_cell_context=self.context,
-            lifecycle_quality_resolver=self.lifecycle_quality_resolver)
+            lifecycle_quality_resolver=self.lifecycle_quality_resolver, group_blocks=self.group_blocks)
         self.natural_block = SheetVitrinaV1WebVitrinaBlock(runtime=self.runtime,
             now_factory=lambda: self.now,
-            lifecycle_quality_resolver=self.lifecycle_quality_resolver)
+            lifecycle_quality_resolver=self.lifecycle_quality_resolver, group_blocks=self.group_blocks)
         self.cached_tables = {}
         if self.existing_catalog and self.existing_catalog["context_epoch"] == self.context_epoch:
             self.catalog = self.existing_catalog
@@ -163,6 +166,9 @@ class NativeDatedCompiler:
             self.catalog = include_card_rating_catalog_presentation(self.catalog)
             self.catalog["order"] = [row["row_id"] for row in table["rows"]]
             self.catalog["context_epoch"] = self.context_epoch
+            if self.group_blocks:
+                self.catalog["reporting_groups"] = self.block.reporting_groups
+                self.catalog["group_identity_contract"] = "current_nomenclature_group_key_v1"
 
     @staticmethod
     def _table(block, start: str, end: str, *, members: set[str] | None = None) -> dict:
@@ -171,8 +177,15 @@ class NativeDatedCompiler:
         if members is not None:
             from dataclasses import replace
             contract = replace(contract, rows=[row for row in contract.rows if row.row_id in members])
-        return compact_adapter_payload(build_web_vitrina_gravity_table_adapter(
-            build_web_vitrina_view_model(contract)))
+        model = build_web_vitrina_view_model(contract)
+        if block.group_blocks:
+            from dataclasses import replace
+            labels = {"group:" + g["group_key"]: g["label"] for g in block.reporting_groups}
+            model = replace(model, rows=[replace(row, cells=[replace(cell, value=labels[row.group_id],
+                display_text=labels[row.group_id]) if cell.column_id == "group" and row.group_id in labels else cell
+                for cell in row.cells]) for row in model.rows],
+                groups=[replace(g, label=labels.get(g.group_id, g.label)) for g in model.groups])
+        return compact_adapter_payload(build_web_vitrina_gravity_table_adapter(model))
 
     def compile(self, day: str) -> dict:
         if active_window_read_context() is None or day not in self.availability:

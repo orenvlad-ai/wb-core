@@ -249,6 +249,7 @@ def main():
             geometry_widths = [390, 624, 960, 1280, 1600]
             for width in geometry_widths:
                 page.set_viewport_size({"width": width, "height": 900})
+                page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
                 if page.locator("[data-history-popover]").is_hidden():
                     page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
                 assert_calendar_geometry()
@@ -281,12 +282,15 @@ def main():
                 assert_preferences()
             for width in (390, 624):
                 page.set_viewport_size({"width": width, "height": 600})
+                page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
                 page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
                 assert_calendar_geometry()
                 page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
             page.set_viewport_size({"width": 1280, "height": 720})
-            page.locator("[data-snapshot-pilot-expand]").click()
-            page.wait_for_function("/SKU: [1-9]/.test(document.querySelector('[data-filter-summary]').textContent)")
+            page.locator("[data-filters-toggle]").click()
+            page.locator('[data-block-kind="skus"]').first.check()
+            page.locator("[data-filters-apply]").click()
+            page.wait_for_selector('[data-table-body] tr[data-row-kind="sku"]')
             assert_preferences()
             assert parse_qs(urlsplit(requests[-1]).query)["edition_id"] == [edition]
             assert not config_writes, config_writes
@@ -307,13 +311,16 @@ def main():
             empty["meta"]["today_current_date"] = "2026-04-21"
             empty["history_snapshot"].update(date_from="2026-04-21", date_to="2026-04-21",
                 current_preliminary=True, availability={"2026-04-21": False},
-                total_rows=0, next_offset=None, scope_totals={"summary": 0, "sku": 0})
+                total_rows=0, next_offset=None, scope_totals={"summary": 0, "total": 0, "group": 0, "sku": 0}, reporting_groups=[])
             empty["table_surface"].update(rows=[], groupings=[], total_row_count=0, returned_row_count=0)
 
             def empty_route(route):
                 query = parse_qs(urlsplit(route.request.url).query)
                 if query.get("date_from") == ["2026-04-21"]:
-                    route.fulfill(json=empty)
+                    response = deepcopy(empty)
+                    response["history_snapshot"].update(scope=query.get("scope", ["catalog"])[0],
+                        group_id=query.get("group_id", [""])[0], offset=int(query.get("offset", ["0"])[0]))
+                    route.fulfill(json=response)
                 else:
                     route.continue_()
 

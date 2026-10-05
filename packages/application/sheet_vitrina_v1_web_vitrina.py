@@ -201,8 +201,11 @@ class SheetVitrinaV1WebVitrinaBlock:
         fbs_inventory_snapshot=None,
         dated_cell_context=None,
         lifecycle_quality_resolver=None,
+        group_blocks=False,
     ) -> None:
         self.runtime = runtime
+        self.group_blocks = group_blocks
+        self.reporting_groups = []
         # Opt-in compiler context; ordinary HTTP reads retain their range rules.
         self.dated_cell_context = dated_cell_context
         self.lifecycle_quality_resolver = lifecycle_quality_resolver
@@ -321,6 +324,19 @@ class SheetVitrinaV1WebVitrinaBlock:
             else self.lifecycle_quality_resolver
         )
         current_state = self.runtime.load_current_state()
+        if self.group_blocks:
+            from packages.application.vitrina_catalog import reporting_config, reporting_groups
+            from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+            conn = borrowed_operational_connection(self.runtime.db_path)
+            if conn is None:
+                raise ValueError('group_blocks_requires_pinned_context')
+            self.reporting_groups = reporting_groups(conn)
+            if self.reporting_groups:
+                config, _ = reporting_config(self.runtime.db_path, current_state.config_v2, canonical_groups=True)
+                keys = {g['group_key'] for g in self.reporting_groups}
+                if any(x.group not in keys for x in config):
+                    raise ValueError('reporting_group_identity_unmapped')
+                current_state = replace(current_state, config_v2=config)
         source_row_ids = (
             _window_source_row_ids(output_row_ids, current_state.config_v2)
             if output_row_ids is not None else None
@@ -644,6 +660,18 @@ class SheetVitrinaV1WebVitrinaBlock:
             metric=metrics_by_key[AVG_EFFECTIVE_DISCOUNT_METRIC_KEY],
             window_operands=window_operands,
         )
+        if self.group_blocks and self.reporting_groups:
+            from packages.application.web_vitrina_group_blocks import include_group_rows, accepted_source_statuses
+            from packages.application.calculation_parameters import CalculationParametersBlock
+            rows = include_group_rows(rows, groups=self.reporting_groups,
+                config=[x for x in current_state.config_v2 if x.enabled], metrics=metrics_by_key,
+                formulas={x.formula_id: x for x in current_state.formulas_v2},
+                dates=snapshot.date_columns, runtime=self.runtime, today=current_business_date_iso(now),
+                parameters3=CalculationParametersBlock(runtime=self.runtime).parameters_for_date,
+                parameters4=self.proxy_v4_parameters_resolver, quality_resolver=lifecycle_quality_resolver,
+                source_statuses=(dict(snapshot.metadata or {}).get('group_source_statuses', [])
+                    if date_from and date_to else [status for day in snapshot.date_columns
+                        for status in accepted_source_statuses(snapshot, column_date=day)]))
         if output_row_ids is not None:
             rows = [row for row in rows if row.row_id in output_row_ids]
         source_temporal_policies = effective_source_temporal_policies(snapshot.source_temporal_policies)
@@ -1013,6 +1041,11 @@ def _build_period_snapshot(
         source_row_ids=source_row_ids,
     )
 
+    from packages.application.web_vitrina_group_blocks import accepted_source_statuses
+    group_source_statuses = [status for binding in materialized_bindings
+        for status in accepted_source_statuses(snapshots_by_as_of_date[binding.storage_key],
+            column_date=binding.column_date, requested_date=binding.requested_date)]
+
     combined_rows: list[list[Any]] = []
     for row in template_rows:
         row_id = str(row[1] or "").strip()
@@ -1053,6 +1086,7 @@ def _build_period_snapshot(
         ],
         metadata={
             "server_cell_presentation": combined_presentation,
+            "group_source_statuses": group_source_statuses,
             "fbs_accounting_bindings": {
                 binding.requested_date: dict(snapshots_by_as_of_date[binding.storage_key].metadata or {})
                     .get("fbs_accounting_bindings", {})[binding.requested_date]

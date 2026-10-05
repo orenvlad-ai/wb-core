@@ -102,3 +102,65 @@ metric_key → ISO date. Дата не выводится из текущего 
 semantics; сохранённые наблюдения внутри окна не отбрасываются.
 Несовместимые идентичности одинакового row ID или статические колонки дают
 явный отказ вместо молчаливого смешивания.
+
+## Однократный переход на блоки групп
+
+Группы нового каталога используют `sku_groups.group_key` как идентичность,
+`label` как подпись и `display_order, group_key` как порядок. Состав всех дат
+берётся из текущей номенклатуры, включая сохранённые скрытые карточки; это не
+восстановление исторического членства. Изменение подписи не меняет group ID.
+Старый каталог и его TOTAL/SKU читаются до переключения без изменения ячеек.
+
+GROUP использует нативный TOTAL evaluator на составе группы и окончательные
+дневные SKU-операнды. Выкуп сохраняет зрелость D−6 и веса заказов; себестоимость,
+Proxy3/4 и товарный капитал сохраняют нативные знаменатели и складские входы.
+Отсутствующие обязательные операнды не заменяются нулями. `fin_storage_fee_total`
+не имеет принятого распределения по SKU: GROUP пустой с качеством `unallocated`.
+Пустая группа присутствует в справочнике, но не создаёт фиктивные числовые строки.
+
+Обычный штатный parent по-прежнему использует rolling14. Полная история разрешена
+только явным `--full-history-group-migration` в подтверждённой паузе с `--manual`
+и точным `--maintenance-window-id`. `group_migration_root` в runtime contract
+отдельный от обслуживаемого `candidate_root`; все mount/reserve/hash/source/lock
+проверки остаются. Лимиты прежние: manual parent 180 секунд, максимум31 дневной
+compute, capture32MiB/20 секунд, proof cache128MiB, store2GiB. Пока новый GROUP
+кандидат строится, старый CURRENT остаётся доступен. Старые proofs/refs вручную
+не переносятся и не переименовываются под новый epoch.
+
+Пример операционной последовательности (root после exact release/CI, не запуск
+из документа):
+
+1. Прочитать CURRENT обслуживаемого root, выполнить штатные maintenance preflight,
+   pause один раз и дождаться `held`, quiet и свободной admission.
+2. Взять epoch из проверенного
+   `artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json`.
+   Вызывать **parent** с `--runtime-dir /opt/wb-core-runtime/state`,
+   `--candidate-root /mnt/wb-core-extra100/web-vitrina-history-groups-candidate`,
+   `--runtime-contract artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json`,
+   `--formula-epoch <проверенный epoch>`, `--date-from 2026-03-01`,
+   `--date-to business-today`, `--manual --maintenance-window-id <точный ID>`,
+   `--full-history-group-migration --budget-seconds 180 --max-recomputes 31`.
+   Конечные порции продолжаются только после known-complete результата и новых
+   полных proofs или валидных дневных refs; нулевой прогресс/неизвестный исход — stop.
+3. После CURRENT кандидата сохранить точные `expected-current` обслуживаемого root
+   и `expected-candidate`. Те же аргументы parent плюс `--group-candidate-preview
+   --expected-current <old> --expected-candidate <new>` выполняют ограниченную
+   read-only проверку всех дневных объектов/16 полей/контекстов/digests и полного
+   покрытия старых дат. Получить `preview_token`; источники кандидата должны быть
+   актуальны, иначе вернуть его к обычной ограниченной порции.
+4. Отправить один parent с теми же идентичностями и
+   `--group-candidate-publish-token <preview_token>` вместо preview-флага.
+   Публикация проверяет fresh native vector/fence до и после копирования
+   неизменяемых производных объектов и атомарно меняет CURRENT через CAS.
+   При неоднозначном ответе читать результат этой операции, не повторять submit.
+5. Проверить CURRENT и pinned старую edition, TOTAL/group/SKU и одинаковую edition
+   во всех выбранных страницах, затем выполнить точный штатный resume. Сервис и
+   календарь не меняются; дальнейший parent без migration-флага обновляет только
+   изменившиеся дни rolling14. Кандидат не является поводом для скрытого полного
+   пересчёта в следующих штатных циклах.
+
+Источник данных сайта после переключения тот же абсолютный root: специального
+редактирования env/ручного CURRENT не требуется. Старые настройки метрик не
+перезаписываются при чтении. HTTP `scope=catalog` возвращает только метаданные;
+`total`, `group` и `sku` независимы, последние два требуют edition. Все SKU и
+групповые страницы остаются ограниченными размером ответа и количеством строк.

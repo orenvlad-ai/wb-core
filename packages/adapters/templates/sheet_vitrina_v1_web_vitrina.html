@@ -5783,6 +5783,31 @@
       .warehouse-incident-options > summary small { text-align: left; }
       .warehouse-summary { grid-template-columns: minmax(0, 1fr); }
     }
+
+    .table-heading-row, .table-heading-row.is-history { grid-template-columns: minmax(130px, 1fr) auto; }
+    .table-heading-left { flex-direction: column; align-items: flex-start; gap: 5px; }
+    .block-filters-modal { width: min(620px, 100%); box-sizing: border-box; max-height: calc(100dvh - 32px); display: flex; flex-direction: column; min-height: 0; }
+    .block-filters-body { overflow-y: auto; min-height: 0; padding: 12px 16px; }
+    .block-filters-modal .table-filters-rail-inner { display: flex; flex-wrap: wrap; gap: 12px; }
+    .block-filters-modal [hidden] { display: none !important; }
+    .block-filter-intro, .block-filter-note { color: var(--muted); font-size: 12px; margin: 6px 0 14px; line-height: 1.5; }
+    .block-filter-masters { display: flex; flex-wrap: wrap; gap: 16px; padding: 10px 0 16px; border-bottom: 1px solid var(--border); }
+    .block-filter-masters label, .block-filter-total { display: flex; gap: 9px; align-items: center; font-size: 14px; }
+    .block-filter-total { padding: 16px 0; }
+    .block-filter-grid { display: grid; grid-template-columns: minmax(0, 1fr) 64px 64px; align-items: center; gap: 0; }
+    .block-filter-grid > * { min-width: 0; padding: 10px 4px; border-bottom: 1px solid var(--border); }
+    .block-filter-grid > * { align-self: stretch; display: flex; align-items: center; margin: 0; }
+    .block-filter-grid > label, .block-filter-grid > .block-filter-col { justify-content: center; text-align: center; }
+    .block-filter-grid input, .block-filter-masters input, .block-filter-total input { width: 17px; height: 17px; min-height: 17px; padding: 0; margin: 0; flex: 0 0 17px; accent-color: var(--accent, #8b5cf6); cursor: pointer; }
+    .block-filter-grid > .block-filter-col:first-child { justify-content: flex-start; }
+    .block-filter-col { color: var(--muted); font-size: 12px; }
+    .block-filter-label { font-size: 14px; overflow-wrap: anywhere; }
+    .block-sku-pages { display: flex; flex-direction: column; gap: 9px; margin-top: 16px; }
+    .block-sku-page { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+    .block-sku-page span { flex: 1 1 170px; color: var(--muted); }
+    .block-sku-page button { min-height: 30px; padding: 5px 9px; font-size: 12px; }
+    .block-filters-modal .ads-modal-actions { flex-shrink: 0; margin-top: 14px; }
+    @media(max-width: 650px) { .table-heading-row, .table-heading-row.is-history { grid-template-columns: minmax(0, 1fr); } .table-heading-right { margin-left: 0; width: 100%; justify-content: flex-start; }  }
   </style>
 </head>
 <body>
@@ -5815,38 +5840,10 @@
         <div class="table-header-main">
           <div class="table-heading-row">
             <div class="table-heading-left">
-              <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
               <div class="table-snapshot-summary" data-table-snapshot-summary hidden>
                 <p class="table-summary-line" data-table-summary-line hidden></p>
               </div>
-            </div>
-            <div class="table-filters-slot" data-filters-slot>
-              <div class="table-filters-rail" id="table-filters-rail" data-filters-rail hidden>
-                <div class="table-filters-rail-inner">
-                  <div class="filters-grid table-filter-controls" data-filter-controls></div>
-                  <div class="sku-metric-picker" data-sku-metric-picker>
-                    <span class="filter-label">SKU-метрики</span>
-                    <button class="sku-metric-toggle" type="button" data-sku-metric-toggle aria-label="Выбрать SKU-метрики" aria-expanded="false" aria-controls="sku-metric-panel">
-                      <span data-sku-metric-summary>SKU-метрики: все</span>
-                    </button>
-                    <div class="sku-metric-panel" id="sku-metric-panel" data-sku-metric-panel hidden>
-                      <div class="sku-metric-selection-modes" data-sku-metric-selection-modes></div>
-                      <div class="sku-metric-options" data-sku-metric-options></div>
-                      <div class="sku-metric-actions">
-                        <button class="button secondary" type="button" data-sku-preset-configure>Настроить пресеты</button>
-                        <button class="button secondary" type="button" data-sku-metric-reset>Сбросить</button>
-                        <button class="button primary" type="button" data-sku-metric-apply>Показать</button>
-                      </div>
-                    </div>
-                  </div>
-                  <details class="column-manager vitrina-column-manager" data-column-manager>
-                    <summary class="column-manager-toggle">Столбцы</summary>
-                    <div class="column-manager-panel">
-                      <div class="column-checkbox-list" data-column-visibility-controls></div>
-                    </div>
-                  </details>
-                </div>
-              </div>
+              <span class="table-object-indicator" data-table-object-label hidden>Итого</span>
             </div>
             <div class="table-heading-right" data-table-heading-right>
               <div class="table-header-controls" data-table-header-controls>
@@ -5900,7 +5897,7 @@
                 </div>
               </div>
               <span class="table-load-action-cluster">
-                <button class="button secondary table-filters-toggle" type="button" data-filters-toggle aria-label="Открыть фильтры витрины" aria-expanded="false" aria-controls="table-filters-rail">Фильтры</button>
+                <button class="button secondary table-filters-toggle" type="button" data-filters-toggle aria-label="Открыть фильтры витрины" aria-expanded="false" aria-haspopup="dialog" aria-controls="table-filters-rail">Фильтры</button>
                 <button class="button secondary metrics-settings-button" type="button" data-metrics-settings-open aria-label="Настроить метрики" aria-haspopup="dialog" aria-controls="metrics-presentation-dialog">Метрики</button>
                 <div class="vitrina-health-cluster" data-health-cluster role="group" aria-label="Здоровье витрины">
                   <button class="vitrina-health-indicator tone-neutral" type="button" data-health-indicator="yesterday_closed" aria-haspopup="dialog" aria-controls="vitrina-health-dialog" aria-label="Вчера: наблюдаем"><span class="vitrina-health-indicator-dot" aria-hidden="true"></span><span>Вчера</span></button>
@@ -5930,9 +5927,6 @@
         </div>
       </div>
 
-      <div class="snapshot-pilot-toolbar" data-snapshot-pilot-toolbar hidden>
-        <button class="button secondary" type="button" data-snapshot-pilot-expand>Показать SKU этого снимка</button>
-      </div>
       <div class="state-box" data-table-state>
         <h3 class="state-title" data-state-title>Загрузка витрины…</h3>
         <p class="state-body" data-state-body>
@@ -7167,6 +7161,39 @@
         <button class="button secondary" type="button" data-prices-modal-close>Отмена</button>
         <button class="button danger" type="button" data-prices-commit disabled>Отправить в WB</button>
       </div>
+    </section>
+  </div>
+
+  <div class="operator-modal-backdrop" data-filters-rail hidden>
+    <section class="operator-modal-card block-filters-modal" id="table-filters-rail" role="dialog" aria-modal="true" aria-labelledby="block-filters-title">
+      <div class="ads-modal-head"><h3 class="ads-modal-title" id="block-filters-title">Фильтры</h3><button class="button ghost" type="button" data-filters-close>Закрыть</button></div>
+      <div class="block-filters-body">
+        <section data-history-block-controls hidden></section>
+                <div class="table-filters-rail-inner" data-legacy-filter-controls>
+                  <div class="filters-grid table-filter-controls" data-filter-controls></div>
+                  <div class="sku-metric-picker" data-sku-metric-picker>
+                    <span class="filter-label">SKU-метрики</span>
+                    <button class="sku-metric-toggle" type="button" data-sku-metric-toggle aria-label="Выбрать SKU-метрики" aria-expanded="false" aria-controls="sku-metric-panel">
+                      <span data-sku-metric-summary>SKU-метрики: все</span>
+                    </button>
+                    <div class="sku-metric-panel" id="sku-metric-panel" data-sku-metric-panel hidden>
+                      <div class="sku-metric-selection-modes" data-sku-metric-selection-modes></div>
+                      <div class="sku-metric-options" data-sku-metric-options></div>
+                      <div class="sku-metric-actions">
+                        <button class="button secondary" type="button" data-sku-preset-configure>Настроить пресеты</button>
+                        <button class="button secondary" type="button" data-sku-metric-reset>Сбросить</button>
+                        <button class="button primary" type="button" data-sku-metric-apply>Показать</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div data-column-manager hidden><div data-column-visibility-controls></div></div>
+                </div>
+      <div class="snapshot-pilot-toolbar" data-snapshot-pilot-toolbar hidden>
+        <button class="button secondary" type="button" data-snapshot-pilot-expand>Показать SKU этого снимка</button>
+      </div>
+
+      </div>
+      <div class="ads-modal-actions"><button class="button secondary" type="button" data-blocks-reset>Только итого</button><button class="button primary" type="button" data-filters-apply>Применить</button></div>
     </section>
   </div>
 
@@ -9116,6 +9143,50 @@
       });
     }
 
+    document.querySelectorAll("[data-filters-close]").forEach(function(button) {
+      button.addEventListener("click", function() { cancelBlockFilters(); });
+    });
+    filtersRailNode.addEventListener("click", function(event) {
+      if (event.target === filtersRailNode) cancelBlockFilters();
+      const page = event.target.closest("[data-block-page]");
+      if (page) void loadHistorySnapshotSku(page.dataset.blockPage, page.dataset.blockGroup);
+    });
+    filtersRailNode.addEventListener("change", function(event) {
+      const input = event.target, h = historySnapshotState;
+      if (!historySnapshotEnabled() || !h.summary || h.busy || !input.matches("[data-block-master],[data-block-total],[data-block-kind]")) return;
+      const groups = historyBlockGroups(), draft = h.draft || normalizeHistoryBlockSelection(h.selection,groups);
+      h.draft = draft;
+      if (input.hasAttribute("data-block-total")) draft.total = input.checked;
+      else if (input.hasAttribute("data-block-master")) {
+        draft.skus = input.checked ? groups.filter(function(g){return g.sku_rows > 0;}).map(function(g){return g.group_id;}) : [];
+        if (input.dataset.blockMaster === "all") {
+          draft.total = input.checked;
+          draft.totals = input.checked ? groups.filter(function(g){return g.total_available;}).map(function(g){return g.group_id;}) : [];
+        }
+      } else {
+        const kind=input.dataset.blockKind, id=input.dataset.blockGroup;
+        draft[kind]=draft[kind].filter(function(value){return value !== id;});
+        if (input.checked) draft[kind].push(id);
+      }
+      const label=input.getAttribute("aria-label"), master=input.dataset.blockMaster, isTotal=input.hasAttribute("data-block-total");
+      renderHistoryBlockFilters();
+      const replacement=Array.from(filtersRailNode.querySelectorAll('input')).find(function(node){
+        return label ? node.getAttribute("aria-label") === label : (master ? node.dataset.blockMaster === master : isTotal && node.hasAttribute("data-block-total"));
+      });
+      if (replacement) replacement.focus();
+    });
+    document.querySelector("[data-filters-apply]").addEventListener("click", function() {
+      if (historySnapshotEnabled()) void applyHistoryBlockSelection(); else setFiltersRailOpen(false);
+    });
+    document.querySelector("[data-blocks-reset]").addEventListener("click", function() {
+      historySnapshotState.draft={total:true,totals:[],skus:[]}; renderHistoryBlockFilters();
+    });
+    function cancelBlockFilters() {
+      const h=historySnapshotState;
+      if (h.busy && h.summary && state.composition) { h.viewId+=1; h.busy=false; }
+      setFiltersRailOpen(false);
+    }
+
     if (skuMetricToggleButton) {
       skuMetricToggleButton.addEventListener("click", function(event) {
         event.preventDefault();
@@ -9647,6 +9718,18 @@
         }
       }, true);
       document.addEventListener("keydown", function(event) {
+        if (state.filters.filtersRailOpen && (!skuPresetModalNode || skuPresetModalNode.hidden)) {
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancelBlockFilters(); return; }
+          if (event.key === "Tab") {
+            const nodes=Array.from(filtersRailNode.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex="0"]')).filter(function(n){return n.offsetParent !== null;});
+            const first=nodes[0], last=nodes[nodes.length-1];
+            if (first && (!filtersRailNode.contains(document.activeElement) || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last))) {
+              event.preventDefault(); (event.shiftKey ? last : first).focus();
+            }
+            return;
+          }
+        }
+
         if (metricsPresentationPanelNode && !metricsPresentationPanelNode.hidden) {
           if (event.key === "Escape") {
             event.preventDefault();
@@ -9797,7 +9880,13 @@
       if (nextOpen && (!options || options.skipCloseAll !== true)) {
         closeAllFloatingControls({exceptRoot: filtersRailNode});
       }
+      const wasOpen = state.filters.filtersRailOpen;
       state.filters.filtersRailOpen = nextOpen;
+      if (nextOpen && !wasOpen) {
+        historySnapshotState.draft = normalizeHistoryBlockSelection(historySnapshotState.selection, historyBlockGroups());
+        renderHistoryBlockFilters();
+      }
+      if (!nextOpen) historySnapshotState.draft = null;
       if (!nextOpen) {
         state.filters.skuMetricPickerOpen = false;
       } else {
@@ -9811,6 +9900,10 @@
         filtersToggleButton.setAttribute("aria-label", nextOpen ? "Закрыть фильтры витрины" : "Открыть фильтры витрины");
       }
       syncMetricControlValues();
+      if (nextOpen && !wasOpen) {
+        const close = filtersRailNode.querySelector("[data-filters-close]");
+        if (close) close.focus();
+      } else if (!nextOpen && wasOpen && filtersToggleButton) filtersToggleButton.focus();
     }
 
     function sameFloatingScope(leftNode, rightNode) {
@@ -12410,7 +12503,7 @@
     }
 
     function metricPresentationScopeIdFromRowKind(rowKind) {
-      return String(rowKind || "").toLowerCase() === "total" ? "total" : "sku";
+      return ["total", "group"].includes(String(rowKind || "").toLowerCase()) ? "total" : "sku";
     }
 
     function metricPresentationScopeLabel(scopeId, fallback) {
@@ -14354,7 +14447,7 @@
         ? [
             totalCount + " метрик",
             commonCount + " общих",
-            totalOnlyCount + " только Итого",
+            totalOnlyCount + " только для итогов",
             skuOnlyCount + " только SKU"
           ]
         : ["метрики не загружены"];
@@ -14431,7 +14524,7 @@
         : (record.availability === "total" ? "Итого" : "");
       const availabilityDescription = record.availability === "sku"
         ? "Доступна только для SKU"
-        : (record.availability === "total" ? "Доступна только в строке Итого" : "");
+        : (record.availability === "total" ? "Доступна для итогов" : "");
       const availabilityBadge = availabilityLabel
         ? '<span class="metrics-config-scope-badge" title="' + escapeHtml(availabilityDescription) + '" aria-label="' + escapeHtml(availabilityDescription) + '">' + escapeHtml(availabilityLabel) + "</span>"
         : "";
@@ -14787,7 +14880,7 @@
       if (leftKind !== rightKind) {
         return false;
       }
-      if (leftKind === "total") {
+      if (leftKind === "total" || (leftKind === "group" && left.group_id === right.group_id)) {
         return true;
       }
       if (String((left && left.group_id) || "") !== String((right && right.group_id) || "")) {
@@ -17309,6 +17402,7 @@
     }
 
     function sortRows(rows, payload) {
+      if (historySnapshotEnabled()) return rows.slice();
       const option = sortOptionsByValue.get(state.filters.sort);
       if (!option) {
         return rows.slice();
@@ -17399,6 +17493,10 @@
       if (!previousRow || !row) {
         return false;
       }
+      if (historySnapshotEnabled()) {
+        return previousRow.row_kind !== row.row_kind || previousRow.group_id !== row.group_id
+          || (row.row_kind === "sku" && skuClusterIdentity(previousRow) !== skuClusterIdentity(row));
+      }
       const previousKind = String(previousRow.row_kind || "");
       const rowKind = String(row.row_kind || "");
       if (previousKind === "total" && rowKind === "sku") {
@@ -17478,6 +17576,7 @@
       if (String((row && row.row_kind) || "").toLowerCase() === "total") {
         return "Итого";
       }
+      if (row && row.row_kind === "group") return "Итого · " + String(cellDisplay(row, "group") || cellValue(row, "group") || cellDisplay(row, "scope_label") || "Группа");
       const label = String(cellDisplay(row, "scope_label") || cellValue(row, "scope_label") || "");
       return label || "SKU";
     }
@@ -23554,9 +23653,9 @@
     // Explicit fixture/pilot mode. A page read gets only persisted TOTAL/GROUP
     // cells; SKU cells are fetched only after the user's expansion gesture.
     // All row pages repeat the full selected range and one edition. No column paging.
-    const historySnapshotState = {summary: null, edition: "", requestId: 0, next: 0,
-      limit: 64, loadedBytes: 0, skuRows: [], total: 0, groupId: "", viewId: 0,
-      offset: 0, pageIndex: -1, pages: []};
+    const historySnapshotState = {summary: null, edition: "", requestId: 0, viewId: 0,
+      blocks: new Map(), selection: {total:true,totals:[],skus:[]}, draft: null,
+      loadedBytes: 0, busy: false, error: ""};
     const HISTORY_CLIENT_BYTES = 64 * 1024 * 1024;
     function historySnapshotEnabled() {
       return WEB_VITRINA_CONFIG.history_snapshots_configured === true;
@@ -23622,178 +23721,222 @@
         }
       }
     }
-    function historySnapshotControls() {
-      loadRefreshButton.hidden = true;
-      loadRefreshButton.disabled = true;
-      filterControlsNode.querySelectorAll("input,select,button").forEach(function(node) { node.disabled = true; });
-      snapshotPilotToolbarNode.hidden = false;
+    function historyBlockGroups() {
+      return ((historySnapshotState.summary || {}).history_snapshot || {}).reporting_groups || [];
+    }
+    function normalizeHistoryBlockSelection(value, groups) {
+      const input = value && typeof value === "object" ? value : {total: true};
+      const result = {total: input.total !== false, totals: [], skus: []};
+      groups.forEach(function(group) {
+        if (group.total_available && Array.isArray(input.totals) && input.totals.includes(group.group_id)) result.totals.push(group.group_id);
+        if (group.sku_rows > 0 && Array.isArray(input.skus) && input.skus.includes(group.group_id)) result.skus.push(group.group_id);
+      });
+      return result;
+    }
+    function historyBlockStorageKey(payload) { return buildMetricPresentationStorageKey(payload) + ":blocks:v1"; }
+    function historyBlockSelectionFromStorage(payload) {
+      let saved = null;
+      try { saved = JSON.parse(window.localStorage.getItem(historyBlockStorageKey(payload)) || "null"); } catch (_) {}
+      return normalizeHistoryBlockSelection(saved, payload.history_snapshot.reporting_groups || []);
+    }
+    function historyBlockKey(scope, groupId) { return scope + "|" + (groupId || ""); }
+    function renderHistoryBlockFilters() {
+      const node = document.querySelector("[data-history-block-controls]");
+      if (!node) return;
       const h = historySnapshotState;
-      snapshotPilotExpandNode.textContent = h.pageIndex < 0 ? "Показать SKU" : "Следующая страница SKU";
-      snapshotPilotExpandNode.disabled = h.next === null || h.total === 0;
-      const previous = snapshotPilotToolbarNode.querySelector("[data-history-sku-previous]");
-      if (previous) previous.disabled = h.pageIndex <= 0;
-      filterSummaryNode.hidden = false;
-      filterSummaryNode.textContent = "TOTAL и группы загружены. SKU: " +
-        (h.skuRows.length ? (h.offset + 1) + " — " + (h.offset + h.skuRows.length) : "0") + " из " + h.total +
-        ". Поиск и сортировка по неполному списку отключены.";
-      if (h.summary && h.summary.history_snapshot.current_preliminary) {
-        filterSummaryNode.textContent += " Текущий день предварительный.";
-      }
+      node.hidden = !historySnapshotEnabled();
+      document.querySelector("[data-legacy-filter-controls]").hidden = historySnapshotEnabled();
+      if (!historySnapshotEnabled()) return;
+      if (!h.summary) { node.innerHTML = '<p class="block-filter-note">Настройки появятся после загрузки таблицы.</p>'; return; }
+      const groups = historyBlockGroups(), draft = h.draft || h.selection;
+      const canTotal = groups.filter(function(g) { return g.total_available; });
+      const canSku = groups.filter(function(g) { return g.sku_rows > 0; });
+      const check = function(on) { return on ? " checked" : ""; };
+      const allSku = canSku.length > 0 && canSku.every(function(g) { return draft.skus.includes(g.group_id); });
+      const all = draft.total && allSku && canTotal.every(function(g) { return draft.totals.includes(g.group_id); });
+      let html = '<p class="block-filter-intro">Выберите, какие блоки показывать. Данные SKU загружаются только при включении.</p>' +
+        '<div class="block-filter-masters"><label><input type="checkbox" data-block-master="all"' + check(all) + '>Все блоки</label>' +
+        '<label><input type="checkbox" data-block-master="sku"' + check(allSku) + '>Все SKU</label></div>' +
+        '<label class="block-filter-total"><input type="checkbox" data-block-total' + check(draft.total) + '>Итого</label>' +
+        '<div class="block-filter-grid"><span class="block-filter-col" style="text-align:left">Группа</span><span class="block-filter-col">Итог</span><span class="block-filter-col">SKU</span>';
+      groups.forEach(function(g) {
+        html += '<span class="block-filter-label">' + escapeHtml(g.label) + '</span>';
+        [["totals",g.total_available,"Итог"],["skus",g.sku_rows > 0,"SKU"]].forEach(function(col) {
+          html += '<label title="' + escapeHtml(col[1] ? col[2] + ': ' + g.label : 'Данные блока ещё не подготовлены') + '"><input type="checkbox" data-block-kind="' + col[0] + '" data-block-group="' + escapeHtml(g.group_id) + '" aria-label="' + escapeHtml(col[2] + ': ' + g.label) + '"' + check(draft[col[0]].includes(g.group_id)) + (col[1] ? '' : ' disabled') + '></label>';
+        });
+      });
+      html += '</div><div class="block-sku-pages">';
+      groups.filter(function(g) { return h.selection.skus.includes(g.group_id); }).forEach(function(g) {
+        const block = h.blocks.get(historyBlockKey("sku",g.group_id));
+        if (!block) return;
+        html += '<div class="block-sku-page"><span>' + escapeHtml(g.label) + ' · строки SKU ' + (block.rows.length ? (block.offset + 1) + '–' + (block.offset + block.rows.length) : '0') + ' из ' + block.total + '</span>' +
+          '<button class="button secondary" type="button" data-block-page="previous" data-block-group="' + escapeHtml(g.group_id) + '" aria-label="Предыдущие SKU: ' + escapeHtml(g.label) + '"' + (block.pageIndex <= 0 || h.busy ? ' disabled' : '') + '>Назад</button>' +
+          '<button class="button secondary" type="button" data-block-page="next" data-block-group="' + escapeHtml(g.group_id) + '" aria-label="Следующие SKU: ' + escapeHtml(g.label) + '"' + (block.next === null || h.busy ? ' disabled' : '') + '>Далее</button></div>';
+      });
+      html += '</div><p class="block-filter-note" data-block-feedback role="status">' + escapeHtml(h.busy ? 'Загружаем выбранные блоки…' : (h.error || '')) + '</p>';
+      node.innerHTML = html;
+      const allNode = node.querySelector('[data-block-master="all"]');
+      allNode.indeterminate = !all && (draft.total || draft.totals.length > 0 || draft.skus.length > 0);
+      node.querySelector('[data-block-master="sku"]').indeterminate = !allSku && draft.skus.length > 0;
+      node.querySelectorAll('input').forEach(function(input) { if (h.busy) input.disabled = true; });
+      document.querySelector('[data-filters-apply]').disabled = h.busy;
+      document.querySelector('[data-blocks-reset]').disabled = h.busy;
+    }
+    function historySnapshotControls() {
+      loadRefreshButton.hidden = true; loadRefreshButton.disabled = true;
+      snapshotPilotToolbarNode.hidden = true;
+      filterSummaryNode.hidden = true;
+      renderHistoryBlockFilters();
     }
     function historySnapshotMerged() {
-      const h = historySnapshotState;
-      const rows = (h.summary.table_surface.rows || []).concat(h.skuRows).sort(function(a, b) {
-        return Number(a.values.row_order.value) - Number(b.values.row_order.value);
+      const h = historySnapshotState, rows = [];
+      const append = function(scope, id) { const block = h.blocks.get(historyBlockKey(scope,id)); if (block) rows.push.apply(rows,block.rows); };
+      if (h.selection.total) append("total", "");
+      historyBlockGroups().forEach(function(g) {
+        if (h.selection.totals.includes(g.group_id)) append("group",g.group_id);
+        if (h.selection.skus.includes(g.group_id)) append("sku",g.group_id);
       });
       const groups = new Map();
       rows.forEach(function(row) {
         const id = row.section_id + "|" + row.group_id;
-        if (!groups.has(id)) groups.set(id, {grouping_id: id, section_id: row.section_id,
-          group_id: row.group_id, row_ids: []});
+        if (!groups.has(id)) groups.set(id,{grouping_id:id,section_id:row.section_id,group_id:row.group_id,row_ids:[]});
         groups.get(id).row_ids.push(row.row_id);
       });
-      return Object.assign({}, h.summary, {table_surface: Object.assign({}, h.summary.table_surface,
-        {rows: rows, groupings: Array.from(groups.values()), total_row_count: rows.length,
-          returned_row_count: rows.length})});
+      return Object.assign({},h.summary,{table_surface:Object.assign({},h.summary.table_surface,
+        {rows:rows,groupings:Array.from(groups.values()),total_row_count:rows.length,returned_row_count:rows.length})});
     }
-    async function loadHistorySnapshot(requestId, performanceMetrics) {
-      const summaryStartedAt = window.performance.now();
-      window.performance.mark("wb-history-summary-start");
-      const period = historySnapshotPeriod();
-      let edition = "", offset = 0, limit = 64, summary = null, bytes = 0;
-      const rows = [], ids = new Set();
-      let pageCount = 0, decodeMs = 0;
-      const transportKeys = ["table_ttfb_ms", "table_download_ms", "table_json_parse_ms",
-        "table_transfer_bytes", "table_encoded_body_bytes", "table_decoded_body_bytes"];
-      const transport = Object.fromEntries(transportKeys.map(function(key) { return [key, 0]; }));
-      for (;;) {
-        const result = await historySnapshotPage("summary", period, edition, offset, limit, "");
-        if (requestId !== state.requestSequence) return;
-        const page = result.payload, marker = page.history_snapshot;
-        limit = result.limit;
-        if (summary && marker.total_rows !== summary.history_snapshot.total_rows) throw new Error("Каталог истории изменился.");
-        summary = summary || page;
-        edition = marker.edition_id;
-        bytes += page.historyReplyBytes;
-        pageCount += 1; decodeMs += page.historyDecodeMs;
-        transportKeys.forEach(function(key) { const value = page.historyReadMetrics[key];
-          transport[key] = value === null || transport[key] === null ? null : transport[key] + value; });
-        if (bytes > HISTORY_CLIENT_BYTES) throw new Error("Summary периода превышает лимит отображения. Выберите более короткий период.");
+    function historyBlockIsCurrent(requestId, viewId) {
+      return requestId === state.requestSequence && requestId === historySnapshotState.requestId && viewId === historySnapshotState.viewId;
+    }
+    async function fetchHistoryBlock(scope, id, requestId, viewId) {
+      const h = historySnapshotState, marker = h.summary.history_snapshot;
+      let offset=0, limit=128, rows=[], bytes=0, total=null, next=null, pages=0, decodeMs=0;
+      const metrics = {};
+      const transportKeys=["table_ttfb_ms","table_download_ms","table_json_parse_ms","table_transfer_bytes","table_encoded_body_bytes","table_decoded_body_bytes"];
+      const ids=new Set();
+      do {
+        const result=await historySnapshotPage(scope,marker,h.edition,offset,limit,id);
+        if (!historyBlockIsCurrent(requestId,viewId)) return null;
+        const page=result.payload, pm=page.history_snapshot;
+        if (total !== null && total !== pm.total_rows) throw new Error("Состав блока изменился. Обновите витрину.");
+        total=pm.total_rows; limit=result.limit; next=pm.next_offset;
         page.table_surface.rows.forEach(function(row) {
-          if (ids.has(row.row_id) || !["total", "group"].includes(row.row_kind)) throw new Error("Некорректные строки summary.");
+          if (row.row_kind !== scope || ids.has(row.row_id) || (id && row.group_id !== id)) throw new Error("Некорректные строки блока.");
           ids.add(row.row_id); rows.push(row);
         });
-        if (marker.next_offset === null) break;
-        offset = marker.next_offset;
-      }
-      if (rows.length !== summary.history_snapshot.total_rows) throw new Error("Summary истории неполон.");
-      summary.table_surface.rows = rows;
-      // Groupings are rebuilt across all pages, without any metric calculations.
-      historySnapshotState.viewId += 1;
-      Object.assign(historySnapshotState, {summary: summary, edition: edition, requestId: requestId,
-        next: 0, limit: 64, loadedBytes: bytes, skuRows: [], total: summary.history_snapshot.scope_totals.sku,
-        groupId: "", offset: 0, pageIndex: -1, pages: []});
-      await ensureMetricPresentationUserConfigLoaded();
-      if (requestId !== state.requestSequence) return;
-      const renderStartedAt = window.performance.now();
-      resetFilterState(summary);
-      renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true});
-      markFreshTableDisplayed(summary);
-      setLoadStatusLamp("готовая история", "success");
-      historySnapshotControls();
-      let previous = snapshotPilotToolbarNode.querySelector("[data-history-sku-previous]");
-      if (!previous) {
-        previous = document.createElement("button"); previous.type = "button";
-        previous.className = "button secondary"; previous.textContent = "Предыдущая страница SKU";
-        previous.setAttribute("data-history-sku-previous", "");
-        previous.addEventListener("click", function() { void loadHistorySnapshotSku("previous"); });
-        snapshotPilotToolbarNode.insertBefore(previous, snapshotPilotExpandNode);
-      }
-      previous.disabled = true;
-      // Group choice discards old SKU pages before loading another group.
-      let selector = snapshotPilotToolbarNode.querySelector("[data-history-sku-group]");
-      if (!selector) {
-        selector = document.createElement("select"); selector.setAttribute("data-history-sku-group", "");
-        selector.setAttribute("aria-label", "Группа SKU"); snapshotPilotToolbarNode.prepend(selector);
-        selector.addEventListener("change", function() {
-          const h = historySnapshotState;
-          h.viewId += 1;
-          h.groupId = selector.value; h.skuRows = []; h.next = 0;
-          h.offset = 0; h.pageIndex = -1; h.pages = [];
-          h.total = h.groupId ? h.summary.history_snapshot.sku_group_totals[h.groupId] : h.summary.history_snapshot.scope_totals.sku;
-          h.loadedBytes = h.summary.historySummaryBytes;
-          renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true,
-            preserveExistingMetricPresentation: true});
-          historySnapshotControls();
+        bytes+=page.historyReplyBytes; pages+=1; decodeMs+=page.historyDecodeMs || 0;
+        transportKeys.forEach(function(key) {
+          const value=page.historyReadMetrics[key];
+          metrics[key]=value === null || metrics[key] === null ? null : (metrics[key] || 0)+value;
         });
+        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Слишком большой период для выбранного блока.");
+        if (scope === "sku" || next === null) break;
+        offset=next;
+      } while (true);
+      return {rows:rows,bytes:bytes,total:total,next:next,limit:limit,offset:0,pageIndex:0,pages:[{offset:0,limit:limit}],requests:pages,metrics:metrics,decodeMs:decodeMs};
+    }
+    async function loadSelectedHistoryBlocks(selection, requestId, viewId) {
+      const h=historySnapshotState, candidate=new Map(), requests=[];
+      if (selection.total) requests.push(["total",""]);
+      historyBlockGroups().forEach(function(g) {
+        if (selection.totals.includes(g.group_id)) requests.push(["group",g.group_id]);
+        if (selection.skus.includes(g.group_id)) requests.push(["sku",g.group_id]);
+      });
+      let bytes=h.summary.historyReplyBytes || 0;
+      for (const item of requests) {
+        const key=historyBlockKey(item[0],item[1]);
+        const block=h.blocks.get(key) || await fetchHistoryBlock(item[0],item[1],requestId,viewId);
+        if (!block || !historyBlockIsCurrent(requestId,viewId)) return false;
+        bytes+=block.bytes;
+        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Выбрано слишком много данных. Сократите период или число SKU-групп.");
+        candidate.set(key,block);
       }
-      summary.historySummaryBytes = bytes;
-      selector.innerHTML = '<option value="">Все SKU</option>';
-      const groupLabels = new Map();
-      rows.filter(function(row) { return row.row_kind === "group"; }).forEach(function(row) {
-        groupLabels.set(row.group_id, (row.values.group && row.values.group.display_text) || row.group_id);
-      });
-      Object.keys(summary.history_snapshot.sku_group_totals).forEach(function(id) {
-        if (id && !groupLabels.has(id)) groupLabels.set(id,
-          (summary.history_snapshot.sku_group_labels || {})[id] || "Группа SKU");
-      });
-      groupLabels.forEach(function(label, id) { const option = document.createElement("option"); option.value = id;
-        option.textContent = label; selector.append(option); });
-      selector.value = "";
-      const renderFinishedAt = window.performance.now();
-      const paintMs = await measureDoubleAnimationFrame(renderFinishedAt);
-      if (requestId !== state.requestSequence) return;
+      if (!historyBlockIsCurrent(requestId,viewId)) return false;
+      h.blocks=candidate; h.selection=selection; h.loadedBytes=bytes;
+      return true;
+    }
+    function renderSelectedHistoryBlocks() {
+      const h=historySnapshotState;
+      renderPage(historySnapshotMerged(),{tableFreshness:"fresh",deferSourceStatusAutoLoad:true,preserveExistingMetricPresentation:true});
+      historySnapshotControls();
+      if (!h.selection.total && !h.selection.totals.length && !h.selection.skus.length) {
+        setStateBox("warning","Выберите блоки","Откройте фильтры и включите итоги или SKU нужных групп.");
+      }
+    }
+    async function applyHistoryBlockSelection() {
+      const h=historySnapshotState;
+      if (!h.summary || h.busy) return;
+      const requestId=h.requestId, viewId=++h.viewId;
+      const selection=normalizeHistoryBlockSelection(h.draft || h.selection,historyBlockGroups());
+      h.busy=true; h.error=""; renderHistoryBlockFilters();
+      try {
+        if (!await loadSelectedHistoryBlocks(selection,requestId,viewId)) return;
+        try { window.localStorage.setItem(historyBlockStorageKey(h.summary),JSON.stringify(selection)); } catch (_) {}
+        renderSelectedHistoryBlocks();
+        setFiltersRailOpen(false);
+      } catch(error) {
+        if (historyBlockIsCurrent(requestId,viewId)) h.error=String(error.message || error);
+      } finally {
+        if (historyBlockIsCurrent(requestId,viewId)) { h.busy=false; renderHistoryBlockFilters(); }
+      }
+    }
+    async function loadHistorySnapshot(requestId, performanceMetrics) {
+      const started=window.performance.now(); window.performance.mark("wb-history-summary-start");
+      const period=historySnapshotPeriod(), h=historySnapshotState;
+      const viewId=++h.viewId;
+      h.busy=true; h.error=""; h.requestId=requestId;
+      const result=await historySnapshotPage("catalog",period,"",0,128,"");
+      if (!historyBlockIsCurrent(requestId,viewId)) return;
+      h.summary=result.payload; h.edition=result.payload.history_snapshot.edition_id; h.blocks=new Map();
+      h.selection=historyBlockSelectionFromStorage(h.summary); h.draft=null;
+      if (!await loadSelectedHistoryBlocks(h.selection,requestId,viewId)) return;
+      await ensureMetricPresentationUserConfigLoaded();
+      if (!historyBlockIsCurrent(requestId,viewId)) return;
+      resetFilterState(h.summary);
+      const renderStart=window.performance.now();
+      renderPage(historySnapshotMerged(),{tableFreshness:"fresh",deferSourceStatusAutoLoad:true});
+      markFreshTableDisplayed(h.summary); h.busy=false; historySnapshotControls();
+      setLoadStatusLamp("готовая история","success");
+      const renderEnd=window.performance.now();
+      const paintMs=await measureDoubleAnimationFrame(renderEnd);
+      if (!historyBlockIsCurrent(requestId,viewId)) return;
       window.performance.mark("wb-history-summary-first-paint");
-      window.performance.measure("wb-history-summary-complete", "wb-history-summary-start", "wb-history-summary-first-paint");
-      tableShellNode.setAttribute("data-history-summary-load-ms", boundedPerformanceDuration(summaryStartedAt, window.performance.now()));
-      tableShellNode.setAttribute("data-history-summary-edition", edition);
-      tableShellNode.setAttribute("data-history-summary-pages", pageCount);
-      tableShellNode.setAttribute("data-history-summary-rows", rows.length);
+      window.performance.measure("wb-history-summary-complete","wb-history-summary-start","wb-history-summary-first-paint");
+      tableShellNode.setAttribute("data-history-summary-load-ms",boundedPerformanceDuration(started,window.performance.now()));
+      tableShellNode.setAttribute("data-history-summary-edition",h.edition);
+      tableShellNode.setAttribute("data-history-summary-pages",1+Array.from(h.blocks.values()).reduce(function(sum,b){return sum+b.requests;},0));
+      tableShellNode.setAttribute("data-history-summary-rows",historySnapshotMerged().table_surface.rows.length);
       if (performanceMetrics) {
-        transportKeys.forEach(function(key) { performanceMetrics[key] = transport[key]; });
-        performanceMetrics.table_merge_render_ms = decodeMs + boundedPerformanceDuration(renderStartedAt, renderFinishedAt);
-        performanceMetrics.table_double_raf_paint_ms = paintMs;
+        const sources=[h.summary.historyReadMetrics].concat(Array.from(h.blocks.values()).map(function(b){return b.metrics || {};}));
+        ["table_ttfb_ms","table_download_ms","table_json_parse_ms","table_transfer_bytes","table_encoded_body_bytes","table_decoded_body_bytes"].forEach(function(key) {
+          performanceMetrics[key]=sources.some(function(m){return m[key] === null;}) ? null : sources.reduce(function(sum,m){return sum+(m[key] || 0);},0);
+        });
+        performanceMetrics.table_merge_render_ms=boundedPerformanceDuration(renderStart,renderEnd)+(h.summary.historyDecodeMs || 0)+Array.from(h.blocks.values()).reduce(function(sum,b){return sum+(b.decodeMs || 0);},0);
+        performanceMetrics.table_double_raf_paint_ms=paintMs;
         sendWebVitrinaPerformanceEnvelope(performanceMetrics);
       }
     }
-    async function loadHistorySnapshotSku(direction) {
-      const h = historySnapshotState, requestId = h.requestId, groupId = h.groupId, viewId = h.viewId;
-      const pageIndex = direction === "previous" ? h.pageIndex - 1 : h.pageIndex + 1;
-      if (!h.summary || requestId !== state.requestSequence || pageIndex < 0
-          || (direction !== "previous" && h.next === null) || h.total === 0) return;
-      const savedPage = h.pages[pageIndex];
-      const offset = savedPage ? savedPage.offset : h.next;
-      const limit = savedPage ? savedPage.limit : h.limit;
-      snapshotPilotExpandNode.disabled = true;
-      const previous = snapshotPilotToolbarNode.querySelector("[data-history-sku-previous]");
-      if (previous) previous.disabled = true;
+    async function loadHistorySnapshotSku(direction, groupId) {
+      const h=historySnapshotState, id=groupId || "", key=historyBlockKey("sku",id), block=h.blocks.get(key);
+      if (!h.summary || !block || h.busy || !h.selection.skus.includes(id)) return;
+      const pageIndex=direction === "previous" ? block.pageIndex-1 : block.pageIndex+1;
+      if (pageIndex<0 || (direction !== "previous" && block.next === null)) return;
+      const previous=block.pages[pageIndex];
+      const offset=previous ? previous.offset : block.next, limit=previous ? previous.limit : block.limit;
+      const requestId=h.requestId, viewId=++h.viewId;
+      h.busy=true; h.error=""; renderHistoryBlockFilters();
       try {
-        const marker = h.summary.history_snapshot;
-        const result = await historySnapshotPage("sku", marker, h.edition, offset, limit, groupId);
-        if (requestId !== state.requestSequence || h.groupId !== groupId || h.viewId !== viewId) return;
-        const page = result.payload;
-        if (h.summary.historySummaryBytes + page.historyReplyBytes > HISTORY_CLIENT_BYTES) throw new Error("Достигнут лимит отображения. Выберите более короткий период.");
-        if (page.history_snapshot.total_rows !== h.total) throw new Error("Каталог SKU версии изменился.");
-        const ids = new Set(h.summary.table_surface.rows.map(function(row) { return row.row_id; }));
-        page.table_surface.rows.forEach(function(row) {
-          if (row.row_kind !== "sku" || ids.has(row.row_id)) throw new Error("Некорректная страница SKU.");
-          ids.add(row.row_id);
-        });
-        h.skuRows = page.table_surface.rows; h.next = page.history_snapshot.next_offset;
-        h.offset = offset; h.pageIndex = pageIndex; h.pages[pageIndex] = {offset: offset, limit: result.limit};
-        h.limit = result.limit; h.loadedBytes = h.summary.historySummaryBytes + page.historyReplyBytes;
-        renderPage(historySnapshotMerged(), {tableFreshness: "fresh", deferSourceStatusAutoLoad: true,
-          preserveExistingMetricPresentation: true});
-        historySnapshotControls();
-      } catch (error) {
-        if (requestId !== state.requestSequence || h.viewId !== viewId) return;
-        historySnapshotControls();
-        filterSummaryNode.textContent = "SKU не загрузились: " + String(error && error.message || error);
-        if (error.code === "snapshot_expired") {
-          h.summary = null; h.skuRows = []; snapshotPilotExpandNode.disabled = true;
-          filterSummaryNode.textContent += " Обновите всю витрину для новой версии.";
-        }
-      }
+        const result=await historySnapshotPage("sku",h.summary.history_snapshot,h.edition,offset,limit,id);
+        if (!historyBlockIsCurrent(requestId,viewId)) return;
+        const payload=result.payload, marker=payload.history_snapshot;
+        if (marker.total_rows !== block.total || payload.table_surface.rows.some(function(row){return row.row_kind !== "sku" || row.group_id !== id;})) throw new Error("Каталог SKU версии изменился.");
+        const bytes=h.loadedBytes-block.bytes+payload.historyReplyBytes;
+        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Достигнут лимит отображения. Сократите период или число групп.");
+        const pages=block.pages.slice(); pages[pageIndex]={offset:offset,limit:result.limit};
+        h.blocks.set(key,{rows:payload.table_surface.rows,bytes:payload.historyReplyBytes,total:marker.total_rows,next:marker.next_offset,limit:result.limit,offset:offset,pageIndex:pageIndex,pages:pages,requests:1});
+        h.loadedBytes=bytes; renderSelectedHistoryBlocks();
+      } catch(error) { if (historyBlockIsCurrent(requestId,viewId)) h.error=String(error.message || error); }
+      finally { if (historyBlockIsCurrent(requestId,viewId)) {h.busy=false;renderHistoryBlockFilters();} }
     }
 
     const snapshotPilotState = {summary: null, generation: "", requestId: 0};
@@ -25170,8 +25313,8 @@
         if (normalizedOptions.activeTabOnly && !isVitrinaTabActive()) return;
         const message = String(error && error.message ? error.message : error);
         if (historySnapshotEnabled()) {
-          historySnapshotState.summary = null; historySnapshotState.skuRows = [];
-          historySnapshotState.next = null; historySnapshotState.viewId += 1;
+          historySnapshotState.summary = null; historySnapshotState.blocks = new Map(); historySnapshotState.busy = false;
+          historySnapshotState.viewId += 1;
           state.composition = null; snapshotPilotToolbarNode.hidden = true;
           loadRefreshButton.hidden = true;
           setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));

@@ -663,7 +663,7 @@ class LiveNativeAdapter:
 def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistoryStore,
                         max_recomputes: int = 31, deadline_monotonic=None,
                         rolling14: bool = False, backfill_dates: list[str] | None = None,
-                        metric_start_dates: dict[str, str] | None = None) -> dict:
+                        metric_start_dates: dict[str, str] | None = None, group_blocks: bool = False) -> dict:
     if Path(runtime.db_path).resolve() != adapter.db_path or Path(runtime.runtime_dir).resolve() != adapter.runtime_dir:
         raise ValueError("runtime differs from live source bridge")
     if store.root.resolve().is_relative_to(adapter.runtime_dir):
@@ -747,7 +747,7 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             compiler = NativeDatedCompiler(runtime, adapter.now, adapter.days[0], adapter.days[-1],
                 existing_catalog=catalog, prepared_context=adapter.context,
                 prepared_availability=adapter.availability,
-                lifecycle_quality_resolver=adapter.lifecycle_quality_resolver)
+                lifecycle_quality_resolver=adapter.lifecycle_quality_resolver, group_blocks=group_blocks)
             def revalidate():
                 # Close the entire bounded portion before obtaining a fresh fence.
                 # Pending/error paths also close through ExitStack's finally.

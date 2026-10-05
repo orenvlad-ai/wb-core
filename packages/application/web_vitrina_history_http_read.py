@@ -80,6 +80,16 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
             if label:
                 group_labels[catalog_group_id] = str(label)
     marker["sku_group_labels"] = group_labels
+    registry_groups = catalog.get("reporting_groups")
+    # Old editions remain readable: derive their available identities, without
+    # relabelling any stored row or claiming native group totals exist.
+    if registry_groups is None:
+        registry_groups = [{"group_key": key.removeprefix("group:"), "label": label,
+            "display_order": i, "is_active": True} for i, (key, label) in enumerate(group_labels.items())]
+    marker["reporting_groups"] = [{**g, "group_id": "group:" + g["group_key"],
+        "sku_rows": page["sku_group_totals"].get("group:" + g["group_key"], 0),
+        "total_available": any(r["row_kind"] == "group" and r.get("group_id") == "group:" + g["group_key"]
+            for r in catalog["rows"].values())} for g in registry_groups]
     marker["archive_status"] = page.get("archive_status", {})
     marker.update(date_from=date_from, date_to=date_to, group_id=group_id or "",
                   current_preliminary=today in page["dates"], saved_at=saved_at)
@@ -102,7 +112,7 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
             cell = _history_metric_label(row) if key == "metric_label" else row.get("values", {}).get(key, [])
             values[key] = {"value": cell[0] if cell else None,
                            "display_text": cell[1] if len(cell) > 1 else ""}
-        metric_rows.append({"row_kind": row["row_kind"], "section_id": row.get("section_id", ""),
+        metric_rows.append({"row_kind": "total" if row["row_kind"] == "group" else row["row_kind"], "section_id": row.get("section_id", ""),
                             "values": values})
     metric_options = _build_metric_options(_count_metric_rows(metric_rows), sections=[])
     payload = {

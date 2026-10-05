@@ -343,13 +343,14 @@
               <tr>
                 <th class="col-key">Ключ</th>
                 <th class="col-label">Название</th>
+                <th>Порядок</th>
                 <th class="col-aliases">Aliases / patterns</th>
                 <th class="col-status">Вкл.</th>
                 <th class="col-group-actions">Действия</th>
               </tr>
             </thead>
             <tbody id="skuGroupRows">
-              <tr><td colspan="5">Группы пока не загружены.</td></tr>
+              <tr><td colspan="6">Группы пока не загружены.</td></tr>
             </tbody>
           </table>
         </div>
@@ -2201,7 +2202,7 @@
 
       function renderSkuGroups() {
         if (!skuGroups.length) {
-          skuGroupRows.innerHTML = '<tr><td colspan="5">Группы пока не загружены.</td></tr>';
+          skuGroupRows.innerHTML = '<tr><td colspan="6">Группы пока не загружены.</td></tr>';
           return;
         }
         skuGroupRows.innerHTML = skuGroups.map(renderSkuGroupRow).join("");
@@ -2219,6 +2220,7 @@
           '<tr data-group-key="' + escapeHtml(group.group_key || "") + '">',
           '<td><input class="wide" data-group-field="group_key" value="' + escapeHtml(group.group_key || "") + '"' + (isNew ? "" : " readonly") + '></td>',
           '<td><input class="wide" data-group-field="label" value="' + escapeHtml(group.label || "") + '"></td>',
+          '<td><input type="number" min="0" max="100000" data-group-field="display_order" value="' + escapeHtml(String(group.display_order || 0)) + '"></td>',
           '<td><textarea class="models-textarea" data-group-field="aliases" placeholder="clean, clear, transparent">' + escapeHtml((group.aliases || []).join("\n")) + '</textarea></td>',
           '<td class="checkbox-cell"><input type="checkbox" data-group-field="is_active"' + (group.is_active !== false ? " checked" : "") + '></td>',
           '<td><div class="actions-cell"><button class="icon-button save" type="button" data-save-sku-group title="Сохранить" aria-label="Сохранить">✓</button><button class="icon-button disable" type="button" data-disable-sku-group title="Отключить" aria-label="Отключить">⏸</button></div></td>',
@@ -2232,6 +2234,7 @@
           const key = input.dataset.groupField;
           payload[key] = input.type === "checkbox" ? input.checked : input.value.trim();
         });
+        payload.display_order = Number(payload.display_order || 0);
         payload.aliases = String(payload.aliases || "").split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean);
         return payload;
       }
@@ -4122,7 +4125,7 @@
       filterInput.addEventListener("input", renderRows);
       visibilitySelect.addEventListener("change", loadItems);
       addSkuGroupButton.addEventListener("click", () => {
-        skuGroupRows.insertAdjacentHTML("afterbegin", renderSkuGroupRow({group_key: "", label: "", aliases: [], is_active: true}));
+        skuGroupRows.insertAdjacentHTML("afterbegin", renderSkuGroupRow({group_key: "", label: "", display_order: 0, aliases: [], is_active: true}));
         const row = skuGroupRows.querySelector("tr[data-group-key='']");
         row.querySelector("[data-save-sku-group]").addEventListener("click", () => saveSkuGroup(row));
         row.querySelector("[data-disable-sku-group]").addEventListener("click", () => row.remove());

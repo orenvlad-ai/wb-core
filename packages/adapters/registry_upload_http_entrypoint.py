@@ -6508,7 +6508,7 @@ def _handle_web_vitrina_history_snapshot_request(handler, query_string, store):
             "offset", "limit", "group_id"
         } or query.get("history_snapshot") != "1" or query.get("surface") != DEFAULT_SHEET_WEB_VITRINA_PAGE_COMPOSITION_SURFACE:
             raise ValueError("history_invalid_query")
-        if query.get("scope") == "sku" and not query.get("edition_id"):
+        if query.get("scope") in {"sku", "group"} and not query.get("edition_id"):
             raise ValueError("history_edition_required")
         payload = read_history_page(HistoryStore(store), date_from=query.get("date_from", ""),
             date_to=query.get("date_to", ""), scope=query.get("scope", "summary"),

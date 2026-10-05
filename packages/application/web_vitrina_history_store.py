@@ -450,6 +450,106 @@ class HistoryStore:
         if self._usage() + additional > self.max_store_bytes:
             raise HistoryUnavailable("history_storage_limit")
 
+    def group_candidate_preview(self, candidate, *, expected_current, expected_candidate,
+                                deadline_monotonic=None):
+        """Bounded read-only validation; no old day is relabelled or rewritten."""
+        if self.root.resolve() == candidate.root.resolve():
+            raise HistoryUnavailable("history_group_candidate_same_root")
+        if (self._current() or {}).get("current") != expected_current:
+            raise HistoryUnavailable("history_group_candidate_superseded")
+        edition = candidate.edition(expected_candidate)
+        if (candidate._current() or {}).get("current") != expected_candidate:
+            raise HistoryUnavailable("history_group_candidate_superseded")
+        if (candidate.root / "PENDING.json").exists():
+            raise HistoryUnavailable("history_group_candidate_pending")
+        catalog = _read(candidate.root / "catalogs" / (edition["catalog"] + ".json"))
+        if digest(catalog) != edition["catalog"] or catalog.get("group_identity_contract") != "current_nomenclature_group_key_v1":
+            raise HistoryUnavailable("history_group_candidate_catalog")
+        old = self.edition(expected_current)
+        if not set(old["days"]) <= set(edition["days"]):
+            raise HistoryUnavailable("history_group_candidate_dates_missing")
+        if any(v != edition["catalog"] for v in candidate.day_catalogs(edition).values()):
+            raise HistoryUnavailable("history_group_candidate_mixed_catalog")
+        validate_vector(edition["consumed"])
+        if set(edition["consumed"]["dates"]) != set(edition["days"]):
+            raise HistoryUnavailable("history_group_candidate_proof_incomplete")
+        for day, object_id in edition["days"].items():
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise HistoryUnavailable("history_group_candidate_deadline")
+            with closing(candidate._open_day(candidate.root / "objects" / (object_id + ".sqlite3"))) as conn:
+                unit = json.loads(conn.execute("SELECT payload FROM metadata").fetchone()[0])
+                cells = {}
+                size = 0
+                for rid, compressed in conn.execute("SELECT row_id,payload FROM cells ORDER BY row_id"):
+                    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                        raise HistoryUnavailable("history_group_candidate_deadline")
+                    decoder = zlib.decompressobj()
+                    raw = decoder.decompress(compressed, 65537)
+                    size += len(raw)
+                    if not decoder.eof or len(raw) > 65536 or size > 64 * 1024**2:
+                        raise HistoryUnavailable("history_cell_limit")
+                    cell = json.loads(raw)
+                    if len(cell) != 16:
+                        raise HistoryUnavailable("history_cell_corrupt")
+                    cells[rid] = cell
+                unit["cells"] = cells
+                if unit["date"] != day or unit["context_epoch"] != catalog["context_epoch"] or set(cells) != set(catalog["rows"]) or digest(unit) != object_id:
+                    raise HistoryUnavailable("history_group_candidate_object_corrupt")
+        claim = {"expected_current": expected_current, "candidate_edition": expected_candidate,
+                 "candidate_root": str(candidate.root.resolve()), "target_root": str(self.root.resolve()),
+                 "days": len(edition["days"]), "catalog": edition["catalog"],
+                 "source_vector": digest(edition["consumed"])}
+        return {"status": "preview", **claim, "preview_token": digest(claim)}
+
+    def publish_group_candidate(self, candidate, *, expected_current, expected_candidate,
+                                preview_token, revalidate, deadline_monotonic=None):
+        """One explicit CAS publication after preview; old edition stays pinned."""
+        import shutil
+        with candidate._writer(), self._writer():
+            preview = self.group_candidate_preview(candidate, expected_current=expected_current,
+                expected_candidate=expected_candidate, deadline_monotonic=deadline_monotonic)
+            if preview["preview_token"] != preview_token:
+                raise HistoryUnavailable("history_group_candidate_preview_mismatch")
+            edition = candidate.edition(expected_candidate)
+            if revalidate() != edition["consumed"]:
+                return {"status": "superseded", "last_good_retained": True}
+            paths = [("catalogs", edition["catalog"] + ".json"),
+                     ("editions", expected_candidate + ".json")]
+            paths += [("objects", key + ".sqlite3") for key in set(edition["days"].values())]
+            required = sum((candidate.root / folder / name).stat().st_size for folder, name in paths
+                           if not (self.root / folder / name).exists())
+            self._reserve(required + 4096)
+            for folder, name in paths:
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                    return {"status": "pending", "last_good_retained": True}
+                src, dst = candidate.root / folder / name, self.root / folder / name
+                if dst.exists():
+                    if src.read_bytes() != dst.read_bytes():
+                        raise HistoryUnavailable("history_group_candidate_object_corrupt")
+                    continue
+                temp = dst.with_name(".building-" + uuid.uuid4().hex)
+                try:
+                    with src.open("rb") as source, temp.open("xb") as target:
+                        shutil.copyfileobj(source, target, 1024 * 1024)
+                        target.flush()
+                        os.fsync(target.fileno())
+                    os.chmod(temp, 0o600)
+                    os.replace(temp, dst)
+                    with _directory_fd(dst.parent) as fd:
+                        os.fsync(fd)
+                finally:
+                    temp.unlink(missing_ok=True)
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return {"status": "pending", "last_good_retained": True}
+            if revalidate() != edition["consumed"]:
+                return {"status": "superseded", "last_good_retained": True}
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return {"status": "pending", "last_good_retained": True}
+            _atomic(self.root / "CURRENT.json", {"current": expected_candidate, "previous": expected_current})
+            self._collect()
+            return {"status": "published", "edition_id": expected_candidate,
+                    "previous_edition_id": expected_current, "recomputes": 0, "days": len(edition["days"])}
+
     def _collect(self, *, pin_ttl_seconds: int = 4 * 3600) -> None:
         """Worker-only bounded retention: current/previous, TTL pins, pending refs."""
         pointer = self._current() or {}
@@ -488,7 +588,7 @@ class HistoryStore:
              offset: int = 0, limit: int = 128, edition_id: str | None = None,
              deadline_monotonic: float | None = None) -> dict:
         days = dates_between(date_from, date_to, limit=self.max_days)
-        if scope not in {"summary", "sku"} or not 1 <= limit <= self.max_rows or offset < 0:
+        if scope not in {"summary", "sku", "total", "group", "catalog"} or not 1 <= limit <= self.max_rows or offset < 0:
             raise ValueError("invalid history read scope")
         if row_ids is not None and len(set(row_ids)) > self.max_rows:
             raise ValueError("history row limit exceeded")
@@ -527,7 +627,7 @@ class HistoryStore:
             availability[day] = meta["accepted_ready_available"]
         selected = [rid for rid in catalog["order"] if rid in members]
         order_by_id = {rid: i for i, rid in enumerate(selected, 1)}
-        scope_totals = {"summary": 0, "sku": 0}
+        scope_totals = {"summary": 0, "sku": 0, "total": 0, "group": 0}
         sku_group_totals = {}
         for rid in selected:
             row = catalog["rows"][rid]
@@ -537,9 +637,10 @@ class HistoryStore:
                 sku_group_totals[group] = sku_group_totals.get(group, 0) + 1
             elif row["row_kind"] in {"total", "group"}:
                 scope_totals["summary"] += 1
+                scope_totals[row["row_kind"]] += 1
         selected = [rid for rid in selected if (
             catalog["rows"][rid]["row_kind"] in {"total", "group"} if scope == "summary"
-            else catalog["rows"][rid]["row_kind"] == "sku")]
+            else catalog["rows"][rid]["row_kind"] == scope)]
         if row_ids is not None:
             wanted = set(row_ids)
             selected = [rid for rid in selected if rid in wanted]
