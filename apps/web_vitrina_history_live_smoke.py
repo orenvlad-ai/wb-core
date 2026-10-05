@@ -208,6 +208,54 @@ def check_dated_slice_progress(root):
                 "over_cap_day_terminal": True}
 
 
+def check_ready_binding_serialization(root):
+    """Fresh native headers and persisted headers consume identical book proof."""
+    now = datetime(2026, 4, 20, 12, tzinfo=timezone.utc)
+    day = "2026-04-20"
+    fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=1, now=now)
+    with fixture:
+        runtime = fixture.entrypoint.runtime
+        with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
+            conn.execute("PRAGMA journal_mode=WAL")  # Owned fixture provisions live RO family.
+            ensure_publication_schema(conn)
+            encoded = conn.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?", (day,)).fetchone()[0]
+            plan = json.loads(encoded)
+            # Deliberately noncanonical at BOTH nesting levels. The native
+            # source is unchanged between cold and pinned/warm captures.
+            plan.setdefault("metadata", {})["fbs_accounting_bindings"] = {
+                day: {"z_owned": {"z_nested": 2, "a_nested": 1}, "a_owned": "proof"}}
+            conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?", (json.dumps(plan), day))
+        with closing(sqlite3.connect(runtime.db_path)) as keeper:
+            keeper.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir,
+                cache_dir=root / "proofs", now=now, date_from=day, date_to=day,
+                formula_epoch="owned-ready-bindings")
+            cold = adapter.capture()
+            assert adapter.stats["plans_loaded"] == 1
+            fence, context = adapter.fence, deepcopy(adapter.context)
+            with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+                assert adapter.capture() == cold
+                assert adapter.fence == fence and adapter.context == context
+                assert adapter.stats["plans_loaded"] == 0
+            assert adapter.capture() == cold and adapter.fence == fence
+            # A genuine binding change still changes the dated proof and the
+            # native revision fence. Its NEW header must immediately be stable.
+            with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
+                plan["metadata"]["fbs_accounting_bindings"][day]["z_owned"]["z_nested"] = 3
+                conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?", (json.dumps(plan), day))
+            corrected = adapter.capture()
+            assert adapter.stats["plans_loaded"] == 1
+            assert changed(cold, corrected) == {day} and corrected["epoch"] == cold["epoch"]
+            assert adapter.fence != fence
+            corrected_fence = adapter.fence
+            with window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir):
+                assert adapter.capture() == corrected and adapter.fence == corrected_fence
+                assert adapter.stats["plans_loaded"] == 0
+            assert adapter.max_read_bytes == 32 * 1024**2 and adapter.max_capture_seconds == 20
+    return {"cold_warm_pinned_equal": True, "new_ready_header_equal": True,
+            "binding_change_dated_dirty": 1, "binding_change_fence_changed": True}
+
+
 def check_pending_rollover(root):
     store = HistoryStore(root)
     catalog, units = setup_units()
@@ -838,6 +886,7 @@ def main():
                 (json.dumps({"daily_rows": [{"operation_date": "2026-04-18", "profit": 3}, {"operation_date": "2026-04-18", "profit": 2}]}),))
         finance_corrected = adapter.capture()
         assert changed(finance, finance_corrected) == {"2026-04-18"}
+        ready_binding_serialization = check_ready_binding_serialization(root / "ready-binding-test")
         check_pending_rollover(root / "pending-test")
         check_quality_floor(root / "quality-test")
         check_source_guards(root / "family-test")
@@ -854,6 +903,7 @@ def main():
         killed = bounded_worker([sys.executable, "-c", "import time;time.sleep(5)"], 0.1)
         assert killed["status"] == "skipped_deadline" and time.monotonic() - started < 2
         print(json.dumps({"status": "pass", "nochange_before_compiler": True,
+                          "ready_binding_serialization": ready_binding_serialization,
                           "current_clock_dirty_dates": 2, "historic_semantic_dirty_dates": 1,
                           "historic_delete_dirty_dates": 1, "pending_rollover_reused": True,
                           "source_aba_superseded": True, "parameter_suffix_days": 3,
