@@ -10,16 +10,45 @@ import os
 import subprocess
 import sys
 import time
+from functools import partial
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from apps.web_vitrina_finished_snapshot_build import admission, bounded_worker, deadline_seconds
+from apps.web_vitrina_finished_snapshot_build import (
+    admission, bounded_worker, deadline_seconds, SAFE_FAILURE_COUNTERS,
+)
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.storage_registry import StoreRegistry
-from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, update_live_history
+from packages.application.web_vitrina_history_live_adapter import (
+    LiveNativeAdapter, LiveSourceUnavailable, update_live_history,
+)
 from packages.application.web_vitrina_history_store import HistoryStore
 from packages.business_time import current_business_date_iso
 from packages.application.business_data_procedure_admission import admitted_write, MaintenanceAdmissionBlocked
 from packages.application.business_data_write_barrier import barrier_status
+
+SAFE_SOURCE_FAILURE_REASONS = frozenset({
+    "live_source_resource_limit", "live_source_read_incomplete", "live_bootstrap_deadline",
+    "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
+    "live_components_bootstrap_pending", "live_temporal_bootstrap_pending",
+    "source_cache_resource_limit", "book_source_resource_limit", "book_blob_content_unknown",
+    "bound_book_blob_missing", "bound_book_version_missing", "current_bundle_missing",
+    "accepted_ready_source_disappeared", "live_inventory_capture_manifest_invalid",
+    "live_source_replaced_while_pinning", "native_revision_trigger_unknown",
+    "native_source_revision_missing", "ready_revision_missing", "temporal_revision_schema_missing",
+    "live_sqlite_family_unavailable", "live_sqlite_header_unknown", "live_sqlite_journal_unknown",
+    "live_sqlite_versions_unknown", "live_sqlite_wal_family_unknown", "lifecycle_quality_pin_closed",
+    "live_source_unavailable",
+})
+# Only this caller opts into the worker's validated, payload-free diagnostics.
+bounded_worker = partial(bounded_worker, allowed_failure_reasons=SAFE_SOURCE_FAILURE_REASONS)
+
+
+def source_failure_result(error, stats):
+    reason = str(error).partition(":")[0]
+    return {"status": "build_failed", "last_good_retained": True,
+            "reason_code": reason if reason in SAFE_SOURCE_FAILURE_REASONS else "live_source_unavailable",
+            "source_reads": {key: value for key, value in stats.items()
+                if key in SAFE_FAILURE_COUNTERS and type(value) is int and 0 <= value < 2**63}}
 
 
 def runtime_storage_admission(root, contract_path, formula_epoch):
@@ -143,9 +172,12 @@ def run_admitted(args):
         adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=source,
             cache_dir=root / "proofs", now=now,
             date_from=args.date_from, date_to=date_to, formula_epoch=args.formula_epoch)
-        result = update_live_history(adapter=adapter, runtime=runtime,
-            store=HistoryStore(root / "history"), max_recomputes=args.max_recomputes,
-            deadline_monotonic=time.monotonic() + seconds)
+        try:
+            result = update_live_history(adapter=adapter, runtime=runtime,
+                store=HistoryStore(root / "history"), max_recomputes=args.max_recomputes,
+                deadline_monotonic=time.monotonic() + seconds)
+        except LiveSourceUnavailable as exc:
+            result = source_failure_result(exc, adapter.stats)
     else:
         state = admission(source)  # Existing probes only; no business locks held.
         if state != "idle":
