@@ -433,6 +433,19 @@ class HistoryStore:
                 "consumed": {"coverage": vector["coverage"], "epoch": vector["epoch"],
                     "dates": {day: p["token"] for day, p in proofs.items() if p["epoch"] == vector["epoch"]}},
                 "rolling14": {key: value for key, value in status.items() if key != "dirty_dates"}}
+            if old and "group_repair" in old:
+                # The claim describes repaired immutable objects, not fresh
+                # compiler output. Derive the first retention map after repair;
+                # later cycles may only retain its still-identical references.
+                retained = old.get("group_repair_retained_days")
+                if retained is None:
+                    retained = {day: old["days"][day] for day, base_ref in
+                        old["group_repair"]["base_objects"].items()
+                        if day in old["days"] and old["days"][day] != base_ref}
+                retained = {day: ref for day, ref in retained.items() if refs.get(day) == ref}
+                if retained:
+                    edition["group_repair"] = deepcopy(old["group_repair"])
+                    edition["group_repair_retained_days"] = retained
             edition_id = digest(edition)
             self._reserve(len(_json(edition)) + 4096)
             _atomic(self.root / "editions" / (edition_id + ".json"), edition)
