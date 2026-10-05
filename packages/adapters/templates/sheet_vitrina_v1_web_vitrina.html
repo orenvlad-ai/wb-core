@@ -17663,7 +17663,12 @@
           "cell-sku-metric-highlight-" + String(skuHighlightIndex + 1)
         );
       }
-      const title = formatCellTitle(column, row, cell);
+      const metricKey = String(cellValue(row, "metric_key") || "");
+      const metricExplanation = column.id === "metric_label" && metricKey === "ctr"
+        ? webVitrinaMetricExplanation(metricKey) : "";
+      const title = metricExplanation
+        ? webVitrinaMetricCaption(metricKey, formatCellValue(cell)) + ". " + metricExplanation
+        : formatCellTitle(column, row, cell);
       const ariaLabel = title || formatCellValue(cell);
       return (
         '<td class="' +
@@ -23841,7 +23846,7 @@
     }
     async function fetchHistoryBlock(scope, id, requestId, viewId, byteBudget) {
       const h = historySnapshotState, marker = h.summary.history_snapshot;
-      let offset=0, limit=128, rows=[], bytes=0, total=null, next=null, pages=0, decodeMs=0;
+      let offset=0, limit=512, rows=[], bytes=0, total=null, next=null, pages=0, decodeMs=0;
       const metrics = {};
       const transportKeys=["table_ttfb_ms","table_download_ms","table_json_parse_ms","table_transfer_bytes","table_encoded_body_bytes","table_decoded_body_bytes"];
       const ids=new Set(), budget=byteBudget === undefined ? HISTORY_CLIENT_BYTES : byteBudget;

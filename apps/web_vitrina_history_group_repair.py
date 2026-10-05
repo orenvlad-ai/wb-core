@@ -24,6 +24,7 @@ from packages.application.web_vitrina_history_group_repair import (
 from packages.application.web_vitrina_group_repair_inputs import (
     prepare_group_repair_day, GroupRepairTransform, captured_repair_cost_bindings,
     load_repair_cost_basis,
+    retained_repair_cost_bindings,
 )
 from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, capture_initial_proofs
 from packages.application.web_vitrina_window_read_context import window_read_context
@@ -43,6 +44,32 @@ def code_proof(contract):
         if hashlib.sha256((repo / name).read_bytes()).hexdigest() != expected:
             raise ValueError('group_repair_code_drift')
     return digest(hashes)
+
+
+def retained_claim(args):
+    return {'original_cache_sha256':getattr(args, 'retained_cost_cache_sha256', ''),
+            'original_candidate_edition':getattr(args, 'original_candidate_edition', '')}
+
+
+def read_retained_cache(args, contract, deadline):
+    """Only the root-attested original producer path, with exact byte binding."""
+    claim = retained_claim(args)
+    if not any(claim.values()):
+        return None
+    if not all(len(v) == 64 and all(c in '0123456789abcdef' for c in v) for v in claim.values()):
+        raise ValueError('group_repair_retained_origin_required')
+    path = Path(contract['group_migration_root'])/'proofs/source-proofs.json'
+    if path.is_symlink() or path.parent.is_symlink() or path.stat().st_size > 128*1024**2:
+        raise ValueError('group_repair_retained_cache_path_invalid')
+    _deadline(deadline)
+    encoded = path.read_bytes()
+    if hashlib.sha256(encoded).hexdigest() != claim['original_cache_sha256']:
+        raise ValueError('group_repair_retained_cache_changed')
+    cache = json.loads(encoded)
+    original = HistoryStore(Path(contract['group_migration_root'])/'history').edition(
+        claim['original_candidate_edition'])
+    _deadline(deadline)
+    return cache, original
 
 
 def warm_cache(previous, cache, candidate, deadline):
@@ -83,6 +110,7 @@ def prepare_inputs(args, contract, source, candidate, deadline):
     """Keep immutable prepared patches; metadata capture never invokes compiler."""
     old = source.edition(args.expected_base)
     code = code_proof(contract)
+    retained = read_retained_cache(args, contract, deadline)
     directory = candidate.root / 'repair-inputs'
     index_path = directory / 'index.json'
     with candidate._writer():
@@ -90,14 +118,16 @@ def prepare_inputs(args, contract, source, candidate, deadline):
             raise HistoryUnavailable('history_group_repair_superseded')
         directory.mkdir(mode=0o700, exist_ok=True)
         index = _read(index_path) if index_path.exists() else {
-            'base': args.expected_base, 'code': code, 'days': {}, 'total': len(old['days'])}
-        if index['base'] != args.expected_base or index['code'] != code:
+            'base': args.expected_base, 'code': code, 'days': {}, 'total': len(old['days']),
+            'retained_cost_origin':retained_claim(args)}
+        if (index['base'] != args.expected_base or index['code'] != code
+                or index.get('retained_cost_origin') != retained_claim(args)):
             raise HistoryUnavailable('history_group_repair_resume_conflict')
         pending = sorted(set(old['days']) - set(index['days']))[:args.max_days]
         if not pending:
             return {'status': 'inputs_ready', 'completed': len(index['days']), 'total': index['total']}
-        # The old private cache only accelerates native proof reads. Equality
-        # with the published epoch/token, not cache existence, grants authority.
+        # Fresh full-token authority remains available. Retained component
+        # authority is separate, explicit and pinned to the original producer.
         cache = candidate.root / 'native-proofs'
         cache.mkdir(mode=0o700, exist_ok=True)
         previous = Path(contract['group_migration_root']) / 'proofs'
@@ -114,6 +144,10 @@ def prepare_inputs(args, contract, source, candidate, deadline):
         with window_read_context(runtime.db_path, runtime_dir=args.runtime_dir):
             vector, _ = capture_initial_proofs(adapter,deadline_monotonic=deadline)
             bindings = captured_repair_cost_bindings(adapter)
+            retained_bindings = retained_repair_cost_bindings(adapter, retained[0],
+                cache_sha256=retained_claim(args)['original_cache_sha256'],
+                original_edition_id=retained_claim(args)['original_candidate_edition'],
+                original=retained[1], served=old) if retained else {}
             for day in pending:
                 _deadline(deadline)
                 catalog_id = source.day_catalogs(old)[day]
@@ -124,8 +158,15 @@ def prepare_inputs(args, contract, source, candidate, deadline):
                 proof = source.day_proofs(old)[day]
                 authority = {'old_epoch': proof['epoch'], 'fresh_epoch': vector['epoch'],
                     'old_token': proof['token'], 'fresh_token': vector['dates'][day]}
+                binding = bindings.get(day)
+                if retained:
+                    # No current/latest fallback when retained provenance was
+                    # requested. Missing old authority stays unresolved.
+                    binding, component_claim = retained_bindings.get(day, (None, None))
+                    if component_claim:
+                        authority['retained_cost_binding'] = component_claim
                 basis, receipt = load_repair_cost_basis(runtime, day, catalog, unit['cells'],
-                    accepted_binding=bindings.get(day), authority=authority, deadline=deadline)
+                    accepted_binding=binding, authority=authority, deadline=deadline)
                 prepared = prepare_group_repair_day(day, catalog, unit['cells'], cost_basis=basis)
                 prepared['cost_authority_receipt'] = receipt
                 prepared['auxiliary_digests']['accepted_cost_authority'] = digest(receipt)
@@ -137,6 +178,9 @@ def prepare_inputs(args, contract, source, candidate, deadline):
                 index['days'][day] = digest(prepared)
                 _atomic(index_path, index)
                 processed += 1
+            # Detect replacement of the retained artifact during preparation.
+            if retained:
+                read_retained_cache(args, contract, deadline)
         return {'status': 'inputs_ready' if len(index['days']) == index['total'] else 'inputs_pending',
             'completed': len(index['days']), 'total': index['total'], 'processed': processed,
             'source_reads': adapter.stats}
@@ -147,8 +191,10 @@ def prepared_plan(args, contract, source, candidate, deadline):
     old = source.edition(args.expected_base)
     code = code_proof(contract)
     if (index['base'] != args.expected_base or index['code'] != code
+            or index.get('retained_cost_origin') != retained_claim(args)
             or set(index['days']) != set(old['days'])):
         raise HistoryUnavailable('history_group_repair_inputs_incomplete')
+    read_retained_cache(args, contract, deadline)
     allowed, auxiliary = {}, {}
     def get(day):
         _deadline(deadline)
@@ -168,7 +214,9 @@ def prepared_plan(args, contract, source, candidate, deadline):
 
 def worker(args, contract, root, deadline):
     source = HistoryStore(Path(contract['candidate_root'])/'history')
-    candidate = HistoryStore(root/'group-repair-history')
+    # A changed repair code proof gets a new isolated intent/input directory.
+    # Existing prepared roots remain untouched; the serving root is unchanged.
+    candidate = HistoryStore(root/('group-repair-history-'+code_proof(contract)[:16]))
     if args.action == 'publish' and (source._current() or {}).get('current') == args.expected_candidate:
         return publish_group_repair(source,candidate,expected_base=args.expected_base,
             expected_candidate=args.expected_candidate,preview_token=args.preview_token,
@@ -201,6 +249,8 @@ def main():
     parser.add_argument('--runtime-dir',type=Path,required=True)
     parser.add_argument('--runtime-contract',type=Path,required=True)
     parser.add_argument('--expected-base',required=True)
+    parser.add_argument('--retained-cost-cache-sha256',default='')
+    parser.add_argument('--original-candidate-edition',default='')
     parser.add_argument('--action',choices=('prepare','build','preview','publish'),required=True)
     parser.add_argument('--expected-candidate',default='')
     parser.add_argument('--preview-token',default='')

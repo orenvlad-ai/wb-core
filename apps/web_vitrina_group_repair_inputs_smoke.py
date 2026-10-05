@@ -11,6 +11,7 @@ from datetime import datetime,timezone
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from packages.application.web_vitrina_group_repair_inputs import (
     prepare_group_repair_day, GroupRepairTransform, load_repair_cost_basis, captured_repair_cost_bindings,
+    retained_repair_cost_bindings,
 )
 from apps.web_vitrina_history_store_smoke import expect_error
 from packages.application.web_vitrina_compact_table import CELL_DEFAULTS
@@ -116,11 +117,129 @@ def main():
         assert captured_repair_cost_bindings(adapter)=={day:binding}
         adapter._quality_cache={'headers':{'wrong':{}}}
         expect_error(lambda:captured_repair_cost_bindings(adapter),ValueError,'header_changed')
-    assert not any('plan_json' in q or 'accounting_current' in q for q in queries);conn.close()
+    assert not any('plan_json' in q or 'accounting_current' in q for q in queries)
+    # The original builder cache is operational provenance, not a claim that
+    # a changed whole-day token matched. A newly exact READY must not replace
+    # the original covered day's older book (production Oct5 <- Oct4 shape).
+    covered, today = '2026-09-23', '2026-09-24'
+    old_binding={**binding,'date':covered}
+    index={'shared_days':{},'wb_days':{},'retained_days':{},
+           'presentations':{day:'blob',covered:'covered-blob'}}
+    retained_cache={'source':['old-source'], 'headers':{digest(identity):{
+        'dates':[day,covered],'book':{day:binding,covered:old_binding}}},
+        'book':{'exact':{'index':index,'verified':['blob','covered-blob']}}}
+    conn.rollback();conn.execute('PRAGMA query_only=OFF')
+    newer=['accepted',covered,'new-exact','new-activated','new-refreshed',1]
+    conn.execute('INSERT INTO sheet_vitrina_v1_ready_snapshots VALUES(?,?,?,?,?)',newer[:5])
+    conn.execute('INSERT INTO sheet_vitrina_v1_ready_revisions VALUES(?,?,?)',(newer[0],covered,1))
+    conn.commit();conn.execute('PRAGMA query_only=ON');conn.execute('BEGIN')
+    adapter.days=[day,covered,today]
+    adapter._quality_cache={'source':['old-source'],'headers':{
+        **retained_cache['headers'],digest(newer):{'dates':[covered],
+            'book':{covered:{**old_binding,'book_version':'latest'}}}}}
+    original={'catalog':digest(catalog),'days':{d:digest(['old-object',d]) for d in adapter.days},
+              'consumed':{'epoch':'old','dates':{d:'day' for d in adapter.days}}}
+    origin_id=digest(original)
+    def retained(served=original):
+        return retained_repair_cost_bindings(adapter,retained_cache,cache_sha256='a'*64,
+            original_edition_id=origin_id,original=original,served=served)
+    with patch('packages.application.web_vitrina_window_read_context.borrowed_operational_connection',return_value=conn):
+        selected=retained()
+        assert selected[covered][0]['book_version']=='exact'
+        assert selected[covered][0]['ready_target']['as_of_date']==day
+        assert today not in selected  # accounting_current authority was not retained
+        changed=deepcopy(original);changed['days'][day]=digest('new-object')
+        assert day not in retained(changed)
+        changed=deepcopy(original);changed['catalog']=digest('other-context')
+        assert not retained(changed)
+        changed=deepcopy(original);changed['consumed']['dates'][day]='different-proof'
+        assert day not in retained(changed)
+        retained_cache['book']['exact']['verified'].remove('blob')
+        expect_error(retained,ValueError,'book_proof_missing')
+        retained_cache['book']['exact']['verified'].append('blob')
+        conn.rollback();conn.execute('PRAGMA query_only=OFF')
+        conn.execute('UPDATE sheet_vitrina_v1_ready_revisions SET revision=2 WHERE as_of_date=?',(day,))
+        conn.commit();conn.execute('PRAGMA query_only=ON');conn.execute('BEGIN')
+        expect_error(retained,ValueError,'ready_changed')
+    conn.close()
+    book=sqlite3.connect(':memory:')
+    book.execute('CREATE TABLE accounting_revisions(version TEXT,payload TEXT)')
+    book.execute('INSERT INTO accounting_revisions VALUES(?,?)',('exact',json.dumps(index)))
+    book.commit();book.execute('PRAGMA query_only=ON');book.execute('BEGIN')
+    claim=selected[day][1]
+    retained_authority={**authority,'fresh_token':'other-component-changed','retained_cost_binding':claim}
+    pinned=SimpleNamespace(borrow_book=lambda path:book)
+    archived_basis={nm:{**b,'presentation_digest':'blob'} for nm,b in basis.items()}
+    with patch('packages.application.web_vitrina_window_read_context.active_window_read_context',return_value=pinned), \
+         patch('packages.application.web_vitrina_group_blocks.accepted_cost_basis',return_value={day:archived_basis}) as load:
+        loaded,receipt=load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=binding,
+            authority=retained_authority,deadline=time.monotonic()+1)
+        assert loaded==archived_basis and receipt['authority_mode']=='retained_original_cost_binding'
+        assert receipt['proof_claim']['old_day_proof']!=receipt['proof_claim']['captured_day_proof']
+        assert receipt['checked_saved_costs']==2
+        bad=deepcopy(cells);bad['SKU:12|our_wb_unit_cost_rub'][0]+=1
+        loaded,receipt=load_repair_cost_basis(fake,day,catalog,bad,accepted_binding=binding,
+            authority=retained_authority,deadline=time.monotonic()+1)
+        assert not loaded and receipt['nm_ids']==[12]  # one matching WAC is insufficient
+        load.reset_mock()
+        bad=deepcopy(retained_authority);bad['retained_cost_binding']['book_index_digest']=digest('wrong')
+        expect_error(lambda:load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=binding,
+            authority=bad,deadline=time.monotonic()+1),ValueError,'book_changed')
+        assert not load.called
+        wrong_blob={nm:{**b,'presentation_digest':'other'} for nm,b in basis.items()}
+        load.return_value={day:wrong_blob}
+        expect_error(lambda:load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=binding,
+            authority=retained_authority,deadline=time.monotonic()+1),ValueError,'blob_changed')
+        load.reset_mock()
+        loaded,receipt=load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=binding,
+            authority={**retained_authority,'fresh_epoch':'drift'},deadline=time.monotonic()+1)
+        assert not loaded and not load.called
+    book.close()
+    # Exercise the actual immutable accounting decoder, not just a mocked
+    # scalar. Doubling capital AND quantity preserves WAC but changes weights:
+    # the original blob fingerprint must reject that body under its old ref.
+    import zlib
+    from packages.application.fbs_snapshot_cost import fingerprint
+    from packages.application.fbs_accounting_runtime import SOURCE
+    payload={'date':day,'version_id':'v','quality':'preliminary',
+             'rows':{str(nm):{'shared_cost':b} for nm,b in basis.items()}}
+    ref=fingerprint(payload)
+    native_index={**index,'presentations':{day:ref},'effective_date':'2026-09-08'}
+    native_projection={k:native_index[k] for k in index}
+    native_binding={**binding,'source':SOURCE,'presentation_version':'v',
+                    'quality':'preliminary','effective_date':'2026-09-08'}
+    native_claim={**claim,'presentation_blob':ref,'book_index_digest':digest(native_projection),
+                  'binding_digest':digest(native_binding)}
+    native_authority={**retained_authority,'retained_cost_binding':native_claim}
+    book=sqlite3.connect(':memory:')
+    book.execute('CREATE TABLE accounting_revisions(version TEXT,payload TEXT)')
+    book.execute('CREATE TABLE accounting_blobs(digest TEXT,payload BLOB)')
+    book.execute('INSERT INTO accounting_revisions VALUES(?,?)',('exact',json.dumps(native_index)))
+    book.execute('INSERT INTO accounting_blobs VALUES(?,?)',(ref,zlib.compress(json.dumps(payload).encode())))
+    book.commit();book.execute('PRAGMA query_only=ON');book.execute('BEGIN')
+    pinned=SimpleNamespace(borrow_book=lambda path:book)
+    with patch('packages.application.web_vitrina_window_read_context.active_window_read_context',return_value=pinned):
+        loaded,receipt=load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=native_binding,
+            authority=native_authority,deadline=time.monotonic()+1)
+        assert receipt['checked_saved_costs']==2 and loaded[11]['presentation_digest']==ref
+        changed=deepcopy(payload)
+        changed['rows']['11']['shared_cost']['quantity']*=2
+        changed['rows']['11']['shared_cost']['capital']*=2
+        assert changed['rows']['11']['shared_cost']['capital']/changed['rows']['11']['shared_cost']['quantity']==cells['SKU:11|our_wb_unit_cost_rub'][0]
+        book.rollback();book.execute('PRAGMA query_only=OFF')
+        book.execute('UPDATE accounting_blobs SET payload=? WHERE digest=?',
+                     (zlib.compress(json.dumps(changed).encode()),ref))
+        book.commit();book.execute('PRAGMA query_only=ON');book.execute('BEGIN')
+        expect_error(lambda:load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=native_binding,
+            authority=native_authority,deadline=time.monotonic()+1),ValueError,'presentation_mismatch')
+    book.close()
     print(json.dumps({'status':'PASS','seconds':round(time.monotonic()-started,3),
         'per_SKU_margin_and_perunit_parity':True,'negative_profit_preserved':True,
         'all_saved_cost_parity':True,'source_epoch_token_before_reads':True,'unproven_preserved':True,
         'GROUP_only_all16_others_unchanged':True,'formatted_percent_money':True,'undefined_not_source_missing':True,
-        'partial_unknown_propagated':True,'immutable_prepared_callback':True,'buyout_untouched':True,'exact_native_compact_header_selection':True}))
+        'partial_unknown_propagated':True,'immutable_prepared_callback':True,'buyout_untouched':True,'exact_native_compact_header_selection':True,
+        'retained_original_not_latest_covered_binding':True,'retained_day_object_catalog_proof_links':True,
+        'retained_READY_revision_index_blob_drift_refused':True,'retained_ALL_saved_cost_parity':True,
+        'native_blob_changed_weights_same_WAC_refused':True}))
 
 if __name__=='__main__':main()
