@@ -21,7 +21,8 @@ from packages.application.storage_registry import StoreRegistry
 from packages.application.web_vitrina_history_live_adapter import (
     LiveNativeAdapter, LiveSourceUnavailable, update_live_history,
 )
-from packages.application.web_vitrina_history_store import HistoryStore
+from packages.application.web_vitrina_history_store import HistoryStore, HistoryUnavailable
+from packages.application.web_vitrina_history_compiler import dates_between
 from packages.business_time import current_business_date_iso
 from packages.application.business_data_procedure_admission import admitted_write, MaintenanceAdmissionBlocked
 from packages.application.business_data_write_barrier import barrier_status
@@ -38,6 +39,9 @@ SAFE_SOURCE_FAILURE_REASONS = frozenset({
     "live_sqlite_family_unavailable", "live_sqlite_header_unknown", "live_sqlite_journal_unknown",
     "live_sqlite_versions_unknown", "live_sqlite_wal_family_unknown", "lifecycle_quality_pin_closed",
     "live_source_unavailable",
+    "history_future_date_unsupported", "history_backfill_outside_source_range",
+    "history_catalog_columns_incompatible", "history_row_identity_incompatible",
+    "history_catalog_limit", "history_catalog_corrupt", "history_storage_limit",
 })
 # Only this caller opts into the worker's validated, payload-free diagnostics.
 bounded_worker = partial(bounded_worker, allowed_failure_reasons=SAFE_SOURCE_FAILURE_REASONS)
@@ -135,6 +139,8 @@ def main():
     parser.add_argument("--formula-epoch", required=True)
     parser.add_argument("--budget-seconds", type=float, default=180)
     parser.add_argument("--max-recomputes", type=int, default=31)
+    parser.add_argument("--backfill-from", help="explicit archive rebuild start; requires --backfill-to")
+    parser.add_argument("--backfill-to", help="explicit archive rebuild end; requires --backfill-from")
     parser.add_argument("--manual", action="store_true",
                         help="explicit bounded manual trial; bypass calendar window only")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -157,6 +163,9 @@ def run_admitted(args):
     root = args.candidate_root.resolve()
     now = datetime.fromisoformat(args.captured_now) if args.captured_now else datetime.now(timezone.utc)
     date_to = current_business_date_iso(now) if args.date_to == "business-today" else args.date_to
+    if bool(args.backfill_from) != bool(args.backfill_to):
+        raise ValueError("both explicit backfill boundaries required")
+    backfill_dates = dates_between(args.backfill_from, args.backfill_to) if args.backfill_from else []
     if root.is_relative_to(source) or not 0 < args.budget_seconds <= 240:
         raise ValueError("separate candidate root and bounded budget required")
     seconds = (min(args.budget_seconds, 180) if args.manual else
@@ -173,10 +182,14 @@ def run_admitted(args):
             cache_dir=root / "proofs", now=now,
             date_from=args.date_from, date_to=date_to, formula_epoch=args.formula_epoch)
         try:
+            # Future metric start dates are fixed entries in the reviewed runtime
+            # contract, never a moving default inferred at reader request time.
+            starts = json.loads(args.runtime_contract.read_bytes()).get("metric_start_dates", {}) if args.runtime_contract else {}
             result = update_live_history(adapter=adapter, runtime=runtime,
                 store=HistoryStore(root / "history"), max_recomputes=args.max_recomputes,
-                deadline_monotonic=time.monotonic() + seconds)
-        except LiveSourceUnavailable as exc:
+                deadline_monotonic=time.monotonic() + seconds, rolling14=True,
+                backfill_dates=backfill_dates, metric_start_dates=starts)
+        except HistoryUnavailable as exc:
             result = source_failure_result(exc, adapter.stats)
     else:
         state = admission(source)  # Existing probes only; no business locks held.

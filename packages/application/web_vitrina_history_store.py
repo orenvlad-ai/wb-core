@@ -16,6 +16,8 @@ import sqlite3
 import time
 import uuid
 import zlib
+from copy import deepcopy
+from datetime import date, timedelta
 
 from packages.application.web_vitrina_history_compiler import CONTRACT, digest, dates_between
 
@@ -156,7 +158,15 @@ class HistoryStore:
 
     def update(self, *, vector: dict, catalog: dict, compile_day: Callable[[str], dict],
                revalidate: Callable[[], dict], max_recomputes: int = 366,
-               deadline_monotonic: float | None = None, expected_base=_UNSET) -> dict:
+               deadline_monotonic: float | None = None, expected_base=_UNSET,
+               business_date: str | None = None, backfill_dates: list[str] | None = None,
+               metric_start_dates: dict[str, str] | None = None) -> dict:
+        if business_date is not None:
+            return self._update_rolling(vector=vector, catalog=catalog, compile_day=compile_day,
+                revalidate=revalidate, max_recomputes=max_recomputes,
+                deadline_monotonic=deadline_monotonic, expected_base=expected_base,
+                business_date=business_date, backfill_dates=backfill_dates or [],
+                metric_start_dates=metric_start_dates or {})
         validate_vector(vector)
         if len(vector["dates"]) > self.max_days:
             raise ValueError("history date limit exceeded")
@@ -237,6 +247,202 @@ class HistoryStore:
             self._collect()
             return {"status": "published", "recomputes": recomputes, "edition_id": edition_id}
 
+    @staticmethod
+    def day_proofs(edition):
+        return edition.get("day_proofs", {day: {"epoch": edition["consumed"]["epoch"],
+            "token": token} for day, token in edition["consumed"]["dates"].items()})
+
+    @staticmethod
+    def day_catalogs(edition):
+        return edition.get("day_catalogs", {day: edition["catalog"] for day in edition["days"]})
+
+    def rolling_scope(self, vector, business_date, backfill_dates=()):
+        validate_vector(vector)
+        today = date.fromisoformat(business_date)
+        first = (today - timedelta(days=13)).isoformat()
+        if any(day > business_date for day in vector["dates"]):
+            raise HistoryUnavailable("history_future_date_unsupported")
+        if not set(backfill_dates) <= set(vector["dates"]):
+            raise HistoryUnavailable("history_backfill_outside_source_range")
+        return {day for day in vector["dates"] if first <= day <= business_date} | set(backfill_dates)
+
+    def rolling_status(self, vector, business_date, backfill_dates=()):
+        scope = self.rolling_scope(vector, business_date, backfill_dates)
+        current = self.edition() if self._current() else None
+        proofs = self.day_proofs(current) if current else {}
+        dirty = {day for day in scope if proofs.get(day) != {
+            "epoch": vector["epoch"], "token": vector["dates"][day]}}
+        archive = (set(vector["dates"]) | set(proofs)) - scope
+        return {"dirty_dates": sorted(dirty), "rolling_window_days": 14,
+            "window_from": (date.fromisoformat(business_date) - timedelta(days=13)).isoformat(),
+            "business_date": business_date,
+            "backfill_required": sorted(day for day in archive if day in vector["dates"] and
+                (day not in proofs or proofs[day]["token"] != vector["dates"][day])),
+            # A new formula/context is not proof that every archived value changed.
+            "archive_not_reevaluated": any(day not in vector["dates"] or
+                proofs.get(day, {}).get("epoch") != vector["epoch"]
+                for day in archive)}
+
+    def start_dates_changed(self, edition, starts):
+        if not starts:
+            return False
+        catalog = _read(self.root / "catalogs" / (edition["catalog"] + ".json"))
+        if digest(catalog) != edition["catalog"]:
+            raise HistoryUnavailable("history_catalog_corrupt")
+        return any(catalog.get("metric_start_dates", {}).get(key) != value
+                   for key, value in starts.items())
+
+    def update_rolling_status(self, *, vector, business_date, revalidate,
+                              expected_base, deadline_monotonic=None, backfill_dates=()):
+        """Publish only a changed archive status; no compiler or day mutation."""
+        with self._writer():
+            pointer = self._current()
+            current_id = pointer["current"] if pointer else None
+            if current_id != expected_base or not pointer:
+                return {"status": "superseded", "recomputes": 0}
+            old = self.edition()
+            status = self.rolling_status(vector, business_date, backfill_dates)
+            if status["dirty_dates"]:
+                return {"status": "superseded", "recomputes": 0}
+            return self._publish_rolling_status(old, current_id, status, vector,
+                                                revalidate, deadline_monotonic)
+
+    def _publish_rolling_status(self, old, current_id, status, vector,
+                                revalidate, deadline_monotonic):
+        metadata = {key: value for key, value in status.items() if key != "dirty_dates"}
+        if old.get("rolling14") == metadata:
+            return {"status": "unchanged", "recomputes": 0, "edition_id": current_id, **status}
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return {"status": "pending", "recomputes": 0, **status}
+        if revalidate() != vector:
+            return {"status": "superseded", "recomputes": 0}
+        edition = {**old, "rolling14": metadata}
+        edition_id = digest(edition)
+        self._reserve(len(_json(edition)) + 4096)
+        _atomic(self.root / "editions" / (edition_id + ".json"), edition)
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return {"status": "pending", "recomputes": 0, **status}
+        _atomic(self.root / "CURRENT.json", {"current": edition_id, "previous": current_id})
+        self._collect()
+        return {"status": "published", "metadata_only": True, "recomputes": 0,
+                "edition_id": edition_id, **status}
+
+    def _merged_catalog(self, old_id, fresh, start_dates):
+        merged = deepcopy(fresh)
+        if old_id:
+            old = _read(self.root / "catalogs" / (old_id + ".json"))
+            if digest(old) != old_id:
+                raise HistoryUnavailable("history_catalog_corrupt")
+            if [c["id"] for c in old["columns"]] != [c["id"] for c in fresh["columns"]]:
+                raise HistoryUnavailable("history_catalog_columns_incompatible")
+            for rid in set(old["rows"]) & set(fresh["rows"]):
+                if any(old["rows"][rid].get(key) != fresh["rows"][rid].get(key)
+                       for key in ("row_kind", "group_id", "parent_id", "section_id", "depth",
+                                   "unit", "semantic_id")) or any(
+                       old["rows"][rid].get("values", {}).get(key, [None])[0] !=
+                       fresh["rows"][rid].get("values", {}).get(key, [None])[0]
+                       for key in ("metric_key", "nm_id")):
+                    raise HistoryUnavailable("history_row_identity_incompatible")
+            merged["rows"] = {**deepcopy(old["rows"]), **merged["rows"]}
+            merged["order"] = old["order"] + [rid for rid in fresh["order"] if rid not in old["rows"]]
+            for asset, key in (("renderers", "renderer_id"), ("formatters", "formatter_id")):
+                items = {item[key]: item for item in old.get("presentation", {}).get(asset, [])}
+                items.update({item[key]: item for item in fresh.get("presentation", {}).get(asset, [])})
+                if items or asset in old.get("presentation", {}) or asset in fresh.get("presentation", {}):
+                    merged.setdefault("presentation", {})[asset] = list(items.values())
+            merged["metric_start_dates"] = {**old.get("metric_start_dates", {}), **start_dates}
+        else:
+            merged["metric_start_dates"] = dict(start_dates)
+        for day in merged["metric_start_dates"].values():
+            dates_between(day, day)
+        return merged
+
+    def _update_rolling(self, *, vector, catalog, compile_day, revalidate,
+                        max_recomputes, deadline_monotonic, expected_base,
+                        business_date, backfill_dates, metric_start_dates):
+        scope = self.rolling_scope(vector, business_date, backfill_dates)
+        if len(vector["dates"]) > self.max_days or len(catalog["rows"]) > 50000:
+            raise HistoryUnavailable("history_catalog_limit")
+        if set(catalog["order"]) != set(catalog["rows"]) or len(catalog["order"]) != len(catalog["rows"]):
+            raise ValueError("invalid catalog order")
+        with self._writer():
+            pointer = self._current()
+            current_id = pointer["current"] if pointer else None
+            if expected_base is not _UNSET and expected_base != current_id:
+                return {"status": "superseded", "recomputes": 0}
+            old = self.edition() if pointer else None
+            status = self.rolling_status(vector, business_date, backfill_dates)
+            if old and not status["dirty_dates"] and not self.start_dates_changed(old, metric_start_dates):
+                return self._publish_rolling_status(old, current_id, status, vector,
+                                                    revalidate, deadline_monotonic)
+            fresh_id = digest(catalog)
+            merged = self._merged_catalog(old["catalog"] if old else None, catalog, metric_start_dates)
+            merged_id = digest(merged)
+            if len(_json(merged)) > 64 * 1024**2 or len(merged["rows"]) > 50000:
+                raise HistoryUnavailable("history_catalog_limit")
+            refs = dict(old["days"]) if old else {}
+            proofs = deepcopy(self.day_proofs(old)) if old else {}
+            day_catalogs = dict(self.day_catalogs(old)) if old else {}
+            pending_path = self.root / "PENDING.json"
+            previous = _read(pending_path) if pending_path.exists() else {}
+            if previous.get("rolling14") and previous.get("base") == current_id:
+                for day in scope:
+                    proof = {"epoch": vector["epoch"], "token": vector["dates"][day]}
+                    if (previous.get("day_proofs", {}).get(day) == proof and
+                            previous.get("day_catalogs", {}).get(day) == fresh_id):
+                        refs[day] = previous["refs"][day]
+                        proofs[day] = proof
+                        day_catalogs[day] = fresh_id
+            pending = {"rolling14": True, "target": digest([vector, merged_id, sorted(scope)]),
+                "base": current_id, "refs": refs, "day_proofs": proofs,
+                "day_catalogs": day_catalogs, "catalog": merged_id, "vector": vector}
+            # No adopted day is stamped with the fresh context/proof.
+            _atomic(pending_path, pending)
+            for value in (catalog, merged):
+                path = self.root / "catalogs" / (digest(value) + ".json")
+                if not path.exists():
+                    self._reserve(len(_json(value)))
+                    _atomic(path, value)
+            self._collect()
+            recomputes = 0
+            for day in sorted(scope):
+                proof = {"epoch": vector["epoch"], "token": vector["dates"][day]}
+                if proofs.get(day) == proof:
+                    continue
+                if recomputes >= max_recomputes or (deadline_monotonic is not None and
+                        time.monotonic() >= deadline_monotonic):
+                    return {"status": "pending", "recomputes": recomputes,
+                        "completed": sum(proofs.get(d) == {"epoch": vector["epoch"],
+                            "token": vector["dates"][d]} for d in scope), "total": len(scope), **status}
+                unit = compile_day(day)
+                if unit["date"] != day or unit["context_epoch"] != catalog["context_epoch"]:
+                    raise ValueError("compiler context mismatch")
+                if set(unit["cells"]) != set(catalog["rows"]):
+                    raise ValueError("compiler row set mismatch")
+                refs[day] = self._write_day(unit)
+                proofs[day] = proof
+                day_catalogs[day] = fresh_id
+                recomputes += 1
+                _atomic(pending_path, pending)
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return {"status": "pending", "recomputes": recomputes, **status}
+            if revalidate() != vector:
+                return {"status": "superseded", "recomputes": recomputes}
+            edition = {"contract": CONTRACT, "storage_version": 2, "catalog": merged_id,
+                "days": refs, "day_catalogs": day_catalogs, "day_proofs": proofs,
+                "consumed": {"coverage": vector["coverage"], "epoch": vector["epoch"],
+                    "dates": {day: p["token"] for day, p in proofs.items() if p["epoch"] == vector["epoch"]}},
+                "rolling14": {key: value for key, value in status.items() if key != "dirty_dates"}}
+            edition_id = digest(edition)
+            self._reserve(len(_json(edition)) + 4096)
+            _atomic(self.root / "editions" / (edition_id + ".json"), edition)
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return {"status": "pending", "recomputes": recomputes, **status}
+            _atomic(self.root / "CURRENT.json", {"current": edition_id, "previous": current_id})
+            pending_path.unlink(missing_ok=True)
+            self._collect()
+            return {"status": "published", "recomputes": recomputes, "edition_id": edition_id, **status}
+
     def _usage(self) -> int:
         return sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
 
@@ -257,6 +463,7 @@ class HistoryStore:
                 edition = _read(path)
                 refs.update(edition["days"].values())
                 catalogs.add(edition["catalog"])
+                catalogs.update(self.day_catalogs(edition).values())
             else:
                 path.unlink()
         pending_path = self.root / "PENDING.json"
@@ -297,13 +504,25 @@ class HistoryStore:
                 raise HistoryUnavailable("history_read_deadline")
         check_deadline()
         members, availability = set(), {}
+        day_catalogs = self.day_catalogs(edition)
+        catalogs = {edition["catalog"]: catalog}
+        def day_catalog(day):
+            catalog_id = day_catalogs[day]
+            if catalog_id not in catalogs:
+                value = _read(self.root / "catalogs" / (catalog_id + ".json"))
+                if digest(value) != catalog_id:
+                    raise HistoryUnavailable("history_catalog_corrupt")
+                catalogs[catalog_id] = value
+            return catalogs[catalog_id]
         # One connection at a time; metadata is bounded by the shared catalog.
         for day in days:
             check_deadline()
             with closing(self._open_day(self.root / "objects" / (edition["days"][day] + ".sqlite3"))) as conn:
                 meta = json.loads(conn.execute("SELECT payload FROM metadata").fetchone()[0])
-            if meta["date"] != day or meta["context_epoch"] != catalog["context_epoch"]:
+            if meta["date"] != day or meta["context_epoch"] != day_catalog(day)["context_epoch"]:
                 raise HistoryUnavailable("history_day_context_mismatch")
+            if not set(meta["members"]) <= set(day_catalog(day)["rows"]):
+                raise HistoryUnavailable("history_day_members_invalid")
             members.update(meta["members"])
             availability[day] = meta["accepted_ready_available"]
         selected = [rid for rid in catalog["order"] if rid in members]
@@ -335,6 +554,8 @@ class HistoryStore:
             check_deadline()
             if not selected:
                 break
+            original_rows = day_catalog(day)["rows"]
+            expected = set(selected) & set(original_rows)
             with closing(self._open_day(self.root / "objects" / (edition["days"][day] + ".sqlite3"))) as conn:
                 placeholders = ",".join("?" for _ in selected)
                 cells = conn.execute("SELECT row_id,payload FROM cells WHERE row_id IN (" + placeholders + ")", selected)
@@ -353,8 +574,21 @@ class HistoryStore:
                         raise HistoryUnavailable("history_cell_corrupt")
                     rows[rid]["cells"][day] = cell
                     found += 1
-                if found != len(selected):
+                if found != len(expected) or any(rid not in expected and
+                        day in rows[rid]["cells"] for rid in selected):
                     raise HistoryUnavailable("history_day_rows_missing")
+            for rid in selected:
+                # A newer start declaration must never mask an already saved
+                # observation. Only a truly absent original row is synthesized.
+                if rid not in original_rows:
+                    reason = "Метрика в этой версии истории ещё не отслеживалась."
+                    rows[rid]["cells"][day] = [None, "—", "number", None, "", "unavailable",
+                        "muted", reason, "not_tracked", "Не отслеживалась", reason,
+                        "not_tracked", None, "", "", ""]
+                    if rid not in original_rows:
+                        response_bytes += len(_json(rows[rid]["cells"][day])) + 64
+                        if response_bytes > self.max_reply_bytes:
+                            raise HistoryUnavailable("history_reply_limit")
         for row in rows.values():
             values = row["values"]
             terms = [str(values.get(k, [""])[0] or "")
@@ -367,7 +601,8 @@ class HistoryStore:
             "dates": days, "availability": availability, "total_rows": total,
             "scope_totals": scope_totals, "sku_group_totals": sku_group_totals,
             "offset": offset, "rows": list(rows.values()), "next_offset": (
-                offset + len(selected) if offset + len(selected) < total else None)}
+                offset + len(selected) if offset + len(selected) < total else None),
+            "archive_status": edition.get("rolling14", {})}
         if len(_json(result)) > self.max_reply_bytes:
             raise HistoryUnavailable("history_reply_limit")
         return result
