@@ -26,7 +26,7 @@ class HttpBackedCardRatingSource:
         now = self.now_factory()
         today = current_business_date_iso(now)
         if request.snapshot_date != today:
-            raise ValueError("item-rating is current-only; historical backfill forbidden")
+            raise ValueError("item-rating observation is collected today only; historical backfill forbidden")
         nm_ids = sorted(set(request.nm_ids))
         if any(type(nm_id) is not int or nm_id <= 0 for nm_id in nm_ids):
             raise ValueError("nmIds must be positive integers")
@@ -36,7 +36,9 @@ class HttpBackedCardRatingSource:
             base_url_env_var="WB_SELLER_ANALYTICS_API_BASE_URL",
             default_timeout_seconds=30.0,
         )
-        yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+        business_day = date.fromisoformat(today)
+        request_period = {"start": (business_day - timedelta(days=7)).isoformat(),
+                          "end": (business_day - timedelta(days=1)).isoformat()}
         items = []
         # Empty requested scope means no request, never nmIds:[] (all WB cards).
         for start in range(0, len(nm_ids), 50):
@@ -45,7 +47,7 @@ class HttpBackedCardRatingSource:
             seen = set()
             while True:
                 payload = self._post(runtime, {
-                    "currentPeriod": {"start": yesterday, "end": yesterday},
+                    "currentPeriod": dict(request_period),
                     "nmIds": batch,
                     "orderBy": {"field": "feedbackCount", "mode": "desc"},
                     "isNotIncludeNmsWithoutSales": False,
@@ -69,7 +71,10 @@ class HttpBackedCardRatingSource:
         if current_business_date_iso(self.now_factory()) != today:
             raise RuntimeError("item-rating crossed business-day boundary; candidate discarded")
         return {"snapshot_date": today, "observed_at": now.isoformat(),
-                "requested_nm_ids": nm_ids, "data": {"items": items}}
+                "requested_nm_ids": nm_ids, "request_period": request_period,
+                "request_period_policy": "last_7_completed_business_days_v1",
+                "source_endpoint": "/api/analytics/v2/item-rating",
+                "source_field": "data.items[].feedbackRating.current", "data": {"items": items}}
 
     def _post(self, runtime, body):
         req = urllib_request.Request(

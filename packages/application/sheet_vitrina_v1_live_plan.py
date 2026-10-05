@@ -474,6 +474,11 @@ class SlotLookups:
     incident_policy: dict[str, Any] = field(default_factory=dict)
     incident_projection_quality: dict[str, Any] = field(default_factory=dict)
     card_rating_lookup: dict[int, Any] = field(default_factory=dict)
+    card_rating_request_period: dict[str, str] | None = None
+    card_rating_request_period_policy: str | None = None
+    card_rating_observed_at: str = ""
+    card_rating_requested_count: int | None = None
+    card_rating_covered_count: int | None = None
     spp_proxy_lookup: dict[int, Any] = field(default_factory=dict)
     authenticated_buyer_lookup: dict[int, Any] = field(default_factory=dict)
     our_wb_cost_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -2068,7 +2073,13 @@ class SheetVitrinaV1LivePlanBlock:
                 elif source_key == "web_source_snapshot":
                     current_lookups.web_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "card_rating":
+                    from packages.application.sheet_vitrina_v1_card_rating import normalize_request_period
                     current_lookups.card_rating_lookup = _index_items_by_nm_id(payload)
+                    current_lookups.card_rating_request_period = normalize_request_period(getattr(payload, "request_period", None))
+                    current_lookups.card_rating_observed_at = getattr(payload, "observed_at", "")
+                    current_lookups.card_rating_request_period_policy = getattr(payload, "request_period_policy", None)
+                    current_lookups.card_rating_requested_count = getattr(payload, "requested_count", None)
+                    current_lookups.card_rating_covered_count = getattr(payload, "covered_count", None)
                 elif source_key == "prices_snapshot":
                     current_lookups.prices_lookup = _index_items_by_nm_id(payload)
                 elif source_key == "sf_period":
@@ -5647,6 +5658,10 @@ def _is_invalid_temporal_web_source_payload(
     if not _is_exact_snapshot_payload(payload, column_date):
         return False
     items = getattr(payload, "items", None)
+    if source_key == "card_rating" and isinstance(items, list):
+        # A successful empty report is an observed all-missing result. It must
+        # supersede the previous rating rather than preserve it as stale.
+        return False
     if not isinstance(items, list) or not items:
         return True
     if source_key == "seller_funnel_snapshot":
