@@ -150,7 +150,7 @@ class LiveNativeAdapter:
     def capture(self) -> dict:
         self.capture_calls += 1
         self.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0,
-                      "dated_days_loaded": 0, "reasons": []}
+                      "dated_days_loaded": 0, "component_captures_loaded": 0, "reasons": []}
         self.deadline = time.monotonic() + self.max_capture_seconds
         self.require_source_families()
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -249,7 +249,20 @@ class LiveNativeAdapter:
                     proof_key = components + ":" + capture_id + ":" + source_digest
                     self.used_slices.add(proof_key)
                     if proof_key not in cache["slices"]:
-                        rows = self._rows(conn, "SELECT * FROM " + components + " WHERE capture_id=? ORDER BY scope_key,component_kind,component_id", (capture_id,))
+                        try:
+                            rows = self._rows(conn, "SELECT * FROM " + components + " WHERE capture_id=? ORDER BY scope_key,component_kind,component_id", (capture_id,))
+                        except LiveSourceUnavailable as exc:
+                            # Only complete newly cached proofs can reset the
+                            # initial warming read budget. Time limits and an
+                            # oversized capture without progress stay terminal.
+                            if (str(exc) == "live_source_resource_limit" and
+                                    self.stats["bytes"] > self.max_read_bytes and
+                                    time.monotonic() < self.deadline):
+                                if self.stats["component_captures_loaded"]:
+                                    raise LiveSourceUnavailable("live_components_bootstrap_pending") from exc
+                                if self.stats["dated_days_loaded"] or self.stats["plans_loaded"]:
+                                    raise LiveSourceUnavailable("live_dated_bootstrap_pending") from exc
+                            raise
                         columns = [r[1] for r in conn.execute("PRAGMA table_info(" + components + ")")]
                         scopes = []
                         for row in rows:
@@ -257,6 +270,7 @@ class LiveNativeAdapter:
                             provenance = json.loads(value["provenance_json"])
                             scopes.append([value["scope_key"], provenance.get("identity", {}), value["component_kind"]])
                         cache["slices"][proof_key] = {"proof": digest(rows), "scopes": scopes}
+                        self.stats["component_captures_loaded"] += 1
                     proof = cache["slices"][proof_key]
                     per_day[day].setdefault("components", []).append([capture_id, proof["proof"]])
                     if json.loads(manifest).get("contract") == "bound_inventory_quantity_v1":
@@ -652,9 +666,11 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             # worker budget. Compiler/portion/fresh publication capture do not
             # retry. A no-progress or terminal source error stays a refusal.
             if (deadline_monotonic is None or str(exc) not in {
-                    "live_ready_bootstrap_pending", "live_dated_bootstrap_pending"} or
+                    "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
+                    "live_components_bootstrap_pending"} or
                     not (adapter.stats.get("plans_loaded", 0) or
-                         adapter.stats.get("dated_days_loaded", 0))):
+                         adapter.stats.get("dated_days_loaded", 0) or
+                         adapter.stats.get("component_captures_loaded", 0))):
                 raise
         else:
             break
