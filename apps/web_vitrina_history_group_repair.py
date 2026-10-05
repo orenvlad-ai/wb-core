@@ -25,7 +25,7 @@ from packages.application.web_vitrina_group_repair_inputs import (
     prepare_group_repair_day, GroupRepairTransform, captured_repair_cost_bindings,
     load_repair_cost_basis,
 )
-from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter
+from packages.application.web_vitrina_history_live_adapter import LiveNativeAdapter, capture_initial_proofs
 from packages.application.web_vitrina_window_read_context import window_read_context
 
 
@@ -34,6 +34,7 @@ def code_proof(contract):
     required = {'apps/web_vitrina_history_group_repair.py',
         'packages/application/web_vitrina_history_group_repair.py',
         'packages/application/web_vitrina_group_repair_inputs.py',
+        'packages/application/web_vitrina_history_live_adapter.py',
         'packages/application/web_vitrina_group_blocks.py'}
     if set(hashes) != required:
         raise ValueError('group_repair_code_contract_missing')
@@ -111,7 +112,7 @@ def prepare_inputs(args, contract, source, candidate, deadline):
         processed = 0
         catalogs = {}
         with window_read_context(runtime.db_path, runtime_dir=args.runtime_dir):
-            vector = adapter.capture()
+            vector, _ = capture_initial_proofs(adapter,deadline_monotonic=deadline)
             bindings = captured_repair_cost_bindings(adapter)
             for day in pending:
                 _deadline(deadline)

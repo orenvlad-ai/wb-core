@@ -44,6 +44,7 @@ def main():
             def __init__(self,**kwargs):
                 assert kwargs['formula_epoch']=='old-formula'
                 self.stats={'bytes':123,'queries':2}
+                self.max_capture_seconds=20
             def capture(self): return deepcopy(vector)
         def prepare(day,catalog,cells,**kwargs):
             result=deepcopy(cells[GROUP[0]]);result[:2]=[30,'30']

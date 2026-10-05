@@ -30,9 +30,10 @@
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {
-    "apps/web_vitrina_history_group_repair.py": "550e4ef31fae8b2f057e45691cb30b2ef602f53d694b1f04e22dda5fda913238",
+    "apps/web_vitrina_history_group_repair.py": "5d4a1c36c8d08301ad6f18e0a90e268f85e9019e304a375c815ee2261c413941",
     "packages/application/web_vitrina_history_group_repair.py": "55980d00f189b7adb210bafa94f29be4fd77d7dc1831111fe00bfb7ebd4ffab4",
     "packages/application/web_vitrina_group_repair_inputs.py": "4625fe3ac3d66b8b7beb841ff787d78daa929a5c652c558d544cbd7973846ace",
-    "packages/application/web_vitrina_group_blocks.py": "60341b91dcaff15c220dcf01fad53f6c1e2b520503eb2400415e2f6d85830403"
+    "packages/application/web_vitrina_group_blocks.py": "60341b91dcaff15c220dcf01fad53f6c1e2b520503eb2400415e2f6d85830403",
+    "packages/application/web_vitrina_history_live_adapter.py": "8d2430d87a45eb26b36beca5799c639ecd953262bb9817b4a08c41a3ea42b8ef"
   }
 }
