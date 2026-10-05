@@ -44,7 +44,7 @@ def card_rating_presentation(*, rows, slots, live_sources):
                 continue
             value = row[2 + list(slots).index(slot)]
             missing = value in (None, "")
-            reason = ("Рейтинг по отзывам из отчёта WB «Оценки и отзывы», из 5. " + provenance +
+            reason = ("Рейтинг по отзывам из отчёта WB «Оценка товара», из 5. " + provenance +
                 ("Последнее подтверждённое наблюдение; текущее обновление не удалось. " if stale else "") +
                 ("Рейтинг для этой даты не подтверждён; отсутствие не равно нулю." if missing else
                  "TOTAL — арифметическое среднее SKU с доступным рейтингом." if row[1].startswith("TOTAL|") else
@@ -83,7 +83,7 @@ def include_card_rating_rows(rows, *, config, dates, metrics):
             group=item.group if item else None, nm_id=item.nm_id if item else None,
             format=metric.format, values_by_date={day: "" for day in dates},
             presentation_by_date={day: {"source": SOURCE_KEY, "quality_state": "missing",
-                "reason": "Рейтинг по отзывам из отчёта WB «Оценки и отзывы», из 5: для этой даты нет сохранённого наблюдения."}
+                "reason": "Рейтинг по отзывам из отчёта WB «Оценка товара», из 5: для этой даты нет сохранённого наблюдения."}
                 for day in dates},
         ))
     return result
