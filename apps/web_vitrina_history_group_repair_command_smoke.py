@@ -24,7 +24,11 @@ def main():
         source,base,old=fixture(root)
         migration=root/'candidate';(migration/'proofs').mkdir(parents=True)
         _atomic(migration/'proofs/source-proofs.json',{'source':['fixture',1,2,'old-formula']})
-        candidate=HistoryStore(migration/'group-repair-history')
+        code=digest('reviewed-code')
+        candidate=HistoryStore(migration/('group-repair-history-'+code[:16]))
+        # Old-code prepared artifacts are not rewritten/reused after this fix.
+        previous=migration/'group-repair-history';previous.mkdir()
+        (previous/'old-prepared.json').write_text('{"old":true}')
         interrupted=root/'interrupted-cache';interrupted.mkdir()
         with patch.object(command.os,'replace',side_effect=OSError('interrupted cache copy')):
             try: command.warm_cache(migration/'proofs',interrupted,candidate,time.monotonic()+20)
@@ -38,7 +42,6 @@ def main():
         (root/'serving').mkdir();(root/'serving/history').symlink_to(source.root,target_is_directory=True)
         args=SimpleNamespace(expected_base=base,max_days=1,runtime_dir=root/'runtime',action='prepare',
                              expected_candidate='',preview_token='')
-        code=digest('reviewed-code')
         vector={'epoch':'captured-context','dates':{d:digest(d) for d in old['days']}}
         class Adapter:
             def __init__(self,**kwargs):
@@ -79,6 +82,45 @@ def main():
             assert result['status']=='published'
             with patch.object(command,'preview_group_repair',side_effect=AssertionError('readback must not preview/submit again')):
                 assert command.worker(args,contract,migration,time.monotonic()+20)['status']=='already_published'
+        assert (previous/'old-prepared.json').read_text()=='{"old":true}'
+        # Root pin is exact bytes at the fixed original migration path and
+        # an existing immutable original candidate edition, not an input path.
+        (migration/'history').symlink_to(source.root,target_is_directory=True)
+        cache_sha=command.hashlib.sha256((migration/'proofs/source-proofs.json').read_bytes()).hexdigest()
+        args.retained_cost_cache_sha256=cache_sha;args.original_candidate_edition=base
+        retained_cache,original=command.read_retained_cache(args,contract,time.monotonic()+20)
+        assert original==old and retained_cache['source'][3]=='old-formula'
+        args.retained_cost_cache_sha256='a'*64
+        try: command.read_retained_cache(args,contract,time.monotonic()+20)
+        except ValueError as exc: assert 'cache_changed' in str(exc)
+        else: raise AssertionError('unpinned original cache accepted')
+        args.retained_cost_cache_sha256=cache_sha
+        # A new codeproof isolates inputs; no old prepared files are overwritten.
+        # Only retained binding is passed, even if fresh selector offers latest.
+        args.expected_base=source._current()['current'];args.action='prepare'
+        new_code=digest('retained-authority-code')
+        new_candidate=HistoryStore(migration/('group-repair-history-'+new_code[:16]))
+        day=DAYS[0];marker={'authority_mode':'retained_original_cost_binding'}
+        def retained_basis(runtime,day,catalog,cells,*,accepted_binding,authority,deadline):
+            assert accepted_binding=={'book_version':'original-covered'}
+            assert authority['retained_cost_binding']==marker
+            return {}, {'status':'fixture_retained'}
+        with patch.object(command,'code_proof',return_value=new_code), \
+             patch.object(command,'RegistryUploadDbBackedRuntime',return_value=SimpleNamespace(db_path=root/'db')), \
+             patch.object(command,'StoreRegistry'),patch.object(command,'LiveNativeAdapter',Adapter), \
+             patch.object(command,'window_read_context',return_value=nullcontext()), \
+             patch.object(command,'captured_repair_cost_bindings',return_value={day:{'book_version':'latest'}}), \
+             patch.object(command,'retained_repair_cost_bindings',return_value={day:({'book_version':'original-covered'},marker)}), \
+             patch.object(command,'load_repair_cost_basis',side_effect=retained_basis), \
+             patch.object(command,'prepare_group_repair_day',side_effect=prepare):
+            result=command.prepare_inputs(args,contract,source,new_candidate,time.monotonic()+20)
+            assert result['processed']==1
+            pinned_index=_read(new_candidate.root/'repair-inputs/index.json')
+            assert pinned_index['retained_cost_origin']==command.retained_claim(args)
+            args.original_candidate_edition=source._current()['current']
+            try: command.prepare_inputs(args,contract,source,new_candidate,time.monotonic()+20)
+            except Exception as exc: assert 'resume_conflict' in str(exc)
+            else: raise AssertionError('retained origin changed during resume')
         argv=['repair','--runtime-dir',str(root/'absent-runtime'),'--runtime-contract',str(root/'absent-contract'),
               '--expected-base',base,'--action','prepare','--maintenance-window-id','not-held','--manual']
         with patch.object(sys,'argv',argv),patch.object(command,'worker',side_effect=AssertionError('admission must stop before writes')):
@@ -87,7 +129,9 @@ def main():
             assert json.loads(output.getvalue())['status']=='skipped_maintenance'
         print(json.dumps({'status':'PASS','bounded_preparation_resume':True,'published_base_unchanged_until_commit':True,
             'same_prepared_inputs_to_preview_CAS':True,'ambiguous_publish_readback_only':True,
-            'no_held_window_no_writes':True,'native_cost_authority_explicit':True,'interrupted_cache_copy_recoverable':True}))
+            'no_held_window_no_writes':True,'native_cost_authority_explicit':True,'interrupted_cache_copy_recoverable':True,
+            'retained_fixed_root_byte_pin':True,'retained_origin_resume_binding':True,
+            'retained_covered_not_latest':True,'new_code_isolated_candidate_old_inputs_preserved':True}))
 
 
 if __name__=='__main__': main()

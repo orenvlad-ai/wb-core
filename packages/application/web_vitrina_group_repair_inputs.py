@@ -203,10 +203,11 @@ class GroupRepairTransform:
 
 def load_repair_cost_basis(runtime, day, catalog, cells, *,
                            accepted_binding, authority, deadline):
-    """Read one exact accounting blob only after the archived input token matches.
+    """Read exact accounting inputs under native or retained component authority.
 
-    The caller captured with the old formula identity in the same pinned source
-    context. A changed recent source is unresolved, not silently rebound.
+    The caller captures with the old formula identity on the same source pin.
+    Whole-token equality or explicit retained original component provenance is
+    required; neither path silently binds a historical day to current inputs.
     """
     import time
     from packages.application.web_vitrina_group_blocks import accepted_cost_basis
@@ -215,16 +216,41 @@ def load_repair_cost_basis(runtime, day, catalog, cells, *,
         'old_day_proof': authority.get('old_token'), 'captured_day_proof': authority.get('fresh_token')}
     if time.monotonic() >= deadline:
         raise ValueError('group_repair_inputs_deadline')
+    retained = authority.get('retained_cost_binding')
     if (not proof_claim.get('old_dependency_epoch')
             or proof_claim.get('old_dependency_epoch') != proof_claim.get('captured_dependency_epoch')
             or not proof_claim.get('old_day_proof')
-            or proof_claim.get('old_day_proof') != proof_claim.get('captured_day_proof')):
+            or (not retained and proof_claim.get('old_day_proof') != proof_claim.get('captured_day_proof'))):
         return {}, {'status':'unresolved_source_authority','proof_claim':deepcopy(proof_claim)}
     if not accepted_binding:
         return {}, {'status':'accepted_cost_binding_absent','proof_claim':deepcopy(proof_claim)}
+    if retained:
+        if (retained.get('authority_mode') != 'retained_original_cost_binding'
+                or retained.get('day') != day
+                or retained.get('old_day_proof') != proof_claim['old_day_proof']
+                or retained.get('binding_digest') != digest(accepted_binding)):
+            raise ValueError('group_repair_retained_binding_claim_invalid')
+        from packages.application.web_vitrina_window_read_context import active_window_read_context
+        from packages.application.fbs_accounting_runtime import path
+        import json
+        context = active_window_read_context()
+        conn = context.borrow_book(path(runtime.runtime_dir)) if context else None
+        if conn is None:
+            raise ValueError('group_repair_retained_book_pin_required')
+        row = conn.execute('SELECT payload FROM accounting_revisions WHERE version=?',
+                           (accepted_binding['book_version'],)).fetchone()
+        index = json.loads(row[0]) if row else {}
+        projection = {field: dict(index.get(field, {})) for field in
+                      ('shared_days', 'wb_days', 'retained_days', 'presentations')}
+        if (digest(projection) != retained['book_index_digest']
+                or index.get('presentations', {}).get(day) != retained['presentation_blob']):
+            raise ValueError('group_repair_retained_book_changed')
     metadata={'fbs_accounting_bindings':{day:accepted_binding},
               'fbs_accounting_targets':{day:accepted_binding.get('ready_target')}}
     basis=accepted_cost_basis(runtime,metadata,[day]).get(day,{})
+    if retained and (not basis or any(b.get('presentation_digest') != retained['presentation_blob']
+                                     for b in basis.values())):
+        raise ValueError('group_repair_retained_blob_changed')
     rows=unpack_rows(day,catalog,cells)
     costs=[r for r in rows if r.scope_kind=='SKU' and r.metric_key=='our_wb_unit_cost_rub'
            and accepted_number(r,day) is not None]
@@ -239,12 +265,83 @@ def load_repair_cost_basis(runtime, day, catalog, cells, *,
     if mismatches:
         return {}, {'status':'saved_cost_basis_mismatch','nm_ids':sorted(mismatches),
                     'proof_claim':deepcopy(proof_claim),'binding_digest':digest(accepted_binding)}
+    if retained and not costs:
+        return {}, {'status':'saved_cost_observations_absent','proof_claim':deepcopy(proof_claim)}
     if time.monotonic() >= deadline:
         raise ValueError('group_repair_inputs_deadline')
     return basis, {'status':'accepted_bound_basis_verified','checked_saved_costs':len(costs),
         'binding_digest':digest(accepted_binding),'basis_digest':digest({str(k):v for k,v in basis.items()}),
         'presentation_digests':sorted({b['presentation_digest'] for b in basis.values()}),
-        'proof_claim':deepcopy(proof_claim)}
+        'proof_claim':deepcopy(proof_claim),
+        'authority_mode':'retained_original_cost_binding' if retained else 'native_day_token_match',
+        'retained_cost_binding':deepcopy(retained)}
+
+
+def retained_repair_cost_bindings(adapter, cache, *, cache_sha256,
+                                  original_edition_id, original, served):
+    """Select only original producer headers, never a newly available READY.
+
+    The CLI pins the known migration-root cache and original candidate edition.
+    This is explicit operational component provenance, NOT whole-token equality.
+    Unchanged immutable day object/catalog/proof links it to the served snapshot.
+    """
+    import json
+    from datetime import date, timedelta
+    from packages.application.web_vitrina_window_read_context import borrowed_operational_connection
+    from packages.application.web_vitrina_window_v3 import _ReadyHeader, _select_bindings
+    from packages.application.web_vitrina_history_store import HistoryStore
+    conn = borrowed_operational_connection(adapter.db_path)
+    if conn is None or not adapter.context or cache.get('source') != adapter._quality_cache.get('source'):
+        raise ValueError('group_repair_retained_source_pin_invalid')
+    if digest(original) != original_edition_id or len(cache_sha256) != 64:
+        raise ValueError('group_repair_retained_origin_invalid')
+    identities = conn.execute('''SELECT s.bundle_version,s.as_of_date,s.snapshot_id,s.activated_at,s.refreshed_at,r.revision
+        FROM sheet_vitrina_v1_ready_snapshots s LEFT JOIN sheet_vitrina_v1_ready_revisions r USING(bundle_version,as_of_date)
+        ORDER BY s.activated_at DESC,s.refreshed_at DESC,s.as_of_date DESC,s.bundle_version DESC''').fetchall()
+    headers, nodes, matched = [], {}, set()
+    for item in identities:
+        key = digest(list(item))
+        node = cache['headers'].get(key)
+        if node is None:
+            continue
+        matched.add(key)
+        h = _ReadyHeader(*item[:5], tuple(node['dates']), json.dumps(node['book'], sort_keys=True), item[5])
+        headers.append(h); nodes[h.key] = (node, list(item))
+    # Missing, updated or re-dated old READY cannot quietly switch bindings.
+    if matched != set(cache['headers']):
+        raise ValueError('group_repair_retained_ready_changed')
+    current = conn.execute('SELECT bundle_version FROM registry_upload_current_state WHERE slot=1').fetchone()[0]
+    original_today = max(original['days'])
+    default_date = (date.fromisoformat(original_today) - timedelta(days=1)).isoformat()
+    bindings, _ = _select_bindings(conn, headers, adapter.days, current, default_date)
+    original_proofs, served_proofs = HistoryStore.day_proofs(original), HistoryStore.day_proofs(served)
+    original_catalogs, served_catalogs = HistoryStore.day_catalogs(original), HistoryStore.day_catalogs(served)
+    result = {}
+    for selected in bindings:
+        day = selected.date
+        # The original current day could have used accounting_current instead
+        # of its READY binding. No retained component claim is made for it.
+        if (day == original_today or original['days'].get(day) != served['days'].get(day)
+                or original_catalogs.get(day) != served_catalogs.get(day)
+                or original_proofs.get(day) != served_proofs.get(day)):
+            continue
+        node, identity = nodes.get(selected.source_key, ({}, []))
+        binding = node.get('book', {}).get(day)
+        if not binding:
+            continue
+        record = cache['book'].get(binding.get('book_version'), {})
+        ref = record.get('index', {}).get('presentations', {}).get(day)
+        target = dict(zip(('bundle_version', 'as_of_date'), identity[:2]))
+        if (binding.get('ready_target') != target or not ref or ref not in record.get('verified', [])):
+            raise ValueError('group_repair_retained_book_proof_missing')
+        result[day] = (deepcopy(binding), {'authority_mode':'retained_original_cost_binding',
+            'day':day, 'original_cache_sha256':cache_sha256,
+            'original_candidate_edition':original_edition_id,
+            'original_day_object':original['days'][day], 'dated_catalog':original_catalogs[day],
+            'old_day_proof':original_proofs[day]['token'],
+            'ready_identity_revision':identity, 'binding_digest':digest(binding),
+            'book_index_digest':digest(record['index']), 'presentation_blob':ref})
+    return result
 
 
 def captured_repair_cost_bindings(adapter):
