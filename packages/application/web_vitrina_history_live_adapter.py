@@ -214,7 +214,7 @@ class LiveNativeAdapter:
                             "labels": label_id, "legacy": any(str(r[1]).endswith(("|stock_total", "|total_stock_total")) and any(v not in (None, "") for v in r[2:]) for r in raw)}
                         self.stats["plans_loaded"] += 1
                     node = cache["headers"][key]
-                    headers.append(_ReadyHeader(*item[:5], tuple(node["dates"]), json.dumps(node["book"]), item[5]))
+                    headers.append(_ReadyHeader(*item[:5], tuple(node["dates"]), json.dumps(node["book"], sort_keys=True), item[5]))
                 business_day = current_business_date_iso(self.now)
                 bindings, default = _select_bindings(conn, headers, self.days, current[0][0], default_business_as_of_date(self.now))
                 by_key = {h.key: h for h in headers}
