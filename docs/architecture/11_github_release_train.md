@@ -35,7 +35,9 @@ workflow ошибкой, а не зелёным статусом.
 
 Workflow `Post-merge Release Recovery` принимает только явно доказанные стадии
 сбоя после merge. Помимо исторических storage/readback и activation-precheck
-случаев, выпуск 36437349246 допускает восстановление после локального
+случаев, точные выпуски 36437349246 (PR 1341) и 37356285295 (PR 1386,
+Gate 37355289217, merge `073f62de40c99eb3c58e60d0f27580a962102831`)
+допускают восстановление после локального
 `SQLiteContentionExhausted` в exact Change Registry activation: failed systemd
 invocation и отсутствие activation job в каноническом operational store должны
 быть подтверждены чтением. Транспортно неопределённый исход не допускается.
