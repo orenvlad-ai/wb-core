@@ -94,7 +94,11 @@ def singleflight(runtime_dir: Path):
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def bounded_worker(command: list[str], seconds: float) -> dict:
+SAFE_FAILURE_COUNTERS = ("bytes", "queries", "plans_loaded", "dated_days_loaded",
+                         "component_captures_loaded", "temporal_proofs_loaded")
+
+
+def bounded_worker(command: list[str], seconds: float, *, allowed_failure_reasons=()) -> dict:
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True)
     try:
@@ -105,6 +109,21 @@ def bounded_worker(command: list[str], seconds: float) -> dict:
         return {"status": "skipped_deadline", "last_good_retained": True}
     if process.returncode:
         # No source/business data is printed in diagnostics.
+        if allowed_failure_reasons:
+            try:
+                failure = json.loads(stdout)
+                counters = failure.get("source_reads", {})
+                if (set(failure) <= {"status", "reason_code", "last_good_retained", "source_reads"}
+                        and failure.get("status") == "build_failed"
+                        and failure.get("last_good_retained") is True
+                        and failure.get("reason_code") in allowed_failure_reasons
+                        and isinstance(counters, dict) and set(counters) <= set(SAFE_FAILURE_COUNTERS)
+                        and all(type(value) is int and 0 <= value < 2**63 for value in counters.values())):
+                    return {"status": "build_failed", "exit_code": process.returncode,
+                            "reason_code": failure["reason_code"], "source_reads": counters,
+                            "last_good_retained": True}
+            except (ValueError, TypeError, AttributeError):
+                pass
         return {"status": "build_failed", "exit_code": process.returncode, "last_good_retained": True}
     try:
         return json.loads(stdout)

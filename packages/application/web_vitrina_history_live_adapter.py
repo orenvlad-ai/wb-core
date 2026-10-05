@@ -150,7 +150,8 @@ class LiveNativeAdapter:
     def capture(self) -> dict:
         self.capture_calls += 1
         self.stats = {"bytes": 0, "queries": 0, "plans_loaded": 0,
-                      "dated_days_loaded": 0, "component_captures_loaded": 0, "reasons": []}
+                      "dated_days_loaded": 0, "component_captures_loaded": 0,
+                      "temporal_proofs_loaded": 0, "reasons": []}
         self.deadline = time.monotonic() + self.max_capture_seconds
         self.require_source_families()
         self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -447,7 +448,22 @@ class LiveNativeAdapter:
                     if snapshot_role:
                         query += " AND snapshot_role=?"
                         args.append(snapshot_role)
-                    cache["slices"][key] = digest(self._rows(conn, query, args))
+                    try:
+                        proof = digest(self._rows(conn, query, args))
+                    except LiveSourceUnavailable as exc:
+                        # A full temporal key is durable progress, just like a
+                        # dated day or immutable capture. Never cache partial
+                        # payloads or turn time/no-progress failures into retries.
+                        if (str(exc) == "live_source_resource_limit" and
+                                self.stats["bytes"] > self.max_read_bytes and
+                                time.monotonic() < self.deadline and any(
+                                    self.stats.get(counter, 0) for counter in (
+                                        "temporal_proofs_loaded", "plans_loaded",
+                                        "dated_days_loaded", "component_captures_loaded"))):
+                            raise LiveSourceUnavailable("live_temporal_bootstrap_pending") from exc
+                        raise
+                    cache["slices"][key] = proof
+                    self.stats["temporal_proofs_loaded"] = self.stats.get("temporal_proofs_loaded", 0) + 1
                 per_day[day].setdefault("temporal", []).append([source, snapshot_role, captured, revision, cache["slices"][key]])
 
     def _finance(self, conn, tables, per_day):
@@ -651,7 +667,7 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
     if store.root.resolve().is_relative_to(adapter.runtime_dir):
         raise ValueError("derived store must be separate from native runtime")
     calls_before = adapter.capture_calls
-    bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0}
+    bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0, "temporal_proofs_loaded": 0}
     configured_capture_seconds = adapter.max_capture_seconds
     while True:
         if deadline_monotonic is not None:
@@ -667,10 +683,11 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             # retry. A no-progress or terminal source error stays a refusal.
             if (deadline_monotonic is None or str(exc) not in {
                     "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
-                    "live_components_bootstrap_pending"} or
+                    "live_components_bootstrap_pending", "live_temporal_bootstrap_pending"} or
                     not (adapter.stats.get("plans_loaded", 0) or
                          adapter.stats.get("dated_days_loaded", 0) or
-                         adapter.stats.get("component_captures_loaded", 0))):
+                         adapter.stats.get("component_captures_loaded", 0) or
+                         adapter.stats.get("temporal_proofs_loaded", 0))):
                 raise
         else:
             break
@@ -678,6 +695,7 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             bootstrap_reads["captures"] += 1
             bootstrap_reads["bytes"] += adapter.stats.get("bytes", 0)
             bootstrap_reads["queries"] += adapter.stats.get("queries", 0)
+            bootstrap_reads["temporal_proofs_loaded"] += adapter.stats.get("temporal_proofs_loaded", 0)
             adapter.max_capture_seconds = configured_capture_seconds
     initial_fence = adapter.fence
     pointer = store._current()

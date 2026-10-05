@@ -235,6 +235,8 @@ def check_initial_warming_failures(adapter, runtime, store):
     for reason, progress, deadline in (
             ("live_source_resource_limit", 1, time.monotonic() + 1),
             ("live_dated_bootstrap_pending", 0, time.monotonic() + 1),
+            ("live_temporal_bootstrap_pending", 0, time.monotonic() + 1),
+            ("live_temporal_bootstrap_pending", 1, None),
             ("live_ready_bootstrap_pending", 1, None)):
         def refused():
             adapter.stats = {"plans_loaded": progress, "dated_days_loaded": 0,
@@ -253,10 +255,10 @@ def check_initial_warming_failures(adapter, runtime, store):
     seen_seconds = []
     def expired():
         seen_seconds.append(adapter.max_capture_seconds)
-        adapter.stats = {"plans_loaded": 0, "dated_days_loaded": 1,
+        adapter.stats = {"plans_loaded": 0, "dated_days_loaded": 0, "temporal_proofs_loaded": 1,
                          "bytes": 1, "queries": 1}
         time.sleep(0.02)
-        raise LiveSourceUnavailable("live_dated_bootstrap_pending")
+        raise LiveSourceUnavailable("live_temporal_bootstrap_pending")
     with patch.object(adapter, "capture", side_effect=expired) as capture:
         try:
             update_live_history(adapter=adapter, runtime=runtime, store=store,
@@ -355,7 +357,41 @@ def check_cli_guards(root):
             patch.object(command, "update_live_history", return_value={"status": "fixture_only"}) as update, redirect_stdout(StringIO()):
         command.main()
         assert started + 180 <= update.call_args.kwargs["deadline_monotonic"] <= time.monotonic() + 180
+    for message, expected in (("live_source_resource_limit:owned-private-detail", "live_source_resource_limit"),
+                              ("unknown-owned-private-detail", "live_source_unavailable")):
+        output = StringIO()
+        with patch.object(sys, "argv", [*manual, "--worker"]), \
+                patch.object(command, "StoreRegistry"), \
+                patch.object(command, "RegistryUploadDbBackedRuntime"), \
+                patch.object(command, "LiveNativeAdapter") as adapter, patch.object(command, "HistoryStore"), \
+                patch.object(command, "update_live_history", side_effect=LiveSourceUnavailable(message)), \
+                redirect_stdout(output):
+            adapter.return_value.stats = {"bytes": 123, "queries": 4, "raw_source": "owned-private-detail"}
+            assert command.main() == 1  # Failure remains nonzero, never a successful data update.
+        failure = json.loads(output.getvalue())
+        assert failure["reason_code"] == expected and failure["source_reads"] == {"bytes": 123, "queries": 4}
+        assert "owned-private-detail" not in output.getvalue()
     assert (lock.read_bytes(), lock.stat().st_mtime_ns) == before
+
+
+def check_safe_failure_parent():
+    failure = command.source_failure_result(LiveSourceUnavailable("live_source_resource_limit:private"),
+                                            {"bytes": 123, "queries": 4})
+    def run(payload, opted_in=True):
+        script = "import sys;print(" + repr(json.dumps(payload)) + ");print('owned-private-stderr',file=sys.stderr);sys.exit(3)"
+        return bounded_worker([sys.executable, "-c", script], 2,
+            allowed_failure_reasons=command.SAFE_SOURCE_FAILURE_REASONS if opted_in else ())
+    accepted = run(failure)
+    assert accepted == {**failure, "exit_code": 3}
+    assert "reason_code" not in run(failure, opted_in=False)
+    for malformed in ([failure], {**failure, "reason_code": "untrusted"},
+                      {**failure, "source_reads": {"bytes": True}},
+                      {**failure, "source_reads": {"raw_source": "private"}},
+                      {**failure, "raw_source": "private"}):
+        refused = run(malformed)
+        assert refused == {"status": "build_failed", "exit_code": 3, "last_good_retained": True}
+    return {"validated_reason_and_counters": True, "nonzero_preserved": True,
+            "stderr_raw_fields_not_forwarded": True, "ordinary_caller_unchanged": True}
 
 
 def check_source_guards(root):
@@ -559,6 +595,87 @@ def check_quality_cache_and_temporal(root):
         assert first != second
 
 
+def check_temporal_progress(root):
+    adapter = LiveNativeAdapter(db_path=root / "native.sqlite3", runtime_dir=root / "runtime",
+        cache_dir=root / "proofs", now=datetime(2026, 4, 20, tzinfo=timezone.utc),
+        date_from="2026-04-14", date_to="2026-04-18", formula_epoch="temporal-proof")
+    tables = {"temporal_source_snapshots", "sheet_vitrina_v1_ready_temporal_revisions"}
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE TABLE temporal_source_snapshots(source_key TEXT,snapshot_date TEXT,captured_at TEXT,payload_json TEXT)")
+        conn.execute("CREATE TABLE sheet_vitrina_v1_ready_temporal_revisions(source_key TEXT,snapshot_date TEXT,snapshot_role TEXT,revision INTEGER)")
+        conn.executemany("INSERT INTO temporal_source_snapshots VALUES(?,?,?,?)",
+            [(SOURCES[0], day, "captured", json.dumps({"padding": "x" * 600})) for day in adapter.days])
+        conn.executemany("INSERT INTO sheet_vitrina_v1_ready_temporal_revisions VALUES(?,?,?,?)",
+            [(SOURCES[0], day, "", 1) for day in adapter.days])
+
+        def capture(cache, limit=2400):
+            adapter.max_read_bytes = limit
+            adapter.stats = {"bytes": 0, "queries": 0, "temporal_proofs_loaded": 0}
+            adapter.deadline = time.monotonic() + 4
+            adapter.used_slices = set()
+            vector = {day: {} for day in adapter.days}
+            adapter._temporal(conn, tables, cache, vector, adapter.days[-1])
+            return vector
+
+        reference = capture({"slices": {}}, 32000)
+        cache, passes = {"slices": {}}, 0
+        while True:
+            before = deepcopy(cache["slices"])
+            passes += 1
+            assert passes <= len(adapter.days)
+            try:
+                vector = capture(cache)
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == "live_temporal_bootstrap_pending"
+                assert adapter.stats["temporal_proofs_loaded"] > 0
+                assert len(cache["slices"]) > len(before)
+            else:
+                assert vector == reference
+                break
+            assert all(cache["slices"][key] == value for key, value in before.items())
+        assert passes > 1 and len(cache["slices"]) == len(adapter.days)
+        assert capture(cache) == reference and adapter.stats["temporal_proofs_loaded"] == 0
+        conn.execute("UPDATE temporal_source_snapshots SET payload_json='{}' WHERE snapshot_date=?", (adapter.days[0],))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_temporal_revisions SET revision=2 WHERE snapshot_date=?", (adapter.days[0],))
+        corrected = capture(cache)
+        assert {day for day in adapter.days if reference[day] != corrected[day]} == {adapter.days[0]}
+        conn.execute("DELETE FROM temporal_source_snapshots WHERE snapshot_date=?", (adapter.days[1],))
+        deleted = capture(cache)
+        assert {day for day in adapter.days if corrected[day] != deleted[day]} == {adapter.days[1]}
+        conn.execute("UPDATE temporal_source_snapshots SET snapshot_date=? WHERE snapshot_date=?",
+                     (adapter.days[1], adapter.days[2]))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_temporal_revisions SET revision=3 WHERE snapshot_date=?", (adapter.days[1],))
+        redated = capture(cache)
+        assert {day for day in adapter.days if deleted[day] != redated[day]} == {adapter.days[1], adapter.days[2]}
+        conn.execute("UPDATE temporal_source_snapshots SET payload_json=? WHERE snapshot_date=?",
+                     (json.dumps({"oversized": "x" * 8000}), adapter.days[0]))
+        conn.execute("UPDATE sheet_vitrina_v1_ready_temporal_revisions SET revision=4 WHERE snapshot_date=?", (adapter.days[0],))
+        fresh = {"slices": {}}
+        try:
+            capture(fresh)
+        except LiveSourceUnavailable as exc:
+            assert str(exc) == "live_source_resource_limit"
+        else:
+            raise AssertionError("one oversized temporal key must stay terminal")
+        assert fresh["slices"] == {} and adapter.stats["temporal_proofs_loaded"] == 0
+        rows = adapter._rows
+        def expired_rows(connection, sql, args=()):
+            if sql.startswith("SELECT payload_json"):
+                adapter.stats["plans_loaded"] = 1  # Prior progress cannot turn time expiry into retry.
+                adapter.deadline = time.monotonic() - 1
+            return rows(connection, sql, args)
+        with patch.object(adapter, "_rows", side_effect=expired_rows):
+            try:
+                capture(fresh)
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == "live_source_resource_limit"
+            else:
+                raise AssertionError("expired temporal read must stay terminal despite prior progress")
+        assert fresh["slices"] == {} and adapter.stats["temporal_proofs_loaded"] == 0
+        return {"passes": passes, "exact_fullproof_vector": True, "cache_hit_new_progress": 0,
+                "correction_delete_redate": True, "oversized_key_terminal": True, "time_expiry_terminal": True}
+
+
 def main():
     now = datetime(2026, 4, 20, 12, tzinfo=timezone.utc)
     fixture = LocalWebVitrinaFixtureServer(with_ready_snapshot=True, ready_days=7, now=now)
@@ -594,12 +711,19 @@ def main():
                 [(day, json.dumps({"unconsumed_fixture_padding": "x" * 128 * 1024}))
                  for day in ("2026-04-18", "2026-04-19")])
             ensure_publication_schema(conn)
+        for day in ("2026-04-16", "2026-04-17"):
+            runtime.save_temporal_source_snapshot(source_key=SOURCES[1], snapshot_date=day,
+                captured_at=day + "T12:00:00Z",
+                payload={"unconsumed_fixture_padding": "x" * 128 * 1024})
         adapter.max_read_bytes = 224 * 1024
         store = HistoryStore(root / "history", max_reply_bytes=32 * 1024**2)
         built = update_live_history(adapter=adapter, runtime=runtime, store=store,
                                     deadline_monotonic=time.monotonic() + 30)
         assert built["status"] == "published", built
-        assert built["bootstrap_source_reads"]["captures"] == 2 and built["capture_calls"] == 4, built
+        assert built["bootstrap_source_reads"]["captures"] >= 3, built
+        assert built["capture_calls"] == built["bootstrap_source_reads"]["captures"] + 2, built
+        assert built["bootstrap_source_reads"]["temporal_proofs_loaded"] >= 2, built
+        assert store._current()["current"] == built["edition_id"]
         warming = built["bootstrap_source_reads"]
         vector = store.edition()["consumed"]
         check_initial_warming_failures(adapter, runtime, store)
@@ -721,9 +845,11 @@ def main():
         quality_bridge = check_quality_scope_bridge(root / "quality-bridge-test")
         publication_projection = check_publication_projection(root / "publication-test")
         dated_slice_progress = check_dated_slice_progress(root / "dated-proof-test")
+        temporal_progress = check_temporal_progress(root / "temporal-proof-test")
         cli_root = root / "cli-test"
         cli_root.mkdir()
         check_cli_guards(cli_root)
+        safe_failure = check_safe_failure_parent()
         started = time.monotonic()
         killed = bounded_worker([sys.executable, "-c", "import time;time.sleep(5)"], 0.1)
         assert killed["status"] == "skipped_deadline" and time.monotonic() - started < 2
@@ -735,10 +861,12 @@ def main():
                           "native_quality_floor": True, "reusable_quality_bridge": quality_bridge, "portion_capture_calls": 3,
                           "publication_projection": publication_projection,
                           "dated_slice_progress": dated_slice_progress,
+                          "temporal_progress": temporal_progress,
                           "native_initial_warming": warming,
                           "warming_no_progress_terminal_deadline_retains_lastgood": True,
                           "publication_diagnostic_nochange_before_compiler": True,
-                          "cli_guards": True, "existing_process_wrapper_kill": True}))
+                          "cli_guards": True, "safe_failure": safe_failure,
+                          "existing_process_wrapper_kill": True}))
 
 
 if __name__ == "__main__":
