@@ -660,18 +660,12 @@ class LiveNativeAdapter:
         return result, planning_day
 
 
-def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistoryStore,
-                        max_recomputes: int = 31, deadline_monotonic=None,
-                        rolling14: bool = False, backfill_dates: list[str] | None = None,
-                        metric_start_dates: dict[str, str] | None = None, group_blocks: bool = False) -> dict:
-    if Path(runtime.db_path).resolve() != adapter.db_path or Path(runtime.runtime_dir).resolve() != adapter.runtime_dir:
-        raise ValueError("runtime differs from live source bridge")
-    if store.root.resolve().is_relative_to(adapter.runtime_dir):
-        raise ValueError("derived store must be separate from native runtime")
-    business_day = current_business_date_iso(adapter.now)
-    if rolling14 and any(day > business_day for day in adapter.days):
-        raise LiveSourceUnavailable("history_future_date_unsupported")
-    calls_before = adapter.capture_calls
+def capture_initial_proofs(adapter: LiveNativeAdapter, deadline_monotonic=None) -> tuple[dict, dict]:
+    """Warm complete native proofs within a caller budget; never publishes.
+
+    Fresh compiler/publication captures must call capture directly so a failed
+    revalidation cannot become a retry or a new accepted source snapshot.
+    """
     bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0, "temporal_proofs_loaded": 0}
     configured_capture_seconds = adapter.max_capture_seconds
     while True:
@@ -686,13 +680,21 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             # Only initial proof warming continues, inside the existing hard
             # worker budget. Compiler/portion/fresh publication capture do not
             # retry. A no-progress or terminal source error stays a refusal.
-            if (deadline_monotonic is None or str(exc) not in {
-                    "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
-                    "live_components_bootstrap_pending", "live_temporal_bootstrap_pending"} or
-                    not (adapter.stats.get("plans_loaded", 0) or
-                         adapter.stats.get("dated_days_loaded", 0) or
-                         adapter.stats.get("component_captures_loaded", 0) or
-                         adapter.stats.get("temporal_proofs_loaded", 0))):
+            progress = any(adapter.stats.get(counter, 0) for counter in (
+                "plans_loaded", "dated_days_loaded", "component_captures_loaded",
+                "temporal_proofs_loaded"))
+            resumable = str(exc) in {
+                "live_ready_bootstrap_pending", "live_dated_bootstrap_pending",
+                "live_components_bootstrap_pending", "live_temporal_bootstrap_pending"}
+            # Fresh metadata reads outside the individual proof loaders can
+            # exhaust the same byte budget after completed proofs were cached.
+            # Continue only initial warming, never timeouts or no-progress reads.
+            if str(exc) == "live_source_resource_limit":
+                now = time.monotonic()
+                resumable = (adapter.stats.get("bytes", 0) > adapter.max_read_bytes and
+                    now < adapter.deadline and deadline_monotonic is not None and
+                    now < deadline_monotonic)
+            if deadline_monotonic is None or not resumable or not progress:
                 raise
         else:
             break
@@ -702,6 +704,22 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
             bootstrap_reads["queries"] += adapter.stats.get("queries", 0)
             bootstrap_reads["temporal_proofs_loaded"] += adapter.stats.get("temporal_proofs_loaded", 0)
             adapter.max_capture_seconds = configured_capture_seconds
+    return vector, bootstrap_reads
+
+
+def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistoryStore,
+                        max_recomputes: int = 31, deadline_monotonic=None,
+                        rolling14: bool = False, backfill_dates: list[str] | None = None,
+                        metric_start_dates: dict[str, str] | None = None, group_blocks: bool = False) -> dict:
+    if Path(runtime.db_path).resolve() != adapter.db_path or Path(runtime.runtime_dir).resolve() != adapter.runtime_dir:
+        raise ValueError("runtime differs from live source bridge")
+    if store.root.resolve().is_relative_to(adapter.runtime_dir):
+        raise ValueError("derived store must be separate from native runtime")
+    business_day = current_business_date_iso(adapter.now)
+    if rolling14 and any(day > business_day for day in adapter.days):
+        raise LiveSourceUnavailable("history_future_date_unsupported")
+    calls_before = adapter.capture_calls
+    vector, bootstrap_reads = capture_initial_proofs(adapter, deadline_monotonic)
     initial_fence = adapter.fence
     pointer = store._current()
     old = store.edition() if pointer else None

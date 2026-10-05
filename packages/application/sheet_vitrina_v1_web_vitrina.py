@@ -661,7 +661,7 @@ class SheetVitrinaV1WebVitrinaBlock:
             window_operands=window_operands,
         )
         if self.group_blocks and self.reporting_groups:
-            from packages.application.web_vitrina_group_blocks import include_group_rows, accepted_source_statuses
+            from packages.application.web_vitrina_group_blocks import include_group_rows, accepted_source_statuses, accepted_cost_basis
             from packages.application.calculation_parameters import CalculationParametersBlock
             rows = include_group_rows(rows, groups=self.reporting_groups,
                 config=[x for x in current_state.config_v2 if x.enabled], metrics=metrics_by_key,
@@ -669,6 +669,7 @@ class SheetVitrinaV1WebVitrinaBlock:
                 dates=snapshot.date_columns, runtime=self.runtime, today=current_business_date_iso(now),
                 parameters3=CalculationParametersBlock(runtime=self.runtime).parameters_for_date,
                 parameters4=self.proxy_v4_parameters_resolver, quality_resolver=lifecycle_quality_resolver,
+                cost_basis=accepted_cost_basis(self.runtime, dict(snapshot.metadata or {}), snapshot.date_columns),
                 source_statuses=(dict(snapshot.metadata or {}).get('group_source_statuses', [])
                     if date_from and date_to else [status for day in snapshot.date_columns
                         for status in accepted_source_statuses(snapshot, column_date=day)]))

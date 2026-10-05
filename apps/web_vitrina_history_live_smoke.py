@@ -22,7 +22,7 @@ from packages.application.web_vitrina_fbs_lifecycle_last_good import load_owner_
 from packages.application.storage_registry import MONOLITH_FILENAME
 from packages.application.ready_publication import ensure_publication_schema
 from packages.application.web_vitrina_history_live_adapter import (
-    LiveNativeAdapter, LiveSourceUnavailable, update_live_history,
+    LiveNativeAdapter, LiveSourceUnavailable, update_live_history, capture_initial_proofs,
     _require_live_sqlite_family, SOURCES,
 )
 from packages.application.web_vitrina_history_store import HistoryStore
@@ -317,6 +317,102 @@ def check_initial_warming_failures(adapter, runtime, store):
             raise AssertionError("deadline must terminate initial warming")
         assert capture.call_count == 1 and 0 < seen_seconds[0] <= 0.01
     assert adapter.max_capture_seconds == configured and store.edition() == previous
+
+
+def check_generic_warming_guards(adapter, runtime, store):
+    previous, configured = store.edition(), adapter.max_capture_seconds
+    for progress, byte_excess, capture_alive, outer_alive, reason in (
+            (0, True, True, True, "live_source_resource_limit"),
+            (1, False, True, True, "live_source_resource_limit"),
+            (1, True, False, True, "live_source_resource_limit"),
+            (1, True, True, False, "live_source_resource_limit"),
+            (1, True, True, True, "live_source_read_incomplete"),
+            (1, True, True, True, "native_revision_trigger_unknown")):
+        deadline = time.monotonic() + (5 if outer_alive else 0.01)
+        def refused():
+            adapter.stats = {"dated_days_loaded": progress, "bytes":
+                adapter.max_read_bytes + 1 if byte_excess else adapter.max_read_bytes,
+                "queries": 1}
+            adapter.deadline = time.monotonic() + (5 if capture_alive else -1)
+            if not outer_alive:
+                # Expire inside capture, after the helper's admission check.
+                time.sleep(0.02)
+            raise LiveSourceUnavailable(reason)
+        with patch.object(adapter, "capture", side_effect=refused) as capture:
+            try:
+                capture_initial_proofs(adapter, deadline)
+            except LiveSourceUnavailable as exc:
+                assert str(exc) == reason
+            else:
+                raise AssertionError("unsafe generic failure must not continue")
+            assert capture.call_count == 1
+        assert adapter.max_capture_seconds == configured and store.edition() == previous
+
+    # A qualifying byte failure at the final publication capture stays terminal.
+    vector = deepcopy(previous["consumed"])
+    vector["dates"][adapter.days[-1]] = "f" * 64
+    calls = 0
+    def fresh_capture():
+        nonlocal calls
+        calls += 1
+        adapter.stats = {"dated_days_loaded": 1, "bytes": adapter.max_read_bytes + 1,
+                         "queries": 1}
+        adapter.deadline = time.monotonic() + 5
+        if calls == 3:
+            raise LiveSourceUnavailable("live_source_resource_limit")
+        return vector
+    def publish(**kwargs):
+        return kwargs["revalidate"]()
+    with patch.object(adapter, "capture", side_effect=fresh_capture), \
+            patch.object(adapter, "finish_quality_portion"), \
+            patch("packages.application.web_vitrina_history_live_adapter.NativeDatedCompiler"), \
+            patch.object(store, "update", side_effect=publish):
+        try:
+            update_live_history(adapter=adapter, runtime=runtime, store=store,
+                                deadline_monotonic=time.monotonic() + 5)
+        except LiveSourceUnavailable as exc:
+            assert str(exc) == "live_source_resource_limit"
+        else:
+            raise AssertionError("fresh publication capture must not retry")
+    assert calls == 3 and store.edition() == previous
+    assert adapter.max_capture_seconds == configured
+
+
+def check_generic_native_warming(root, runtime, now):
+    """Real capture finally persists complete proofs before a metadata overflow."""
+    adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=runtime.runtime_dir,
+        cache_dir=root / "generic-proofs", now=now, date_from="2026-04-14",
+        date_to="2026-04-20", formula_epoch="native-fixture-live-v1")
+    reference = adapter.capture()
+    # A new private cache exercises cold proof progress, while the original
+    # main-fixture cache remains cold for its existing bounded compile check.
+    adapter.cache_dir = root / "generic-cold-proofs"
+    temporal, passes, failures = adapter._temporal, [], []
+    def bounded_temporal(*args):
+        if not passes:
+            # Reach a real fresh metadata query just beyond the byte bound.
+            # The resulting cap remains fixed for the rest of this fixture.
+            adapter.max_read_bytes = adapter.stats["bytes"] + 1
+            assert adapter.max_read_bytes < 32 * 1024**2
+            assert adapter.stats["dated_days_loaded"] > 0
+        else:
+            persisted = json.loads((adapter.cache_dir / "source-proofs.json").read_text())
+            assert persisted["slices"] and persisted["headers"]
+            assert adapter.stats["dated_days_loaded"] == adapter.stats["plans_loaded"] == 0
+        passes.append(dict(adapter.stats))
+        try:
+            return temporal(*args)
+        except LiveSourceUnavailable as exc:
+            failures.append(str(exc))
+            raise
+    with patch.object(adapter, "_temporal", side_effect=bounded_temporal):
+        vector, reads = capture_initial_proofs(adapter, time.monotonic() + 30)
+    assert vector == reference and failures[0] == "live_source_resource_limit"
+    assert len(passes) >= 2 and reads["captures"] == len(passes)
+    assert reads["bytes"] > adapter.max_read_bytes
+    assert adapter.max_capture_seconds == 20
+    return {"captures": reads["captures"], "fixed_byte_cap": adapter.max_read_bytes,
+            "completed_proofs_persisted_reused": True, "same_vector": True}
 
 
 def check_quality_floor(root):
@@ -763,6 +859,7 @@ def main():
             runtime.save_temporal_source_snapshot(source_key=SOURCES[1], snapshot_date=day,
                 captured_at=day + "T12:00:00Z",
                 payload={"unconsumed_fixture_padding": "x" * 128 * 1024})
+        generic_warming = check_generic_native_warming(root, runtime, now)
         adapter.max_read_bytes = 224 * 1024
         store = HistoryStore(root / "history", max_reply_bytes=32 * 1024**2)
         built = update_live_history(adapter=adapter, runtime=runtime, store=store,
@@ -775,6 +872,7 @@ def main():
         warming = built["bootstrap_source_reads"]
         vector = store.edition()["consumed"]
         check_initial_warming_failures(adapter, runtime, store)
+        check_generic_warming_guards(adapter, runtime, store)
         adapter.max_read_bytes = 32 * 1024**2
         with closing(sqlite3.connect(runtime.db_path)) as conn, conn:
             conn.execute("UPDATE sheet_vitrina_v1_ready_publications SET diagnostics_json=?,inputs_json=? WHERE operation_id='bridge-diagnostics'",
@@ -913,6 +1011,9 @@ def main():
                           "dated_slice_progress": dated_slice_progress,
                           "temporal_progress": temporal_progress,
                           "native_initial_warming": warming,
+                          "generic_initial_warming": generic_warming,
+                          "generic_timeout_no_progress_inconsistent_terminal": True,
+                          "fresh_publication_capture_never_retries": True,
                           "warming_no_progress_terminal_deadline_retains_lastgood": True,
                           "publication_diagnostic_nochange_before_compiler": True,
                           "cli_guards": True, "safe_failure": safe_failure,

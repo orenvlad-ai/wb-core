@@ -118,33 +118,33 @@ def _browser(base, edition, expected_summary):
         assert_total_preserved("first SKU page")
         assert parse_qs(urlsplit(requests[-1]).query)["edition_id"] == [edition]
         page.locator("[data-filters-toggle]").click()
-        pager = page.locator(".block-sku-page").first
-        label = pager.locator("span")
-        initial = label.inner_text()
-        total = int(re.search(r"из (\d+)", initial).group(1))
-        assert total > 2, "tail fixture must exceed the displayed-page budget"
-        while pager.locator('[data-block-page="next"]').is_enabled():
-            before_text = label.inner_text()
-            pager.locator('[data-block-page="next"]').click()
-            page.wait_for_function("old => document.querySelector('.block-sku-page span').textContent !== old",
-                                   arg=before_text, timeout=30000)
-            page.wait_for_function("!document.querySelector('[data-filters-apply]').disabled")
-            assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() <= 2
-            assert_total_preserved("Next SKU page")
-        tail = label.inner_text()
-        matched = re.search(r"строки SKU (\d+)–(\d+) из (\d+)", tail)
-        assert matched and int(matched.group(2)) == total and int(matched.group(3)) == total, tail
+        complete = page.locator(".block-sku-page").first
+        label = complete.locator("span").inner_text()
+        assert "загружено" in label and "SKU" in label, label
+        assert complete.locator("button").count() == 0
+        block = page.evaluate("id => historySnapshotState.blocks.get(historyBlockKey('sku',id))", group_value)
+        assert block["total"] > 2 and len(block["rows"]) == block["total"]
+        assert block["requests"] > 1
         query = parse_qs(urlsplit(requests[-1]).query)
-        assert int(query["offset"][0]) >= total - 2 and query["edition_id"] == [edition]
+        assert int(query["offset"][0]) >= block["total"] - 2 and query["edition_id"] == [edition]
         assert query.get("group_id", [""]) == [group_value]
-        assert pager.locator('[data-block-page="previous"]').is_enabled()
-        pager.locator('[data-block-page="previous"]').click()
-        page.wait_for_function("old => document.querySelector('.block-sku-page span').textContent !== old",
-                               arg=tail, timeout=30000)
-        previous = label.inner_text()
-        assert int(re.search(r"строки SKU (\d+)", previous).group(1)) < int(matched.group(1)), previous
-        assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() <= 2
-        assert_total_preserved("Previous SKU page")
+        scopes = {row["row_id"].split("|")[0] for row in block["rows"]}
+        visible_scopes = set(page.locator('[data-table-body] tr[data-row-kind="sku"]').evaluate_all(
+            "rows => rows.map(row => row.getAttribute('data-row-scope-key'))"))
+        assert scopes == visible_scopes, {"expected": scopes, "visible": visible_scopes}
+        assert_total_preserved("complete SKU group")
+        sku_requests = sum(parse_qs(urlsplit(url).query).get("scope") == ["sku"] for url in requests)
+        page.locator('[data-block-kind="skus"][data-block-group="' + group_value + '"]').uncheck()
+        page.locator("[data-filters-apply]").click()
+        page.wait_for_function("historySnapshotState.busy === false")
+        assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() == 0
+        page.locator("[data-filters-toggle]").click()
+        page.locator('[data-block-kind="skus"][data-block-group="' + group_value + '"]').check()
+        page.locator("[data-filters-apply]").click()
+        page.wait_for_selector('[data-table-body] tr[data-row-kind="sku"]')
+        assert sum(parse_qs(urlsplit(url).query).get("scope") == ["sku"] for url in requests) == sku_requests
+        assert_total_preserved("cached SKU toggle")
+        page.locator("[data-filters-toggle]").click()
         page.locator("[data-filters-close]").click()
         assert not errors, errors
         if evidence:
@@ -191,8 +191,8 @@ def main(browser_only=False):
             summary = read_history_page(store, date_from=dates[0], date_to=dates[-1])
             _browser(base, edition, summary["history_snapshot"]["total_rows"])
             print(json.dumps({"status": "pass", "fixture_only": True,
-                "synthetic_180_transport_only": True, "replacement_sku_tail_and_previous": True,
-                "displayed_sku_page_cap_override": 2, "same_edition_full_range": True,
+                "synthetic_180_transport_only": True, "complete_sku_tail_and_cache": True,
+                "transport_sku_page_cap_override": 2, "same_edition_full_range": True,
                 "total_order_and_user_hidden_preserved": True, "cached_group_human_label": True,
                 "no_heavy_fallback": True}))
             return

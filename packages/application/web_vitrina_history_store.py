@@ -433,6 +433,19 @@ class HistoryStore:
                 "consumed": {"coverage": vector["coverage"], "epoch": vector["epoch"],
                     "dates": {day: p["token"] for day, p in proofs.items() if p["epoch"] == vector["epoch"]}},
                 "rolling14": {key: value for key, value in status.items() if key != "dirty_dates"}}
+            if old and "group_repair" in old:
+                # The claim describes repaired immutable objects, not fresh
+                # compiler output. Derive the first retention map after repair;
+                # later cycles may only retain its still-identical references.
+                retained = old.get("group_repair_retained_days")
+                if retained is None:
+                    retained = {day: old["days"][day] for day, base_ref in
+                        old["group_repair"]["base_objects"].items()
+                        if day in old["days"] and old["days"][day] != base_ref}
+                retained = {day: ref for day, ref in retained.items() if refs.get(day) == ref}
+                if retained:
+                    edition["group_repair"] = deepcopy(old["group_repair"])
+                    edition["group_repair_retained_days"] = retained
             edition_id = digest(edition)
             self._reserve(len(_json(edition)) + 4096)
             _atomic(self.root / "editions" / (edition_id + ".json"), edition)
@@ -586,7 +599,7 @@ class HistoryStore:
     def read(self, *, date_from: str, date_to: str, scope: str = "summary",
              row_ids: list[str] | None = None, group_id: str | None = None,
              offset: int = 0, limit: int = 128, edition_id: str | None = None,
-             deadline_monotonic: float | None = None) -> dict:
+             deadline_monotonic: float | None = None, business_today: str | None = None) -> dict:
         days = dates_between(date_from, date_to, limit=self.max_days)
         if scope not in {"summary", "sku", "total", "group", "catalog"} or not 1 <= limit <= self.max_rows or offset < 0:
             raise ValueError("invalid history read scope")
@@ -594,7 +607,12 @@ class HistoryStore:
             raise ValueError("history row limit exceeded")
         edition = self.edition(edition_id)
         actual_id = digest(edition)
-        if any(day not in edition["days"] for day in days):
+        missing_days = set(days) - set(edition["days"])
+        # Only the HTTP reader opts into the one-day business rollover. A stale
+        # edition, an internal gap or a future date retains the strict refusal.
+        if missing_days and not (business_today is not None and missing_days == {business_today}
+                and max(edition["days"], default="") ==
+                    (date.fromisoformat(business_today) - timedelta(days=1)).isoformat()):
             raise HistoryUnavailable("history_date_unavailable")
         catalog = _read(self.root / "catalogs" / (edition["catalog"] + ".json"))
         if digest(catalog) != edition["catalog"]:
@@ -617,6 +635,9 @@ class HistoryStore:
         # One connection at a time; metadata is bounded by the shared catalog.
         for day in days:
             check_deadline()
+            if day in missing_days:
+                availability[day] = False
+                continue
             with closing(self._open_day(self.root / "objects" / (edition["days"][day] + ".sqlite3"))) as conn:
                 meta = json.loads(conn.execute("SELECT payload FROM metadata").fetchone()[0])
             if meta["date"] != day or meta["context_epoch"] != day_catalog(day)["context_epoch"]:
@@ -655,6 +676,16 @@ class HistoryStore:
             check_deadline()
             if not selected:
                 break
+            if day in missing_days:
+                reason = "За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+                for rid in selected:
+                    cell = [None, "—", "number", None, "", "unavailable", "muted", reason,
+                            "unavailable", "Нет сохранённых данных", reason, "unavailable", None, "", "", ""]
+                    rows[rid]["cells"][day] = cell
+                    response_bytes += len(_json(cell)) + 64
+                    if response_bytes > self.max_reply_bytes:
+                        raise HistoryUnavailable("history_reply_limit")
+                continue
             original_rows = day_catalog(day)["rows"]
             expected = set(selected) & set(original_rows)
             with closing(self._open_day(self.root / "objects" / (edition["days"][day] + ".sqlite3"))) as conn:
@@ -699,7 +730,8 @@ class HistoryStore:
             displays += [row["cells"][day][1] for day in days]
             row["search_text"] = " ".join(v for v in terms + displays if v not in {"", "—"})
         result = {"contract": CONTRACT, "edition_id": actual_id, "scope": scope,
-            "dates": days, "availability": availability, "total_rows": total,
+            "dates": days, "availability": availability, "unmaterialized_dates": sorted(missing_days),
+            "total_rows": total,
             "scope_totals": scope_totals, "sku_group_totals": sku_group_totals,
             "offset": offset, "rows": list(rows.values()), "next_offset": (
                 offset + len(selected) if offset + len(selected) < total else None),
