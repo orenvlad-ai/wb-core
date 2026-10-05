@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import json
+import math
 import sys
 import time
 import sqlite3
@@ -202,7 +203,9 @@ def main():
     from packages.application.fbs_snapshot_cost import fingerprint
     from packages.application.fbs_accounting_runtime import SOURCE
     payload={'date':day,'version_id':'v','quality':'preliminary',
-             'rows':{str(nm):{'shared_cost':b} for nm,b in basis.items()}}
+             'rows':{str(nm):{'shared_cost':{**{k:v for k,v in b.items() if k!='capital'},
+                         'capital_rub':str(b['capital']),'quantity':str(b['quantity'])}}
+                     for nm,b in basis.items()}}
     ref=fingerprint(payload)
     native_index={**index,'presentations':{day:ref},'effective_date':'2026-09-08'}
     native_projection={k:native_index[k] for k in index}
@@ -222,10 +225,15 @@ def main():
         loaded,receipt=load_repair_cost_basis(fake,day,catalog,cells,accepted_binding=native_binding,
             authority=native_authority,deadline=time.monotonic()+1)
         assert receipt['checked_saved_costs']==2 and loaded[11]['presentation_digest']==ref
+        assert loaded[11]['capital']==loaded[11]['capital_rub']=='144'
+        assert loaded[12]['capital']==loaded[12]['capital_rub']=='900'
+        repaired=prepare_group_repair_day(day,catalog,cells,cost_basis=loaded)
+        assert not repaired['unresolved']
+        assert math.isclose(repaired['patch']['GROUP:a|total_our_wb_unit_cost_rub'][0],1044/42)
         changed=deepcopy(payload)
-        changed['rows']['11']['shared_cost']['quantity']*=2
-        changed['rows']['11']['shared_cost']['capital']*=2
-        assert changed['rows']['11']['shared_cost']['capital']/changed['rows']['11']['shared_cost']['quantity']==cells['SKU:11|our_wb_unit_cost_rub'][0]
+        changed['rows']['11']['shared_cost']['quantity']=str(float(changed['rows']['11']['shared_cost']['quantity'])*2)
+        changed['rows']['11']['shared_cost']['capital_rub']=str(float(changed['rows']['11']['shared_cost']['capital_rub'])*2)
+        assert float(changed['rows']['11']['shared_cost']['capital_rub'])/float(changed['rows']['11']['shared_cost']['quantity'])==cells['SKU:11|our_wb_unit_cost_rub'][0]
         book.rollback();book.execute('PRAGMA query_only=OFF')
         book.execute('UPDATE accounting_blobs SET payload=? WHERE digest=?',
                      (zlib.compress(json.dumps(changed).encode()),ref))
@@ -240,6 +248,6 @@ def main():
         'partial_unknown_propagated':True,'immutable_prepared_callback':True,'buyout_untouched':True,'exact_native_compact_header_selection':True,
         'retained_original_not_latest_covered_binding':True,'retained_day_object_catalog_proof_links':True,
         'retained_READY_revision_index_blob_drift_refused':True,'retained_ALL_saved_cost_parity':True,
-        'native_blob_changed_weights_same_WAC_refused':True}))
+        'native_blob_changed_weights_same_WAC_refused':True,'native_capital_rub_normalized_GROUP_cost':True}))
 
 if __name__=='__main__':main()

@@ -113,7 +113,11 @@ def accepted_cost_basis(runtime, metadata, dates):
                 or payload.get('quality') != binding.get('quality')
                 or index.get('effective_date') != binding.get('effective_date')):
             raise ValueError('group_cost_basis_bound_presentation_mismatch')
+        # Native shared-cost books name the admitted capital `capital_rub`.
+        # The evaluator/repair internal basis uses `capital`; normalize once,
+        # without substituting displayed WB/FF overlays or inferred weights.
         result[day] = {int(nm): {**value.get('shared_cost', {}),
+            'capital': value.get('shared_cost', {}).get('capital_rub'),
             'presentation_version': payload['version_id'], 'presentation_digest': blob_digest,
             'book_version': binding['book_version']} for nm, value in payload.get('rows', {}).items()}
     return result

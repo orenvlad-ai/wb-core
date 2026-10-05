@@ -375,8 +375,8 @@ def basis_binding_checks():
     from packages.application.fbs_accounting_runtime import SOURCE
     day='2026-09-22';target={'bundle_version':'accepted','as_of_date':day}
     payload={'date':day,'version_id':'accepted-presentation','quality':'preliminary',
-        'rows':{'11':{'shared_cost':{'quantity':'5737','capital':'578332.5852057938',
-            'source_digest':'exact-source','unit_cost':'100.80749262781834'}}}}
+        'rows':{'11':{'shared_cost':{'quantity':'5737','capital_rub':'578332.5852057938',
+            'source_digest':'exact-source','unit_cost_rub':'100.80749262781834'}}}}
     key=fingerprint(payload)
     index={'effective_date':'2026-09-08','presentations':{day:key}}
     metadata={'ready_publication_target':target,'fbs_accounting_bindings':{day:{
@@ -399,6 +399,7 @@ def basis_binding_checks():
                 basis=groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),metadata,[day])
                 assert basis[day][11]['quantity']=='5737' and basis[day][11]['presentation_digest']==key
                 assert abs(float(basis[day][11]['capital'])/5737-100.80749262781834)<1e-12
+                assert basis[day][11]['capital']==basis[day][11]['capital_rub']
                 assert not any('accounting_current' in q for q in queries)
                 wrong=deepcopy(metadata);wrong['fbs_accounting_bindings'][day]['presentation_version']='latest'
                 expect_error(lambda:groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),wrong,[day]),ValueError,'presentation_mismatch')
@@ -411,7 +412,8 @@ def basis_binding_checks():
             c.execute('PRAGMA query_only=ON');c.execute('BEGIN')
             with patch('packages.application.web_vitrina_window_read_context.active_window_read_context',return_value=Context()):
                 expect_error(lambda:groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),metadata,[day]),ValueError,'presentation_mismatch')
-    return {'exact_bound_revision_blob':True,'fingerprint_corruption_refusal':True,'no_latest_fallback':True,'dated_target_version_refusal':True}
+    return {'exact_bound_revision_blob':True,'native_capital_rub_normalized_once':True,
+            'fingerprint_corruption_refusal':True,'no_latest_fallback':True,'dated_target_version_refusal':True}
 
 
 def membership_checks():
