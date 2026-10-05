@@ -15,6 +15,20 @@ from packages.application.web_vitrina_page_composition import (
 )
 
 
+def _history_metric_label(row):
+    cell = row.get("values", {}).get("metric_label", [])
+    metric = row.get("values", {}).get("metric_key", [])
+    key = metric[0] if metric else ""
+    if key not in {"inventory_fbs_total_qty_v1", "total_inventory_fbs_total_qty_v1"}:
+        return cell
+    label = (cell[1] or cell[0]) if len(cell) >= 2 else cell[0] if cell else ""
+    if str(label or "").strip() not in {"", key}:
+        return cell
+    # Retained compatibility aggregate rows predate the public inventory order.
+    # Repair only their missing/raw caption; every dated cell stays untouched.
+    return ["Остаток FBS: всего", "Остаток FBS: всего", *cell[2:]]
+
+
 def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=None,
                       offset=0, limit=64, group_id=None):
     page = store.read(date_from=date_from, date_to=date_to, scope=scope,
@@ -40,6 +54,8 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
                 cell = [row["row_order"], str(row["row_order"]), *catalog["row_order_cell_template"][2:]]
             elif key.startswith("date:"):
                 cell = row["cells"][key[5:]]
+            elif key == "metric_label":
+                cell = _history_metric_label(row)
             else:
                 cell = row["values"][key]
             values.append([index, *cell])
@@ -82,7 +98,7 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
     for row in catalog["rows"].values():
         values = {}
         for key in ("metric_key", "metric_label", "section"):
-            cell = row.get("values", {}).get(key, [])
+            cell = _history_metric_label(row) if key == "metric_label" else row.get("values", {}).get(key, [])
             values[key] = {"value": cell[0] if cell else None,
                            "display_text": cell[1] if len(cell) > 1 else ""}
         metric_rows.append({"row_kind": row["row_kind"], "section_id": row.get("section_id", ""),

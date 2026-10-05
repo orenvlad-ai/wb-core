@@ -17,6 +17,51 @@ from packages.application.web_vitrina_page_composition import WEB_VITRINA_PAGE_S
 from packages.adapters.registry_upload_http_entrypoint import DEFAULT_SHEET_WEB_VITRINA_READ_PATH
 
 
+def check_legacy_fbs_labels(root, table):
+    """Known legacy captions only; stored rows and all dated fields are unchanged."""
+    known = {"total": "total_inventory_fbs_total_qty_v1", "sku": "inventory_fbs_total_qty_v1"}
+    for caption in ("raw", "empty", "custom"):
+        fixture = deepcopy(table)
+        columns = fixture["columns"]
+        indices = {c["id"]: i for i, c in enumerate(columns)}
+        rows = [next(r for r in fixture["rows"] if r["row_kind"] == kind) for kind in known]
+        fixture["rows"] = rows
+        date_index = next(i for i, c in enumerate(columns) if c["id"].startswith("date:"))
+        fixture["columns"] = columns[:date_index + 1]
+        columns = fixture["columns"]
+        for position, row in enumerate(rows, start=1):
+            row["values"] = [cell for cell in row["values"] if cell[0] <= date_index]
+            next(cell for cell in row["values"] if cell[0] == indices["row_order"])[1:3] = [position, str(position)]
+            metric = known[row["row_kind"]]
+            row["row_id"] = row["row_id"].split("|", 1)[0] + "|" + metric
+            for cell in row["values"]:
+                if cell[0] == indices["metric_key"]:
+                    cell[1:3] = [metric, metric]
+                elif cell[0] == indices["metric_label"]:
+                    label = metric if caption == "raw" else "" if caption == "empty" else "Сохранённая подпись FBS"
+                    cell[1:3] = [label, label]
+        store = HistoryStore(root / ("legacy-caption-" + caption))
+        day = next(c["id"][5:] for c in columns if c["id"].startswith("date:"))
+        edition = import_finished_table(store, fixture, accepted_ready={day: True})["edition_id"]
+        before = {p: p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+        expected = "Сохранённая подпись FBS" if caption == "custom" else "Остаток FBS: всего"
+        for scope in ("summary", "sku"):
+            payload = read_history_page(store, date_from=day, date_to=day, scope=scope)
+            decoded = _dense(payload["table_surface"]["rows"], payload["table_surface"]["columns"])
+            source = [r for r in _dense(rows, columns) if (r["row_kind"] == "sku") == (scope == "sku")]
+            assert [r["row_id"] for r in decoded] == [r["row_id"] for r in source]
+            for actual, original in zip(decoded, source):
+                label = actual["values"]["metric_label"]
+                assert label["value"] == label["display_text"] == expected, (caption, scope, label)
+                for key, cell in actual["values"].items():
+                    if key != "metric_label":
+                        assert cell == original["values"][key], (caption, scope, key)
+            options = payload["filter_surface"]["controls"][0]["options"]
+            assert all(next(o for o in options if o["value"] == key)["label"] == expected for key in known.values())
+            assert payload["history_snapshot"]["edition_id"] == edition
+        assert all(p.read_bytes() == content for p, content in before.items())
+
+
 def main():
     from playwright.sync_api import sync_playwright
 
@@ -64,6 +109,7 @@ def main():
             if not any(r["formatter_id"] == formatter for r in table["renderers"]):
                 table["renderers"].append({"renderer_id": "renderer:" + kind + ":" + formatter,
                                           "formatter_id": formatter, "gravity_variant": "text", "align": "end"})
+        check_legacy_fbs_labels(Path(server.history_snapshot_store).parent, table)
         store = HistoryStore(server.history_snapshot_store)
         edition = import_finished_table(store, table, accepted_ready={d: True for d in dates})["edition_id"]
         saved = datetime(2026, 4, 19, 17, 20, 51, tzinfo=timezone.utc)
@@ -281,7 +327,7 @@ def main():
         print(json.dumps({"status": "pass", "synthetic_display_only": True, "exact16fields": True,
                           "percent_money_unit": True, "saved_at": True, "calendar": True,
                           "preset_days": [31, 1, 3, 14, 180], "calendar_geometry_widths": geometry_widths,
-                          "calendar_save_each_width": True,
+                          "calendar_save_each_width": True, "legacy_fbs_label_only": True,
                           "private_config_baseline": bool(baseline_path)}), flush=True)
         if os.environ.get("WBC_HISTORY_DISPLAY_PREVIEW") == "1":
             server.entrypoint.handle_sheet_web_vitrina_user_config_request = lambda **kwargs: {
