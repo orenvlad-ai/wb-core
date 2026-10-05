@@ -8355,7 +8355,7 @@ class RegistryUploadDbBackedRuntime:
                 SELECT *
                 FROM sheet_vitrina_v1_sku_groups
                 {where_clause}
-                ORDER BY is_active DESC, group_key ASC
+                ORDER BY display_order ASC, group_key ASC
                 """
             ).fetchall()
             return [_sku_group_to_dict(row) for row in rows]
@@ -8394,15 +8394,17 @@ class RegistryUploadDbBackedRuntime:
                     aliases_json,
                     is_active,
                     is_system,
+                    display_order,
                     created_at,
                     updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(group_key) DO UPDATE SET
                     label = excluded.label,
                     aliases_json = excluded.aliases_json,
                     is_active = excluded.is_active,
                     is_system = excluded.is_system,
+                    display_order = excluded.display_order,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -8411,6 +8413,7 @@ class RegistryUploadDbBackedRuntime:
                     json.dumps([str(alias) for alias in aliases if str(alias or "").strip()], ensure_ascii=False),
                     1 if bool(group.get("is_active", True)) else 0,
                     1 if bool(group.get("is_system")) else 0,
+                    int(group.get("display_order", 0)),
                     created_at,
                     updated_at,
                 ),
@@ -10893,6 +10896,7 @@ def _nomenclature_item_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 def _sku_group_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "group_key": row["group_key"],
+        "display_order": row["display_order"],
         "label": row["label"] or row["group_key"],
         "aliases": [str(item) for item in _loads_json_list(row["aliases_json"]) if str(item or "").strip()],
         "is_active": bool(row["is_active"]),
@@ -13417,6 +13421,7 @@ def _ensure_schema_uncached(
         );
         """
     )
+    _ensure_column(conn, table_name="sheet_vitrina_v1_sku_groups", column_name="display_order", column_sql="INTEGER NOT NULL DEFAULT 0")
     ensure_ff_pool_foundation_schema(conn)
     ensure_ff_pool_document_schema(conn)
     ensure_ff_pool_fbs_applicability_schema(conn)

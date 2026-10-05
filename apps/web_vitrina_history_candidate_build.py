@@ -42,6 +42,11 @@ SAFE_SOURCE_FAILURE_REASONS = frozenset({
     "history_future_date_unsupported", "history_backfill_outside_source_range",
     "history_catalog_columns_incompatible", "history_row_identity_incompatible",
     "history_catalog_limit", "history_catalog_corrupt", "history_storage_limit",
+    "history_group_candidate_source_changed", "history_group_candidate_superseded",
+    "history_group_candidate_pending", "history_group_candidate_catalog",
+    "history_group_candidate_dates_missing", "history_group_candidate_mixed_catalog",
+    "history_group_candidate_proof_incomplete", "history_group_candidate_deadline",
+    "history_group_candidate_object_corrupt", "history_group_candidate_preview_mismatch",
 })
 # Only this caller opts into the worker's validated, payload-free diagnostics.
 bounded_worker = partial(bounded_worker, allowed_failure_reasons=SAFE_SOURCE_FAILURE_REASONS)
@@ -55,11 +60,12 @@ def source_failure_result(error, stats):
                 if key in SAFE_FAILURE_COUNTERS and type(value) is int and 0 <= value < 2**63}}
 
 
-def runtime_storage_admission(root, contract_path, formula_epoch):
+def runtime_storage_admission(root, contract_path, formula_epoch, *, group_migration=False):
     """Private trial's exact mount/reserve/formula guards, before any writes."""
     contract = json.loads(contract_path.read_text())
     mount = Path('/mnt/wb-core-extra100')
-    if str(root) != contract['candidate_root'] or root != root.resolve() or not os.path.ismount(mount):
+    expected_root = contract['group_migration_root'] if group_migration else contract['candidate_root']
+    if str(root) != expected_root or root != root.resolve() or not os.path.ismount(mount):
         raise ValueError('history_storage_path_or_mount')
     actual = subprocess.check_output(['findmnt', '-n', '-T', str(mount), '-o',
                                      'TARGET,SOURCE,FSTYPE,OPTIONS'], text=True, timeout=2)
@@ -141,6 +147,12 @@ def main():
     parser.add_argument("--max-recomputes", type=int, default=31)
     parser.add_argument("--backfill-from", help="explicit archive rebuild start; requires --backfill-to")
     parser.add_argument("--backfill-to", help="explicit archive rebuild end; requires --backfill-from")
+    parser.add_argument("--group-candidate-preview", action="store_true", help="read-only bounded preview of a completed group candidate")
+    parser.add_argument("--group-candidate-publish-token", default="", help="one-submit token returned by exact candidate preview")
+    parser.add_argument("--expected-current", default="", help="CAS identity of the currently served edition")
+    parser.add_argument("--expected-candidate", default="", help="exact completed candidate edition")
+    parser.add_argument("--full-history-group-migration", action="store_true",
+                        help="explicit one-off isolated group catalog rebuild; ordinary builds remain rolling14")
     parser.add_argument("--manual", action="store_true",
                         help="explicit bounded manual trial; bypass calendar window only")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -166,6 +178,8 @@ def run_admitted(args):
     if bool(args.backfill_from) != bool(args.backfill_to):
         raise ValueError("both explicit backfill boundaries required")
     backfill_dates = dates_between(args.backfill_from, args.backfill_to) if args.backfill_from else []
+    if getattr(args, "full_history_group_migration", False) and not (args.manual and args.maintenance_window_id and args.runtime_contract):
+        raise ValueError("group migration requires explicit held manual candidate contract")
     if root.is_relative_to(source) or not 0 < args.budget_seconds <= 240:
         raise ValueError("separate candidate root and bounded budget required")
     seconds = (min(args.budget_seconds, 180) if args.manual else
@@ -175,7 +189,7 @@ def run_admitted(args):
         return
     if args.worker:
         if args.runtime_contract:
-            runtime_storage_admission(root, args.runtime_contract, args.formula_epoch)
+            runtime_storage_admission(root, args.runtime_contract, args.formula_epoch, group_migration=getattr(args, "full_history_group_migration", False))
         registry = StoreRegistry(source)
         runtime = RegistryUploadDbBackedRuntime(source, store_registry=registry)
         adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=source,
@@ -185,10 +199,32 @@ def run_admitted(args):
             # Future metric start dates are fixed entries in the reviewed runtime
             # contract, never a moving default inferred at reader request time.
             starts = json.loads(args.runtime_contract.read_bytes()).get("metric_start_dates", {}) if args.runtime_contract else {}
-            result = update_live_history(adapter=adapter, runtime=runtime,
+            if getattr(args, "group_candidate_preview", False) or getattr(args, "group_candidate_publish_token", ""):
+                if not (getattr(args, "full_history_group_migration", False) and getattr(args, "expected_current", "") and getattr(args, "expected_candidate", "")):
+                    raise ValueError("explicit group candidate identities required")
+                contract = json.loads(args.runtime_contract.read_bytes())
+                target = HistoryStore(Path(contract['candidate_root']) / 'history')
+                candidate = HistoryStore(root / 'history')
+                deadline = time.monotonic() + seconds
+                vector = adapter.capture()
+                fence = adapter.fence
+                if candidate.edition(getattr(args, "expected_candidate", ""))['consumed'] != vector:
+                    raise HistoryUnavailable('history_group_candidate_source_changed')
+                def revalidate():
+                    fresh = adapter.capture()
+                    return fresh if adapter.fence == fence else {**fresh, 'publication_fence': 'changed'}
+                if getattr(args, "group_candidate_preview", False):
+                    result = target.group_candidate_preview(candidate, expected_current=getattr(args, "expected_current", ""),
+                        expected_candidate=getattr(args, "expected_candidate", ""), deadline_monotonic=deadline)
+                else:
+                    result = target.publish_group_candidate(candidate, expected_current=getattr(args, "expected_current", ""),
+                        expected_candidate=getattr(args, "expected_candidate", ""), preview_token=getattr(args, "group_candidate_publish_token", ""),
+                        revalidate=revalidate, deadline_monotonic=deadline)
+            else:
+                result = update_live_history(adapter=adapter, runtime=runtime,
                 store=HistoryStore(root / "history"), max_recomputes=args.max_recomputes,
-                deadline_monotonic=time.monotonic() + seconds, rolling14=True,
-                backfill_dates=backfill_dates, metric_start_dates=starts)
+                deadline_monotonic=time.monotonic() + seconds, rolling14=not getattr(args, "full_history_group_migration", False),
+                backfill_dates=backfill_dates, metric_start_dates=starts, group_blocks=True)
         except HistoryUnavailable as exc:
             result = source_failure_result(exc, adapter.stats)
     else:
@@ -202,7 +238,7 @@ def run_admitted(args):
                 else:
                     if args.runtime_contract:
                         try:
-                            runtime_storage_admission(root, args.runtime_contract, args.formula_epoch)
+                            runtime_storage_admission(root, args.runtime_contract, args.formula_epoch, group_migration=getattr(args, "full_history_group_migration", False))
                         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
                             print(json.dumps({'status': 'skipped_storage', 'reason': type(exc).__name__,
                                               'last_good_retained': True}))

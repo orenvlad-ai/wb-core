@@ -4427,10 +4427,14 @@ def _normalize_sku_group_payload(payload: Mapping[str, Any], *, created_at: str,
     if not _valid_sku_group_key(group_key):
         raise ValueError("sku group_key must contain lowercase latin letters, digits or underscores")
     label = str(payload.get("label") or group_key).strip()
+    display_order = payload.get("display_order", 0)
+    if type(display_order) is not int or not 0 <= display_order <= 100000:
+        raise ValueError("sku group display_order must be an integer 0..100000")
     aliases = _normalize_alias_list(payload.get("aliases"))
     return {
         "group_key": group_key,
         "label": label,
+        "display_order": display_order,
         "aliases": aliases,
         "is_active": bool(payload.get("is_active", True)),
         "is_system": bool(payload.get("is_system", False)),

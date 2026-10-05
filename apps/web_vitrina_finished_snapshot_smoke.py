@@ -258,7 +258,7 @@ def check_http_ui(server):
         requests = []
         page.on('request', lambda request: requests.append(request.url) if '/v1/sheet-vitrina-v1/web-vitrina?' in request.url else None)
         page.goto(base + '/sheet-vitrina-v1/vitrina')
-        page.locator('[data-snapshot-pilot-toolbar]').wait_for(state='visible')
+        page.wait_for_function("!document.querySelector('[data-snapshot-pilot-toolbar]').hidden")
         assert not calls, calls
         assert len(config_reads) == 1
         page.locator('[data-metrics-settings-open]').click()
@@ -279,8 +279,10 @@ def check_http_ui(server):
         page.wait_for_timeout(150)
         assert any('period_days=31' in url and 'part=summary' in url for url in requests), requests
         assert not calls
+        page.locator('[data-filters-toggle]').click()
         page.locator('[data-snapshot-pilot-expand]').click()
         page.locator('[data-snapshot-pilot-toolbar]').wait_for(state='hidden')
+        page.locator('[data-filters-close]').click()
         assert any('part=sku' in url and 'generation_id=' in url for url in requests)
         assert page.locator('[data-load-status-text]').get_attribute('data-load-status-text') == 'предыдущий готовый снимок'
         # Same-page transition through the existing 30-day preset.
@@ -294,7 +296,7 @@ def check_http_ui(server):
         calls.clear()
         page.locator('[data-history-toggle]').click()
         page.locator('[data-history-preset="finished_31"]').click()
-        page.locator('[data-snapshot-pilot-toolbar]').wait_for(state='visible')
+        page.wait_for_function("!document.querySelector('[data-snapshot-pilot-toolbar]').hidden")
         assert not calls
         # Existing corrupt or missing+initialized store stays in fast mode and never evaluates.
         calls.clear()

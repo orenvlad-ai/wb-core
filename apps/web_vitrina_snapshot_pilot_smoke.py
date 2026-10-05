@@ -114,7 +114,7 @@ def _browser_flow(base: str, full: dict[tuple[str, str], dict]) -> None:
         page.on("pageerror", lambda error: errors.append(str(error)))
         for start, end in PERIODS:
             page.goto(_url(base, start, end, pilot=True), wait_until="domcontentloaded")
-            page.wait_for_selector("[data-snapshot-pilot-toolbar]:visible", timeout=20000)
+            page.wait_for_function("!document.querySelector('[data-snapshot-pilot-toolbar]').hidden", timeout=20000)
             assert "снимок сохранён:" in page.locator("[data-table-summary-line]").inner_text().lower()
             assert page.locator("[data-table-summary-updated-at]").get_attribute(
                 "data-table-summary-updated-at"
@@ -127,6 +127,7 @@ def _browser_flow(base: str, full: dict[tuple[str, str], dict]) -> None:
             assert any(row["row_id"] == "TOTAL|avg_card_rating" for row in expected_summary)
             assert page.locator("[data-table-body] tr").count() == len(expected_summary)
             assert page.locator("[data-load-refresh-button]").is_hidden()
+            page.locator("[data-filters-toggle]").click()
             page.locator("[data-snapshot-pilot-expand]").click()
             page.wait_for_function(
                 "document.querySelector('[data-snapshot-pilot-toolbar]').hidden",
@@ -136,6 +137,7 @@ def _browser_flow(base: str, full: dict[tuple[str, str], dict]) -> None:
                 "expected => document.querySelectorAll('[data-table-body] tr:not([data-row-kind=separator])').length === expected",
                 arg=len(expected_rows), timeout=20000,
             )
+            page.locator("[data-filters-close]").click()
             assert len(expected_rows) > len(expected_summary)
         assert not errors, errors
         table_requests = requests

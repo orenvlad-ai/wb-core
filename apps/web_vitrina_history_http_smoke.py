@@ -42,7 +42,7 @@ def _browser(base, edition, expected_summary):
         page.add_init_script("""const nativeFetch = window.fetch;
           window.fetch = function(input, init) {
             const url = new URL(String(input), window.location.origin);
-            if (url.searchParams.get('history_snapshot') === '1' && url.searchParams.get('scope') === 'summary')
+            if (url.searchParams.get('history_snapshot') === '1' && url.searchParams.get('scope') === 'total')
               url.searchParams.set('limit', '2');
             if (url.searchParams.get('history_snapshot') === '1' && url.searchParams.get('scope') === 'sku')
               url.searchParams.set('limit', '2');
@@ -57,7 +57,7 @@ def _browser(base, edition, expected_summary):
         page.goto(base + "/sheet-vitrina-v1/vitrina?history_mode=explicit&date_from="
                   + start + "&date_to=2026-04-20", wait_until="domcontentloaded")
         try:
-            page.wait_for_selector("[data-snapshot-pilot-toolbar]:visible", timeout=30000)
+            page.wait_for_selector("[data-history-summary-load-ms]", timeout=30000)
         except Exception as error:
             raise AssertionError({"initial_history_load": str(error), "page_errors": errors,
                                   "requests": requests, "body": page.locator("body").inner_text()[:4000]}) from error
@@ -74,7 +74,8 @@ def _browser(base, edition, expected_summary):
         assert float(timing.get_attribute("data-history-summary-load-ms")) > 0
         assert page.evaluate("performance.getEntriesByName('wb-history-summary-complete').length") == 1
         assert len(requests) > 1
-        assert all(parse_qs(urlsplit(url).query).get("scope") == ["summary"] for url in requests)
+        assert parse_qs(urlsplit(requests[0]).query).get("scope") == ["catalog"]
+        assert all(parse_qs(urlsplit(url).query).get("scope") == ["total"] for url in requests[1:])
         assert all(parse_qs(urlsplit(url).query).get("edition_id") == [edition] for url in requests[1:])
         def total_order():
             return page.locator('[data-table-body] tr[data-row-kind="total"]').evaluate_all(
@@ -108,48 +109,43 @@ def _browser(base, edition, expected_summary):
         evidence = os.environ.get("WBC_HISTORY_UI_EVIDENCE_DIR")
         if evidence:
             page.screenshot(path=str(Path(evidence) / "history-summary-fixture-180.png"))
-        page.locator("[data-snapshot-pilot-expand]").click()
-        page.wait_for_function("/SKU: [1-9]/.test(document.querySelector('[data-filter-summary]').textContent)", timeout=30000)
+        page.locator("[data-filters-toggle]").click()
+        choice = page.locator('[data-block-kind="skus"]').first
+        group_value = choice.get_attribute("data-block-group")
+        choice.check()
+        page.locator("[data-filters-apply]").click()
+        page.wait_for_selector('[data-table-body] tr[data-row-kind="sku"]', timeout=30000)
         assert_total_preserved("first SKU page")
-        assert len(requests) >= 2
         assert parse_qs(urlsplit(requests[-1]).query)["edition_id"] == [edition]
-        # Group choice clears old pages and requests the same edition/range.
-        selector = page.locator("[data-history-sku-group]")
-        if selector.locator("option").count() > 1:
-            assert selector.locator("option").nth(1).inner_text() == "Clean"
-            assert selector.locator("option").nth(1).get_attribute("value") == "group:Clean"
-            selector.select_option(index=1)
-            assert_total_preserved("group selected, before SKU")
-            page.locator("[data-snapshot-pilot-expand]").click()
-            page.wait_for_function("/SKU: [1-9]/.test(document.querySelector('[data-filter-summary]').textContent)", timeout=30000)
-            assert_total_preserved("group first SKU page")
-            assert parse_qs(urlsplit(requests[-1]).query)["edition_id"] == [edition]
-        # A group larger than the displayed-page budget remains fully reachable.
-        group_value = selector.input_value()
-        initial = page.locator("[data-filter-summary]").inner_text()
+        page.locator("[data-filters-toggle]").click()
+        pager = page.locator(".block-sku-page").first
+        label = pager.locator("span")
+        initial = label.inner_text()
         total = int(re.search(r"из (\d+)", initial).group(1))
         assert total > 2, "tail fixture must exceed the displayed-page budget"
-        while page.locator("[data-snapshot-pilot-expand]").is_enabled():
-            before_text = page.locator("[data-filter-summary]").inner_text()
-            page.locator("[data-snapshot-pilot-expand]").click()
-            page.wait_for_function("old => document.querySelector('[data-filter-summary]').textContent !== old",
+        while pager.locator('[data-block-page="next"]').is_enabled():
+            before_text = label.inner_text()
+            pager.locator('[data-block-page="next"]').click()
+            page.wait_for_function("old => document.querySelector('.block-sku-page span').textContent !== old",
                                    arg=before_text, timeout=30000)
+            page.wait_for_function("!document.querySelector('[data-filters-apply]').disabled")
             assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() <= 2
             assert_total_preserved("Next SKU page")
-        tail = page.locator("[data-filter-summary]").inner_text()
-        matched = re.search(r"SKU: (\d+) — (\d+) из (\d+)", tail)
+        tail = label.inner_text()
+        matched = re.search(r"строки SKU (\d+)–(\d+) из (\d+)", tail)
         assert matched and int(matched.group(2)) == total and int(matched.group(3)) == total, tail
         query = parse_qs(urlsplit(requests[-1]).query)
         assert int(query["offset"][0]) >= total - 2 and query["edition_id"] == [edition]
         assert query.get("group_id", [""]) == [group_value]
-        assert page.locator("[data-history-sku-previous]").is_enabled()
-        page.locator("[data-history-sku-previous]").click()
-        page.wait_for_function("old => document.querySelector('[data-filter-summary]').textContent !== old",
+        assert pager.locator('[data-block-page="previous"]').is_enabled()
+        pager.locator('[data-block-page="previous"]').click()
+        page.wait_for_function("old => document.querySelector('.block-sku-page span').textContent !== old",
                                arg=tail, timeout=30000)
-        previous = page.locator("[data-filter-summary]").inner_text()
-        assert int(re.search(r"SKU: (\d+)", previous).group(1)) < int(matched.group(1)), previous
+        previous = label.inner_text()
+        assert int(re.search(r"строки SKU (\d+)", previous).group(1)) < int(matched.group(1)), previous
         assert page.locator('[data-table-body] tr[data-row-kind="sku"]').count() <= 2
         assert_total_preserved("Previous SKU page")
+        page.locator("[data-filters-close]").click()
         assert not errors, errors
         if evidence:
             page.screenshot(path=str(Path(evidence) / "history-sku-fixture-180.png"))
