@@ -170,25 +170,75 @@ def main():
             page.get_by_role("button", name="Предыдущий месяц", exact=True).click()
             assert "март" in page.locator("[data-history-month-label]").inner_text().lower()
             assert page.get_by_role("button", name="Следующий месяц", exact=True).is_enabled()
-            for count in (31, 1, 3, 14, 180):
+            def assert_calendar_geometry():
+                geometry = page.locator("[data-history-popover]").evaluate("""popup => {
+                    const bounds=popup.getBoundingClientRect();
+                    const nodes=[...popup.querySelectorAll('button,input')];
+                    return {viewport:{width:innerWidth,height:innerHeight},
+                        bounds:{left:bounds.left,right:bounds.right,top:bounds.top,bottom:bounds.bottom},
+                        overflow:popup.scrollWidth > popup.clientWidth,
+                        controls:nodes.map(node => {
+                            const r=node.getBoundingClientRect();
+                            const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+                            const range=document.createRange(); range.selectNodeContents(node);
+                            const text=range.getBoundingClientRect();
+                            return {label:node.textContent || node.getAttribute('data-history-date-from') || node.type,
+                                left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+                                hitSelf:hit===node || node.contains(hit), hitTag:hit && hit.outerHTML.slice(0,240),
+                                textFits:!node.textContent || (text.left>=r.left && text.right<=r.right),
+                                overflow:node.scrollWidth > node.clientWidth};
+                        })};
+                }""")
+                box, viewport = geometry["bounds"], geometry["viewport"]
+                assert 0 <= box["left"] < box["right"] <= viewport["width"], geometry
+                assert 0 <= box["top"] < box["bottom"] <= viewport["height"], geometry
+                assert not geometry["overflow"], geometry
+                for control in geometry["controls"]:
+                    assert box["left"] <= control["left"] < control["right"] <= box["right"], geometry
+                    assert box["top"] <= control["top"] < control["bottom"] <= box["bottom"], geometry
+                    assert control["hitSelf"] and control["textFits"] and not control["overflow"], geometry
+                return geometry
+
+            page.get_by_role("button", name="Следующий месяц", exact=True).click()
+            geometry_widths = [390, 624, 960, 1280, 1600]
+            for width in geometry_widths:
+                page.set_viewport_size({"width": width, "height": 900})
                 if page.locator("[data-history-popover]").is_hidden():
                     page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
-                hit_targets = page.locator("[data-history-preset]").evaluate_all("""nodes => nodes.map(n => {
-                    const r=n.getBoundingClientRect(), hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
-                    return {id:n.dataset.historyPreset,rect:{x:r.x,y:r.y,w:r.width,h:r.height},
-                            hit:hit && hit.closest('[data-history-preset]')?.dataset.historyPreset};})""")
-                assert all(item["id"] == item["hit"] for item in hit_targets), hit_targets
-                page.get_by_role("button", name=f"Последние {count} дн. · готовая история", exact=True).click()
-                try:
+                assert_calendar_geometry()
+                screenshot_dir = os.environ.get("WBC_HISTORY_DISPLAY_SCREENSHOT_DIR")
+                if screenshot_dir:
+                    page.screenshot(path=str(Path(screenshot_dir) / ("calendar-" + str(width) + ".png")))
+                page.get_by_role("button", name="Предыдущий месяц", exact=True).click()
+                assert "март" in page.locator("[data-history-month-label]").inner_text().lower()
+                page.get_by_role("button", name="Следующий месяц", exact=True).click()
+                assert "апрель" in page.locator("[data-history-month-label]").inner_text().lower()
+                for count in (31, 1, 3, 14, 180):
+                    if page.locator("[data-history-popover]").is_hidden():
+                        page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
+                    assert_calendar_geometry()
+                    label = str(count) + (" день" if count in (1, 31) else " дня" if count == 3 else " дней")
+                    page.get_by_role("button", name=label, exact=True).click()
                     page.wait_for_function("count => document.querySelectorAll('[data-table-head] th[data-col-id^=\"date:\"]').length === count", arg=count)
-                except Exception as error:
-                    raise AssertionError({"preset": count, "url": page.url, "requests": requests[-4:],
-                        "headers": page.locator('[data-table-head] th[data-col-id^="date:"]').count(),
-                        "hit_targets": hit_targets, "body": page.locator("body").inner_text()[-800:], "errors": errors}) from error
+                    query = parse_qs(urlsplit(requests[-1]).query)
+                    assert query["date_to"] == ["2026-04-20"], (width, count, query)
+                    assert query["date_from"] == [(date(2026, 4, 20) - timedelta(days=count - 1)).isoformat()], (width, count, query)
+                    assert_preferences()
+                page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
+                page.locator("[data-history-date-from]").fill("2026-04-18")
+                page.locator("[data-history-date-to]").fill("2026-04-19")
+                assert_calendar_geometry()
+                page.get_by_role("button", name="Сохранить", exact=True).click()
+                page.wait_for_function("document.querySelectorAll('[data-table-head] th[data-col-id^=\"date:\"]').length === 2")
                 query = parse_qs(urlsplit(requests[-1]).query)
-                assert query["date_to"] == ["2026-04-20"]
-                assert query["date_from"] == [(date(2026, 4, 20) - timedelta(days=count - 1)).isoformat()]
+                assert query["date_from"] == ["2026-04-18"] and query["date_to"] == ["2026-04-19"], (width, query)
                 assert_preferences()
+            for width in (390, 624):
+                page.set_viewport_size({"width": width, "height": 600})
+                page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
+                assert_calendar_geometry()
+                page.get_by_role("button", name="Выбрать диапазон", exact=True).click()
+            page.set_viewport_size({"width": 1280, "height": 720})
             page.locator("[data-snapshot-pilot-expand]").click()
             page.wait_for_function("/SKU: [1-9]/.test(document.querySelector('[data-filter-summary]').textContent)")
             assert_preferences()
@@ -230,7 +280,8 @@ def main():
             browser.close()
         print(json.dumps({"status": "pass", "synthetic_display_only": True, "exact16fields": True,
                           "percent_money_unit": True, "saved_at": True, "calendar": True,
-                          "preset_days": [31, 1, 3, 14, 180],
+                          "preset_days": [31, 1, 3, 14, 180], "calendar_geometry_widths": geometry_widths,
+                          "calendar_save_each_width": True,
                           "private_config_baseline": bool(baseline_path)}), flush=True)
         if os.environ.get("WBC_HISTORY_DISPLAY_PREVIEW") == "1":
             server.entrypoint.handle_sheet_web_vitrina_user_config_request = lambda **kwargs: {
