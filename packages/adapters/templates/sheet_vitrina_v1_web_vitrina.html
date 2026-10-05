@@ -5934,6 +5934,7 @@
         </p>
       </div>
 
+      <p class="panel-meta" data-history-current-unavailable role="status" hidden></p>
       <div class="table-shell is-hidden" data-table-shell>
         <div class="window-v3-loading-overlay" data-window-v3-loading-overlay role="status" aria-live="polite" hidden>Загружаем видимые даты…</div>
         <div class="table-scroll" data-table-scroll>
@@ -23786,6 +23787,16 @@
       loadRefreshButton.hidden = true; loadRefreshButton.disabled = true;
       snapshotPilotToolbarNode.hidden = true;
       filterSummaryNode.hidden = true;
+      const marker = ((historySnapshotState.summary || {}).history_snapshot || {});
+      const missingToday = (marker.unmaterialized_dates || []).length > 0;
+      const notice = document.querySelector("[data-history-current-unavailable]");
+      notice.hidden = !missingToday;
+      notice.textContent = missingToday
+        ? (marker.date_from === marker.date_to
+          ? "За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+          : "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.") : "";
+      setLoadStatusLamp(missingToday ? "текущий день ещё не сохранён" : "готовая история",
+        missingToday ? "warning" : "success");
       renderHistoryBlockFilters();
     }
     function historySnapshotMerged() {
@@ -23896,7 +23907,6 @@
       const renderStart=window.performance.now();
       renderPage(historySnapshotMerged(),{tableFreshness:"fresh",deferSourceStatusAutoLoad:true});
       markFreshTableDisplayed(h.summary); h.busy=false; historySnapshotControls();
-      setLoadStatusLamp("готовая история","success");
       const renderEnd=window.performance.now();
       const paintMs=await measureDoubleAnimationFrame(renderEnd);
       if (!historyBlockIsCurrent(requestId,viewId)) return;
@@ -25316,6 +25326,7 @@
           historySnapshotState.summary = null; historySnapshotState.blocks = new Map(); historySnapshotState.busy = false;
           historySnapshotState.viewId += 1;
           state.composition = null; snapshotPilotToolbarNode.hidden = true;
+          document.querySelector("[data-history-current-unavailable]").hidden = true;
           loadRefreshButton.hidden = true;
           setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));
           setLoadStatusLamp("история недоступна", "warning");
