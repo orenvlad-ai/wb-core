@@ -1053,36 +1053,49 @@ Job for {unit} failed because the control process exited with error code.
 
 def test_sqlite_activation_exact_log_and_receipt() -> None:
     case = recovery.RecoveryCase.SQLITE_ACTIVATION
-    assert recovery.recovery_case(recovery.EXPECTED_ACTIVATION_RELEASE_RUN_ID) is case
-    proof = recovery._prove_failed_stage(sqlite_activation_log(), recovery.EXPECTED_ACTIVATION_GATE_RUN_ID,
-                                         'One-shot deployed release', case=case)
-    assert proof['stage'] == 'change-registry-activation' and proof['exit_status'] == 1
-    for raw in (sqlite_activation_log(merge='a' * 40), sqlite_activation_log(gate=1),
-                sqlite_activation_log(exit_status=255)):
-        try:
-            recovery._prove_failed_stage(raw, recovery.EXPECTED_ACTIVATION_GATE_RUN_ID,
-                                         'One-shot deployed release', case=case)
-        except recovery.RecoveryError:
-            pass
-        else:
-            raise AssertionError('mismatched release log was admitted')
-    expect_reason('failed-stage-not-definite-single-exit1', lambda: recovery._prove_failed_stage(
-        sqlite_activation_log(extra_failure=True), recovery.EXPECTED_ACTIVATION_GATE_RUN_ID,
-        'One-shot deployed release', case=case))
-    receipt = {'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError',
-               'release_kind': 'live_runtime', 'deployed_sha': None, 'pull_request': recovery.EXPECTED_ACTIVATION_PR,
-               'gate_run_id': recovery.EXPECTED_ACTIVATION_GATE_RUN_ID, 'base_sha': '1' * 40,
-               'head_sha': '2' * 40, 'merge_sha': recovery.EXPECTED_ACTIVATION_MERGE_SHA,
-               'operation_id': 'release-v3-exact'}
-    assert recovery._validate_original_receipt(receipt, case=case)['merge_sha'] == recovery.EXPECTED_ACTIVATION_MERGE_SHA
-    expect_reason('original-receipt-not-exact-sqlite-activation', lambda: recovery._validate_original_receipt(
-        {**receipt, 'merge_sha': 'a' * 40}, case=case))
+    for run_id, profile in recovery.SQLITE_ACTIVATION_PROFILES.items():
+        gate, merge = profile['gate_run_id'], profile['merge_sha']
+        assert recovery.recovery_case(run_id) is case
+        proof = recovery._prove_failed_stage(sqlite_activation_log(gate=gate, merge=merge), gate,
+                                             'One-shot deployed release', case=case, release_run_id=run_id)
+        assert proof['stage'] == 'change-registry-activation' and proof['exit_status'] == 1
+        for raw in (sqlite_activation_log(gate=gate, merge='a' * 40),
+                    sqlite_activation_log(gate=1, merge=merge),
+                    sqlite_activation_log(gate=gate, merge=merge, exit_status=255)):
+            try:
+                recovery._prove_failed_stage(raw, gate, 'One-shot deployed release',
+                                             case=case, release_run_id=run_id)
+            except recovery.RecoveryError:
+                pass
+            else:
+                raise AssertionError('mismatched release log was admitted')
+        expect_reason('failed-stage-not-definite-single-exit1', lambda: recovery._prove_failed_stage(
+            sqlite_activation_log(gate=gate, merge=merge, extra_failure=True), gate,
+            'One-shot deployed release', case=case, release_run_id=run_id))
+        receipt = {'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError',
+                   'release_kind': 'live_runtime', 'deployed_sha': None,
+                   'pull_request': profile['pull_request'], 'gate_run_id': gate,
+                   'base_sha': profile.get('base_sha', '1' * 40),
+                   'head_sha': profile.get('head_sha', '2' * 40), 'merge_sha': merge,
+                   'operation_id': 'release-v3-exact'}
+        assert recovery._validate_original_receipt(receipt, case=case, release_run_id=run_id)['merge_sha'] == merge
+        for key in ('pull_request', 'gate_run_id', 'base_sha', 'head_sha', 'merge_sha'):
+            if key in profile:
+                wrong = 1 if isinstance(profile[key], int) else 'a' * 40
+                expect_reason('original-receipt-not-exact-sqlite-activation', lambda key=key, wrong=wrong:
+                    recovery._validate_original_receipt({**receipt, key: wrong}, case=case, release_run_id=run_id))
+        other = next(key for key in recovery.SQLITE_ACTIVATION_PROFILES if key != run_id)
+        expect_reason('original-receipt-not-exact-sqlite-activation', lambda:
+            recovery._validate_original_receipt(receipt, case=case, release_run_id=other))
+    assert recovery.recovery_case(37356285296) is recovery.RecoveryCase.STORAGE_TAIL
+    expect_reason('sqlite-activation-release-not-supported', lambda: recovery._sqlite_activation_profile(37356285296))
 
 
-def test_sqlite_activation_remote_rollback_proof() -> None:
-    unit = f"wb-core-change-registry-activation@{recovery.EXPECTED_ACTIVATION_MERGE_SHA}.service"
-    job = f"crjob_activation_{recovery.EXPECTED_ACTIVATION_MERGE_SHA}"
-    invocation = 'a' * 32
+def test_sqlite_activation_remote_rollback_proof(run_id: int) -> None:
+    profile = recovery.SQLITE_ACTIVATION_PROFILES[run_id]
+    unit = f"wb-core-change-registry-activation@{profile['merge_sha']}.service"
+    job = f"crjob_activation_{profile['merge_sha']}"
+    invocation = profile.get('invocation_id', 'a' * 32)
     stamp = 1790606411873478
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -1102,6 +1115,7 @@ def test_sqlite_activation_remote_rollback_proof() -> None:
             command.write_text(f'#!/bin/sh\n/bin/cat {fixture}\n')
             command.chmod(0o755)
         expected = {'unit': unit, 'job_id': job, 'runtime_dir': str(root),
+                    'invocation_id': profile.get('invocation_id'),
                     'started_at': '2026-09-28T14:37:33Z', 'completed_at': '2026-09-28T14:40:16Z'}
         script = recovery._sqlite_activation_failure_script(expected)
         env = {**os.environ, 'PATH': str(bin_dir) + os.pathsep + os.environ.get('PATH', '')}
@@ -1130,9 +1144,68 @@ def test_sqlite_activation_remote_rollback_proof() -> None:
                             'owner': 'change_registry_observer.py'}, record_invocation='b' * 32), failed]).returncode == 41
         assert run([record({'event': 'sqlite_contention_exhausted', 'phase': 'read_statement', 'exhausted': True,
                             'owner': 'change_registry_observer.py'}), failed]).returncode == 44
-        conn.execute('INSERT INTO change_registry_observer_jobs VALUES (?)', (job,)); conn.commit()
-        assert run([exhausted, failed]).returncode == 47
+        if profile.get('invocation_id'):
+            systemctl.write_text(systemctl.read_text().replace(invocation, 'b' * 32))
+            assert run([exhausted, failed]).returncode == 40
+            systemctl.write_text(systemctl.read_text().replace('b' * 32, invocation))
+        for table, column in (('change_registry_observer_jobs', 'job_id'),
+                              ('change_registry_observer_job_events', 'job_id'),
+                              ('change_registry_observer_leases', 'owner_job_id')):
+            conn.execute(f'INSERT INTO {table} ({column}) VALUES (?)', (job,)); conn.commit()
+            assert run([exhausted, failed]).returncode == 47
+            conn.execute(f'DELETE FROM {table}'); conn.commit()
         conn.close()
+
+
+def test_sqlite_activation_preview_requires_fresh_absence_proof() -> None:
+    from apps.registry_upload_http_entrypoint_hosted_runtime import load_hosted_runtime_target
+
+    target = load_hosted_runtime_target(recovery.TARGET_FILE)
+    originals = (recovery.collect_evidence, recovery.prove_repo_only_descendant,
+                 recovery.collect_prestate, recovery._run_remote_json)
+    try:
+        for run_id, profile in recovery.SQLITE_ACTIVATION_PROFILES.items():
+            merge = profile['merge_sha']
+            unit = f'wb-core-change-registry-activation@{merge}.service'
+            original = {**preview()['source'], **{key: profile[key] for key in
+                        ('pull_request', 'gate_run_id', 'base_sha', 'head_sha', 'merge_sha') if key in profile},
+                        'operation_id': 'release-v3-exact'}
+            failure = {'stage': 'change-registry-activation', 'unit': unit,
+                       'job_started_at': '2026-10-05T18:30:00Z', 'job_completed_at': '2026-10-05T18:33:00Z'}
+            evidence = {'original_receipt': original, 'recovery_case': recovery.RecoveryCase.SQLITE_ACTIVATION.value,
+                        'failure': failure, 'original_receipt_sha256': 'a' * 64,
+                        'gate_plan': {'plan_sha256': 'b' * 64}}
+            recovery.collect_evidence = lambda *_args: evidence
+            recovery.prove_repo_only_descendant = lambda *_args: preview()['runner']
+            recovery.collect_prestate = lambda *_args, **_kwargs: preview()['prestate']
+            proof = {'unit': unit, 'job_id': f'crjob_activation_{merge}',
+                     'invocation_id': profile.get('invocation_id', 'a' * 32),
+                     'job_rows': 0, 'event_rows': 0, 'owned_leases': 0,
+                     'commit_failure_at_us': 1, 'manifest_sha256': 'a' * 64,
+                     'operational_relative_path': 'operational.sqlite3',
+                     'operational_device': 1, 'operational_inode': 2}
+            reads = []
+            def remote(_target, script):
+                reads.append(script)
+                assert unit in script and f'crjob_activation_{merge}' in script
+                assert "?mode=ro" in script and 'PRAGMA query_only=ON' in script
+                if profile.get('invocation_id'):
+                    assert profile['invocation_id'] in script
+                return proof
+            recovery._run_remote_json = remote
+            client = CommentsClient()
+            result = recovery.build_preview(client, run_id, target)
+            assert result['activation_failure_proof'] == proof and len(reads) == 1
+            assert client.values == []  # Preview has not claimed or submitted anything.
+            for key in ('job_rows', 'event_rows', 'owned_leases'):
+                proof[key] = 1
+                expect_reason('sqlite-activation-remote-proof-invalid', lambda:
+                    recovery.build_preview(client, run_id, target))
+                proof[key] = 0
+                assert client.values == []
+    finally:
+        (recovery.collect_evidence, recovery.prove_repo_only_descendant,
+         recovery.collect_prestate, recovery._run_remote_json) = originals
 
 
 def test_sqlite_activation_probe_blocks_metadata_cas_and_replay() -> None:
@@ -1157,13 +1230,18 @@ def test_sqlite_activation_probe_blocks_metadata_cas_and_replay() -> None:
     assert not any(recovery.RECEIPT_MARKER in body for body in client.values)
 
 
-def test_sqlite_activation_exact_tail_success_and_ssh_ambiguity() -> None:
+def test_sqlite_activation_exact_tail_success_and_ssh_ambiguity(run_id: int) -> None:
     from apps.registry_upload_http_entrypoint_hosted_runtime import load_hosted_runtime_target
 
     target = load_hosted_runtime_target(recovery.TARGET_FILE)
-    built = recovery.build_stage_commands(target, recovery.EXPECTED_ACTIVATION_MERGE_SHA,
-                                          'a' * 64, 123, case=recovery.RecoveryCase.SQLITE_ACTIVATION)
-    assert '--expected-sha ' + recovery.EXPECTED_ACTIVATION_MERGE_SHA in built['cleaner_precomplete_probe'][-1]
+    profile = recovery.SQLITE_ACTIVATION_PROFILES[run_id]
+    merge = profile['merge_sha']
+    built = recovery.build_stage_commands(target, merge, 'a' * 64, 123,
+                                          case=recovery.RecoveryCase.SQLITE_ACTIVATION, release_run_id=run_id)
+    assert '--expected-sha ' + merge in built['cleaner_precomplete_probe'][-1]
+    assert 'systemctl start wb-core-change-registry-activation@' + merge in built['activation'][-1]
+    expect_reason('sqlite-activation-target-contract-invalid', lambda: recovery.build_stage_commands(
+        target, 'a' * 40, 'a' * 64, 123, case=recovery.RecoveryCase.SQLITE_ACTIVATION, release_run_id=run_id))
     assert '--phase before_complete' in built['cleaner_precomplete_probe'][-1]
     assert 'normal_activation_tail' not in built
     for activation_status, readback_status, expected_state, expected_calls in (
@@ -1171,6 +1249,7 @@ def test_sqlite_activation_exact_tail_success_and_ssh_ambiguity() -> None:
         (255, 1, 'ambiguous', ['root-readback', 'status', 'auth', 'activation', 'activation-readback']),
     ):
         value = preview()
+        value['release_run_id'] = run_id
         value['recovery_case'] = recovery.RecoveryCase.SQLITE_ACTIVATION.value
         value['failure'] = {'stage': 'change-registry-activation', 'unit': 'exact-unit'}
         value['activation_failure_proof'] = {'job_rows': 0}
@@ -1178,12 +1257,17 @@ def test_sqlite_activation_exact_tail_success_and_ssh_ambiguity() -> None:
         calls, originals = patch_apply(activation_status=activation_status,
                                        activation_readback_status=readback_status)
         original_proof = recovery.collect_sqlite_activation_failure
-        recovery.collect_sqlite_activation_failure = lambda *_args: value['activation_failure_proof']
+        proof_calls = []
+        def selected_proof(_target, _failure, selected_run):
+            proof_calls.append(selected_run)
+            return value['activation_failure_proof']
+        recovery.collect_sqlite_activation_failure = selected_proof
         try:
             result = recovery.apply_recovery(client, value, FINGERPRINT, object())
         finally:
             recovery.collect_sqlite_activation_failure = original_proof
             restore_apply(originals)
+        assert proof_calls == [run_id]
         assert result['state'] == expected_state and calls == expected_calls, (result, calls)
         assert 'restart' not in calls and 'dependencies' not in calls
         assert sum(recovery.CLAIM_MARKER in body for body in client.values) == 1
@@ -1243,9 +1327,12 @@ def main() -> None:
     test_bounded_status_readback_retries_only_read()
     test_safe_remote_failure_diagnostics()
     test_sqlite_activation_exact_log_and_receipt()
-    test_sqlite_activation_remote_rollback_proof()
+    for run_id in recovery.SQLITE_ACTIVATION_PROFILES:
+        test_sqlite_activation_remote_rollback_proof(run_id)
+    test_sqlite_activation_preview_requires_fresh_absence_proof()
     test_sqlite_activation_probe_blocks_metadata_cas_and_replay()
-    test_sqlite_activation_exact_tail_success_and_ssh_ambiguity()
+    for run_id in recovery.SQLITE_ACTIVATION_PROFILES:
+        test_sqlite_activation_exact_tail_success_and_ssh_ambiguity(run_id)
     test_sqlite_activation_proof_drift_and_existing_claim_are_readback_only()
     print("post_merge_release_recovery_smoke: ok")
 
