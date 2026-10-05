@@ -268,9 +268,58 @@ def ensure_publication_schema(conn) -> None:
             "ON CONFLICT(bundle_version,as_of_date) DO UPDATE SET revision=revision+1; END")
 
 
+SKU_GROUPS_TABLE = "sheet_vitrina_v1_sku_groups"
+SKU_GROUPS_LEGACY_COLUMNS = (
+    "group_key", "label", "aliases_json", "is_active", "is_system", "created_at", "updated_at",
+)
+
+
+def _sku_groups_revision_trigger_upgrade(conn):
+    """Recognize only the producer's seven-column -> display_order upgrade.
+
+    This preflight is read-only. Unknown SQL is never replaced merely because
+    its trigger name matches; fresh tables keep the ordinary bootstrap path.
+    """
+    trigger = "ready_input_" + SKU_GROUPS_TABLE + "_update"
+    actual = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)).fetchone()
+    if actual is None:
+        return None
+    columns = tuple(row[1] for row in conn.execute(f'PRAGMA table_info("{SKU_GROUPS_TABLE}")'))
+
+    def sql_for(names):
+        different = " OR ".join(f'old."{column}" IS NOT new."{column}"' for column in names)
+        return (f'CREATE TRIGGER "{trigger}" AFTER UPDATE ON "{SKU_GROUPS_TABLE}" WHEN {different} '
+                f"BEGIN UPDATE {REVISIONS} SET revision=revision+1 WHERE source_table='{SKU_GROUPS_TABLE}'; END")
+
+    def normalized(sql):
+        return "".join(sql.lower().split()).replace('"', '')
+
+    current = sql_for(columns)
+    if normalized(actual[0]) == normalized(current):
+        return None
+    if (columns == (*SKU_GROUPS_LEGACY_COLUMNS, "display_order") and
+            normalized(actual[0]) == normalized(sql_for(SKU_GROUPS_LEGACY_COLUMNS))):
+        return trigger, current
+    raise ValueError("ready_source_revision_trigger_unknown:" + trigger)
+
+
 def ensure_material_revisions(conn) -> None:
     """Also called by the three lazy source-schema owners before their first write."""
     was_in_transaction = conn.in_transaction
+    upgrade = _sku_groups_revision_trigger_upgrade(conn)
+    if upgrade is not None:
+        trigger, sql = upgrade
+        # DDL replacement belongs to this schema owner, and rolls back as a
+        # pair even when invoked inside an existing source transaction.
+        conn.execute("SAVEPOINT ready_sku_groups_trigger_upgrade")
+        try:
+            conn.execute(f'DROP TRIGGER "{trigger}"')
+            conn.execute(sql)
+            conn.execute("RELEASE SAVEPOINT ready_sku_groups_trigger_upgrade")
+        except BaseException:
+            conn.execute("ROLLBACK TO SAVEPOINT ready_sku_groups_trigger_upgrade")
+            conn.execute("RELEASE SAVEPOINT ready_sku_groups_trigger_upgrade")
+            raise
     conn.execute(f"CREATE TABLE IF NOT EXISTS {REVISIONS}(source_table TEXT PRIMARY KEY,revision INTEGER NOT NULL)")
     existing = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table in (*MATERIAL_TABLES, *INVENTORY_PREPARATION_TABLES):
@@ -309,7 +358,7 @@ def material_revisions_schema_ready(conn) -> bool:
             for event in ("insert", "update", "delete")
         ):
             return False
-    return True
+    return _sku_groups_revision_trigger_upgrade(conn) is None
 
 
 def capture_history(conn, bundle_version=None):

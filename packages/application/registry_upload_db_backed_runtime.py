@@ -11955,6 +11955,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if schema_key in _SCHEMA_READY_KEYS:
             return
         was_in_transaction = conn.in_transaction
+        # Preflight the one known source-column trigger upgrade before any
+        # runtime schema mutation. A familiar name is not authority to replace
+        # an unknown alarm body, even on an already upgraded database.
+        from packages.application.ready_publication import _sku_groups_revision_trigger_upgrade
+        _sku_groups_revision_trigger_upgrade(conn)
         # The cleaner extension rebuilds populated legacy registry tables and
         # therefore owns its migration transaction.  Run that one explicit
         # setup before this broad runtime bootstrap starts its own DML.  An
