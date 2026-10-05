@@ -315,6 +315,22 @@ def command_dependency_checks():
             paths=[sibling_source], file_exists=lambda _, p: p in {sibling_source, script})
         check(sibling, [script])
 
+    # Card-rating history launches Chromium even though its name is not a
+    # browser suffix. Both direct selection and the narrow API group need it.
+    history_script = "apps/sheet_vitrina_v1_card_rating_history_smoke.py"
+    for path in (history_script, "packages/adapters/card_rating.py"):
+        rating = build_plan_from_paths(pull_request=36, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: (select_checks.ROOT / p).is_file())
+        check(rating, [history_script])
+        selected = {tuple(command) for command in rating["commands"]
+                    if len(command) > 1 and command[1].endswith("_smoke.py")}
+        assert selected == {
+            ("python3", "apps/sheet_vitrina_v1_card_rating_smoke.py"),
+            ("python3", history_script),
+        }, rating
+        assert rating["groups"] == ["card_rating"], rating
+    print("card-rating history dependencies: direct/group install before browser, narrow checks OK")
+
     # The dependency prerequisite precedes this future candidate file, so model
     # only that absent script while retaining existence checks above.
     direct = build_plan_from_paths(pull_request=30, base=BASE, head=HEAD,

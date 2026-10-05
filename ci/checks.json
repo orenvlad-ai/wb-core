@@ -45,6 +45,7 @@
         "apps/sheet_vitrina_v1_web_vitrina_browser_smoke.py",
         "apps/web_vitrina_snapshot_pilot_smoke.py",
         "apps/web_vitrina_finished_snapshot_smoke.py",
+        "apps/sheet_vitrina_v1_card_rating_history_smoke.py",
         "apps/sheet_vitrina_v1_settings_lazy_browser_smoke.py",
         "apps/sheet_vitrina_v1_settings_sources_sessions_browser_smoke.py",
         "apps/sheet_vitrina_v1_web_vitrina_current_tail_browser_smoke.py",
