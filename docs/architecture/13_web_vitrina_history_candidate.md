@@ -71,3 +71,34 @@ Live smoke на owned native fixture: no-change без construction; actual curr
 Локальный импорт ранее принятого saved31 отдельно измерил только serialization/read: 31 day objects и shared catalog заняли 63,61 MiB; summary79rows 1/3/14/31 — 0,128–0,156 с; первая128SKU31 — 0,162 с. Exact16/static/search parity, исходный SHA/stat и derived file family unchanged. Это не production benchmark и не доказательство независимого compiler на реальных данных. Приватные доказательства находятся вне Git в аудите `ЕДИНАЯ_ИСТОРИЯ_ЭТАП2_2026-10-04`.
 
 Formula manifest/runtime contract и существующий service epoch обновляются вместе по reviewed file content. Новый epoch штатно прогревает source proofs заново и заменяет несовместимый PENDING; перенос старых proofs/refs вручную не предусмотрен. Partial/error portion сохраняет только полные scope entries; pruning происходит после всех потребителей порции, перед fresh publication fence. No-change preflight и ABA revalidation остаются прежними, новый generic retry отсутствует.
+# Автоматическое окно 14 дней
+
+Штатный history parent обновляет только изменённые дни от business-today−13
+до business-today включительно. День определяется `business_time`
+(Asia/Yekaterinburg); расписание таймера в Asia/Tbilisi не меняется.
+Рассчитывается полный native день, без обещания вычисления отдельных метрик.
+
+Редакция storage_version=2 сохраняет исходные object ID, catalog ID и
+epoch/token каждого архивного дня. Общий каталог служит для чтения объединённого
+набора строк, а контекст объекта проверяется по его собственному каталогу.
+Старые ячейки не получают новую формулу или свежий proof. `CURRENT` меняется
+атомарно после завершения нужных дней и свежей проверки источника; незаконченный
+`PENDING` сохраняет предыдущую опубликованную редакцию.
+
+`backfill_required` перечисляет известные изменения входных proofs вне окна;
+они не блокируют свежие дни и не снимаются обычным обновлением.
+`archive_not_reevaluated` отдельно обозначает архив, не проверенный под новым
+контекстом, без утверждения об изменении всех его значений. Оба поля доступны
+в результате parent и `history_snapshot.archive_status` читателя.
+Архивный перерасчёт запускается только с явной парой `--backfill-from YYYY-MM-DD
+--backfill-to YYYY-MM-DD` внутри объявленного source range, под прежними
+admission, singleflight, source/fence и resource guards.
+
+Отсутствующая в исходном дневном каталоге новая строка показывается как
+`null/—`, «Не отслеживалась», без нулей. Для будущей новой метрики можно задать
+фиксированный `metric_start_dates` в проверенном runtime contract: mapping
+metric_key → ISO date. Дата не выводится из текущего времени reader.
+Существующая метрика без объявленной даты начала сохраняет native missing
+semantics; сохранённые наблюдения внутри окна не отбрасываются.
+Несовместимые идентичности одинакового row ID или статические колонки дают
+явный отказ вместо молчаливого смешивания.

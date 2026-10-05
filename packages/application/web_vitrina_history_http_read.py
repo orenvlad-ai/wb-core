@@ -80,6 +80,7 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
             if label:
                 group_labels[catalog_group_id] = str(label)
     marker["sku_group_labels"] = group_labels
+    marker["archive_status"] = page.get("archive_status", {})
     marker.update(date_from=date_from, date_to=date_to, group_id=group_id or "",
                   current_preliminary=today in page["dates"], saved_at=saved_at)
     dates = sorted(edition["days"])

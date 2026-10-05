@@ -661,11 +661,16 @@ class LiveNativeAdapter:
 
 
 def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistoryStore,
-                        max_recomputes: int = 31, deadline_monotonic=None) -> dict:
+                        max_recomputes: int = 31, deadline_monotonic=None,
+                        rolling14: bool = False, backfill_dates: list[str] | None = None,
+                        metric_start_dates: dict[str, str] | None = None) -> dict:
     if Path(runtime.db_path).resolve() != adapter.db_path or Path(runtime.runtime_dir).resolve() != adapter.runtime_dir:
         raise ValueError("runtime differs from live source bridge")
     if store.root.resolve().is_relative_to(adapter.runtime_dir):
         raise ValueError("derived store must be separate from native runtime")
+    business_day = current_business_date_iso(adapter.now)
+    if rolling14 and any(day > business_day for day in adapter.days):
+        raise LiveSourceUnavailable("history_future_date_unsupported")
     calls_before = adapter.capture_calls
     bootstrap_reads = {"captures": 0, "bytes": 0, "queries": 0, "temporal_proofs_loaded": 0}
     configured_capture_seconds = adapter.max_capture_seconds
@@ -700,20 +705,27 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
     initial_fence = adapter.fence
     pointer = store._current()
     old = store.edition() if pointer else None
+    rolling_status = store.rolling_status(vector, business_day, backfill_dates or []) if rolling14 else None
+    writable_days = store.rolling_scope(vector, business_day, backfill_dates or []) if rolling14 else set(adapter.days)
     if old:
         for day, available in adapter.availability.items():
-            if not available and day in old["days"]:
+            if not available and day in writable_days and day in old["days"]:
                 with closing(store._open_day(store.root / "objects" / (old["days"][day] + ".sqlite3"))) as conn:
                     unit = json.loads(conn.execute("SELECT payload FROM metadata").fetchone()[0])
                 if unit["accepted_ready_available"]:
                     # No producer intent distinguishes retention from deletion.
                     # Preserve accepted derived history until that intent exists.
                     raise LiveSourceUnavailable("accepted_ready_source_disappeared:" + day)
-    if old and old["consumed"] == vector:
+    if old and (not rolling_status["dirty_dates"] and not store.start_dates_changed(old,
+            metric_start_dates or {}) if rolling14 else old["consumed"] == vector):
         return {"status": "unchanged", "recomputes": 0, "compiler_constructed": False,
                 "edition_id": pointer["current"], "source_reads": adapter.stats,
-                "bootstrap_source_reads": bootstrap_reads}
-    catalog = _read(store.root / "catalogs" / (old["catalog"] + ".json")) if old else None
+                "bootstrap_source_reads": bootstrap_reads, **(rolling_status or {})}
+    # The merged reader catalog may include retired archive-only rows. A day
+    # compiler may reuse only an actual day catalog, never that display union.
+    catalog_id = (store.day_catalogs(old)[max(old["days"])] if rolling14 and old
+                  else old["catalog"] if old else None)
+    catalog = _read(store.root / "catalogs" / (catalog_id + ".json")) if catalog_id else None
     with ExitStack() as batch:
         adapter.require_source_families()
         batch.enter_context(window_read_context(runtime.db_path, runtime_dir=runtime.runtime_dir))
@@ -737,7 +749,9 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
                 return current if adapter.fence == initial_fence else {**current, "publication_fence": "changed"}
             result = store.update(vector=vector, catalog=compiler.catalog, compile_day=compiler.compile,
                 revalidate=revalidate, max_recomputes=max_recomputes,
-                deadline_monotonic=deadline_monotonic, expected_base=pointer["current"] if pointer else None)
+                deadline_monotonic=deadline_monotonic, expected_base=pointer["current"] if pointer else None,
+                business_date=business_day if rolling14 else None, backfill_dates=backfill_dates,
+                metric_start_dates=metric_start_dates)
         finally:
             # Partial/error portions preserve complete scope proofs. They are
             # validated against fresh inputs before reuse by a later pin.
