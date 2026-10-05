@@ -72,25 +72,27 @@ def check_complete_sku_pages():
     source = TEMPLATE.read_text()
     helpers = source[source.index('    function historyBlockGroups()'):source.index('    function renderHistoryBlockFilters()')]
     loader = source[source.index('    function historyBlockIsCurrent('):source.index('    function renderSelectedHistoryBlocks()')]
+    page_loader = source[source.index('    async function historySnapshotPage('):source.index('    function historyBlockGroups()')]
     script = r'''const assert=require('node:assert/strict');
 const state={requestSequence:7}; let HISTORY_CLIENT_BYTES=100000;
-const groups=[{group_id:'group:clean',label:'Clean',sku_rows:213,total_available:true},
- {group_id:'group:matte',label:'Matte',sku_rows:142,total_available:true}];
+const groups=[{group_id:'group:clean',label:'Clean',sku_rows:710,total_available:true},
+ {group_id:'group:matte',label:'Matte',sku_rows:568,total_available:true}];
 const historySnapshotState={requestId:7,viewId:3,edition:'e',summary:{history_snapshot:{reporting_groups:groups},historyReplyBytes:20},blocks:new Map()};
 function renderHistoryBlockFilters(){}
 function skuClusterIdentity(row){return row.row_id.split('|')[0];}
-''' + helpers + loader + r'''
-const h=historySnapshotState; let calls=[],cancel=false,broken=false;
+''' + helpers + page_loader + loader + r'''
+const h=historySnapshotState; let calls=[],cancel=false,broken=false,replyCeiling=512;
 const dataset={};
-for(const [group,n] of [['group:clean',3],['group:matte',2]]){
+for(const [group,n] of [['group:clean',10],['group:matte',8]]){
  dataset[group]=Array.from({length:n*71},(_,i)=>({row_id:'SKU:'+group+':'+Math.floor(i/71)+'|metric:'+i%71,row_kind:'sku',group_id:group,section_id:'s'}));
 }
-async function historySnapshotPage(scope,period,edition,offset,limit,id){
+async function historySnapshotFetch(scope,period,edition,offset,limit,id){
  calls.push({scope,id,offset,limit,edition});
+ if(scope==='sku'&&limit>replyCeiling){const error=new Error('history_reply_limit');error.code='history_reply_limit';throw error;}
  if(cancel && scope==='sku' && offset>0){h.viewId++;cancel=false;}
  const all=scope==='sku'?dataset[id]:[{row_id:scope+id,row_kind:scope,group_id:id,section_id:'s'}];
  const rows=all.slice(offset,offset+limit),next=offset+rows.length<all.length?offset+rows.length:null;
- return {limit,payload:{table_surface:{rows},history_snapshot:{total_rows:all.length,next_offset:broken?null:next},historyReplyBytes:rows.length*10,historyReadMetrics:{}}};
+ return {table_surface:{rows},history_snapshot:{total_rows:all.length,next_offset:broken?null:next},historyReplyBytes:rows.length*10,historyReadMetrics:{}};
 }
 (async()=>{
  const all={total:true,totals:groups.map(g=>g.group_id),skus:groups.map(g=>g.group_id)};
@@ -102,11 +104,11 @@ async function historySnapshotPage(scope,period,edition,offset,limit,id){
   assert.deepEqual(rows.map(r=>r.row_id),dataset[g.group_id].map(r=>r.row_id));
   const identities=new Map();
   for(const row of rows){const sku=row.row_id.split('|')[0];identities.set(sku,(identities.get(sku)||0)+1);}
-  assert.equal(identities.size,g.group_id==='group:clean'?3:2);
+  assert.equal(identities.size,g.group_id==='group:clean'?10:8);
   assert([...identities.values()].every(count=>count===71));
-  assert.deepEqual(calls.filter(c=>c.id===g.group_id&&c.scope==='sku').map(c=>c.offset),[0,128]);
+  assert.deepEqual(calls.filter(c=>c.id===g.group_id&&c.scope==='sku').map(c=>c.offset),[0,512]);
  }
- assert(calls.every(c=>c.edition==='e'));assert(h.progress.includes('Matte'));assert.equal(h.progressRows,142);assert.equal(h.progressTotal,142);
+ assert(calls.every(c=>c.edition==='e'));assert(h.progress.includes('Matte'));assert.equal(h.progressRows,568);assert.equal(h.progressTotal,568);
  calls=[];assert(await loadSelectedHistoryBlocks({total:true,totals:[],skus:[]},7,3));
  assert(await loadSelectedHistoryBlocks(all,7,3));assert.equal(calls.length,0);
  // New period/edition clears cache before fetching: identical identities get fresh rows.
@@ -125,14 +127,26 @@ async function historySnapshotPage(scope,period,edition,offset,limit,id){
  await assert.rejects(loadSelectedHistoryBlocks(all,7,3),/Слишком большой объём/);
  assert.equal(h.blocks,completeBefore);assert.equal(h.selection,selectedBefore);assert.equal(h.loadedBytes,bytesBefore);
  HISTORY_CLIENT_BYTES=100000;assert(await loadSelectedHistoryBlocks(all,7,3));
- HISTORY_CLIENT_BYTES=3400;
+ HISTORY_CLIENT_BYTES=8000;
  assert(await loadSelectedHistoryBlocks({total:true,totals:[],skus:['group:clean']},7,3));
  assert(!h.blocks.has(historyBlockKey('sku','group:matte'))); // optional cache evicted before exceeding the budget
  assert.equal(h.loadedBytes,20+[...h.blocks.values()].reduce((sum,b)=>sum+b.bytes,0));
  assert(h.loadedBytes<=HISTORY_CLIENT_BYTES);
- HISTORY_CLIENT_BYTES=100000;broken=true;
+ // Use the actual adaptive page helper: a rejected 512 page halves at the
+ // same pinned offset, then every subsequent page keeps the safe 128 limit.
+ HISTORY_CLIENT_BYTES=100000;replyCeiling=128;calls=[];
+ const fallback=await fetchHistoryBlock('sku','group:clean',7,3);
+ assert.deepEqual(fallback.rows.map(r=>r.row_id),dataset['group:clean'].map(r=>r.row_id));
+ assert.deepEqual(calls.slice(0,3).map(c=>[c.offset,c.limit]),[[0,512],[0,256],[0,128]]);
+ assert(calls.slice(2).every(c=>c.limit===128&&c.edition==='new'));
+ assert.deepEqual(calls.slice(2).map(c=>c.offset),[0,128,256,384,512,640]);
+ assert.equal(fallback.requests,6);
+ replyCeiling=0;calls=[];
+ await assert.rejects(fetchHistoryBlock('sku','group:clean',7,3),e=>e.code==='history_reply_limit');
+ assert.equal(calls.at(-1).limit,1);assert.equal(calls.length,10);
+ replyCeiling=512;broken=true;
  await assert.rejects(fetchHistoryBlock('sku','group:clean',7,3),/не полностью/);
- console.log(JSON.stringify({status:'pass',complete_sku_identities:5,metric_rows_per_sku:71,transport_boundary_inside_sku:true,toggle_cache:true,period_reset:true,cancellation:true,bounded_atomic_failure:true}));
+ console.log(JSON.stringify({status:'pass',complete_sku_identities:18,metric_rows_per_sku:71,initial_transport_limit:512,adaptive_reply_limit_fallback:true,transport_boundary_inside_sku:true,toggle_cache:true,period_reset:true,cancellation:true,bounded_atomic_failure:true}));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''
     with tempfile.TemporaryDirectory(prefix='wbc-complete-sku-') as temp:
@@ -164,7 +178,7 @@ def serve():
         ctr=next((r for r in sku_metrics if any(v[0]==indices['metric_key'] and v[1]=='ctr' for v in r['values'])),None)
         if ctr is None:
             ctr=deepcopy(sku_metrics[0]);ctr['row_id']=first_sku+'|ctr';set_value(ctr,'metric_key','ctr');sku_metrics.append(ctr)
-        set_value(ctr,'metric_label','CTR')
+        set_value(ctr,'metric_label','CTR в воронке')
         from packages.application.web_vitrina_compact_table import CELL_DEFAULTS
         for cell in ctr['values']:
             if table['columns'][cell[0]]['id'].startswith('date:'):
@@ -177,7 +191,7 @@ def serve():
                 set_value(row,'group',label);set_value(row,'scope_key','GROUP:'+key);set_value(row,'scope_label',label)
                 table['rows'].append(row)
             expected['group:'+key]=[]
-            for n in range(9):
+            for n in range(34):
                 nm=1000+group_index*100+n
                 for original in sku_metrics:
                     row=deepcopy(original);row['row_id']='SKU:'+str(nm)+'|'+original['row_id'].split('|')[-1];row['group_id']='group:'+key
@@ -188,20 +202,25 @@ def serve():
         store=HistoryStore(Path(directory)/'history')
         import_finished_table(store,table,accepted_ready={d:True for d in ['2026-04-19','2026-04-20']})
         config={'status':'ok','revision':0,'config':{}}
+        transport={'sku_reply_ceiling':512}
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args):pass
             def do_GET(self):
-                path=urlsplit(self.path)
+                path=urlsplit(self.path);status=200
                 if path.path=='/sheet-vitrina-v1/vitrina':
                     body=_render_sheet_vitrina_web_vitrina_ui(read_path='/read',operator_path='/operator',refresh_path='/refresh',job_path='/job',history_snapshots_configured=True).encode()
                     mime='text/html; charset=utf-8'
                 elif path.path=='/read':
                     q={k:v[0] for k,v in parse_qs(path.query).items()}
-                    body=json.dumps(read_history_page(store,date_from=q['date_from'],date_to=q['date_to'],scope=q['scope'],edition_id=q.get('edition_id'),group_id=q.get('group_id'),offset=int(q.get('offset',0)),limit=int(q.get('limit',128))),ensure_ascii=False).encode();mime='application/json'
+                    limit=int(q.get('limit',128));mime='application/json'
+                    if q['scope']=='sku' and limit>transport['sku_reply_ceiling']:
+                        status=503;body=b'{"error":"history_reply_limit"}'
+                    else:
+                        body=json.dumps(read_history_page(store,date_from=q['date_from'],date_to=q['date_to'],scope=q['scope'],edition_id=q.get('edition_id'),group_id=q.get('group_id'),offset=int(q.get('offset',0)),limit=limit),ensure_ascii=False).encode()
                 elif path.path.endswith('.css'):
                     body=(ROOT/'packages/adapters/templates/sheet_vitrina_v1_ui_system.css').read_bytes();mime='text/css'
                 else:body=json.dumps(config).encode();mime='application/json'
-                self.send_response(200);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+                self.send_response(status);self.send_header('Content-Type',mime);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
             def do_POST(self):
                 body=self.rfile.read(int(self.headers.get('Content-Length','0')))
                 if 'user-config' in self.path:
@@ -212,14 +231,14 @@ def serve():
         if '--browser' in sys.argv:
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             try:
-                check_browser_complete_groups('http://127.0.0.1:'+str(server.server_port),expected)
+                check_browser_complete_groups('http://127.0.0.1:'+str(server.server_port),expected,transport)
             finally:server.shutdown();thread.join();server.server_close()
         else:
             try:server.serve_forever()
             finally:server.server_close()
 
 
-def check_browser_complete_groups(base, expected):
+def check_browser_complete_groups(base, expected, transport):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser=p.chromium.launch(headless=True);page=browser.new_page();errors=[];requests=[]
@@ -237,9 +256,14 @@ def check_browser_complete_groups(base, expected):
         page.locator('[data-filters-apply]').click()
         page.wait_for_function('historySnapshotState.busy === false && historySnapshotState.selection.skus.length === 3')
         for group,ids in expected.items():
-            assert len(ids)>128, {'group':group,'metricrows':len(ids)}
+            assert len(ids)>512, {'group':group,'metricrows':len(ids)}
             actual=page.evaluate("id => historySnapshotState.blocks.get(historyBlockKey('sku',id)).rows.map(row=>row.row_id)",group)
             assert actual==ids, {'group':group,'expected':len(ids),'actual':len(actual)}
+            from urllib.parse import parse_qs, urlsplit
+            pages=[parse_qs(urlsplit(url).query) for url in requests
+                if 'scope=sku' in url and parse_qs(urlsplit(url).query).get('group_id')==[group]]
+            assert [page['offset'][0] for page in pages]==['0','512'],pages
+            assert all(page['limit']==['512'] for page in pages),pages
         scopes=page.locator('[data-table-body] tr[data-row-scope-key]').evaluate_all("rows=>[...new Set(rows.map(r=>r.dataset.rowScopeKey))]")
         wanted=['TOTAL']
         for group in page.evaluate('historyBlockGroups().map(g=>g.group_id)'):
@@ -249,6 +273,13 @@ def check_browser_complete_groups(base, expected):
         ctr_caption=page.locator('[data-table-body] td[data-metric-key="ctr"][data-col-id="metric_label"] .metric-label-text').first
         assert ctr_caption.inner_text()=='Открытия / показы выдачи, %'
         assert 'может превышать 100%' in ctr_caption.get_attribute('title')
+        ctr_label_cell=ctr_caption.locator('xpath=ancestor::td')
+        explanation=page.evaluate("webVitrinaMetricExplanation('ctr')")
+        assert explanation in ctr_label_cell.get_attribute('title')
+        assert 'Открытия / показы выдачи, %' in ctr_label_cell.get_attribute('title')
+        assert 'CTR в воронке' not in ctr_label_cell.get_attribute('title')
+        assert ctr_label_cell.get_attribute('aria-label')==ctr_label_cell.get_attribute('title')
+        assert page.evaluate("historySnapshotState.blocks.get(historyBlockKey('sku','group:clean')).rows.find(r=>r.values.metric_key.value==='ctr').values.metric_label.value")=='CTR в воронке'
         displayed_ctr=page.locator('[data-table-body] td[data-metric-key="ctr"][data-col-id^="date:"]').first.inner_text()
         assert '%' in displayed_ctr and float(re.sub(r'[\s\u00a0%]','',displayed_ctr).replace(',','.'))==1100,displayed_ctr
         assert page.evaluate("historySnapshotState.blocks.get(historyBlockKey('sku','group:clean')).rows.find(r=>r.values.metric_key.value==='ctr').values['date:2026-04-20'].value")==11
@@ -265,17 +296,22 @@ def check_browser_complete_groups(base, expected):
         page.wait_for_function('historySnapshotState.busy === false && historySnapshotState.selection.skus.length === 3')
         assert len(requests)==before
         # The real period-load entrypoint clears complete cached blocks and reads the new date range.
-        before=len(requests)
+        before=len(requests);transport['sku_reply_ceiling']=128
         page.evaluate("async () => { history.replaceState(null,'','?history_mode=explicit&date_from=2026-04-20&date_to=2026-04-20'); state.requestSequence+=1; await loadHistorySnapshot(state.requestSequence); }")
         assert any('scope=sku' in url for url in requests[before:])
         assert all('date_from=2026-04-20' in url and 'date_to=2026-04-20' in url for url in requests[before:])
         assert page.locator('[data-table-head] th[data-col-id^="date:"]').count()==1
         for group,ids in expected.items():
             assert page.evaluate("id => historySnapshotState.blocks.get(historyBlockKey('sku',id)).rows.length",group)==len(ids)
+            pages=[parse_qs(urlsplit(url).query) for url in requests[before:]
+                if 'scope=sku' in url and parse_qs(urlsplit(url).query).get('group_id')==[group]]
+            assert [(page['offset'][0],page['limit'][0]) for page in pages[:3]]==[('0','512'),('0','256'),('0','128')],pages
+            assert all(page['limit']==['128'] for page in pages[2:]),pages
+            assert [page['offset'][0] for page in pages[2:]]==[str(offset) for offset in range(0,len(ids),128)],pages
         assert not errors,errors
         evidence=os.environ.get('WBC_HISTORY_UI_EVIDENCE_DIR')
         if evidence:page.screenshot(path=str(Path(evidence)/'complete-all-sku-groups-fixture.png'))
-        print(json.dumps({'status':'pass','fixture_only':True,'selected_groups':3,'sku_identities':27,'metric_rows_per_group':{k:len(v) for k,v in expected.items()},'all_metric_rows_complete':True,'group_total_then_sku_order':True,'toggle_cache':True,'period_reset_real_loader':True,'retained_ctr_caption_tooltip_and_1100_preserved':True}))
+        print(json.dumps({'status':'pass','fixture_only':True,'selected_groups':3,'sku_identities':102,'metric_rows_per_group':{k:len(v) for k,v in expected.items()},'all_metric_rows_complete':True,'initial_transport_limit':512,'http_reply_limit_fallback_512_256_128':True,'group_total_then_sku_order':True,'toggle_cache':True,'period_reset_real_loader':True,'retained_ctr_caption_tooltip_and_1100_preserved':True,'old_snapshot_ctr_label_td_title_and_aria_explained':True}))
         browser.close()
 
 
