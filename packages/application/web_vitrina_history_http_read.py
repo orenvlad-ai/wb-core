@@ -31,9 +31,10 @@ def _history_metric_label(row):
 
 def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=None,
                       offset=0, limit=64, group_id=None):
+    today = current_business_date_iso()
     page = store.read(date_from=date_from, date_to=date_to, scope=scope,
         edition_id=edition_id, offset=offset, limit=limit, group_id=group_id,
-        deadline_monotonic=time.monotonic() + 10)
+        deadline_monotonic=time.monotonic() + 10, business_today=today)
     edition = store.edition(page["edition_id"])
     catalog = _read(store.root / "catalogs" / (edition["catalog"] + ".json"))
     if digest(catalog) != edition["catalog"]:
@@ -67,10 +68,9 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
         groups.setdefault(key, []).append(row["row_id"])
     groupings = [{"grouping_id": section + "|" + group, "section_id": section,
                   "group_id": group, "row_ids": ids} for (section, group), ids in groups.items()]
-    today = current_business_date_iso()
     saved_at = datetime.fromtimestamp((store.root / "editions" /
         (page["edition_id"] + ".json")).stat().st_mtime, timezone.utc).isoformat()
-    marker = {k: page[k] for k in ("edition_id", "scope", "offset", "next_offset", "total_rows", "availability", "scope_totals", "sku_group_totals")}
+    marker = {k: page[k] for k in ("edition_id", "scope", "offset", "next_offset", "total_rows", "availability", "scope_totals", "sku_group_totals", "unmaterialized_dates")}
     group_labels = {}
     for row in catalog["rows"].values():
         catalog_group_id = row.get("group_id", "")
@@ -129,7 +129,11 @@ def read_history_page(store, *, date_from, date_to, scope="summary", edition_id=
             "available_date_min": dates[0], "available_date_max": dates[-1],
             "current_mode": "period", "selected_date_from": date_from, "selected_date_to": date_to,
             "default_as_of_date": today, "default_date_from": date_from, "default_date_to": date_to,
-            "status_text": "Готовая история. Качество и полнота указаны в ячейках; текущий день предварительный.",
+            "status_text": (("За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+                if date_from == date_to else
+                "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.")
+                if page["unmaterialized_dates"] else
+                "Готовая история. Качество и полнота указаны в ячейках; текущий день предварительный."),
             "preset_options": [], "supported_query_mode": "history_mode_explicit_date_window"},
         "table_surface": {**presentation, "columns": columns, "rows": rows,
             "groupings": groupings, "total_row_count": page["total_rows"], "returned_row_count": len(rows),

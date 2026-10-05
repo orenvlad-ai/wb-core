@@ -5934,6 +5934,7 @@
         </p>
       </div>
 
+      <p class="panel-meta" data-history-current-unavailable role="status" hidden></p>
       <div class="table-shell is-hidden" data-table-shell>
         <div class="window-v3-loading-overlay" data-window-v3-loading-overlay role="status" aria-live="polite" hidden>Загружаем видимые даты…</div>
         <div class="table-scroll" data-table-scroll>
@@ -7736,6 +7737,8 @@
     const AUTH_DISCOUNT_OLD_LOGICAL_ID = "sku::effective_nonwallet_discount";
     const AUTH_DISCOUNT_LOGICAL_ID = "pair::avg_effective_nonwallet_discount::effective_nonwallet_discount";
     const AUTH_DISCOUNT_EXPLANATION = "От цены продавца после скидки к цене покупателя без WB Кошелька. Не отдельная скидка WB.";
+    const WB_OPEN_IMPRESSION_CAPTION = "Открытия / показы выдачи, %";
+    const WB_OPEN_IMPRESSION_EXPLANATION = "Показатель WB: открытия карточки / показы в выдаче. Открытия по прямым ссылкам и другим путям могут не входить в показы, поэтому значение может превышать 100%. Это не доля кликов одной аудитории.";
     const INVENTORY_PLANNING_STATIC_SKU_METRIC_KEYS = new Set([
       "inventory_wb_total_qty_v1",
       "inventory_wb_effective_qty_v1",
@@ -9148,8 +9151,6 @@
     });
     filtersRailNode.addEventListener("click", function(event) {
       if (event.target === filtersRailNode) cancelBlockFilters();
-      const page = event.target.closest("[data-block-page]");
-      if (page) void loadHistorySnapshotSku(page.dataset.blockPage, page.dataset.blockGroup);
     });
     filtersRailNode.addEventListener("change", function(event) {
       const input = event.target, h = historySnapshotState;
@@ -12136,10 +12137,27 @@
       }) || null;
     }
 
+    function webVitrinaMetricCaption(metricKey, fallback) {
+      const label=String(fallback || metricKey || "");
+      if (metricKey === "ctr") return WB_OPEN_IMPRESSION_CAPTION;
+      if (["total_ads_sum","total_ads_sum_price"].includes(metricKey) && !label.includes("₽")) return label + ", ₽";
+      return label;
+    }
+
+    function webVitrinaMetricExplanation(metricKey) {
+      if (metricKey === "ctr") return WB_OPEN_IMPRESSION_EXPLANATION;
+      if (["avg_addToCartConversion","avg_cartToOrderConversion"].includes(metricKey)) return "Среднее значение по SKU с доступными данными.";
+      if (metricKey === AUTH_DISCOUNT_SKU_KEY || metricKey === AUTH_DISCOUNT_TOTAL_KEY) return AUTH_DISCOUNT_EXPLANATION;
+      return "";
+    }
+
     function metricFilterOptions(payload) {
       const control = metricFilterControl(payload);
       return ((control && control.options) || []).filter(function(option) {
         return String((option && option.value) || "") && String(option.value) !== ALL_VALUE;
+      }).map(function(option) {
+        const label=webVitrinaMetricCaption(option.value,option.label);
+        return label !== option.label ? Object.assign({},option,{label:label}) : option;
       });
     }
 
@@ -14514,7 +14532,8 @@
 
     function renderUnifiedMetricConfigRow(record) {
       const logicalMetricId = String(record.logicalId || "");
-      const label = String(record.label || logicalMetricId);
+      const captionKey=record.skuKey === "ctr" ? "ctr" : (record.totalKey || record.skuKey);
+      const label = webVitrinaMetricCaption(captionKey,record.label || logicalMetricId);
       const groupLabel = String(record.sectionLabel || "Без секции");
       const status = unifiedMetricDisplayStatus(logicalMetricId);
       const selectionActive = metricPresentationSelectionMode();
@@ -14534,7 +14553,7 @@
         selectionActive ? '<input class="metrics-config-select-checkbox" type="checkbox" data-metric-selection-checkbox data-metric-config-key="' + escapeHtml(logicalMetricId) + '" aria-label="' + escapeHtml("Выбрать: " + label) + '"' + (selected ? " checked" : "") + ">" : "",
         '<span class="metrics-config-drag-handle" draggable="true" role="button" tabindex="0" aria-label="' + escapeHtml("Перетащить метрику: " + label) + '" data-metric-drag-handle data-metric-config-key="' + escapeHtml(logicalMetricId) + '" title="Перетащить метрику">⋮⋮</span>',
         '<span class="metrics-config-accent" aria-hidden="true"></span>',
-        '<span class="metrics-config-label" title="' + escapeHtml(record.skuKey === AUTH_DISCOUNT_SKU_KEY ? AUTH_DISCOUNT_EXPLANATION : label) + '">' + escapeHtml(label) + '</span>',
+        '<span class="metrics-config-label" title="' + escapeHtml(webVitrinaMetricExplanation(captionKey) || label) + '">' + escapeHtml(label) + '</span>',
         availabilityBadge,
         "</span>",
         '<span class="metrics-config-group-badge" role="cell" title="' + escapeHtml(groupLabel) + '">' + escapeHtml(groupLabel) + '</span>',
@@ -17743,7 +17762,9 @@
       if (column.id === "metric_label") {
         const scopeId = rowMetricPresentationScopeId(row);
         const metricKey = String(cellValue(row, "metric_key") || "");
-        const content = '<span class="metric-label-text"' + ((metricKey === AUTH_DISCOUNT_SKU_KEY || metricKey === AUTH_DISCOUNT_TOTAL_KEY) ? ' title="' + escapeHtml(AUTH_DISCOUNT_EXPLANATION) + '"' : '') + '>' + escapeHtml(formatCellValue(cell)) + '</span>';
+        const explanation = webVitrinaMetricExplanation(metricKey);
+        const caption = webVitrinaMetricCaption(metricKey,formatCellValue(cell));
+        const content = '<span class="metric-label-text"' + (explanation ? ' title="' + escapeHtml(explanation) + '"' : '') + '>' + escapeHtml(caption) + '</span>';
         const collapsedMetricKeys = metricAnchorCollapsedMetricKeys(scopeId, metricKey);
         const hiddenCount = collapsedMetricKeys.length;
         if (hiddenCount > 0) {
@@ -23655,8 +23676,8 @@
     // All row pages repeat the full selected range and one edition. No column paging.
     const historySnapshotState = {summary: null, edition: "", requestId: 0, viewId: 0,
       blocks: new Map(), selection: {total:true,totals:[],skus:[]}, draft: null,
-      loadedBytes: 0, busy: false, error: ""};
-    const HISTORY_CLIENT_BYTES = 64 * 1024 * 1024;
+      loadedBytes: 0, busy: false, error: "", progress: ""};
+    const HISTORY_CLIENT_BYTES = 128 * 1024 * 1024;
     function historySnapshotEnabled() {
       return WEB_VITRINA_CONFIG.history_snapshots_configured === true;
     }
@@ -23769,12 +23790,12 @@
       groups.filter(function(g) { return h.selection.skus.includes(g.group_id); }).forEach(function(g) {
         const block = h.blocks.get(historyBlockKey("sku",g.group_id));
         if (!block) return;
-        html += '<div class="block-sku-page"><span>' + escapeHtml(g.label) + ' · строки SKU ' + (block.rows.length ? (block.offset + 1) + '–' + (block.offset + block.rows.length) : '0') + ' из ' + block.total + '</span>' +
-          '<button class="button secondary" type="button" data-block-page="previous" data-block-group="' + escapeHtml(g.group_id) + '" aria-label="Предыдущие SKU: ' + escapeHtml(g.label) + '"' + (block.pageIndex <= 0 || h.busy ? ' disabled' : '') + '>Назад</button>' +
-          '<button class="button secondary" type="button" data-block-page="next" data-block-group="' + escapeHtml(g.group_id) + '" aria-label="Следующие SKU: ' + escapeHtml(g.label) + '"' + (block.next === null || h.busy ? ' disabled' : '') + '>Далее</button></div>';
+        html += '<div class="block-sku-page"><span>' + escapeHtml(g.label) + ' · загружено ' + block.skuCount + ' SKU</span></div>';
       });
-      html += '</div><p class="block-filter-note" data-block-feedback role="status">' + escapeHtml(h.busy ? 'Загружаем выбранные блоки…' : (h.error || '')) + '</p>';
+      html += '</div><p class="block-filter-note" data-block-feedback role="status">' + escapeHtml(h.busy ? (h.progress || 'Загружаем выбранные блоки…') : (h.error || '')) + '</p>';
       node.innerHTML = html;
+      node.setAttribute("data-history-block-loaded-rows",String(h.progressRows || 0));
+      node.setAttribute("data-history-block-total-rows",String(h.progressTotal || 0));
       const allNode = node.querySelector('[data-block-master="all"]');
       allNode.indeterminate = !all && (draft.total || draft.totals.length > 0 || draft.skus.length > 0);
       node.querySelector('[data-block-master="sku"]').indeterminate = !allSku && draft.skus.length > 0;
@@ -23786,6 +23807,16 @@
       loadRefreshButton.hidden = true; loadRefreshButton.disabled = true;
       snapshotPilotToolbarNode.hidden = true;
       filterSummaryNode.hidden = true;
+      const marker = ((historySnapshotState.summary || {}).history_snapshot || {});
+      const missingToday = (marker.unmaterialized_dates || []).length > 0;
+      const notice = document.querySelector("[data-history-current-unavailable]");
+      notice.hidden = !missingToday;
+      notice.textContent = missingToday
+        ? (marker.date_from === marker.date_to
+          ? "За текущий день ещё нет сохранённых данных. Текущий день предварительный."
+          : "За текущий день ещё нет сохранённых данных. Прошлые дни показаны из готовой истории.") : "";
+      setLoadStatusLamp(missingToday ? "текущий день ещё не сохранён" : "готовая история",
+        missingToday ? "warning" : "success");
       renderHistoryBlockFilters();
     }
     function historySnapshotMerged() {
@@ -23808,32 +23839,43 @@
     function historyBlockIsCurrent(requestId, viewId) {
       return requestId === state.requestSequence && requestId === historySnapshotState.requestId && viewId === historySnapshotState.viewId;
     }
-    async function fetchHistoryBlock(scope, id, requestId, viewId) {
+    async function fetchHistoryBlock(scope, id, requestId, viewId, byteBudget) {
       const h = historySnapshotState, marker = h.summary.history_snapshot;
       let offset=0, limit=128, rows=[], bytes=0, total=null, next=null, pages=0, decodeMs=0;
       const metrics = {};
       const transportKeys=["table_ttfb_ms","table_download_ms","table_json_parse_ms","table_transfer_bytes","table_encoded_body_bytes","table_decoded_body_bytes"];
-      const ids=new Set();
+      const ids=new Set(), budget=byteBudget === undefined ? HISTORY_CLIENT_BYTES : byteBudget;
+      const group=historyBlockGroups().find(function(g){return g.group_id === id;});
       do {
+        if (!historyBlockIsCurrent(requestId,viewId)) return null;
         const result=await historySnapshotPage(scope,marker,h.edition,offset,limit,id);
         if (!historyBlockIsCurrent(requestId,viewId)) return null;
         const page=result.payload, pm=page.history_snapshot;
-        if (total !== null && total !== pm.total_rows) throw new Error("Состав блока изменился. Обновите витрину.");
+        if ((total !== null && total !== pm.total_rows) || (scope === "sku" && group && group.sku_rows !== pm.total_rows)) throw new Error("Состав блока изменился. Обновите витрину.");
         total=pm.total_rows; limit=result.limit; next=pm.next_offset;
+        if (!Number.isSafeInteger(total) || total<0 || offset + page.table_surface.rows.length>total
+            || (next !== null && (next !== offset + page.table_surface.rows.length || next<=offset || next>=total))
+            || (next === null && offset + page.table_surface.rows.length !== total)) {
+          throw new Error("Блок истории получен не полностью. Обновите витрину.");
+        }
+        bytes+=page.historyReplyBytes;
+        if (bytes>budget) throw new Error("Слишком большой объём: выберите меньше SKU-групп или короче период. Выбор не применён.");
         page.table_surface.rows.forEach(function(row) {
           if (row.row_kind !== scope || ids.has(row.row_id) || (id && row.group_id !== id)) throw new Error("Некорректные строки блока.");
           ids.add(row.row_id); rows.push(row);
         });
-        bytes+=page.historyReplyBytes; pages+=1; decodeMs+=page.historyDecodeMs || 0;
+        pages+=1; decodeMs+=page.historyDecodeMs || 0;
         transportKeys.forEach(function(key) {
           const value=page.historyReadMetrics[key];
           metrics[key]=value === null || metrics[key] === null ? null : (metrics[key] || 0)+value;
         });
-        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Слишком большой период для выбранного блока.");
-        if (scope === "sku" || next === null) break;
+        h.progress=(scope === "sku" ? "Загружаем SKU группы " : "Загружаем итог ") + (group ? group.label : "Итого") + "…";
+        h.progressRows=rows.length; h.progressTotal=total;
+        renderHistoryBlockFilters();
+        if (next === null) break;
         offset=next;
       } while (true);
-      return {rows:rows,bytes:bytes,total:total,next:next,limit:limit,offset:0,pageIndex:0,pages:[{offset:0,limit:limit}],requests:pages,metrics:metrics,decodeMs:decodeMs};
+      return {rows:rows,bytes:bytes,total:total,skuCount:scope === "sku" ? new Set(rows.map(skuClusterIdentity)).size : 0,requests:pages,metrics:metrics,decodeMs:decodeMs};
     }
     async function loadSelectedHistoryBlocks(selection, requestId, viewId) {
       const h=historySnapshotState, candidate=new Map(), requests=[];
@@ -23845,13 +23887,19 @@
       let bytes=h.summary.historyReplyBytes || 0;
       for (const item of requests) {
         const key=historyBlockKey(item[0],item[1]);
-        const block=h.blocks.get(key) || await fetchHistoryBlock(item[0],item[1],requestId,viewId);
+        const block=h.blocks.get(key) || await fetchHistoryBlock(item[0],item[1],requestId,viewId,HISTORY_CLIENT_BYTES-bytes);
         if (!block || !historyBlockIsCurrent(requestId,viewId)) return false;
         bytes+=block.bytes;
-        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Выбрано слишком много данных. Сократите период или число SKU-групп.");
+        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Слишком большой объём: выберите меньше SKU-групп или короче период. Выбор не применён.");
         candidate.set(key,block);
       }
       if (!historyBlockIsCurrent(requestId,viewId)) return false;
+      // Reuse complete deselected blocks while the same edition fits the budget.
+      h.blocks.forEach(function(block,key) {
+        if (!candidate.has(key) && bytes+block.bytes<=HISTORY_CLIENT_BYTES) {
+          candidate.set(key,block); bytes+=block.bytes;
+        }
+      });
       h.blocks=candidate; h.selection=selection; h.loadedBytes=bytes;
       return true;
     }
@@ -23868,7 +23916,7 @@
       if (!h.summary || h.busy) return;
       const requestId=h.requestId, viewId=++h.viewId;
       const selection=normalizeHistoryBlockSelection(h.draft || h.selection,historyBlockGroups());
-      h.busy=true; h.error=""; renderHistoryBlockFilters();
+      h.busy=true; h.error=""; h.progress=""; renderHistoryBlockFilters();
       try {
         if (!await loadSelectedHistoryBlocks(selection,requestId,viewId)) return;
         try { window.localStorage.setItem(historyBlockStorageKey(h.summary),JSON.stringify(selection)); } catch (_) {}
@@ -23884,7 +23932,7 @@
       const started=window.performance.now(); window.performance.mark("wb-history-summary-start");
       const period=historySnapshotPeriod(), h=historySnapshotState;
       const viewId=++h.viewId;
-      h.busy=true; h.error=""; h.requestId=requestId;
+      h.busy=true; h.error=""; h.progress=""; h.requestId=requestId;
       const result=await historySnapshotPage("catalog",period,"",0,128,"");
       if (!historyBlockIsCurrent(requestId,viewId)) return;
       h.summary=result.payload; h.edition=result.payload.history_snapshot.edition_id; h.blocks=new Map();
@@ -23896,7 +23944,6 @@
       const renderStart=window.performance.now();
       renderPage(historySnapshotMerged(),{tableFreshness:"fresh",deferSourceStatusAutoLoad:true});
       markFreshTableDisplayed(h.summary); h.busy=false; historySnapshotControls();
-      setLoadStatusLamp("готовая история","success");
       const renderEnd=window.performance.now();
       const paintMs=await measureDoubleAnimationFrame(renderEnd);
       if (!historyBlockIsCurrent(requestId,viewId)) return;
@@ -23916,29 +23963,6 @@
         sendWebVitrinaPerformanceEnvelope(performanceMetrics);
       }
     }
-    async function loadHistorySnapshotSku(direction, groupId) {
-      const h=historySnapshotState, id=groupId || "", key=historyBlockKey("sku",id), block=h.blocks.get(key);
-      if (!h.summary || !block || h.busy || !h.selection.skus.includes(id)) return;
-      const pageIndex=direction === "previous" ? block.pageIndex-1 : block.pageIndex+1;
-      if (pageIndex<0 || (direction !== "previous" && block.next === null)) return;
-      const previous=block.pages[pageIndex];
-      const offset=previous ? previous.offset : block.next, limit=previous ? previous.limit : block.limit;
-      const requestId=h.requestId, viewId=++h.viewId;
-      h.busy=true; h.error=""; renderHistoryBlockFilters();
-      try {
-        const result=await historySnapshotPage("sku",h.summary.history_snapshot,h.edition,offset,limit,id);
-        if (!historyBlockIsCurrent(requestId,viewId)) return;
-        const payload=result.payload, marker=payload.history_snapshot;
-        if (marker.total_rows !== block.total || payload.table_surface.rows.some(function(row){return row.row_kind !== "sku" || row.group_id !== id;})) throw new Error("Каталог SKU версии изменился.");
-        const bytes=h.loadedBytes-block.bytes+payload.historyReplyBytes;
-        if (bytes>HISTORY_CLIENT_BYTES) throw new Error("Достигнут лимит отображения. Сократите период или число групп.");
-        const pages=block.pages.slice(); pages[pageIndex]={offset:offset,limit:result.limit};
-        h.blocks.set(key,{rows:payload.table_surface.rows,bytes:payload.historyReplyBytes,total:marker.total_rows,next:marker.next_offset,limit:result.limit,offset:offset,pageIndex:pageIndex,pages:pages,requests:1});
-        h.loadedBytes=bytes; renderSelectedHistoryBlocks();
-      } catch(error) { if (historyBlockIsCurrent(requestId,viewId)) h.error=String(error.message || error); }
-      finally { if (historyBlockIsCurrent(requestId,viewId)) {h.busy=false;renderHistoryBlockFilters();} }
-    }
-
     const snapshotPilotState = {summary: null, generation: "", requestId: 0};
     function snapshotBusinessToday() {
       const parts = new Intl.DateTimeFormat("en-CA", {timeZone: "Asia/Yekaterinburg",
@@ -25316,6 +25340,7 @@
           historySnapshotState.summary = null; historySnapshotState.blocks = new Map(); historySnapshotState.busy = false;
           historySnapshotState.viewId += 1;
           state.composition = null; snapshotPilotToolbarNode.hidden = true;
+          document.querySelector("[data-history-current-unavailable]").hidden = true;
           loadRefreshButton.hidden = true;
           setStateBox("error", "Готовая история недоступна для выбранного периода", escapeHtml(message));
           setLoadStatusLamp("история недоступна", "warning");

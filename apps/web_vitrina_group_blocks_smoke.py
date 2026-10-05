@@ -37,6 +37,13 @@ def row(kind, key, nm=None, values=None, presentation=None):
         '', 'Экономика', None, nm, 'number', values or {}, presentation or {})
 
 
+def basis_for(values, days):
+    return {day: {nm: {'quantity': sum(data.get(own_stage_metric_key(stage,'qty'),0) or 0 for stage in ('WB','FF')),
+        'capital': sum(data.get(own_stage_metric_key(stage,'capital_rub'),0) or 0 for stage in ('WB','FF')),
+        'source_digest':'sha256:source', 'presentation_digest':'sha256:blob', 'presentation_version':'sha256:version'}
+        for nm,data in values.items()} for day in days}
+
+
 def semantic_checks(runtime):
     days = ['2026-04-20', '2026-09-14', '2026-09-20']
     state = runtime.load_current_state()
@@ -70,7 +77,8 @@ def semantic_checks(runtime):
         values[nm].update({own_stage_metric_key('WB','qty'): qty,
             own_stage_metric_key('WB','capital_rub'): capital,
             own_stage_metric_key('WB','confirmed_share_pct'): confirmed,
-            own_stage_metric_key('WB','cost_coverage_pct'): 1})
+            own_stage_metric_key('WB','cost_coverage_pct'): 1,
+            own_stage_metric_key('FF','qty'): 0, own_stage_metric_key('FF','capital_rub'): 0})
     from packages.application.sheet_vitrina_v1_card_rating import SKU_METRIC_KEY, TOTAL_METRIC_KEY
     from packages.application.sheet_vitrina_v1_authenticated_buyer import EFFECTIVE_DISCOUNT_METRIC_KEY, AVG_EFFECTIVE_DISCOUNT_METRIC_KEY
     for nm, rating, discount in [(11,4,.1),(12,None,.3),(13,2,.5)]:
@@ -83,13 +91,11 @@ def semantic_checks(runtime):
     mature = {nm: {'2026-09-14': SimpleNamespace(buyout_percent=percent,order_count=count)} for nm,percent,count in [(11,.5,10),(12,.9,30),(13,.2,2)]}
     # These pure native readers have their own parity tests; owned accepted
     # observations isolate the group aggregation/late-injection boundary.
-    with patch.object(groups_module, 'load_canonical_wb_cost_lookup', return_value=canonical), \
-         patch.object(groups_module.OwnProductCapitalBlock, '_load_functional_daily_metric_lookup', return_value=None), \
-         patch.object(groups_module.OwnProductCapitalBlock, '_load_canonical_daily_metric_lookup', return_value={}), \
-         patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature):
+    with patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature):
         result = include_group_rows(totals+sku, groups=groups, config=config, metrics=metrics,
             formulas={f.formula_id:f for f in state.formulas_v2}, dates=days, runtime=runtime,
-            today='2026-09-20', parameters3=lambda d: params, parameters4=lambda d: params)
+            today='2026-09-20', parameters3=lambda d: params, parameters4=lambda d: params,
+            cost_basis=basis_for(values,days))
     projected = {r.row_id:r for r in result if r.scope_kind == 'GROUP'}
     assert len(projected) == len(totals)*2 and not any(k.startswith('GROUP:empty') for k in projected)
     for key in projected:
@@ -109,19 +115,20 @@ def semantic_checks(runtime):
     from packages.application.sheet_vitrina_v1_buyout_percent import BUYOUT_PERCENT_METRIC_KEY
     assert abs(val('a',BUYOUT_PERCENT_METRIC_KEY,'2026-09-14')-.8) < 1e-12
     assert val('a',BUYOUT_PERCENT_METRIC_KEY) == ''
-    # Native WB+FF evidence includes the real FF facility operands, not a
-    # WB-only average or copied global cost. Proxy4 uses final group profits
-    # and the same expected-revenue/quantity denominators as native TOTAL.
-    from apps.inventory_cost_blend_smoke import _product, _location
-    physical = {11:_product(wb=('10','100'),ff=('2','40',[_location('ff_a','FBS','2','40')])),
-                12:_product(wb=('30','900')),13:_product(wb=('2','180'))}
-    with patch.object(groups_module, 'load_canonical_wb_cost_lookup', return_value=canonical), \
-         patch.object(groups_module.OwnProductCapitalBlock, '_load_functional_daily_metric_lookup', return_value=physical), \
-         patch.object(groups_module.OwnProductCapitalBlock, 'load_daily_metric_lookup', return_value=physical), \
-         patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature):
-        native = include_group_rows(totals+sku, groups=groups, config=config, metrics=metrics,
+    # The final accepted WB+FF cells are sufficient. A private functional
+    # replay (including an unrelated missing SKU) must not change this cohort.
+    physical_sku = [replace(r, values_by_date={d: (140/12 if r.metric_key == 'our_wb_unit_cost_rub'
+        else 2 if r.metric_key == own_stage_metric_key('FF','qty')
+        else 40 if r.metric_key == own_stage_metric_key('FF','capital_rub') else r.values_by_date[d])
+        for d in days}) if r.nm_id == 11 else r for r in sku]
+    physical_basis=basis_for(values,days)
+    for day in days: physical_basis[day][11].update(quantity=12,capital=140)
+    with patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature), \
+         patch('packages.application.own_product_capital.OwnProductCapitalBlock._load_functional_daily_metric_lookup', side_effect=AssertionError('private replay')), \
+         patch('packages.application.canonical_wb_cost_resolver.load_canonical_wb_cost_lookup', side_effect=AssertionError('cost replay')):
+        native = include_group_rows(totals+physical_sku, groups=groups, config=config, metrics=metrics,
             formulas={f.formula_id:f for f in state.formulas_v2}, dates=days, runtime=runtime,
-            today='2026-09-20', parameters3=lambda d: params, parameters4=lambda d: params)
+            today='2026-09-20', parameters3=lambda d: params, parameters4=lambda d: params,cost_basis=physical_basis)
     native = {r.row_id:r for r in native if r.scope_kind=='GROUP'}
     def native_value(group,key):return native[f'GROUP:{group}|{key}'].values_by_date['2026-09-20']
     assert abs(native_value('a','total_our_wb_unit_cost_rub')-1040/42)<1e-12
@@ -129,11 +136,16 @@ def semantic_checks(runtime):
     assert native_value('a','total_proxy_profit_4_rub')==500
     assert abs(native_value('a','proxy_margin_4_pct_total')-500/8000)<1e-12
     assert abs(native_value('a','proxy_margin_per_unit_rub_total')-500/32)<1e-12
-    # Positive uncovered FF invalidates WAC instead of reusing WB-only cost.
-    physical[11]['own_capital_FF_cost_covered_qty']=0
-    from packages.application.inventory_cost_blend import build_inventory_cost_blend_lookup
-    proof = build_inventory_cost_blend_lookup(as_of_date='2026-09-20',wb_compat_lookup=canonical,product_capital_lookup=physical)
-    assert proof[11]['our_wb_unit_cost_rub'] is None
+    # Scalar price alone cannot authorize an invented WAC weight.
+    unrelated = [replace(r,values_by_date={d: None for d in days}) if r.nm_id==12
+        and r.metric_key==own_stage_metric_key('FF','capital_rub') else r for r in physical_sku]
+    incomplete_basis=deepcopy(physical_basis);incomplete_basis[days[-1]].pop(12)
+    pure = AcceptedGroupEvaluator(cost_basis=incomplete_basis,rows=unrelated,enabled_config=config[:2],metrics_by_key=metrics,
+        formulas_by_id={},live_sources=TemporalLiveSources([],[],{days[-1]:SimpleNamespace(column_date=days[-1])},{}),
+        proxy_v4_parameters_resolver=lambda d:params)
+    assert abs(pure.resolve_total('total_our_wb_unit_cost_rub',days[-1])-140/12)<1e-12
+    assert pure.aggregation_evidence[(days[-1],'cost')]['missing_nm_ids']==[12]
+    assert pure.resolve_total('total_proxy_profit_4_rub',days[-1])==500
     # Accepted advertising incompleteness is dated, not inferred from a blank
     # operand: native TOTAL aligns both ratio/formula member sets only then.
     ratio_key = 'group_ads_ratio_test'
@@ -150,10 +162,7 @@ def semantic_checks(runtime):
     assert statuses == [{'source_key':'ads_compact','kind':'incomplete','temporal_slot':days[-1]}]
     assert accepted_source_statuses(source_plan,column_date=days[0]) == []
     assert accepted_source_statuses(source_plan,column_date=days[-1],requested_date='2026-09-21')[0]['temporal_slot']=='2026-09-21'
-    with patch.object(groups_module, 'load_canonical_wb_cost_lookup', return_value=canonical), \
-         patch.object(groups_module.OwnProductCapitalBlock, '_load_functional_daily_metric_lookup', return_value=None), \
-         patch.object(groups_module.OwnProductCapitalBlock, '_load_canonical_daily_metric_lookup', return_value={}), \
-         patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature):
+    with patch.object(groups_module, 'load_buyout_percent_snapshot_metrics', return_value=mature):
         aligned = include_group_rows(totals+[row('TOTAL',ratio_key)]+asymmetric,
             groups=groups,config=config,metrics=ads_metrics,
             formulas={f.formula_id:f for f in state.formulas_v2},dates=days,runtime=runtime,
@@ -187,7 +196,116 @@ def semantic_checks(runtime):
     evaluator = AcceptedGroupEvaluator(rows=broken,enabled_config=config[:2],metrics_by_key=metrics,
         formulas_by_id={}, live_sources=TemporalLiveSources([],[],{'2026-09-20':SimpleNamespace(column_date='2026-09-20',own_product_capital_lookup={11:{own_stage_metric_key('WB','qty'):10,own_stage_metric_key('WB','confirmed_qty'):5},12:{own_stage_metric_key('WB','qty'):30,own_stage_metric_key('WB','confirmed_qty'):None}})},{}))
     assert evaluator.resolve_total(own_stage_total_metric_key('WB','confirmed_share_pct'),'2026-09-20') is None
-    return {'total_metric_outcomes':len(totals),'group_metric_outcomes':len(projected),'weighted_cost_share_price':True,'account_storage_unallocated':True,'D6_buyout':True,'missing_not_zero':True,'native_WB_FF_Proxy4':True,'partial_ads_dated_native_alignment':True}
+    return {'total_metric_outcomes':len(totals),'group_metric_outcomes':len(projected),'weighted_cost_share_price':True,'account_storage_unallocated':True,'D6_buyout':True,'missing_not_zero':True,'accepted_WB_FF_Proxy4_no_private_replay':True,'partial_ads_dated_native_alignment':True}
+
+
+def integrity_checks(runtime):
+    from packages.application.calculation_parameters import DEFAULT_PROXY_PARAMETERS
+    from apps.sheet_vitrina_v1_proxy_v4_smoke import _unit_margin_parameters
+    DEFAULT_PROXY_V4_PARAMETERS=_unit_margin_parameters()
+    from packages.application.vitrina_economics import project_catalog_economics
+    day='2026-09-22'
+    state=runtime.load_current_state()
+    metrics={m.metric_key:m for m in _effective_web_vitrina_metrics(state.metrics_v2)}
+    formulas={f.formula_id:f for f in state.formulas_v2}
+    keys=['orderCount','orderSum','ads_sum','our_wb_unit_cost_rub','open_card_count','view_count',
+          'ctr',own_stage_metric_key('WB','qty'),own_stage_metric_key('WB','capital_rub'),
+          own_stage_metric_key('FF','qty'),own_stage_metric_key('FF','capital_rub')]
+    source={11:[10,1000,20,12,44,4,11,10,100,2,44],
+            12:[30,9000,30,30,10,100,.1,30,900,0,0],
+            13:[2,100,None,None,7,None,999,None,None,None,None]}
+    contract=[row('SKU',k,nm,{day:v}, {day:{'state':'unconfirmed','quality_state':'preliminary'}})
+        for nm,vals in source.items() for k,v in zip(keys,vals)]
+    total_keys=list(groups_module.PROXY_TOTALS)+['total_our_wb_unit_cost_rub','ctr','total_views_current']
+    # Actual canonical managed projection forms accepted SKU economics; an
+    # unrelated source-incomplete third SKU is not replaced by a fake zero.
+    plan={'metadata':{'server_cell_presentation':{}},'sheets':[{'sheet_name':'DATA_VITRINA',
+        'header':['label','key',day], 'rows':[['',r.row_id,r.values_by_date[day]] for r in contract]
+        +[['','TOTAL|'+k,''] for k in total_keys]}]}
+    canonical=project_catalog_economics(plan,day=day,parameters=(DEFAULT_PROXY_PARAMETERS,DEFAULT_PROXY_V4_PARAMETERS))
+    table=canonical['sheets'][0]['rows'];present=canonical['metadata']['server_cell_presentation']
+    contract=[row('SKU',rid.split('|')[1],int(rid.split('|')[0][4:]),{day:v},
+        {day:present.get(rid,{}).get(day,{'state':'unconfirmed','quality_state':'preliminary'})})
+        for _,rid,v in table if rid.startswith('SKU:')]
+    totals=[row('TOTAL',k,values={day:17}) for k in total_keys]
+    config=[ConfigV2Item(nm,True,str(nm),'a' if nm!=13 else 'b',i) for i,nm in enumerate(source)]
+    groups=[{'group_key':k,'label':k} for k in ('a','b')]
+    basis=basis_for({nm:dict(zip(keys,v)) for nm,v in source.items()},[day])
+    # Public stage overlays deliberately differ: the accepted shared basis, not
+    # these displayed capital rows, remains the WAC authority.
+    contract=[replace(r,values_by_date={day:777}) if r.metric_key==own_stage_metric_key('WB','capital_rub') else r for r in contract]
+    def project(rows=contract):
+        with patch.object(groups_module,'load_buyout_percent_snapshot_metrics',return_value={}), \
+             patch('packages.application.own_product_capital.OwnProductCapitalBlock._load_functional_daily_metric_lookup',side_effect=AssertionError('global private guard')):
+            output=include_group_rows(totals+rows,groups=groups,config=config,metrics=metrics,formulas=formulas,
+                dates=[day],runtime=runtime,today=day,parameters3=lambda d:DEFAULT_PROXY_PARAMETERS,
+                parameters4=lambda d:DEFAULT_PROXY_V4_PARAMETERS,cost_basis=basis)
+        assert output[:len(totals)+len(rows)]==totals+rows
+        return {r.row_id:r for r in output if r.scope_kind=='GROUP'}
+    output=project()
+    expected={rid.split('|')[1]:v for _,rid,v in table if rid.startswith('TOTAL|')}
+    for k in groups_module.PROXY_TOTALS:
+        assert abs(output['GROUP:a|'+k].values_by_date[day]-expected[k])<1e-9,(k,expected[k])
+    assert abs(output['GROUP:a|total_our_wb_unit_cost_rub'].values_by_date[day]-1044/42)<1e-12
+    assert output['GROUP:a|ctr'].values_by_date[day]==54/104
+    assert output['GROUP:b|ctr'].values_by_date[day]==''
+    assert '100%' in output['GROUP:a|ctr'].presentation_by_date[day]['reason']
+    # Source ratio >100% is legitimate and is never clamped or averaged.
+    only=[r for r in contract if r.nm_id==11]
+    e=AcceptedGroupEvaluator(rows=only,enabled_config=config[:1],metrics_by_key=metrics,
+        formulas_by_id=formulas,live_sources=TemporalLiveSources([],[],{},{}))
+    assert e.resolve_total('ctr',day)==11
+    zero=[replace(r,values_by_date={day:0}) if r.metric_key=='view_count' else r for r in contract]
+    zero_ctr=project(zero)['GROUP:a|ctr']
+    assert zero_ctr.values_by_date[day]=='' and zero_ctr.presentation_by_date[day]['quality_state']=='undefined'
+    assert zero_ctr.presentation_by_date[day]['missing_sku_count']==0
+    # Numeric raw cells marked unavailable cannot become accepted operands.
+    bad=[replace(r,presentation_by_date={day:{'state':'unavailable'}}) if r.nm_id==12
+         and r.metric_key=='orderSum' else r for r in contract]
+    incomplete=project(bad)
+    p=incomplete['GROUP:a|total_proxy_profit_4_rub']
+    assert p.presentation_by_date[day]['quality_state']=='partial'
+    assert p.presentation_by_date[day]['aggregation_evidence']['eligible_nm_ids']==[11]
+    assert p.presentation_by_date[day]['aggregation_evidence']['missing_nm_ids']==[12]
+    # Complete/partial/unknown source quality survives available-only sums,
+    # including a real observed zero beside absent observations.
+    search=[row('SKU','views_current',11,{day:0},{day:{'state':'available','completeness_state':'partial',
+        'missing_sku_count':1,'reason':'Сохранённый неполный источник'}}),
+        row('SKU','views_current',12,{day:None},{day:{'state':'unavailable','quality_state':'missing'}})]
+    partial=project(contract+search)['GROUP:a|total_views_current']
+    assert partial.values_by_date[day]==0
+    assert partial.presentation_by_date[day]['quality_state']=='partial'
+    assert partial.presentation_by_date[day]['missing_sku_count']==2
+    assert 'Сохранённый неполный источник' in partial.presentation_by_date[day]['reason']
+    unknown=[replace(r,presentation_by_date={day:{'state':'available','completeness_state':'unknown_scope',
+        'missing_sku_count':None}}) if r.metric_key=='views_current' and r.nm_id==11 else r for r in contract+search]
+    quality=project(unknown)['GROUP:a|total_views_current'].presentation_by_date[day]
+    assert quality['completeness_state']=='unknown_scope' and quality['missing_sku_count'] is None
+    assert output['GROUP:a|total_our_wb_unit_cost_rub'].presentation_by_date[day]['quality_state']=='preliminary'
+    inventory_config=[ConfigV2Item(nm,True,str(nm),'a',nm) for nm in range(1,14)]
+    inventory=[row('SKU','stock_total',nm,{day: nm if nm<=11 else None},
+        {day:{'state':'available' if nm<=11 else 'unavailable'}}) for nm in range(1,14)]
+    def stock(rows):
+        with patch.object(groups_module,'load_buyout_percent_snapshot_metrics',return_value={}):
+            result=include_group_rows([row('TOTAL','total_stock_total')]+rows,
+                groups=[{'group_key':'a','label':'A'}],config=inventory_config,metrics=metrics,formulas=formulas,
+                dates=[day],runtime=runtime,today=day,parameters3=lambda d:DEFAULT_PROXY_PARAMETERS,
+                parameters4=lambda d:DEFAULT_PROXY_V4_PARAMETERS)
+        return next(r for r in result if r.scope_kind=='GROUP')
+    observed=stock(inventory)
+    assert observed.values_by_date[day]==66
+    assert observed.presentation_by_date[day]['quality_state']=='partial'
+    assert observed.presentation_by_date[day]['missing_sku_count']==2
+    missing=stock([replace(r,values_by_date={day:None}) for r in inventory])
+    assert missing.values_by_date[day]=='' and missing.presentation_by_date[day]['state']=='unavailable'
+    # No new direct SKU percentage may inherit the sum fallback accidentally.
+    metrics['self_pct']=MetricV2Item('self_pct',True,'SKU','self','metric','self_pct',True,'percent',1,'Test')
+    e=AcceptedGroupEvaluator(rows=[row('SKU','self_pct',11,{day:.4}),row('SKU','self_pct',12,{day:.9})],
+        enabled_config=config[:2],metrics_by_key=metrics,formulas_by_id={},live_sources=TemporalLiveSources([],[],{},{}))
+    assert e.resolve_total('self_pct',day) is None
+    return {'canonical_managed_proxy_parity':True,'same_eligible_denominators':True,
+        'accepted_WB_FF_basis':True,'no_private_global_replay':True,'common_CTR_cohort_no_cap':True,
+        'all_dependency_quality_propagated':True,'no_direct_SKU_scalar_sum':True,'TOTAL_SKU_unchanged':True,'inventory_11_known_2_missing_allmissing':True}
 
 
 def migration_checks():
@@ -249,6 +367,51 @@ def migration_checks():
         expect_error(lambda:old.group_candidate_preview(new,**args),HistoryUnavailable,'superseded')
         return {'isolated_resumable_candidate':True,'preview_CAS_fence':True,'post_revalidation_deadline_retains_CURRENT':True,'old_all16_pinned':True,'catalog_zero_cells':True,'group_no_SKU':True,'sameedition_SKU':True,'ordinary_rolling14_after_cutover':True}
 
+
+
+def basis_binding_checks():
+    import zlib
+    from packages.application.fbs_snapshot_cost import fingerprint
+    from packages.application.fbs_accounting_runtime import SOURCE
+    day='2026-09-22';target={'bundle_version':'accepted','as_of_date':day}
+    payload={'date':day,'version_id':'accepted-presentation','quality':'preliminary',
+        'rows':{'11':{'shared_cost':{'quantity':'5737','capital':'578332.5852057938',
+            'source_digest':'exact-source','unit_cost':'100.80749262781834'}}}}
+    key=fingerprint(payload)
+    index={'effective_date':'2026-09-08','presentations':{day:key}}
+    metadata={'ready_publication_target':target,'fbs_accounting_bindings':{day:{
+        'book_version':'accepted-book','presentation_version':'accepted-presentation',
+        'date':day,'quality':'preliminary','effective_date':'2026-09-08','source':SOURCE,'ready_target':target}}}
+    with TemporaryDirectory(prefix='group-accepted-basis-') as tmp:
+        db=Path(tmp)/'fbs-snapshot-accounting.sqlite3'
+        with closing(sqlite3.connect(db)) as c,c:
+            c.execute('CREATE TABLE accounting_revisions(version TEXT,payload TEXT)')
+            c.execute('CREATE TABLE accounting_blobs(digest TEXT,payload BLOB)')
+            c.execute('INSERT INTO accounting_revisions VALUES(?,?)',('accepted-book',json.dumps(index)))
+            c.execute('INSERT INTO accounting_blobs VALUES(?,?)',(key,zlib.compress(json.dumps(payload).encode())))
+        with closing(sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True)) as c:
+            c.execute('PRAGMA query_only=ON');c.execute('BEGIN');queries=[];c.set_trace_callback(queries.append)
+            class Context:
+                def borrow_book(self,path):
+                    assert path==db.resolve() and c.in_transaction and c.execute('PRAGMA query_only').fetchone()[0]==1
+                    return c
+            with patch('packages.application.web_vitrina_window_read_context.active_window_read_context',return_value=Context()):
+                basis=groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),metadata,[day])
+                assert basis[day][11]['quantity']=='5737' and basis[day][11]['presentation_digest']==key
+                assert abs(float(basis[day][11]['capital'])/5737-100.80749262781834)<1e-12
+                assert not any('accounting_current' in q for q in queries)
+                wrong=deepcopy(metadata);wrong['fbs_accounting_bindings'][day]['presentation_version']='latest'
+                expect_error(lambda:groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),wrong,[day]),ValueError,'presentation_mismatch')
+                wrong=deepcopy(metadata);wrong['ready_publication_target']={}
+                expect_error(lambda:groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),wrong,[day]),ValueError,'binding_mismatch')
+            c.rollback()
+        with closing(sqlite3.connect(db)) as c,c:
+            corrupt={**payload,'rows':{}};c.execute('UPDATE accounting_blobs SET payload=?',(zlib.compress(json.dumps(corrupt).encode()),))
+        with closing(sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True)) as c:
+            c.execute('PRAGMA query_only=ON');c.execute('BEGIN')
+            with patch('packages.application.web_vitrina_window_read_context.active_window_read_context',return_value=Context()):
+                expect_error(lambda:groups_module.accepted_cost_basis(SimpleNamespace(runtime_dir=tmp),metadata,[day]),ValueError,'presentation_mismatch')
+    return {'exact_bound_revision_blob':True,'fingerprint_corruption_refusal':True,'no_latest_fallback':True,'dated_target_version_refusal':True}
 
 
 def membership_checks():
@@ -342,6 +505,7 @@ def main():
             assert period.metadata['group_source_statuses']==[
                 {'source_key':'ads_compact','kind':'incomplete','temporal_slot':'2026-04-21'}]
             semantic=semantic_checks(runtime)
+            integrity=integrity_checks(runtime)
             normal=NativeDatedCompiler(runtime,datetime(2026,4,20,12,tzinfo=timezone.utc),'2026-04-20','2026-04-20')
             grouped=NativeDatedCompiler(runtime,datetime(2026,4,20,12,tzinfo=timezone.utc),'2026-04-20','2026-04-20',group_blocks=True)
             old,new=normal.compile('2026-04-20'),grouped.compile('2026-04-20')
@@ -351,6 +515,6 @@ def main():
                 if r['row_kind']=='group' and rid.startswith('GROUP:clean|'):
                     assert r['group_id']=='group:clean' and r['values']['group'][0]=='Clean renamed'
         assert before==hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
-    print(json.dumps({'status':'PASS','semantics':semantic,'native_compiler_all16_unchanged':True,'stable_label_identity_order':True,'source_RO':True,'migration':migration_checks(),'membership':membership_checks(),'CLI':cli_checks(),'seconds':round(time.monotonic()-started,3)}))
+    print(json.dumps({'status':'PASS','semantics':semantic,'integrity':integrity,'native_compiler_all16_unchanged':True,'stable_label_identity_order':True,'source_RO':True,'accepted_basis':basis_binding_checks(),'migration':migration_checks(),'membership':membership_checks(),'CLI':cli_checks(),'seconds':round(time.monotonic()-started,3)}))
 
 if __name__=='__main__':main()
