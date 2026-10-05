@@ -292,6 +292,41 @@ class HistoryStore:
         return any(catalog.get("metric_start_dates", {}).get(key) != value
                    for key, value in starts.items())
 
+    def update_rolling_status(self, *, vector, business_date, revalidate,
+                              expected_base, deadline_monotonic=None, backfill_dates=()):
+        """Publish only a changed archive status; no compiler or day mutation."""
+        with self._writer():
+            pointer = self._current()
+            current_id = pointer["current"] if pointer else None
+            if current_id != expected_base or not pointer:
+                return {"status": "superseded", "recomputes": 0}
+            old = self.edition()
+            status = self.rolling_status(vector, business_date, backfill_dates)
+            if status["dirty_dates"]:
+                return {"status": "superseded", "recomputes": 0}
+            return self._publish_rolling_status(old, current_id, status, vector,
+                                                revalidate, deadline_monotonic)
+
+    def _publish_rolling_status(self, old, current_id, status, vector,
+                                revalidate, deadline_monotonic):
+        metadata = {key: value for key, value in status.items() if key != "dirty_dates"}
+        if old.get("rolling14") == metadata:
+            return {"status": "unchanged", "recomputes": 0, "edition_id": current_id, **status}
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return {"status": "pending", "recomputes": 0, **status}
+        if revalidate() != vector:
+            return {"status": "superseded", "recomputes": 0}
+        edition = {**old, "rolling14": metadata}
+        edition_id = digest(edition)
+        self._reserve(len(_json(edition)) + 4096)
+        _atomic(self.root / "editions" / (edition_id + ".json"), edition)
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return {"status": "pending", "recomputes": 0, **status}
+        _atomic(self.root / "CURRENT.json", {"current": edition_id, "previous": current_id})
+        self._collect()
+        return {"status": "published", "metadata_only": True, "recomputes": 0,
+                "edition_id": edition_id, **status}
+
     def _merged_catalog(self, old_id, fresh, start_dates):
         merged = deepcopy(fresh)
         if old_id:
@@ -338,7 +373,8 @@ class HistoryStore:
             old = self.edition() if pointer else None
             status = self.rolling_status(vector, business_date, backfill_dates)
             if old and not status["dirty_dates"] and not self.start_dates_changed(old, metric_start_dates):
-                return {"status": "unchanged", "recomputes": 0, "edition_id": current_id, **status}
+                return self._publish_rolling_status(old, current_id, status, vector,
+                                                    revalidate, deadline_monotonic)
             fresh_id = digest(catalog)
             merged = self._merged_catalog(old["catalog"] if old else None, catalog, metric_start_dates)
             merged_id = digest(merged)
@@ -542,10 +578,9 @@ class HistoryStore:
                         day in rows[rid]["cells"] for rid in selected):
                     raise HistoryUnavailable("history_day_rows_missing")
             for rid in selected:
-                metric_cell = catalog["rows"][rid].get("values", {}).get("metric_key", [])
-                metric = metric_cell[0] if metric_cell else rid.split("|", 1)[-1]
-                start = catalog.get("metric_start_dates", {}).get(metric)
-                if rid not in original_rows or (start and day < start):
+                # A newer start declaration must never mask an already saved
+                # observation. Only a truly absent original row is synthesized.
+                if rid not in original_rows:
                     reason = "Метрика в этой версии истории ещё не отслеживалась."
                     rows[rid]["cells"][day] = [None, "—", "number", None, "", "unavailable",
                         "muted", reason, "not_tracked", "Не отслеживалась", reason,

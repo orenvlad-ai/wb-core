@@ -109,8 +109,10 @@ def run(root):
     stock = next(row for row in page["rows"] if row["row_id"] == "TOTAL|stock")
     assert stock["cells"]["2026-09-01"] == old_units["2026-09-01"]["cells"]["TOTAL|stock"]
     rating = next(row for row in page["rows"] if row["row_id"] == "TOTAL|rating")
-    for day in ("2026-09-01", "2026-10-07", "2026-10-09"):
-        assert rating["cells"][day][0] is None and rating["cells"][day][8] == "not_tracked"
+    assert rating["cells"]["2026-09-01"][0] is None and rating["cells"]["2026-09-01"][8] == "not_tracked"
+    # A declared later start may not erase a saved earlier observation.
+    for day in ("2026-10-07", "2026-10-09"):
+        assert rating["cells"][day] == unit(fresh, day)["cells"]["TOTAL|rating"]
     assert rating["cells"]["2026-10-10"][0] is not None
     edition = finished["edition_id"]
     summary = read_history_page(store, date_from="2026-09-01", date_to="2026-10-20")
@@ -123,6 +125,16 @@ def run(root):
     assert sku2["history_snapshot"]["edition_id"] == edition
     calls.clear()
     assert update()["status"] == "unchanged" and calls == []
+    original_archive = deepcopy(store.edition())
+    declaration = store.update(vector=vector, catalog=fresh, compile_day=compile_day,
+        revalidate=lambda: vector, business_date="2026-10-20",
+        metric_start_dates={"stock": "2026-10-10"})
+    assert declaration["status"] == "published" and declaration["recomputes"] == 0 and calls == []
+    assert store.edition()["days"] == original_archive["days"]
+    assert store.edition()["day_proofs"] == original_archive["day_proofs"]
+    archived = store.read(date_from="2026-09-01", date_to="2026-09-01")["rows"][0]
+    assert archived["cells"]["2026-09-01"] == old_units["2026-09-01"]["cells"]["TOTAL|stock"]
+    assert archived["cells"]["2026-09-01"][0] == 10
     # Known archived mutation is reported, while the fresh day still publishes.
     vector["dates"]["2026-09-03"] = digest("old-date correction")
     vector["dates"]["2026-10-20"] = digest("fresh correction")
@@ -208,6 +220,56 @@ def run(root):
             "rolling_window_days": 14, "native_compute": "fixture callbacks only"}
 
 
+def metadata_status(root):
+    store = HistoryStore(root)
+    catalog = fixture()
+    days = dates_between("2026-09-01", "2026-10-20")
+    vector = {"coverage": "complete_frozen_native_v1", "epoch": "same-formula",
+              "dates": {day: digest(day) for day in days}}
+    store.update(vector=vector, catalog=catalog, compile_day=lambda day: unit(catalog, day),
+                 revalidate=lambda: vector)
+    before = store.edition()
+    vector["dates"]["2026-09-02"] = digest("archive correction")
+    def must_not_compile(day):
+        raise AssertionError("archive-only status must not compile")
+    result = store.update(vector=vector, catalog=catalog, compile_day=must_not_compile,
+        revalidate=lambda: vector, business_date="2026-10-20")
+    assert result["status"] == "published" and result["metadata_only"] and result["recomputes"] == 0
+    after = store.edition()
+    assert after["days"] == before["days"] and after["catalog"] == before["catalog"]
+    assert after["consumed"] == before["consumed"]
+    assert store.day_proofs(after) == store.day_proofs(before)
+    assert store.read(date_from="2026-09-02", date_to="2026-09-02")["archive_status"]["backfill_required"] == ["2026-09-02"]
+    unchanged = store.update(vector=vector, catalog=catalog, compile_day=must_not_compile,
+        revalidate=lambda: (_ for _ in ()).throw(AssertionError("unchanged must not publish")),
+        business_date="2026-10-20")
+    assert unchanged["status"] == "unchanged" and unchanged["edition_id"] == result["edition_id"]
+    vector["dates"]["2026-09-03"] = digest("another archive correction")
+    stable_id = store._current()["current"]
+    def status_update(**kwargs):
+        return store.update_rolling_status(vector=vector, business_date="2026-10-20",
+            expected_base=stable_id, **kwargs)
+    superseded = status_update(revalidate=lambda: {**vector, "publication_fence": "changed"})
+    assert superseded["status"] == "superseded" and store._current()["current"] == stable_id
+    expired = status_update(revalidate=lambda: vector, deadline_monotonic=time.monotonic() - 1)
+    assert expired["status"] == "pending" and store._current()["current"] == stable_id
+    stale = store.update_rolling_status(vector=vector, business_date="2026-10-20",
+        expected_base="0" * 64, revalidate=lambda: vector)
+    assert stale["status"] == "superseded" and store._current()["current"] == stable_id
+    # An explicit backfill clears the corresponding durable reader status.
+    calls = []
+    def backfill(day):
+        calls.append(day)
+        return unit(catalog, day)
+    fixed = store.update(vector=vector, catalog=catalog, compile_day=backfill,
+        revalidate=lambda: vector, business_date="2026-10-20",
+        backfill_dates=["2026-09-02", "2026-09-03"])
+    assert fixed["status"] == "published" and calls == ["2026-09-02", "2026-09-03"]
+    assert store.read(date_from="2026-09-02", date_to="2026-09-03")["archive_status"]["backfill_required"] == []
+    return {"archive_only_metadata_published": True, "dayrefs_proofs_preserved": True,
+            "fence_CAS_deadline_retains_lastgood": True, "explicit_backfill_clears_reader_status": True}
+
+
 def native_bridge(root):
     from apps.sheet_vitrina_v1_web_vitrina_browser_smoke import LocalWebVitrinaFixtureServer
     from packages.application.ready_publication import ensure_publication_schema
@@ -265,7 +327,23 @@ def native_bridge(root):
                 stable = update_live_history(adapter=adapter, runtime=runtime, store=store, rolling14=True)
             assert stable["status"] == "unchanged" and not stable["compiler_constructed"]
             assert stable["edition_id"] == result["edition_id"]
+            # Adapter control-flow: inject one owned archived proof into real
+            # captures, while the actual native recent source remains unchanged.
+            capture = adapter.capture
+            correction = {"2026-04-01": digest("owned archive correction")}
+            def captured():
+                return {**capture(), "dates": {**vector["dates"], **correction}}
+            unchanged_refs = deepcopy(store.edition()["days"])
+            with patch.object(adapter, "capture", side_effect=captured), \
+                    patch("packages.application.web_vitrina_history_live_adapter.NativeDatedCompiler",
+                          side_effect=AssertionError("metadata update constructed compiler")):
+                status = update_live_history(adapter=adapter, runtime=runtime, store=store, rolling14=True)
+            assert status["status"] == "published" and status["metadata_only"]
+            assert not status["compiler_constructed"] and status["recomputes"] == 0
+            assert store.edition()["days"] == unchanged_refs
+            assert store.read(date_from="2026-04-01", date_to="2026-04-01")["archive_status"]["backfill_required"] == ["2026-04-01"]
             return {"native_recomputes": len(calls), "nochange_compiler_constructed": False,
+                    "adapter_metadata_without_compiler": True,
                     "archive_refs_preserved": len(baseline_days) - len(calls)}
 
 
@@ -294,6 +372,7 @@ def cli_worker(root):
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="history-rolling14-") as directory:
         result = run(Path(directory) / "state")
+        result["metadata_status"] = metadata_status(Path(directory) / "metadata")
         result["native_bridge"] = native_bridge(Path(directory) / "native")
         result["cli"] = cli_worker(Path(directory) / "cli")
         print(json.dumps(result))

@@ -718,9 +718,17 @@ def update_live_history(*, adapter: LiveNativeAdapter, runtime, store: HistorySt
                     raise LiveSourceUnavailable("accepted_ready_source_disappeared:" + day)
     if old and (not rolling_status["dirty_dates"] and not store.start_dates_changed(old,
             metric_start_dates or {}) if rolling14 else old["consumed"] == vector):
-        return {"status": "unchanged", "recomputes": 0, "compiler_constructed": False,
-                "edition_id": pointer["current"], "source_reads": adapter.stats,
-                "bootstrap_source_reads": bootstrap_reads, **(rolling_status or {})}
+        result = {"status": "unchanged", "recomputes": 0, "edition_id": pointer["current"]}
+        if rolling14:
+            def revalidate_status():
+                current = adapter.capture()
+                return current if adapter.fence == initial_fence else {**current, "publication_fence": "changed"}
+            result = store.update_rolling_status(vector=vector, business_date=business_day,
+                backfill_dates=backfill_dates or [], revalidate=revalidate_status,
+                expected_base=pointer["current"], deadline_monotonic=deadline_monotonic)
+        return {**result, "compiler_constructed": False, "source_reads": adapter.stats,
+                "bootstrap_source_reads": bootstrap_reads,
+                "capture_calls": adapter.capture_calls - calls_before}
     # The merged reader catalog may include retired archive-only rows. A day
     # compiler may reuse only an actual day catalog, never that display union.
     catalog_id = (store.day_catalogs(old)[max(old["days"])] if rolling14 and old
