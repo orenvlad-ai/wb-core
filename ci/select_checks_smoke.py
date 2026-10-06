@@ -22,6 +22,7 @@ BOUNDARIES = {
         "artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service",
         "apps/web_vitrina_history_candidate_build.py",
         "apps/web_vitrina_history_activation_smoke.py",
+        "packages/application/sheet_vitrina_v1_live_plan.py",
     ),
     "finance_liquidity_contract_smoke": (
         "packages/contracts/finance_liquidity.py",
@@ -468,7 +469,10 @@ def buyout_percent_dependency_checks():
             file_exists=lambda _, candidate: (select_checks.ROOT / candidate).is_file(),
         )
         verify_plan(plan)
-        assert plan["groups"] == ["buyout_percent"], plan
+        expected_groups = ["buyout_percent"]
+        if path == source:
+            expected_groups.append("web_vitrina_history_activation")
+        assert plan["groups"] == expected_groups, plan
         assert plan["pip"] == ["openpyxl==3.1.5"], plan
         assert plan["commands"].count(["python3", smoke]) == 1, plan
         assert plan["commands"][0][:3] == ["python3", "-m", "py_compile"], plan
