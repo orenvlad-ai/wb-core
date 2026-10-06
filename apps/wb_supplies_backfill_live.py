@@ -12,10 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import (  # noqa: E402
     DB_FILENAME,
     RegistryUploadDbBackedRuntime,
 )
+from packages.application.business_data_procedure_admission import guarded_cli
 from packages.application.wb_supplies import WbSuppliesBlock  # noqa: E402
 
 
@@ -25,6 +27,17 @@ def main() -> int:
         print(json.dumps({"status": "blocked", "error": "WB_API_TOKEN is required"}, ensure_ascii=False))
         return 2
     runtime_dir = Path(args.runtime_dir or os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR") or ROOT / ".runtime" / "registry_upload")
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with heavy_admitted(runtime_dir, operation="supplies_backfill_cli"):
+            return _run_admitted(args, runtime_dir)
+    except HeavyAdmissionBusy as exc:
+        print(json.dumps({"status": "busy", "reason": str(exc), "effects_started": False,
+                          "retryable": True}, ensure_ascii=False))
+        return 0
+
+
+def _run_admitted(args, runtime_dir):
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=runtime_dir)
     block = WbSuppliesBlock(runtime=runtime)
     run = block.run_full_backfill(
@@ -77,4 +90,4 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(guarded_cli(main, default_runtime=str(ROOT / ".runtime" / "registry_upload")))

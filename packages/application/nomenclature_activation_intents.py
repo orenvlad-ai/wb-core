@@ -159,7 +159,24 @@ def drain_nomenclature_activation_intents(
     runtime: Any, *, item_ids: Sequence[str] | None = None,
     service: Any = None, raise_errors: bool = False, batch_limit: int = 100,
 ) -> dict[str, Any]:
+    """Admission precedes domain lock and scans; busy preserves exact source demand."""
+    from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+    from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+    try:
+        with heavy_admitted(runtime.runtime_dir, operation="nomenclature-activation"):
+            return _drain_nomenclature_activation_intents(runtime, item_ids=item_ids, service=service,
+                raise_errors=raise_errors, batch_limit=batch_limit)
+    except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+        return {"status": "pending", "deferred": True, "reason": str(exc), "batches": []}
+
+
+def _drain_nomenclature_activation_intents(
+    runtime: Any, *, item_ids: Sequence[str] | None = None,
+    service: Any = None, raise_errors: bool = False, batch_limit: int = 100,
+) -> dict[str, Any]:
     """Existing save/warehouse continuation; no inactive catalog/history scan."""
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    require_heavy_owner(runtime.runtime_dir)
     from packages.application.ff_pool_dense_fbs import DenseFbsService
     from packages.application.registry_upload_db_backed_runtime import _connect
     from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
@@ -224,4 +241,4 @@ def drain_nomenclature_activation_intents(
             first_error.details = {"catalog_saved": True, "activation_status": "pending",
                                    "cause": first_error.details}
         raise first_error
-    return {"status": "pending" if first_error else ("ok" if results else "no_op"), "batches": results}
+    return {"status": "pending" if first_error or any(row.get("state") == "pending" for row in results) else ("ok" if results else "no_op"), "batches": results}

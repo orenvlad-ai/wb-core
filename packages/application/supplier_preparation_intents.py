@@ -358,11 +358,24 @@ def _prepare(runtime: Any, request: dict[str, Any]) -> dict[str, Any]:
 
 
 def drain_supplier_preparation_intents(runtime: Any, *, shipment_ids: Iterable[str] | None = None, inject_failure: Any = None) -> dict[str, Any]:
+    """Nonblocking derived continuation; saved source intent is never consumed on busy."""
+    from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+    from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+    try:
+        with heavy_admitted(runtime.runtime_dir, operation="supplier-preparation"):
+            return _drain_supplier_preparation_intents(runtime, shipment_ids=shipment_ids, inject_failure=inject_failure)
+    except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+        return {"status": "pending", "deferred": True, "reason": str(exc), "requests": []}
+
+
+def _drain_supplier_preparation_intents(runtime: Any, *, shipment_ids: Iterable[str] | None = None, inject_failure: Any = None) -> dict[str, Any]:
     """Prepare saved source revisions and hand them to the canonical queue.
 
     Work is retriable. Acknowledge and queue insertion share a short transaction
     after an exact source/revision/scope recheck. A new revision stays pending.
     """
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    require_heavy_owner(runtime.runtime_dir)
     from packages.application.registry_upload_db_backed_runtime import _connect
     from packages.application.warehouse_functional import ensure_warehouse_functional_schema, enqueue_supplier_replay_in_connection
     from packages.application.warehouse_functional_lock import warehouse_functional_write_lock
@@ -435,7 +448,8 @@ def drain_supplier_preparation_intents(runtime: Any, *, shipment_ids: Iterable[s
 
 def resume_supplier_preparation(runtime: Any, shipment_id: str) -> dict[str, Any]:
     try:
-        return _resume_supplier_preparation(runtime, shipment_id)
+        return {**_resume_supplier_preparation(runtime, shipment_id),
+                "operation_applied": True, "durable_saved": True}
     except Exception as exc:
         # Callers invoke this only after the source transaction has succeeded.
         return {"status": "pending", "operation_applied": True, "shipment_id": shipment_id, "error": str(exc).replace("\n", " ")[:500]}
@@ -459,5 +473,8 @@ def _resume_supplier_preparation(runtime: Any, shipment_id: str) -> dict[str, An
                     queued = conn.execute(f"SELECT * FROM {PREFIX}warehouse_targeted_recalc_queue WHERE queue_id=?", (row["queue_id"],)).fetchone()
                     if queued is not None:
                         return {**dict(queued), "preparation_revision": row["revision"], "shipment_id": shipment_id}
-                return {"status": "pending", "queue_id": row["queue_id"], "preparation_revision": row["revision"], "shipment_id": shipment_id}
+                return {"status": "pending", "queue_id": row["queue_id"], "preparation_revision": row["revision"],
+                        "shipment_id": shipment_id, "stable_source_id": "supplier_shipment:" + shipment_id,
+                        "source_revision": "supplier-preparation:" + str(row["revision"]) + ":" + row["source_fingerprint"],
+                        **({"deferred": True, "reason": result["reason"]} if result.get("deferred") else {})}
     return {"status": "pending", "retryable": False, "shipment_id": shipment_id, "error": "saved source has no proven continuation; explicit source finalization required"}

@@ -244,6 +244,16 @@ class DenseFbsService:
             }
 
     def activate_staged_skus(
+        self, *, staged_items: Sequence[Mapping[str, Any]], orchestration_key: str,
+        request_identity: str, actor: str,
+    ) -> dict[str, Any]:
+        """Direct staged publisher shares admission with its saved-intent drain."""
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        with heavy_admitted(self.runtime_dir, operation="nomenclature-activation"):
+            return self._activate_staged_skus(staged_items=staged_items,
+                orchestration_key=orchestration_key, request_identity=request_identity, actor=actor)
+
+    def _activate_staged_skus(
         self,
         *,
         staged_items: Sequence[Mapping[str, Any]],
@@ -251,6 +261,8 @@ class DenseFbsService:
         request_identity: str,
         actor: str,
     ) -> dict[str, Any]:
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        require_heavy_owner(self.runtime_dir)
         normalized = sorted(
             (
                 {

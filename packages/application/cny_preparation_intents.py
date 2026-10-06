@@ -179,6 +179,21 @@ def _outcome(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def drain_cny_preparation_intents(runtime: Any, *, block: Any = None, reason: str = 'saved_cny_source', inject_failure: Any = None) -> dict[str, Any]:
+    """Nonblocking derived continuation; saved source intent is never consumed on busy."""
+    from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+    from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+    try:
+        with heavy_admitted(runtime.runtime_dir, operation="cny-preparation"):
+            return _drain_cny_preparation_intents(runtime, block=block, reason=reason, inject_failure=inject_failure)
+    except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+        request = read_account_request(runtime)
+        return {**(_outcome(request) if request is not None else {"status": "no_op", "requests": []}),
+                "deferred": True, "reason": str(exc)}
+
+
+def _drain_cny_preparation_intents(runtime: Any, *, block: Any = None, reason: str = 'saved_cny_source', inject_failure: Any = None) -> dict[str, Any]:
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    require_heavy_owner(runtime.runtime_dir)
     from packages.application.cny_ledger import CnyLedgerBlock
     from packages.application.registry_upload_db_backed_runtime import _connect
     from packages.application.own_product_capital import OwnProductCapitalBlock

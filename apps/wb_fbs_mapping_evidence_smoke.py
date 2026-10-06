@@ -182,7 +182,7 @@ def main() -> int:
         source = OfficialSource()
         catalog = CatalogSource()
         registry = WbFbsWarehouseRegistry(
-            db_path=path,
+            db_path=path, runtime_dir=path.parent,
             timestamp_factory=clock,
             source=source,
             catalog_source=catalog,

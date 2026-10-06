@@ -137,7 +137,7 @@ def main() -> int:
             ]
         )
         registry = WbFbsWarehouseRegistry(
-            db_path=db_path,
+            db_path=db_path, runtime_dir=db_path.parent,
             timestamp_factory=lambda: next(moments),
             source=FakeSource(),
             catalog_source=CatalogSource(),
@@ -202,7 +202,7 @@ def main() -> int:
             ]
         )
         failed_stock_registry = WbFbsWarehouseRegistry(
-            db_path=db_path,
+            db_path=db_path, runtime_dir=db_path.parent,
             timestamp_factory=lambda: next(failed_moments),
             source=StockFailureSource(),
             catalog_source=CatalogSource(),

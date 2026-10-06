@@ -8292,17 +8292,36 @@ class RegistryUploadDbBackedRuntime:
                     conn, desired_items=prepared_items,
                     staged_item_ids={item["item_id"] for item in activation_items},
                 )
+                saved_activation_sources = source_statuses(
+                    conn, [item["item_id"] for item in activation_items],
+                ) if activation_items else {}
                 conn.commit()
-            if activation_items:
+        # Source+intent committed together. Close the source writer before
+        # heavy admission, then let the consumer revalidate its exact revision.
+        continuation_error = None
+        if activation_items:
+            try:
                 drain_nomenclature_activation_intents(
                     self, item_ids=[item["item_id"] for item in activation_items],
                     raise_errors=True,
                 )
+            except RuntimeError as exc:
+                # An unavailable continuation cannot make the committed source
+                # unsaved. Preserve DenseFbsError/business errors; reread actual
+                # source statuses below rather than inventing pending or an ack.
+                continuation_error = {"code": "activation_continuation_runtime_error",
+                                      "error_type": type(exc).__name__}
         loaded_items: list[dict[str, Any]] = []
         for prepared in prepared_items:
             loaded = self.load_nomenclature_item(str(prepared["item_id"]))
             if loaded is None:
                 raise ValueError(f"nomenclature item was not saved: {prepared['item_id']}")
+            source = saved_activation_sources.get(str(prepared["item_id"]))
+            if continuation_error is not None and source is not None:
+                loaded["activation_continuation_diagnostic"] = {
+                    **continuation_error,
+                    "attempted_source_revision": source["activation_source_revision"],
+                }
             loaded_items.append(loaded)
         return loaded_items
 

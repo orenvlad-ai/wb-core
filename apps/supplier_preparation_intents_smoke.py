@@ -726,24 +726,27 @@ def test_consumer_to_functional_result():
 
 
 def test_two_consumers_one_preparation():
-    from contextlib import contextmanager
     from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
-    from packages.application import warehouse_functional_lock as locks
+    from threading import Event
     with TemporaryDirectory() as raw:
         rt=RegistryUploadDbBackedRuntime(runtime_dir=Path(raw));source(rt)
-        barrier=Barrier(2);original_lock=locks.warehouse_functional_write_lock
-        @contextmanager
-        def synchronized_lock(*args,**kwargs):
-            barrier.wait(timeout=20)
-            with original_lock(*args,**kwargs) as value:
-                yield value
-        with patch.object(locks,'warehouse_functional_write_lock',synchronized_lock), patch.object(intents,'_prepare',wraps=intents._prepare) as prepare:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                outcomes=list(pool.map(lambda _:intents.drain_supplier_preparation_intents(rt),range(2)))
-        assert prepare.call_count==1, outcomes
-        assert sorted(outcome['status'] for outcome in outcomes)==['no_op','queued'],outcomes
+        reached, release = Event(), Event()
+        original_prepare = intents._prepare
+        def preparing(*args, **kwargs):
+            reached.set(); assert release.wait(20)
+            return original_prepare(*args, **kwargs)
+        with patch.object(intents, '_prepare', side_effect=preparing) as prepare:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                first = pool.submit(intents.drain_supplier_preparation_intents, rt)
+                assert reached.wait(20)
+                second = intents.drain_supplier_preparation_intents(rt)
+                assert second['status'] == 'pending' and second['deferred'], second
+                assert request(rt)['status'] == 'pending' and not queue(rt)
+                release.set()
+                outcome = first.result(timeout=30)
+        assert prepare.call_count==1 and outcome['status']=='queued', outcome
         assert len(queue(rt))==1
+        assert intents.drain_supplier_preparation_intents(rt)['status']=='no_op'
 
 
 def main():

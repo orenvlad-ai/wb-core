@@ -216,7 +216,7 @@ def main() -> int:
         _seed(db_path)
         clock = Clock()
         registry = WbFbsWarehouseRegistry(
-            db_path=db_path,
+            db_path=db_path, runtime_dir=db_path.parent,
             timestamp_factory=clock,
             source=OfficialSource(),
             catalog_source=CatalogSource(),
@@ -267,7 +267,7 @@ def main() -> int:
 
         stable_generation_id = generation["generation_id"]
         drifted = WbFbsWarehouseRegistry(
-            db_path=db_path,
+            db_path=db_path, runtime_dir=db_path.parent,
             timestamp_factory=clock,
             source=OfficialSource(),
             catalog_source=CatalogSource(drift=True),
@@ -276,7 +276,7 @@ def main() -> int:
         assert drifted["source_generation"]["generation_id"] == stable_generation_id
 
         failed = WbFbsWarehouseRegistry(
-            db_path=db_path,
+            db_path=db_path, runtime_dir=db_path.parent,
             timestamp_factory=clock,
             source=StockFailureSource(),
             catalog_source=CatalogSource(),
@@ -285,7 +285,7 @@ def main() -> int:
         assert failed["source_generation"]["generation_id"] == stable_generation_id
 
         office_mismatch = WbFbsWarehouseRegistry(
-            db_path=db_path,
+            db_path=db_path, runtime_dir=db_path.parent,
             timestamp_factory=clock,
             source=OfficeMismatchSource(),
             catalog_source=CatalogSource(),

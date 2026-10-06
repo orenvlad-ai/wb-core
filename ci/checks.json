@@ -62,6 +62,86 @@
     }
   },
   "groups": {
+    "business_heavy_supplies": {
+      "patterns": [
+        "packages/application/wb_supplies.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "apps/wb_supplies_backfill_live.py",
+        "apps/wb_supplies_goods_composition_diagnostics.py",
+        "apps/business_data_heavy_supplies_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/business_data_heavy_supplies_smoke.py"],
+        ["python3", "apps/wb_supplies_backfill_smoke.py"],
+        ["python3", "apps/wb_supplies_transit_cost_enrichment_smoke.py"],
+        ["python3", "apps/wb_supplies_incremental_sync_smoke.py"],
+        ["python3", "apps/wb_supplies_goods_composition_smoke.py"],
+        ["python3", "apps/wb_supplies_status_accepted_refresh_smoke.py"],
+        ["python3", "apps/wb_supplies_first20_parity_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "business_heavy_sources": {
+      "patterns": [
+        "packages/application/business_data_heavy_admission.py",
+        "packages/application/wb_finance_weekly.py",
+        "packages/application/wb_finance_daily.py",
+        "packages/application/wb_fbs_warehouse_registry.py",
+        "packages/application/ff_pool_overhead_backfill.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "apps/wb_finance_weekly.py",
+        "apps/wb_finance_daily.py",
+        "apps/wb_fbs_warehouse_registry.py",
+        "apps/ff_pool_overhead_backfill.py",
+        "apps/business_data_heavy_sources_smoke.py",
+        "apps/wb_fbs_*snapshot_smoke.py",
+        "apps/wb_fbs_warehouse_registry_smoke.py",
+        "apps/wb_fbs_mapping_evidence_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/business_data_heavy_sources_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_finance_daily_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_finance_weekly_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_finance_weekly_stale_cost_safety_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_finance_weekly_cost_cutover_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_fbs_warehouse_registry_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_fbs_complete_snapshot_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/wb_fbs_mapping_evidence_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_overhead_backfill_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
     "business_heavy_core_producers": {
       "patterns": [
         "packages/application/business_data_heavy_admission.py",
@@ -878,6 +958,32 @@
         [
           "python3",
           "apps/change_registry_internal_writers_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
+    "heavy_derived_intents": {
+      "patterns": [
+        "packages/application/supplier_preparation_intents.py",
+        "packages/application/cny_preparation_intents.py",
+        "packages/application/cny_ledger.py",
+        "packages/application/fulfillment_recalc_intents.py",
+        "packages/application/nomenclature_activation_intents.py",
+        "packages/application/ff_pool_dense_fbs.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/supplier_shipment_invoice_revision.py",
+        "apps/supplier_preparation_intents_smoke.py",
+        "apps/cny_preparation_intents_smoke.py",
+        "apps/heavy_derived_intents_smoke.py",
+        "docs/runbooks/heavy_derived_intents.md"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/heavy_derived_intents_smoke.py"
         ]
       ],
       "pip": [

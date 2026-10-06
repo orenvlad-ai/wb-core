@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
 from packages.application.ff_pool_overhead_backfill import (  # noqa: E402
     FfPoolOverheadBackfill,
     FfPoolOverheadBackfillError,
@@ -78,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.command == 'readback':
+        return _run_admitted(args)
+    runtime = Path(args.runtime_dir).resolve()
+    runtime.mkdir(parents=True, exist_ok=True)
+    with heavy_admitted(runtime, operation='ff_overhead_cli'):
+        return _run_admitted(args)
+
+
+def _run_admitted(args) -> dict[str, Any]:
     mutation = FfPoolOverheadBackfill(
         runtime_dir=Path(args.runtime_dir).resolve(),
         deployed_sha=str(args.deployed_sha),
@@ -119,6 +129,10 @@ def main() -> int:
             )
         )
         return 0 if payload.get("status") not in {"blocked", "error"} else 2
+    except HeavyAdmissionBusy as exc:
+        print(json.dumps({'status': 'busy', 'reason': str(exc), 'retryable': True,
+                          'effects_started': False}, ensure_ascii=False))
+        return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(
             json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False),

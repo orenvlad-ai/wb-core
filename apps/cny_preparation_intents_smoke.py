@@ -170,28 +170,28 @@ def test_new_revision_and_consumer_race():
         assert not any(row['source_revision'].startswith('cny-preparation:'+str(old['revision'])+':') for row in queue(rt))
         assert intents.drain_cny_preparation_intents(rt)['status'] == 'ok'
         assert rt.load_cny_document('pay-a')['source_order_id'] == 'a'
-        # Two simultaneous consumers both observe pending, only one prepares.
+        # One admitted consumer prepares; another returns its exact durable
+        # pending identity without entering the domain lock or waiting.
         rt.update_cny_document_context(document_id='pay-a', source_order_id='c', context_order_id='c', updated_at=NOW)
-        gate = threading.Barrier(2); original_read = intents.read_account_request
-        local = threading.local(); calls = []
-        def read(runtime):
-            row = original_read(runtime)
-            if not getattr(local, 'seen', False):
-                local.seen = True; gate.wait(timeout=20)
-            return row
+        reached, release = threading.Event(), threading.Event()
         original = CnyLedgerBlock._replay_ledger
+        calls = []
         def replay(self, **kwargs):
-            calls.append(1); return original(self, **kwargs)
-        errors = []
+            calls.append(1); reached.set(); assert release.wait(20)
+            return original(self, **kwargs)
+        outcomes, errors = [], []
         def consume():
-            try:
-                assert intents.drain_cny_preparation_intents(rt)['status'] == 'ok'
+            try: outcomes.append(intents.drain_cny_preparation_intents(rt))
             except Exception as exc: errors.append(repr(exc))
-        with patch.object(intents, 'read_account_request', read), patch.object(CnyLedgerBlock, '_replay_ledger', replay):
-            threads = [threading.Thread(target=consume) for _ in range(2)]
-            for thread in threads: thread.start()
-            for thread in threads: thread.join(30)
-        assert not errors and len(calls) == 1, (errors, calls)
+        with patch.object(CnyLedgerBlock, '_replay_ledger', replay):
+            thread = threading.Thread(target=consume); thread.start()
+            assert reached.wait(20)
+            second = intents.drain_cny_preparation_intents(rt)
+            assert second['status']=='pending' and second['deferred'], second
+            assert second['durable_retry_identity']['account_revision']==intents.read_account_request(rt)['revision']
+            release.set(); thread.join(30); assert not thread.is_alive()
+        assert not errors and len(calls)==1 and outcomes[0]['status']=='ok', (errors,calls,outcomes)
+        assert intents.drain_cny_preparation_intents(rt)['status']=='ok'
 
 
 def test_source_and_late_failures():

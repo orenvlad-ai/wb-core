@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted  # noqa: E402
 from packages.application.wb_finance_weekly import WbFinanceApiClient, block_from_env  # noqa: E402
 from packages.application.root_storage_policy import (  # noqa: E402
     admit_root_write,
@@ -84,6 +85,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-interval-seconds", type=float, default=60.0)
     args = parser.parse_args(argv)
     _load_env(Path(args.env_file))
+    try:
+        if args.command == 'status':
+            return _run_admitted(args, parser)
+        runtime = Path(args.runtime_dir)
+        runtime.mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(runtime, operation='finance_weekly'):
+            return _run_admitted(args, parser)
+    except HeavyAdmissionBusy as exc:
+        print(json.dumps({'status': 'busy', 'reason': str(exc), 'retryable': True,
+                          'effects_started': False}, ensure_ascii=False))
+        return 0
+
+
+def _run_admitted(args, parser):
     block = block_from_env(Path(args.runtime_dir))
     if args.command == "ensure-schema":
         block.ensure_schema()

@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from apps.wb_finance_weekly import _load_env  # noqa: E402
 from packages.adapters.wb_finance_api import WbFinanceApiClient  # noqa: E402
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted  # noqa: E402
 from packages.application.wb_finance_daily import daily_block_from_env  # noqa: E402
 from packages.application.wb_finance_weekly import block_from_env as weekly_block_from_env  # noqa: E402
 
@@ -48,6 +49,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-days", type=int, default=2)
     args = parser.parse_args(argv)
     _load_env(Path(args.env_file))
+    try:
+        if args.command == 'status':
+            return _run_admitted(args, parser)
+        runtime = Path(args.runtime_dir)
+        runtime.mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(runtime, operation='finance_daily'):
+            return _run_admitted(args, parser)
+    except HeavyAdmissionBusy as exc:
+        print(json.dumps({'status': 'busy', 'reason': str(exc), 'retryable': True,
+                          'effects_started': False}, ensure_ascii=False))
+        return 0
+
+
+def _run_admitted(args, parser):
     block = daily_block_from_env(Path(args.runtime_dir))
     if args.command == "ensure-schema":
         block.ensure_schema()

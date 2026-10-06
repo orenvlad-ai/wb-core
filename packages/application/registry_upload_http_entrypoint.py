@@ -1333,7 +1333,7 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.wb_fbs_warehouse_registry = WbFbsWarehouseRegistry(
-            db_path=self.runtime.db_path,
+            db_path=self.runtime.db_path, runtime_dir=self.runtime.runtime_dir,
             timestamp_factory=self.activated_at_factory,
             writer_enabled=lambda: bool(
                 (
@@ -4715,6 +4715,7 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         return self.supplier_shipments_block.update_expenses_complete(shipment_id, payload.get("expenses_complete"))
 
+    @_heavy_http_method
     def handle_our_wb_cost_recalculate_request(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         result = self.our_wb_cost_block.rebuild_all()
         rebuilt = asdict(result)
@@ -6432,11 +6433,16 @@ class RegistryUploadHttpEntrypoint:
         return self.wb_supplies_block.list_supplies(params)
 
     def handle_wb_supplies_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        result = self.wb_supplies_block.sync_supplies(payload)
-        return {
-            **result,
-            "transit_cost_collection": self.wb_supplies_block.collect_all_due_transit_costs(),
-        }
+        from packages.application.wb_supplies import _normalize_sync_request, SYNC_MODE_FULL_BACKFILL
+        request = _normalize_sync_request(payload)
+        if request["mode"] == SYNC_MODE_FULL_BACKFILL:
+            return self.wb_supplies_block._start_combined_full_backfill(request)
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplies"):
+            result = self.wb_supplies_block.sync_supplies(payload)
+            return {
+                **result,
+                "transit_cost_collection": self.wb_supplies_block.collect_all_due_transit_costs(),
+            }
 
     def handle_wb_supplies_backfill_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.start_full_backfill(payload)
@@ -6468,6 +6474,9 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_supplies_transit_cost_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.get_transit_cost_enrichment_status(params)
+
+    def handle_wb_supplies_cached_detail_request(self, supply_id: str) -> dict[str, Any] | None:
+        return self.wb_supplies_block.cached_supply_detail_if_deferred(supply_id)
 
     def handle_wb_supplies_detail_request(self, supply_id: str) -> dict[str, Any]:
         return self.wb_supplies_block.get_supply(supply_id)
@@ -6979,10 +6988,27 @@ class RegistryUploadHttpEntrypoint:
         return self._replay_ff_document_queue(stable_source_ids=[stable_source_id])
 
     def _replay_ff_document_queue(
+        self, *, stable_source_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        # The source and exact targeted queue already committed. Admission is
+        # before queue scans/plans/domain locks; busy never claims running.
+        from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        identities = sorted({str(item) for item in stable_source_ids if str(item)})
+        try:
+            with heavy_admitted(self.runtime.runtime_dir, operation="ff-targeted-replay"):
+                return self._replay_ff_document_queue_admitted(stable_source_ids=identities)
+        except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+            return {"status": "queued", "deferred": True, "reason": str(exc),
+                    "stable_source_ids": identities}
+
+    def _replay_ff_document_queue_admitted(
         self,
         *,
         stable_source_ids: Iterable[str],
     ) -> dict[str, Any]:
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        require_heavy_owner(self.runtime.runtime_dir)
         stable_ids = sorted({str(item) for item in stable_source_ids if str(item)})
         if not stable_ids:
             return {"status": "idle", "reason": "stable_source_missing"}
@@ -7601,9 +7627,28 @@ class RegistryUploadHttpEntrypoint:
         self, result: Mapping[str, Any]
     ) -> dict[str, Any]:
         payload = dict(result)
-        payload["wb_finance_cost_recalculation"] = (
-            self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
-        )
+        if payload.get('status') != 'ok':
+            payload['wb_finance_cost_recalculation'] = {'status': 'not_required',
+                'reason': 'no_successful_source_result'}
+            return payload
+        # These saved rows are already durable. Busy/error here describes only
+        # the derived Finance continuation, never rejection of the source.
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        try:
+            payload['wb_finance_cost_recalculation'] = self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+        except Exception as exc:
+            from packages.application.ready_publication import canonical, digest
+            items = ([payload['item']] if isinstance(payload.get('item'), Mapping) else
+                [item.get('item', item) for item in payload.get('items', []) if isinstance(item, Mapping)])
+            identities = sorted((dict(item) for item in items), key=lambda item: str(item.get('item_id', '')))
+            deferred = isinstance(exc, (HeavyAdmissionBusy, MaintenanceAdmissionBlocked))
+            payload['wb_finance_cost_recalculation'] = {
+                'status': 'deferred' if deferred else 'failed', 'reason': type(exc).__name__,
+                'source_accepted': True, 'source_revision_count': len(identities),
+                'source_revision_fingerprint': digest(canonical(identities)),
+                'retry_policy': 'authoritative_source_stale_detection',
+                'exact_revision_acked': False,
+            }
         return payload
 
     def handle_sku_groups_list_request(self) -> dict[str, Any]:

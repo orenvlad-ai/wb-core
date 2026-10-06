@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
 
 from packages.adapters.wb_supplies import HttpBackedWbSuppliesSource  # noqa: E402
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime  # noqa: E402
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
 from packages.application.wb_supplies import WbSuppliesBlock, _supply_detail_payload  # noqa: E402
 
 
@@ -28,6 +30,20 @@ def main() -> int:
     parser.add_argument("--output-json", action="store_true")
     args = parser.parse_args()
 
+    if not args.live_fetch:
+        return _run(args)
+    runtime_dir = Path(args.runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with heavy_admitted(runtime_dir, operation="supplies_detail_cli"):
+            return _run(args)
+    except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+        print(json.dumps({"status": "busy" if isinstance(exc, HeavyAdmissionBusy) else "skipped_maintenance",
+                          "reason": str(exc), "effects_started": False, "retryable": True}))
+        return 2
+
+
+def _run(args):
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
     target_ids = args.target_id or DEFAULT_TARGET_IDS
     block = WbSuppliesBlock(runtime=runtime, source=HttpBackedWbSuppliesSource()) if args.live_fetch else None

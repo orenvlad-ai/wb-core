@@ -465,7 +465,7 @@ class SourceAndAdmissionTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             root=Path(temp);db=root/'operational.sqlite3';fbs_fixture._seed(db)
             clock=fbs_fixture.Clock()
-            registry=WbFbsWarehouseRegistry(db_path=db,timestamp_factory=clock,
+            registry=WbFbsWarehouseRegistry(db_path=db,runtime_dir=db.parent,timestamp_factory=clock,
                 source=fbs_fixture.OfficialSource(),catalog_source=fbs_fixture.CatalogSource())
             registry.collect()
             entry=SimpleNamespace(runtime=SimpleNamespace(db_path=db),
@@ -477,7 +477,7 @@ class SourceAndAdmissionTests(unittest.TestCase):
             with patch.object(registry,'collect',return_value={'status':'last_good'}):
                 with self.assertRaisesRegex(CycleStageFailure,'fbs_new_complete_generation_missing'):
                     Entry._cycle_fbs_generation(entry)
-            bad=WbFbsWarehouseRegistry(db_path=db,timestamp_factory=clock,
+            bad=WbFbsWarehouseRegistry(db_path=db,runtime_dir=db.parent,timestamp_factory=clock,
                 source=fbs_fixture.OfficialSource(),catalog_source=fbs_fixture.CatalogSource(drift=True))
             entry.wb_fbs_warehouse_registry=bad
             with self.assertRaisesRegex(CycleStageFailure,'fbs_new_complete_generation_missing'):

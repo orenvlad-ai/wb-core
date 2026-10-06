@@ -218,12 +218,14 @@ class WbFbsWarehouseRegistry:
         self,
         *,
         db_path: Path,
+        runtime_dir: Path | None = None,
         timestamp_factory: Any | None = None,
         source: Any | None = None,
         catalog_source: Any | None = None,
         writer_enabled: bool | Callable[[], bool] = False,
     ) -> None:
         self.db_path = Path(db_path)
+        self.runtime_dir = Path(runtime_dir).resolve() if runtime_dir is not None else None
         self._now = timestamp_factory or _utc_now
         self.source = source or HttpBackedWbFbsOrdersSource()
         self.catalog_source = catalog_source or HttpBackedWbContentSource()
@@ -234,8 +236,18 @@ class WbFbsWarehouseRegistry:
         )
 
     def collect(self) -> dict[str, Any]:
-        """Capture one stable exact-catalog generation before one short local write."""
+        """Admit the full source/commit lifetime under its explicit runtime root."""
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        if self.runtime_dir is None:
+            raise RuntimeError('official FBS collection requires explicit runtime_dir')
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(self.runtime_dir, operation='official_fbs'):
+            return self._collect_admitted()
 
+    def _collect_admitted(self) -> dict[str, Any]:
+        """Capture one stable exact-catalog generation before one short local write."""
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        require_heavy_owner(self.runtime_dir)
         started_at = self._now()
         run_id = "fbsreg_" + hashlib.sha256(
             f"{started_at}:{self._now()}".encode("utf-8")
