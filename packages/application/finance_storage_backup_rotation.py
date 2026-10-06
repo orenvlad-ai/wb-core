@@ -13,6 +13,7 @@ from contextlib import closing
 from dataclasses import asdict
 from datetime import datetime, timezone
 import fcntl
+from functools import wraps
 import hashlib
 import json
 import os
@@ -23,6 +24,13 @@ import stat as stat_module
 from typing import Any, Mapping
 
 from packages.application.business_data_write_barrier import barrier_status
+from packages.application.business_data_heavy_admission import (
+    HeavyAdmissionBusy, HeavyAdmissionLease,
+)
+from packages.application.finance_backup_admission import (
+    BackupAdmissionStateError, backup_admission_priority, backup_admission_request_id,
+    defer_backup_admission, resolve_backup_admission,
+)
 from packages.application.finance_storage_migration import (
     SHADOW_STATE_CONTRACT,
     SHADOW_STATE_FILENAME,
@@ -111,6 +119,43 @@ _ARCHIVE_ALLOWED_FILES = _ROOT_ALLOWED_FILES | {
 
 class FinanceStorageBackupRotationError(FinanceStorageSnapshotRetentionError):
     """The post-cutover backup boundary is unsafe or ambiguous."""
+
+
+class FinanceBackupDeferred(HeavyAdmissionBusy):
+    """Canonical plan/apply was not entered; no plan or success is fabricated."""
+
+    def __init__(self, payload: dict):
+        super().__init__(payload["reason"])
+        self.result_payload = payload
+
+
+def _backup_heavy_method(function):
+    @wraps(function)
+    def guarded(self, *args, **kwargs):
+        try:
+            lease = HeavyAdmissionLease(self.runtime_dir, operation="finance-backup")
+        except HeavyAdmissionBusy as exc:
+            raise FinanceBackupDeferred(defer_backup_admission(
+                self.runtime_dir, deployed_sha=self.deployed_sha,
+            )) from exc
+        try:
+            with lease.entered():
+                # Priority's bounded inventory is intentionally conservative for
+                # other producers/scheduled resume. Manual canonical proof has
+                # its own exact guards and can supersede multiple safe started
+                # records; only observe the private intent for acknowledgement.
+                request_id = backup_admission_request_id(self.runtime_dir)
+                result = function(self, *args, **kwargs)
+                # Resolve only the request observed before these exact effects.
+                # Concurrent new demand must not be acknowledged by an old run.
+                resolve_backup_admission(
+                    self.runtime_dir, request_id=request_id,
+                    terminal_status=str(result.get("status") or ""),
+                )
+                return result
+        finally:
+            lease.close()
+    return guarded
 
 
 def _utc_now() -> str:
@@ -1524,6 +1569,7 @@ class FinanceStorageBackupRotation:
                 return True
         return source.get("watermarks") != guard.get("watermarks")
 
+    @_backup_heavy_method
     def build_plan(
         self,
         *,
@@ -2758,6 +2804,7 @@ class FinanceStorageBackupRotation:
         _atomic_write_json(self.policy_path, policy)
         return policy
 
+    @_backup_heavy_method
     def apply(
         self,
         *,
@@ -3182,6 +3229,7 @@ class FinanceStorageBackupRotation:
         finally:
             os.close(lock_descriptor)
 
+    @_backup_heavy_method
     def readback(
         self, *, reviewed_plan: dict[str, Any], expected_fingerprint: str
     ) -> dict[str, Any]:
@@ -3669,6 +3717,47 @@ def backup_rotation_health(runtime_dir: Path) -> dict[str, Any]:
 
 
 def scheduled_rotation(
+    runtime_dir: Path,
+    *,
+    deployed_sha: str,
+    require_distinct_device: bool = True,
+    require_backup_mountpoint: bool = True,
+) -> dict[str, Any]:
+    """Hold one shared heavy owner across exact recovery or fresh plan/apply.
+
+    Deferred intent uses only bounded metadata. The full original plan is rebuilt
+    after acquisition; canonical copies/verification/selection/GC remain one
+    exclusive window. Legacy producers not yet integrated are not serialized.
+    """
+    runtime = Path(runtime_dir).expanduser().resolve()
+    # Preserve absent-policy inertness without provisioning either lock.
+    if not (runtime / ARCHIVE_RELATIVE_ROOT / POLICY_FILENAME).exists():
+        return {"contract_version": RESULT_CONTRACT, "status": "policy_inert", "mutation_count": 0}
+    try:
+        lease = HeavyAdmissionLease(runtime, operation="finance-backup")
+    except HeavyAdmissionBusy:
+        return {"contract_version": RESULT_CONTRACT,
+                **defer_backup_admission(runtime, deployed_sha=deployed_sha)}
+    try:
+        with lease.entered():
+            before = backup_admission_priority(runtime)
+            if not before["ready"]:
+                raise BackupAdmissionStateError(before["error"])
+            result = _scheduled_rotation_owned(
+                runtime, deployed_sha=deployed_sha,
+                require_distinct_device=require_distinct_device,
+                require_backup_mountpoint=require_backup_mountpoint,
+            )
+            resolve_backup_admission(
+                runtime, request_id=(before.get("intent") or {}).get("request_id"),
+                terminal_status=str(result.get("status") or ""),
+            )
+            return result
+    finally:
+        lease.close()
+
+
+def _scheduled_rotation_owned(
     runtime_dir: Path,
     *,
     deployed_sha: str,
