@@ -16,7 +16,7 @@ import tempfile
 from packages.application import business_data_maintenance_pause as pause
 from packages.application import business_data_schedule_profile as profile
 from packages.application.business_data_write_barrier import (
-    _atomic_write_private_json, _append_private_audit, _validate_actor,
+    _atomic_write_private_json, _append_private_audit, _validate_actor, _BarrierLock,
     _validate_identifier, barrier_status, release_schedule_target_barrier,
 )
 
@@ -248,12 +248,19 @@ def apply(runtime_dir: Path, *, reviewed_plan: dict, expected_fingerprint: str, 
                 raise RuntimeError("schedule target changed after preview")
             state = {"schema_version": profile.TRANSITION_SCHEMA, "plan": plan, "phase": "prepared",
                      "actor": actor, "reason": reason}
-            _save(runtime, state, "prepared"); fault("prepared")
+            # Ordinary direct release does not own the restore lock. Serialize
+            # the first intent with its release authority, re-proving held before
+            # recording anything; subsequent ordinary release sees partial state.
+            with _BarrierLock(runtime):
+                _pause_binding(runtime, plan)
+                _save(runtime, state, "prepared")
+            fault("prepared")
         current = _observed(runtime, plan, systemd, activity_reader, proc_root, mixed=True)
         if state["phase"] not in {"committed", "released"}:
             _write_image(Path(plan["dropin_path"]), plan["dropin_before"], _target_image(profile.DROPIN_BYTES))
             fault("dropin_written")
             state["phase"] = "dropin_installed"; _save(runtime, state, "dropin_installed")
+            fault("dropin_installed")
             if pause._unit_fingerprint(systemd.unit_state(profile.WAREHOUSE_TIMER)) != plan["target_unit_digests"][profile.WAREHOUSE_TIMER]:
                 _run(systemd, ["daemon-reload"])
             fault("reloaded")

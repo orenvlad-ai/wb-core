@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apps.business_data_maintenance_pause_smoke import FakeSystemd
 from apps.business_data_maintenance import POLICY_FILENAME, POLICY_SCHEMA_VERSION, maintenance_prepare, maintenance_restore
+from apps import business_data_maintenance as master_cli
+from apps import business_data_maintenance_pause as pause_cli
 from apps.hosted_runtime_deploy_barrier import reconcile
 from packages.application import business_data_maintenance_pause as pause
 from packages.application import business_data_schedule_profile as profile
@@ -157,7 +159,7 @@ class ScheduleProfileSmoke(unittest.TestCase):
             self.assertTrue(barrier_status(runtime)["active"])
 
     def test_every_target_step_interruption_restart_identity_no_resend(self):
-        points = ["prepared", "dropin_written", "reloaded", "selector_written", "target_verified", "committed", "barrier_released"]
+        points = ["prepared", "dropin_written", "dropin_installed", "reloaded", "selector_written", "target_verified", "committed", "barrier_released"]
         points += ["timer:" + timer for timer in pause.TIMERS]
         for point in points:
             with self.subTest(point=point), fixture() as (runtime, systemd, options), \
@@ -202,6 +204,154 @@ class ScheduleProfileSmoke(unittest.TestCase):
                 with self.assertRaises(BusinessDataWriteBarrierError):
                     release_barrier(runtime, window_id=plan["window_id"], plan_fingerprint=plan["baseline_fingerprint"],
                                     actor="test", reason="no false prior", restore_readback=receipt)
+
+    def test_partial_pre_reload_ordinary_resume_and_both_release_clis_cannot_escape(self):
+        for point in ("prepared", "dropin_written", "dropin_installed"):
+            for recover in ("target", "rollback"):
+                with self.subTest(point=point, recover=recover), fixture() as (runtime, systemd, options), \
+                        patch.object(profile, "activation_dependencies", return_value=READY):
+                    plan = reviewed(runtime, systemd, options)
+                    def fault(here):
+                        if here == point:
+                            raise RuntimeError("pre reload interruption")
+                    with self.assertRaisesRegex(RuntimeError, "pre reload interruption"):
+                        apply(runtime, systemd, options, plan, _fault=fault)
+                    # Loaded configuration still equals the original baseline.
+                    for unit, old in plan["baseline"]["units"].items():
+                        self.assertEqual(pause._unit_fingerprint(systemd.unit_state(unit)), pause._unit_fingerprint(old))
+                    before = {path: path.read_bytes() for path in runtime.rglob("*") if path.is_file()}
+                    calls = list(systemd.calls)
+                    with self.assertRaisesRegex(RuntimeError, "same-operation"):
+                        pause.resume(runtime, window_id=plan["window_id"], actor="test", reason="ordinary resume", **options)
+                    exact_prior = {"schema_version": pause.SCHEMA, "status": "restored", "exact_prior_state_restored": True,
+                                   "baseline_fingerprint": plan["baseline_fingerprint"], "units": plan["baseline"]["units"]}
+                    with self.assertRaisesRegex(RuntimeError, "same-operation"):
+                        release_barrier(runtime, window_id=plan["window_id"], plan_fingerprint=plan["baseline_fingerprint"],
+                                        actor="test", reason="ordinary direct release", restore_readback=exact_prior)
+                    with patch.object(pause_cli, "_read_env_file", return_value={}), \
+                         patch.object(pause_cli, "_build_web_auth_cookie", return_value="offline"), \
+                         patch.object(pause_cli, "SystemdClient", return_value=systemd), \
+                         patch.object(pause_cli, "RuntimeScheduleClient"), patch("builtins.print"):
+                        result = pause_cli.main(["resume", "--runtime-dir", str(runtime), "--env-file", "offline.env",
+                                                 "--window-id", plan["window_id"], "--actor", "test", "--reason", "CLI resume"])
+                        self.assertEqual(result, 1)
+                    with patch.object(master_cli, "_load_json_object", return_value={
+                            "phase": "restored", "exact_prior_state_restored": True, "restore_readback": exact_prior}):
+                        with self.assertRaisesRegex(RuntimeError, "same-operation"):
+                            master_cli.main(["barrier-release", "--runtime-dir", str(runtime), "--env-file", "offline.env",
+                                             "--window-id", plan["window_id"], "--plan-fingerprint", plan["baseline_fingerprint"],
+                                             "--actor", "test", "--reason", "CLI release"])
+                    self.assertEqual(calls, systemd.calls)
+                    self.assertEqual(before, {path: path.read_bytes() for path in runtime.rglob("*") if path.is_file()})
+                    self.assertTrue(barrier_status(runtime)["active"])
+                    if recover == "target":
+                        self.assertTrue(apply(runtime, systemd, options, plan)["exact_target_state_restored"])
+                    else:
+                        transition.rollback(runtime, operation_id=plan["operation_id"], actor="test", reason="controlled rollback", **options)
+                        self.assertIsNone(transition._image(Path(plan["dropin_path"])))
+                        self.assertTrue(pause.resume(runtime, window_id=plan["window_id"], actor="test", reason="exact old", **options)["exact_prior_state_restored"])
+                    self.assertFalse(barrier_status(runtime)["active"])
+
+    def test_restored_files_before_durable_rollback_cannot_be_ordinarily_released(self):
+        with fixture() as (runtime, systemd, options), patch.object(profile, "activation_dependencies", return_value=READY):
+            plan = reviewed(runtime, systemd, options)
+            def stop(here):
+                if here == "target_verified":
+                    raise RuntimeError("before commit")
+            with self.assertRaises(RuntimeError):
+                apply(runtime, systemd, options, plan, _fault=stop)
+            def interrupted(here):
+                if here == "rollback_reloaded":
+                    raise RuntimeError("before durable rolled back")
+            with self.assertRaisesRegex(RuntimeError, "before durable"):
+                transition.rollback(runtime, operation_id=plan["operation_id"], actor="test", reason="rollback", **options, _fault=interrupted)
+            self.assertEqual(profile.load_transition(runtime, plan["operation_id"])["phase"], "rolling_back")
+            before = {path: path.read_bytes() for path in runtime.rglob("*") if path.is_file()}
+            calls = list(systemd.calls)
+            with self.assertRaisesRegex(RuntimeError, "same-operation"):
+                pause.resume(runtime, window_id=plan["window_id"], actor="test", reason="premature", **options)
+            with self.assertRaisesRegex(RuntimeError, "same-operation"):
+                release_barrier(runtime, window_id=plan["window_id"], plan_fingerprint=plan["baseline_fingerprint"],
+                                actor="test", reason="premature", restore_readback={"status": "restored", "exact_prior_state_restored": True})
+            self.assertEqual(calls, systemd.calls)
+            self.assertEqual(before, {path: path.read_bytes() for path in runtime.rglob("*") if path.is_file()})
+            transition.rollback(runtime, operation_id=plan["operation_id"], actor="test", reason="same operation", **options)
+            self.assertTrue(pause.resume(runtime, window_id=plan["window_id"], actor="test", reason="exact old", **options)["exact_prior_state_restored"])
+
+    def test_first_prepared_record_and_competing_release_share_barrier_authority(self):
+        with fixture() as (runtime, systemd, options), patch.object(profile, "activation_dependencies", return_value=READY):
+            plan = reviewed(runtime, systemd, options)
+            code = """import sys
+from pathlib import Path
+from packages.application import business_data_schedule_profile as profile
+from packages.application.business_data_write_barrier import release_barrier
+original = profile.assert_no_partial_transition
+checks = 0
+def observed(runtime):
+    global checks
+    original(runtime)
+    checks += 1
+    if checks == 1:
+        print('prechecked', flush=True)
+profile.assert_no_partial_transition = observed
+try:
+    release_barrier(Path(sys.argv[1]), window_id=sys.argv[2], plan_fingerprint=sys.argv[3],
+                    actor='offline-child', reason='competing ordinary release',
+                    restore_readback={'status':'restored','exact_prior_state_restored':True})
+except RuntimeError as exc:
+    print('refused:' + str(exc), flush=True)
+else:
+    raise AssertionError('partial transition escaped')
+"""
+            child = None
+            original_save = transition._save
+            def save_with_contender(runtime, state, event):
+                nonlocal child
+                if event == "prepared":
+                    child = subprocess.Popen([sys.executable, "-c", code, str(runtime),
+                                              plan["window_id"], plan["baseline_fingerprint"]], cwd=ROOT,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    self.assertEqual(child.stdout.readline().strip(), "prechecked")
+                    # First check saw no intent. Actual release is blocked on
+                    # the barrier lock owned around this first journal write.
+                    self.assertIsNone(child.poll())
+                original_save(runtime, state, event)
+            def stopped(here):
+                if here == "prepared":
+                    raise RuntimeError("prepared interruption")
+            try:
+                with patch.object(transition, "_save", side_effect=save_with_contender):
+                    with self.assertRaisesRegex(RuntimeError, "prepared interruption"):
+                        apply(runtime, systemd, options, plan, _fault=stopped)
+                output, error = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, error)
+                self.assertIn("refused:schedule transition requires exact same-operation recovery", output)
+            finally:
+                if child is not None and child.poll() is None:
+                    child.kill(); child.communicate()
+            self.assertTrue(barrier_status(runtime)["active"])
+            self.assertEqual(profile.load_transition(runtime, plan["operation_id"])["phase"], "prepared")
+            self.assertTrue(apply(runtime, systemd, options, plan)["exact_target_state_restored"])
+
+    def test_unknown_transition_inventory_blocks_ordinary_authority_without_mutation(self):
+        with fixture() as (runtime, systemd, options):
+            root = runtime / profile.TRANSITIONS_DIRECTORY
+            root.mkdir(mode=0o700)
+            unknown = root / "unknown-record.txt"
+            unknown.write_text("unproven inventory")
+            before = {path: path.read_bytes() for path in runtime.rglob("*") if path.is_file()}
+            calls = list(systemd.calls)
+            state = pause.load_state(runtime)
+            with self.assertRaisesRegex(RuntimeError, "inventory"):
+                pause.resume(runtime, window_id=state["window_id"], actor="test", reason="unknown", **options)
+            with self.assertRaisesRegex(RuntimeError, "inventory"):
+                release_barrier(runtime, window_id=state["window_id"], plan_fingerprint=state["baseline_fingerprint"],
+                                actor="test", reason="unknown", restore_readback={"status": "restored", "exact_prior_state_restored": True})
+            self.assertEqual(calls, systemd.calls)
+            self.assertEqual(before, {path: path.read_bytes() for path in runtime.rglob("*") if path.is_file()})
+            self.assertTrue(barrier_status(runtime)["active"])
+            unknown.unlink()
+            self.assertTrue(pause.resume(runtime, window_id=state["window_id"], actor="test", reason="legacy exact", **options)["exact_prior_state_restored"])
 
     def test_ambiguous_systemd_submit_reads_back_without_resend(self):
         for action in ("enable", "start"):

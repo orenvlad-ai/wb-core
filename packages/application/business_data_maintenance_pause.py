@@ -268,11 +268,16 @@ def resume(runtime_dir: Path, *, window_id: str, actor: str, reason: str,
     _validate_actor(actor)
     if not str(reason).strip():
         raise RuntimeError("audited restore reason is required")
+    from packages.application.business_data_schedule_profile import assert_no_partial_transition
+    # Loaded unit digests can still equal baseline before daemon-reload even
+    # when a target preset is already on disk. Never escape that operation.
+    assert_no_partial_transition(runtime_dir)
     state = load_state(runtime_dir)
     if state is None:
         raise RuntimeError("no pause baseline")
     _identity(state, window_id)
     with _ExclusiveRestoreLock(runtime_dir):
+        assert_no_partial_transition(runtime_dir)
         state = load_state(runtime_dir)
         _identity(state, window_id)
         before = readback(runtime_dir, systemd=systemd, activity_reader=activity_reader, proc_root=proc_root)

@@ -88,6 +88,14 @@ and `exact_prior_state_restored=false`. Original pause baseline is never replace
 Ordinary pause resume and ordinary barrier release keep exact-prior requirements;
 the separate fixed-target release requires committed private target proof.
 
+Ordinary resume and central ordinary barrier release also reject partial/unknown
+transition inventory before mutation, including prepared and preset-on-disk
+before reload when loaded digests still match baseline. Both recheck under their
+existing locks; the first prepared journal shares the barrier authority lock
+and re-proves held binding. A competing direct release cannot strand the intent.
+There is no caller bypass flag. Only exact committed target release or successful
+durable rolled_back followed by ordinary exact-prior resume can complete it.
+
 Before commit, rollback pauses all timers, proves drain, restores exact before
 bytes/absence/mode/ownership and selector, reloads and proves original digests
 and raw controls. It leaves the same barrier active; ordinary exact pause resume

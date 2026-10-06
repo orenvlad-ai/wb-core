@@ -429,7 +429,19 @@ def release_barrier(
         raise BusinessDataWriteBarrierError(
             "write barrier release requires confirmed exact maintenance restore"
         )
+    from packages.application.business_data_schedule_profile import assert_no_partial_transition
+
+    def schedule_release_guard() -> None:
+        try:
+            assert_no_partial_transition(runtime_dir)
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
+            raise BusinessDataWriteBarrierError(str(exc)) from exc
+
+    schedule_release_guard()
     with _BarrierLock(runtime_dir):
+        # Transition's first prepared record uses this same lock and rechecks
+        # held binding. A competing ordinary release cannot strand that record.
+        schedule_release_guard()
         state = _load_state(runtime_dir)
         if state is None:
             raise BusinessDataWriteBarrierError(
