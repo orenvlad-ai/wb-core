@@ -91,12 +91,40 @@ def owner_policy_preserved_units(runtime_dir: Path, requested: set[str]) -> set[
 def reconcile(
     *, runtime_dir: Path, enable: list[str], restart: list[str], mutate: bool = True
 ) -> dict[str, Any]:
+    from apps.business_data_maintenance import SystemdClient
+    from packages.application import business_data_schedule_profile as profile
+    runtime = runtime_dir.resolve()
+    # Read-only validation before any enable/restart, including future deploys.
+    profile.assert_no_partial_transition(runtime)
+    selector = profile.load_selector(runtime)
+    profile_disabled = set()
+    if selector:
+        profile.prove_preset(SystemdClient())
+        core = profile.effective_core(runtime)
+        held = barrier_status(runtime).get("active")
+        if held:
+            core = {unit: ("disabled", "inactive") for unit in core}
+        profile_disabled = {unit for unit, pair in core.items() if pair == ("disabled", "inactive")}
+        enable = [unit for unit in enable if unit not in core]
+        restart = [unit for unit in restart if unit not in core]
+        for unit, pair in core.items():
+            if pair == ("enabled", "active"):
+                enable.append(unit); restart.append(unit)
+            elif held:
+                state = unit_state(unit)
+                if state.get("UnitFileState") != "disabled" or state.get("ActiveState") != "inactive":
+                    raise DeployBarrierError("profile timer is not quiescent under pause: " + unit)
     requested = set(enable) | set(restart)
     barrier_preserved = preserved_units(runtime_dir, requested)
     owner_policy_preserved = owner_policy_preserved_units(runtime_dir, requested)
     preserved = barrier_preserved | owner_policy_preserved
     filtered_enable = [unit for unit in enable if unit not in preserved]
     filtered_restart = [unit for unit in restart if unit not in preserved]
+    if mutate:
+        for unit in sorted(profile_disabled):
+            state = unit_state(unit)
+            if state.get("UnitFileState") != "disabled" or state.get("ActiveState") != "inactive":
+                subprocess.run(["systemctl", "disable", "--now", unit], timeout=120, check=True)
     if mutate and filtered_enable:
         subprocess.run(["systemctl", "enable", *filtered_enable], timeout=120, check=True)
     if mutate and filtered_restart:
@@ -107,6 +135,8 @@ def reconcile(
         "preserved_owner_policy_timers": sorted(owner_policy_preserved),
         "enabled_units": filtered_enable,
         "restarted_units": filtered_restart,
+        "selected_schedule_profile": selector.get("profile_fingerprint") if selector else None,
+        "profile_disabled_timers": sorted(profile_disabled),
     }
 
 

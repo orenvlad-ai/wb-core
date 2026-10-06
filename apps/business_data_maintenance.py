@@ -2912,6 +2912,8 @@ def maintenance_restore(
     require_stable_readback: bool = False,
     poll_interval_seconds: float = 2.0,
 ) -> dict[str, Any]:
+    from packages.application.business_data_schedule_profile import require_legacy_master
+    require_legacy_master(runtime_dir.resolve())
     state_path = runtime_dir / STATE_FILENAME
     maintenance_state = _load_json_object(state_path) or {}
     baseline = dict(maintenance_state.get("baseline") or {})
@@ -4081,6 +4083,8 @@ def maintenance_prepare(
     plan_fingerprint: str = "",
     autoanswers_reconcile: Any | None = None,
 ) -> dict[str, Any]:
+    from packages.application.business_data_schedule_profile import require_legacy_master
+    require_legacy_master(runtime_dir.resolve())
     state_path = runtime_dir / STATE_FILENAME
     audit_path = runtime_dir / AUDIT_FILENAME
     existing: dict[str, Any] | None = None

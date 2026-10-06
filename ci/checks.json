@@ -60,6 +60,26 @@
     }
   },
   "groups": {
+    "business_data_schedule_profile": {
+      "patterns": [
+        "packages/application/business_data_schedule_profile.py",
+        "packages/application/business_data_schedule_transition.py",
+        "packages/application/business_data_maintenance_pause.py",
+        "packages/application/business_data_write_barrier.py",
+        "apps/business_data_schedule_profile*.py",
+        "apps/business_data_maintenance_pause*.py",
+        "apps/business_data_maintenance.py",
+        "apps/hosted_runtime_deploy_barrier*.py",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-warehouse-functional-sync.timer"
+      ],
+      "commands": [
+        ["python3", "apps/business_data_schedule_profile_smoke.py"],
+        ["python3", "apps/business_data_maintenance_pause_smoke.py"],
+        ["python3", "apps/business_data_write_barrier_smoke.py"],
+        ["python3", "apps/hosted_runtime_deploy_barrier_smoke.py"]
+      ],
+      "pip": []
+    },
     "sheet_vitrina_cycle": {
       "patterns": [
         "packages/application/sheet_vitrina_v1_cycle.py",
