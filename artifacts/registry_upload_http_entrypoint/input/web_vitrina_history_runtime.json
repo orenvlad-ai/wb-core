@@ -32,7 +32,7 @@
   "repair_code_hashes": {
     "apps/web_vitrina_history_group_repair.py": "a11da087ee9ef6287c3e29456215395f0bba6b36dea5b6fb485f1e21210407c0",
     "packages/application/web_vitrina_history_group_repair.py": "55980d00f189b7adb210bafa94f29be4fd77d7dc1831111fe00bfb7ebd4ffab4",
-    "packages/application/web_vitrina_group_repair_inputs.py": "8ecc88157a8cdce4f30fda2cc2a26f0a4344e6c86ef29baf8866bbbb6ea19138",
+    "packages/application/web_vitrina_group_repair_inputs.py": "493ffb5ec2ec96861027071ef0d1a71c180aabaffe93511359abb82e7394c161",
     "packages/application/web_vitrina_group_blocks.py": "6aa10133fe4f30cfb3afc0a67c23e5e81876a25771b7bb96e1e047225c5fd76c",
     "packages/application/web_vitrina_history_live_adapter.py": "8d2430d87a45eb26b36beca5799c639ecd953262bb9817b4a08c41a3ea42b8ef"
   }

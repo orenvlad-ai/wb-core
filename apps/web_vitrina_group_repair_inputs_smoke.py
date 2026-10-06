@@ -51,8 +51,86 @@ def fixture():
     return day,catalog,cells,basis
 
 
+def restored_numeric_format_checks():
+    day,catalog,cells,basis=fixture()
+    # Exact empty packed cells from the accepted Sep22 Clean GROUP sample.
+    # No private catalog/source payload is required to reproduce the defect.
+    empty=['','—','empty','empty_default','renderer:empty:empty_default',
+        'unavailable','neutral',
+        'Нативный итог по текущему составу группы и окончательным дневным SKU-операндам.',
+        'missing','',
+        'Нативный итог по текущему составу группы и окончательным дневным SKU-операндам.',
+        '',None,'','','']
+    inventory_empty=list(empty)
+    inventory_empty[7]=inventory_empty[10]=('Сумма окончательных дневных складских наблюдений членов группы; '
+                                         'неполные входы не равны нулю.')
+    inventory='total_inventory_fbs_total_qty_v1'
+    rid='GROUP:a|'+inventory
+    catalog['rows'][rid]=deepcopy(catalog['rows']['GROUP:a|total_stock_total'])
+    catalog['rows'][rid]['row_id']=rid
+    catalog['rows'][rid]['values']['metric_key']=[inventory]
+    catalog['order'].append(rid);cells[rid]=deepcopy(cells['GROUP:a|total_stock_total'])
+    for nm in (11,12):
+        sku=f'SKU:{nm}|inventory_fbs_total_qty_v1'
+        catalog['rows'][sku]=deepcopy(catalog['rows'][f'SKU:{nm}|stock_total'])
+        catalog['rows'][sku]['row_id']=sku
+        catalog['rows'][sku]['values']['metric_key']=['inventory_fbs_total_qty_v1']
+        catalog['order'].append(sku);cells[sku]=deepcopy(cells[f'SKU:{nm}|stock_total'])
+    semantics={
+        'total_proxy_profit_4_rub':('money','money_rub','-100 ₽'),
+        'proxy_margin_4_pct_total':('percent','percent_default','-1,25%'),
+        'proxy_margin_per_unit_rub_total':('money','money_rub_per_unit','-3 ₽/шт'),
+        'total_our_wb_unit_cost_rub':('money','money_rub','25 ₽'),
+        inventory:('number','number_default','7'),
+    }
+    catalog['presentation']={'renderers':[]}
+    for key,(kind,formatter,_) in semantics.items():
+        renderer='renderer:'+kind+':'+formatter
+        catalog['presentation']['renderers'].append({'renderer_id':renderer,'formatter_id':formatter})
+        total='TOTAL|'+key
+        catalog['rows'][total]=deepcopy(catalog['rows']['GROUP:a|'+key])
+        catalog['rows'][total].update(row_id=total,row_kind='total',group_id='group:overview')
+        catalog['rows'][total]['values'].update(scope_kind=['TOTAL'],scope_key=['TOTAL'])
+        catalog['order'].append(total)
+        cells[total]=[123,'preserved TOTAL',kind,formatter,renderer,*list(CELL_DEFAULTS)[5:]]
+    typed=prepare_group_repair_day(day,catalog,cells,cost_basis=basis)['patch']
+    for key in semantics:
+        cells['GROUP:a|'+key]=deepcopy(inventory_empty if key==inventory else empty)
+    before=deepcopy(cells)
+    result=prepare_group_repair_day(day,catalog,cells,cost_basis=basis)
+    assert not result['unresolved'],result['unresolved']
+    for key,(kind,formatter,display) in semantics.items():
+        rid='GROUP:a|'+key;cell=result['patch'][rid]
+        assert cell[2:5]==[kind,formatter,'renderer:'+kind+':'+formatter],cell
+        assert cell[1]==display,cell
+        assert cell[0]==typed[rid][0] and cell[5:13]==typed[rid][5:13]
+        assert cell[13:]==before[rid][13:]
+    assert cells==before
+    applied={**cells,**result['patch']}
+    assert all(applied[r]==c for r,c in before.items() if not r.startswith('GROUP:'))
+    # A different metric's money renderer cannot establish cost units. Missing
+    # immutable assets and contradictory same-metric contracts also fail closed.
+    target='GROUP:a|total_our_wb_unit_cost_rub'
+    absent=deepcopy(cells);del absent['TOTAL|total_our_wb_unit_cost_rub']
+    unproven=prepare_group_repair_day(day,catalog,absent,cost_basis=basis)
+    assert unproven['patch'][target]==before[target]
+    assert unproven['unresolved'][target]=='accepted_metric_format_unproven'
+    no_asset=deepcopy(catalog)
+    no_asset['presentation']['renderers']=[r for r in no_asset['presentation']['renderers']
+                                          if r['formatter_id']!='money_rub']
+    assert prepare_group_repair_day(day,no_asset,cells,cost_basis=basis)['patch'][target]==before[target]
+    conflicting=deepcopy(catalog);conflicting_cells=deepcopy(cells)
+    other='GROUP:b|total_our_wb_unit_cost_rub'
+    conflicting['rows'][other]=deepcopy(catalog['rows'][target])
+    conflicting['rows'][other].update(row_id=other,group_id='group:b')
+    conflicting['order'].append(other)
+    conflicting_cells[other]=[1,'1','number','number_default','renderer:number:number_default',*list(CELL_DEFAULTS)[5:]]
+    assert prepare_group_repair_day(day,conflicting,conflicting_cells,cost_basis=basis)['patch'][target]==before[target]
+
+
 def main():
     started=time.monotonic();day,catalog,cells,basis=fixture()
+    restored_numeric_format_checks()
     result=prepare_group_repair_day(day,catalog,cells,cost_basis=basis)
     assert not result['unresolved'],result['unresolved']
     patched=result['patch'];ctr=patched['GROUP:a|ctr']
@@ -248,6 +326,8 @@ def main():
         'partial_unknown_propagated':True,'immutable_prepared_callback':True,'buyout_untouched':True,'exact_native_compact_header_selection':True,
         'retained_original_not_latest_covered_binding':True,'retained_day_object_catalog_proof_links':True,
         'retained_READY_revision_index_blob_drift_refused':True,'retained_ALL_saved_cost_parity':True,
-        'native_blob_changed_weights_same_WAC_refused':True,'native_capital_rub_normalized_GROUP_cost':True}))
+        'native_blob_changed_weights_same_WAC_refused':True,'native_capital_rub_normalized_GROUP_cost':True,
+        'actual_empty_GROUP_numeric_formats_restored':True,'same_metric_day_asset_required':True,
+        'numeric_format_conflict_unresolved':True}))
 
 if __name__=='__main__':main()
