@@ -16,6 +16,13 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "web_vitrina_history_activation_smoke": (
+        "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-web-vitrina-finished-snapshot.service",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service",
+        "apps/web_vitrina_history_candidate_build.py",
+        "apps/web_vitrina_history_activation_smoke.py",
+    ),
     "finance_liquidity_contract_smoke": (
         "packages/contracts/finance_liquidity.py",
         "packages/application/registry_upload_db_backed_runtime.py",
@@ -191,6 +198,11 @@ DIRECT_WRITERS = (
 
 def boundary_checks():
     root = select_checks.ROOT
+    for path in BOUNDARIES['web_vitrina_history_activation_smoke'][:3]:
+        plan = build_plan_from_paths(pull_request=20, base=BASE, head=HEAD,
+            paths=[path], file_exists=lambda _, p: (root / p).is_file())
+        assert plan['commands'] == [['python3', 'apps/web_vitrina_history_activation_smoke.py']], plan
+        assert plan['pip'] == ['openpyxl==3.1.5'], plan
     expected = {}
     for smoke, paths in BOUNDARIES.items():
         for path in paths:

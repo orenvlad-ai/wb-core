@@ -130,7 +130,8 @@ def main():
     args = shlex.split(exec_start)[2:]
     assert '--manual' not in args and args[args.index('--date-from') + 1] == '2026-03-01'
     assert args[args.index('--date-to') + 1] == 'business-today'
-    assert args[args.index('--formula-epoch') + 1] == epoch
+    service_epoch = args[args.index('--formula-epoch') + 1]
+    assert service_epoch == epoch, ('history_service_formula_epoch_drift', service_epoch, epoch)
     assert args[args.index('--candidate-root') + 1] == str(root)
     assert 'Environment=WEB_VITRINA_HISTORY_STORE=' + str(root / 'history') in http
     with tempfile.TemporaryDirectory() as temporary:
