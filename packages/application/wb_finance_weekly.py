@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from functools import wraps
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -18,6 +19,8 @@ from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from packages.application.shared_sku_cost import SharedSkuCostSnapshot
+
+from packages.application.business_data_heavy_admission import heavy_admitted
 
 from packages.adapters.wb_finance_api import (
     FINANCE_URL,
@@ -737,6 +740,19 @@ def classify_deduction(row: Mapping[str, Any]) -> str:
     return "other_deductions"
 
 
+
+def _finance_heavy_method(method):
+    """Finite Finance operations reserve before scans, claims or source writes."""
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        # Cold writer runtimes need only private lock infrastructure before the
+        # existing schema constructor. Status/read functions do not call this.
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(self.runtime_dir, operation='finance'):
+            return method(self, *args, **kwargs)
+    return admitted
+
+
 class WbFinanceWeeklyBlock:
     allocation_raw_table = "wb_finance_weekly_raw_rows"
     allocation_sync_table = "wb_finance_weekly_sync"
@@ -904,6 +920,7 @@ class WbFinanceWeeklyBlock:
                 )
             conn.commit()
 
+    @_finance_heavy_method
     def sync_week(
         self, week_start: date, week_end: date, client: WbFinanceApiClient
     ) -> dict[str, Any]:
@@ -965,6 +982,7 @@ class WbFinanceWeeklyBlock:
                 conn.commit()
             raise
 
+    @_finance_heavy_method
     def ingest_week(
         self,
         week_start: date,
@@ -1260,6 +1278,7 @@ class WbFinanceWeeklyBlock:
                     "events": acknowledged,
                 }
 
+    @_finance_heavy_method
     def recover_receipted_split_outbox(
         self,
         *,
@@ -1499,6 +1518,7 @@ class WbFinanceWeeklyBlock:
             raise ValueError("Finance shadow ingest state is invalid")
         return bool(state["enabled"])
 
+    @_finance_heavy_method
     def recalculate_week(self, week_start: date, week_end: date) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as conn:
@@ -1526,6 +1546,7 @@ class WbFinanceWeeklyBlock:
         )
         return dict(projection["metrics"])
 
+    @_finance_heavy_method
     def preview_candidate_week(self, week_start: date, week_end: date) -> dict[str, Any]:
         """Calculate one opt-in candidate week without changing active reports."""
         with closing(self._connect_shared_cost_preview()) as conn, conn:
@@ -3550,6 +3571,7 @@ class WbFinanceWeeklyBlock:
             .replace("+00:00", "Z"),
         }
 
+    @_finance_heavy_method
     def refresh_recent_spp(self, *, limit: int = 10) -> dict[str, Any]:
         """Refresh a bounded disclosure from acknowledged raw membership only."""
 
@@ -3627,6 +3649,7 @@ class WbFinanceWeeklyBlock:
             writer.commit()
         return {"status": "ok", "weeks": projections}
 
+    @_finance_heavy_method
     def run_backfill(
         self,
         client: WbFinanceApiClient,
@@ -3681,6 +3704,7 @@ class WbFinanceWeeklyBlock:
             "week_count": len(bounds),
         }
 
+    @_finance_heavy_method
     def recalculate_all_weeks(self) -> dict[str, Any]:
         """Rebuild every stored week for the configured seller from raw rows."""
         self.ensure_schema()
@@ -4491,6 +4515,7 @@ class WbFinanceWeeklyBlock:
             ).hexdigest(),
         }
 
+    @_finance_heavy_method
     def plan_canonical_finance_backfill(
         self,
         *,
@@ -5248,6 +5273,7 @@ class WbFinanceWeeklyBlock:
             manifests[name] = {"row_count": digest.count, "digest": digest.finish()}
         return manifests
 
+    @_finance_heavy_method
     def apply_canonical_finance_backfill(
         self,
         *,
@@ -5829,6 +5855,7 @@ class WbFinanceWeeklyBlock:
             json.loads(str(row["scope_json"] or "{}")) == expected_scope for row in rows
         )
 
+    @_finance_heavy_method
     def recalculate_stale_cost_weeks(self) -> dict[str, Any]:
         """Rebuild forward-ingress weeks whose canonical derived state changed."""
         self.ensure_schema()
@@ -5840,6 +5867,7 @@ class WbFinanceWeeklyBlock:
             expected_fingerprint=str(plan["fingerprint"]), date_from=boundary,
         )
 
+    @_finance_heavy_method
     def plan_stale_cost_weeks(
         self,
         *,
@@ -6014,6 +6042,7 @@ class WbFinanceWeeklyBlock:
         )
         return plan
 
+    @_finance_heavy_method
     def apply_stale_cost_weeks(
         self,
         *,
@@ -6709,6 +6738,7 @@ class WbFinanceWeeklyBlock:
             ).hexdigest()
         )
 
+    @_finance_heavy_method
     def repair_orphan_derived_rows(self) -> dict[str, Any]:
         """Remove derived rows that have no matching seller/week sync boundary."""
         self.ensure_schema()

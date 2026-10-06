@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from packages.adapters.wb_finance_api import FinanceApiError, WbFinanceApiClient
 from packages.application.wb_finance_weekly import (
     CLASSIFIER_VERSION, MOSCOW, WbFinanceWeeklyBlock,
-    _nomenclature_identity_index,
+    _nomenclature_identity_index, _finance_heavy_method,
 )
 from packages.application.canonical_wb_cost_resolver import CanonicalChannelCostSnapshot
 from packages.application.wb_finance_spp import project_spp
@@ -330,6 +330,7 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
                 "spp": spp, "report_ids": sorted({str(row["reportId"]) for row in rows}),
                 "report_types": sorted({int(row.get("reportType") or 0) for row in rows})}
 
+    @_finance_heavy_method
     def project_pointer(self, day: date, *, unchanged_fetch: bool = False) -> dict[str, Any]:
         """Idempotently derive the exact raw pointer; safe after a crash."""
         with closing(self._connect_daily_read()) as reader:
@@ -449,6 +450,7 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
             )
             writer.commit()
 
+    @_finance_heavy_method
     def sync_day(self, day: date, client: WbFinanceApiClient) -> dict[str, Any]:
         self.ensure_schema()
         with self.store_registry.session(
@@ -518,6 +520,7 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
                 break
         return due
 
+    @_finance_heavy_method
     def tick(self, client: WbFinanceApiClient, *, max_days: int = 2) -> dict[str, Any]:
         self.ensure_schema()
         # Reconcile a pointed raw batch after an interrupted previous projection.
@@ -579,6 +582,7 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
             reader.rollback()
         return [self._commit_projection(item) for item in prepared] + errors
 
+    @_finance_heavy_method
     def repair_visible_projections(self) -> dict[str, Any]:
         """Admitted source-free visible14 repair, followed by truthful readback."""
         repaired = self._repair_visible_stale()

@@ -1333,7 +1333,7 @@ class RegistryUploadHttpEntrypoint:
             timestamp_factory=self.activated_at_factory,
         )
         self.wb_fbs_warehouse_registry = WbFbsWarehouseRegistry(
-            db_path=self.runtime.db_path,
+            db_path=self.runtime.db_path, runtime_dir=self.runtime.runtime_dir,
             timestamp_factory=self.activated_at_factory,
             writer_enabled=lambda: bool(
                 (
@@ -4715,6 +4715,7 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         return self.supplier_shipments_block.update_expenses_complete(shipment_id, payload.get("expenses_complete"))
 
+    @_heavy_http_method
     def handle_our_wb_cost_recalculate_request(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         result = self.our_wb_cost_block.rebuild_all()
         rebuilt = asdict(result)
@@ -7601,9 +7602,28 @@ class RegistryUploadHttpEntrypoint:
         self, result: Mapping[str, Any]
     ) -> dict[str, Any]:
         payload = dict(result)
-        payload["wb_finance_cost_recalculation"] = (
-            self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
-        )
+        if payload.get('status') != 'ok':
+            payload['wb_finance_cost_recalculation'] = {'status': 'not_required',
+                'reason': 'no_successful_source_result'}
+            return payload
+        # These saved rows are already durable. Busy/error here describes only
+        # the derived Finance continuation, never rejection of the source.
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        try:
+            payload['wb_finance_cost_recalculation'] = self.wb_finance_weekly_block.recalculate_stale_cost_weeks()
+        except Exception as exc:
+            from packages.application.ready_publication import canonical, digest
+            items = ([payload['item']] if isinstance(payload.get('item'), Mapping) else
+                [item.get('item', item) for item in payload.get('items', []) if isinstance(item, Mapping)])
+            identities = sorted((dict(item) for item in items), key=lambda item: str(item.get('item_id', '')))
+            deferred = isinstance(exc, (HeavyAdmissionBusy, MaintenanceAdmissionBlocked))
+            payload['wb_finance_cost_recalculation'] = {
+                'status': 'deferred' if deferred else 'failed', 'reason': type(exc).__name__,
+                'source_accepted': True, 'source_revision_count': len(identities),
+                'source_revision_fingerprint': digest(canonical(identities)),
+                'retry_policy': 'authoritative_source_stale_detection',
+                'exact_revision_acked': False,
+            }
         return payload
 
     def handle_sku_groups_list_request(self) -> dict[str, Any]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from functools import wraps
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 import hashlib
@@ -12,6 +13,7 @@ import re
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from packages.application.business_data_heavy_admission import heavy_admitted
 from packages.application.ff_document_workflow import (
     mark_ff_replay_economics,
     mark_ff_replay_finance,
@@ -64,6 +66,14 @@ CAPITAL_MINOR_UNIT = Decimal("0.01")
 CAPITAL_COMPARISON = "decimal_round_half_up_kopeck_v1"
 
 
+def _heavy_backfill_method(method):
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with heavy_admitted(self.runtime.runtime_dir, operation='ff_overhead_backfill'):
+            return method(self, *args, **kwargs)
+    return admitted
+
+
 class FfPoolOverheadBackfillError(RuntimeError):
     pass
 
@@ -88,6 +98,7 @@ class FfPoolOverheadBackfill:
             )
         self.timestamp_factory = timestamp_factory or _utc_now
 
+    @_heavy_backfill_method
     def build_plan(self) -> dict[str, Any]:
         self._assert_runtime_sha()
         snapshot = _read_snapshot(self.runtime.db_path)
@@ -191,6 +202,7 @@ class FfPoolOverheadBackfill:
         plan["fingerprint"] = _fingerprint(_fingerprint_material(plan))
         return plan
 
+    @_heavy_backfill_method
     def apply(
         self,
         reviewed_plan: Mapping[str, Any],
