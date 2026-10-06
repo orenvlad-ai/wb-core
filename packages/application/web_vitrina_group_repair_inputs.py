@@ -106,7 +106,19 @@ def _formatted_display(value, formatter_id):
     return text.replace(',', '\u00a0').replace('.', ',') + (formatter.suffix or '')
 
 
-def _cell(original, value, operands, day, missing_members, *, undefined=False):
+def _numeric_cell_format(cell):
+    """Accept only preserved native numeric renderer/formatter contracts."""
+    from packages.application.web_vitrina_view_model import _FORMATTER_LIBRARY
+    kind, formatter_id, renderer = cell[2:5]
+    formatter = _FORMATTER_LIBRARY.get(formatter_id)
+    if (formatter is not None and formatter.decimals is not None
+            and kind == formatter.cell_kind
+            and renderer == f'renderer:{kind}:{formatter_id}'):
+        return (kind, formatter_id, renderer)
+    return None
+
+
+def _cell(original, value, operands, day, missing_members, *, undefined=False, numeric_format=None):
     cell = list(original)
     known = [r.presentation_by_date.get(day, {}) for r in operands]
     missing_members = set(missing_members)
@@ -123,7 +135,9 @@ def _cell(original, value, operands, day, missing_members, *, undefined=False):
     reason += ' ' + ' '.join(str(x) for x in inherited[:3] if x)
     if undefined:
         reason += ' Нулевой знаменатель: отношение не определено.'
-    cell[0:2] = [value, _formatted_display(value, original[3])]
+    if value is not None and numeric_format is not None:
+        cell[2:5] = numeric_format
+    cell[0:2] = [value, _formatted_display(value, cell[3])]
     cell[5:13] = ['unavailable' if value is None else 'unconfirmed' if partial or preliminary else 'available',
         'neutral' if value is None else 'warning' if partial or preliminary else 'neutral', reason.strip(),
         'undefined' if undefined else 'missing' if value is None else 'partial' if partial else 'preliminary' if preliminary else 'exact',
@@ -136,6 +150,18 @@ def prepare_group_repair_day(day, catalog, cells, *, cost_basis=None):
     cost_basis = {int(k):v for k,v in (cost_basis or {}).items()}
     rows = unpack_rows(day, catalog, cells)
     by = {r.row_id: r for r in rows}
+    # Empty/unknown dated cells carry placeholder formatters, not their metric
+    # units. Recover those units from numeric observations of the SAME metric
+    # in the accepted day, never from current registry definitions or key names.
+    renderer_assets = {r['renderer_id']: r.get('formatter_id')
+                       for r in catalog.get('presentation', {}).get('renderers', [])}
+    metric_formats = {}
+    for r in rows:
+        if numeric(cells[r.row_id][0]) is not None:
+            native_format = _numeric_cell_format(cells[r.row_id])
+            if (native_format is not None
+                    and renderer_assets.get(native_format[2]) == native_format[1]):
+                metric_formats.setdefault(r.metric_key, set()).add(native_format)
     members = {}
     for r in rows:
         if r.scope_kind == 'SKU' and r.group is not None:
@@ -181,7 +207,15 @@ def prepare_group_repair_day(day, catalog, cells, *, cost_basis=None):
                 value = sum(values) if values else None
                 absent = set(items) - {r.nm_id for r in operands if accepted_number(r, day) is not None}
                 undefined = False
-            patch[rid] = _cell(cells[rid], value, operands, day, absent, undefined=undefined)
+            numeric_format = None
+            if value is not None and _numeric_cell_format(cells[rid]) is None:
+                formats = metric_formats.get(key, set())
+                if len(formats) != 1:
+                    patch[rid] = list(cells[rid]);unresolved[rid] = 'accepted_metric_format_unproven'
+                    continue
+                numeric_format = next(iter(formats))
+            patch[rid] = _cell(cells[rid], value, operands, day, absent,
+                               undefined=undefined, numeric_format=numeric_format)
     aux = {'stored_day_cells': digest(cells), 'dated_catalog': digest(catalog),
            'accepted_cost_basis': digest({str(k):v for k,v in (cost_basis or {}).items()}), 'saved_proxy_rate_parity': digest(parameters)}
     return {'schema': SCHEMA, 'day': day, 'patch': patch, 'auxiliary_digests': aux,
