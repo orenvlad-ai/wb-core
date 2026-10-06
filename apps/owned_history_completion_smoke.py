@@ -9,6 +9,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from apps.owned_history_worker_smoke import ownership, NOW, logical_source_digest, simple_runtime
 from packages.application import owned_history_worker as supervisor
 from packages.application.owned_history_worker_capability import HistoryDelegationError
