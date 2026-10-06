@@ -579,6 +579,23 @@ class WbFinanceDailyBlock(WbFinanceWeeklyBlock):
             reader.rollback()
         return [self._commit_projection(item) for item in prepared] + errors
 
+    def repair_visible_projections(self) -> dict[str, Any]:
+        """Admitted source-free visible14 repair, followed by truthful readback."""
+        repaired = self._repair_visible_stale()
+        payload = self.build_daily_payload()
+        bad = {'stale_projection', 'source_advanced', 'projection_error', 'no_raw_pointer'}
+        failed = any(item.get('status') in bad for item in repaired + payload['days'])
+        with closing(self._connect_daily_read()) as conn:
+            first = closed_daily_dates(self.now_factory())[0].isoformat()
+            unresolved = conn.execute(f'''SELECT count(*) FROM {self._raw_pointer_table(conn)} p
+                LEFT JOIN wb_finance_daily_sync s ON s.seller_id=p.seller_id AND s.report_day=p.report_day
+                WHERE p.seller_id=? AND p.report_day>=? AND
+                (s.batch_id IS NULL OR s.batch_id<>p.batch_id OR s.content_hash<>p.content_hash)''',
+                (self.seller_id, first)).fetchone()[0]
+        failed = failed or bool(unresolved)
+        return {'status': 'failed' if failed else 'ok', 'repaired': repaired,
+                'days': payload['days'], 'generated_at': payload['generated_at']}
+
     def build_daily_payload(self) -> dict[str, Any]:
         """Light read-only payload; never fetch or recalculate on HTTP GET."""
 

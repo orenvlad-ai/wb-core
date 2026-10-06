@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-OPERATIONS = frozenset({"auto_update", "refresh", "refresh_group"})
+OPERATIONS = frozenset({"auto_update", "refresh", "refresh_group", "cycle"})
 DIRECTORY = "finished-snapshot-api-jobs"
 
 
@@ -83,7 +83,7 @@ class ApiJobMarkers:
                 self.disable()
 
 
-def api_jobs_admission(runtime_dir: Path) -> str:
+def api_jobs_admission(runtime_dir: Path, *, cycle_owner: dict | None = None) -> str:
     """A point-in-time read; future manual starts remain allowed."""
     root = Path(runtime_dir) / DIRECTORY
     try:
@@ -91,6 +91,14 @@ def api_jobs_admission(runtime_dir: Path) -> str:
         owner = json.loads(before)
         if not owner.get("identity") or process_identity(int(owner["pid"])) != owner["identity"]:
             return "unknown"
+        matched_owner = False
+        if cycle_owner is not None:
+            from packages.application.business_data_procedure_admission import already_admitted
+            if (not already_admitted(runtime_dir) or cycle_owner.get('operation') != 'cycle'
+                    or cycle_owner.get('pid') != os.getpid()
+                    or cycle_owner.get('identity') != process_identity(os.getpid())
+                    or {key: cycle_owner.get(key) for key in ('pid', 'identity')} != owner):
+                return 'unknown'
         for path in root.glob("job-*.json"):
             try:
                 job = json.loads(path.read_text())
@@ -99,9 +107,12 @@ def api_jobs_admission(runtime_dir: Path) -> str:
             if not job.get("identity") or job.get("operation") not in OPERATIONS or not job.get("job_id"):
                 return "unknown"
             if process_identity(int(job["pid"])) == job["identity"]:
+                if cycle_owner is not None and job == cycle_owner:
+                    matched_owner = True
+                    continue
                 return "busy"
         if (root / "ready.json").read_bytes() != before:
             return "unknown"
-        return "idle"
+        return "idle" if cycle_owner is None or matched_owner else "unknown"
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return "unknown"
