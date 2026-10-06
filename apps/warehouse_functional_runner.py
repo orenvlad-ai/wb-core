@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted  # noqa: E402
 from packages.adapters.stocks_block import HttpBackedStocksSource  # noqa: E402
 from packages.application.our_wb_costs import OurWbCostBlock  # noqa: E402
 from packages.application.ff_document_workflow import (  # noqa: E402
@@ -232,6 +233,13 @@ def _run(
     *,
     sqlite_busy_timeout_ms: int | None,
 ) -> dict[str, Any]:
+    if args.command == 'readback':
+        return _run_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
+    with heavy_admitted(Path(str(args.runtime_dir)).resolve(), operation='warehouse_cli'):
+        return _run_heavy_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
+
+
+def _run_heavy_admitted(args, *, sqlite_busy_timeout_ms):
     if args.command in {"hourly-sync", "manual-sync", "sync-apply"}:
         # Admission precedes constructors/schema work, not only domain apply.
         with warehouse_functional_job_lock(Path(str(args.runtime_dir)).resolve()) as metrics:
@@ -1246,6 +1254,9 @@ def _json(value: Any) -> str:
 def main() -> int:
     try:
         result = run(build_parser().parse_args())
+    except HeavyAdmissionBusy as exc:
+        print(_json({'status': 'busy', 'reason': str(exc), 'retryable': True, 'effects_started': False}))
+        return 0
     except Exception as exc:
         print(_json({"status": "error", "error": str(exc)}), file=sys.stderr)
         return 1

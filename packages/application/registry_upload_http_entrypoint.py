@@ -5,6 +5,11 @@ from __future__ import annotations
 from packages.application.sheet_vitrina_v1_card_rating import extend_metrics_with_card_rating
 
 from copy import deepcopy
+from functools import wraps
+
+from packages.application.business_data_heavy_admission import (
+    HeavyAdmissionBusy, HeavyAdmissionLease, heavy_admitted, require_heavy_owner,
+)
 
 import hashlib
 import importlib
@@ -699,6 +704,24 @@ WEB_VITRINA_OTHER_SOURCES_DERIVED_METRIC_KEYS = (
     "proxy_margin_pct",
     "proxy_profit_rub",
 )
+
+
+def _heavy_http_method(method):
+    """Selected canonical calls acquire before their scans/domain locks/effects."""
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with heavy_admitted(self.runtime.runtime_dir, operation='http_refresh'):
+            return method(self, *args, **kwargs)
+    return admitted
+
+
+def _run_heavy_worker(lease, target, *args):
+    """Transfer a real lease to its sole worker; no request token grants entry."""
+    try:
+        with lease.entered():
+            return target(*args)
+    finally:
+        lease.close()
 
 
 class SellerPortalRecoveryController:
@@ -2937,14 +2960,21 @@ class RegistryUploadHttpEntrypoint:
         store = CycleReceiptStore(self.runtime.runtime_dir, self.activated_at_factory)
         with admitted_write(self.runtime.runtime_dir), self.operator_jobs._lock:
             # Matching accepted/terminal requests read the same receipt even if another job is active.
-            from packages.application.ready_publication import digest
-            prior = store.read(digest(request_key).removeprefix('sha256:')[:32])
+            prior = store.matching(request_key=request_key, slot_utc=slot_utc, config=history_config)
+            if prior is not None:
+                return prior
             active = self.operator_jobs.active_job(operations=HEAVY_OPERATIONS)
-            if active and not prior:
+            if active:
                 return {**active, 'single_flight': True, 'already_running_job_id': active['job_id']}
-            receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
-                config=history_config, now=self.now_factory())
+            heavy = HeavyAdmissionLease(self.runtime.runtime_dir, operation='cycle', independent=True)
+            try:
+                receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
+                    config=history_config, now=self.now_factory())
+            except BaseException:
+                heavy.close()
+                raise
             if slot is None:
+                heavy.close()
                 return receipt
             def accepted(job_id):
                 receipt['job_id'] = job_id
@@ -2958,10 +2988,11 @@ class RegistryUploadHttpEntrypoint:
                 finally:
                     slot.close()
             try:
-                self.operator_jobs.start(operation='cycle', runner=worker, on_accept=accepted)
+                self.operator_jobs.start(operation='cycle', runner=worker, on_accept=accepted, _heavy_lease=heavy)
             except BaseException:
                 thread = self.operator_jobs._threads.get(receipt['job_id'])
                 if thread is None or thread_start_is_proven_absent(thread):
+                    heavy.close()
                     receipt.update(status='interrupted', error_code='cycle_worker_not_started', finished_at=self.activated_at_factory())
                     try:
                         store.write(receipt)
@@ -3037,6 +3068,7 @@ class RegistryUploadHttpEntrypoint:
             'fbs_run_sequence': str(latest['run_sequence'])})
 
     def _cycle_warehouse(self, store, receipt, fbs):
+        require_heavy_owner(self.runtime.runtime_dir)
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         from packages.application.ready_publication import readonly
         from packages.application.fbs_accounting_runtime import load
@@ -3162,6 +3194,7 @@ class RegistryUploadHttpEntrypoint:
         from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         from packages.application.web_vitrina_snapshot_admission import process_identity
+        require_heavy_owner(self.runtime.runtime_dir)
         job_id = SHEET_OPERATOR_JOB_ID.get()
         job = self.operator_jobs.get(job_id)
         if (job_id != receipt['job_id'] or job['operation'] != 'cycle' or job['status'] != 'running'
@@ -3218,17 +3251,21 @@ class RegistryUploadHttpEntrypoint:
                     trigger_source=trigger_source,
                     active_job=active_job,
                 )
-        resolved_schedule_id, resolved_due_at = self._resolve_auto_refresh_schedule_context(
-            schedule_id=schedule_id,
-            due_at=due_at,
-        )
-        if resolved_schedule_id:
-            return self.start_sheet_scheduled_auto_update_job(
-                schedule_id=resolved_schedule_id,
-                due_at=resolved_due_at,
-                trigger_source=trigger_source or "scheduled",
-            )
-        return self.start_sheet_refresh_job(as_of_date=as_of_date, auto_load=True)
+        # This resolver may persist missed-slot metadata. Reserve before it,
+        # then transfer the same actual lease to the async worker, without
+        # entering/binding it in the dispatching thread.
+        heavy = HeavyAdmissionLease(self.runtime.runtime_dir, operation='auto_update', independent=True)
+        try:
+            resolved_schedule_id, resolved_due_at = self._resolve_auto_refresh_schedule_context(
+                schedule_id=schedule_id, due_at=due_at)
+        except BaseException:
+            heavy.close()
+            raise
+        runner = (lambda log: self._run_sheet_scheduled_auto_update(
+            schedule_id=resolved_schedule_id, due_at=resolved_due_at,
+            trigger_source=trigger_source or 'scheduled', log=log)) if resolved_schedule_id else (
+                lambda log: self._run_sheet_auto_update(as_of_date=as_of_date, log=log))
+        return self.operator_jobs.start(operation='auto_update', runner=runner, _heavy_lease=heavy)
 
     def _skip_night_refresh_experiment_for_active_job(
         self,
@@ -3284,6 +3321,7 @@ class RegistryUploadHttpEntrypoint:
             ),
         )
 
+    @_heavy_http_method
     def handle_sheet_auto_refresh_request(
         self,
         as_of_date: str | None = None,
@@ -4108,6 +4146,7 @@ class RegistryUploadHttpEntrypoint:
             ),
         }
 
+    @_heavy_http_method
     def run_sheet_temporal_closure_retry_cycle(
         self,
         *,
@@ -7047,6 +7086,7 @@ class RegistryUploadHttpEntrypoint:
             db_path=self.runtime.db_path,
         ).public_status()
 
+    @_heavy_http_method
     def handle_warehouse_manual_sync_request(self) -> dict[str, Any]:
         with warehouse_functional_job_lock(self.runtime.runtime_dir) as metrics:
             payload = self._handle_owned_warehouse_manual_sync_request(
@@ -7056,6 +7096,7 @@ class RegistryUploadHttpEntrypoint:
         return payload
 
     def _handle_owned_warehouse_manual_sync_request(self, *, owner_token: str, durable_run_id: str = "") -> dict[str, Any]:
+        require_heavy_owner(self.runtime.runtime_dir)
         require_warehouse_job_owner(self.runtime.runtime_dir, owner_token)
         active_phase = ""
 
@@ -7577,6 +7618,7 @@ class RegistryUploadHttpEntrypoint:
     def handle_sku_groups_delete_request(self, group_key: str) -> dict[str, Any]:
         return self.supplier_shipments_block.deactivate_sku_group(group_key)
 
+    @_heavy_http_method
     def _run_sheet_auto_update(
         self,
         *,
@@ -7781,6 +7823,7 @@ class RegistryUploadHttpEntrypoint:
             "limit": 20,
         }
 
+    @_heavy_http_method
     def _run_sheet_scheduled_auto_update(
         self,
         *,
@@ -7828,6 +7871,7 @@ class RegistryUploadHttpEntrypoint:
         result["auto_schedule_trigger_source"] = trigger_source
         return result
 
+    @_heavy_http_method
     def _run_sheet_refresh(
         self,
         *,
@@ -8222,6 +8266,7 @@ class RegistryUploadHttpEntrypoint:
             },
         }
 
+    @_heavy_http_method
     def _run_sheet_source_group_refresh(
         self,
         *,
@@ -10513,7 +10558,7 @@ class SheetVitrinaV1OperatorJobStore:
     def resume_warehouse_pending(self, *, runtime_dir: Path, journal: WarehouseUpdateJournal,
                                  runner: Callable[..., dict[str, Any]]) -> threading.Thread | None:
         from packages.application.business_data_procedure_admission import (
-            MaintenanceAdmissionBlocked, business_write_is_blocked,
+            MaintenanceAdmissionBlocked, business_write_is_blocked, thread_start_is_proven_absent,
         )
         def pick() -> None:
             # Busy live owners are never reclassified. Retry only admission, not effects.
@@ -10545,7 +10590,7 @@ class SheetVitrinaV1OperatorJobStore:
                     if self._warehouse_pending_picker is threading.current_thread():
                         self._warehouse_pending_picker = None
         with self._lock:
-            if self._warehouse_pending_picker is not None and self._warehouse_pending_picker.is_alive():
+            if self._warehouse_pending_picker is not None:
                 return self._warehouse_pending_picker
             if not business_write_is_blocked(runtime_dir) and not journal.needs_pickup():
                 return None
@@ -10554,7 +10599,9 @@ class SheetVitrinaV1OperatorJobStore:
             try:
                 thread.start()
             except BaseException:
-                self._warehouse_pending_picker = None
+                if (thread_start_is_proven_absent(thread)
+                        and self._warehouse_pending_picker is thread):
+                    self._warehouse_pending_picker = None
                 raise
             return thread
 
@@ -10583,6 +10630,10 @@ class SheetVitrinaV1OperatorJobStore:
                             raise WarehouseRequestConflict("request_key already accepted with a different payload")
                         return prior, False
                     return prior, True
+            try:
+                heavy = HeavyAdmissionLease(runtime_dir, operation="warehouse", independent=True)
+            except HeavyAdmissionBusy:
+                return None, True
             ready, proceed = threading.Event(), threading.Event()
             admission: dict[str, Any] = {}
 
@@ -10663,8 +10714,17 @@ class SheetVitrinaV1OperatorJobStore:
                         self.resume_warehouse_pending(runtime_dir=runtime_dir, journal=journal, runner=runner)
 
             from packages.application.business_data_procedure_admission import admitted_thread
-            thread = admitted_thread(runtime_dir, target=worker, daemon=True)
-            thread.start()
+            thread = None
+            try:
+                thread = admitted_thread(runtime_dir, target=_run_heavy_worker,
+                    args=(heavy, worker), daemon=True)
+                thread.start()
+            except BaseException:
+                if thread is None:
+                    heavy.close()
+                else:
+                    heavy.close_if_unstarted(thread)
+                raise
             observed = ready.wait(timeout=max(0.0, deadline - time.monotonic()))
             with self._lock:
                 if not observed and "job" not in admission:
@@ -10679,20 +10739,41 @@ class SheetVitrinaV1OperatorJobStore:
             self._warehouse_start_lock.release()
 
     def start(self, *, operation: str, runner: Callable[[OperatorLogEmitter], dict[str, Any]],
-            on_accept: Callable[[str], None] | None = None) -> dict[str, Any]:
+            on_accept: Callable[[str], None] | None = None,
+            _heavy_lease: HeavyAdmissionLease | None = None) -> dict[str, Any]:
         from packages.application.business_data_procedure_admission import admitted_thread, thread_start_is_proven_absent
         from packages.application.sheet_vitrina_v1_cycle import HEAVY_OPERATIONS
         with self._lock:
             if operation in HEAVY_OPERATIONS:
                 active = self.active_job(operations=HEAVY_OPERATIONS)
                 if active:
+                    if _heavy_lease is not None:
+                        _heavy_lease.close()
                     return {**active, 'already_running_job_id': active['job_id'], 'single_flight': True}
-            job_id = uuid4().hex
-            job = SheetVitrinaV1OperatorJob(job_id=job_id, operation=operation,
-                status='running', started_at=self.timestamp_factory())
-            options = dict(target=self._run, args=(job_id, runner), daemon=True)
-            thread = (admitted_thread(self.runtime_dir, **options) if self.runtime_dir is not None
-                else threading.Thread(**options))
+            heavy = _heavy_lease
+            if heavy is not None:
+                # Internal actual-object handoff, never reconstructed from a token.
+                if (operation not in {'cycle', 'auto_update'} or not isinstance(heavy, HeavyAdmissionLease)
+                        or heavy.operation != operation
+                        or self.runtime_dir is None or heavy.runtime_dir != Path(self.runtime_dir).resolve()
+                        or heavy.pid != os.getpid() or heavy.fd is None or heavy._closed
+                        or heavy._bound_thread is not None or heavy._borrowed is not None):
+                    raise RuntimeError('invalid heavy lease handoff')
+            elif operation in HEAVY_OPERATIONS and self.runtime_dir is not None:
+                heavy = HeavyAdmissionLease(self.runtime_dir, operation=operation, independent=True)
+            try:
+                job_id = uuid4().hex
+                job = SheetVitrinaV1OperatorJob(job_id=job_id, operation=operation,
+                    status='running', started_at=self.timestamp_factory())
+                options = dict(target=self._run, args=(job_id, runner), daemon=True)
+                if heavy is not None:
+                    options.update(target=_run_heavy_worker, args=(heavy, self._run, job_id, runner))
+                thread = (admitted_thread(self.runtime_dir, **options) if self.runtime_dir is not None
+                    else threading.Thread(**options))
+            except BaseException:
+                if heavy is not None:
+                    heavy.close()
+                raise
             self._jobs[job_id] = job
             self._threads[job_id] = thread
             try:
@@ -10705,6 +10786,8 @@ class SheetVitrinaV1OperatorJobStore:
                 no_start = (thread.abort_if_unstarted() if hasattr(thread, 'abort_if_unstarted')
                     else thread_start_is_proven_absent(thread))
                 if no_start:
+                    if heavy is not None:
+                        heavy.close()
                     job.status = 'error'
                     job.error = 'thread start failed: ' + type(exc).__name__
                     job.finished_at = self.timestamp_factory()

@@ -62,6 +62,19 @@
     }
   },
   "groups": {
+    "business_heavy_core_producers": {
+      "patterns": [
+        "packages/application/business_data_heavy_admission.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/sheet_vitrina_v1_cycle.py",
+        "apps/warehouse_functional_runner.py",
+        "apps/web_vitrina_history_candidate_build.py",
+        "apps/business_data_heavy_producers_smoke.py"
+      ],
+      "commands": [["python3", "apps/business_data_heavy_producers_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "business_data_schedule_profile": {
       "patterns": [
         "packages/application/business_data_schedule_profile.py",

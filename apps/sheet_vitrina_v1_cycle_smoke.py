@@ -23,6 +23,7 @@ from packages.application.sheet_vitrina_v1_cycle import (
 from packages.application.registry_upload_http_entrypoint import (
     RegistryUploadHttpEntrypoint as Entry, SheetVitrinaV1OperatorJobStore,
 )
+from packages.application.business_data_heavy_admission import heavy_admitted, heavy_admission_status
 from packages.application.business_data_procedure_admission import initialize_admission, admission_idle, admitted_write, MaintenanceAdmissionBlocked
 from packages.application.web_vitrina_snapshot_admission import ApiJobMarkers, api_jobs_admission
 from packages.application.wb_finance_daily import WbFinanceDailyBlock
@@ -105,11 +106,16 @@ class CycleTests(unittest.TestCase):
         self.store=CycleReceiptStore(self.root,lambda:STAMP)
         self.identity=patch('packages.application.sheet_vitrina_v1_cycle.process_identity',return_value=IDENTITY)
         self.identity.start();self.addCleanup(self.identity.stop)
+    def owned_history(self, runtime, config):
+        with heavy_admitted(runtime.runtime_dir, operation='cycle'):
+            return history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
     def accepted(self, key='slot-request', config=None, slot=SLOT):
         return self.store.accept(request_key=key,slot_utc=slot,config=config or self.config,now=NOW)
     def test_fixed_order_and_no_repeat_after_finish(self):
         receipt,lock=self.accepted();fake=CycleFake(self.root)
-        try:result=run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+        try:
+            with heavy_admitted(self.root, operation='cycle'):
+                result=run_cycle(fake,self.store,receipt,self.config,lambda _:None)
         finally:lock.close()
         self.assertEqual(fake.events,list(STAGES[:5])+['derive']+list(STAGES[5:]))
         self.assertEqual(result['status'],'complete')
@@ -125,7 +131,7 @@ class CycleTests(unittest.TestCase):
                 receipt,lock=self.accepted(key=fail,slot=f'2026-09-29T{10+STAGES.index(fail):02}:00:00+00:00')
                 fake=CycleFake(self.root,fail)
                 try:
-                    with self.assertRaises(CycleStageFailure):run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+                    with heavy_admitted(self.root, operation='cycle'), self.assertRaises(CycleStageFailure):run_cycle(fake,self.store,receipt,self.config,lambda _:None)
                 finally:lock.close()
                 self.assertEqual(receipt['status'],'failed')
                 self.assertEqual(receipt['current_stage'],fail)
@@ -134,7 +140,7 @@ class CycleTests(unittest.TestCase):
     def test_consumed_source_drift_never_derives_or_recollects(self):
         receipt,lock=self.accepted();fake=CycleFake(self.root,'source_drift')
         try:
-            with self.assertRaises(CycleStageFailure):run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+            with heavy_admitted(self.root, operation='cycle'), self.assertRaises(CycleStageFailure):run_cycle(fake,self.store,receipt,self.config,lambda _:None)
         finally:lock.close()
         self.assertNotIn('derive',fake.events)
         self.assertEqual(fake.events.count('api_sources'),1)
@@ -237,12 +243,14 @@ with open(sys.argv[1],'rb') as stream:
             with self.assertRaises(KeyboardInterrupt):fake.operator_jobs.start(operation='cycle',runner=work)
         active=fake.operator_jobs.active_job(operations=('cycle',));thread=fake.operator_jobs._threads[active['job_id']]
         self.assertFalse(admission_idle(self.root)['idle']);self.assertFalse(thread.is_alive())
+        self.assertFalse(heavy_admission_status(self.root)['idle'])
         second=fake.operator_jobs.start(operation='cycle',runner=lambda _:self.fail('second child'))
         self.assertEqual(second['job_id'],active['job_id'])
         bootstrap.set();self.assertTrue(entered.wait(5))
         second=fake.operator_jobs.start(operation='cycle',runner=lambda _:self.fail('second child'))
         self.assertEqual(second['job_id'],active['job_id'])
         finish.set();thread.join(5);self.assertTrue(admission_idle(self.root)['idle'])
+        self.assertTrue(heavy_admission_status(self.root)['idle'])
     def test_explicit_degradation_policy_rejects_unproved_operands(self):
         value=summary();slot=value['slots'][0]
         for policy in ('accepted_partial','accepted_retained','archive_only','temporal_role_unavailable'):
@@ -268,7 +276,7 @@ with open(sys.argv[1],'rb') as stream:
              patch.object(history,'candidate_singleflight',acquired),patch.object(history,'LiveNativeAdapter',return_value=adapter), \
              patch.object(history,'HistoryStore'),patch.object(history,'update_live_history',return_value={'status':'pending'}):
             with self.assertRaisesRegex(ValueError,'cycle_history_incomplete'):
-                history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
+                self.owned_history(runtime, config)
 
     def test_history_exact_final_vector_and_other_systemd_guard(self):
         runtime=SimpleNamespace(runtime_dir=self.root,db_path=self.root/'db')
@@ -296,14 +304,14 @@ with open(sys.argv[1],'rb') as stream:
             stack.enter_context(patch.object(history,'LiveNativeAdapter',return_value=adapter))
             stack.enter_context(patch.object(history,'HistoryStore',return_value=store))
             build=stack.enter_context(patch.object(history,'update_live_history',return_value={'status':'published','edition_id':'edition'}))
-            result=history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
+            result=self.owned_history(runtime, config)
             self.assertEqual(result['edition_id'],'edition');self.assertEqual(result['window_from'],days[0])
             proofs[days[0]]['token']='another-source'
             with self.assertRaisesRegex(ValueError,'cycle_history_final_vector_changed'):
-                history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
+                self.owned_history(runtime, config)
             guard.reset_mock();build.reset_mock();systemd.return_value='busy'
             with self.assertRaisesRegex(ValueError,'cycle_history_admission_busy'):
-                history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
+                self.owned_history(runtime, config)
             guard.assert_not_called();build.assert_not_called()
 
 
@@ -588,7 +596,8 @@ class BoundWarehouseTests(unittest.TestCase):
             accounting={'status':'published','ready_obligation':'complete','version':'book','operation_id':'book-ready'}
             book={'state':{'periods':{'2026-09-29':{'snapshot':{'id':'fbs','digest':'fbs-digest'}}}}}
             with patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting) as refresh, \
-                 patch('packages.application.fbs_accounting_runtime.load',return_value=(book,'book')):
+                 patch('packages.application.fbs_accounting_runtime.load',return_value=(book,'book')), \
+                 heavy_admitted(root, operation='cycle'):
                 proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
             self.assertEqual(proof.versions['fbs_book'],'book')
             self.assertEqual(refresh.call_count,1)

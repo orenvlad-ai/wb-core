@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packages.application.business_data_heavy_admission import HeavyAdmissionBusy
+
 import base64
 import binascii
 from contextlib import nullcontext
@@ -1257,6 +1259,10 @@ def _build_handler(
                                 as_of_date=as_of_date or None,
                                 auto_load=auto_refresh_requested,
                             )
+                    except HeavyAdmissionBusy as exc:
+                        _write_json_response(self, HTTPStatus.CONFLICT,
+                            {'status': 'busy', 'reason': str(exc), 'retryable': True, 'effects_started': False})
+                        return
                     except Exception as exc:  # pragma: no cover - bounded fallback
                         _write_json_response(
                             self,
@@ -1302,6 +1308,10 @@ def _build_handler(
                             "target": "legacy_google_sheets_contour",
                         },
                     )
+                    return
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {'status': 'busy', 'reason': str(exc), 'retryable': True, 'effects_started': False})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
@@ -1411,6 +1421,10 @@ def _build_handler(
                         {"error": str(exc)},
                     )
                     return
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {'status': 'busy', 'reason': str(exc), 'retryable': True, 'effects_started': False})
+                    return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -1440,6 +1454,10 @@ def _build_handler(
                         HTTPStatus.BAD_REQUEST,
                         {"error": str(exc)},
                     )
+                    return
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {'status': 'busy', 'reason': str(exc), 'retryable': True, 'effects_started': False})
                     return
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
