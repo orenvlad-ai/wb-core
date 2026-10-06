@@ -77,6 +77,9 @@ def fixture(*, existing=False, master=True):
         root = Path(temporary)
         runtime = root / "runtime"; runtime.mkdir()
         initialize_admission(runtime)
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        with heavy_admitted(runtime, operation='fixture_bootstrap'):
+            pass
         policy = {"schema_version": POLICY_SCHEMA_VERSION, "master_desired": master,
                   "processes": {key: {"desired": True} for key in
                                 ("warehouse_functional", "wb_finance_weekly", "vitrina_refresh")}}
@@ -110,6 +113,17 @@ READY = {"ready": True, "contract": "offline_fixture_only", "blockers": []}
 
 
 class ScheduleProfileSmoke(unittest.TestCase):
+    def test_selected_activation_requires_existing_canonical_heavy_infrastructure_readonly(self):
+        from packages.application.business_data_heavy_admission import LOCK_FILENAME
+        with fixture() as (runtime, systemd, options):
+            self.assertTrue(profile.activation_readiness(runtime)['ready'])
+            path = runtime / LOCK_FILENAME
+            path.unlink()
+            readiness = profile.activation_readiness(runtime)
+            self.assertFalse(readiness['ready'])
+            self.assertIn('canonical_heavy_infrastructure_unproven', readiness['blockers'])
+            self.assertFalse(path.exists())
+
     def test_legacy_noop_and_exact_fixed_slots(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = Path(temp)
@@ -124,10 +138,32 @@ class ScheduleProfileSmoke(unittest.TestCase):
         self.assertTrue(profile.PROFILE["fbs_collect_every_cycle"])
         self.assertEqual(profile.PROFILE["fbs_max_age_seconds"], 9 * 3600)
 
-    def test_dormant_readiness_and_raw_disabled_phase_block_before_effects(self):
+    def test_reviewed_code_readiness_exact_target_without_override(self):
+        self.assertEqual(profile.activation_dependencies(), {
+            'ready': True, 'contract': 'business_data_cycle_activation_dependencies_v1', 'blockers': []})
         with fixture() as (runtime, systemd, options):
+            baseline = deepcopy(pause.load_state(runtime)['baseline'])
+            self.assertIsNone(profile.load_selector(runtime))
             plan = reviewed(runtime, systemd, options)
+            self.assertTrue(plan['activation_readiness']['ready'])
+            result = apply(runtime, systemd, options, plan)
+            self.assertTrue(result['exact_target_state_restored'])
+            self.assertFalse(result['exact_prior_state_restored'])
+            self.assertFalse(barrier_status(runtime)['active'])
+            self.assertEqual(pause.load_state(runtime)['baseline'], baseline)
+            self.assertEqual(profile.load_selector(runtime)['operation_id'], plan['operation_id'])
+            for timer, pair in profile.effective_core(runtime).items():
+                state = systemd.unit_state(timer)
+                self.assertEqual((state['is_enabled'], state['is_active']), pair)
+
+    def test_stale_not_ready_plan_and_raw_disabled_phase_block_before_effects(self):
+        with fixture() as (runtime, systemd, options):
+            with patch.object(profile, 'activation_dependencies', return_value={
+                    'ready': False, 'contract': 'business_data_cycle_activation_dependencies_v1',
+                    'blockers': ['offline_old_code']}):
+                plan = reviewed(runtime, systemd, options)
             self.assertFalse(plan["activation_readiness"]["ready"])
+            self.assertTrue(profile.activation_readiness(runtime)['ready'])
             calls = list(systemd.calls)
             files = {p: p.read_bytes() for p in runtime.iterdir() if p.is_file()}
             with self.assertRaisesRegex(RuntimeError, "dependencies"):
@@ -138,12 +174,61 @@ class ScheduleProfileSmoke(unittest.TestCase):
             policy = json.loads((runtime / POLICY_FILENAME).read_text())
             policy["processes"]["warehouse_functional"]["desired"] = False
             (runtime / POLICY_FILENAME).write_text(json.dumps(policy))
-            with patch.object(profile, "activation_dependencies", return_value=READY):
+            readiness = profile.activation_readiness(runtime)
+            self.assertFalse(readiness["ready"])
+            self.assertIn("required_phase_owner_disabled_or_unknown:warehouse_functional", readiness["blockers"])
+            with self.assertRaisesRegex(RuntimeError, "mandatory"):
+                profile.effective_core(runtime)
+
+    def test_ready_code_does_not_override_raw_owner_or_schedule_gates(self):
+        from packages.application.sheet_vitrina_v1_auto_refresh import DEFAULT_STATE_FILENAME
+        cases = [(key, value) for key in ('warehouse_functional', 'wb_finance_weekly', 'vitrina_refresh')
+                 for value in (False, None)] + [('vitrina_raw_schedule_enable', False)]
+        for key, desired in cases:
+            with self.subTest(key=key, desired=desired), fixture() as (runtime, systemd, options):
+                plan = reviewed(runtime, systemd, options)
+                if key == 'vitrina_raw_schedule_enable':
+                    path = runtime / DEFAULT_STATE_FILENAME
+                    path.write_text(json.dumps({'schedules': [{'enabled': False}]})); path.chmod(0o600)
+                else:
+                    path = runtime / POLICY_FILENAME
+                    policy = json.loads(path.read_text())
+                    if desired is None:
+                        del policy['processes'][key]['desired']
+                    else:
+                        policy['processes'][key]['desired'] = desired
+                    path.write_text(json.dumps(policy))
                 readiness = profile.activation_readiness(runtime)
-                self.assertFalse(readiness["ready"])
-                self.assertIn("required_phase_owner_disabled_or_unknown:warehouse_functional", readiness["blockers"])
-                with self.assertRaisesRegex(RuntimeError, "mandatory"):
-                    profile.effective_core(runtime)
+                self.assertTrue(readiness['wiring']['ready'])
+                self.assertFalse(readiness['ready'])
+                self.assertIn('required_phase_owner_disabled_or_unknown:' + key, readiness['blockers'])
+                before = {p: p.read_bytes() for p in runtime.rglob('*') if p.is_file()}
+                calls = list(systemd.calls)
+                with self.assertRaisesRegex(RuntimeError, 'dependencies'):
+                    apply(runtime, systemd, options, plan)
+                self.assertEqual(calls, systemd.calls)
+                self.assertEqual(before, {p: p.read_bytes() for p in runtime.rglob('*') if p.is_file()})
+                self.assertFalse((runtime / profile.TRANSITIONS_DIRECTORY).exists())
+                self.assertTrue(barrier_status(runtime)['active'])
+
+    def test_ready_code_unsafe_heavy_refuses_and_master_off_stays_off(self):
+        from packages.application.business_data_heavy_admission import LOCK_FILENAME
+        with fixture() as (runtime, systemd, options):
+            plan = reviewed(runtime, systemd, options)
+            path = runtime / LOCK_FILENAME; path.chmod(0o644)
+            calls = list(systemd.calls)
+            self.assertFalse(profile.activation_readiness(runtime)['ready'])
+            with self.assertRaisesRegex(RuntimeError, 'dependencies'):
+                apply(runtime, systemd, options, plan)
+            self.assertEqual(calls, systemd.calls)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            self.assertFalse((runtime / profile.TRANSITIONS_DIRECTORY).exists())
+        with fixture(master=False) as (runtime, systemd, options):
+            plan = reviewed(runtime, systemd, options)
+            self.assertTrue(plan['activation_readiness']['ready'])
+            apply(runtime, systemd, options, plan)
+            self.assertEqual(profile.effective_core(runtime)[profile.WAREHOUSE_TIMER], ('disabled', 'inactive'))
+            self.assertEqual(systemd.unit_state(profile.WAREHOUSE_TIMER)['is_active'], 'inactive')
 
     def test_unknown_overrides_and_plain_resume_drift_refuse(self):
         with fixture() as (runtime, systemd, options), patch.object(profile, "activation_dependencies", return_value=READY):

@@ -91,9 +91,23 @@ class CycleFake:
     def _cycle_publish_ready(self, plan):
         assert plan=='plan'
         return {'snapshot_id':'ready'},self.mark('final_ready')
-    def _cycle_history(self, config, receipt, ready):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
         assert ready['snapshot_id']=='ready'
+        assert backfill_dates == () and closed_receipt is None
         return self.mark('rolling14')
+
+
+class EmptyClosedFixture:
+    """Fault harness only; real finite/source/native paths have separate tests."""
+    def __init__(self, adapter):
+        self.entry = adapter.collect_sources.__self__
+    def collect(self, cycle_id):
+        self.entry.mark('closed_sources')
+        return {'dates': {}}
+    def status(self):return None
+    def publication_dates(self):
+        self.entry.mark('closed_ready')
+        return ()
 
 
 class CycleTests(unittest.TestCase):
@@ -106,6 +120,8 @@ class CycleTests(unittest.TestCase):
         self.store=CycleReceiptStore(self.root,lambda:STAMP)
         self.identity=patch('packages.application.sheet_vitrina_v1_cycle.process_identity',return_value=IDENTITY)
         self.identity.start();self.addCleanup(self.identity.stop)
+        self.closed=patch('packages.application.sheet_vitrina_v1_cycle.ClosedBacklog',EmptyClosedFixture)
+        self.closed.start();self.addCleanup(self.closed.stop)
     def owned_history(self, runtime, config):
         with heavy_admitted(runtime.runtime_dir, operation='cycle'):
             return history.build_owned_cycle_history(runtime=runtime,config=config,cycle_owner={},now=NOW)
@@ -117,7 +133,7 @@ class CycleTests(unittest.TestCase):
             with heavy_admitted(self.root, operation='cycle'):
                 result=run_cycle(fake,self.store,receipt,self.config,lambda _:None)
         finally:lock.close()
-        self.assertEqual(fake.events,list(STAGES[:5])+['derive']+list(STAGES[5:]))
+        self.assertEqual(fake.events,list(STAGES[:7])+['derive']+list(STAGES[7:]))
         self.assertEqual(result['status'],'complete')
         prior,lock=self.accepted();self.assertIsNone(lock)
         self.assertEqual(prior['cycle_id'],result['cycle_id'])
@@ -136,7 +152,7 @@ class CycleTests(unittest.TestCase):
                 self.assertEqual(receipt['status'],'failed')
                 self.assertEqual(receipt['current_stage'],fail)
                 self.assertTrue(all(i['status']=='pending' for i in receipt['stages'][STAGES.index(fail)+1:]))
-                self.assertEqual(fake.events.count('warehouse'),int(STAGES.index(fail)>=3))
+                self.assertEqual(fake.events.count('warehouse'),int(STAGES.index(fail)>=STAGES.index('warehouse')))
     def test_consumed_source_drift_never_derives_or_recollects(self):
         receipt,lock=self.accepted();fake=CycleFake(self.root,'source_drift')
         try:
@@ -194,6 +210,30 @@ with open(sys.argv[1],'rb') as stream:
         self.assertTrue(admission_idle(self.root)['idle'])
         self.assertEqual(fake.events.count('api_sources'),1)
         self.assertEqual(self.store.read(result['cycle_id'])['status'],'complete')
+    def test_worker_adapter_initialization_failure_terminalizes_receipt_and_releases(self):
+        for index,target in enumerate(('adapter','closed')):
+            with self.subTest(target=target):
+                fake=CycleFake(self.root);key='init-failure-'+target
+                slot=f'2026-09-29T{10+index*3:02}:00:00+00:00'
+                context=(patch.object(fake,'_cycle_sources',side_effect=RuntimeError('private init detail'))
+                    if target=='adapter' else patch('packages.application.sheet_vitrina_v1_cycle.ClosedBacklog',side_effect=RuntimeError('private init detail')))
+                with context as constructor:
+                    result=fake._start_sheet_cycle_job(request_key=key,slot_utc=slot,history_config=self.config)
+                    thread=fake.operator_jobs._threads[result['job_id']];thread.join(5)
+                    self.assertFalse(thread.is_alive());self.assertEqual(constructor.call_count,1)
+                    receipt=self.store.read(result['cycle_id'])
+                    self.assertEqual(receipt['status'],'failed');self.assertEqual(receipt['error_code'],'RuntimeError')
+                    self.assertTrue(all(item['status']=='pending' for item in receipt['stages']))
+                    self.assertEqual(fake.events,[])
+                    self.assertTrue(admission_idle(self.root)['idle']);self.assertTrue(heavy_admission_status(self.root)['idle'])
+                    prior=fake._start_sheet_cycle_job(request_key=key,slot_utc=slot,history_config=self.config)
+                    self.assertEqual(prior['cycle_id'],receipt['cycle_id']);self.assertEqual(constructor.call_count,1)
+                next_fake=CycleFake(self.root)
+                next_result=next_fake._start_sheet_cycle_job(request_key='after-'+key,
+                    slot_utc=f'2026-09-29T{11+index*3:02}:00:00+00:00',history_config=self.config)
+                next_fake.operator_jobs._threads[next_result['job_id']].join(5)
+                self.assertEqual(self.store.read(next_result['cycle_id'])['status'],'complete')
+                self.assertEqual(next_fake.events.count('api_sources'),1)
     def test_operator_constructor_and_proven_no_start_cancellation_release(self):
         for failure in (RuntimeError,KeyboardInterrupt,SystemExit):
             for method in ('__init__','start'):
@@ -258,61 +298,59 @@ with open(sys.argv[1],'rb') as stream:
             self.assertTrue(validate_collection(value).warnings)
         slot.update(policy='unavailable',accepted=False)
         with self.assertRaises(CycleStageFailure):validate_collection(value)
-    def test_history_deadline_or_pending_is_failure(self):
-        # Actual reviewed helper refuses a normally-returned pending result.
+    def test_history_delegates_exact_owned_context_and_fixed_dates(self):
+        # Completion/FD/terminal predicates live in the actual Linux worker suite.
+        # This checks the public canonical factory boundary without constructing
+        # an adapter/compiler or granting authority to a fake proof dictionary.
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        from types import ModuleType
         runtime=SimpleNamespace(runtime_dir=self.root,db_path=self.root/'db')
         config=replace(self.config,candidate_root=Path(self.tmp.name+'-history').resolve())
-        adapter=SimpleNamespace()
-        from contextlib import contextmanager
+        cycle_owner={'job_id':'same-job','cycle_id':'same-cycle'}
+        dates=('2026-04-01','2026-04-02');closed=object()
+        terminal={'status':'published','edition_id':'exact-edition','completed':True}
+        calls=[]
+        worker=SimpleNamespace(complete=lambda now,**kwargs:
+            (calls.append((now,kwargs)),terminal)[1])
+        module=ModuleType('packages.application.owned_history_worker')
         @contextmanager
-        def slot(*_):yield 'idle'
-        @contextmanager
-        def acquired(*_):yield True
-        with patch('packages.application.web_vitrina_snapshot_admission.api_jobs_admission',return_value='idle'), \
-             patch('apps.web_vitrina_finished_snapshot_build.systemd_admission',return_value='idle'), \
-             patch('apps.web_vitrina_finished_snapshot_build.lock_admission',return_value='idle'), \
-             patch('packages.application.warehouse_functional_lock.warehouse_functional_job_is_busy',return_value=False), \
-             patch.object(history,'runtime_storage_admission'),patch.object(history,'finished_builder_slot',slot), \
-             patch.object(history,'candidate_singleflight',acquired),patch.object(history,'LiveNativeAdapter',return_value=adapter), \
-             patch.object(history,'HistoryStore'),patch.object(history,'update_live_history',return_value={'status':'pending'}):
-            with self.assertRaisesRegex(ValueError,'cycle_history_incomplete'):
-                self.owned_history(runtime, config)
+        def factory(**kwargs):
+            self.assertEqual(require_heavy_owner(self.root).operation,'cycle')
+            self.assertIs(kwargs['runtime'],runtime);self.assertIs(kwargs['config'],config)
+            self.assertIs(kwargs['cycle_owner'],cycle_owner)
+            yield worker
+        module.owned_history_worker=factory
+        with patch.dict(sys.modules,{module.__name__:module}), \
+             heavy_admitted(self.root,operation='cycle'):
+            result=history.build_owned_cycle_history(runtime=runtime,config=config,
+                cycle_owner=cycle_owner,now=NOW,backfill_dates=dates,closed_receipt=closed)
+        self.assertIs(result,terminal);self.assertEqual(len(calls),1)
+        self.assertIs(calls[0][0],NOW);self.assertIs(calls[0][1]['backfill_dates'],dates)
+        self.assertIs(calls[0][1]['closed_receipt'],closed)
 
-    def test_history_exact_final_vector_and_other_systemd_guard(self):
+    def test_history_delegated_failure_and_actual_owner_guard_propagate(self):
+        from types import ModuleType
         runtime=SimpleNamespace(runtime_dir=self.root,db_path=self.root/'db')
-        config=replace(self.config,candidate_root=Path(self.tmp.name+'-history').resolve())
-        days=history.dates_between('2026-09-16','2026-09-29')
-        vector={'epoch':'epoch','dates':{day:'token-'+day for day in days}}
-        adapter=SimpleNamespace(fence='owned-material',capture=lambda:vector)
-        edition={'days':dict.fromkeys(days)}
-        proofs={day:{'epoch':'epoch','token':vector['dates'][day]} for day in days}
-        store=SimpleNamespace(edition=lambda _:edition,_current=lambda:{'current':'edition'},
-            day_proofs=lambda _:proofs,rolling_status=lambda *_:{'dirty_dates':[],
-                'window_from':days[0],'business_date':days[-1]})
+        module=ModuleType('packages.application.owned_history_worker')
+        entered=[]
+        class WorkerTerminalFailure(ValueError):pass
         @contextmanager
-        def slot(*_):yield 'idle'
-        @contextmanager
-        def acquired(*_):yield True
-        with ExitStack() as stack:
-            stack.enter_context(patch('packages.application.web_vitrina_snapshot_admission.api_jobs_admission',return_value='idle'))
-            systemd=stack.enter_context(patch('apps.web_vitrina_finished_snapshot_build.systemd_admission',return_value='idle'))
-            stack.enter_context(patch('apps.web_vitrina_finished_snapshot_build.lock_admission',return_value='idle'))
-            stack.enter_context(patch('packages.application.warehouse_functional_lock.warehouse_functional_job_is_busy',return_value=False))
-            guard=stack.enter_context(patch.object(history,'runtime_storage_admission'))
-            stack.enter_context(patch.object(history,'finished_builder_slot',slot))
-            stack.enter_context(patch.object(history,'candidate_singleflight',acquired))
-            stack.enter_context(patch.object(history,'LiveNativeAdapter',return_value=adapter))
-            stack.enter_context(patch.object(history,'HistoryStore',return_value=store))
-            build=stack.enter_context(patch.object(history,'update_live_history',return_value={'status':'published','edition_id':'edition'}))
-            result=self.owned_history(runtime, config)
-            self.assertEqual(result['edition_id'],'edition');self.assertEqual(result['window_from'],days[0])
-            proofs[days[0]]['token']='another-source'
-            with self.assertRaisesRegex(ValueError,'cycle_history_final_vector_changed'):
-                self.owned_history(runtime, config)
-            guard.reset_mock();build.reset_mock();systemd.return_value='busy'
-            with self.assertRaisesRegex(ValueError,'cycle_history_admission_busy'):
-                self.owned_history(runtime, config)
-            guard.assert_not_called();build.assert_not_called()
+        def factory(**kwargs):
+            entered.append(kwargs)
+            def complete(*args,**kwargs):raise WorkerTerminalFailure('exact-native-drift')
+            yield SimpleNamespace(complete=complete)
+        module.owned_history_worker=factory
+        with patch.dict(sys.modules,{module.__name__:module}):
+            with heavy_admitted(self.root,operation='cycle'):
+                with self.assertRaisesRegex(WorkerTerminalFailure,'exact-native-drift'):
+                    history.build_owned_cycle_history(runtime=runtime,config=self.config,
+                        cycle_owner={},now=NOW)
+            self.assertEqual(len(entered),1)
+            with heavy_admitted(self.root,operation='warehouse'):
+                with self.assertRaisesRegex(RuntimeError,'actual owned cycle'):
+                    history.build_owned_cycle_history(runtime=runtime,config=self.config,
+                        cycle_owner={},now=NOW)
+            self.assertEqual(len(entered),1)
 
 
 class SourceAndAdmissionTests(unittest.TestCase):

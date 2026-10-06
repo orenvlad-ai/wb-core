@@ -33,6 +33,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if str(args.env_file or "").strip():
         _load_env_file(Path(str(args.env_file)).resolve())
     if args.command == 'collect':
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(runtime_dir)
+        if managed is not None:
+            return managed
         runtime_dir.mkdir(parents=True, exist_ok=True)
         with heavy_admitted(runtime_dir, operation='official_fbs_cli'):
             return _run_admitted(args, runtime_dir)

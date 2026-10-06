@@ -26,6 +26,7 @@ from packages.application.web_vitrina_history_compiler import dates_between
 from packages.business_time import current_business_date_iso
 from packages.application.business_data_procedure_admission import admitted_write, MaintenanceAdmissionBlocked
 from packages.application.business_data_write_barrier import barrier_status
+from packages.application.business_data_heavy_admission import heavy_admitted, HeavyAdmissionBusy
 
 SAFE_SOURCE_FAILURE_REASONS = frozenset({
     "live_source_resource_limit", "live_source_read_incomplete", "live_bootstrap_deadline",
@@ -121,7 +122,7 @@ def finished_builder_slot(source):
 
 @contextmanager
 def history_procedure_admission(args):
-    if args.maintenance_window_id:
+    if getattr(args, "maintenance_window_id", ""):
         status = barrier_status(args.runtime_dir)
         if not (args.manual and status.get("active") is True
                 and status.get("phase") == "held" and status.get("hold_confirmed") is True
@@ -132,7 +133,7 @@ def history_procedure_admission(args):
         # baseline/quiet/source/code receipts; this flag grants no business write.
         yield
     else:
-        with admitted_write(args.runtime_dir):
+        with heavy_admitted(args.runtime_dir, operation="history"):
             yield
 
 
@@ -164,6 +165,9 @@ def main():
     try:
         with history_procedure_admission(args):
             return run_admitted(args)
+    except HeavyAdmissionBusy:
+        print(json.dumps({"status": "skipped_busy", "reason": "heavy_producer_running"}))
+        return 0
     except MaintenanceAdmissionBlocked as exc:
         print(json.dumps({"status": "skipped_maintenance", "reason": str(exc),
                           "last_good_retained": True}))
@@ -171,6 +175,13 @@ def main():
 
 
 def run_admitted(args):
+    # Direct canonical entry cannot bypass the normal pre-constructor guard.
+    # The existing explicit held manual exception keeps its separate contract.
+    with history_procedure_admission(args):
+        return _run_admitted(args)
+
+
+def _run_admitted(args):
     source = args.runtime_dir.resolve()
     root = args.candidate_root.resolve()
     now = datetime.fromisoformat(args.captured_now) if args.captured_now else datetime.now(timezone.utc)
@@ -187,6 +198,42 @@ def run_admitted(args):
     if seconds <= 0:
         print(json.dumps({"status": "skipped_window", "last_good_retained": True}))
         return
+    if not getattr(args, "maintenance_window_id", ""):
+        # Ordinary hidden --worker argv is not a delegated capability. Normal
+        # parents use only the authenticated fixed FD worker below.
+        if args.worker or not args.runtime_contract:
+            print(json.dumps({"status": "build_failed", "reason_code":
+                "history_worker_requires_fixed_fd_capability" if args.worker else "history_runtime_contract_required"}))
+            return 1
+        try:
+            runtime_storage_admission(root, args.runtime_contract, args.formula_epoch)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+            print(json.dumps({"status":"skipped_storage", "reason":type(exc).__name__}))
+            return 0
+        from types import SimpleNamespace
+        from packages.application.owned_history_worker import standalone_history_worker
+        from packages.application.owned_history_worker_capability import HistoryDelegationError
+        # Heavy has been entered before registry/runtime/adapter construction.
+        registry = StoreRegistry(source)
+        runtime = RegistryUploadDbBackedRuntime(source, store_registry=registry)
+        config = SimpleNamespace(candidate_root=root, runtime_contract=args.runtime_contract,
+            formula_epoch=args.formula_epoch, budget_seconds=seconds, max_recomputes=args.max_recomputes)
+        try:
+            with standalone_history_worker(runtime=runtime, config=config) as worker:
+                # Recheck the ordinary calendar after domain acquisition.
+                remaining = seconds if args.manual else min(seconds, deadline_seconds(datetime.now(timezone.utc)))
+                if remaining <= 0:
+                    print(json.dumps({"status": "skipped_window"}))
+                    return 0
+                config.budget_seconds = remaining
+                proof = worker.complete(now, source_range=(args.date_from, date_to),
+                    backfill_dates=tuple(backfill_dates), total_seconds=remaining, max_portions=1)
+                result = proof
+        except (HistoryDelegationError, ValueError, OSError) as exc:
+            # No automatic compiler/source resend or invented retained proof.
+            result = {"status": "build_failed", "reason_code": str(exc)[:128] if isinstance(exc, HistoryDelegationError) else type(exc).__name__}
+        print(json.dumps(result))
+        return 1 if result["status"] == "build_failed" else 0
     if args.worker:
         if args.runtime_contract:
             runtime_storage_admission(root, args.runtime_contract, args.formula_epoch, group_migration=getattr(args, "full_history_group_migration", False))
@@ -254,62 +301,20 @@ def run_admitted(args):
     return 1 if result["status"] == "build_failed" else 0
 
 
-def build_owned_cycle_history(*, runtime, config, cycle_owner, now):
-    """Reviewed rolling14 seam for the exact live cycle owner, in its SH lease.
+def build_owned_cycle_history(*, runtime, config, cycle_owner, now,
+                              backfill_dates=(), closed_receipt=None):
+    """Complete one frozen rolling14∪fixed old-date target, no source replay.
 
-    The caller proves live thread/job identity. All other actor, filesystem,
-    formula, finished-builder and candidate guards remain enforced.
+    The actual cycle retains SH/heavy and both domain descriptors across all
+    portions. Only exact newly completed day objects authorize continuation.
+    Total/count ceilings are safety limits, not a three-hour completion SLA.
     """
-    from apps.web_vitrina_finished_snapshot_build import systemd_admission, lock_admission
-    from packages.application.web_vitrina_snapshot_admission import api_jobs_admission
-    from packages.application.warehouse_functional_lock import warehouse_functional_job_is_busy
     from packages.application.business_data_heavy_admission import require_heavy_owner
-    source = Path(runtime.runtime_dir).resolve()
-    if require_heavy_owner(source).operation != 'cycle':
-        raise RuntimeError('owned cycle heavy admission is required')
-    root = Path(config.candidate_root)
-    if root != root.resolve() or root.is_relative_to(source) or not 0 < config.budget_seconds <= 240:
-        raise ValueError('cycle_history_config_invalid')
-    for state in (api_jobs_admission(source, cycle_owner=cycle_owner), systemd_admission(),
-                  lock_admission(source / '.wb-finance-daily-worker.lock')):
-        if state != 'idle':
-            raise ValueError('cycle_history_admission_' + state)
-    if warehouse_functional_job_is_busy(source):
-        raise ValueError('cycle_history_warehouse_busy')
-    runtime_storage_admission(root, config.runtime_contract, config.formula_epoch)
-    with finished_builder_slot(source) as slot:
-        if slot != 'idle':
-            raise ValueError('cycle_history_builder_' + slot)
-        with candidate_singleflight(root) as acquired:
-            if not acquired:
-                raise ValueError('cycle_history_candidate_busy')
-            today = current_business_date_iso(now)
-            first = (datetime.fromisoformat(today) - timedelta(days=13)).date().isoformat()
-            adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=source,
-                cache_dir=root / 'proofs', now=now, date_from=first, date_to=today,
-                formula_epoch=config.formula_epoch)
-            store = HistoryStore(root / 'history')
-            starts = json.loads(config.runtime_contract.read_bytes()).get('metric_start_dates', {})
-            result = update_live_history(adapter=adapter, runtime=runtime, store=store,
-                max_recomputes=config.max_recomputes, deadline_monotonic=time.monotonic() + config.budget_seconds,
-                rolling14=True, metric_start_dates=starts, group_blocks=True)
-            if result.get('status') not in {'published', 'unchanged'} or not result.get('edition_id'):
-                raise ValueError('cycle_history_incomplete')
-            edition = store.edition(result['edition_id'])
-            fence = adapter.fence
-            vector = adapter.capture()
-            status = store.rolling_status(vector, today)
-            days = dates_between(first, today)
-            proofs = store.day_proofs(edition)
-            if (store._current()['current'] != result['edition_id'] or adapter.fence != fence
-                    or any(proofs.get(day) != {'epoch': vector['epoch'], 'token': vector['dates'].get(day)} for day in days)
-                    or status['dirty_dates'] or
-                    status['window_from'] != first or status['business_date'] != today or
-                    not set(days) <= set(edition['days'])):
-                raise ValueError('cycle_history_final_vector_changed')
-            return {'edition_id': result['edition_id'], 'vector_digest': hashlib.sha256(
-                json.dumps(vector, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
-                'window_from': first, 'window_to': today}
+    if require_heavy_owner(runtime.runtime_dir).operation != "cycle":
+        raise RuntimeError("history requires an actual owned cycle")
+    from packages.application.owned_history_worker import owned_history_worker
+    with owned_history_worker(runtime=runtime, config=config, cycle_owner=cycle_owner) as worker:
+        return worker.complete(now, backfill_dates=backfill_dates, closed_receipt=closed_receipt)
 
 
 if __name__ == "__main__":

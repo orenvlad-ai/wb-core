@@ -1,4 +1,4 @@
-# Fixed business-data schedule profile (dormant)
+# Fixed business-data schedule profile (explicit selection)
 
 One exact legacy → `business-data-cycle-3h-v1` transition is prepared here.
 Installing this code activates nothing. The only configured file is the known
@@ -10,28 +10,36 @@ The fixed calendar is 00/03/06/09/12/15/18/21:00 Asia/Yekaterinburg, every day.
 It resets the previous hourly OnCalendar, sets eight slots, one-second accuracy,
 zero random delay and keeps Persistent=true. FBS is collected **in every 3h
 cycle**. Nine hours is the maximum age, not collection cadence; current-day/full
-generation proofs remain required. This PR records policy; readers retain their
-existing defaults until separate reviewed wiring.
+generation proofs remain required. Readers use the selected profile's reviewed
+freshness policy; an absent selector retains their legacy defaults.
 
 ## Dependencies and raw intent
 
-`activation_dependencies()` has three fixed unresolved code dependencies:
-cycle dispatch, every conflicting legacy heavy producer, and FBS reader wiring.
-Module presence does not prove readiness. No external flag, CLI override or
-readiness file exists. Separately reviewed code must replace these blockers with
-actual code-backed evidence. Current production apply refuses before mutation.
+`activation_dependencies()` is code-owned ready: independent Linux proof covers
+an actual operator Thread, closed-date/current ready publication and the actual
+owned history child with native acknowledgement. It is not production timing or
+runtime availability evidence. No external flag, CLI override or readiness file
+exists. Installing the code does not choose a selector or alter timer states.
+
+Runtime readiness still requires raw owner intent and the existing safe canonical
+heavy inode. Storage admission is a separate mandatory history-worker check:
+exact root/mount identity, reserve, runtime contract/epoch and formula pins. It is
+not included in `activation_readiness()`; source stages may precede this check.
+Prove installed history storage and Linux worker infrastructure read-only before
+the first target selection, then retain the worker's checks at each execution.
+The synthetic integration proof does not show production completion within 3h.
 
 The sole cadence owner is `master_desired`. Required phases cannot be silently
 skipped: raw `warehouse_functional`, `wb_finance_weekly` and `vitrina_refresh`
 managed owner intent must be proven true under this conservative initial-profile
-policy. This is not evidence that the current runner already obeys those owners.
-Unknown/false blocks readiness; runtime/deploy projection refuses an enabled
-complete cycle in that state. Future dispatch must check these raw owners before
-effects. Current runner has no desired/source flag mapping: daily/FBS source
-calls use canonical defaults; weekly no_due uses its own due policy. In particular,
-warehouse owner is not asserted to own FBS source collection, and weekly owner
-is not asserted to own daily source collection. Exact source-to-owner mapping
-and hook integration remain part of the separately reviewed wiring dependency.
+policy. This selected-profile policy explicitly maps warehouse owner to mandatory official
+FBS collection and warehouse materialization; Finance owner to daily source plus
+weekly own-due source; vitrina owner to full auto_daily, ready and rolling14.
+Raw vitrina schedule any-enabled is also required. Unknown/false blocks readiness
+and enabled deploy projection; the dispatcher checks again under acquired heavy
+before acceptance. This mapping is new profile policy, not a claim about legacy
+scheduler behavior. No owner flag narrows source groups, metrics, dates or
+selectors within full auto_daily. A false mandatory phase is blocked, never skipped.
 
 `projected_schedule(runtime, raw_feature_intent)` exposes raw intent plus a
 separate effective schedule. Settings must preserve raw `activity.feature_intent`;
@@ -49,6 +57,7 @@ and effective timer states.
 | wb-finance-weekly | disabled/inactive; source/cost eligibility belongs to cycle |
 | sheet-vitrina-refresh | disabled/inactive; refresh belongs to cycle |
 | web-vitrina-finished-snapshot | disabled/inactive; the same rolling14 publisher belongs to cycle |
+| sheet-vitrina-closure-retry | disabled/inactive; bounded closed-date retry belongs to cycle |
 
 Independent timers retain exact original enabled/active pairs during cutover.
 Their schedules, full Finance backup cadence/policy, Autoanswers, FBS shadow,
@@ -69,8 +78,9 @@ runtime-dir/env-file/base-url/operation-id. Preview adds window-id/deployed-sha;
 apply adds private reviewed-plan/expected-fingerprint/actor/reason. CLI verifies
 completed deployment metadata and runtime SHA marker before preview/apply.
 Save a preview with `umask 077`, inspect its full fingerprint/readiness/target,
-then submit that exact plan once. This contract does not authorize production
-application now; dependencies are deliberately unresolved.
+then submit that exact plan once within the authorized cutover. A plan prepared
+with code readiness false remains invalid after a code update: obtain and review
+a fresh exact plan; never rewrite its captured proof or fingerprint.
 
 The immutable plan/baseline and exact drop-in/selector before-images are retained
 in private `.business-data-schedule-transitions/<operation-id>.json`. Phases:
@@ -104,7 +114,7 @@ only that exact missing path may use raw property readback, and all timers must
 be proven paused before reload. Unknown missing/foreign content remains blocked.
 Interrupted rollback continues the same operation. Before-images are retained.
 
-Future deploy reconcile validates the exact preset, projects all six timer states,
+Future deploy reconcile validates the exact preset, projects all seven timer states (one owner, six retired),
 adds warehouse owner even when absent from legacy enable list, and prevents
 retired timers reopening. Active held pause keeps timers paused. Partial target
 transition requires explicit recovery. Legacy master prepare/restore refuse a
@@ -116,10 +126,113 @@ fabricated or replayed by this transition.
 
 ## Offline verification
 
-The profile smoke covers legacy no-op, exact slots/TZ/FBS policy, dormant/disabled
-phase refusal, foreign override/plain resume drift, every timer/transition
+The profile smoke covers legacy no-op, exact slots/TZ/FBS policy, unpatched code
+readiness/exact target, stale false-plan and disabled/unknown owner/infrastructure
+refusal, foreign override/plain resume drift, every timer/transition
 interruption, journal read from a new process, ambiguous enable/start without
 resend, missing/existing drop-in rollback at timer/file/reload boundaries, partial
 deploy/master refusal, committed drift and deploy under another held pause.
 Existing pause/barrier/master restore/deploy/boundary smokes retain legacy coverage.
 Fixtures are temporary and offline; no WB or production commands are required.
+
+## Fixed dispatch and Settings mapping
+
+The existing warehouse hourly-sync command dispatches the selected profile to
+`/v1/business-data-cycle/dispatch` on the fixed local HTTP daemon. It does so
+before warehouse constructors/job locks/heavy EX and keeps only the existing
+short maintenance SH plus its nonblocking transport lock. No new unit is added.
+The route requires configured session authentication, Settings/admin authority
+and a loopback caller. It accepts only a server-issued opaque dispatch ID.
+Client root/epoch/date/source/ownership selection is forbidden.
+
+GET preparation and same-ID readback are read-only: no job, directory or source
+acceptance. The deterministic ID binds latest completed wall-clock 3h slot in
+Asia/Yekaterinburg, fixed profile, deployed SHA and server-owned history contract
+(with existing 240s portion/max31 limits). POST delegates to canonical same-daemon
+cycle acceptance; backup priority/recheck and actual lease handoff are preserved.
+The ID grants dedup evidence, never heavy ownership. Canonical source stages
+require the actual same-thread live cycle lease; names, copied IDs and forked
+ContextVars do not grant exemption.
+
+One private bounded atomic `.business-data-cycle-dispatch.json` transport record
+is written before the single POST. Unknown POST/404/timeout/process loss means
+same-ID GET only, including after slot rollover/restart. No negative idle proof
+causes another POST. A still active or uncertain old request blocks a newer slot.
+Known terminal/no-accept permits one preparation in the same launcher invocation.
+A different latest-slot ID receives at most one new POST; the old POST is never
+resent. Same-slot terminal results remain read-only. This prevents resolution
+of a previous completed operation from consuming the sole next 3h timer slot.
+Current-slot absence remains
+unknown. After rollover, exact absent+expired proof is checked under the operator
+lock and the existing heavy inode EX opened read-only/nonblocking (no provision).
+Busy, missing, unsafe or replaced heavy infrastructure cannot prove no acceptance;
+absence remains unknown. Selected activation requires proven existing canonical
+heavy infrastructure. Neither GET nor readback repairs/provisions an inode. Canonical POST repeats slot,
+deployed SHA, history contract and selected-profile guard immediately before
+durable acceptance under actual EX plus the same operator lock. A paused old
+handler that passed the guard retains EX until receipt/terminal; another process
+cannot prove false absence in that gap. A handler still before the guard cannot
+later accept the expired request. Only this server proof resolves uncertain
+transport and permits a new slot; old POST is never resent. Unknown404/timeout
+alone resolves nothing. Session-secret rotation fails closed rather than
+silently discarding unknown intent.
+
+Selected legacy health06:30/night/auto tick/scheduled/synchronous/direct refresh,
+group/manual warehouse, daily/weekly/FBS source CLI and ordinary no-date closure
+launcher return cycle-managed before source/job/ledger effects. HTTP manual
+trigger refusal is 409 with accepted=false. Existing pending warehouse intent
+remains pending without standalone pickup; no false completed/consumed receipt
+is manufactured. Explicit approved date recovery retains its existing separate
+maintenance/backup/CAS contract. Source-free cost replay and saved-source operator
+acceptance are unchanged. Absent selector preserves legacy behavior; malformed
+selector fails before dispatch or schedule save.
+
+Settings returns raw rows/policy/fingerprint separately from eight effective
+24/7 slots and exact owner timer. Raw file byte digest is distinct from projection
+fingerprint; existing 0644 raw source JSON is read bounded/NOFOLLOW without format
+or mode rewrite, while private transport/profile metadata stays 0600. Maintenance
+activity and controls explicitly use the raw helper, never projected slots.
+Cadence editing/run-now is marked cycle-managed; saved raw intent remains intact.
+
+Old dated ready publication reuses the canonical CAS/save/complete receipt with
+exact as-of and current bundle verification, without repeated collection, promo
+GC or manual-result tails. Current ready is still published last by the separately
+reviewed cycle wiring. History passes only immutable dates and the actual internal
+ClosedBacklog object to the independently owned helper. Module presence alone
+does not prove completion; the independently reviewed whole-cycle Linux test uses
+the real operator Thread and owned child. Final production source/history/total
+duration, mount pressure and backup conflict still require controlled measurement.
+
+## First cutover and controlled pilot
+
+After the current full backup has terminal proof, obtain one fresh held
+maintenance window with its immutable old baseline. Release the reviewed code
+union while the selector is absent, then prove the exact installed SHA/completed
+deploy metadata, services/admission, unchanged unit baseline, formula/repair pins
+and the separate history storage contract. No SHA change while backup is pending.
+
+Profile CLI checks `.wb-core-deploy.json` version2, `deployment_complete=true`
+and exact commit/SHA marker. It does not require Change Registry source completion.
+Save/review a fresh exact target preview for this same held window and installed
+SHA; apply the same operation once. Unknown outcomes read back the same operation.
+Pre-commit recovery may roll back; committed recovery proves only the exact target.
+Target timer proof precedes barrier release. Ordinary resume is never a bypass.
+
+Held maintenance can make the release's Change Registry activation return
+`skipped_maintenance`; this is not activation completion evidence. After exact
+target restore/release use the existing canonical
+`wb-core-change-registry-activation@<finalSHA>.service` and
+`apps/change_registry_observer.py ... activation-status --deployed-sha <finalSHA>`.
+Submit once, then read the same unit/job on unknown outcomes. Require actual
+terminal complete and source evidence. This observer acquires its own Prices/Ads
+snapshot; selected-profile legacy Finance/FBS/refresh suppression does not block it.
+No second maintenance window or new activation workflow is required by this chain.
+
+Timer restoration/release can start a selected cycle before a manual pilot,
+including persistent catch-up. Choose cutover time against the next fixed slot
+and read the exact current slot receipt; a prior acceptance becomes that pilot's
+readback, never a duplicate request. Use the fixed authenticated dispatch/server
+ID for the full-cycle pilot; unknown POST means same-ID GET, never old POST resend.
+Prove terminal ready/CURRENT/native acknowledgement and measure production phases.
+The target receipt proves scheduling configuration, not successful data update;
+code readiness and restore RTO do not provide a backup or cycle duration SLA.

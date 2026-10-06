@@ -710,6 +710,13 @@ def _heavy_http_method(method):
     """Selected canonical calls acquire before their scans/domain locks/effects."""
     @wraps(method)
     def admitted(self, *args, **kwargs):
+        if method.__name__ in {'_run_sheet_auto_update', '_run_sheet_scheduled_auto_update',
+                '_run_sheet_refresh', '_run_sheet_source_group_refresh',
+                'run_sheet_temporal_closure_retry_cycle', 'handle_warehouse_manual_sync_request'}:
+            from packages.application.business_data_cycle_dispatch import legacy_refusal
+            managed = legacy_refusal(self.runtime.runtime_dir)
+            if managed is not None:
+                return managed
         with heavy_admitted(self.runtime.runtime_dir, operation='http_refresh'):
             return method(self, *args, **kwargs)
     return admitted
@@ -909,7 +916,7 @@ class _EntrypointMaintenanceSchedules:
 
     def read_all(self) -> dict[str, dict[str, Any]]:
         return {
-            "web_vitrina": self.entrypoint.handle_sheet_web_vitrina_auto_schedules_request(),
+            "web_vitrina": self.entrypoint._raw_web_vitrina_auto_schedules(),
             "feedback_complaints": (
                 self.entrypoint.handle_sheet_feedbacks_auto_complaints_schedules_request()
             ),
@@ -2542,6 +2549,10 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_sheet_web_vitrina_auto_schedules_request(self) -> dict[str, Any]:
+        from packages.application.business_data_schedule_profile import project_settings
+        return project_settings(self.runtime.runtime_dir, self._raw_web_vitrina_auto_schedules())
+
+    def _raw_web_vitrina_auto_schedules(self) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         return self.sheet_auto_refresh_schedules_block.build_payload(
             auto_context={
@@ -2554,6 +2565,12 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_sheet_web_vitrina_auto_schedules_save_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        from packages.application.business_data_schedule_profile import project_settings, load_selector
+        load_selector(self.runtime.runtime_dir)  # Refuse malformed selector before raw save.
+        # Saving remains raw feature intent; cadence projection is read-only.
+        return project_settings(self.runtime.runtime_dir, self._save_raw_web_vitrina_auto_schedules(payload))
+
+    def _save_raw_web_vitrina_auto_schedules(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         auto_update_state = self.runtime.load_sheet_vitrina_auto_update_state()
         return self.sheet_auto_refresh_schedules_block.save_schedules(
             payload,
@@ -2573,7 +2590,7 @@ class RegistryUploadHttpEntrypoint:
         from packages.application.business_data_procedure_admission import admission_idle
         from packages.application.sheet_vitrina_v1_feedbacks_auto_complaints import ACTIVE_RUN_STATUSES
         from packages.contracts.wb_spp_tester import SPP_TEST_ACTIVE_STATUSES
-        web = self.handle_sheet_web_vitrina_auto_schedules_request()
+        web = self._raw_web_vitrina_auto_schedules()
         feedback = self.handle_sheet_feedbacks_auto_complaints_schedules_request()
         def intent(payload):
             return {"schedules": [
@@ -2798,6 +2815,10 @@ class RegistryUploadHttpEntrypoint:
             raise ValueError("unsupported auto-updates action")
 
     def handle_sheet_web_vitrina_auto_schedules_run_now_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         schedule_id = str(payload.get("schedule_id") or "").strip()
         if not schedule_id:
             schedules_payload = self.sheet_auto_refresh_schedules_block.build_payload()
@@ -2922,6 +2943,10 @@ class RegistryUploadHttpEntrypoint:
         due_at: str = "",
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
         if _is_scheduled_auto_refresh_trigger(trigger_source):
             active_job = self.operator_jobs.active_job(operations=("auto_update",))
@@ -2945,6 +2970,10 @@ class RegistryUploadHttpEntrypoint:
         *,
         auto_load: bool = False,
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         if auto_load:
             return self._run_sheet_auto_update(as_of_date=as_of_date, log=None)
         return self._run_sheet_refresh(as_of_date=as_of_date, log=None)
@@ -2953,8 +2982,18 @@ class RegistryUploadHttpEntrypoint:
         del as_of_date
         raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
-    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config) -> dict:
-        """Dormant internal dispatch only; deliberately no route, CLI or timer."""
+    def handle_business_data_cycle_dispatch_request(self, payload=None):
+        from packages.application.business_data_cycle_dispatch import dispatch, prepare
+        if payload is None:
+            return prepare(self.runtime.runtime_dir, self.now_factory())
+        return dispatch(self, payload)
+
+    def handle_business_data_cycle_readback_request(self, dispatch_id):
+        from packages.application.business_data_cycle_dispatch import readback_fenced
+        return readback_fenced(self, dispatch_id)
+
+    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config, _dispatch_guard=None) -> dict:
+        """Same-daemon full-cycle acceptance; selected-profile route stays readiness-blocked."""
         from packages.application.business_data_procedure_admission import admitted_write, thread_start_is_proven_absent
         from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, HEAVY_OPERATIONS, run_cycle
         from packages.application.finance_backup_handoff import cycle_backup_priority, handoff_cycle_backup
@@ -2980,6 +3019,15 @@ class RegistryUploadHttpEntrypoint:
                 if priority['priority']:
                     heavy.close()
                     return handoff_cycle_backup(self.runtime.runtime_dir)
+                from packages.application.business_data_schedule_profile import load_selector, activation_readiness, effective_core, WAREHOUSE_TIMER
+                if load_selector(self.runtime.runtime_dir) is not None:
+                    readiness = activation_readiness(self.runtime.runtime_dir)
+                    if not readiness['ready'] or effective_core(self.runtime.runtime_dir)[WAREHOUSE_TIMER][0] != 'enabled':
+                        heavy.close()
+                        return {'status': 'blocked', 'accepted': False, 'source_effects_started': False}
+                if _dispatch_guard is not None and not _dispatch_guard():
+                    heavy.close()
+                    return {'status': 'not_accepted', 'accepted': False, 'source_effects_started': False}
                 receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
                     config=history_config, now=self.now_factory())
             except BaseException:
@@ -3185,10 +3233,36 @@ class RegistryUploadHttpEntrypoint:
         warnings = () if result.get('semantic_status') == 'success' else ({'source_key': 'final_ready', 'policy': 'truthful_warning'},)
         return versions, StageProof(versions, warnings)
 
+    def _cycle_publish_dated_ready(self, plan):
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+        require_heavy_owner(self.runtime.runtime_dir)
+        state = self.runtime.load_current_state()
+        expected = self.runtime.prepare_sheet_vitrina_ready_publication(
+            bundle_version=state.bundle_version, as_of_date=plan.as_of_date)
+        state, expected = bind_local_derive_publication(self.runtime, plan, state, expected)
+        refreshed = self.refreshed_at_factory()
+        previous, previous_time = _load_existing_ready_snapshot_for_preservation(self.runtime, as_of_date=plan.as_of_date)
+        plan = _with_full_refresh_metadata(plan, refreshed_at=refreshed, previous_plan=previous,
+            previous_refreshed_at=previous_time, business_date=current_business_date_iso(self.now_factory()), runtime=self.runtime)
+        result = self.runtime.save_sheet_vitrina_ready_snapshot(current_state=state, refreshed_at=refreshed,
+            plan=plan, expected=expected, build_inputs=dict(plan.metadata or {}).get('publication_inputs'))
+        result = {key: getattr(result, key, '') for key in
+            ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id','semantic_status')}
+        if result['semantic_status'] == 'error' or not result.get('publication_operation_id') or not result.get('publication_attempt_id'):
+            raise CycleStageFailure('dated_ready_publication_unproven')
+        versions = {key: str(result.get(key) or '') for key in
+            ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id')}
+        versions['ready_fingerprint'] = self.runtime.prepare_sheet_vitrina_ready_publication(
+            bundle_version=versions['bundle_version'], as_of_date=versions['as_of_date']).fingerprint
+        self._cycle_verify_ready(versions)
+        return versions, StageProof(versions)
+
     def _cycle_verify_ready(self, versions):
         from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
-        plan = self.runtime.load_sheet_vitrina_ready_snapshot()
-        if plan is None or plan.snapshot_id != versions['snapshot_id'] or plan.plan_version != versions['plan_version']:
+        plan = self.runtime.load_sheet_vitrina_ready_snapshot(as_of_date=versions['as_of_date'])
+        if (plan is None or plan.snapshot_id != versions['snapshot_id'] or plan.plan_version != versions['plan_version']
+                or self.runtime.load_current_state().bundle_version != versions['bundle_version']):
             raise CycleStageFailure('cycle_ready_changed')
         expected = self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=versions['bundle_version'], as_of_date=versions['as_of_date'])
         from packages.application.ready_publication import readonly, publication_status, digest
@@ -3202,7 +3276,7 @@ class RegistryUploadHttpEntrypoint:
                 or publication['state'] != 'complete' or publication['after_digest'] != digest(expected.plan_json)):
             raise CycleStageFailure('cycle_ready_receipt_changed')
 
-    def _cycle_history(self, config, receipt, ready):
+    def _cycle_history(self, config, receipt, ready, *, backfill_dates=(), closed_receipt=None):
         from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
         from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
         from packages.application.web_vitrina_snapshot_admission import process_identity
@@ -3213,7 +3287,8 @@ class RegistryUploadHttpEntrypoint:
                 or self.operator_jobs._threads.get(job_id) is not threading.current_thread()):
             raise CycleStageFailure('cycle_history_owner_mismatch')
         owner = dict(job_id=job_id, operation='cycle', pid=os.getpid(), identity=process_identity(os.getpid()))
-        proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory())
+        proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory(),
+            backfill_dates=backfill_dates, closed_receipt=closed_receipt)
         self._cycle_verify_ready(ready)
         return StageProof({'history_' + key: str(value) for key,value in proof.items()})
 
@@ -3223,6 +3298,10 @@ class RegistryUploadHttpEntrypoint:
         *,
         auto_load: bool = False,
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         active_job = self.operator_jobs.active_job(
             operations=("auto_update", "refresh", "refresh_group", "cycle"),
         )
@@ -3249,6 +3328,10 @@ class RegistryUploadHttpEntrypoint:
         due_at: str = "",
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         if str(trigger_source or "").strip() == SHEET_VITRINA_HEALTH_CANDIDATE_TRIGGER:
             # The 06:30 health candidate is deliberately outside the operator's
             # 10/13/16/19/22 schedule ledger.  It still uses the canonical full
@@ -3311,6 +3394,10 @@ class RegistryUploadHttpEntrypoint:
         due_at: str = "",
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
         if _is_scheduled_auto_refresh_trigger(trigger_source):
             active_job = self.operator_jobs.active_job(
@@ -3342,6 +3429,10 @@ class RegistryUploadHttpEntrypoint:
         due_at: str = "",
         trigger_source: str = "scheduled",
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         resolved_schedule_id, resolved_due_at = self._resolve_auto_refresh_schedule_context(
             schedule_id=schedule_id,
             due_at=due_at,
@@ -3428,6 +3519,10 @@ class RegistryUploadHttpEntrypoint:
         as_of_date: str | None = None,
         health_recovery: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         normalized_group_id = _normalize_source_group_id(source_group_id)
         source_keys = set(_source_group_config(normalized_group_id)["source_keys"])
         if not source_keys.intersection(_active_web_vitrina_source_keys()):
@@ -7329,6 +7424,10 @@ class RegistryUploadHttpEntrypoint:
     def handle_warehouse_manual_sync_start_request(
         self, payload: Mapping[str, Any] | None = None, *, request_scope: str = "local_operator",
     ) -> dict[str, Any]:
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(self.runtime.runtime_dir)
+        if managed is not None:
+            return managed
         key, fingerprint, body = validate_warehouse_request(payload, request_scope)
         if key:
             prior = self.warehouse_update_journal.lookup(request_key=key, request_scope=request_scope)
@@ -9008,9 +9107,11 @@ class RegistryUploadHttpEntrypoint:
                 else _sanitize_auto_update_reason(auto_update_state.last_run_error or "")
             ),
         }
-        auto_schedules_payload = self.sheet_auto_refresh_schedules_block.build_payload(auto_context=auto_context)
+        from packages.application.business_data_schedule_profile import project_settings
+        auto_schedules_payload = project_settings(self.runtime.runtime_dir,
+            self.sheet_auto_refresh_schedules_block.build_payload(auto_context=auto_context))
         auto_schedule_policy = (
-            dict(auto_schedules_payload.get("schedule_policy") or {})
+            dict(auto_schedules_payload.get("effective_schedule_policy") or auto_schedules_payload.get("schedule_policy") or {})
             if isinstance(auto_schedules_payload.get("schedule_policy"), Mapping)
             else {}
         )
@@ -9037,14 +9138,14 @@ class RegistryUploadHttpEntrypoint:
             "default_as_of_date": default_business_as_of_date(now),
             "today_current_date": current_business_date_iso(now),
             "daily_refresh_business_time": f"{business_times} {CANONICAL_BUSINESS_TIMEZONE_NAME}",
-            "daily_refresh_systemd_time": "every 10 minutes UTC due-check",
-            "daily_refresh_systemd_oncalendar": SHEET_AUTO_REFRESH_TICK_ONCALENDAR,
+            "daily_refresh_systemd_time": "every 3 hours, 24/7 Asia/Yekaterinburg" if auto_schedules_payload.get("profile") else "every 10 minutes UTC due-check",
+            "daily_refresh_systemd_oncalendar": auto_schedules_payload.get("systemd_oncalendar") or SHEET_AUTO_REFRESH_TICK_ONCALENDAR,
             "daily_auto_action": SHEET_VITRINA_DAILY_AUTO_ACTION,
             "daily_auto_description": (
                 f"Runtime-managed schedules ({business_times} {CANONICAL_BUSINESS_TIMEZONE_NAME}) "
                 f"trigger {SHEET_VITRINA_DAILY_AUTO_ACTION}."
             ),
-            "daily_auto_trigger_name": SHEET_VITRINA_DAILY_TIMER_NAME,
+            "daily_auto_trigger_name": auto_schedules_payload.get("systemd_timer_name") or SHEET_VITRINA_DAILY_TIMER_NAME,
             "daily_auto_trigger_description": SHEET_VITRINA_DAILY_TRIGGER_DESCRIPTION,
             "daily_auto_schedule_mode": SHEET_AUTO_REFRESH_SCHEDULE_MODE,
             "daily_auto_schedule_mode_type": str(auto_schedules_payload.get("schedule_mode_type") or auto_schedule_policy.get("mode") or "manual"),
@@ -9053,8 +9154,8 @@ class RegistryUploadHttpEntrypoint:
             "daily_auto_interval_options": auto_schedules_payload.get("interval_options") or [],
             "daily_auto_interval_preview_slots": auto_schedules_payload.get("interval_preview_slots") or [],
             "daily_auto_schedules": schedule_rows,
-            "daily_auto_schedule_editable": True,
-            "daily_auto_schedule_blocker": "",
+            "daily_auto_schedule_editable": not auto_schedules_payload.get("schedule_editing_managed_by_cycle", False),
+            "daily_auto_schedule_blocker": auto_schedules_payload.get("message", "") if auto_schedules_payload.get("profile") else "",
             "next_auto_run_at": str(auto_schedules_payload.get("next_auto_run_at") or ""),
             "auto_schedule_timezone": CANONICAL_BUSINESS_TIMEZONE_NAME,
             "auto_schedule_source": SHEET_AUTO_REFRESH_SCHEDULE_SOURCE,
@@ -10664,10 +10765,17 @@ class SheetVitrinaV1OperatorJobStore:
         from packages.application.business_data_procedure_admission import (
             MaintenanceAdmissionBlocked, business_write_is_blocked, thread_start_is_proven_absent,
         )
+        from packages.application.business_data_cycle_dispatch import selected
+        if selected(runtime_dir):
+            return None
         def pick() -> None:
             # Busy live owners are never reclassified. Retry only admission, not effects.
             try:
                 while True:
+                    if selected(runtime_dir):
+                        with self._lock:
+                            self._warehouse_pending_picker = None
+                        return
                     if business_write_is_blocked(runtime_dir):
                         # Keep startup/resume intent alive without touching the
                         # journal or holding a writer lease during maintenance.
@@ -10719,6 +10827,11 @@ class SheetVitrinaV1OperatorJobStore:
         Cancellation before acceptance is harmless. After acceptance the pending
         row survives cancellation/process loss and is eligible for startup pickup.
         """
+        from packages.application.business_data_cycle_dispatch import selected
+        if selected(runtime_dir):
+            # Existing durable pending stays visible; no claim, reclassification
+            # or standalone warehouse continuation under the selected owner.
+            return None, True
         deadline = time.monotonic() + 5.0
         if not self._warehouse_start_lock.acquire(timeout=5.0):
             return None, True

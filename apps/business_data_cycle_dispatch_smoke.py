@@ -1,0 +1,520 @@
+"""Offline fixed dispatch identity, authenticated caller and launcher no-resend proofs."""
+from __future__ import annotations
+import json
+import io
+from contextlib import redirect_stdout
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
+from packages.application import business_data_cycle_dispatch as d
+from packages.application import business_data_schedule_profile as p
+from packages.application.business_data_heavy_admission import heavy_admitted, current_heavy_owner
+from packages.application.business_data_procedure_admission import initialize_admission
+from packages.application.sheet_vitrina_v1_cycle import CycleHistoryConfig, CycleReceiptStore
+from packages.application.registry_upload_http_entrypoint import RegistryUploadHttpEntrypoint as Entry
+from apps.sheet_vitrina_v1_cycle_smoke import CycleFake
+
+NOW = datetime(2026,9,29,0,59,59,tzinfo=timezone.utc)
+SHA = 'c' * 40
+
+class DispatchSmoke(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        initialize_admission(self.root)
+        with heavy_admitted(self.root,operation='fixture_bootstrap'):
+            pass  # Existing canonical inode, never provisioned by GET.
+        from apps.business_data_maintenance import POLICY_FILENAME, POLICY_SCHEMA_VERSION
+        policy = {'schema_version': POLICY_SCHEMA_VERSION, 'master_desired': True, 'processes':
+                  {key: {'desired': True} for key in ('warehouse_functional', 'wb_finance_weekly', 'vitrina_refresh')}}
+        policy_path = self.root / POLICY_FILENAME
+        policy_path.write_text(json.dumps(policy)); policy_path.chmod(0o600)
+        self.contract = self.root / 'contract.json'; self.contract.write_text('{}')
+        self.config = CycleHistoryConfig(self.root/'history',self.contract,'offline',240,31)
+        for context in (patch.dict(os.environ, {'WB_CORE_WEB_AUTH_SESSION_SECRET':'offline-secret'}),
+                        patch.object(d,'_identity',return_value=SHA), patch.object(p,'load_selector',return_value={'offline':True}),
+                        patch.object(d,'history_config',return_value=self.config)):
+            context.start();self.addCleanup(context.stop)
+        if sys.platform != 'linux':
+            # Production process-generation proof is /proc; Mac fixture only.
+            context=patch('packages.application.sheet_vitrina_v1_cycle.process_identity',return_value='offline-process-generation')
+            context.start();self.addCleanup(context.stop)
+        # The reviewed sequencing companion adds two closed stages. This fake
+        # has no operational database or old debt; represent that exact empty
+        # component, as its own cycle smoke does, without replacing run_cycle.
+        from packages.application import sheet_vitrina_v1_cycle as cycle
+        if hasattr(cycle, 'ClosedBacklog'):
+            from apps.sheet_vitrina_v1_cycle_smoke import EmptyClosedFixture
+            context = patch.object(cycle, 'ClosedBacklog', EmptyClosedFixture)
+            context.start(); self.addCleanup(context.stop)
+
+    def test_fixed_slots_readonly_prepare_code_ready_runtime_blocked_no_provision(self):
+        before = sorted(x.name for x in self.root.iterdir())
+        prepared = d.prepare(self.root,NOW)
+        value=d._decode(prepared['dispatch_id'])
+        self.assertEqual(value['slot'],'2026-09-28T22:00:00+00:00')
+        self.assertEqual(value['history'],self.config.fingerprint())
+        self.assertEqual(before,sorted(x.name for x in self.root.iterdir()))
+        slots={d.latest_slot(NOW+timedelta(hours=n)) for n in range(24)}
+        self.assertEqual(len(slots),9)  # crossing midnight adds next day's first slot
+        with patch.object(p,'activation_readiness',return_value={'ready':False,'blockers':['proof_missing']}):
+            self.assertEqual(d.prepare(self.root,NOW)['status'],'blocked')
+        self.assertTrue(p.activation_dependencies()['ready'])
+        self.assertEqual(len(p.RETIRED_TIMERS),6)
+
+    def test_default_code_readiness_owner_and_infrastructure_refuse_before_acceptance(self):
+        from apps.business_data_maintenance import POLICY_FILENAME
+        from packages.application.business_data_heavy_admission import LOCK_FILENAME
+        fake = CycleFake(self.root); fake.now_factory = lambda: NOW
+        identity = d.prepare(self.root, NOW)['dispatch_id']
+        path = self.root / POLICY_FILENAME
+        original = path.read_bytes()
+        value = json.loads(original); value['processes']['warehouse_functional']['desired'] = False
+        path.write_text(json.dumps(value))
+        with self.assertRaisesRegex(RuntimeError, 'mandatory cycle phase'):
+            d.prepare(self.root, NOW)
+        with self.assertRaisesRegex(RuntimeError, 'mandatory cycle phase'):
+            d.dispatch(fake, {'dispatch_id': identity})
+        self.assertEqual(fake.events, [])
+        self.assertFalse((self.root / 'sheet-vitrina-cycles').exists())
+        path.write_bytes(original)
+        (self.root / LOCK_FILENAME).unlink()
+        before = sorted(p.name for p in self.root.iterdir())
+        self.assertEqual(d.prepare(self.root, NOW)['status'], 'blocked')
+        self.assertFalse(d.dispatch(fake, {'dispatch_id': identity})['accepted'])
+        self.assertEqual(before, sorted(p.name for p in self.root.iterdir()))
+        self.assertFalse((self.root / LOCK_FILENAME).exists())
+        self.assertEqual(fake.events, [])
+
+    def test_actual_worker_full_scope_exact_readback_across_rollover(self):
+        fake=CycleFake(self.root);fake.now_factory=lambda:NOW
+        prepared=d.prepare(self.root,NOW);identity=prepared['dispatch_id']
+        result=d.dispatch(fake,{'dispatch_id':identity})
+        self.assertTrue(result['accepted'])
+        for thread in list(fake.operator_jobs._threads.values()):thread.join(5);self.assertFalse(thread.is_alive())
+        fake.now_factory=lambda:NOW+timedelta(hours=4)
+        old=d.readback(self.root,identity)
+        self.assertEqual(old['dispatch_id'],identity)
+        self.assertIn(old['status'],d.TERMINAL)
+        before=list(fake.events)
+        self.assertTrue(d.dispatch(fake,{'dispatch_id':identity})['accepted'])
+        self.assertEqual(fake.events,before)
+        self.assertIn('warehouse',before);self.assertIn('fbs_generation',before);self.assertIn('rolling14',before)
+        from packages.application.sheet_vitrina_v1_cycle import STAGES
+        if 'closed_sources' in STAGES:
+            self.assertLess(before.index('closed_sources'), before.index('api_sources'))
+            self.assertLess(before.index('closed_ready'), before.index('final_ready'))
+        with self.assertRaises(ValueError):d.dispatch(fake,{'dispatch_id':identity,'as_of_date':'2000-01-01'})
+        with self.assertRaises(ValueError):d.readback(self.root,identity[:-1]+'x')
+
+    def test_deploy_in_owned_slot_does_not_prepare_different_request_or_steal_ack(self):
+        fake=CycleFake(self.root);fake.now_factory=lambda:NOW
+        identity=d.prepare(self.root,NOW)['dispatch_id'];d.dispatch(fake,{'dispatch_id':identity})
+        for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
+        with patch.object(d,'_identity',return_value='d'*40):
+            result=d.prepare(self.root,NOW)
+            self.assertFalse(result['accepted']);self.assertNotIn('dispatch_id',result)
+            self.assertEqual(result['blockers'],['slot_owned_by_another_deployed_request'])
+            self.assertTrue(d.readback(self.root,identity)['accepted'])
+            self.assertEqual(d.prepare(self.root,NOW+timedelta(hours=4))['status'],'prepared')
+
+    def test_stale_unaccepted_slot_never_accepts_and_due_backup_remains_pre_acceptance(self):
+        fake=CycleFake(self.root);fake.now_factory=lambda:NOW+timedelta(hours=4)
+        identity=d.prepare(self.root,NOW)['dispatch_id']
+        self.assertFalse(d.dispatch(fake,{'dispatch_id':identity})['accepted'])
+        self.assertEqual(fake.events,[])
+        fake.now_factory=lambda:NOW
+        with patch('packages.application.finance_backup_handoff.cycle_backup_priority',return_value={'priority':True}), \
+             patch('packages.application.finance_backup_handoff.handoff_cycle_backup',return_value={'accepted':False,'status':'backup_priority'}) as handoff:
+            result=d.dispatch(fake,{'dispatch_id':identity})
+        self.assertEqual(result['status'],'not_accepted');self.assertEqual(fake.events,[])
+        handoff.assert_called_once()
+        self.assertIsNone(CycleReceiptStore(self.root,lambda:'').read(d._decode(identity)['cycle_id']))
+
+    def test_readiness_race_under_actual_heavy_blocks_before_receipt_and_releases(self):
+        fake=CycleFake(self.root);fake.now_factory=lambda:NOW
+        identity=d.prepare(self.root,NOW)['dispatch_id']
+        with patch.object(p,'activation_readiness',side_effect=[{'ready':True,'blockers':[]},{'ready':False,'blockers':['owner_changed']}]):
+            result=d.dispatch(fake,{'dispatch_id':identity})
+        self.assertFalse(result['accepted']);self.assertEqual(fake.events,[])
+        self.assertFalse((self.root/'sheet-vitrina-cycles').exists())
+        with heavy_admitted(self.root,operation='finance'):
+            self.assertEqual(current_heavy_owner(self.root).operation,'finance')
+
+    def test_unknown_post_restart_and_rollover_read_same_identity_without_resend(self):
+        identity=d.prepare(self.root,NOW)['dispatch_id'];calls=[]
+        def request(method, dispatch_id=None):
+            self.assertIsNone(current_heavy_owner(self.root))
+            calls.append((method,dispatch_id))
+            if method=='POST':raise TimeoutError('unknown')
+            if dispatch_id:return {'status':'unknown','accepted':None,'dispatch_id':dispatch_id}
+            return {'status':'prepared','dispatch_id':identity}
+        with patch.object(d,'_request',side_effect=request):
+            self.assertEqual(d.launch(self.root)['status'],'unknown')
+            self.assertEqual(d.launch(self.root)['status'],'unknown')
+        self.assertEqual([x[0] for x in calls],['GET','POST','GET'])
+        # Real fresh interpreter reads durable old identity; its POST branch is forbidden.
+        script="""
+import os,json,sys
+from pathlib import Path
+from unittest.mock import patch
+from packages.application import business_data_cycle_dispatch as d
+r=Path(sys.argv[1]);d._identity=lambda r:'c'*40;d.selected=lambda r:True
+def req(method,identity=None):
+ assert method=='GET' and identity
+ return {'status':'unknown','accepted':None,'dispatch_id':identity}
+d._request=req
+print(json.dumps(d.launch(r)))
+"""
+        result=subprocess.run([sys.executable,'-c',script,str(self.root)],cwd=ROOT,env=dict(os.environ),capture_output=True,text=True,check=True,timeout=10)
+        self.assertEqual(json.loads(result.stdout)['dispatch_id'],identity)
+        self.assertEqual(d._read_record(self.root)['phase'],'uncertain')
+
+    def test_accepted_active_prevents_new_slot_terminal_allows_only_new_slot(self):
+        first=d.prepare(self.root,NOW)['dispatch_id'];second=d.prepare(self.root,NOW+timedelta(hours=4))['dispatch_id']
+        calls=[];status=['running']
+        def req(method,identity=None):
+            calls.append((method,identity))
+            if not identity:return {'status':'prepared','dispatch_id':second}
+            return {'status':status[0],'accepted':True,'dispatch_id':identity}
+        d._write_record(self.root,{'schema':1,'dispatch_id':first,'phase':'accepted','last_status':'running'})
+        with patch.object(d,'_request',side_effect=req):
+            d.launch(self.root);self.assertEqual(calls,[('GET',first)])
+            status[0]='degraded';d.launch(self.root)
+        self.assertEqual(calls[-2:],[('GET',None),('POST',second)])
+        self.assertEqual(d._read_record(self.root)['dispatch_id'],second)
+
+    def test_late_old_handler_expired_absence_fence_recovers_new_slot_without_resend(self):
+        fake=CycleFake(self.root);clock=[NOW];fake.now_factory=lambda:clock[0]
+        identity=d.prepare(self.root,NOW)['dispatch_id'];entered=threading.Event();release=threading.Event();result=[]
+        original=fake._start_sheet_cycle_job
+        def slow(**kwargs):
+            entered.set();self.assertTrue(release.wait(5));return original(**kwargs)
+        fake._start_sheet_cycle_job=slow
+        old=threading.Thread(target=lambda:result.append(d.dispatch(fake,{'dispatch_id':identity})))
+        old.start();self.assertTrue(entered.wait(5));clock[0]=NOW+timedelta(hours=4)
+        proof=d.readback_fenced(fake,identity)
+        self.assertEqual(proof['status'],'expired_not_accepted');self.assertFalse(proof['accepted'])
+        release.set();old.join(5);self.assertFalse(old.is_alive());self.assertFalse(result[0]['accepted'])
+        self.assertEqual(fake.events,[])
+        fake._start_sheet_cycle_job=original
+        d._write_record(self.root,{'schema':1,'dispatch_id':identity,'phase':'uncertain','last_status':'unknown'})
+        calls=[]
+        def request(method,key=None):
+            calls.append((method,key))
+            if method=='POST':return d.dispatch(fake,{'dispatch_id':key})
+            return d.readback_fenced(fake,key) if key else d.prepare(self.root,clock[0])
+        with patch.object(d,'_request',side_effect=request):
+            accepted=d.launch(self.root);self.assertTrue(accepted['accepted'])
+        self.assertEqual([item[0] for item in calls],['GET','GET','POST'])
+        self.assertNotEqual(calls[-1][1],identity)
+        for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
+        self.assertIn('warehouse',fake.events)
+
+    def test_actual_three_hour_invocation_resolves_old_and_submits_only_new_slot(self):
+        fake=CycleFake(self.root);clock=[NOW];fake.now_factory=lambda:clock[0]
+        calls=[]
+        def request(method,key=None):
+            calls.append((method,key))
+            if method=='POST':return d.dispatch(fake,{'dispatch_id':key})
+            return d.readback_fenced(fake,key) if key else d.prepare(self.root,clock[0])
+        def finish():
+            for worker in list(fake.operator_jobs._threads.values()):
+                worker.join(5);self.assertFalse(worker.is_alive())
+        with patch.object(d,'_request',side_effect=request):
+            first=d.launch(self.root);self.assertTrue(first['accepted']);finish()
+            first_id=first['dispatch_id'];first_calls=len(calls)
+            self.assertEqual([m for m,k in calls],['GET','POST'])
+            before=len(calls);clock[0]=NOW+timedelta(hours=3)
+            second=d.launch(self.root);self.assertTrue(second['accepted']);finish()
+            self.assertNotEqual(second['dispatch_id'],first_id)
+            self.assertEqual([m for m,k in calls[before:]],['GET','GET','POST'])
+            # Terminal in the same slot is read-only and never resends.
+            before=len(calls)
+            same=d.launch(self.root);self.assertEqual(same['dispatch_id'],second['dispatch_id'])
+            self.assertEqual([m for m,k in calls[before:]],['GET','GET','GET'])
+            self.assertEqual([(m,k) for m,k in calls if m=='POST'],
+                [('POST',first_id),('POST',second['dispatch_id'])])
+        self.assertEqual(fake.events.count('warehouse'),2)
+
+    def test_three_hour_old_terminal_readback_and_new_accept_in_same_invocation(self):
+        first=d.prepare(self.root,NOW)['dispatch_id'];second=d.prepare(self.root,NOW+timedelta(hours=3))['dispatch_id']
+        d._write_record(self.root,{'schema':1,'dispatch_id':first,'phase':'accepted','last_status':'running'})
+        calls=[]
+        def request(method,key=None):
+            calls.append((method,key))
+            if key==first:return {'status':'complete','accepted':True,'dispatch_id':first}
+            if method=='GET':return {'status':'prepared','dispatch_id':second}
+            return {'status':'accepted','accepted':True,'dispatch_id':second}
+        with patch.object(d,'_request',side_effect=request):
+            result=d.launch(self.root)
+        self.assertEqual(result['dispatch_id'],second)
+        self.assertEqual(calls,[('GET',first),('GET',None),('POST',second)])
+        self.assertEqual(d._read_record(self.root)['phase'],'accepted')
+
+    def test_missing_unsafe_or_replaced_heavy_inode_never_proves_expired_noaccept(self):
+        from packages.application.business_data_heavy_admission import LOCK_FILENAME
+        fake=CycleFake(self.root);fake.now_factory=lambda:NOW+timedelta(hours=4)
+        identity=d.prepare(self.root,NOW)['dispatch_id'];path=self.root/LOCK_FILENAME
+        path.unlink()
+        self.assertEqual(d.readback_fenced(fake,identity)['status'],'unknown')
+        self.assertFalse(path.exists())
+        path.write_bytes(b'');path.chmod(0o644)
+        self.assertEqual(d.readback_fenced(fake,identity)['status'],'unknown')
+        path.chmod(0o600)
+        def replace_inode(*args):
+            path.unlink();path.write_bytes(b'');path.chmod(0o600)
+            return False
+        with patch.object(d,'_still_current',side_effect=replace_inode):
+            self.assertEqual(d.readback_fenced(fake,identity)['status'],'unknown')
+
+    def test_acceptance_ex_gap_never_reports_false_expiry_to_other_instance(self):
+        fake=CycleFake(self.root);clock=[NOW];fake.now_factory=lambda:clock[0]
+        sibling=SimpleNamespace(runtime=fake.runtime,operator_jobs=SimpleNamespace(_lock=threading.RLock()),now_factory=lambda:clock[0])
+        identity=d.prepare(self.root,NOW)['dispatch_id'];entered=threading.Event();release=threading.Event();results=[]
+        original=CycleReceiptStore.accept
+        def paused_accept(store,**kwargs):
+            entered.set();self.assertTrue(release.wait(5));return original(store,**kwargs)
+        with patch.object(CycleReceiptStore,'accept',paused_accept):
+            old=threading.Thread(target=lambda:results.append(d.dispatch(fake,{'dispatch_id':identity})))
+            old.start();self.assertTrue(entered.wait(5));clock[0]=NOW+timedelta(hours=4)
+            # Actual EX stays held between latest guard and durable receipt;
+            # another server instance cannot prove absent/no-accept here.
+            self.assertEqual(d.readback_fenced(sibling,identity)['status'],'unknown')
+            release.set();old.join(5);self.assertFalse(old.is_alive())
+        self.assertTrue(results[0]['accepted'])
+        self.assertTrue(d.readback_fenced(sibling,identity)['accepted'])
+        for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
+
+    def test_cross_process_launcher_lock_no_submit(self):
+        script="""
+import sys
+from pathlib import Path
+from packages.application.business_data_cycle_dispatch import _launcher_lock
+with _launcher_lock(Path(sys.argv[1])):
+ print('ready',flush=True)
+ sys.stdin.readline()
+"""
+        child=subprocess.Popen([sys.executable,'-c',script,str(self.root)],cwd=ROOT,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(),'ready')
+            with patch.object(d,'_request',side_effect=AssertionError('must not request')):
+                self.assertEqual(d.launch(self.root)['status'],'busy')
+        finally:
+            child.communicate('release\n',timeout=5)
+        self.assertEqual(child.returncode,0)
+
+    def test_selected_legacy_and_manual_refused_before_any_source_or_queue(self):
+        fake=SimpleNamespace(runtime=SimpleNamespace(runtime_dir=self.root))
+        names=['handle_sheet_refresh_request','start_sheet_refresh_job','start_sheet_auto_refresh_job',
+            'start_sheet_scheduled_auto_update_job','handle_sheet_auto_refresh_request',
+            'handle_sheet_scheduled_auto_update_request','start_sheet_source_group_refresh_job',
+            'handle_warehouse_manual_sync_start_request','handle_sheet_web_vitrina_auto_schedules_run_now_request',
+            'run_sheet_temporal_closure_retry_cycle','handle_warehouse_manual_sync_request']
+        import inspect
+        for name in names:
+            function=getattr(Entry,name)
+            kwargs={}
+            for key,param in inspect.signature(function).parameters.items():
+                if key!='self' and param.default is inspect.Parameter.empty:
+                    kwargs[key]={} if key=='payload' else 'offline'
+            with self.subTest(name=name):
+                self.assertEqual(function(fake,**kwargs)['status'],'cycle_managed')
+        self.assertEqual(Entry.__dict__['_run_sheet_refresh'](fake,as_of_date='2000-01-01',log=None)['status'],'cycle_managed')
+
+    def test_real_cycle_owner_only_source_exemption_no_name_or_fork_authority(self):
+        with self.assertRaises(RuntimeError):d.require_source_dispatch(self.root)
+        with heavy_admitted(self.root,operation='finance'):
+            with self.assertRaises(RuntimeError):d.require_source_dispatch(self.root)
+        with heavy_admitted(self.root,operation='cycle'):
+            d.require_source_dispatch(self.root)
+        script="""
+import os,sys
+from pathlib import Path
+from packages.application import business_data_cycle_dispatch as d
+from packages.application.business_data_heavy_admission import heavy_admitted
+r=Path(sys.argv[1]);d.selected=lambda r:True
+with heavy_admitted(r,operation='cycle'):
+ d.require_source_dispatch(r)
+ pid=os.fork()
+ if pid==0:
+  try:d.require_source_dispatch(r)
+  except RuntimeError:os._exit(0)
+  os._exit(9)
+ assert os.waitpid(pid,0)[1]==0
+"""
+        subprocess.run([sys.executable,'-c',script,str(self.root)],cwd=ROOT,check=True,timeout=10)
+
+    def test_raw_settings_projection_and_owner_disabled_no_clocks_become_intent(self):
+        from apps.business_data_maintenance import POLICY_FILENAME,POLICY_SCHEMA_VERSION
+        policy={'schema_version':POLICY_SCHEMA_VERSION,'master_desired':True,'processes':
+            {key:{'desired':True} for key in ('warehouse_functional','wb_finance_weekly','vitrina_refresh')}}
+        path=self.root/POLICY_FILENAME;path.write_text(json.dumps(policy));path.chmod(0o600)
+        from packages.application.sheet_vitrina_v1_auto_refresh import DEFAULT_STATE_FILENAME
+        raw={'schedules':[{'enabled':True,'local_time_hhmm':'19:00'}],'schedule_policy':{'mode':'manual'}}
+        schedule=self.root/DEFAULT_STATE_FILENAME;schedule.write_text(json.dumps(raw));schedule.chmod(0o644)
+        before=schedule.read_bytes()
+        projected=p.project_settings(self.root,raw)
+        self.assertEqual(len(projected['effective_schedules']),8)
+        self.assertEqual(projected['raw_feature_intent'],raw)
+        self.assertEqual(schedule.read_bytes(),before)
+        raw['schedules'][0]['enabled']=False;schedule.write_text(json.dumps(raw))
+        self.assertFalse(p.required_phase_readiness(self.root)['ready'])
+        self.assertTrue(all(not row['enabled'] for row in p.project_settings(self.root,raw)['effective_schedules']))
+        with patch.object(p,'load_selector',return_value=None):self.assertIs(p.project_settings(self.root,raw),raw)
+
+    def test_cli_and_public_source_refused_before_constructor_or_recovery_claim(self):
+        from apps import wb_finance_daily, wb_finance_weekly, wb_fbs_warehouse_registry, warehouse_functional_runner
+        from packages.application.wb_fbs_warehouse_registry import WbFbsWarehouseRegistry
+        from packages.application.wb_finance_weekly import WbFinanceWeeklyBlock
+        from packages.application.wb_finance_daily import WbFinanceDailyBlock
+        from packages.application.registry_upload_http_entrypoint import SheetVitrinaV1OperatorJobStore
+        for app in (wb_finance_daily,wb_finance_weekly):
+            with patch.object(app,'_load_env'),patch.object(app,'_run_admitted',side_effect=AssertionError('constructor')), redirect_stdout(io.StringIO()):
+                self.assertEqual(app.main(['tick','--runtime-dir',str(self.root)]),0)
+        # Import the actual closure module, then call its real no-date CLI body.
+        # Neither its runtime constructor nor a recovery plan may be reached.
+        from apps import sheet_vitrina_v1_temporal_closure_retry_live as closure
+        args = SimpleNamespace(dates=[], apply=False, manifest_fingerprint='', deployed_sha='',
+            approval_reference='', approval_digest='', runtime_sha_marker=str(self.root/'sha'), backup_dir='')
+        output = io.StringIO()
+        with patch.object(closure, 'parse_args', return_value=args), \
+             patch.object(closure, 'load_registry_upload_http_entrypoint_config', return_value=SimpleNamespace(runtime_dir=self.root)), \
+             patch.object(closure, 'RegistryUploadHttpEntrypoint', side_effect=AssertionError('closure constructor')), \
+             patch.object(closure, 'build_explicit_recovery_plan', side_effect=AssertionError('recovery plan')), \
+             redirect_stdout(output):
+            closure.main.__wrapped__()
+        self.assertEqual(json.loads(output.getvalue())['status'], 'cycle_managed')
+        # Explicit reviewed recovery never consults the ordinary tick guard.
+        args.dates = ['2026-09-01']; output = io.StringIO()
+        with patch.object(closure, 'parse_args', return_value=args), \
+             patch.object(closure, 'load_registry_upload_http_entrypoint_config', return_value=SimpleNamespace(runtime_dir=self.root)), \
+             patch.object(closure, 'build_explicit_recovery_plan', return_value={'status':'recovery_preview', '_internal':{}}), \
+             patch.object(d, 'legacy_refusal', side_effect=AssertionError('explicit recovery changed')), redirect_stdout(output):
+            closure.main.__wrapped__()
+        self.assertEqual(json.loads(output.getvalue()), {'status':'recovery_preview'})
+        # Real import, argument parser and decorated CLI in a fresh interpreter.
+        script = """
+import os,sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from apps import sheet_vitrina_v1_temporal_closure_retry_live as closure
+from packages.application import business_data_schedule_profile as profile
+root=Path(sys.argv[1]);sys.argv=['closure'];os.environ['REGISTRY_UPLOAD_RUNTIME_DIR']=str(root)
+with patch.object(profile,'load_selector',return_value={'offline':True}), \
+     patch.object(closure,'load_registry_upload_http_entrypoint_config',return_value=SimpleNamespace(runtime_dir=root)), \
+     patch.object(closure,'RegistryUploadHttpEntrypoint',side_effect=AssertionError('constructor')):
+ closure.main()
+"""
+        before = set(self.root.iterdir())
+        child = subprocess.run([sys.executable, '-c', script, str(self.root)], cwd=ROOT,
+            capture_output=True, text=True, check=True, timeout=10)
+        self.assertEqual(json.loads(child.stdout)['status'], 'cycle_managed')
+        self.assertEqual(set(self.root.iterdir()), before)
+        with patch.object(wb_fbs_warehouse_registry,'_run_admitted',side_effect=AssertionError('constructor')):
+            result=wb_fbs_warehouse_registry.run(SimpleNamespace(runtime_dir=str(self.root),env_file='',command='collect'))
+            self.assertEqual(result['status'],'cycle_managed')
+        with patch.object(warehouse_functional_runner,'_run_admitted',side_effect=AssertionError('constructor')):
+            result=warehouse_functional_runner._run(SimpleNamespace(runtime_dir=str(self.root),command='manual-sync'),sqlite_busy_timeout_ms=100)
+            self.assertEqual(result['status'],'cycle_managed')
+            def dispatched(runtime):
+                self.assertIsNone(current_heavy_owner(runtime))
+                return {'status':'blocked','accepted':False}
+            with patch.object(d,'launch',side_effect=dispatched) as launcher:
+                result=warehouse_functional_runner._run(SimpleNamespace(runtime_dir=str(self.root),command='hourly-sync'),sqlite_busy_timeout_ms=100)
+                self.assertFalse(result['accepted']);launcher.assert_called_once_with(self.root)
+        block=SimpleNamespace(runtime_dir=self.root)
+        with self.assertRaisesRegex(RuntimeError,'managed'):WbFbsWarehouseRegistry.collect(block)
+        with self.assertRaisesRegex(RuntimeError,'managed'):WbFinanceWeeklyBlock.sync_week(block,None,None,None)
+        with self.assertRaisesRegex(RuntimeError,'managed'):WbFinanceDailyBlock.tick(block,None)
+        store=SheetVitrinaV1OperatorJobStore(lambda:'offline',runtime_dir=self.root)
+        trap=SimpleNamespace(needs_pickup=lambda: (_ for _ in ()).throw(AssertionError('journal claim')))
+        self.assertIsNone(store.resume_warehouse_pending(runtime_dir=self.root,journal=trap,runner=lambda:None))
+        self.assertEqual(store.start_warehouse_if_idle(runtime_dir=self.root,journal=trap,runner=lambda:None),(None,True))
+
+    def test_transport_private_bound_symlink_and_raw_selector_refusal(self):
+        identity=d.prepare(self.root,NOW)['dispatch_id']
+        record=self.root/d.RECORD
+        record.write_bytes(b' '* (d.MAXIMUM+1));record.chmod(0o600)
+        with self.assertRaises(RuntimeError):d._read_record(self.root)
+        record.unlink();outside=self.root/'outside';outside.write_text('{}');record.symlink_to(outside)
+        with self.assertRaises(OSError):d._read_record(self.root)
+        fake=SimpleNamespace(runtime=SimpleNamespace(runtime_dir=self.root))
+        with patch.object(p,'load_selector',side_effect=RuntimeError('malformed selector')):
+            with self.assertRaisesRegex(RuntimeError,'malformed'):
+                Entry.handle_sheet_web_vitrina_auto_schedules_save_request(fake,{'schedules':[]})
+        self.assertEqual(outside.read_text(),'{}')
+
+    def test_ready_exact_dated_receipt_ignores_newer_snapshot_and_no_duplicate_tails(self):
+        from apps import sheet_vitrina_v1_local_derive_smoke as local
+        from contextlib import closing
+        import sqlite3
+        case=local.LocalDeriveTests();case.setUp()
+        try:
+            entry=Entry(runtime_dir=case.runtime.runtime_dir,runtime=case.runtime,
+                now_factory=lambda:local.NOW,activated_at_factory=lambda:'2026-05-20T08:02:00Z',
+                refreshed_at_factory=lambda:'2026-05-20T08:02:00Z')
+            entry.sheet_plan_block=case.block
+            handle=case.sources.collect_sources(**case.kwargs);plan=case.sources.derive_collected(handle)
+            with patch.object(case.block,'build_plan',side_effect=AssertionError('recollection')):
+                with heavy_admitted(case.runtime.runtime_dir,operation='cycle'):
+                    versions,proof=entry._cycle_publish_dated_ready(plan)
+            self.assertEqual(proof.versions,versions)
+            with closing(sqlite3.connect(case.runtime.db_path)) as conn,conn:
+                conn.execute("INSERT INTO sheet_vitrina_v1_ready_snapshots(bundle_version,activated_at,as_of_date,snapshot_id,plan_version,refreshed_at,plan_json) SELECT bundle_version,activated_at,'2099-01-01','newer-snapshot',plan_version,refreshed_at,json_set(plan_json,'$.snapshot_id','newer-snapshot') FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?",(plan.as_of_date,))
+            self.assertEqual(case.runtime.load_sheet_vitrina_ready_snapshot().snapshot_id,'newer-snapshot')
+            entry._cycle_verify_ready(versions)
+        finally:case.doCleanups()
+
+    def test_authenticated_actual_http_route_no_disabled_auth_or_caller_fields(self):
+        from packages.adapters import registry_upload_http_entrypoint as web
+        from apps.sheet_vitrina_v1_auto_refresh_tick import _build_web_auth_cookie
+        fake=CycleFake(self.root);fake.now_factory=lambda:NOW
+        fake.handle_business_data_cycle_dispatch_request=Entry.handle_business_data_cycle_dispatch_request.__get__(fake)
+        fake.handle_business_data_cycle_readback_request=Entry.handle_business_data_cycle_readback_request.__get__(fake)
+        env={'WB_CORE_WEB_AUTH_REQUIRED':'1','WB_CORE_WEB_AUTH_USERNAME':'owner',
+            'WB_CORE_WEB_AUTH_PASSWORD_HASH':'configured','WB_CORE_WEB_AUTH_SESSION_SECRET':'offline-secret',
+            'REGISTRY_UPLOAD_HTTP_PORT':'0','REGISTRY_UPLOAD_RUNTIME_DIR':str(self.root)}
+        with patch.dict(os.environ,env):
+            server=web.build_registry_upload_http_server(web.load_registry_upload_http_entrypoint_config(),fake)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            def stop_server():
+                server.shutdown();thread.join(5);server.server_close()
+            self.addCleanup(stop_server)
+            base=f'http://127.0.0.1:{server.server_address[1]}'+d.PATH
+            def request(method='GET',body=None,cookie=True,url=base):
+                data=json.dumps(body).encode() if body is not None else None
+                headers={'Cookie':_build_web_auth_cookie(os.environ)} if cookie else {}
+                try:
+                    with urlopen(Request(url,data=data,method=method,headers=headers),timeout=5) as response:return response.status,json.loads(response.read())
+                except HTTPError as exc:return exc.code,json.loads(exc.read())
+            handler=SimpleNamespace(client_address=('192.0.2.1',1234))
+            with patch.object(web,'_write_json_response') as response,patch.object(web,'_ensure_admin_role',side_effect=AssertionError('remote caller')):
+                self.assertFalse(web._ensure_cycle_dispatch_access(handler,SimpleNamespace(path=d.PATH)))
+                self.assertEqual(response.call_args.args[1],403)
+            self.assertEqual(request(cookie=False)[0],401)
+            code, prepared=request();self.assertEqual(code,200);self.assertEqual(prepared['status'],'prepared')
+            self.assertEqual(request(url=base+'?runtime=/tmp&slot=2000')[0],409)
+            self.assertEqual(request('POST',{},url=base.replace(d.PATH,web.DEFAULT_SHEET_REFRESH_PATH))[0],409)
+            self.assertEqual(request('POST',{'dispatch_id':prepared['dispatch_id'],'root':'/tmp'})[0],409)
+            self.assertEqual(request('POST',[])[0],409)
+            code,accepted=request('POST',{'dispatch_id':prepared['dispatch_id']});self.assertEqual(code,200);self.assertTrue(accepted['accepted'])
+            for worker in list(fake.operator_jobs._threads.values()):worker.join(5)
+            from urllib.parse import urlencode
+            code,read=request(url=base+'?'+urlencode({'dispatch_id':prepared['dispatch_id']}));self.assertEqual(code,200);self.assertTrue(read['accepted'])
+            with patch.dict(os.environ,{'WB_CORE_WEB_AUTH_PASSWORD_HASH':''}):self.assertNotEqual(request()[0],200)
+
+if __name__=='__main__':unittest.main()

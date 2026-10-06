@@ -90,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
         or os.environ.get("REGISTRY_UPLOAD_RUNTIME_DIR")
         or str(DEFAULT_RUNTIME_DIR)
     )
+    from packages.application.business_data_cycle_dispatch import legacy_refusal
+    managed = legacy_refusal(runtime_dir)
+    if managed is not None:
+        _print(managed)
+        return 0
     base_url = (
         args.base_url
         or os.environ.get("SHEET_VITRINA_AUTO_REFRESH_BASE_URL")

@@ -27,13 +27,18 @@ def check_maintenance_seam():
         (runtime / ".web-vitrina-finished-builder.lock").write_bytes(b"fixture")
         arguments = ["candidate", "--runtime-dir", str(runtime), "--candidate-root", str(root / "derived"),
                      "--date-from", "2026-03-01", "--date-to", "2026-10-04", "--formula-epoch", "fixture"]
-        def assert_parent_lease(command_line, seconds):
+        from contextlib import contextmanager
+        from packages.application import owned_history_worker as delegation
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        @contextmanager
+        def assert_parent_lease(**kwargs):
             assert admission_idle(runtime) == {"ready": True, "idle": False, "reason": "admitted_writer_running"}
-            return {"status": "fixture_only"}
-        with patch.object(sys, "argv", [*arguments, "--manual"]), \
-                patch.object(command, "admission", return_value="idle"), \
-                patch.object(command, "bounded_worker", side_effect=assert_parent_lease), redirect_stdout(StringIO()):
-            assert command.main() == 0
+            assert require_heavy_owner(runtime).operation=='history'
+            yield SimpleNamespace(complete=lambda *args, **kw: {'status':'fixture_only'})
+        with patch.object(sys, "argv", [*arguments, "--manual", "--runtime-contract", str(root/'contract.json')]), \
+                patch.object(command,"StoreRegistry"), patch.object(command,"RegistryUploadDbBackedRuntime"), \
+                patch.object(command,"runtime_storage_admission"), patch.object(delegation,"standalone_history_worker",assert_parent_lease), redirect_stdout(StringIO()):
+            assert command.main()==0
         assert admission_idle(runtime)["idle"] is True
         window = "history-fixture-window-001"
         state_path = runtime / STATE_FILENAME
@@ -155,27 +160,38 @@ def main():
             command.main()
             assert json.loads(output.getvalue())['status'] == 'skipped_storage'
             assert not candidate_lock.called and not worker.called
-        # At UTC20:00 the business date is already next day, independently of
-        # the quiet slot timezone. Freeze that date/now into the child argv.
-        now = datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc)
-        arguments[arguments.index('--candidate-root') + 1] = str(fixture / 'scheduled')
-        with patch.object(sys, 'argv', arguments), patch.object(command, 'datetime') as clock, \
-                patch.object(command, 'deadline_seconds', side_effect=[10, 7]), \
-                patch.object(command, 'admission', return_value='idle'), \
-                patch.object(command, 'runtime_storage_admission') as storage, \
-                patch.object(command, 'bounded_worker', return_value={'status': 'fixture_only'}) as worker, \
-                redirect_stdout(StringIO()):
-            clock.now.return_value = now
-            command.main()
-            argv, seconds = worker.call_args.args
-            assert argv[-5:] == ['--date-to', '2026-10-04', '--captured-now', now.isoformat(), '--worker']
-            assert seconds == 7 and storage.called
-        with patch.object(sys, 'argv', arguments), patch.object(command, 'deadline_seconds', return_value=7), \
-                patch.object(command, 'admission', return_value='idle'), \
-                patch.object(command, 'runtime_storage_admission'), \
-                patch.object(command, 'bounded_worker', return_value={'status': 'build_failed'}), \
-                redirect_stdout(StringIO()):
-            assert command.main() == 1
+        # The same pinned business date/clock reaches the fixed supervisor,
+        # not a raw argv child. Actual FD/kernel behavior has Linux tests.
+        from contextlib import contextmanager
+        from packages.application import owned_history_worker as delegation
+        observed={}
+        @contextmanager
+        def fixed_worker(*, runtime, config):
+            def complete(captured, **kwargs):
+                observed.update(now=captured,config=config,kwargs=kwargs)
+                return {'status':'fixture_only'}
+            yield SimpleNamespace(complete=complete)
+        now=datetime(2026,10,3,20,0,tzinfo=timezone.utc)
+        arguments[arguments.index('--candidate-root')+1]=str(fixture/'scheduled')
+        with patch.object(sys,'argv',arguments), patch.object(command,'datetime') as clock, \
+             patch.object(command,'deadline_seconds',side_effect=[10,7]), \
+             patch.object(command,'runtime_storage_admission') as storage, \
+             patch.object(command,'StoreRegistry'),patch.object(command,'RegistryUploadDbBackedRuntime'), \
+             patch.object(delegation,'standalone_history_worker',fixed_worker),redirect_stdout(StringIO()):
+            clock.now.return_value=now
+            assert command.main()==0
+        assert observed['now']==now and observed['kwargs']['source_range']==('2026-03-01','2026-10-04')
+        assert observed['kwargs']['total_seconds']==7 and storage.called
+        @contextmanager
+        def failed_worker(**kwargs):
+            from packages.application.owned_history_worker_capability import HistoryDelegationError
+            raise HistoryDelegationError('fixture_child_failure')
+            yield
+        with patch.object(sys,'argv',arguments),patch.object(command,'deadline_seconds',return_value=7), \
+             patch.object(command,'runtime_storage_admission'),patch.object(command,'StoreRegistry'), \
+             patch.object(command,'RegistryUploadDbBackedRuntime'), \
+             patch.object(delegation,'standalone_history_worker',failed_worker),redirect_stdout(StringIO()):
+            assert command.main()==1
     check_maintenance_seam()
     print(json.dumps({'status': 'pass', 'fixture_only': True,
         'maintenance_parent_worker_gate_and_exact_manual_exception': True,

@@ -13,11 +13,12 @@ from uuid import uuid4
 from packages.application.ready_publication import canonical, digest, readonly
 from packages.application.web_vitrina_snapshot_admission import process_identity, _atomic
 from packages.business_time import current_business_date_iso
+from packages.application.sheet_vitrina_v1_closed_backlog import ClosedBacklog, ClosedBacklogConflict
 
 OPERATION = 'cycle'
 HEAVY_OPERATIONS = ('auto_update', 'refresh', 'refresh_group', OPERATION)
-STAGES = ('api_sources', 'finance_sources', 'fbs_generation', 'warehouse',
-          'daily_projection', 'final_ready', 'rolling14')
+STAGES = ('closed_sources', 'api_sources', 'finance_sources', 'fbs_generation', 'warehouse',
+          'daily_projection', 'closed_ready', 'final_ready', 'rolling14')
 ACTIVE = {'accepted', 'running'}
 
 
@@ -279,12 +280,29 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
     from packages.application.business_data_heavy_admission import require_heavy_owner
     if require_heavy_owner(entrypoint.runtime.runtime_dir).operation != 'cycle':
         raise RuntimeError('owned cycle heavy admission is required')
-    source_adapter = entrypoint._cycle_sources()
+    source_adapter = None
+    closed = None
+    backfill_dates = ()
     handle = None
     summary = None
     ready = None
     finance = None
     fbs = None
+    def closed_sources():
+        value = closed.collect(receipt['cycle_id'])
+        warnings = []
+        for day, item in value['dates'].items():
+            if item.get('deferred_reason'):
+                warnings.append(dict(source_key='closed_sources', date=day, policy=item['deferred_reason']))
+            for key, source in item['sources'].items():
+                if source['outcome'] in {'capturing', 'outcome_unknown'}:
+                    raise CycleStageFailure('closed_source_outcome_uncertain:' + key + ':' + day)
+                if not source['anchor']:
+                    warnings.append(dict(source_key=key, date=day, policy=source['outcome']))
+                elif source['outcome'] == 'accepted_retained':
+                    warnings.append(dict(source_key=key, date=day, policy='accepted_retained'))
+        return StageProof({'closed_receipt_digest': digest(canonical(closed.status())),
+            'closed_selected_dates': canonical(tuple(sorted(value['dates'])))}, tuple(warnings))
     def sources():
         nonlocal handle, summary
         handle = source_adapter.collect_sources(as_of_date=entrypoint._cycle_as_of_date(),
@@ -309,16 +327,58 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         plan = source_adapter.derive_collected(handle)
         ready, proof = entrypoint._cycle_publish_ready(plan)
         return proof
+    def closed_ready():
+        nonlocal backfill_dates
+        warnings, proofs = [], []
+        value = closed.status()
+        for day, item in (value['dates'].items() if value else ()):
+            if item['state'] == 'acknowledged' or item.get('deferred_reason') or not all(source['anchor'] for source in item['sources'].values()):
+                continue
+            if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
+                raise CycleStageFailure('cycle_business_date_changed')
+            entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
+            try:
+                # A prior ready commit needs evidence readback, not an accepted
+                # source refetch or another dated publication merely for dates.
+                try:
+                    proof = closed.record_ready(day)
+                except ClosedBacklogConflict as exc:
+                    if not str(exc).startswith('closed_ready_missing:'):
+                        raise
+                    plan = source_adapter.derive_collected(closed.compose(handle, day))
+                    _, result = entrypoint._cycle_publish_dated_ready(plan)
+                    warnings.extend(result.warnings)
+                    proof = closed.record_ready(day)
+                proofs.append(proof)
+            except ClosedBacklogConflict as exc:
+                if not str(exc).startswith(('closed_operand_unavailable:', 'closed_operand_invalid:')):
+                    raise
+                closed._defer_publication(day, str(exc))
+                warnings.append(dict(source_key='closed_ready', date=day, policy=str(exc)))
+        backfill_dates = closed.publication_dates()
+        return StageProof({'closed_ready_proofs': canonical(proofs),
+            'closed_backfill_dates': canonical(backfill_dates),
+            'closed_receipt_digest': digest(canonical(closed.status()))}, tuple(warnings))
     def history():
         if history_config.fingerprint() != receipt['history_config_fingerprint']:
             raise CycleStageFailure('cycle_history_contract_changed')
-        proof = entrypoint._cycle_history(history_config, receipt, ready)
+        proof = entrypoint._cycle_history(history_config, receipt, ready,
+            backfill_dates=backfill_dates, closed_receipt=closed if backfill_dates else None)
+        if backfill_dates:
+            value = closed.status()
+            if not value or any(value['dates'][day]['state'] != 'acknowledged' for day in backfill_dates):
+                raise CycleStageFailure('closed_native_ack_missing')
         entrypoint._cycle_validate_predecessors(finance, fbs, receipt['final_versions'])
         return proof
-    actions = (sources, finance_sources, fbs_generation,
-        lambda: entrypoint._cycle_warehouse(store, receipt, fbs),
-        entrypoint._cycle_daily_projection, final_ready, history)
     try:
+        # A durable accepted cycle must terminalize even if constructing its
+        # adapters fails before the first source action. Ownership above still
+        # precedes every receipt write; no unowned caller can terminalize it.
+        source_adapter = entrypoint._cycle_sources()
+        closed = ClosedBacklog(source_adapter)
+        actions = (closed_sources, sources, finance_sources, fbs_generation,
+            lambda: entrypoint._cycle_warehouse(store, receipt, fbs),
+            entrypoint._cycle_daily_projection, closed_ready, final_ready, history)
         for item, action in zip(receipt['stages'], actions, strict=True):
             if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
                 raise CycleStageFailure('cycle_business_date_changed')
@@ -326,6 +386,8 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
             item.update(status='running', started_at=store.timestamp_factory())
             store.write(receipt)  # Before effects: a crash is uncertain, never pending replay.
             proof = action()
+            if current_business_date_iso(entrypoint.now_factory()) != receipt['business_date']:
+                raise CycleStageFailure('cycle_business_date_changed')
             if not isinstance(proof, StageProof) or not proof.versions or not all(isinstance(v,str) and v for v in proof.versions.values()):
                 raise CycleStageFailure('cycle_stage_proof_missing:' + item['stage'])
             item.update(status='degraded' if proof.warnings else 'complete', finished_at=store.timestamp_factory(),

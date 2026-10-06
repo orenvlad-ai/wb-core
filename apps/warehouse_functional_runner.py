@@ -235,6 +235,10 @@ def _run(
 ) -> dict[str, Any]:
     if args.command == 'readback':
         return _run_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
+    from packages.application.business_data_cycle_dispatch import legacy_refusal, launch
+    managed = legacy_refusal(Path(str(args.runtime_dir)).resolve())
+    if managed and args.command in WAREHOUSE_SYNC_COMMANDS:
+        return launch(Path(str(args.runtime_dir)).resolve()) if args.command == 'hourly-sync' else managed
     with heavy_admitted(Path(str(args.runtime_dir)).resolve(), operation='warehouse_cli'):
         return _run_heavy_admitted(args, sqlite_busy_timeout_ms=sqlite_busy_timeout_ms)
 

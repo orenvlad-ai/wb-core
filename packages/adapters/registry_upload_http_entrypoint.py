@@ -728,6 +728,32 @@ def _build_handler(
                 return
             if not _ensure_web_auth(self, parsed):
                 return
+            if parsed.path == "/v1/business-data-cycle/dispatch":
+                if not _ensure_cycle_dispatch_access(self, parsed):
+                    return
+                if not _ensure_business_data_write_allowed(self, parsed.path):
+                    return
+                try:
+                    if parsed.query:
+                        raise ValueError('cycle dispatch POST query is forbidden')
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < length <= 4096:
+                        raise ValueError('cycle dispatch body exceeds bound')
+                    payload = json.loads(self.rfile.read(length))
+                    if not isinstance(payload, dict):
+                        raise ValueError('cycle dispatch body must be an object')
+                    result = entrypoint.handle_business_data_cycle_dispatch_request(payload)
+                    _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Cache-Control": "private, no-store"})
+                except (ValueError, RuntimeError) as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"status": "blocked", "accepted": False, "error": str(exc)})
+                return
+            if parsed.path in {sheet_refresh_path, DEFAULT_SHEET_WEB_VITRINA_GROUP_REFRESH_PATH,
+                    DEFAULT_SHEET_WEB_VITRINA_AUTO_SCHEDULES_RUN_NOW_PATH, DEFAULT_WAREHOUSES_SYNC_PATH}:
+                from packages.application.business_data_cycle_dispatch import legacy_refusal
+                managed = legacy_refusal(entrypoint.runtime.runtime_dir)
+                if managed is not None:
+                    _write_json_response(self, HTTPStatus.CONFLICT, managed)
+                    return
             if search_cluster_cleaner_http.handles(parsed.path):
                 if not _ensure_business_data_write_allowed(self, parsed.path):
                     return
@@ -3279,6 +3305,21 @@ def _build_handler(
                 _handle_web_auth_logout(self)
                 return
             if not _ensure_web_auth(self, parsed):
+                return
+            if parsed.path == "/v1/business-data-cycle/dispatch":
+                if not _ensure_cycle_dispatch_access(self, parsed):
+                    return
+                try:
+                    query = urllib_parse.parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                    if not query:
+                        result = entrypoint.handle_business_data_cycle_dispatch_request()
+                    elif set(query) == {'dispatch_id'} and len(query['dispatch_id']) == 1:
+                        result = entrypoint.handle_business_data_cycle_readback_request(query['dispatch_id'][0])
+                    else:
+                        raise ValueError('cycle dispatch query is forbidden')
+                    _write_json_response(self, HTTPStatus.OK, result, extra_headers={"Cache-Control": "private, no-store"})
+                except (ValueError, RuntimeError) as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {"status": "blocked", "accepted": False, "error": str(exc)})
                 return
             if parsed.path == "/v1/business-data-maintenance/activity":
                 if not _ensure_admin_role(self, parsed.path):
@@ -10487,6 +10528,14 @@ def _default_unified_tab_for_sections(allowed_sections: Sequence[str]) -> str:
     return tabs[0] if tabs else "vitrina"
 
 
+def _ensure_cycle_dispatch_access(handler, parsed):
+    # This is a fixed local service transport, not a public unauthenticated route.
+    if not _web_auth_config().get('enabled') or handler.client_address[0] not in {'127.0.0.1', '::1'}:
+        _write_json_response(handler, HTTPStatus.FORBIDDEN, {'error': 'authenticated local cycle transport required'})
+        return False
+    return _ensure_admin_role(handler, parsed.path)
+
+
 def _required_section_for_path(path: str) -> str:
     normalized = str(path or "").split("?", 1)[0]
     if normalized in {
@@ -10519,7 +10568,7 @@ def _required_section_for_path(path: str) -> str:
         DEFAULT_PARTNER_REPORT_PREFIX + "/"
     ):
         return WEB_AUTH_SECTION_REPORTS
-    if normalized in {DEFAULT_SETTINGS_UI_PATH, "/v1/business-data-maintenance/activity"}:
+    if normalized in {DEFAULT_SETTINGS_UI_PATH, "/v1/business-data-maintenance/activity", "/v1/business-data-cycle/dispatch"}:
         return WEB_AUTH_SECTION_SETTINGS
     if normalized == DEFAULT_INSTRUCTIONS_UI_PATH:
         return WEB_AUTH_SECTION_INSTRUCTIONS

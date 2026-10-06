@@ -240,6 +240,8 @@ class WbFbsWarehouseRegistry:
         from packages.application.business_data_heavy_admission import heavy_admitted
         if self.runtime_dir is None:
             raise RuntimeError('official FBS collection requires explicit runtime_dir')
+        from packages.application.business_data_cycle_dispatch import require_source_dispatch
+        require_source_dispatch(self.runtime_dir)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with heavy_admitted(self.runtime_dir, operation='official_fbs'):
             return self._collect_admitted()
