@@ -531,6 +531,11 @@ def main() -> None:
             )
         ):
             raise TemporalRecoveryError("apply gates are valid only with explicit --date")
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(config.runtime_dir)
+        if managed is not None:
+            print(json.dumps(managed, ensure_ascii=False))
+            return
         activated_at_override = os.environ.get(
             "REGISTRY_UPLOAD_ACTIVATED_AT_OVERRIDE", ""
         ).strip()

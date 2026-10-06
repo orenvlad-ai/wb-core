@@ -745,6 +745,9 @@ def _finance_heavy_method(method):
     """Finite Finance operations reserve before scans, claims or source writes."""
     @wraps(method)
     def admitted(self, *args, **kwargs):
+        if method.__name__ in {'sync_week', 'ingest_week', 'run_backfill', 'sync_day', 'tick'}:
+            from packages.application.business_data_cycle_dispatch import require_source_dispatch
+            require_source_dispatch(self.runtime_dir)
         # Cold writer runtimes need only private lock infrastructure before the
         # existing schema constructor. Status/read functions do not call this.
         self.runtime_dir.mkdir(parents=True, exist_ok=True)

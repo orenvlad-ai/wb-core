@@ -83,6 +83,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.apply:
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        Path(args.runtime_dir).mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(Path(args.runtime_dir), operation="unified-recovery"):
+            return _run_admitted(args)
+    return _run_admitted(args)
+
+
+def _run_admitted(args) -> int:
     runtime = RegistryUploadDbBackedRuntime(
         runtime_dir=Path(args.runtime_dir).resolve()
     )
@@ -280,6 +289,12 @@ def apply_plan(
     args: argparse.Namespace,
     plan: Mapping[str, Any],
 ) -> dict[str, Any]:
+    from packages.application.business_data_heavy_admission import heavy_admitted
+    with heavy_admitted(runtime.runtime_dir, operation="unified-recovery"):
+        return _apply_plan_admitted(runtime, args, plan)
+
+
+def _apply_plan_admitted(runtime, args, plan):
     if not plan.get("would_change"):
         return {
             **dict(plan),

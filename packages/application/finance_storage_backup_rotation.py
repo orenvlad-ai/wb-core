@@ -29,7 +29,7 @@ from packages.application.business_data_heavy_admission import (
 )
 from packages.application.finance_backup_admission import (
     BackupAdmissionStateError, backup_admission_priority, backup_admission_request_id,
-    defer_backup_admission, resolve_backup_admission,
+    defer_backup_admission, resolve_backup_admission, canonical_backup_acknowledgement,
 )
 from packages.application.finance_storage_migration import (
     SHADOW_STATE_CONTRACT,
@@ -3736,21 +3736,25 @@ def scheduled_rotation(
     try:
         lease = HeavyAdmissionLease(runtime, operation="finance-backup")
     except HeavyAdmissionBusy:
-        return {"contract_version": RESULT_CONTRACT,
-                **defer_backup_admission(runtime, deployed_sha=deployed_sha)}
+        result = {"contract_version": RESULT_CONTRACT,
+                  **defer_backup_admission(runtime, deployed_sha=deployed_sha)}
+        canonical_backup_acknowledgement(runtime, deployed_sha=deployed_sha, before=None, result=result)
+        return result
     try:
         with lease.entered():
             before = backup_admission_priority(runtime)
             if not before["ready"]:
                 raise BackupAdmissionStateError(before["error"])
+            intent = before.get("intent") or {}
+            if intent.get("status") == "waiting" and intent.get("deployed_sha") != deployed_sha:
+                raise BackupAdmissionStateError("waiting backup belongs to another deployed SHA")
             result = _scheduled_rotation_owned(
                 runtime, deployed_sha=deployed_sha,
                 require_distinct_device=require_distinct_device,
                 require_backup_mountpoint=require_backup_mountpoint,
             )
-            resolve_backup_admission(
-                runtime, request_id=(before.get("intent") or {}).get("request_id"),
-                terminal_status=str(result.get("status") or ""),
+            canonical_backup_acknowledgement(
+                runtime, deployed_sha=deployed_sha, before=before, result=result,
             )
             return result
     finally:
@@ -3900,6 +3904,16 @@ def _scheduled_rotation_owned(
             "status": "not_due",
             "mutation_count": 0,
             "plan_fingerprint": plan["fingerprint"],
+            "consumed_not_due": {
+                "source_stat_fingerprint": _fingerprint({
+                    "manifest_sha256": plan["canonical_guard"]["manifest_sha256"],
+                    **{name: {key: plan["canonical_guard"][name][key] for key in
+                       ("name", "device", "inode", "size_bytes", "allocated_bytes", "mtime_ns", "mode", "sidecars")}
+                       for name in ("raw", "operational")},
+                }),
+                "current_fingerprint": (plan.get("current_before") or {}).get("selector", {}).get("fingerprint"),
+                "policy_fingerprint": policy["fingerprint"],
+            },
             "health": backup_rotation_health(runtime),
         }
     try:

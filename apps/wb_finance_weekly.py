@@ -88,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == 'status':
             return _run_admitted(args, parser)
+        from packages.application.business_data_cycle_dispatch import legacy_refusal
+        managed = legacy_refusal(Path(args.runtime_dir).resolve())
+        if managed is not None and args.command in {'tick', 'backfill', 'sync-week'}:
+            print(json.dumps(managed, ensure_ascii=False))
+            return 0
         runtime = Path(args.runtime_dir)
         runtime.mkdir(parents=True, exist_ok=True)
         with heavy_admitted(runtime, operation='finance_weekly'):

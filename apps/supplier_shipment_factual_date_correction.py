@@ -92,6 +92,15 @@ def build_correction_request(args: argparse.Namespace) -> dict[str, object]:
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
+    if args.apply:
+        from packages.application.business_data_heavy_admission import heavy_admitted
+        Path(args.runtime_dir).mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(Path(args.runtime_dir), operation="supplier-factual"):
+            return _run_admitted(args)
+    return _run_admitted(args)
+
+
+def _run_admitted(args: argparse.Namespace) -> dict[str, object]:
     runtime = RegistryUploadDbBackedRuntime(runtime_dir=Path(args.runtime_dir))
     block = SupplierShipmentFactualCorrectionBlock(runtime=runtime)
     common = build_correction_request(args)

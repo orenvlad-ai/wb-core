@@ -8,6 +8,7 @@ feature epoch has been configured by a later activation change.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -19,6 +20,8 @@ import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from packages.application.business_data_heavy_admission import heavy_admitted
 
 from packages.application.ff_pool_documents import (
     ALIASES_TABLE,
@@ -1179,7 +1182,9 @@ class FfPoolSurface:
             warehouse_functional_write_lock,
         )
 
-        with warehouse_functional_write_lock(self.runtime_dir):
+        active = _boolean(payload.get("active", True), field="active")
+        admission = heavy_admitted(self.runtime_dir, operation="facility") if active else nullcontext()
+        with admission, warehouse_functional_write_lock(self.runtime_dir):
             return self._create_facility_locked(payload, actor=actor)
 
     def _overhead_accounting_view(self):
@@ -1473,7 +1478,9 @@ class FfPoolSurface:
             warehouse_functional_write_lock,
         )
 
-        with warehouse_functional_write_lock(self.runtime_dir):
+        active = "active" in payload and _boolean(payload["active"], field="active")
+        admission = heavy_admitted(self.runtime_dir, operation="facility") if active else nullcontext()
+        with admission, warehouse_functional_write_lock(self.runtime_dir):
             return self._update_facility_locked(
                 facility_id, payload, actor=actor
             )

@@ -238,11 +238,17 @@ def defer_backup_admission(runtime_dir: Path, *, deployed_sha: str) -> dict:
     state = backup_admission_priority(runtime)
     if not state["ready"]:
         raise BackupAdmissionStateError(state["error"])
+    pending = state.get("pending_transaction")
+    if pending and pending["deployed_sha"] != deployed_sha:
+        raise BackupAdmissionStateError("pending backup belongs to another deployed SHA")
     if not state.get("policy_fingerprint") or not state["priority"]:
         return {"status": "deferred", "reason": "heavy_producer_running", "intent_recorded": False,
                 "admission": state, "mutation_count": 0}
     def update(previous):
-        if previous is not None and previous.get("status") == "waiting" and previous.get("current_fingerprint") == state["current_fingerprint"]:
+        if previous is not None and previous.get("status") == "waiting" and (
+                previous.get("launch") or previous.get("current_fingerprint") == state["current_fingerprint"]):
+            if previous.get("deployed_sha") != deployed_sha:
+                raise BackupAdmissionStateError("waiting backup belongs to another deployed SHA")
             return previous  # Same due request survives contenders and restart.
         result = {"contract_version": CONTRACT, "status": "waiting", "deployed_sha": deployed_sha,
                   "requested_at": datetime.now(timezone.utc).isoformat(),
@@ -264,3 +270,56 @@ def resolve_backup_admission(runtime_dir: Path, *, request_id: str | None, termi
         return {**previous, "status": "resolved", "resolved_at": datetime.now(timezone.utc).isoformat(),
                 "terminal_status": terminal_status}
     _update(Path(runtime_dir).resolve(), update)
+
+
+def canonical_backup_acknowledgement(runtime_dir: Path, *, deployed_sha: str,
+                                     before: dict | None, result: dict) -> None:
+    """Bounded outcome from the real scheduled producer; never a launch token.
+
+    A not-due outcome authorizes a later cycle only for exactly the source/current/
+    policy consumed by the canonical plan, stable before and after its calculation.
+    Short source writers may run while heavy is held, so a post-plan stat alone is
+    insufficient. Unknown/error outcomes remain waiting for exact recovery.
+    """
+    runtime = Path(runtime_dir).resolve()
+    request_id = ((before or {}).get('intent') or {}).get('request_id') if before else result.get('request_id')
+    if not request_id:
+        return
+    status = str(result.get('status') or 'unknown')
+    if status in {'completed', 'not_due'}:
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        require_heavy_owner(runtime)
+    intent = _read_intent(runtime)
+    if (not intent or intent.get('request_id') != request_id
+            or (intent['status'] != 'waiting' and status != 'completed')):
+        return
+    after = backup_admission_priority(runtime)
+    consumed = result.get('consumed_not_due') or {}
+    proof = None
+    if status == 'not_due' and before and before.get('ready') and after['ready']:
+        keys = ('source_stat_fingerprint', 'current_fingerprint', 'policy_fingerprint')
+        if all(consumed.get(key) and consumed[key] == before.get(key) == after.get(key) for key in keys):
+            proof = {key: consumed[key] for key in keys}
+            proof['plan_fingerprint'] = result['plan_fingerprint']
+    def update(previous):
+        if (not previous or previous.get('request_id') != request_id
+                or (previous.get('status') != 'waiting' and status != 'completed')):
+            return None
+        if previous.get('deployed_sha') != deployed_sha:
+            raise BackupAdmissionStateError('backup acknowledgement belongs to another deployed SHA')
+        terminal = status == 'completed' or (status == 'not_due' and proof is not None)
+        ack = {'at': datetime.now(timezone.utc).isoformat(), 'deployed_sha': deployed_sha,
+               'status': status if status != 'not_due' or proof else 'not_due_unproven',
+               'plan_fingerprint': result.get('plan_fingerprint'),
+               'mutation_count': result.get('mutation_count'),
+               'not_due_proof': proof}
+        # INVOCATION_ID is evidence only, never lease/reentry authority.
+        invocation = os.environ.get('INVOCATION_ID', '')
+        if re.fullmatch(r'[0-9a-f]{32}', invocation):
+            ack['invocation_id'] = invocation
+        launch = previous.get('launch')
+        if launch:
+            ack['launch_attempt'] = launch['attempt']
+        resolved = {'status': 'resolved', 'resolved_at': ack['at'], 'terminal_status': status} if terminal else {}
+        return {**previous, **resolved, 'canonical_ack': ack}
+    _update(runtime, update)

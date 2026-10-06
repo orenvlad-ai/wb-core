@@ -16,6 +16,20 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "business_data_cycle_dispatch_smoke": (
+        "packages/application/business_data_cycle_dispatch.py",
+        "packages/application/business_data_schedule_profile.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/wb_finance_weekly.py",
+        "packages/application/wb_fbs_warehouse_registry.py",
+        "apps/warehouse_functional_runner.py",
+        "apps/wb_finance_daily.py",
+        "apps/wb_finance_weekly.py",
+        "apps/wb_fbs_warehouse_registry.py",
+        "apps/sheet_vitrina_v1_auto_refresh_tick.py",
+        "apps/sheet_vitrina_v1_temporal_closure_retry_live.py",
+    ),
     "fbs_current_snapshot_policy_smoke": (
         "packages/application/fbs_current_snapshot_policy.py",
         "packages/application/ready_publication.py",

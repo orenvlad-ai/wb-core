@@ -448,74 +448,70 @@ def check_quality_floor(root):
 
 
 def check_cli_guards(root):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from packages.application import owned_history_worker as delegation
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    from packages.application.owned_history_worker_capability import HistoryDelegationError
     source = root / "runtime"
     source.mkdir()
     lock = source / ".web-vitrina-finished-builder.lock"
     lock.write_bytes(b"owned fixture lock")
     before = (lock.read_bytes(), lock.stat().st_mtime_ns)
+    contract = root / 'fixture-contract.json'; contract.write_text('{}')
     arguments = ["candidate", "--runtime-dir", str(source), "--candidate-root", str(root / "candidate"),
-                 "--date-from", "2026-04-18", "--date-to", "2026-04-20", "--formula-epoch", "fixture"]
-    with patch.object(sys, "argv", arguments), patch.object(command, "deadline_seconds", side_effect=[10, 8]), \
-            patch.object(command, "admission", return_value="idle"), \
-            patch.object(command, "bounded_worker", return_value={"status": "fixture_only"}) as worker, redirect_stdout(StringIO()):
-        command.main()
-        assert worker.call_args.args[1] == 8 and worker.call_args.args[0][-1] == "--worker"
-    with lock.open("rb") as held:
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with patch.object(sys, "argv", arguments), patch.object(command, "deadline_seconds", return_value=10), \
-                patch.object(command, "admission", return_value="idle"), \
-                patch.object(command, "bounded_worker") as worker, redirect_stdout(StringIO()):
-            command.main()
-            assert not worker.called
-    with patch.object(sys, "argv", [*arguments, "--worker"]), \
-            patch.object(command, "deadline_seconds", return_value=0), \
-            patch.object(command, "StoreRegistry") as registry, redirect_stdout(StringIO()):
-        command.main()
-        assert not registry.called
-    manual = [*arguments, "--manual", "--budget-seconds", "240"]
-    with patch.object(sys, "argv", manual), \
-            patch.object(command, "deadline_seconds", side_effect=AssertionError("manual uses no calendar")), \
-            patch.object(command, "admission", return_value="idle"), \
-            patch.object(command, "bounded_worker", return_value={"status": "fixture_only"}) as worker, redirect_stdout(StringIO()):
-        command.main()
-        assert worker.call_args.args[1] == 180
-        assert "--manual" in worker.call_args.args[0] and worker.call_args.args[0][-1] == "--worker"
-    with patch.object(sys, "argv", manual), \
-            patch.object(command, "admission", return_value="busy"), \
-            patch.object(command, "bounded_worker") as worker, redirect_stdout(StringIO()):
-        command.main()
-        assert not worker.called
-    with lock.open("rb") as held:
-        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with patch.object(sys, "argv", manual), \
-                patch.object(command, "admission", return_value="idle"), \
-                patch.object(command, "bounded_worker") as worker, redirect_stdout(StringIO()):
-            command.main()
-            assert not worker.called
-    started = time.monotonic()
-    with patch.object(sys, "argv", [*manual, "--worker"]), \
-            patch.object(command, "deadline_seconds", side_effect=AssertionError("manual worker uses no calendar")), \
-            patch.object(command, "StoreRegistry"), \
-            patch.object(command, "RegistryUploadDbBackedRuntime"), \
-            patch.object(command, "LiveNativeAdapter"), patch.object(command, "HistoryStore"), \
-            patch.object(command, "update_live_history", return_value={"status": "fixture_only"}) as update, redirect_stdout(StringIO()):
-        command.main()
-        assert started + 180 <= update.call_args.kwargs["deadline_monotonic"] <= time.monotonic() + 180
+                 "--date-from", "2026-04-18", "--date-to", "2026-04-20", "--formula-epoch", "fixture",
+                 "--runtime-contract", str(contract)]
+    calls = []
+    @contextmanager
+    def fixed_worker(*, runtime, config):
+        assert require_heavy_owner(source).operation == 'history'
+        if command.admission(source) != 'idle':
+            raise HistoryDelegationError('fixture_admission_busy')
+        with command.finished_builder_slot(source) as slot:
+            if slot != 'idle': raise HistoryDelegationError('fixture_domain_busy')
+            def complete(now, **kwargs):
+                assert kwargs['source_range'] == ('2026-04-18','2026-04-20')
+                assert kwargs['max_portions'] == 1
+                calls.append((config.budget_seconds, kwargs['total_seconds']))
+                return {'status':'fixture_only'}
+            yield SimpleNamespace(complete=complete)
+    with patch.object(delegation, 'standalone_history_worker', fixed_worker), \
+         patch.object(command, 'StoreRegistry'), patch.object(command, 'RegistryUploadDbBackedRuntime'), \
+         patch.object(command, 'runtime_storage_admission'):
+        with patch.object(sys, 'argv', arguments), patch.object(command, 'deadline_seconds', side_effect=[10,8]), \
+             patch.object(command,'admission',return_value='idle'), redirect_stdout(StringIO()):
+            assert command.main() == 0
+        assert calls == [(8,8)]
+        manual = [*arguments, '--manual', '--budget-seconds','240']
+        with patch.object(sys,'argv',manual), patch.object(command,'admission',return_value='idle'), \
+             patch.object(command,'deadline_seconds',side_effect=AssertionError('manual has no calendar')), redirect_stdout(StringIO()):
+            assert command.main() == 0
+        assert calls[-1] == (180,180)
+        for argv in (arguments,manual):
+            with lock.open('rb') as held:
+                fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                count = len(calls)
+                with patch.object(sys,'argv',argv), patch.object(command,'admission',return_value='idle'), \
+                     patch.object(command,'deadline_seconds',return_value=10), redirect_stdout(StringIO()):
+                    assert command.main() == 1
+                assert len(calls)==count
+        with patch.object(sys,'argv',manual), patch.object(command,'admission',return_value='busy'), redirect_stdout(StringIO()):
+            count=len(calls); assert command.main()==1; assert len(calls)==count
+    # No ordinary argv flag or omitted contract supplies kernel capability.
+    for argv,reason in (([*manual,'--worker'],'history_worker_requires_fixed_fd_capability'),
+                        ([*arguments[:-2],'--manual'],'history_runtime_contract_required')):
+        output=StringIO()
+        with patch.object(sys,'argv',argv), patch.object(command,'StoreRegistry') as registry, redirect_stdout(output):
+            assert command.main()==1
+        assert json.loads(output.getvalue())['reason_code']==reason and not registry.called
     for message, expected in (("live_source_resource_limit:owned-private-detail", "live_source_resource_limit"),
                               ("unknown-owned-private-detail", "live_source_unavailable")):
-        output = StringIO()
-        with patch.object(sys, "argv", [*manual, "--worker"]), \
-                patch.object(command, "StoreRegistry"), \
-                patch.object(command, "RegistryUploadDbBackedRuntime"), \
-                patch.object(command, "LiveNativeAdapter") as adapter, patch.object(command, "HistoryStore"), \
-                patch.object(command, "update_live_history", side_effect=LiveSourceUnavailable(message)), \
-                redirect_stdout(output):
-            adapter.return_value.stats = {"bytes": 123, "queries": 4, "raw_source": "owned-private-detail"}
-            assert command.main() == 1  # Failure remains nonzero, never a successful data update.
-        failure = json.loads(output.getvalue())
-        assert failure["reason_code"] == expected and failure["source_reads"] == {"bytes": 123, "queries": 4}
-        assert "owned-private-detail" not in output.getvalue()
-    assert (lock.read_bytes(), lock.stat().st_mtime_ns) == before
+        failure=command.source_failure_result(LiveSourceUnavailable(message),
+            {'bytes':123,'queries':4,'raw_source':'owned-private-detail'})
+        assert failure['reason_code']==expected and failure['source_reads']=={'bytes':123,'queries':4}
+        assert 'owned-private-detail' not in json.dumps(failure)
+    assert (lock.read_bytes(),lock.stat().st_mtime_ns)==before
 
 
 def check_safe_failure_parent():

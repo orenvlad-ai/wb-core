@@ -155,6 +155,25 @@
       "commands": [["python3", "apps/business_data_heavy_producers_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
+    "business_data_cycle_dispatch": {
+      "patterns": [
+        "packages/application/business_data_cycle_dispatch.py",
+        "packages/application/business_data_schedule_profile.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "packages/application/wb_finance_weekly.py",
+        "packages/application/wb_fbs_warehouse_registry.py",
+        "apps/warehouse_functional_runner.py",
+        "apps/wb_finance_daily.py",
+        "apps/wb_finance_weekly.py",
+        "apps/wb_fbs_warehouse_registry.py",
+        "apps/sheet_vitrina_v1_auto_refresh_tick.py",
+        "apps/sheet_vitrina_v1_temporal_closure_retry_live.py",
+        "apps/business_data_cycle_dispatch_smoke.py"
+      ],
+      "commands": [["python3", "apps/business_data_cycle_dispatch_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "business_data_schedule_profile": {
       "patterns": [
         "packages/application/business_data_schedule_profile.py",
@@ -175,11 +194,24 @@
       ],
       "pip": []
     },
+    "sheet_vitrina_closed_backlog": {
+      "patterns": [
+        "packages/application/sheet_vitrina_v1_closed_backlog.py",
+        "packages/application/sheet_vitrina_v1_cycle_sources.py",
+        "apps/sheet_vitrina_v1_closed_backlog_smoke.py",
+        "docs/runbooks/sheet_vitrina_v1_closed_backlog.md"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_closed_backlog_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "sheet_vitrina_cycle": {
       "patterns": [
         "packages/application/sheet_vitrina_v1_cycle.py",
         "packages/application/sheet_vitrina_v1_cycle_sources.py",
         "apps/sheet_vitrina_v1_cycle_smoke.py",
+        "apps/sheet_vitrina_v1_cycle_wiring_smoke.py",
+        "apps/business_data_cycle_owned_integration_smoke.py",
+        "packages/application/sheet_vitrina_v1_closed_backlog.py",
         "apps/sheet_vitrina_v1_local_derive_smoke.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/application/sheet_vitrina_v1_live_plan.py",
@@ -187,7 +219,7 @@
         "packages/application/web_vitrina_snapshot_admission.py",
         "apps/web_vitrina_history_candidate_build.py"
       ],
-      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"]],
+      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_cycle_wiring_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "wb_buyer_support": {
@@ -984,6 +1016,102 @@
         [
           "python3",
           "apps/heavy_derived_intents_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
+    "owned_history_worker": {
+      "patterns": [
+        "packages/application/owned_history_worker.py",
+        "packages/application/owned_history_worker_capability.py",
+        "apps/web_vitrina_owned_history_worker.py",
+        "apps/owned_history_worker_smoke.py",
+        "docs/runbooks/owned_history_worker.md",
+        "packages/application/owned_history_native_ack.py",
+        "apps/owned_history_completion_smoke.py",
+        "apps/business_data_cycle_owned_integration_smoke.py",
+        "apps/web_vitrina_history_candidate_build.py"
+      ],
+      "commands": [["python3", "apps/owned_history_worker_smoke.py"], ["python3", "apps/owned_history_completion_smoke.py"], ["python3", "apps/business_data_cycle_owned_integration_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
+    "finance_backup_handoff": {
+      "patterns": [
+        "packages/application/finance_backup_handoff.py",
+        "packages/application/finance_backup_admission.py",
+        "packages/application/finance_storage_backup_rotation.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "apps/finance_backup_handoff_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/finance_backup_handoff_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/business_data_heavy_admission_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/finance_storage_backup_rotation_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/sheet_vitrina_v1_cycle_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
+    },
+    "business_heavy_operator_producers": {
+      "patterns": [
+        "packages/application/ff_pool_surfaces.py",
+        "packages/application/ff_pool_dense_fbs.py",
+        "packages/application/supplier_shipment_factual_correction.py",
+        "packages/application/warehouse_targeted_replay.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "apps/supplier_shipment_factual_date_correction.py",
+        "apps/warehouse_cost_unified_recovery.py",
+        "apps/business_data_heavy_operator_producers_smoke.py",
+        "apps/supplier_confirmation_flows_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/business_data_heavy_operator_producers_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_dense_fbs_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_surfaces_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_surfaces_http_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_targeted_replay_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_cost_unified_recovery_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/supplier_shipment_factual_date_correction_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/supplier_confirmation_flows_smoke.py"
         ]
       ],
       "pip": [

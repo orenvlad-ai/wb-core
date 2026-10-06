@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import wraps
+from packages.application.business_data_heavy_admission import heavy_admitted
+
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -59,6 +62,14 @@ SOURCE_TYPE = CONTRACT_NAME
 NOMENCLATURE_TABLE = "sheet_vitrina_v1_nomenclature_items"
 
 
+
+def _heavy_method(method):
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with heavy_admitted(self.runtime_dir, operation="dense-fbs"):
+            return method(self, *args, **kwargs)
+    return admitted
+
 class DenseFbsError(ValueError):
     def __init__(self, code: str, message: str, *, details: Any = None) -> None:
         super().__init__(message)
@@ -86,6 +97,7 @@ class DenseFbsService:
         self.timestamp_factory = timestamp_factory or _utc_now
         self.document_service_factory = document_service_factory
 
+    @_heavy_method
     def activate_facility(
         self,
         *,
@@ -940,6 +952,7 @@ class DenseFbsService:
             plan["fingerprint"] = _fingerprint(plan)
             return plan
 
+    @_heavy_method
     def apply_zero_repair_plan(
         self,
         plan: Mapping[str, Any],

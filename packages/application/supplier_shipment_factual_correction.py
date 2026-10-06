@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import wraps
+from packages.application.business_data_heavy_admission import heavy_admitted
+
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -107,6 +110,14 @@ NON_SEMANTIC_COLLATERAL_COLUMNS = {
 }
 
 
+
+def _heavy_method(method):
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplier-factual"):
+            return method(self, *args, **kwargs)
+    return admitted
+
 class SupplierShipmentFactualCorrectionError(RuntimeError):
     """A safe operator-visible correction failure."""
 
@@ -170,15 +181,9 @@ class SupplierShipmentFactualCorrectionBlock:
                     "active": False,
                     "finished": True,
                 }
-        request_fingerprint = _hash(
-            {
-                "shipment_id": shipment_id,
-                "old_value": old_value,
-                "new_value": new_value,
-                "actor": actor,
-                "source": CORRECTION_SOURCE,
-                "target_header_digest": _target_header_digest(self.runtime.db_path, shipment_id),
-            }
+        request_fingerprint = _correction_request_fingerprint(
+            shipment_id, old_value, new_value, actor,
+            _target_header_digest(self.runtime.db_path, shipment_id),
         )
         correction_id = "ssfc_job_" + uuid4().hex
         with _connect(self.runtime.db_path) as conn:
@@ -234,6 +239,42 @@ class SupplierShipmentFactualCorrectionBlock:
                 raise
         return self.get_job(correction_id)
 
+    def matching_active_job(
+        self, *, shipment_id: str, new_actual_shipment_date: Any, actor: str,
+    ) -> dict[str, Any] | None:
+        """Read exact existing acceptance, without schema/claim or a new job."""
+        shipment_id = _required_text(shipment_id, "shipment_id")
+        actor = _required_text(actor or "operator", "actor")
+        with closing(sqlite3.connect(
+            self.runtime.db_path.resolve().as_uri() + "?mode=ro", uri=True,
+        )) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            if not _table_exists(conn, CORRECTION_TABLE):
+                return None
+            active = conn.execute(
+                f"SELECT * FROM {CORRECTION_TABLE} WHERE shipment_id=? AND status IN ('queued','running') ORDER BY requested_at DESC LIMIT 1",
+                (shipment_id,),
+            ).fetchone()
+            if active is None:
+                return None
+            header = conn.execute(
+                "SELECT * FROM sheet_vitrina_v1_supplier_shipments WHERE shipment_id=?",
+                (shipment_id,),
+            ).fetchone()
+            if header is None:
+                return None
+            fingerprint = _correction_request_fingerprint(
+                shipment_id, str(header["actual_shipment_date"] or "").strip(),
+                str(new_actual_shipment_date or "").strip(), actor,
+                _target_header_digest_conn(conn, shipment_id),
+            )
+            if str(active["request_fingerprint"] or "") != fingerprint:
+                return None
+            return {**_correction_row_to_dict(active), "deduplicated": True}
+
+    @_heavy_method
     def run_job(self, correction_id: str, emit: ProgressEmitter | None = None) -> dict[str, Any]:
         job = self.get_job(correction_id)
         if job["status"] == "zero_change":
@@ -301,8 +342,18 @@ class SupplierShipmentFactualCorrectionBlock:
                 completed=True,
             )
             return self.get_job(correction_id)
-        except Exception as exc:
+        except BaseException as exc:
             safe_message = _safe_error_message(exc)
+            if not isinstance(exc, Exception):
+                try:
+                    self._set_job_state(
+                        correction_id, status="needs_review", phase="requires_review",
+                        progress_text="Требует разбора", error_code=type(exc).__name__,
+                        error_message=safe_message, completed=True,
+                    )
+                except Exception as cleanup_error:
+                    exc.add_note('factual cancellation readback failed: ' + type(cleanup_error).__name__)
+                raise
             needs_review = isinstance(exc, WarehouseTargetedReplayError) and any(
                 marker in safe_message
                 for marker in (
@@ -392,6 +443,7 @@ class SupplierShipmentFactualCorrectionBlock:
         ) as candidate:
             yield candidate
 
+    @_heavy_method
     def apply(
         self,
         *,
@@ -2279,6 +2331,12 @@ def _replace_canonical_tables(
             f'INSERT INTO "{table}"({column_sql}) VALUES({placeholders})',
             rows,
         )
+
+
+def _correction_request_fingerprint(shipment_id, old_value, new_value, actor, header_digest) -> str:
+    return _hash({"shipment_id": shipment_id, "old_value": old_value,
+        "new_value": new_value, "actor": actor, "source": CORRECTION_SOURCE,
+        "target_header_digest": header_digest})
 
 
 def _target_header_digest(db_path: Path, shipment_id: str) -> str:

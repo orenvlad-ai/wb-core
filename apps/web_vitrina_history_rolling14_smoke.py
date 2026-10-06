@@ -348,21 +348,30 @@ def native_bridge(root):
 
 
 def cli_worker(root):
+    (root/"native").mkdir(parents=True)
     from apps import web_vitrina_history_candidate_build as command
     args = SimpleNamespace(runtime_dir=root / "native", candidate_root=root / "derived",
         captured_now="2026-10-20T19:00:00+00:00", date_to="business-today",
         date_from="2026-09-01", backfill_from="2026-09-03", backfill_to="2026-09-04",
         formula_epoch="fixture", budget_seconds=180, max_recomputes=31,
         manual=True, worker=True, runtime_contract=None)
+    from contextlib import contextmanager
+    from packages.application import owned_history_worker as delegation
+    captured={}
+    args.worker=False; args.maintenance_window_id=''; args.runtime_contract=root/'contract.json'
+    @contextmanager
+    def fixed_worker(*, runtime, config):
+        def complete(now, **kwargs):
+            captured.update(config=config,kwargs=kwargs)
+            return {'status':'fixture_only'}
+        yield SimpleNamespace(complete=complete)
     with patch.object(command, "StoreRegistry"), patch.object(command, "RegistryUploadDbBackedRuntime"), \
-            patch.object(command, "LiveNativeAdapter") as adapter, \
-            patch.object(command, "update_live_history", return_value={"status": "fixture_only"}) as update, \
-            redirect_stdout(StringIO()):
+         patch.object(command,'runtime_storage_admission'), \
+         patch.object(delegation,'standalone_history_worker',fixed_worker),redirect_stdout(StringIO()):
         command.run_admitted(args)
-    assert update.call_args.kwargs["rolling14"] is True
-    assert update.call_args.kwargs["backfill_dates"] == ["2026-09-03", "2026-09-04"]
-    assert update.call_args.kwargs["max_recomputes"] == 31
-    assert adapter.call_args.kwargs["date_to"] == "2026-10-21"
+    assert captured['kwargs']['source_range']==('2026-09-01','2026-10-21')
+    assert captured['kwargs']['backfill_dates']==('2026-09-03','2026-09-04')
+    assert captured['kwargs']['max_portions']==1 and captured['config'].max_recomputes==31
     args.backfill_to = None
     expect_error(lambda: command.run_admitted(args), ValueError, "both explicit")
     return {"rolling14_default": True, "explicit_backfill_propagated": True,
