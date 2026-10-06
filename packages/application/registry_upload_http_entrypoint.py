@@ -4584,6 +4584,18 @@ class RegistryUploadHttpEntrypoint:
                 shipment_id,
                 correction_payload,
             )
+            # Read the same already accepted operation before requesting a new
+            # EX. Never create/claim a job here. The separate acceptance tail is
+            # not part of the canonical correction fingerprint, so a new tail
+            # cannot borrow another request's worker acceptance.
+            if desired_acceptance == str(existing_header.get("actual_ff_acceptance_date") or "").strip():
+                prior = self.supplier_shipment_factual_correction_block.matching_active_job(
+                    shipment_id=shipment_id, new_actual_shipment_date=new_value,
+                    actor=actor or "operator",
+                )
+                if prior is not None:
+                    response = _factual_correction_execution_readback(self.operator_jobs, prior)
+                    return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
             heavy = HeavyAdmissionLease(
                 self.runtime.runtime_dir, operation="supplier_factual_date_correction", independent=True,
             )
@@ -4600,18 +4612,7 @@ class RegistryUploadHttpEntrypoint:
                         supplier_safe=supplier_safe,
                     )
                 if correction.get("deduplicated"):
-                    execution = self.operator_jobs.factual_correction_execution(str(correction["correction_id"]))
-                    response = {
-                        "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
-                        "status": "accepted" if execution["worker_present"] else "needs_review",
-                        "correction": correction,
-                        "job": execution["job"],
-                    }
-                    if not execution["worker_present"]:
-                        # Persisted queued/running is not evidence of a current
-                        # worker, especially after process restart. Do not claim
-                        # failure/rollback or resubmit the same source operation.
-                        response.update(requires_review=True, reason="worker_execution_unproven")
+                    response = _factual_correction_execution_readback(self.operator_jobs, correction)
                     return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
                 correction_id = str(correction["correction_id"])
                 def run_confirmed_factual_dates(emit: Any) -> dict[str, Any]:
@@ -9112,6 +9113,19 @@ class RegistryUploadHttpEntrypoint:
             "stock_report_active_sku_count": len(active_skus),
             "stock_report_active_sku_source": "current_registry_config_v2",
         }
+
+
+def _factual_correction_execution_readback(operator_jobs, correction):
+    execution = operator_jobs.factual_correction_execution(str(correction["correction_id"]))
+    response = {
+        "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
+        "status": "accepted" if execution["worker_present"] else "needs_review",
+        "correction": correction, "job": execution["job"],
+    }
+    if not execution["worker_present"]:
+        # Durable queued/running alone never proves a worker or permits resend.
+        response.update(requires_review=True, reason="worker_execution_unproven")
+    return response
 
 
 def _supplier_safe_factual_correction_projection(raw: Any) -> dict[str, Any] | None:
