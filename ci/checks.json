@@ -319,6 +319,35 @@
       ],
       "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
     },
+    "fbs_current_snapshot_policy": {
+      "patterns": [
+        "apps/fbs_current_snapshot_policy_smoke.py",
+        "packages/application/fbs_current_snapshot_policy.py",
+        "packages/application/ready_publication.py",
+        "packages/application/business_data_schedule_profile.py",
+        "packages/application/storage_registry.py",
+        "packages/application/official_fbs_stock_read.py",
+        "packages/application/wb_fbs_warehouse_registry.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/fbs_snapshot_cost_sources.py",
+        "packages/application/web_vitrina_official_fbs.py",
+        "packages/application/fbs_fulfillment_order.py",
+        "packages/application/sku_management.py",
+        "packages/application/inventory_planning_read_model.py",
+        "packages/application/sheet_vitrina_v1_web_vitrina.py",
+        "packages/application/web_vitrina_management_history.py",
+        "packages/application/web_vitrina_window_read_context.py"
+      ],
+      "commands": [
+        ["python3", "apps/fbs_current_snapshot_policy_smoke.py"],
+        ["python3", "apps/fbs_fulfillment_official_source_smoke.py"],
+        ["python3", "apps/fbs_accounting_runtime_smoke.py"],
+        ["python3", "apps/wb_fbs_warehouse_registry_smoke.py"],
+        ["python3", "apps/web_vitrina_official_fbs_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "xlrd==2.0.1"]
+    },
     "fbs_accounting": {
       "patterns": [
         "apps/fbs_accounting_runtime.py",

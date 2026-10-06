@@ -843,6 +843,11 @@ class WbFbsWarehouseRegistry:
             return _empty_read_model("schema_absent")
         observed_at = self._now()
         with _connect_readonly(self.db_path) as conn:
+            from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy, FbsSnapshotPolicyError
+            try:
+                freshness_policy = resolve_current_snapshot_policy(connection=conn)
+            except FbsSnapshotPolicyError:
+                freshness_policy = None
             required = {
                 REGISTRY_RUNS_TABLE, REGISTRY_ROWS_TABLE, STOCK_RUNS_TABLE,
                 STOCK_ROWS_TABLE, WAREHOUSE_MAPPINGS_TABLE, FACILITIES_TABLE,
@@ -956,8 +961,9 @@ class WbFbsWarehouseRegistry:
                                 "complete": bool(stock_run["complete"]),
                                 "snapshot_at": str(stock_run["snapshot_at"]),
                                 "freshness": _freshness(
-                                    str(stock_run["snapshot_at"]), observed_at
-                                ),
+                                    str(stock_run["snapshot_at"]), observed_at,
+                                    max_age_seconds=freshness_policy.official_max_age_seconds,
+                                ) if freshness_policy is not None else "unavailable",
                                 "source_digest": str(stock_run["source_digest"]),
                                 "identity_scope": json.loads(
                                     str(stock_run["identity_scope_json"] or "{}")
@@ -1536,10 +1542,8 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     borrowed = borrowed_operational_connection(path)
     if borrowed is not None:
         return borrowed
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
-    return conn
+    from packages.application.fbs_current_snapshot_policy import open_current_snapshot_readonly
+    return open_current_snapshot_readonly(path)
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:
@@ -1611,7 +1615,7 @@ def _safe_error(exc: Exception) -> str:
     return " ".join(str(exc).split())[:1000]
 
 
-def _freshness(snapshot_at: str, observed_at: str) -> str:
+def _freshness(snapshot_at: str, observed_at: str, *, max_age_seconds: int = 30 * 60) -> str:
     try:
         snapshot = datetime.fromisoformat(str(snapshot_at).replace("Z", "+00:00"))
         observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
@@ -1620,7 +1624,7 @@ def _freshness(snapshot_at: str, observed_at: str) -> str:
     age = observed - snapshot
     if age < -timedelta(minutes=5):
         return "invalid_future_timestamp"
-    return "fresh" if age <= timedelta(minutes=30) else "stale"
+    return "fresh" if age <= timedelta(seconds=max_age_seconds) else "stale"
 
 
 def _utc_now() -> str:

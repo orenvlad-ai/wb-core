@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any
 from packages.business_time import current_business_date_iso
 from packages.application.stock_catalog_scope import read_stock_catalog_scope
+from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy, FbsSnapshotPolicyError
 from packages.application.wb_fbs_warehouse_registry import (
     _complete_source_generation, _freshness, REGISTRY_RUNS_TABLE, STOCK_RUNS_TABLE,
     STOCK_ROWS_TABLE, WAREHOUSE_MAPPINGS_TABLE, FACILITIES_TABLE,
@@ -20,6 +21,7 @@ def _number(value):
 
 def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list[int] | None,
                                     day: str, now: datetime) -> dict:
+    freshness = resolve_current_snapshot_policy(connection=conn)
     if universe is None:
         current_scope = read_stock_catalog_scope(conn)
         if not current_scope["complete"]:
@@ -58,7 +60,7 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
         ).fetchone()
         timestamp = str(stock_run["snapshot_at"])
         if (current_business_date_iso(datetime.fromisoformat(timestamp.replace("Z", "+00:00"))) != day
-                or _freshness(timestamp, now.isoformat()) != "fresh"):
+                or _freshness(timestamp, now.isoformat(), max_age_seconds=freshness.official_max_age_seconds) != "fresh"):
             raise ValueError("official_snapshot_not_fresh_current_day")
         captured.append(timestamp)
         facility_evidence[facility] = {**warehouse, "captured_at": timestamp,
@@ -89,6 +91,7 @@ def read_complete_official_fbs_stock(conn: sqlite3.Connection, *, universe: list
         "captured_at": min(captured), "catalog_sku_count": catalog["active_nm_id_count"],
         "sku_count": len(stocks), "facilities": sorted(facilities), "skus": {},
         "facility_evidence": facility_evidence,
+        "freshness_max_age_seconds": freshness.official_max_age_seconds,
     }
     result["skus"] = {nm: {"facilities": values} for nm, values in stocks.items()}
     return result
@@ -110,6 +113,7 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                 f"FROM {FACILITIES_TABLE} f LEFT JOIN {FACILITY_PROFILES_TABLE} p "
                 "ON p.facility_id=f.facility_id WHERE f.active=1 ORDER BY f.code,f.facility_id")]
             try:
+                freshness = resolve_current_snapshot_policy(connection=conn)
                 if universe == []:
                     raise ValueError("empty_active_catalog")
                 stock = read_complete_official_fbs_stock(conn, universe=universe, day=day, now=now)
@@ -127,8 +131,10 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                 values = [{"nm_id": nm, "available": int(stock["skus"][nm]["facilities"][fid]),
                            "state": "official_declared_stock"} for nm in result["requested_nm_ids"]] if available else []
                 reason = stock.get("reason", "facility_outside_complete_scope")
+                max_age = freshness.official_max_age_seconds if reason == "official_snapshot_not_fresh_current_day" else 0
+                age_label = "9 часов" if max_age == 9 * 3600 else "30 минут"
                 reason_ru = (
-                    "Официальный снимок остатков FBS устарел: нужен снимок за сегодня не старше 30 минут."
+                    f"Официальный снимок остатков FBS устарел: нужен снимок за сегодня не старше {age_label}."
                     if reason == "official_snapshot_not_fresh_current_day" else
                     "Изменилась привязка склада WB к фулфилменту; нужен новый полный снимок."
                     if reason == "mapping_changed" else
@@ -136,6 +142,6 @@ def current_official_fbs_facilities(db_path, *, requested_nm_ids, now):
                 result["facilities"].append({**facility, "sku_values": values,
                     "available": sum(v["available"] for v in values) if available else None,
                     "stock_source": evidence, "source_blocker": "" if available else reason_ru})
-    except sqlite3.Error:
+    except (sqlite3.Error, FbsSnapshotPolicyError):
         result["reason"] = "Официальный источник остатков FBS недоступен."
     return result
