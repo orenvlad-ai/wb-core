@@ -92,6 +92,10 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     contract_path = repo / 'artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json'
     contract = json.loads(contract_path.read_text())
+    # Every file pinned by history must select this guard before release.
+    checks = json.loads((repo / 'ci/checks.json').read_text())
+    patterns = checks['groups']['web_vitrina_history_activation']['patterns']
+    assert set(contract['formula_code_hashes']).issubset(patterns), 'history_formula_guard_not_selected'
     root = Path(contract['candidate_root'])
     reserve = 8 * 1024**3 + 2 * 1024**3 + 128 * 1024**2
     assert contract['reserve_bytes'] == reserve
