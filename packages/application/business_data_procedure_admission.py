@@ -150,19 +150,42 @@ def guard_cli(*, default_runtime: str = ".runtime/registry_upload"):
     return decorate
 
 
+def thread_start_is_proven_absent(thread) -> bool:
+    """CPython no-child proof; missing lifecycle evidence is conservative."""
+    import threading
+    limbo_lock = getattr(threading, "_active_limbo_lock", None)
+    limbo = getattr(threading, "_limbo", None)
+    started = getattr(thread, "_started", None)
+    if limbo_lock is None or limbo is None or started is None:
+        return False
+    with limbo_lock:
+        return not started.is_set() and thread not in limbo
+
+
 def admitted_thread(runtime_dir: Path, **options):
     """Retain an independently admitted async operation through target finally."""
     import threading
-    lease = AdmissionLease(runtime_dir, independent=True)
     target = options.pop("target")
     args = options.pop("args", ())
     kwargs = options.pop("kwargs", {})
+    lease = AdmissionLease(runtime_dir, independent=True)
     class AdmittedThread(threading.Thread):
+        def abort_if_unstarted(self):
+            # CPython registers a possible native child in _limbo before
+            # spawning it. _started alone cannot prove no-start: start() can
+            # be interrupted while waiting for that child to bootstrap.
+            if not thread_start_is_proven_absent(self):
+                return False
+            lease.close()
+            return True
+
         def start(self):
             try:
                 return super().start()
             except BaseException:
-                lease.close()
+                # Keep started/uncertain children drain-visible. Callers may
+                # terminalize only when abort_if_unstarted proves no child.
+                self.abort_if_unstarted()
                 raise
     def run():
         try:
@@ -170,7 +193,11 @@ def admitted_thread(runtime_dir: Path, **options):
                 target(*args, **kwargs)
         finally:
             lease.close()
-    return AdmittedThread(target=run, **options)
+    try:
+        return AdmittedThread(target=run, **options)
+    except BaseException:
+        lease.close()
+        raise
 
 
 def admitted_status(runtime_dir: Path, *, live_reader: Callable, cached_reader: Callable):

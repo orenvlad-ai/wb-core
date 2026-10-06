@@ -26,6 +26,9 @@ from packages.adapters.seller_portal_transit_costs import (
     SellerPortalTransitCostNetworkJsonSource,
     SellerPortalTransitCostSourceError,
 )
+from packages.application.business_data_procedure_admission import (
+    admitted_thread, admitted_write,
+)
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.wb_supply_overlay import (
@@ -724,6 +727,10 @@ class WbSuppliesBlock:
         }
 
     def start_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        with admitted_write(self.runtime.runtime_dir):
+            return self._start_full_backfill_admitted(payload)
+
+    def _start_full_backfill_admitted(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_backfill_request(payload or {})
         with self._run_lock:
             active_run = self.runtime.load_active_wb_supplies_sync_run()
@@ -749,13 +756,26 @@ class WbSuppliesBlock:
                 offset=request["start_offset"],
                 logs=[_run_log(queued_at, "full backfill queued")],
             )
-            thread = threading.Thread(
-                target=self._run_full_backfill_guarded,
-                args=(run_id, request),
-                name=f"wb-supplies-backfill-{run_id[:8]}",
-                daemon=True,
-            )
-            thread.start()
+            thread = None
+            try:
+                thread = admitted_thread(
+                    self.runtime.runtime_dir,
+                    target=self._run_full_backfill_guarded,
+                    args=(run_id, request),
+                    name=f"wb-supplies-backfill-{run_id[:8]}",
+                    daemon=True,
+                )
+                thread.start()
+            except BaseException:
+                if thread is not None and not thread.abort_if_unstarted():
+                    raise
+                failed_at = self.timestamp_factory()
+                self.runtime.update_wb_supplies_sync_run(
+                    run_id, status="failed", phase="worker_start_failed",
+                    updated_at=failed_at, completed_at=failed_at,
+                    last_error="full backfill worker could not start",
+                )
+                raise
         return {
             "contract_name": CONTRACT_NAME,
             "contract_version": CONTRACT_VERSION,
@@ -796,6 +816,10 @@ class WbSuppliesBlock:
         }
 
     def start_transit_cost_enrichment(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        with admitted_write(self.runtime.runtime_dir):
+            return self._start_transit_cost_enrichment_admitted(payload)
+
+    def _start_transit_cost_enrichment_admitted(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_transit_cost_enrichment_request(payload or {})
         with self._transit_cost_run_lock:
             active_run = self._reconcile_stale_transit_cost_run()
@@ -837,16 +861,20 @@ class WbSuppliesBlock:
                     raise
                 run = existing
             if candidates:
-                thread = threading.Thread(
-                    target=self._run_transit_cost_enrichment_guarded,
-                    args=(run_id, candidates),
-                    name=f"wb-transit-cost-{run_id[:8]}",
-                    daemon=True,
-                )
-                self._transit_cost_threads[run_id] = thread
+                thread = None
                 try:
+                    thread = admitted_thread(
+                        self.runtime.runtime_dir,
+                        target=self._run_transit_cost_enrichment_guarded,
+                        args=(run_id, candidates),
+                        name=f"wb-transit-cost-{run_id[:8]}",
+                        daemon=True,
+                    )
+                    self._transit_cost_threads[run_id] = thread
                     thread.start()
-                except Exception:
+                except BaseException:
+                    if thread is not None and not thread.abort_if_unstarted():
+                        raise
                     self._transit_cost_threads.pop(run_id, None)
                     failed_at = self.timestamp_factory()
                     try:
