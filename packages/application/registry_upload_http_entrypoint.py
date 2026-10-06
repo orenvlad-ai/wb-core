@@ -2957,6 +2957,7 @@ class RegistryUploadHttpEntrypoint:
         """Dormant internal dispatch only; deliberately no route, CLI or timer."""
         from packages.application.business_data_procedure_admission import admitted_write, thread_start_is_proven_absent
         from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, HEAVY_OPERATIONS, run_cycle
+        from packages.application.finance_backup_handoff import cycle_backup_priority, handoff_cycle_backup
         store = CycleReceiptStore(self.runtime.runtime_dir, self.activated_at_factory)
         with admitted_write(self.runtime.runtime_dir), self.operator_jobs._lock:
             # Matching accepted/terminal requests read the same receipt even if another job is active.
@@ -2966,8 +2967,19 @@ class RegistryUploadHttpEntrypoint:
             active = self.operator_jobs.active_job(operations=HEAVY_OPERATIONS)
             if active:
                 return {**active, 'single_flight': True, 'already_running_job_id': active['job_id']}
+            # No receipt/source acceptance while backup owns the earliest due slot.
+            # Priority does not build a full plan or scan SQLite contents.
+            priority = cycle_backup_priority(self.runtime.runtime_dir, now=self.now_factory())
+            if priority['priority']:
+                return handoff_cycle_backup(self.runtime.runtime_dir)
             heavy = HeavyAdmissionLease(self.runtime.runtime_dir, operation='cycle', independent=True)
             try:
+                # EX is already acquired, but not entered/bound to the parent:
+                # the actual job worker must remain its sole eventual owner.
+                priority = cycle_backup_priority(self.runtime.runtime_dir, now=self.now_factory())
+                if priority['priority']:
+                    heavy.close()
+                    return handoff_cycle_backup(self.runtime.runtime_dir)
                 receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
                     config=history_config, now=self.now_factory())
             except BaseException:
