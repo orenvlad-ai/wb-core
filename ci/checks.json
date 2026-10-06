@@ -60,6 +60,21 @@
     }
   },
   "groups": {
+    "sheet_vitrina_cycle": {
+      "patterns": [
+        "packages/application/sheet_vitrina_v1_cycle.py",
+        "packages/application/sheet_vitrina_v1_cycle_sources.py",
+        "apps/sheet_vitrina_v1_cycle_smoke.py",
+        "apps/sheet_vitrina_v1_local_derive_smoke.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/sheet_vitrina_v1_live_plan.py",
+        "packages/application/wb_finance_daily.py",
+        "packages/application/web_vitrina_snapshot_admission.py",
+        "apps/web_vitrina_history_candidate_build.py"
+      ],
+      "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"]],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "search_cluster_cleaner": {
       "patterns": [
         "packages/contracts/search_cluster_cleaner.py",

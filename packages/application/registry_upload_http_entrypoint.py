@@ -2926,6 +2926,248 @@ class RegistryUploadHttpEntrypoint:
         del as_of_date
         raise LegacyGoogleSheetsContourArchivedError(LEGACY_GOOGLE_SHEETS_ARCHIVE_MESSAGE)
 
+    def _start_sheet_cycle_job(self, *, request_key: str, slot_utc: str, history_config) -> dict:
+        """Dormant internal dispatch only; deliberately no route, CLI or timer."""
+        from packages.application.business_data_procedure_admission import admitted_write, thread_start_is_proven_absent
+        from packages.application.sheet_vitrina_v1_cycle import CycleReceiptStore, HEAVY_OPERATIONS, run_cycle
+        store = CycleReceiptStore(self.runtime.runtime_dir, self.activated_at_factory)
+        with admitted_write(self.runtime.runtime_dir), self.operator_jobs._lock:
+            # Matching accepted/terminal requests read the same receipt even if another job is active.
+            from packages.application.ready_publication import digest
+            prior = store.read(digest(request_key).removeprefix('sha256:')[:32])
+            active = self.operator_jobs.active_job(operations=HEAVY_OPERATIONS)
+            if active and not prior:
+                return {**active, 'single_flight': True, 'already_running_job_id': active['job_id']}
+            receipt, slot = store.accept(request_key=request_key, slot_utc=slot_utc,
+                config=history_config, now=self.now_factory())
+            if slot is None:
+                return receipt
+            def accepted(job_id):
+                receipt['job_id'] = job_id
+                store.write(receipt)
+            def worker(log):
+                try:
+                    with self._sheet_cycle_lock:
+                        return run_cycle(self, store, receipt, history_config, log)
+                except Exception as exc:
+                    raise SheetVitrinaV1OperatorJobError('cycle_failed', result_payload=receipt) from exc
+                finally:
+                    slot.close()
+            try:
+                self.operator_jobs.start(operation='cycle', runner=worker, on_accept=accepted)
+            except BaseException:
+                thread = self.operator_jobs._threads.get(receipt['job_id'])
+                if thread is None or thread_start_is_proven_absent(thread):
+                    receipt.update(status='interrupted', error_code='cycle_worker_not_started', finished_at=self.activated_at_factory())
+                    try:
+                        store.write(receipt)
+                    finally:
+                        slot.close()
+                # Native-start uncertainty belongs to the possible worker; never resend.
+                raise
+            return store.read(receipt['cycle_id'])
+
+    def _cycle_as_of_date(self):
+        return _resolve_sheet_refresh_as_of_date(None, now=self.now_factory())
+
+    def _cycle_sources(self):
+        from packages.application.sheet_vitrina_v1_cycle_sources import SheetVitrinaCycleSources
+        return SheetVitrinaCycleSources(self.sheet_plan_block)
+
+    def _cycle_finance_sources(self):
+        from apps.wb_finance_daily import _worker_lock
+        from packages.adapters.wb_finance_api import WbFinanceApiClient
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure, finance_raw_proof, daily_report_proof
+        from packages.application.ready_publication import canonical, digest
+        client = WbFinanceApiClient(os.environ.get('WB_API_TOKEN', ''), rate_gate_root=self.runtime.runtime_dir)
+        with _worker_lock(self.runtime.runtime_dir) as acquired:
+            if not acquired:
+                raise CycleStageFailure('finance_daily_busy')
+            daily = self.wb_finance_daily_block.tick(client, max_days=2)
+            if daily['status'] not in {'ok', 'completed_with_errors'} or any(item['status'] in
+                    {'projection_error', 'source_advanced', 'no_raw_pointer'} for item in daily['recovered']):
+                raise CycleStageFailure('finance_daily_attempt_failed')
+            daily_proof = daily_report_proof(self.wb_finance_daily_block, attempts=daily['days'])
+            weekly = self.wb_finance_weekly_block
+            recovery = weekly.recover_receipted_split_outbox()
+            if recovery['status'] not in {'disabled', 'clean', 'acknowledged'}:
+                raise CycleStageFailure('finance_outbox_unresolved')
+            due = weekly.due_tick_week()
+            result = {'status': 'no_due_week'} if due is None else weekly.sync_week(due[0], due[1], client)
+            if result['status'] not in {'completed', 'loaded_preliminary', 'waiting', 'no_due_week'}:
+                raise CycleStageFailure('finance_weekly_attempt_failed')
+            spp = weekly.refresh_recent_spp()  # Once, as the canonical tick does.
+            if spp['status'] != 'ok':
+                raise CycleStageFailure('finance_weekly_spp_failed')
+            versions = finance_raw_proof(self)
+            versions['daily_source_report_proofs'] = daily_proof.versions['daily_report_proofs']
+            versions.update(finance_attempt_digest=digest(canonical({'daily': daily, 'weekly': result, 'recovery': recovery})))
+            outbox = result.get('storage_outbox') or {}
+            versions['finance_outbox_receipt'] = canonical({key: outbox.get(key) for key in ('batch_id', 'event_id', 'sequence_no')})
+            warnings = list(daily_proof.warnings)
+            if result['status'] in {'loaded_preliminary', 'waiting'}:
+                warnings.append({'source_key': 'canonical_finance_weekly', 'policy': result['status']})
+            return StageProof(versions, tuple(warnings))
+
+    def _cycle_fbs_generation(self):
+        from packages.application.wb_fbs_warehouse_registry import REGISTRY_RUNS_TABLE, _complete_source_generation
+        from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
+        from packages.application.ready_publication import readonly, canonical, digest
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        with readonly(self.runtime.db_path) as conn:
+            prior = conn.execute(f'SELECT coalesce(max(run_sequence),0) FROM {REGISTRY_RUNS_TABLE}').fetchone()[0]
+        self.wb_fbs_warehouse_registry.collect()  # Exactly one attempt; never last-good as new collection.
+        with readonly(self.runtime.db_path) as conn:
+            latest = conn.execute(f'SELECT * FROM {REGISTRY_RUNS_TABLE} ORDER BY run_sequence DESC LIMIT 1').fetchone()
+            generation = _complete_source_generation(conn)
+            stock = read_complete_official_fbs_stock(conn, universe=None,
+                day=current_business_date_iso(self.now_factory()), now=self.now_factory())
+        if (latest is None or latest['run_sequence'] <= prior or latest['status'] != 'success'
+                or not latest['complete'] or not generation['complete']
+                or stock['generation_id'] != latest['run_id'] or generation['generation_id'] != latest['run_id']):
+            raise CycleStageFailure('fbs_new_complete_generation_missing')
+        return StageProof({'fbs_generation': stock['generation_id'], 'fbs_digest': stock['generation_digest'],
+            'fbs_catalog': digest(canonical(generation['catalog_scope'])),
+            'fbs_mapping': digest(canonical([{key: row[key] for key in ('seller_warehouse_id', 'facility_id', 'mapping_id')}
+                for row in generation['warehouses']])),
+            'fbs_run_sequence': str(latest['run_sequence'])})
+
+    def _cycle_warehouse(self, store, receipt, fbs):
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.ready_publication import readonly
+        from packages.application.fbs_accounting_runtime import load
+        from packages.application.warehouse_update_journal import PHASES
+        with warehouse_functional_job_lock(self.runtime.runtime_dir) as metrics:
+            token = str(metrics['owner_token'])
+            run_id = self.warehouse_update_journal.start(trigger_source='cycle', scheduled_for=receipt['slot_utc'], owner_token=token)
+            item = next(i for i in receipt['stages'] if i['stage'] == 'warehouse')
+            item['durable_ref'] = run_id
+            store.write(receipt)  # Persist domain association before effects.
+            try:
+                result = self._handle_owned_warehouse_manual_sync_request(owner_token=token, durable_run_id=run_id)
+            except BaseException as exc:
+                if not isinstance(exc, Exception):
+                    self.warehouse_update_journal.finish(run_id, status='interrupted', error='cycle_cancelled', owner_token=token)
+                raise
+        accounting = result.get('fbs_snapshot_accounting') or {}
+        active = result.get('active_version') or {}
+        finance = result.get('wb_finance_cost_recalculation') or {}
+        economics = result.get('functional_economics_publication') or {}
+        if (result.get('status') != 'success' or not active.get('version_id')
+                or accounting.get('status') != 'published' or accounting.get('ready_obligation') != 'complete'
+                or not accounting.get('operation_id') or not economics.get('plan_fingerprint')
+                or finance.get('status') not in {'already_current', 'applied'} or not finance.get('fingerprint')):
+            raise CycleStageFailure('warehouse_downstream_proof_missing')
+        with readonly(self.runtime.db_path) as conn:
+            run = conn.execute('SELECT status,functional_version_id FROM sheet_vitrina_v1_warehouse_update_runs WHERE run_id=?', (run_id,)).fetchone()
+            phases = {row[0]: row[1] for row in conn.execute('SELECT phase_key,status FROM sheet_vitrina_v1_warehouse_update_phases WHERE run_id=?', (run_id,))}
+            stocks = conn.execute('SELECT snapshot_id,pagination_complete,raw_rows_digest FROM sheet_vitrina_v1_warehouse_wb_snapshots WHERE version_id=?', (active['version_id'],)).fetchall()
+            current = conn.execute('SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1').fetchone()
+        book, version = load(self.runtime.runtime_dir)
+        snapshot = (book or {}).get('state', {}).get('periods', {}).get(receipt['business_date'], {}).get('snapshot', {})
+        if (not run or run['status'] != 'success' or run['functional_version_id'] != active['version_id']
+                or phases != {name: 'success' for name in PHASES} or not current or current[0] != active['version_id']
+                or len(stocks) != 1 or not stocks[0]['pagination_complete'] or not stocks[0]['raw_rows_digest']
+                or version != accounting['version'] or snapshot.get('id') != fbs['fbs_generation']
+                or snapshot.get('digest') != fbs['fbs_digest']):
+            raise CycleStageFailure('warehouse_generation_or_journal_changed')
+        return StageProof({'warehouse_run': run_id, 'functional_version': active['version_id'],
+            'fbo_snapshot': stocks[0]['snapshot_id'], 'fbo_digest': stocks[0]['raw_rows_digest'],
+            'fbs_book': version, 'fbs_ready_operation': accounting['operation_id'],
+            'economics_fingerprint': economics['plan_fingerprint'], 'weekly_cost_fingerprint': finance['fingerprint']})
+
+    def _cycle_daily_projection(self):
+        from apps.wb_finance_daily import _worker_lock
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure, daily_report_proof
+        from packages.application.ready_publication import canonical, digest
+        with _worker_lock(self.runtime.runtime_dir) as acquired:
+            if not acquired:
+                raise CycleStageFailure('daily_projection_busy')
+            result = self.wb_finance_daily_block.repair_visible_projections()
+            if result['status'] != 'ok':
+                raise CycleStageFailure('daily_projection_not_current')
+            days = result['days']
+            from packages.application.wb_finance_daily import closed_daily_dates
+            known = {item['day'] for item in days}
+            missing = [{'source_key': 'canonical_finance_daily', 'date': day.isoformat(), 'policy': 'official_missing', 'status': 'missing', 'accepted': False}
+                for day in closed_daily_dates(self.now_factory()) if day.isoformat() not in known]
+            proof = daily_report_proof(self.wb_finance_daily_block, payload=result)
+            return StageProof({'daily_projection_digest': digest(canonical(days)),
+                'daily_projection_report_proofs': proof.versions['daily_report_proofs']}, proof.warnings + tuple(missing))
+
+    def _cycle_validate_predecessors(self, finance, fbs, material):
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure, finance_raw_proof
+        from packages.application.official_fbs_stock_read import read_complete_official_fbs_stock
+        from packages.application.ready_publication import readonly
+        current = finance_raw_proof(self)
+        if any(current[key] != finance[key] for key in current):
+            raise CycleStageFailure('cycle_finance_source_changed')
+        with readonly(self.runtime.db_path) as conn:
+            stock = read_complete_official_fbs_stock(conn, universe=None,
+                day=current_business_date_iso(self.now_factory()), now=self.now_factory())
+        if stock['generation_id'] != fbs['fbs_generation'] or stock['generation_digest'] != fbs['fbs_digest']:
+            raise CycleStageFailure('cycle_fbs_generation_changed')
+
+        from packages.application.fbs_accounting_runtime import load
+        from packages.application.ready_publication import canonical, digest
+        with readonly(self.runtime.db_path) as conn:
+            active = conn.execute('SELECT version_id FROM sheet_vitrina_v1_warehouse_functional_active WHERE slot=1').fetchone()
+        _, version = load(self.runtime.runtime_dir)
+        days = self.wb_finance_daily_block.build_daily_payload()['days']
+        if (not active or active[0] != material['functional_version'] or version != material['fbs_book']
+                or digest(canonical(days)) != material['daily_projection_digest']):
+            raise CycleStageFailure('cycle_material_version_changed')
+
+    def _cycle_publish_ready(self, plan):
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        current = self.runtime.load_current_state()
+        expected = self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version, as_of_date=plan.as_of_date)
+        started = self.activated_at_factory()
+        diagnostics = _new_operator_refresh_diagnostics(job_id=SHEET_OPERATOR_JOB_ID.get(), execution_mode=EXECUTION_MODE_AUTO_DAILY, started_at=started)
+        phase = _start_operator_phase('build_plan_total', started_at=started)
+        result = self._publish_sheet_refresh_plan(plan=plan, current_state=current, expected_ready=expected, emit=_noop_log,
+            execution_mode=EXECUTION_MODE_AUTO_DAILY, refresh_diagnostics=diagnostics, build_plan_phase=phase,
+            refresh_started_at=started, refresh_started_perf=time.perf_counter())
+        if result.get('status') == 'error' or result.get('semantic_status') == 'error' or not result.get('publication_operation_id'):
+            raise CycleStageFailure('final_ready_semantic_failure')
+        versions = {key: str(result.get(key) or '') for key in ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id')}
+        versions['ready_fingerprint'] = self.runtime.prepare_sheet_vitrina_ready_publication(
+            bundle_version=versions['bundle_version'], as_of_date=versions['as_of_date']).fingerprint
+        self._cycle_verify_ready(versions)
+        warnings = () if result.get('semantic_status') == 'success' else ({'source_key': 'final_ready', 'policy': 'truthful_warning'},)
+        return versions, StageProof(versions, warnings)
+
+    def _cycle_verify_ready(self, versions):
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure
+        plan = self.runtime.load_sheet_vitrina_ready_snapshot()
+        if plan is None or plan.snapshot_id != versions['snapshot_id'] or plan.plan_version != versions['plan_version']:
+            raise CycleStageFailure('cycle_ready_changed')
+        expected = self.runtime.prepare_sheet_vitrina_ready_publication(bundle_version=versions['bundle_version'], as_of_date=versions['as_of_date'])
+        from packages.application.ready_publication import readonly, publication_status, digest
+        publication = publication_status(self.runtime.db_path, operation_id=versions['publication_operation_id'],
+            attempt_id=versions['publication_attempt_id'])
+        with readonly(self.runtime.db_path) as conn:
+            row = conn.execute('SELECT refreshed_at FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?',
+                (versions['bundle_version'], versions['as_of_date'])).fetchone()
+        if (not expected.exists or expected.fingerprint != versions['ready_fingerprint']
+                or not row or row[0] != versions['refreshed_at'] or not publication
+                or publication['state'] != 'complete' or publication['after_digest'] != digest(expected.plan_json)):
+            raise CycleStageFailure('cycle_ready_receipt_changed')
+
+    def _cycle_history(self, config, receipt, ready):
+        from apps.web_vitrina_history_candidate_build import build_owned_cycle_history
+        from packages.application.sheet_vitrina_v1_cycle import StageProof, CycleStageFailure
+        from packages.application.web_vitrina_snapshot_admission import process_identity
+        job_id = SHEET_OPERATOR_JOB_ID.get()
+        job = self.operator_jobs.get(job_id)
+        if (job_id != receipt['job_id'] or job['operation'] != 'cycle' or job['status'] != 'running'
+                or self.operator_jobs._threads.get(job_id) is not threading.current_thread()):
+            raise CycleStageFailure('cycle_history_owner_mismatch')
+        owner = dict(job_id=job_id, operation='cycle', pid=os.getpid(), identity=process_identity(os.getpid()))
+        proof = build_owned_cycle_history(runtime=self.runtime, config=config, cycle_owner=owner, now=self.now_factory())
+        self._cycle_verify_ready(ready)
+        return StageProof({'history_' + key: str(value) for key,value in proof.items()})
+
     def start_sheet_refresh_job(
         self,
         as_of_date: str | None = None,
@@ -2933,7 +3175,7 @@ class RegistryUploadHttpEntrypoint:
         auto_load: bool = False,
     ) -> dict[str, Any]:
         active_job = self.operator_jobs.active_job(
-            operations=("auto_update", "refresh", "refresh_group"),
+            operations=("auto_update", "refresh", "refresh_group", "cycle"),
         )
         if active_job:
             return {
@@ -2965,7 +3207,7 @@ class RegistryUploadHttpEntrypoint:
             return self.start_sheet_refresh_job(as_of_date=as_of_date, auto_load=True)
         if _is_night_refresh_experiment_trigger(trigger_source):
             active_job = self.operator_jobs.active_job(
-                operations=("auto_update", "refresh", "refresh_group"),
+                operations=("auto_update", "refresh", "refresh_group", "cycle"),
             )
             if active_job:
                 return self._skip_night_refresh_experiment_for_active_job(
@@ -3019,7 +3261,7 @@ class RegistryUploadHttpEntrypoint:
         self.sheet_auto_refresh_schedules_block.get_schedule(schedule_id)
         if _is_scheduled_auto_refresh_trigger(trigger_source):
             active_job = self.operator_jobs.active_job(
-                operations=("auto_update", "refresh", "refresh_group"),
+                operations=("auto_update", "refresh", "refresh_group", "cycle"),
             )
             if active_job:
                 return self._skip_sheet_scheduled_auto_update_for_active_job(
@@ -3139,7 +3381,7 @@ class RegistryUploadHttpEntrypoint:
                 f"source group {normalized_group_id!r} is a technical archive and cannot refresh the active vitrina"
             )
         active_job = self.operator_jobs.active_job(
-            operations=("auto_update", "refresh", "refresh_group"),
+            operations=("auto_update", "refresh", "refresh_group", "cycle"),
         )
         if active_job:
             return {
@@ -3311,7 +3553,7 @@ class RegistryUploadHttpEntrypoint:
                     str(action.get("reason") or "Автоматическое историческое восстановление недоступно."),
                 )
             active_job = self.operator_jobs.active_job(
-                operations=("auto_update", "refresh", "refresh_group"),
+                operations=("auto_update", "refresh", "refresh_group", "cycle"),
             )
             if active_job:
                 raise SheetVitrinaHealthRecoveryConflict(
@@ -3760,7 +4002,7 @@ class RegistryUploadHttpEntrypoint:
     ) -> dict[str, Any]:
         refresh_status = self.runtime.load_sheet_vitrina_refresh_status_any_bundle(as_of_date=snapshot_as_of_date)
         latest_refresh_job = self.operator_jobs.latest_relevant_job(
-            operations=("refresh", "auto_update", "refresh_group"),
+            operations=("refresh", "auto_update", "refresh_group", "cycle"),
             preferred_as_of_date=snapshot_as_of_date,
             strict_preferred_as_of_date=True,
         )
@@ -7665,205 +7907,10 @@ class RegistryUploadHttpEntrypoint:
                     log=emit,
                     execution_mode=execution_mode,
                 )
-                from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
-                current_state, expected_ready = bind_local_derive_publication(
-                    self.runtime, plan, current_state, expected_ready)
-                _finish_operator_phase(
-                    refresh_diagnostics,
-                    build_plan_phase,
-                    finished_at=self.activated_at_factory(),
-                    status="success",
-                )
-                refresh_diagnostics = _merge_refresh_diagnostics(
-                    refresh_diagnostics,
-                    _refresh_diagnostics_from_plan(plan),
-                )
-                row_counts = _sheet_row_counts(plan)
-                emit(
-                    _format_log_event(
-                        "refresh_snapshot_ready",
-                        cycle="refresh",
-                        snapshot_id=plan.snapshot_id,
-                        plan_version=plan.plan_version,
-                        as_of_date=plan.as_of_date,
-                        date_columns=",".join(plan.date_columns),
-                        data_rows=row_counts.get("DATA_VITRINA"),
-                        status_rows=row_counts.get("STATUS"),
-                    )
-                )
-                emit(
-                    _format_log_event(
-                        "refresh_runtime_save_start",
-                        cycle="refresh",
-                        runtime_store="sheet_vitrina_ready_snapshot",
-                        snapshot_id=plan.snapshot_id,
-                    )
-                )
-                refreshed_at = self.refreshed_at_factory()
-                previous_plan, previous_refreshed_at = _load_existing_ready_snapshot_for_preservation(
-                    self.runtime,
-                    as_of_date=plan.as_of_date,
-                )
-                plan = _with_full_refresh_metadata(
-                    plan,
-                    refreshed_at=refreshed_at,
-                    previous_plan=previous_plan,
-                    previous_refreshed_at=previous_refreshed_at,
-                    business_date=current_business_date_iso(self.now_factory()),
-                    runtime=self.runtime,
-                )
-                save_snapshot_phase = _start_operator_phase(
-                    "save_ready_snapshot",
-                    started_at=self.activated_at_factory(),
-                )
-                refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
-                    current_state=current_state,
-                    refreshed_at=refreshed_at,
-                    plan=plan,
-                    expected=expected_ready,
-                    build_inputs=dict(plan.metadata or {}).get("publication_inputs"),
-                )
-                active_refresh = active_refresh_summary(refresh_result)
-                _finish_operator_phase(
-                    refresh_diagnostics,
-                    save_snapshot_phase,
-                    finished_at=self.activated_at_factory(),
-                    status="success",
-                )
-                # The full vitrina refresh is a consumer of the last atomically
-                # published functional warehouse/cost version.  External WB fetch,
-                # movement replay and legacy WB/own-capital rebuilds are owned only
-                # by the bounded hourly/manual functional pipeline.
-                refresh_diagnostics["our_wb_cost_recalculate"] = {
-                    "status": "skipped",
-                    "reason": "materialized_functional_state_read_only",
-                    "changed": False,
-                }
-                promo_gc_phase = _start_operator_phase(
-                    "promo_artifact_light_gc",
-                    started_at=self.activated_at_factory(),
-                )
-                promo_gc_summary = _run_promo_artifact_light_gc_after_refresh(
-                    runtime_dir=self.runtime.runtime_dir,
-                    refresh_diagnostics=refresh_diagnostics,
-                    runner=self.promo_artifact_gc_runner,
-                    emit=emit,
-                )
-                _finish_operator_phase(
-                    refresh_diagnostics,
-                    promo_gc_phase,
-                    finished_at=self.activated_at_factory(),
-                    status=(
-                        "success"
-                        if str(promo_gc_summary.get("status") or "") == "success"
-                        else "warning"
-                    ),
-                    note_kind=(
-                        None
-                        if str(promo_gc_summary.get("status") or "") == "success"
-                        else "promo_artifact_gc_warning"
-                    ),
-                )
-                refresh_outcome = _build_refresh_result_payload(refresh_result)
-                save_operator_phase = _start_operator_phase(
-                    "save_operator_state",
-                    started_at=self.activated_at_factory(),
-                )
-                if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
-                    self.runtime.save_sheet_vitrina_manual_refresh_result(
-                        result_payload=refresh_outcome,
-                        refreshed_at=refresh_result.refreshed_at,
-                    )
-                    _finish_operator_phase(
-                        refresh_diagnostics,
-                        save_operator_phase,
-                        finished_at=self.activated_at_factory(),
-                        status="success",
-                    )
-                else:
-                    _finish_operator_phase(
-                        refresh_diagnostics,
-                        save_operator_phase,
-                        finished_at=self.activated_at_factory(),
-                        status="skipped",
-                        note_kind="non_manual_execution_mode",
-                    )
-                job_finalize_phase = _start_operator_phase(
-                    "job_finalize",
-                    started_at=self.activated_at_factory(),
-                )
-                payload = asdict(refresh_result)
-                updated_cells = _updated_cells_for_plan(plan)
-                payload["technical_status"] = payload["status"]
-                payload["status_label"] = payload["semantic_label"]
-                payload["status_reason"] = payload["semantic_reason"]
-                payload["updated_cells"] = updated_cells
-                payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
-                payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
-                    updated_cells,
-                    "latest_confirmed",
-                )
-                _finish_operator_phase(
-                    refresh_diagnostics,
-                    job_finalize_phase,
-                    finished_at=self.activated_at_factory(),
-                    status="success",
-                )
-                _complete_refresh_diagnostics(
-                    refresh_diagnostics,
-                    job_id=SHEET_OPERATOR_JOB_ID.get(),
-                    execution_mode=execution_mode,
-                    as_of_date=refresh_result.as_of_date,
-                    bundle_version=refresh_result.bundle_version,
-                    started_at=refresh_started_at,
-                    finished_at=self.activated_at_factory(),
-                    duration_ms=max(0, int(round((time.perf_counter() - refresh_started_perf) * 1000))),
-                    semantic_status=active_refresh["status"],
-                    technical_status=refresh_result.status,
-                )
-                # Finalization owns diagnostics, never the earlier business plan.
-                self.runtime.finalize_sheet_vitrina_publication(
-                    operation_id=refresh_result.publication_operation_id,
-                    attempt_id=refresh_result.publication_attempt_id, diagnostics=refresh_diagnostics)
-                payload.update(asdict(refresh_result))
-                _apply_active_refresh_semantics(payload, refresh_result)
-                payload["updated_cells"] = updated_cells
-                payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
-                payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
-                    updated_cells,
-                    "latest_confirmed",
-                )
-                payload["refresh_diagnostics"] = refresh_diagnostics
-                payload["server_context"] = self.build_sheet_server_context()
-                payload["manual_context"] = self.build_sheet_manual_context()
-                payload["load_context"] = self.build_sheet_load_context()
-                emit(
-                    _format_log_event(
-                        "refresh_runtime_save_finish",
-                        cycle="refresh",
-                        snapshot_id=refresh_result.snapshot_id,
-                        refreshed_at=refresh_result.refreshed_at,
-                        data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
-                        status_rows=refresh_result.sheet_row_counts.get("STATUS"),
-                        semantic_status=active_refresh["status"],
-                        semantic_reason=active_refresh["reason"],
-                        updated_cells=payload["updated_cell_count"],
-                        latest_confirmed_cells=payload["latest_confirmed_cell_count"],
-                        duration_ms=refresh_diagnostics.get("duration_ms"),
-                    )
-                )
-                emit(
-                    _format_log_event(
-                        "cycle_finish",
-                        cycle="refresh",
-                        status="success",
-                        semantic_status=active_refresh["status"],
-                        semantic_reason=active_refresh["reason"],
-                        route=SHEET_VITRINA_REFRESH_ROUTE,
-                        snapshot_id=refresh_result.snapshot_id,
-                    )
-                )
-                return payload
+                return self._publish_sheet_refresh_plan(plan=plan, current_state=current_state,
+                    expected_ready=expected_ready, emit=emit, execution_mode=execution_mode,
+                    refresh_diagnostics=refresh_diagnostics, build_plan_phase=build_plan_phase,
+                    refresh_started_at=refresh_started_at, refresh_started_perf=refresh_started_perf)
             except Exception as exc:
                 finished_at = self.activated_at_factory()
                 if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
@@ -7886,6 +7933,209 @@ class RegistryUploadHttpEntrypoint:
                     )
                 )
                 raise
+
+    def _publish_sheet_refresh_plan(self, *, plan, current_state, expected_ready, emit,
+            execution_mode, refresh_diagnostics, build_plan_phase, refresh_started_at, refresh_started_perf):
+        """Publication-only ordinary tail; collection is owned by the caller."""
+        from packages.application.sheet_vitrina_v1_live_plan import bind_local_derive_publication
+        current_state, expected_ready = bind_local_derive_publication(
+            self.runtime, plan, current_state, expected_ready)
+        _finish_operator_phase(
+            refresh_diagnostics,
+            build_plan_phase,
+            finished_at=self.activated_at_factory(),
+            status="success",
+        )
+        refresh_diagnostics = _merge_refresh_diagnostics(
+            refresh_diagnostics,
+            _refresh_diagnostics_from_plan(plan),
+        )
+        row_counts = _sheet_row_counts(plan)
+        emit(
+            _format_log_event(
+                "refresh_snapshot_ready",
+                cycle="refresh",
+                snapshot_id=plan.snapshot_id,
+                plan_version=plan.plan_version,
+                as_of_date=plan.as_of_date,
+                date_columns=",".join(plan.date_columns),
+                data_rows=row_counts.get("DATA_VITRINA"),
+                status_rows=row_counts.get("STATUS"),
+            )
+        )
+        emit(
+            _format_log_event(
+                "refresh_runtime_save_start",
+                cycle="refresh",
+                runtime_store="sheet_vitrina_ready_snapshot",
+                snapshot_id=plan.snapshot_id,
+            )
+        )
+        refreshed_at = self.refreshed_at_factory()
+        previous_plan, previous_refreshed_at = _load_existing_ready_snapshot_for_preservation(
+            self.runtime,
+            as_of_date=plan.as_of_date,
+        )
+        plan = _with_full_refresh_metadata(
+            plan,
+            refreshed_at=refreshed_at,
+            previous_plan=previous_plan,
+            previous_refreshed_at=previous_refreshed_at,
+            business_date=current_business_date_iso(self.now_factory()),
+            runtime=self.runtime,
+        )
+        save_snapshot_phase = _start_operator_phase(
+            "save_ready_snapshot",
+            started_at=self.activated_at_factory(),
+        )
+        refresh_result = self.runtime.save_sheet_vitrina_ready_snapshot(
+            current_state=current_state,
+            refreshed_at=refreshed_at,
+            plan=plan,
+            expected=expected_ready,
+            build_inputs=dict(plan.metadata or {}).get("publication_inputs"),
+        )
+        active_refresh = active_refresh_summary(refresh_result)
+        _finish_operator_phase(
+            refresh_diagnostics,
+            save_snapshot_phase,
+            finished_at=self.activated_at_factory(),
+            status="success",
+        )
+        # The full vitrina refresh is a consumer of the last atomically
+        # published functional warehouse/cost version.  External WB fetch,
+        # movement replay and legacy WB/own-capital rebuilds are owned only
+        # by the bounded hourly/manual functional pipeline.
+        refresh_diagnostics["our_wb_cost_recalculate"] = {
+            "status": "skipped",
+            "reason": "materialized_functional_state_read_only",
+            "changed": False,
+        }
+        promo_gc_phase = _start_operator_phase(
+            "promo_artifact_light_gc",
+            started_at=self.activated_at_factory(),
+        )
+        promo_gc_summary = _run_promo_artifact_light_gc_after_refresh(
+            runtime_dir=self.runtime.runtime_dir,
+            refresh_diagnostics=refresh_diagnostics,
+            runner=self.promo_artifact_gc_runner,
+            emit=emit,
+        )
+        _finish_operator_phase(
+            refresh_diagnostics,
+            promo_gc_phase,
+            finished_at=self.activated_at_factory(),
+            status=(
+                "success"
+                if str(promo_gc_summary.get("status") or "") == "success"
+                else "warning"
+            ),
+            note_kind=(
+                None
+                if str(promo_gc_summary.get("status") or "") == "success"
+                else "promo_artifact_gc_warning"
+            ),
+        )
+        refresh_outcome = _build_refresh_result_payload(refresh_result)
+        save_operator_phase = _start_operator_phase(
+            "save_operator_state",
+            started_at=self.activated_at_factory(),
+        )
+        if execution_mode == EXECUTION_MODE_MANUAL_OPERATOR:
+            self.runtime.save_sheet_vitrina_manual_refresh_result(
+                result_payload=refresh_outcome,
+                refreshed_at=refresh_result.refreshed_at,
+            )
+            _finish_operator_phase(
+                refresh_diagnostics,
+                save_operator_phase,
+                finished_at=self.activated_at_factory(),
+                status="success",
+            )
+        else:
+            _finish_operator_phase(
+                refresh_diagnostics,
+                save_operator_phase,
+                finished_at=self.activated_at_factory(),
+                status="skipped",
+                note_kind="non_manual_execution_mode",
+            )
+        job_finalize_phase = _start_operator_phase(
+            "job_finalize",
+            started_at=self.activated_at_factory(),
+        )
+        payload = asdict(refresh_result)
+        updated_cells = _updated_cells_for_plan(plan)
+        payload["technical_status"] = payload["status"]
+        payload["status_label"] = payload["semantic_label"]
+        payload["status_reason"] = payload["semantic_reason"]
+        payload["updated_cells"] = updated_cells
+        payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
+        payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
+            updated_cells,
+            "latest_confirmed",
+        )
+        _finish_operator_phase(
+            refresh_diagnostics,
+            job_finalize_phase,
+            finished_at=self.activated_at_factory(),
+            status="success",
+        )
+        _complete_refresh_diagnostics(
+            refresh_diagnostics,
+            job_id=SHEET_OPERATOR_JOB_ID.get(),
+            execution_mode=execution_mode,
+            as_of_date=refresh_result.as_of_date,
+            bundle_version=refresh_result.bundle_version,
+            started_at=refresh_started_at,
+            finished_at=self.activated_at_factory(),
+            duration_ms=max(0, int(round((time.perf_counter() - refresh_started_perf) * 1000))),
+            semantic_status=active_refresh["status"],
+            technical_status=refresh_result.status,
+        )
+        # Finalization owns diagnostics, never the earlier business plan.
+        self.runtime.finalize_sheet_vitrina_publication(
+            operation_id=refresh_result.publication_operation_id,
+            attempt_id=refresh_result.publication_attempt_id, diagnostics=refresh_diagnostics)
+        payload.update(asdict(refresh_result))
+        _apply_active_refresh_semantics(payload, refresh_result)
+        payload["updated_cells"] = updated_cells
+        payload["updated_cell_count"] = _count_updated_cells_by_status(updated_cells, "updated")
+        payload["latest_confirmed_cell_count"] = _count_updated_cells_by_status(
+            updated_cells,
+            "latest_confirmed",
+        )
+        payload["refresh_diagnostics"] = refresh_diagnostics
+        payload["server_context"] = self.build_sheet_server_context()
+        payload["manual_context"] = self.build_sheet_manual_context()
+        payload["load_context"] = self.build_sheet_load_context()
+        emit(
+            _format_log_event(
+                "refresh_runtime_save_finish",
+                cycle="refresh",
+                snapshot_id=refresh_result.snapshot_id,
+                refreshed_at=refresh_result.refreshed_at,
+                data_rows=refresh_result.sheet_row_counts.get("DATA_VITRINA"),
+                status_rows=refresh_result.sheet_row_counts.get("STATUS"),
+                semantic_status=active_refresh["status"],
+                semantic_reason=active_refresh["reason"],
+                updated_cells=payload["updated_cell_count"],
+                latest_confirmed_cells=payload["latest_confirmed_cell_count"],
+                duration_ms=refresh_diagnostics.get("duration_ms"),
+            )
+        )
+        emit(
+            _format_log_event(
+                "cycle_finish",
+                cycle="refresh",
+                status="success",
+                semantic_status=active_refresh["status"],
+                semantic_reason=active_refresh["reason"],
+                route=SHEET_VITRINA_REFRESH_ROUTE,
+                snapshot_id=refresh_result.snapshot_id,
+            )
+        )
+        return payload
 
     def _run_our_wb_cost_post_refresh_recalculate(
         self,
@@ -10239,11 +10489,10 @@ class SheetVitrinaV1OperatorJobError(RuntimeError):
 class SheetVitrinaV1OperatorJobStore:
     def __init__(self, timestamp_factory: Callable[[], str], runtime_dir: Path | None = None) -> None:
         self.runtime_dir = runtime_dir
-        self._maintenance_leases: dict[str, Any] = {}
         self.timestamp_factory = timestamp_factory
         self._jobs: dict[str, SheetVitrinaV1OperatorJob] = {}
         self._threads: dict[str, threading.Thread] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
         self._warehouse_pending_picker: threading.Thread | None = None
@@ -10425,47 +10674,42 @@ class SheetVitrinaV1OperatorJobStore:
         finally:
             self._warehouse_start_lock.release()
 
-    def start(
-        self,
-        *,
-        operation: str,
-        runner: Callable[[OperatorLogEmitter], dict[str, Any]],
-    ) -> dict[str, Any]:
-        from packages.application.business_data_procedure_admission import AdmissionLease
-        lease = AdmissionLease(self.runtime_dir, independent=True) if self.runtime_dir is not None else None
-        job_id = uuid4().hex
-        job = SheetVitrinaV1OperatorJob(
-            job_id=job_id,
-            operation=operation,
-            status="running",
-            started_at=self.timestamp_factory(),
-        )
-        thread = threading.Thread(
-            target=self._run,
-            args=(job_id, runner),
-            daemon=True,
-        )
+    def start(self, *, operation: str, runner: Callable[[OperatorLogEmitter], dict[str, Any]],
+            on_accept: Callable[[str], None] | None = None) -> dict[str, Any]:
+        from packages.application.business_data_procedure_admission import admitted_thread, thread_start_is_proven_absent
+        from packages.application.sheet_vitrina_v1_cycle import HEAVY_OPERATIONS
         with self._lock:
-            if lease is not None:
-                self._maintenance_leases[job_id] = lease
+            if operation in HEAVY_OPERATIONS:
+                active = self.active_job(operations=HEAVY_OPERATIONS)
+                if active:
+                    return {**active, 'already_running_job_id': active['job_id'], 'single_flight': True}
+            job_id = uuid4().hex
+            job = SheetVitrinaV1OperatorJob(job_id=job_id, operation=operation,
+                status='running', started_at=self.timestamp_factory())
+            options = dict(target=self._run, args=(job_id, runner), daemon=True)
+            thread = (admitted_thread(self.runtime_dir, **options) if self.runtime_dir is not None
+                else threading.Thread(**options))
             self._jobs[job_id] = job
             self._threads[job_id] = thread
-            if self._snapshot_markers is not None:
-                self._snapshot_job_markers[job_id] = self._snapshot_markers.start(job_id, operation)
-        try:
-            thread.start()
-        except BaseException as exc:
-            with self._lock:
-                job.status = "error"
-                job.error = "thread start failed: " + type(exc).__name__
-                job.finished_at = self.timestamp_factory()
-            if self._snapshot_markers is not None:
-                self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
-            failed_lease = self._maintenance_leases.pop(job_id, None)
-            if failed_lease is not None:
-                failed_lease.close()
-            raise
-        return self.get(job_id)
+            try:
+                if self._snapshot_markers is not None:
+                    self._snapshot_job_markers[job_id] = self._snapshot_markers.start(job_id, operation)
+                if on_accept is not None:
+                    on_accept(job_id)
+                thread.start()
+            except BaseException as exc:
+                no_start = (thread.abort_if_unstarted() if hasattr(thread, 'abort_if_unstarted')
+                    else thread_start_is_proven_absent(thread))
+                if no_start:
+                    job.status = 'error'
+                    job.error = 'thread start failed: ' + type(exc).__name__
+                    job.finished_at = self.timestamp_factory()
+                    self._threads.pop(job_id, None)
+                    if self._snapshot_markers is not None:
+                        self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
+                # A possible native child keeps its lease, marker and running ref.
+                raise
+            return self.get(job_id)
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self._lock:
@@ -10590,7 +10834,8 @@ class SheetVitrinaV1OperatorJobStore:
             if job.status != "running":
                 continue
             thread = self._threads.get(job_id)
-            if thread is None or thread.ident is None or thread.is_alive():
+            started = getattr(thread, '_started', None)
+            if thread is None or started is None or not started.is_set() or thread.is_alive():
                 continue
             job.status = "error"
             job.finished_at = self.timestamp_factory()
@@ -10605,11 +10850,8 @@ class SheetVitrinaV1OperatorJobStore:
         try:
             token = SHEET_OPERATOR_JOB_ID.set(job_id)
             try:
-                from contextlib import nullcontext
-                lease = self._maintenance_leases.get(job_id)
-                with lease.entered() if lease is not None else nullcontext():
-                    result = runner(lambda message: self._append_log(job_id, message))
-            except Exception as exc:
+                result = runner(lambda message: self._append_log(job_id, message))
+            except BaseException as exc:
                 self._append_log(job_id, f"Ошибка: {exc}")
                 with self._lock:
                     job = self._jobs[job_id]
@@ -10619,6 +10861,8 @@ class SheetVitrinaV1OperatorJobStore:
                     if isinstance(exc, SheetVitrinaV1OperatorJobError) and exc.result_payload:
                         job.result = dict(exc.result_payload)
                 SHEET_OPERATOR_JOB_ID.reset(token)
+                if not isinstance(exc, Exception):
+                    raise
                 return
 
             with self._lock:
@@ -10629,9 +10873,6 @@ class SheetVitrinaV1OperatorJobStore:
             SHEET_OPERATOR_JOB_ID.reset(token)
 
         finally:
-            lease = self._maintenance_leases.pop(job_id, None)
-            if lease is not None:
-                lease.close()
             if self._snapshot_markers is not None:
                 self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
 

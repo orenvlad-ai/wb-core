@@ -1,6 +1,6 @@
 """Bounded history parent; scheduled activation requires an accepted ready store."""
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import argparse
 import fcntl
@@ -252,6 +252,61 @@ def run_admitted(args):
                                 "status": "skipped_busy", "last_good_retained": True}
     print(json.dumps(result))
     return 1 if result["status"] == "build_failed" else 0
+
+
+def build_owned_cycle_history(*, runtime, config, cycle_owner, now):
+    """Reviewed rolling14 seam for the exact live cycle owner, in its SH lease.
+
+    The caller proves live thread/job identity. All other actor, filesystem,
+    formula, finished-builder and candidate guards remain enforced.
+    """
+    from apps.web_vitrina_finished_snapshot_build import systemd_admission, lock_admission
+    from packages.application.web_vitrina_snapshot_admission import api_jobs_admission
+    from packages.application.warehouse_functional_lock import warehouse_functional_job_is_busy
+    source = Path(runtime.runtime_dir).resolve()
+    root = Path(config.candidate_root)
+    if root != root.resolve() or root.is_relative_to(source) or not 0 < config.budget_seconds <= 240:
+        raise ValueError('cycle_history_config_invalid')
+    for state in (api_jobs_admission(source, cycle_owner=cycle_owner), systemd_admission(),
+                  lock_admission(source / '.wb-finance-daily-worker.lock')):
+        if state != 'idle':
+            raise ValueError('cycle_history_admission_' + state)
+    if warehouse_functional_job_is_busy(source):
+        raise ValueError('cycle_history_warehouse_busy')
+    runtime_storage_admission(root, config.runtime_contract, config.formula_epoch)
+    with finished_builder_slot(source) as slot:
+        if slot != 'idle':
+            raise ValueError('cycle_history_builder_' + slot)
+        with candidate_singleflight(root) as acquired:
+            if not acquired:
+                raise ValueError('cycle_history_candidate_busy')
+            today = current_business_date_iso(now)
+            first = (datetime.fromisoformat(today) - timedelta(days=13)).date().isoformat()
+            adapter = LiveNativeAdapter(db_path=runtime.db_path, runtime_dir=source,
+                cache_dir=root / 'proofs', now=now, date_from=first, date_to=today,
+                formula_epoch=config.formula_epoch)
+            store = HistoryStore(root / 'history')
+            starts = json.loads(config.runtime_contract.read_bytes()).get('metric_start_dates', {})
+            result = update_live_history(adapter=adapter, runtime=runtime, store=store,
+                max_recomputes=config.max_recomputes, deadline_monotonic=time.monotonic() + config.budget_seconds,
+                rolling14=True, metric_start_dates=starts, group_blocks=True)
+            if result.get('status') not in {'published', 'unchanged'} or not result.get('edition_id'):
+                raise ValueError('cycle_history_incomplete')
+            edition = store.edition(result['edition_id'])
+            fence = adapter.fence
+            vector = adapter.capture()
+            status = store.rolling_status(vector, today)
+            days = dates_between(first, today)
+            proofs = store.day_proofs(edition)
+            if (store._current()['current'] != result['edition_id'] or adapter.fence != fence
+                    or any(proofs.get(day) != {'epoch': vector['epoch'], 'token': vector['dates'].get(day)} for day in days)
+                    or status['dirty_dates'] or
+                    status['window_from'] != first or status['business_date'] != today or
+                    not set(days) <= set(edition['days'])):
+                raise ValueError('cycle_history_final_vector_changed')
+            return {'edition_id': result['edition_id'], 'vector_digest': hashlib.sha256(
+                json.dumps(vector, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                'window_from': first, 'window_to': today}
 
 
 if __name__ == "__main__":
