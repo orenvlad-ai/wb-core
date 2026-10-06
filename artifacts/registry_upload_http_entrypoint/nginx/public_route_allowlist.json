@@ -133,6 +133,42 @@
       "methods": ["GET"]
     },
     {
+      "name": "buyer_support_pilot_refresh",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/buyer-support/pilot/refresh",
+      "methods": ["POST"]
+    },
+    {
+      "name": "buyer_support_pilot_propose",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/buyer-support/pilot/propose",
+      "methods": ["POST"]
+    },
+    {
+      "name": "buyer_support_pilot_send",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/buyer-support/pilot/send",
+      "methods": ["POST"]
+    },
+    {
+      "name": "buyer_support_pilot_claim",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/buyer-support/pilot/claim",
+      "methods": ["POST"]
+    },
+    {
+      "name": "buyer_support_pilot_reconcile",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/buyer-support/pilot/reconcile",
+      "methods": ["POST"]
+    },
+    {
+      "name": "buyer_support_pilot_operation",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/feedbacks/buyer-support/pilot/operation",
+      "methods": ["GET"]
+    },
+    {
       "name": "sheet_vitrina_feedbacks_detail",
       "match": "exact",
       "path": "/v1/sheet-vitrina-v1/feedbacks/detail",

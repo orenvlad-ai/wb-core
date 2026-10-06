@@ -53,7 +53,9 @@
         "apps/sku_inventory_balance_browser_smoke.py",
         "apps/wb_buyer_chrome_auth_smoke.py",
         "apps/wb_buyer_chrome_price_smoke.py",
-        "apps/search_cluster_cleaner_browser_smoke.py"
+        "apps/search_cluster_cleaner_browser_smoke.py",
+        "apps/wb_buyer_support_pilot_browser_smoke.py",
+        "apps/wb_buyer_support_smoke.py"
       ],
       "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
@@ -94,6 +96,25 @@
       ],
       "commands": [["python3", "apps/sheet_vitrina_v1_cycle_smoke.py"], ["python3", "apps/sheet_vitrina_v1_local_derive_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
+    },
+    "wb_buyer_support": {
+      "patterns": [
+        "apps/wb_buyer_support*.py",
+        "packages/application/wb_buyer_support*.py",
+        "packages/adapters/wb_buyer_support*.py",
+        "packages/adapters/templates/wb_buyer_support.*",
+        "packages/contracts/wb_buyer_support*",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json"
+      ],
+      "commands": [
+        ["python3", "apps/wb_buyer_support_smoke.py"],
+        ["python3", "apps/wb_buyer_support_pilot_smoke.py"],
+        ["python3", "apps/wb_buyer_support_pilot_http_smoke.py"],
+        ["python3", "apps/wb_buyer_support_pilot_browser_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
     },
     "search_cluster_cleaner": {
       "patterns": [

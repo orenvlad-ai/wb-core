@@ -65,6 +65,7 @@ from packages.application.wb_buyer_session import WbBuyerChromeAuthController, W
 from packages.adapters.wb_buyer_chrome_price import WbBuyerChromePriceAdapter
 from packages.contracts.spp_proxy_block import SppProxyRequest
 from packages.application.wb_buyer_support import BuyerSupportRepository
+from packages.application.wb_buyer_support_pilot import BuyerSupportPilotService
 from packages.application.wb_autoanswers_runtime import (
     AutoanswersRepository,
     AutoanswersRuntimeError,
@@ -1075,6 +1076,7 @@ class RegistryUploadHttpEntrypoint:
         feedbacks_complaints_block: SheetVitrinaV1FeedbacksComplaintsBlock | None = None,
         feedbacks_auto_complaints_block: SheetVitrinaV1FeedbacksAutoComplaintsBlock | None = None,
         autoanswers_repository: AutoanswersRepository | None = None,
+        buyer_support_pilot: BuyerSupportPilotService | None = None,
         autoanswers_lifecycle: Any | None = None,
         autoanswers_node_bridge: NodeAutoanswersBridge | None = None,
         ads_block: SheetVitrinaV1AdsBlock | None = None,
@@ -1173,6 +1175,8 @@ class RegistryUploadHttpEntrypoint:
             now_factory=self.now_factory,
         )
         self.buyer_support_repository = BuyerSupportRepository(self.runtime.runtime_dir)
+        self.buyer_support_pilot = buyer_support_pilot or BuyerSupportPilotService(
+            self.runtime.runtime_dir, observation_repository=self.buyer_support_repository)
         self.autoanswers_lifecycle = autoanswers_lifecycle
         self.autoanswers_node_bridge = autoanswers_node_bridge or NodeAutoanswersBridge()
         self.feedbacks_ai_block = feedbacks_ai_block or SheetVitrinaV1FeedbacksAiBlock(

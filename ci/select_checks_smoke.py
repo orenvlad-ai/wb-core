@@ -834,6 +834,20 @@ def main() -> None:
     assert browser["commands"].index(install) < browser["commands"].index(smoke)
     assert "playwright==1.58.0" in browser["pip"]
     assert "openpyxl==3.1.5" in browser["pip"]
+    buyer_support = build_plan_from_paths(
+        pull_request=115, base=BASE, head=HEAD,
+        paths=["packages/adapters/templates/wb_buyer_support.js"],
+        file_exists=lambda *_: True,
+    )
+    verify_plan(buyer_support)
+    assert "wb_buyer_support" in buyer_support["groups"]
+    for name in ("wb_buyer_support_smoke", "wb_buyer_support_pilot_smoke",
+                 "wb_buyer_support_pilot_http_smoke", "wb_buyer_support_pilot_browser_smoke"):
+        assert ["python3", "apps/" + name + ".py"] in buyer_support["commands"]
+    assert buyer_support["commands"].index(install) < buyer_support["commands"].index(
+        ["python3", "apps/wb_buyer_support_pilot_browser_smoke.py"])
+    assert "playwright==1.58.0" in buyer_support["pip"]
+
     backend = build_plan_from_paths(
         pull_request=8, base=BASE, head=HEAD,
         paths=["packages/application/sku_inventory_balance.py", "packages/application/change_registry_writer.py"],
