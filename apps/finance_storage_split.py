@@ -73,6 +73,7 @@ from packages.application.finance_storage_snapshot_retention import (
 )
 from packages.application.finance_storage_backup_rotation import (
     FinanceStorageBackupRotation,
+    FinanceBackupDeferred,
     backup_rotation_health,
 )
 from packages.application.finance_storage_post_manifest_recovery import (
@@ -443,7 +444,7 @@ def _run_recovery_preflight(
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     runtime_dir = args.runtime_dir.expanduser().resolve()
     generation_filesystem_contract: dict[str, Any] | None = None
@@ -923,6 +924,16 @@ def main(argv: list[str] | None = None) -> int:
         payload["recovery_preflight"] = recovery_preflight
     _emit(payload, args.output)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except FinanceBackupDeferred as exc:
+        # A deferred canonical plan is not a plan file and cannot be applied.
+        # Print the bounded receipt; leave --output and reviewed inputs intact.
+        _emit(exc.result_payload, None)
+        return 0
 
 
 if __name__ == "__main__":
