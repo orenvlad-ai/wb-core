@@ -181,6 +181,64 @@ class OperatorProducersSmoke(unittest.TestCase):
             create.assert_not_called()
         self.assertEqual(durable_jobs(runtime),[])
 
+    def test_same_active_request_reads_exact_worker_before_heavy_without_acceptance(self):
+        runtime,block,entry=fixture(self.root)
+        entered,finish=threading.Event(),threading.Event()
+        def held_job(*args):
+            require_heavy_owner(self.root);entered.set();self.assertTrue(finish.wait(5))
+            return {'status':'offline-terminal'}
+        with patch.object(block,'run_job',side_effect=held_job):
+            first=submit(entry);thread=entry.operator_jobs._threads[first['job']['job_id']]
+            try:
+                self.assertTrue(entered.wait(5));saved=durable_jobs(runtime)
+                source=runtime.load_supplier_shipment('fixture')
+                with patch('packages.application.registry_upload_http_entrypoint.HeavyAdmissionLease',
+                        side_effect=AssertionError('new heavy acceptance')), \
+                     patch.object(block,'create_job',side_effect=AssertionError('new durable acceptance')), \
+                     patch.object(runtime,'complete_supplier_confirmation_preview',
+                        side_effect=lambda **kw:{'result':kw['result']}) as complete:
+                    repeated=confirm(entry)
+                self.assertEqual(repeated['status'],'accepted');self.assertTrue(repeated['correction']['deduplicated'])
+                self.assertEqual(repeated['correction']['correction_id'],first['correction']['correction_id'])
+                self.assertEqual(repeated['job']['job_id'],first['job']['job_id']);complete.assert_called_once()
+                self.assertEqual(durable_jobs(runtime),saved);self.assertEqual(runtime.load_supplier_shipment('fixture'),source)
+                self.assertFalse(heavy_admission_status(self.root)['idle'])
+                # Actor/date/header fingerprint mismatches and a different FF
+                # acceptance tail cannot read another operation's acceptance.
+                self.assertIsNone(block.matching_active_job(shipment_id='fixture',
+                    new_actual_shipment_date='2026-07-22',actor='offline'))
+                self.assertIsNone(block.matching_active_job(shipment_id='fixture',
+                    new_actual_shipment_date='2026-07-21',actor='different'))
+                with self.assertRaises(HeavyAdmissionBusy):submit(entry,acceptance=True)
+                with self.assertRaises(HeavyAdmissionBusy):
+                    Entry.handle_supplier_shipments_patch_request(entry,'fixture',
+                        {'actual_shipment_date':'2026-07-21'},confirmed_factual_dates=True,actor='different')
+                with closing(sqlite3.connect(runtime.db_path)) as conn,conn:
+                    conn.execute("UPDATE sheet_vitrina_v1_supplier_shipments SET invoice_no='CHANGED' WHERE shipment_id='fixture'")
+                self.assertIsNone(block.matching_active_job(shipment_id='fixture',
+                    new_actual_shipment_date='2026-07-21',actor='offline'))
+                with self.assertRaises(HeavyAdmissionBusy):submit(entry)
+                self.assertEqual(durable_jobs(runtime),saved)
+            finally:finish.set();thread.join(5)
+        self.idle()
+
+    def test_detached_active_readback_under_other_heavy_never_claims_or_consumes(self):
+        runtime,block,entry=fixture(self.root)
+        accepted=block.create_job(shipment_id='fixture',new_actual_shipment_date='2026-07-21',actor='offline')
+        for status in ('queued','running'):
+            block._set_job_state(accepted['correction_id'],status=status,
+                phase='waiting_for_recalculation',progress_text='offline-detached')
+            saved=durable_jobs(runtime)
+            with busy(self.root),patch.object(block,'create_job',side_effect=AssertionError('claim')), \
+                 patch.object(entry.operator_jobs,'start',side_effect=AssertionError('spawn')), \
+                 patch.object(runtime,'complete_supplier_confirmation_preview') as complete:
+                result=confirm(entry)
+                self.assertEqual(result['status'],'needs_review');self.assertIsNone(result['job'])
+                self.assertEqual(result['reason'],'worker_execution_unproven');complete.assert_not_called()
+                self.assertEqual(result['correction']['correction_id'],accepted['correction_id'])
+            self.assertEqual(durable_jobs(runtime),saved)
+        self.idle()
+
     def test_async_start_constructor_failures_cancel_cleanup_under_lease(self):
         for where in ('constructor','start'):
             for failure in (RuntimeError,KeyboardInterrupt,SystemExit):
@@ -378,7 +436,11 @@ print(json.dumps(result))
                 self.assertTrue(entry.operator_jobs.factual_correction_execution(correction_id)['worker_present'])
                 self.assertFalse(entry.operator_jobs.factual_correction_execution('copied-id')['worker_present'])
                 self.assertFalse(heavy_admission_status(self.root)['idle']);self.assertFalse(admission_idle(self.root)['idle'])
-                with self.assertRaises(HeavyAdmissionBusy):submit(entry)
+                same=submit(entry)
+                self.assertEqual(same['status'],'accepted')
+                self.assertEqual(same['correction']['correction_id'],correction_id)
+                self.assertEqual(same['job']['job_id'],entry.operator_jobs._factual_workers[correction_id][0])
+                with self.assertRaises(HeavyAdmissionBusy):submit(entry,acceptance=True)
                 self.assertEqual(len(durable_jobs(runtime)),1)
                 bootstrap.set();self.assertTrue(entered.wait(5));self.assertEqual(durable_jobs(runtime)[0]['status'],'running')
             finally:bootstrap.set();finish.set();threads[0].join(5)
