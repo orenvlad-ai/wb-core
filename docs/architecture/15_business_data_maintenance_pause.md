@@ -71,6 +71,51 @@ monitor исключён. Штатный release уже перезапускае
 
 ## Проверки кандидата
 
+### Время жизни фоновых продолжений
+
+FF inventory/overhead preview, SKU Balance calculation, WB supplies backfill,
+transit-cost enrichment и manual change-registry observer удерживают отдельный
+SH admission lease до выхода потока, включая сохранение результата/ошибки и
+`finally`. Starts расчёта, поставок и observer получают caller admission до
+durable acceptance; FF processing claim происходит внутри admitted worker.
+Пауза после acceptance не прерывает уже принятую работу. Отказ независимого
+допуска или `Thread.start()` не оставляет активный слот без worker: FF остаётся
+`accepted` для существующего `resume_incomplete`, остальные finite starts
+сохраняют контролируемую ошибку и освобождают слот. Нового FF picker нет.
+
+Прерывание запуска (`KeyboardInterrupt`/`SystemExit`) повторно выбрасывается.
+Terminal failure/очистка допускаются только при доказанном отсутствии native
+child. Проверка опирается на CPython `_started`, `_limbo` и
+`_active_limbo_lock` в поддерживаемых Linux/macOS средах. Child, ожидающий
+bootstrap, сохраняет lease/слот/ссылку; недоступные internals не дают доказательства
+no-start. Неопределённый запуск разрешает только чтение того же job, не resend.
+Raw SKU poll loop использует тот же no-start proof без собственного lease:
+сохранённая ссылка считается занятой и до bootstrap, и после него. Только
+доказанный no-start очищает её при startup exception; штатный `finally`
+очищает только ссылку своего потока.
+
+SKU live apply получает допуск **перед claim каждого job** и сохраняет его через
+submit, readback, восстановление неоднозначного результата и terminal evidence.
+Poll/wakeup ожидание не держит lease; при maintenance pending/recoverable jobs
+остаются незахваченными до существующего pickup после resume. Существующие
+startup recovery, canary/readback и запрет blind resend не меняются.
+
+Offline regression: `apps/business_data_async_workers_smoke.py` использует
+private временные SQLite и fake services; `business_data_procedure_admission_smoke.py`
+дополнен отдельным process drain proof, гонкой pause/handoff, отказами создания и
+запуска потока, повторным `start()` и cancellation/target-finally.
+
+Первый выпуск требует pause **и отдельного idle proof старых raw-thread путей**:
+старый runtime ещё не удерживает новые leases, а обычный prepare-deploy не
+доказывает завершение этих daemon threads. Этот код не запускает pause/deploy.
+После выпуска проверка только чтением: сверить deployed SHA, readiness
+admission и maintenance `status`; наблюдать статусы существующих jobs через
+read-only endpoints/operational sessions (`mode=ro`, `query_only=ON`). Для
+естественно активного job drain должен оставаться non-idle до completion/error,
+после завершения всех jobs — idle. Ожидающий SKU worker сам по себе не означает
+non-idle. Не запускать новый job или pause ради такой проверки без отдельного
+разрешения; отсутствие активного job не доказывает его lifetime в production.
+
 Новые focused smokes: `business_data_procedure_admission_smoke.py`,
 `business_data_maintenance_pause_smoke.py`, `business_data_maintenance_boundary_smoke.py`.
 Проверены overlap/nested/fork ownership, принятый async handoff через race,

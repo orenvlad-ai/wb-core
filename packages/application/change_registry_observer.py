@@ -17,6 +17,9 @@ import sqlite3
 import threading
 from typing import Any, Callable, Mapping
 
+from packages.application.business_data_procedure_admission import (
+    admitted_thread, admitted_write,
+)
 from packages.application.change_registry import (
     ANNOTATION_REVISIONS_TABLE,
     CHECKPOINTS_TABLE,
@@ -486,7 +489,10 @@ class ChangeRegistryObserver:
 
     def submit_manual(self, *, requested_by: str, job_id: str = "") -> dict[str, Any]:
         """Admit a manual job, then perform its read-only scan in background."""
+        with admitted_write(self.runtime_dir):
+            return self._submit_manual_admitted(requested_by=requested_by, job_id=job_id)
 
+    def _submit_manual_admitted(self, *, requested_by: str, job_id: str = "") -> dict[str, Any]:
         now = canonical_utc_timestamp(self.now_fn())
         exact_job_id = job_id or _id(
             "crjob_",
@@ -555,11 +561,22 @@ class ChangeRegistryObserver:
                 except ChangeRegistryObserverTerminalEvidenceError:
                     return
 
-        threading.Thread(
-            target=worker,
-            name=f"change-registry-{exact_job_id[-12:]}",
-            daemon=True,
-        ).start()
+        thread = None
+        try:
+            thread = admitted_thread(
+                self.runtime_dir,
+                target=worker,
+                name=f"change-registry-{exact_job_id[-12:]}",
+                daemon=True,
+            )
+            thread.start()
+        except BaseException as exc:
+            if thread is not None and not thread.abort_if_unstarted():
+                raise
+            self._fail_job(exact_job_id, "manual", "", _failure_evidence(
+                exc, failure_origin="local_persistence", source_status="not_observed",
+            ))
+            raise
         return self.read_job(exact_job_id)
 
     def _admit(self, **row: Any) -> dict[str, bool]:

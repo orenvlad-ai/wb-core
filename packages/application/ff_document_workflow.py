@@ -18,6 +18,9 @@ import threading
 import time
 from typing import Any, Iterable, Mapping
 
+from packages.application.business_data_procedure_admission import (
+    MaintenanceAdmissionBlocked, admitted_thread,
+)
 from packages.application.ff_inventory_reconciliation import (
     FfInventoryReconciliation,
     FfInventoryReconciliationError,
@@ -541,13 +544,24 @@ class FfDocumentWorkflow:
             if key in self._inflight:
                 return
             self._inflight.add(key)
-        thread = threading.Thread(
-            target=self._worker_entry,
-            args=(action_type, preview_id),
-            name=f"ff-{action_type}-preview-{preview_id[-6:]}",
-            daemon=True,
-        )
-        thread.start()
+        thread = None
+        try:
+            thread = admitted_thread(
+                self.runtime.runtime_dir,
+                target=self._worker_entry,
+                args=(action_type, preview_id),
+                name=f"ff-{action_type}-preview-{preview_id[-6:]}",
+                daemon=True,
+            )
+            thread.start()
+        except BaseException as exc:
+            if thread is not None and not thread.abort_if_unstarted():
+                raise
+            with self._worker_lock:
+                self._inflight.discard(key)
+            # No durable claim was made. Existing resume_incomplete can retry.
+            if not isinstance(exc, MaintenanceAdmissionBlocked):
+                raise
 
     def _worker_entry(self, action_type: str, preview_id: str) -> None:
         try:

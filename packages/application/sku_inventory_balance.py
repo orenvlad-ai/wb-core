@@ -21,6 +21,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from packages.application.business_data_procedure_admission import (
+    MaintenanceAdmissionBlocked, admitted_thread, admitted_write,
+    thread_start_is_proven_absent,
+)
 from packages.application.sku_management import SkuManagementError
 from packages.application.sheet_vitrina_v1_ads import (
     AdsBidSafetyThresholdPolicy,
@@ -543,6 +547,18 @@ class SkuInventoryBalanceBlock:
         user_key: str,
         actor: str,
     ) -> dict[str, Any]:
+        with admitted_write(self.runtime.runtime_dir):
+            return self._start_calculation_operation_admitted(
+                payload, user_key=user_key, actor=actor,
+            )
+
+    def _start_calculation_operation_admitted(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        user_key: str,
+        actor: str,
+    ) -> dict[str, Any]:
         operation_id = _operation_token(payload.get("operation_id"), "operation_id")
         idempotency_key = _operation_token(
             payload.get("idempotency_key"),
@@ -683,15 +699,32 @@ class SkuInventoryBalanceBlock:
             active = self._calculation_worker_thread
             if active is not None and active.is_alive():
                 return self._calculation_worker_operation_id == operation_id
-            worker = threading.Thread(
-                target=self._execute_calculation_operation,
-                args=(operation_id,),
-                name="sku-inventory-balance-operation",
-                daemon=True,
-            )
-            self._calculation_worker_operation_id = operation_id
-            self._calculation_worker_thread = worker
-            worker.start()
+            worker = None
+            try:
+                worker = admitted_thread(
+                    self.runtime.runtime_dir,
+                    target=self._execute_calculation_operation,
+                    args=(operation_id,),
+                    name="sku-inventory-balance-operation",
+                    daemon=True,
+                )
+                self._calculation_worker_operation_id = operation_id
+                self._calculation_worker_thread = worker
+                worker.start()
+            except BaseException as exc:
+                if worker is not None and not worker.abort_if_unstarted():
+                    raise
+                self._calculation_worker_operation_id = ""
+                self._calculation_worker_thread = None
+                if isinstance(exc, Exception):
+                    return False
+                self._fail_calculation_operation(
+                    operation_id,
+                    error_code="worker_capacity_unavailable",
+                    error_message="Не удалось запустить bounded worker. Создайте новую операцию.",
+                    release_slot=True,
+                )
+                raise
             return True
 
     def _execute_calculation_operation(self, operation_id: str) -> None:
@@ -1692,7 +1725,7 @@ class SkuInventoryBalanceBlock:
             return False
         with self._apply_worker_lock:
             active = self._apply_worker_thread
-            if active is not None and active.is_alive():
+            if active is not None and not thread_start_is_proven_absent(active):
                 self._apply_worker_wakeup.set()
                 return True
             worker = threading.Thread(
@@ -1701,27 +1734,47 @@ class SkuInventoryBalanceBlock:
                 daemon=True,
             )
             self._apply_worker_thread = worker
-            worker.start()
+            try:
+                worker.start()
+            except BaseException:
+                if thread_start_is_proven_absent(worker):
+                    self._apply_worker_thread = None
+                raise
             return True
 
     def _apply_worker_loop(self) -> None:
         try:
             while not self._apply_worker_stop.is_set():
-                claimed = self._claim_next_live_job()
-                if claimed:
-                    job_id, worker_token = claimed
-                    try:
-                        self._run_live_job(job_id, worker_token)
-                    except Exception as exc:  # final worker containment
-                        self._mark_job_worker_error(job_id, worker_token, exc)
-                    continue
+                try:
+                    # The poll loop has no lease while idle. Admission precedes
+                    # the durable claim and covers submit, readback and recovery.
+                    with admitted_write(self.runtime.runtime_dir):
+                        claimed = self._claim_next_live_job()
+                        if claimed:
+                            job_id, worker_token = claimed
+                            try:
+                                self._run_live_job(job_id, worker_token)
+                            except Exception as exc:  # final worker containment
+                                self._mark_job_worker_error(job_id, worker_token, exc)
+                            except BaseException:
+                                # Cancellation has no worker-error terminal
+                                # write; leave the job recoverable without a
+                                # stale token. Normal/error paths release above.
+                                self._release_job_lease(job_id, worker_token)
+                                raise
+                            continue
+                except MaintenanceAdmissionBlocked:
+                    # Leave durable pending/recoverable jobs untouched until
+                    # maintenance ends; a wakeup/stop still interrupts the wait.
+                    pass
                 if not self._has_active_live_jobs():
                     break
                 self._apply_worker_wakeup.wait(timeout=1.0)
                 self._apply_worker_wakeup.clear()
         finally:
             with self._apply_worker_lock:
-                self._apply_worker_thread = None
+                if self._apply_worker_thread is threading.current_thread():
+                    self._apply_worker_thread = None
 
     def _claim_next_live_job(self) -> tuple[str, str] | None:
         now = self.timestamp_factory()
