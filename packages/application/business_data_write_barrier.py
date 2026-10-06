@@ -503,6 +503,75 @@ def release_barrier(
         return {**barrier_status(runtime_dir), "idempotent": False}
 
 
+def release_schedule_target_barrier(
+    runtime_dir: Path, *, window_id: str, plan_fingerprint: str, operation_id: str,
+    actor: str, reason: str,
+) -> dict[str, Any]:
+    """Separate exact fixed-target release; ordinary exact-prior API is unchanged.
+
+    No caller-provided success boolean: require the committed private operation,
+    immutable original pause baseline, selector and its exact target receipt.
+    The transition owns the existing restore lock through live target readback.
+    """
+    from packages.application import business_data_schedule_profile as profile
+    from packages.application import business_data_maintenance_pause as pause
+
+    runtime = Path(runtime_dir).resolve()
+    window = _validate_identifier(window_id, label="window_id")
+    exact_plan = _validate_fingerprint(plan_fingerprint)
+    normalized_actor = _validate_actor(actor)
+    normalized_reason = _bounded(reason, 1000)
+    if not normalized_reason:
+        raise BusinessDataWriteBarrierError("audited target release reason is required")
+    transition = profile.load_transition(runtime, operation_id)
+    selector = profile.load_selector(runtime)
+    old = pause.load_state(runtime)
+    target = (transition or {}).get("plan") or {}
+    receipt = (transition or {}).get("receipt") or {}
+    if (not transition or transition["phase"] not in {"committed", "released"}
+            or not selector or not old or old["baseline"] != target.get("baseline")
+            or old["baseline_fingerprint"] != exact_plan or old["window_id"] != window
+            or target.get("window_id") != window or target.get("baseline_fingerprint") != exact_plan
+            or receipt.get("schema_version") != profile.RECEIPT_SCHEMA
+            or receipt.get("exact_target_state_restored") is not True
+            or receipt.get("exact_prior_state_restored") is not False
+            or receipt.get("target_fingerprint") != target.get("fingerprint")
+            or receipt.get("operation_id") != operation_id
+            or receipt.get("window_id") != window or receipt.get("baseline_fingerprint") != exact_plan
+            or receipt.get("profile_fingerprint") != target.get("profile_fingerprint")
+            or receipt.get("control_signature") != target.get("raw_controls_fingerprint")
+            or receipt.get("status") != "restored"
+            or selector.get("operation_id") != operation_id):
+        raise BusinessDataWriteBarrierError("committed exact fixed schedule target proof is unproven")
+    for unit, digest in target["target_unit_digests"].items():
+        actual = (receipt.get("units") or {}).get(unit) or {}
+        if pause._unit_fingerprint(actual) != digest:
+            raise BusinessDataWriteBarrierError("target receipt unit configuration differs")
+        if unit.endswith(".timer") and [actual.get("is_enabled"), actual.get("is_active")] != target["target_timer_states"][unit]:
+            raise BusinessDataWriteBarrierError("target receipt timer state differs")
+    with _BarrierLock(runtime):
+        state = _load_state(runtime)
+        if (not state or state.get("window_id") != window or state.get("plan_fingerprint") != exact_plan
+                or state.get("window_kind") != "maintenance_pause" or not state.get("hold_confirmed")
+                or state.get("phase") not in {"held", "restoring", "released"}):
+            raise BusinessDataWriteBarrierError("held schedule target barrier identity differs")
+        if state["phase"] == "released":
+            if (state.get("restore") or {}).get("target_fingerprint") != target["fingerprint"]:
+                raise BusinessDataWriteBarrierError("released schedule target identity differs")
+            return {**barrier_status(runtime), "idempotent": True}
+        state.update(phase="released", active=False, released_at=_utc_now(), released_by=normalized_actor,
+                     release_reason=normalized_reason, restore={"status": "restored",
+                     "exact_target_state_restored": True, "exact_prior_state_restored": False,
+                     "operation_id": operation_id, "target_fingerprint": target["fingerprint"],
+                     "readback_fingerprint": _fingerprint(receipt)})
+        state["state_fingerprint"] = _fingerprint({key: value for key, value in state.items() if key != "state_fingerprint"})
+        _atomic_write_private_json(_state_path(runtime), state)
+        _append_private_audit(_audit_path(runtime), {"event": "schedule_target_barrier_released",
+                              "captured_at": state["released_at"], "window_id": window,
+                              "restore": state["restore"], "actor": normalized_actor})
+        return {**barrier_status(runtime), "idempotent": False}
+
+
 def abort_barrier_acquire(
     runtime_dir: Path,
     *,

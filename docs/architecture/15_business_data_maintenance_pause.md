@@ -126,3 +126,9 @@ HTTP auth smoke дополнен side-effect GET и cleaner PATCH/DELETE; browse
 cleaner/feedback/SPP/default maintenance/deploy-barrier smokes пройдены локально.
 Полные команды, hashes и приватные результаты — в `candidate-final-005.json`
 в evidence задачи; production acceptance выполняется отдельно после выпуска.
+
+Фиксированный переход в общее расписание описан отдельно в
+[dormant schedule profile](../runbooks/business_data_cycle_schedule_profile.md).
+Он сохраняет старый baseline и использует отдельный точный target receipt;
+обычный resume по-прежнему отказывает при intentional unit drift. Сам выпуск
+кода не включает профиль, а применение блокируют незакрытые code dependencies.
