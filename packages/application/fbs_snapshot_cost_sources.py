@@ -74,9 +74,8 @@ state. A timestamp cutoff alone never establishes the initialization boundary.
     conn = connection
     try:
         if conn is None:
-            conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA query_only=ON")
+            from packages.application.fbs_current_snapshot_policy import open_current_snapshot_readonly
+            conn = open_current_snapshot_readonly(db_path)
             conn.execute("BEGIN")
         with localcontext() as context:
             context.prec = 50  # matches the published official FBS estimate

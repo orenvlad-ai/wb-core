@@ -455,7 +455,7 @@ class RegistryUploadDbBackedRuntime:
         if _prepared_book is not None and publication_date not in plan.date_columns:
             raise ReadyPublicationConflict("ready_current_book_target_missing_date")
         book, expected_book = load(self.runtime_dir) if _prepared_book is None else _prepared_book
-        active_inventory = inventory_from_book(book, now=publication_now) if book and book["active"] else None
+        active_inventory = inventory_from_book(book, now=publication_now, runtime_dir=self.runtime_dir) if book and book["active"] else None
         if active_inventory is not None and publication_date in plan.date_columns and active_inventory.payload()["quality"] == "unavailable":
             raise ReadyPublicationConflict("ready_current_book_operand_unavailable")
         with readonly(self.db_path) as conn:

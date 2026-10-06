@@ -54,9 +54,8 @@ def readonly(db_path):
         with borrowed as conn:
             yield conn
         return
-    with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
+    from packages.application.fbs_current_snapshot_policy import open_current_snapshot_readonly
+    with closing(open_current_snapshot_readonly(db_path)) as conn:
         conn.execute("BEGIN")
         yield conn
 

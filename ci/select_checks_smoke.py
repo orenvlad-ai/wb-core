@@ -16,6 +16,16 @@ HEAD = "2" * 40
 # Independent expected commands: a package path has no automatic apps/ sibling.
 # Keep these assertions when splitting/renaming a selected production boundary.
 BOUNDARIES = {
+    "fbs_current_snapshot_policy_smoke": (
+        "packages/application/fbs_current_snapshot_policy.py",
+        "packages/application/ready_publication.py",
+        "packages/application/business_data_schedule_profile.py",
+        "packages/application/storage_registry.py",
+        "packages/application/official_fbs_stock_read.py",
+        "packages/application/fbs_accounting_runtime.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/inventory_planning_read_model.py",
+    ),
     "web_vitrina_history_activation_smoke": (
         "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json",
         "artifacts/registry_upload_http_entrypoint/systemd/wb-core-web-vitrina-finished-snapshot.service",

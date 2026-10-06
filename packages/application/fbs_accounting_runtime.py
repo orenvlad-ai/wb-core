@@ -381,7 +381,7 @@ def current_publication_receipt(runtime, *, now=None):
     book, version = load(runtime.runtime_dir)
     if not book or not book["active"]:
         return None
-    snapshot = inventory_from_book(book, now=now)
+    snapshot = inventory_from_book(book, now=now, runtime_dir=runtime.runtime_dir)
     data = snapshot.payload()
     if data["quality"] == "unavailable":
         raise ValueError("current_accounting_publication_unavailable")
@@ -485,7 +485,7 @@ class ActiveInventorySnapshot(FbsInventorySnapshot):
         return result
 
 
-def inventory_from_book(book, *, now=None):
+def inventory_from_book(book, *, now=None, runtime_dir=None):
     now = now or datetime.now(timezone.utc)
     day = current_business_date_iso(now)
     saved = book["presentations"].get(day)
@@ -494,7 +494,15 @@ def inventory_from_book(book, *, now=None):
     payload = deepcopy(saved or book["presentations"][max(book["presentations"])])
     payload["accounting_effective_date"] = book["effective_date"]
     captured = datetime.fromisoformat(payload["quantity_snapshot"]["captured_at"].replace("Z", "+00:00"))
-    if book.get("publication_error") or saved is None or not 0 <= (now - captured).total_seconds() <= 3 * 3600:
+    from packages.application.fbs_current_snapshot_policy import resolve_current_snapshot_policy, FbsSnapshotPolicyError
+    policy_error = False
+    try:
+        max_age = resolve_current_snapshot_policy(runtime_dir=runtime_dir).book_max_age_seconds
+    except FbsSnapshotPolicyError:
+        policy_error = True
+        max_age = 0
+    if (policy_error or book.get("publication_error") or saved is None
+            or not 0 <= (now - captured).total_seconds() <= max_age):
         payload["date"] = day
         payload["quality"] = "unavailable"
         def mask(value):
@@ -508,7 +516,8 @@ def inventory_from_book(book, *, now=None):
         # unknown quantities. The original source identity remains explicit.
         for row in payload["rows"].values():
             row["locations"] = []
-        payload["pending_documents"] = [{"reason": "fresh_current_accounting_snapshot_missing"}]
+        payload["pending_documents"] = [{"reason": "current_accounting_freshness_policy_unavailable" if policy_error
+                                         else "fresh_current_accounting_snapshot_missing"}]
     result = ActiveInventorySnapshot.__new__(ActiveInventorySnapshot)
     object.__setattr__(result, "_json", json.dumps(payload, ensure_ascii=False))
     return result
@@ -516,7 +525,7 @@ def inventory_from_book(book, *, now=None):
 
 def load_inventory(runtime_dir, *, now=None):
     book, _ = load(runtime_dir)
-    return inventory_from_book(book, now=now) if book and book["active"] else None
+    return inventory_from_book(book, now=now, runtime_dir=runtime_dir) if book and book["active"] else None
 
 
 _UNSET = object()
@@ -528,7 +537,7 @@ def materialize(plan, *, runtime_dir, now=None, book=_UNSET, book_version=None, 
         book, book_version = load(runtime_dir)
     if not book or not book["active"]:
         return plan
-    current = inventory_from_book(book, now=now)
+    current = inventory_from_book(book, now=now, runtime_dir=runtime_dir)
     metadata = deepcopy(dict(plan.metadata or {}))
     cells = metadata.setdefault("server_cell_presentation", {})
     # Only dates from this policy. Closed inventory presentations are immutable
@@ -610,7 +619,7 @@ def load_management_inventory(runtime_dir, plan, *, now):
     # revision. Preserve dated display, but never re-enable a forbidden operand.
     if current.get("publication_error"):
         return None
-    inventory = inventory_from_book(book, now=now)
+    inventory = inventory_from_book(book, now=now, runtime_dir=runtime_dir)
     return inventory if inventory.payload().get("quality") != "unavailable" else None
 
 
