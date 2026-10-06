@@ -263,7 +263,10 @@ def build_owned_cycle_history(*, runtime, config, cycle_owner, now):
     from apps.web_vitrina_finished_snapshot_build import systemd_admission, lock_admission
     from packages.application.web_vitrina_snapshot_admission import api_jobs_admission
     from packages.application.warehouse_functional_lock import warehouse_functional_job_is_busy
+    from packages.application.business_data_heavy_admission import require_heavy_owner
     source = Path(runtime.runtime_dir).resolve()
+    if require_heavy_owner(source).operation != 'cycle':
+        raise RuntimeError('owned cycle heavy admission is required')
     root = Path(config.candidate_root)
     if root != root.resolve() or root.is_relative_to(source) or not 0 < config.budget_seconds <= 240:
         raise ValueError('cycle_history_config_invalid')

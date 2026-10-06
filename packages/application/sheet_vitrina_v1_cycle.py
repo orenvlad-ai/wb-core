@@ -106,7 +106,7 @@ class CycleReceiptStore:
         finally:
             os.close(fd)
 
-    def accept(self, *, request_key, slot_utc, config, now):
+    def _request_identity(self, *, request_key, slot_utc, config):
         if not request_key or len(request_key) > 160:
             raise ValueError('invalid_cycle_request')
         slot = datetime.fromisoformat(slot_utc.replace('Z', '+00:00'))
@@ -116,11 +116,24 @@ class CycleReceiptStore:
         fingerprint = digest(canonical({'slot': slot_utc, 'history': config.fingerprint(), 'scope': 'full_auto_daily'}))
         cycle_id = digest(request_key).removeprefix('sha256:')[:32]
         slot_path = self.root / ('slot-' + digest(slot_utc).removeprefix('sha256:')[:32] + '.json')
+        return slot_utc, fingerprint, cycle_id, slot_path
+
+    def matching(self, *, request_key, slot_utc, config):
+        """Read-only dedup with the same scope checks; never grants admission."""
+        _, fingerprint, cycle_id, slot_path = self._request_identity(
+            request_key=request_key, slot_utc=slot_utc, config=config)
+        prior = self.read(cycle_id)
+        if prior is None and slot_path.exists():
+            prior = self.read(json.loads(slot_path.read_text())['cycle_id'])
+        if prior is not None and prior['request_fingerprint'] != fingerprint:
+            raise CycleConflict('cycle_request_conflict')
+        return prior
+
+    def accept(self, *, request_key, slot_utc, config, now):
+        slot_utc, fingerprint, cycle_id, slot_path = self._request_identity(
+            request_key=request_key, slot_utc=slot_utc, config=config)
         def same_request_or_slot():
-            prior = self.read(cycle_id)
-            if prior is None and slot_path.exists():
-                prior = self.read(json.loads(slot_path.read_text())['cycle_id'])
-            return prior
+            return self.matching(request_key=request_key, slot_utc=slot_utc, config=config)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         stream = (self.runtime_dir / '.sheet-vitrina-cycle.lock').open('a+b')
         try:
@@ -263,6 +276,9 @@ def daily_report_proof(block, *, attempts=(), payload=None):
 
 def run_cycle(entrypoint, store, receipt, history_config, log):
     """Only the owning admitted worker calls this; no external-stage retries."""
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    if require_heavy_owner(entrypoint.runtime.runtime_dir).operation != 'cycle':
+        raise RuntimeError('owned cycle heavy admission is required')
     source_adapter = entrypoint._cycle_sources()
     handle = None
     summary = None
