@@ -14,6 +14,7 @@ import re
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Protocol
+from weakref import WeakKeyDictionary
 
 from packages.adapters.ads_bids_block import HttpBackedAdsBidsSource
 from packages.adapters.ads_compact_block import HttpBackedAdsCompactSource
@@ -1045,6 +1046,16 @@ class _SyntheticNoPromoLiveSourceBlock:
         )
 
 
+class CollectedLivePlanSources:
+    """Opaque, in-process source capture, usable only by its collecting block.
+
+    Contains no public raw outcomes or mutable invocation context. It is not a
+    plan, persistence format or permission to repeat source collection.
+    """
+
+    __slots__ = ("__weakref__",)
+
+
 @dataclass
 class _CollectedBuildSources:
     """One invocation's accepted source outcomes; never a publishable plan."""
@@ -1054,6 +1065,9 @@ class _CollectedBuildSources:
     slots: dict[tuple, Any] = field(default_factory=dict)
     inputs: dict[str, Any] = field(default_factory=dict)
     capital_reader: OwnProductCapitalBlock | None = None
+    request_args: tuple = ()
+    request_kwargs: dict[str, Any] = field(default_factory=dict)
+    runtime_context: tuple | None = None
 
 
 def _registry_state_fingerprint(current_state):
@@ -1156,15 +1170,24 @@ class SheetVitrinaV1LivePlanBlock:
         self.current_web_source_sync = current_web_source_sync or ShellBackedWebSourceCurrentSync()
         self.closed_day_web_source_sync = closed_day_web_source_sync or self.current_web_source_sync
         self.now_factory = now_factory or _default_now_factory
+        # Identity-bound opaque handles cannot expose mutable captured payloads.
+        # Discarding a handle releases its private capture without a close API.
+        self._source_collections: WeakKeyDictionary = WeakKeyDictionary()
 
     def _diagnostic_timestamp(self) -> str:
         return _format_runtime_timestamp(self.now_factory())
 
     def build_plan(self, *args, **kwargs) -> SheetVitrinaV1Envelope:
-        from packages.application.ready_publication import (
-            ReadyPublicationConflict, capture_build_inputs, capture_expected,
-            check_build_inputs, check_expected, readonly,
-        )
+        return self.derive_collected(self.collect_sources(*args, **kwargs))
+
+    def collect_sources(self, *args, **kwargs) -> CollectedLivePlanSources:
+        """Capture the existing source effects once; do not derive/publish a plan.
+
+        Uses the same invocation arguments as build_plan, including one-shot
+        selectors. Collection is not read-only: existing capture/cache effects,
+        mature buyout, rollover and web sync retain their original behavior.
+        """
+        from packages.application.ready_publication import capture_build_inputs
         args = list(args)
         for index in (3, 4):
             if len(args) > index and args[index] is not None:
@@ -1172,13 +1195,40 @@ class SheetVitrinaV1LivePlanBlock:
         for key in ("source_keys", "metric_keys"):
             if kwargs.get(key) is not None:
                 kwargs[key] = tuple(kwargs[key])
-        collected = _CollectedBuildSources()
+        collected = _CollectedBuildSources(
+            request_args=tuple(args), request_kwargs=dict(kwargs),
+            runtime_context=(self.runtime, Path(self.runtime.runtime_dir).resolve(),
+                             Path(self.runtime.db_path).resolve()),
+        )
         with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as source_inputs:
             self._build_plan(*args, **kwargs, _collection=collected, _collect_only=True)
         # Material pins from before external collection are deliberately not
         # reused. Every local operand is read again below with fresh pins.
         collected.inputs = deepcopy({key: source_inputs[key] for key in (
             "sources", "consumed", "conflicts", "authority")})
+        handle = CollectedLivePlanSources()
+        self._source_collections[handle] = collected
+        return handle
+
+    def derive_collected(self, handle: CollectedLivePlanSources) -> SheetVitrinaV1Envelope:
+        """Derive from an owned capture with fresh local pins and no source fetch.
+
+        A handle binds its original request and runtime. Reuse retains source
+        outcomes but reopens material/ready operands; all existing source,
+        authority, scope and publication guards still apply.
+        """
+        from packages.application.ready_publication import (
+            ReadyPublicationConflict, capture_build_inputs, capture_expected,
+            check_build_inputs, check_expected, readonly,
+        )
+        if not isinstance(handle, CollectedLivePlanSources) or handle not in self._source_collections:
+            raise ReadyPublicationConflict("ready_collection_context_changed")
+        collected = self._source_collections[handle]
+        runtime, runtime_dir, db_path = collected.runtime_context
+        if (runtime is not self.runtime or runtime_dir != Path(self.runtime.runtime_dir).resolve()
+                or db_path != Path(self.runtime.db_path).resolve()):
+            raise ReadyPublicationConflict("ready_collection_context_changed")
+        args, kwargs = collected.request_args, collected.request_kwargs
         for attempt in range(1, 4):
             with capture_build_inputs(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir) as inputs:
                 if inputs["authority"] != collected.inputs["authority"]:
