@@ -120,9 +120,12 @@ def _assert_date_contract(
     _assert(runtime.list_ff_stock_operations() == receipts_before,
             "preview/cancel has no FF effects")
 
-    def run_inline(*, operation, runner):
+    def run_inline(*, operation, runner, on_accept, _heavy_lease, _on_no_start, _factual_correction_id):
         _assert(operation == "supplier_factual_date_correction", "correct worker")
-        return runner(lambda *_args, **_kwargs: None)
+        # The fake scheduler transfers the actual pre-acceptance lease exactly
+        # as the real worker does; it must not acquire a competing lease.
+        with _heavy_lease.entered():
+            return runner(lambda *_args, **_kwargs: None)
 
     # Only scheduling is synchronous; the persisted correction and its real
     # transaction/readback execute against this disposable runtime.
