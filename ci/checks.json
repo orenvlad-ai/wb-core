@@ -576,6 +576,19 @@
       ],
       "pip": ["openpyxl==3.1.5"]
     },
+    "web_vitrina_history_activation": {
+      "patterns": [
+        "artifacts/registry_upload_http_entrypoint/input/web_vitrina_history_runtime.json",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-web-vitrina-finished-snapshot.service",
+        "artifacts/registry_upload_http_entrypoint/systemd/wb-core-registry-http.service",
+        "apps/web_vitrina_history_candidate_build.py",
+        "apps/web_vitrina_history_activation_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/web_vitrina_history_activation_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "web_vitrina": {
       "patterns": [
         "apps/*web_vitrina*.py",
