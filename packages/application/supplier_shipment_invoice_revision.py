@@ -207,19 +207,25 @@ class SupplierInvoiceRevisionAdapter:
                     intent = dict(conn.execute(f"SELECT * FROM {TABLE} WHERE shipment_id=?", (request["shipment_id"],)).fetchone())
                     pending = {"status": "pending", "shipment_id": request["shipment_id"], "preparation_revision": intent["revision"], "source_fingerprint": intent["source_fingerprint"], "operation_id": operation_id}
                     conn.execute(f"INSERT INTO {AUDIT} VALUES(?,?,?,?,?,?)", (operation_id, request["shipment_id"], now, encoded(before).decode(), encoded(after).decode(), encoded(pending).decode()))
-            try:
-                queue = self.enqueue(root, before, after, now)
-            except Exception as exc:
-                queue = {**pending, "error": str(exc).replace("\n", " ")[:500]}
-            try:
-                with closing(connect(db, readonly=False)) as conn:
-                    with conn:
-                        update(conn, AUDIT, "operation_id", operation_id, {"queue_json": encoded(queue).decode()})
-            except Exception as exc:
-                # The atomic audit already records applied source + its durable
-                # pending identity. A late receipt failure cannot undo that fact.
-                queue = {**queue, "audit_receipt_pending": True, "receipt_error": str(exc).replace("\n", " ")[:500]}
-            return {"operation_id": operation_id, "disposition": "submitted", "queue": queue}
+        # Atomic source+intent+audit are durable before admitted continuation.
+        try:
+            queue = self.enqueue(root, before, after, now)
+            if queue.get("preparation_revision") != pending["preparation_revision"]:
+                # A concurrent newer source may have coalesced the demand.
+                # Its receipt must not complete this operation's old revision.
+                queue = {**pending, "reason": "source_revision_superseded",
+                         "latest_preparation_revision": queue.get("preparation_revision")}
+        except Exception as exc:
+            queue = {**pending, "error": str(exc).replace("\n", " ")[:500]}
+        try:
+            with closing(connect(db, readonly=False)) as conn:
+                with conn:
+                    update(conn, AUDIT, "operation_id", operation_id, {"queue_json": encoded(queue).decode()})
+        except Exception as exc:
+            # The atomic audit already records applied source + its durable
+            # pending identity. A late receipt failure cannot undo that fact.
+            queue = {**queue, "audit_receipt_pending": True, "receipt_error": str(exc).replace("\n", " ")[:500]}
+        return {"operation_id": operation_id, "disposition": "submitted", "queue": queue}
 
     def enqueue(self, root, before, after, now):
         from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime

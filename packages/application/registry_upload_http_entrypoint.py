@@ -6988,10 +6988,27 @@ class RegistryUploadHttpEntrypoint:
         return self._replay_ff_document_queue(stable_source_ids=[stable_source_id])
 
     def _replay_ff_document_queue(
+        self, *, stable_source_ids: Iterable[str],
+    ) -> dict[str, Any]:
+        # The source and exact targeted queue already committed. Admission is
+        # before queue scans/plans/domain locks; busy never claims running.
+        from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+        identities = sorted({str(item) for item in stable_source_ids if str(item)})
+        try:
+            with heavy_admitted(self.runtime.runtime_dir, operation="ff-targeted-replay"):
+                return self._replay_ff_document_queue_admitted(stable_source_ids=identities)
+        except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+            return {"status": "queued", "deferred": True, "reason": str(exc),
+                    "stable_source_ids": identities}
+
+    def _replay_ff_document_queue_admitted(
         self,
         *,
         stable_source_ids: Iterable[str],
     ) -> dict[str, Any]:
+        from packages.application.business_data_heavy_admission import require_heavy_owner
+        require_heavy_owner(self.runtime.runtime_dir)
         stable_ids = sorted({str(item) for item in stable_source_ids if str(item)})
         if not stable_ids:
             return {"status": "idle", "reason": "stable_source_missing"}

@@ -144,6 +144,19 @@ def read_request(conn: sqlite3.Connection, upload_id: str, revision: str) -> dic
 
 
 def drain_fulfillment_recalc_intents(runtime: Any) -> dict[str, Any]:
+    """Nonblocking derived continuation; saved source intent is never consumed on busy."""
+    from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+    from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
+    try:
+        with heavy_admitted(runtime.runtime_dir, operation="fulfillment-preparation"):
+            return _drain_fulfillment_recalc_intents(runtime)
+    except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+        return {"status": "pending", "deferred": True, "reason": str(exc), "requests": []}
+
+
+def _drain_fulfillment_recalc_intents(runtime: Any) -> dict[str, Any]:
+    from packages.application.business_data_heavy_admission import require_heavy_owner
+    require_heavy_owner(runtime.runtime_dir)
     from packages.application.sqlite_contention import connect_sqlite
     with connect_sqlite(runtime.db_path) as conn:
         conn.row_factory = sqlite3.Row

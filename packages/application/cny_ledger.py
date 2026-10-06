@@ -520,12 +520,21 @@ class CnyLedgerBlock:
         return document
 
     def replay_ledger(self, *, reason: str = "manual") -> dict[str, Any]:
-        from packages.application.cny_preparation_intents import ensure_account_request, drain_cny_preparation_intents
+        from packages.application.cny_preparation_intents import (
+            ensure_account_request, drain_cny_preparation_intents, read_account_request, _outcome,
+        )
+        from packages.application.business_data_heavy_admission import HeavyAdmissionBusy, heavy_admitted
+        from packages.application.business_data_procedure_admission import MaintenanceAdmissionBlocked
 
         try:
-            self._sync_supplier_payment_documents_from_financial_documents(now=self.timestamp_factory())
-            ensure_account_request(self.runtime)
-            return drain_cny_preparation_intents(self.runtime, block=self, reason=reason)
+            with heavy_admitted(self.runtime.runtime_dir, operation="cny-preparation"):
+                self._sync_supplier_payment_documents_from_financial_documents(now=self.timestamp_factory())
+                ensure_account_request(self.runtime)
+                return drain_cny_preparation_intents(self.runtime, block=self, reason=reason)
+        except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+            request = read_account_request(self.runtime)
+            return {**(_outcome(request) if request is not None else {"status": "pending"}),
+                    "deferred": True, "reason": str(exc)}
         except Exception as exc:
             # Public writers call this after the canonical document commit.
             # A late failure cannot ask the operator to submit money again.

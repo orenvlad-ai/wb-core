@@ -963,6 +963,32 @@
       "pip": [
         "openpyxl==3.1.5"
       ]
+    },
+    "heavy_derived_intents": {
+      "patterns": [
+        "packages/application/supplier_preparation_intents.py",
+        "packages/application/cny_preparation_intents.py",
+        "packages/application/cny_ledger.py",
+        "packages/application/fulfillment_recalc_intents.py",
+        "packages/application/nomenclature_activation_intents.py",
+        "packages/application/ff_pool_dense_fbs.py",
+        "packages/application/registry_upload_db_backed_runtime.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/application/supplier_shipment_invoice_revision.py",
+        "apps/supplier_preparation_intents_smoke.py",
+        "apps/cny_preparation_intents_smoke.py",
+        "apps/heavy_derived_intents_smoke.py",
+        "docs/runbooks/heavy_derived_intents.md"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/heavy_derived_intents_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
     }
   }
 }
