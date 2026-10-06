@@ -6433,11 +6433,16 @@ class RegistryUploadHttpEntrypoint:
         return self.wb_supplies_block.list_supplies(params)
 
     def handle_wb_supplies_sync_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        result = self.wb_supplies_block.sync_supplies(payload)
-        return {
-            **result,
-            "transit_cost_collection": self.wb_supplies_block.collect_all_due_transit_costs(),
-        }
+        from packages.application.wb_supplies import _normalize_sync_request, SYNC_MODE_FULL_BACKFILL
+        request = _normalize_sync_request(payload)
+        if request["mode"] == SYNC_MODE_FULL_BACKFILL:
+            return self.wb_supplies_block._start_combined_full_backfill(request)
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplies"):
+            result = self.wb_supplies_block.sync_supplies(payload)
+            return {
+                **result,
+                "transit_cost_collection": self.wb_supplies_block.collect_all_due_transit_costs(),
+            }
 
     def handle_wb_supplies_backfill_request(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.start_full_backfill(payload)
@@ -6469,6 +6474,9 @@ class RegistryUploadHttpEntrypoint:
 
     def handle_wb_supplies_transit_cost_status_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.get_transit_cost_enrichment_status(params)
+
+    def handle_wb_supplies_cached_detail_request(self, supply_id: str) -> dict[str, Any] | None:
+        return self.wb_supplies_block.cached_supply_detail_if_deferred(supply_id)
 
     def handle_wb_supplies_detail_request(self, supply_id: str) -> dict[str, Any]:
         return self.wb_supplies_block.get_supply(supply_id)

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+from functools import wraps
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import sqlite3
 from math import ceil
 import threading
 import time
@@ -26,8 +28,12 @@ from packages.adapters.seller_portal_transit_costs import (
     SellerPortalTransitCostNetworkJsonSource,
     SellerPortalTransitCostSourceError,
 )
+from packages.application.business_data_heavy_admission import (
+    HeavyAdmissionBusy, HeavyAdmissionLease, current_heavy_owner,
+    heavy_admitted, heavy_admission_status, require_heavy_owner,
+)
 from packages.application.business_data_procedure_admission import (
-    admitted_thread, admitted_write,
+    MaintenanceAdmissionBlocked, admitted_thread, admitted_write,
 )
 from packages.application.ff_stock_ledger import FfStockLedgerBlock
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
@@ -166,6 +172,23 @@ class WbSuppliesBlockError(RuntimeError):
     def __init__(self, message: str, *, http_status: int = 502) -> None:
         self.http_status = int(http_status)
         super().__init__(message)
+
+
+def _heavy_supplies_method(method):
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplies"):
+            return method(self, *args, **kwargs)
+    return admitted
+
+
+def _run_heavy_supplies_worker(lease, target, *args):
+    try:
+        with lease.entered():
+            return target(*args)
+    finally:
+        lease.close()
 
 
 class WbSuppliesBlock:
@@ -373,6 +396,12 @@ class WbSuppliesBlock:
         request = _normalize_sync_request(raw_payload)
         if request["mode"] == SYNC_MODE_FULL_BACKFILL:
             return self.start_full_backfill(request)
+        self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplies"):
+            return self._sync_supplies_admitted(request, record_ff_movements=record_ff_movements)
+
+    def _sync_supplies_admitted(self, request, *, record_ff_movements):
+        require_heavy_owner(self.runtime.runtime_dir)
         synced_at = self.timestamp_factory()
         warnings: list[str] = []
         run_id = _new_run_id()
@@ -631,6 +660,7 @@ class WbSuppliesBlock:
         response["sync"]["fbs_orders_collection"] = fbs_collection
         return response
 
+    @_heavy_supplies_method
     def sync_functional_sources(self, *, record_ff_movements: bool = True) -> dict[str, Any]:
         """Fetch one complete supply source set for functional warehouse replay.
 
@@ -727,19 +757,43 @@ class WbSuppliesBlock:
         }
 
     def start_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        with admitted_write(self.runtime.runtime_dir):
-            return self._start_full_backfill_admitted(payload)
+        return self._admit_full_backfill_start(payload)
 
-    def _start_full_backfill_admitted(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _start_combined_full_backfill(self, payload):
+        # Fixed internal tail; no request/argv value can supply a callback.
+        return self._admit_full_backfill_start(payload, _after_backfill=self.collect_all_due_transit_costs)
+
+    def _admit_full_backfill_start(self, payload, *, _after_backfill=None):
+        self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+        with admitted_write(self.runtime.runtime_dir):
+            heavy = HeavyAdmissionLease(self.runtime.runtime_dir, operation="supplies_backfill", independent=True)
+            handoff = []
+            try:
+                return self._start_full_backfill_admitted(
+                    payload, _heavy=heavy, _handoff=handoff, _after_backfill=_after_backfill,
+                )
+            finally:
+                if not handoff:
+                    heavy.close()
+                else:
+                    # The existing CPython no-start proof preserves a possible
+                    # native child's complete reservation, even before bootstrap.
+                    heavy.close_if_unstarted(handoff[0])
+
+    def _start_full_backfill_admitted(
+        self, payload: Mapping[str, Any] | None = None, *,
+        _heavy: HeavyAdmissionLease, _handoff: list, _after_backfill=None,
+    ) -> dict[str, Any]:
         request = _normalize_backfill_request(payload or {})
         with self._run_lock:
             active_run = self.runtime.load_active_wb_supplies_sync_run()
             if active_run:
+                combined_unknown = active_run.get("phase") == "backfill_completed_awaiting_transit"
                 return {
                     "contract_name": CONTRACT_NAME,
                     "contract_version": CONTRACT_VERSION,
-                    "status": active_run.get("status") or "running",
-                    "accepted": True,
+                    "status": "unknown" if combined_unknown else active_run.get("status") or "running",
+                    "accepted": not combined_unknown,
                     "run_id": active_run.get("run_id"),
                     "active_run": active_run,
                     "sync_state": self.runtime.load_wb_supplies_sync_state(),
@@ -760,11 +814,12 @@ class WbSuppliesBlock:
             try:
                 thread = admitted_thread(
                     self.runtime.runtime_dir,
-                    target=self._run_full_backfill_guarded,
-                    args=(run_id, request),
+                    target=_run_heavy_supplies_worker,
+                    args=(_heavy, self._run_full_backfill_guarded, run_id, request, _after_backfill),
                     name=f"wb-supplies-backfill-{run_id[:8]}",
                     daemon=True,
                 )
+                _handoff.append(thread)
                 thread.start()
             except BaseException:
                 if thread is not None and not thread.abort_if_unstarted():
@@ -786,6 +841,7 @@ class WbSuppliesBlock:
             "sync_state": self.runtime.load_wb_supplies_sync_state(),
         }
 
+    @_heavy_supplies_method
     def run_full_backfill(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         request = _normalize_backfill_request(payload or {})
         run_id = str(request.get("run_id") or _new_run_id())
@@ -816,10 +872,26 @@ class WbSuppliesBlock:
         }
 
     def start_transit_cost_enrichment(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
         with admitted_write(self.runtime.runtime_dir):
-            return self._start_transit_cost_enrichment_admitted(payload)
+            heavy = HeavyAdmissionLease(self.runtime.runtime_dir, operation="supplies_transit", independent=True)
+            handoff = []
+            try:
+                return self._start_transit_cost_enrichment_admitted(
+                    payload, _heavy=heavy, _handoff=handoff,
+                )
+            finally:
+                if not handoff:
+                    heavy.close()
+                else:
+                    # The existing CPython no-start proof preserves a possible
+                    # native child's complete reservation, even before bootstrap.
+                    heavy.close_if_unstarted(handoff[0])
 
-    def _start_transit_cost_enrichment_admitted(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _start_transit_cost_enrichment_admitted(
+        self, payload: Mapping[str, Any] | None = None, *,
+        _heavy: HeavyAdmissionLease, _handoff: list,
+    ) -> dict[str, Any]:
         request = _normalize_transit_cost_enrichment_request(payload or {})
         with self._transit_cost_run_lock:
             active_run = self._reconcile_stale_transit_cost_run()
@@ -865,12 +937,13 @@ class WbSuppliesBlock:
                 try:
                     thread = admitted_thread(
                         self.runtime.runtime_dir,
-                        target=self._run_transit_cost_enrichment_guarded,
-                        args=(run_id, candidates),
+                        target=_run_heavy_supplies_worker,
+                        args=(_heavy, self._run_transit_cost_enrichment_guarded, run_id, candidates),
                         name=f"wb-transit-cost-{run_id[:8]}",
                         daemon=True,
                     )
                     self._transit_cost_threads[run_id] = thread
+                    _handoff.append(thread)
                     thread.start()
                 except BaseException:
                     if thread is not None and not thread.abort_if_unstarted():
@@ -897,6 +970,7 @@ class WbSuppliesBlock:
             "active_run": run,
         }
 
+    @_heavy_supplies_method
     def collect_transit_costs(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Run one durable autonomous batch in the current process.
 
@@ -961,6 +1035,7 @@ class WbSuppliesBlock:
             "coverage": self.transit_cost_coverage(),
         }
 
+    @_heavy_supplies_method
     def collect_all_due_transit_costs(
         self,
         *,
@@ -1224,6 +1299,92 @@ class WbSuppliesBlock:
         }
 
     def get_supply(self, supply_id: str) -> dict[str, Any]:
+        self.runtime.runtime_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with heavy_admitted(self.runtime.runtime_dir, operation="supplies"):
+                return self._get_supply_admitted(supply_id)
+        except (HeavyAdmissionBusy, MaintenanceAdmissionBlocked) as exc:
+            reason = "heavy_busy" if isinstance(exc, HeavyAdmissionBusy) else "maintenance"
+            cached = self._cached_supply_detail(supply_id, reason=reason)
+            if cached is None:
+                raise
+            return cached
+
+    def cached_supply_detail_if_deferred(self, supply_id: str) -> dict[str, Any] | None:
+        """RO preflight before HTTP maintenance admission can emit a response."""
+        from packages.application.business_data_write_barrier import barrier_status
+        if current_heavy_owner(self.runtime.runtime_dir) is not None:
+            return None
+        if barrier_status(self.runtime.runtime_dir)["active"]:
+            reason = "maintenance"
+        elif heavy_admission_status(self.runtime.runtime_dir).get("idle") is False:
+            reason = "heavy_busy"
+        else:
+            return None
+        return self._cached_supply_detail(supply_id, reason=reason)
+
+    def _cached_supply_detail(self, supply_id: str, *, reason: str) -> dict[str, Any] | None:
+        from packages.application.fulfillment_services import FulfillmentServicesBlock
+        from packages.application.registry_upload_db_backed_runtime import (
+            _wb_supply_record_from_row, _wb_supply_transit_cost_enrichment_to_dict,
+        )
+        from packages.application.web_vitrina_window_read_context import (
+            WindowReadContextError, window_read_context,
+        )
+        normalized_id = str(supply_id or "").strip()
+        if not normalized_id:
+            return None
+        values = {normalized_id, f"supply:{normalized_id}",
+                  normalized_id.removeprefix("supply:"), normalized_id.removeprefix("preorder:")}
+        placeholders = ",".join("?" for _ in values)
+        try:
+            # Direct SELECTs avoid legacy runtime mkdir/schema/rw loaders. The
+            # record, transit evidence and approved FF overlay share one pinned
+            # query-only operational snapshot; no provider/FF writer is called.
+            with window_read_context(self.runtime.db_path) as context:
+                conn = context.borrow(self.runtime.db_path)
+                row = conn.execute(
+                    f"SELECT * FROM sheet_vitrina_v1_wb_supplies WHERE "
+                    f"supply_id IN ({placeholders}) OR cache_key IN ({placeholders}) "
+                    f"OR wb_supply_id IN ({placeholders}) OR preorder_id IN ({placeholders}) LIMIT 1",
+                    tuple(values) * 4,
+                ).fetchone()
+                if row is None:
+                    return None
+                record = _wb_supply_record_from_row(row)
+                # Missing operands cannot become a fabricated empty composition.
+                if not isinstance(record["raw_detail"], Mapping) or not isinstance(record["raw_goods"], list):
+                    return None
+                transit_values = {normalized_id, normalized_id.removeprefix("supply:"),
+                                  normalized_id.removeprefix("preorder:")}
+                transit = conn.execute(
+                    "SELECT * FROM sheet_vitrina_v1_wb_supply_transit_cost_enrichment "
+                    "WHERE supply_id IN (" + ",".join("?" for _ in transit_values) + ") LIMIT 1",
+                    tuple(transit_values),
+                ).fetchone()
+                enrichment = _wb_supply_transit_cost_enrichment_to_dict(transit) if transit else None
+                overlay = FulfillmentServicesBlock.approved_overlay_in_connection(conn)
+                record["normalized"] = {
+                    **record["normalized"],
+                    **{key: record[key] for key in ("raw_list", "raw_detail", "raw_goods", "raw_package")},
+                }
+                detail = _supply_detail_payload(record)
+                supply = _row_with_transit_cost_enrichment(
+                    detail["supply"], _transit_cost_enrichment_map([enrichment] if enrichment else []),
+                )
+                detail["supply"] = _row_with_display_fields(_row_with_fulfillment_overlay(supply, overlay))
+                return {
+                    "contract_name": CONTRACT_NAME, "contract_version": CONTRACT_VERSION,
+                    "meta": {"source": WB_SUPPLIES_SOURCE_LABEL, "read_only": True,
+                             "enrichment": {"status": "deferred", "reason": reason, "attempted": False}},
+                    **detail,
+                }
+        except (WindowReadContextError, sqlite3.OperationalError):
+            # Absent/incomplete cache or overlay schema cannot authorize a fake
+            # successful card. The caller retains its actual busy/maintenance.
+            return None
+
+    def _get_supply_admitted(self, supply_id: str) -> dict[str, Any]:
         normalized_id = str(supply_id or "").strip()
         if not normalized_id:
             raise WbSuppliesBlockError("supply_id is required", http_status=400)
@@ -1257,6 +1418,7 @@ class WbSuppliesBlock:
             overlay = {}
         return [_row_with_fulfillment_overlay(row, overlay) for row in rows]
 
+    @_heavy_supplies_method
     def _ensure_supply_detail_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(record.get("normalized") or {})
         raw_list = record.get("raw_list") if isinstance(record.get("raw_list"), Mapping) else normalized.get("raw_list")
@@ -1412,6 +1574,7 @@ class WbSuppliesBlock:
         return candidates
 
     def _run_transit_cost_enrichment_guarded(self, run_id: str, candidates: list[Mapping[str, Any]]) -> None:
+        require_heavy_owner(self.runtime.runtime_dir)
         try:
             self._run_transit_cost_enrichment(run_id, candidates)
         except Exception as exc:  # noqa: BLE001 - background job must persist controlled failure.
@@ -1439,6 +1602,7 @@ class WbSuppliesBlock:
                 self._transit_cost_threads.pop(run_id, None)
 
     def _run_transit_cost_enrichment(self, run_id: str, candidates: list[Mapping[str, Any]]) -> dict[str, Any]:
+        require_heavy_owner(self.runtime.runtime_dir)
         started_at = self.timestamp_factory()
         logs = [_run_log(started_at, f"Seller Portal transit cost enrichment started; candidates={len(candidates)}")]
         # Persist the actual fetch phase before contacting WB. If this small
@@ -1604,9 +1768,14 @@ class WbSuppliesBlock:
             **counters,
         )
 
-    def _run_full_backfill_guarded(self, run_id: str, request: Mapping[str, Any]) -> None:
+    def _run_full_backfill_guarded(
+        self, run_id: str, request: Mapping[str, Any], _after_backfill=None,
+    ) -> None:
+        require_heavy_owner(self.runtime.runtime_dir)
         try:
-            self._run_full_backfill(run_id, request)
+            run = self._run_full_backfill(
+                run_id, request, _defer_terminal=_after_backfill is not None,
+            )
         except Exception as exc:  # noqa: BLE001 - background job must persist controlled failure.
             failed_at = self.timestamp_factory()
             block_error = _to_block_error(exc)
@@ -1630,8 +1799,65 @@ class WbSuppliesBlock:
                 backfill_complete=False,
                 may_have_more=True,
             )
+            return
+        if _after_backfill is not None:
+            self._finish_combined_transit(run_id, run, _after_backfill)
 
-    def _run_full_backfill(self, run_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+    def _finish_combined_transit(self, run_id, source_run, tail):
+        require_heavy_owner(self.runtime.runtime_dir)
+        source_status = source_run["_backfill_source_status"]
+        logs = list(source_run.get("logs") or [])
+        try:
+            result = dict(tail())
+            tail_status = str(result.get("status") or "unknown")
+            if source_status == "success" and tail_status == "complete":
+                status = "success"
+            elif source_status == "failed":
+                status = "failed"
+            else:
+                status = "partial"
+            phase = "combined_completed" if status == "success" else "transit_cost_collection_degraded"
+            error = "" if status == "success" else f"backfill={source_status}; transit={tail_status}"
+            proof = {
+                "source_status": source_status,
+                "transit_status": tail_status,
+                "run_ids": [str(item.get("run_id") or "") for item in result.get("batches", [])[:20]],
+            }
+        except Exception as exc:
+            status = "failed"
+            phase = "transit_cost_collection_failed"
+            error = _safe_error_message(exc)
+            proof = {"source_status": source_status, "transit_error": type(exc).__name__}
+        completed_at = self.timestamp_factory()
+        logs = (logs + [_run_log(
+            completed_at, "combined transit proof: " + json.dumps(proof, sort_keys=True),
+        )])[-20:]
+        self.runtime.update_wb_supplies_sync_run(
+            run_id, status=status, phase=phase, updated_at=completed_at,
+            completed_at=completed_at, last_error=error, logs=logs,
+        )
+        # Source sync_state/cursors were already saved. Never reset/replay them
+        # because a later transit operation failed or had a degraded outcome.
+
+    def _finish_backfill_source(self, run_id, *, _defer_terminal, **fields):
+        source_status = fields["status"]
+        if _defer_terminal:
+            proof = {"status": source_status, "phase": fields["phase"]}
+            fields["logs"] = (list(fields.get("logs") or []) + [_run_log(
+                fields["updated_at"], "combined backfill proof: " + json.dumps(proof, sort_keys=True),
+            )])[-20:]
+            fields.update(
+                status="running", phase="backfill_completed_awaiting_transit", completed_at=None,
+            )
+        result = self.runtime.update_wb_supplies_sync_run(run_id, **fields)
+        if _defer_terminal:
+            result["_backfill_source_status"] = source_status
+        return result
+
+    def _run_full_backfill(
+        self, run_id: str, request: Mapping[str, Any], *, _defer_terminal=False,
+    ) -> dict[str, Any]:
+        require_heavy_owner(self.runtime.runtime_dir)
         started_at = self.timestamp_factory()
         limit = int(request.get("limit") or DEFAULT_SYNC_LIMIT)
         state = self.runtime.load_wb_supplies_sync_state()
@@ -1812,8 +2038,8 @@ class WbSuppliesBlock:
                 backfill_complete=False,
             )
             status = "partial" if counters["raw_fetched"] > 0 else "failed"
-            return self.runtime.update_wb_supplies_sync_run(
-                run_id,
+            return self._finish_backfill_source(
+                run_id, _defer_terminal=_defer_terminal,
                 status=status,
                 phase="failed",
                 updated_at=failed_at,
@@ -1860,8 +2086,8 @@ class WbSuppliesBlock:
                 _run_log(completed_at, f"ФФ stock debits created={ff_stock_debits.get('created_count', 0)}"),
             ]
         )[-20:]
-        return self.runtime.update_wb_supplies_sync_run(
-            run_id,
+        return self._finish_backfill_source(
+            run_id, _defer_terminal=_defer_terminal,
             status=status,
             phase="completed" if backfill_complete else "partial",
             updated_at=completed_at,

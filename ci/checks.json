@@ -62,6 +62,27 @@
     }
   },
   "groups": {
+    "business_heavy_supplies": {
+      "patterns": [
+        "packages/application/wb_supplies.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "apps/wb_supplies_backfill_live.py",
+        "apps/wb_supplies_goods_composition_diagnostics.py",
+        "apps/business_data_heavy_supplies_smoke.py"
+      ],
+      "commands": [
+        ["python3", "apps/business_data_heavy_supplies_smoke.py"],
+        ["python3", "apps/wb_supplies_backfill_smoke.py"],
+        ["python3", "apps/wb_supplies_transit_cost_enrichment_smoke.py"],
+        ["python3", "apps/wb_supplies_incremental_sync_smoke.py"],
+        ["python3", "apps/wb_supplies_goods_composition_smoke.py"],
+        ["python3", "apps/wb_supplies_status_accepted_refresh_smoke.py"],
+        ["python3", "apps/wb_supplies_first20_parity_smoke.py"],
+        ["python3", "apps/sheet_vitrina_v1_wb_supplies_http_smoke.py"]
+      ],
+      "pip": ["openpyxl==3.1.5"]
+    },
     "business_heavy_sources": {
       "patterns": [
         "packages/application/business_data_heavy_admission.py",

@@ -3042,6 +3042,11 @@ def _build_handler(
                 try:
                     payload = _load_optional_request_payload(self)
                     result = entrypoint.handle_wb_supplies_sync_request(payload)
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {"status": "busy", "reason": str(exc), "retryable": True,
+                         "effects_started": False, "accepted": False})
+                    return
                 except WbSuppliesBlockError as exc:
                     _write_json_response(
                         self,
@@ -3067,6 +3072,11 @@ def _build_handler(
                 try:
                     payload = _load_optional_request_payload(self)
                     result = entrypoint.handle_wb_supplies_backfill_request(payload)
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {"status": "busy", "reason": str(exc), "retryable": True,
+                         "effects_started": False, "accepted": False})
+                    return
                 except WbSuppliesBlockError as exc:
                     _write_json_response(
                         self,
@@ -3098,6 +3108,11 @@ def _build_handler(
                         if parsed.path == DEFAULT_WB_SUPPLIES_TRANSIT_COST_CHECK_PATH
                         else entrypoint.handle_wb_supplies_transit_cost_enrich_request(payload)
                     )
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {"status": "busy", "reason": str(exc), "retryable": True,
+                         "effects_started": False, "accepted": False})
+                    return
                 except WbSuppliesBlockError as exc:
                     _write_json_response(
                         self,
@@ -5327,7 +5342,16 @@ def _build_handler(
             if _is_wb_supply_detail_path(parsed.path):
                 try:
                     supply_id = _resolve_wb_supply_id_from_detail_path(parsed.path)
-                    payload = entrypoint.handle_wb_supplies_detail_request(supply_id)
+                    payload = entrypoint.handle_wb_supplies_cached_detail_request(supply_id)
+                    if payload is None:
+                        if not _ensure_business_data_write_allowed(self, parsed.path):
+                            return
+                        payload = entrypoint.handle_wb_supplies_detail_request(supply_id)
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT,
+                        {"status": "busy", "reason": str(exc), "retryable": True,
+                         "effects_started": False, "accepted": False})
+                    return
                 except WbSuppliesBlockError as exc:
                     _write_json_response(
                         self,
