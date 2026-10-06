@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import wraps
+from packages.application.business_data_heavy_admission import heavy_admitted
+
 from contextlib import closing, contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -106,6 +109,14 @@ NON_SEMANTIC_COLLATERAL_COLUMNS = {
     "sheet_vitrina_v1_supplier_financial_documents": frozenset({"updated_at"}),
 }
 
+
+
+def _heavy_method(method):
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplier-factual"):
+            return method(self, *args, **kwargs)
+    return admitted
 
 class SupplierShipmentFactualCorrectionError(RuntimeError):
     """A safe operator-visible correction failure."""
@@ -234,6 +245,7 @@ class SupplierShipmentFactualCorrectionBlock:
                 raise
         return self.get_job(correction_id)
 
+    @_heavy_method
     def run_job(self, correction_id: str, emit: ProgressEmitter | None = None) -> dict[str, Any]:
         job = self.get_job(correction_id)
         if job["status"] == "zero_change":
@@ -301,8 +313,18 @@ class SupplierShipmentFactualCorrectionBlock:
                 completed=True,
             )
             return self.get_job(correction_id)
-        except Exception as exc:
+        except BaseException as exc:
             safe_message = _safe_error_message(exc)
+            if not isinstance(exc, Exception):
+                try:
+                    self._set_job_state(
+                        correction_id, status="needs_review", phase="requires_review",
+                        progress_text="Требует разбора", error_code=type(exc).__name__,
+                        error_message=safe_message, completed=True,
+                    )
+                except Exception as cleanup_error:
+                    exc.add_note('factual cancellation readback failed: ' + type(cleanup_error).__name__)
+                raise
             needs_review = isinstance(exc, WarehouseTargetedReplayError) and any(
                 marker in safe_message
                 for marker in (
@@ -392,6 +414,7 @@ class SupplierShipmentFactualCorrectionBlock:
         ) as candidate:
             yield candidate
 
+    @_heavy_method
     def apply(
         self,
         *,

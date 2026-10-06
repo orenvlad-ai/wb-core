@@ -989,6 +989,57 @@
       "pip": [
         "openpyxl==3.1.5"
       ]
+    },
+    "business_heavy_operator_producers": {
+      "patterns": [
+        "packages/application/ff_pool_surfaces.py",
+        "packages/application/ff_pool_dense_fbs.py",
+        "packages/application/supplier_shipment_factual_correction.py",
+        "packages/application/warehouse_targeted_replay.py",
+        "packages/application/registry_upload_http_entrypoint.py",
+        "packages/adapters/registry_upload_http_entrypoint.py",
+        "apps/supplier_shipment_factual_date_correction.py",
+        "apps/warehouse_cost_unified_recovery.py",
+        "apps/business_data_heavy_operator_producers_smoke.py",
+        "apps/supplier_confirmation_flows_smoke.py"
+      ],
+      "commands": [
+        [
+          "python3",
+          "apps/business_data_heavy_operator_producers_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_dense_fbs_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_surfaces_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/ff_pool_surfaces_http_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_targeted_replay_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/warehouse_cost_unified_recovery_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/supplier_shipment_factual_date_correction_smoke.py"
+        ],
+        [
+          "python3",
+          "apps/supplier_confirmation_flows_smoke.py"
+        ]
+      ],
+      "pip": [
+        "openpyxl==3.1.5"
+      ]
     }
   }
 }

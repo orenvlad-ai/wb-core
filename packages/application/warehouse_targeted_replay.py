@@ -9,6 +9,9 @@ the exact before image recorded in the audit row.
 
 from __future__ import annotations
 
+from functools import wraps
+from packages.application.business_data_heavy_admission import heavy_admitted
+
 from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -54,6 +57,14 @@ QUEUE_TABLE = "sheet_vitrina_v1_warehouse_targeted_recalc_queue"
 FINANCE_RAW_TABLE = "wb_finance_weekly_raw_rows"
 ZERO = Decimal("0")
 
+
+
+def _heavy_method(method):
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with heavy_admitted(self.runtime.runtime_dir, operation="supplier-targeted"):
+            return method(self, *args, **kwargs)
+    return admitted
 
 class WarehouseTargetedReplayError(RuntimeError):
     """A bounded target replay could not be proven safe."""
@@ -651,6 +662,7 @@ class WarehouseTargetedSupplierReplay:
             },
         }
 
+    @_heavy_method
     def apply(
         self,
         plan: Mapping[str, Any],

@@ -4584,53 +4584,79 @@ class RegistryUploadHttpEntrypoint:
                 shipment_id,
                 correction_payload,
             )
-            correction = self.supplier_shipment_factual_correction_block.create_job(
-                shipment_id=shipment_id,
-                new_actual_shipment_date=new_value,
-                actor=actor or "operator",
+            heavy = HeavyAdmissionLease(
+                self.runtime.runtime_dir, operation="supplier_factual_date_correction", independent=True,
             )
-            if correction.get("status") == "zero_change":
-                return self.handle_supplier_shipments_detail_request(
-                    shipment_id,
-                    supplier_safe=supplier_safe,
+            accepted_job = []
+            try:
+                correction = self.supplier_shipment_factual_correction_block.create_job(
+                    shipment_id=shipment_id,
+                    new_actual_shipment_date=new_value,
+                    actor=actor or "operator",
                 )
-            if correction.get("deduplicated"):
+                if correction.get("status") == "zero_change":
+                    return self.handle_supplier_shipments_detail_request(
+                        shipment_id,
+                        supplier_safe=supplier_safe,
+                    )
+                if correction.get("deduplicated"):
+                    execution = self.operator_jobs.factual_correction_execution(str(correction["correction_id"]))
+                    response = {
+                        "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
+                        "status": "accepted" if execution["worker_present"] else "needs_review",
+                        "correction": correction,
+                        "job": execution["job"],
+                    }
+                    if not execution["worker_present"]:
+                        # Persisted queued/running is not evidence of a current
+                        # worker, especially after process restart. Do not claim
+                        # failure/rollback or resubmit the same source operation.
+                        response.update(requires_review=True, reason="worker_execution_unproven")
+                    return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
+                correction_id = str(correction["correction_id"])
+                def run_confirmed_factual_dates(emit: Any) -> dict[str, Any]:
+                    result = self.supplier_shipment_factual_correction_block.run_job(
+                        correction_id,
+                        emit,
+                    )
+                    if desired_acceptance != str(
+                        existing_header.get("actual_ff_acceptance_date") or ""
+                    ).strip():
+                        result = {
+                            **result,
+                            "acceptance_update": self.supplier_shipments_block.update_shipment(
+                                shipment_id,
+                                {"actual_ff_acceptance_date": desired_acceptance},
+                            ),
+                        }
+                    return result
+
+                def not_started(exc):
+                    self.supplier_shipment_factual_correction_block._set_job_state(
+                        correction_id, status="error", phase="failed",
+                        progress_text="Ошибка запуска пересчёта", completed=True,
+                        error_code=type(exc).__name__, error_message="correction worker did not start",
+                    )
+                job = self.operator_jobs.start(
+                    operation="supplier_factual_date_correction",
+                    runner=run_confirmed_factual_dates,
+                    on_accept=lambda job_id: accepted_job.append(job_id),
+                    _heavy_lease=heavy, _on_no_start=not_started,
+                    _factual_correction_id=correction_id,
+                )
                 response = {
                     "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
                     "status": "accepted",
                     "correction": correction,
-                    "job": None,
+                    "job": job,
                 }
                 return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
-            correction_id = str(correction["correction_id"])
-            def run_confirmed_factual_dates(emit: Any) -> dict[str, Any]:
-                result = self.supplier_shipment_factual_correction_block.run_job(
-                    correction_id,
-                    emit,
-                )
-                if desired_acceptance != str(
-                    existing_header.get("actual_ff_acceptance_date") or ""
-                ).strip():
-                    result = {
-                        **result,
-                        "acceptance_update": self.supplier_shipments_block.update_shipment(
-                            shipment_id,
-                            {"actual_ff_acceptance_date": desired_acceptance},
-                        ),
-                    }
-                return result
-
-            job = self.operator_jobs.start(
-                operation="supplier_factual_date_correction",
-                runner=run_confirmed_factual_dates,
-            )
-            response = {
-                "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_accepted",
-                "status": "accepted",
-                "correction": correction,
-                "job": job,
-            }
-            return _supplier_safe_factual_correction_accepted_projection(response) if supplier_safe else response
+            finally:
+                thread = self.operator_jobs._threads.get(accepted_job[0]) if accepted_job else None
+                if thread is None:
+                    heavy.close()
+                else:
+                    heavy.close_if_unstarted(thread)
         if supplier_safe:
             return self.supplier_shipments_block.update_shipment_supplier_safe(shipment_id, payload)
         return self.supplier_shipments_block.update_shipment(shipment_id, payload)
@@ -4683,6 +4709,8 @@ class RegistryUploadHttpEntrypoint:
             supplier_safe=False,
             confirmed_factual_dates=True,
         )
+        if result.get("status") == "needs_review":
+            return result
         completed = self.runtime.complete_supplier_confirmation_preview(
             token=token,
             consumed_at=self.activated_at_factory(),
@@ -9104,6 +9132,8 @@ def _supplier_safe_factual_correction_accepted_projection(
         "contract_name": "sheet_vitrina_v1_supplier_factual_date_correction_supplier_safe_v1",
         "status": str(raw.get("status") or "accepted"),
         "correction": _supplier_safe_factual_correction_projection(raw.get("correction")),
+        **({"requires_review": True, "reason": "worker_execution_unproven"}
+           if raw.get("reason") == "worker_execution_unproven" else {}),
     }
 
 
@@ -10586,6 +10616,9 @@ class SheetVitrinaV1OperatorJobStore:
         self.timestamp_factory = timestamp_factory
         self._jobs: dict[str, SheetVitrinaV1OperatorJob] = {}
         self._threads: dict[str, threading.Thread] = {}
+        # In-process association only; a persisted correction ID is not a
+        # worker capability and cannot establish execution after restart.
+        self._factual_workers: dict[str, tuple[str, threading.Thread]] = {}
         self._lock = threading.RLock()
         self._warehouse_start_lock = threading.Lock()
         self._warehouse_admitted_job: str | None = None
@@ -10785,7 +10818,9 @@ class SheetVitrinaV1OperatorJobStore:
 
     def start(self, *, operation: str, runner: Callable[[OperatorLogEmitter], dict[str, Any]],
             on_accept: Callable[[str], None] | None = None,
-            _heavy_lease: HeavyAdmissionLease | None = None) -> dict[str, Any]:
+            _heavy_lease: HeavyAdmissionLease | None = None,
+            _on_no_start: Callable[[BaseException], None] | None = None,
+            _factual_correction_id: str | None = None) -> dict[str, Any]:
         from packages.application.business_data_procedure_admission import admitted_thread, thread_start_is_proven_absent
         from packages.application.sheet_vitrina_v1_cycle import HEAVY_OPERATIONS
         with self._lock:
@@ -10796,9 +10831,11 @@ class SheetVitrinaV1OperatorJobStore:
                         _heavy_lease.close()
                     return {**active, 'already_running_job_id': active['job_id'], 'single_flight': True}
             heavy = _heavy_lease
+            if operation == 'supplier_factual_date_correction' and heavy is None:
+                raise RuntimeError('factual worker requires pre-acceptance heavy handoff')
             if heavy is not None:
                 # Internal actual-object handoff, never reconstructed from a token.
-                if (operation not in {'cycle', 'auto_update'} or not isinstance(heavy, HeavyAdmissionLease)
+                if (operation not in {'cycle', 'auto_update', 'supplier_factual_date_correction'} or not isinstance(heavy, HeavyAdmissionLease)
                         or heavy.operation != operation
                         or self.runtime_dir is None or heavy.runtime_dir != Path(self.runtime_dir).resolve()
                         or heavy.pid != os.getpid() or heavy.fd is None or heavy._closed
@@ -10806,6 +10843,12 @@ class SheetVitrinaV1OperatorJobStore:
                     raise RuntimeError('invalid heavy lease handoff')
             elif operation in HEAVY_OPERATIONS and self.runtime_dir is not None:
                 heavy = HeavyAdmissionLease(self.runtime_dir, operation=operation, independent=True)
+            if _on_no_start is not None and (operation != 'supplier_factual_date_correction' or heavy is None):
+                raise RuntimeError('invalid factual no-start callback')
+            if _factual_correction_id is not None and (
+                    operation != 'supplier_factual_date_correction' or heavy is None
+                    or not _factual_correction_id):
+                raise RuntimeError('invalid factual correction association')
             try:
                 job_id = uuid4().hex
                 job = SheetVitrinaV1OperatorJob(job_id=job_id, operation=operation,
@@ -10815,12 +10858,21 @@ class SheetVitrinaV1OperatorJobStore:
                     options.update(target=_run_heavy_worker, args=(heavy, self._run, job_id, runner))
                 thread = (admitted_thread(self.runtime_dir, **options) if self.runtime_dir is not None
                     else threading.Thread(**options))
-            except BaseException:
-                if heavy is not None:
-                    heavy.close()
+            except BaseException as exc:
+                try:
+                    if _on_no_start is not None:
+                        try:
+                            _on_no_start(exc)
+                        except Exception as cleanup_error:
+                            exc.add_note('factual no-start cleanup failed: ' + type(cleanup_error).__name__)
+                finally:
+                    if heavy is not None:
+                        heavy.close()
                 raise
             self._jobs[job_id] = job
             self._threads[job_id] = thread
+            if _factual_correction_id is not None:
+                self._factual_workers[_factual_correction_id] = (job_id, thread)
             try:
                 if self._snapshot_markers is not None:
                     self._snapshot_job_markers[job_id] = self._snapshot_markers.start(job_id, operation)
@@ -10831,17 +10883,40 @@ class SheetVitrinaV1OperatorJobStore:
                 no_start = (thread.abort_if_unstarted() if hasattr(thread, 'abort_if_unstarted')
                     else thread_start_is_proven_absent(thread))
                 if no_start:
-                    if heavy is not None:
-                        heavy.close()
-                    job.status = 'error'
-                    job.error = 'thread start failed: ' + type(exc).__name__
-                    job.finished_at = self.timestamp_factory()
-                    self._threads.pop(job_id, None)
-                    if self._snapshot_markers is not None:
-                        self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
+                    try:
+                        if _on_no_start is not None:
+                            try:
+                                _on_no_start(exc)
+                            except Exception as cleanup_error:
+                                exc.add_note('factual no-start cleanup failed: ' + type(cleanup_error).__name__)
+                    finally:
+                        try:
+                            job.status = 'error'
+                            job.error = 'thread start failed: ' + type(exc).__name__
+                            job.finished_at = self.timestamp_factory()
+                            self._threads.pop(job_id, None)
+                            if self._snapshot_markers is not None:
+                                self._snapshot_markers.finish(self._snapshot_job_markers.pop(job_id, None))
+                        finally:
+                            if heavy is not None:
+                                heavy.close()
                 # A possible native child keeps its lease, marker and running ref.
                 raise
             return self.get(job_id)
+
+    def factual_correction_execution(self, correction_id: str) -> dict[str, Any]:
+        """Read the actual local worker association; never recover or start it."""
+        with self._lock:
+            self._reap_stopped_running_threads_unlocked()
+            association = self._factual_workers.get(correction_id)
+            if association is None:
+                return {"worker_present": False, "job": None}
+            job_id, thread = association
+            job = self._jobs.get(job_id)
+            present = (job is not None and job.status == "running"
+                and self._threads.get(job_id) is thread
+                and (thread.is_alive() or thread.ident is None))
+            return {"worker_present": present, "job": job.snapshot() if job is not None else None}
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self._lock:

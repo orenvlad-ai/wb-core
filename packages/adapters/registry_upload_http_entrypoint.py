@@ -782,6 +782,12 @@ def _build_handler(
                         path=parsed.path,
                         actor=_current_web_user_actor(self),
                     )
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {
+                        "status": "busy", "error_code": "heavy_producer_running",
+                        "error": str(exc), "accepted": False, "source_effects_started": False,
+                    })
+                    return
                 except (
                     FfPoolSurfaceError,
                     FfPoolXlsxError,
@@ -2559,6 +2565,12 @@ def _build_handler(
                         _load_request_payload(self),
                         actor=_current_web_user_config_key(self),
                     )
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {
+                        "status": "busy", "error_code": "heavy_producer_running",
+                        "error": str(exc), "accepted": False, "source_effects_started": False,
+                    })
+                    return
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
@@ -6274,6 +6286,12 @@ def _build_handler(
                             actor=_current_web_user_config_key(self),
                             supplier_safe=_current_web_user_is_supplier(self),
                         )
+                except HeavyAdmissionBusy as exc:
+                    _write_json_response(self, HTTPStatus.CONFLICT, {
+                        "status": "busy", "error_code": "heavy_producer_running",
+                        "error": str(exc), "accepted": False, "source_effects_started": False,
+                    })
+                    return
                 except SupplierShipmentFactualCorrectionError as exc:
                     _write_json_response(self, HTTPStatus.CONFLICT, {"error": str(exc)})
                     return
