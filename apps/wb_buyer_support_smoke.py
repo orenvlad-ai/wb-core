@@ -292,8 +292,12 @@ class HttpTest(unittest.TestCase):
     def test_public_proxy_lists_only_get_for_new_routes(self):
         manifest=json.loads((ROOT/'artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json').read_text())
         rows=[r for r in manifest['routes'] if '/buyer-support/' in r['path']]
-        self.assertEqual(len(rows),2)
-        self.assertTrue(all(r['methods']==['GET'] for r in rows))
+        observation=[r for r in rows if '/pilot/' not in r['path']]
+        self.assertEqual(len(observation),2)
+        self.assertTrue(all(r['methods']==['GET'] for r in observation))
+        pilot=[r for r in rows if '/pilot/' in r['path']]
+        self.assertEqual(len(pilot),6)
+        self.assertTrue(all(r['methods']==(['GET'] if r['path'].endswith('/operation') else ['POST']) for r in pilot))
 
 
 class UiTest(unittest.TestCase):
@@ -314,7 +318,7 @@ assert(r.renderList({configured:true,items:[],history:{state:'not_loaded'}},'').
         from packages.adapters.registry_upload_http_entrypoint import _web_vitrina_ui_base_template, WEB_AUTH_UNIFIED_TAB_SECTIONS, _required_section_for_path, _user_can_access_path
         _web_vitrina_ui_base_template.cache_clear()
         html=_web_vitrina_ui_base_template()
-        self.assertIn('Наблюдение · без отправки',html)
+        self.assertIn('Автоответы: OFF',html)
         self.assertNotIn('/* BUYER_SUPPORT_SCRIPT */',html)
         self.assertEqual(WEB_AUTH_UNIFIED_TAB_SECTIONS['buyer-support'],'feedbacks')
         path='/v1/sheet-vitrina-v1/feedbacks/buyer-support/list'

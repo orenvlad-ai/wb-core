@@ -28,6 +28,7 @@ from urllib import parse as urllib_parse
 from uuid import uuid4
 import zlib
 
+from packages.application.wb_buyer_support_pilot import BuyerSupportPilotError
 from packages.application.warehouse_update_journal import WarehouseRequestConflict
 
 from packages.application.registry_upload_http_entrypoint import (
@@ -761,6 +762,9 @@ def _build_handler(
                 _write_empty_private_response(self, HTTPStatus.NO_CONTENT)
                 return
             if not _ensure_business_data_write_allowed(self, parsed.path):
+                return
+            if parsed.path.startswith(DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/pilot/"):
+                _handle_buyer_support_pilot_post(self, parsed, entrypoint)
                 return
             if parsed.path in AUTOANSWERS_MUTATION_PATHS and not _ensure_autoanswers_csrf(self, parsed.path):
                 return
@@ -3260,14 +3264,21 @@ def _build_handler(
                 )
                 return
             if parsed.path in {DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/list",
-                                DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/detail"}:
+                                DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/detail",
+                                DEFAULT_SHEET_FEEDBACKS_PATH + "/buyer-support/pilot/operation"}:
                 if not _ensure_feedback_capability(self, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
                     return
+                if parsed.path.endswith("/pilot/operation"):
+                    auth = _web_auth_config()
+                    if not auth["enabled"] or not _authenticated_web_user(self, auth):
+                        _write_json_response(self, HTTPStatus.UNAUTHORIZED, {"error": "buyer_support_session_required"})
+                        return
                 # Single trusted cabinet context, never taken from a browser/query parameter.
                 cabinet = os.environ.get("WB_BUYER_SUPPORT_CABINET_ID", "").strip()
                 try:
                     query = urllib_parse.parse_qs(parsed.query, keep_blank_values=True)
-                    allowed = {"q", "filter", "period", "offset", "limit"} if parsed.path.endswith("/list") else {"kind", "id"}
+                    allowed = ({"q", "filter", "period", "offset", "limit"} if parsed.path.endswith("/list")
+                               else {"operation_id", "request_id"} if parsed.path.endswith("/operation") else {"kind", "id"})
                     if set(query) - allowed or any(len(v) != 1 for v in query.values()):
                         raise ValueError("invalid buyer support query")
                     if parsed.path.endswith("/list"):
@@ -3276,9 +3287,18 @@ def _build_handler(
                             filter_state=query.get("filter", ["all"])[0],
                             period=query.get("period", ["90d"])[0],
                             offset=int(query.get("offset", ["0"])[0]), limit=int(query.get("limit", ["50"])[0]))
+                    elif parsed.path.endswith("/operation"):
+                        if bool(query.get("operation_id", [""])[0]) == bool(query.get("request_id", [""])[0]):
+                            raise ValueError("exactly one operation selector required")
+                        payload = entrypoint.buyer_support_pilot.operation(
+                            cabinet, operation_id=query.get("operation_id", [""])[0],
+                            request_id=query.get("request_id", [""])[0])
                     else:
-                        payload = entrypoint.buyer_support_repository.detail(
+                        payload = entrypoint.buyer_support_pilot.detail(
                             cabinet, kind=query.get("kind", [""])[0], item_id=query.get("id", [""])[0])
+                except BuyerSupportPilotError as exc:
+                    _write_json_response(self, HTTPStatus(exc.http_status), {"error": exc.code, "code": exc.code})
+                    return
                 except ValueError:
                     _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid_buyer_support_query"})
                     return
@@ -8879,6 +8899,68 @@ def _ensure_feedback_capability(handler: BaseHTTPRequestHandler, path: str, capa
         return True
     _write_auth_forbidden(handler, path)
     return False
+
+
+def _handle_buyer_support_pilot_post(handler: BaseHTTPRequestHandler, parsed: Any,
+                                    entrypoint: RegistryUploadHttpEntrypoint) -> None:
+    """Session-scoped, bounded commands; browser cannot select cabinet or actor."""
+    action = parsed.path.rsplit("/", 1)[-1]
+    fields = {
+        "refresh": {"kind", "item_id", "request_id"},
+        "propose": {"kind", "item_id", "chat_id", "expected_context_version", "request_id"},
+        "send": {"draft_id", "expected_context_version", "request_id", "confirmed"},
+        "claim": {"draft_id", "claim_id", "action", "expected_context_version", "expected_claim_version", "request_id", "confirmed", "text_basis_confirmed"},
+        "reconcile": {"operation_id", "request_id"},
+    }
+    if action not in fields:
+        _write_json_response(handler, HTTPStatus.NOT_FOUND, {"error": "buyer_support_route_not_found"})
+        return
+    auth = _web_auth_config()
+    if not auth["enabled"] or not _authenticated_web_user(handler, auth):
+        _write_json_response(handler, HTTPStatus.UNAUTHORIZED, {"error": "buyer_support_session_required"})
+        return
+    if not _ensure_feedback_capability(handler, parsed.path, WEB_AUTH_SECTION_FEEDBACKS):
+        return
+    content_type = str(handler.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+    origin = str(handler.headers.get("Origin", "")).rstrip("/")
+    site = str(handler.headers.get("Sec-Fetch-Site", "")).lower()
+    if (content_type != "application/json" or handler.headers.get("X-WB-Buyer-Support-CSRF") != "1"
+            or (origin and not hmac.compare_digest(origin, _request_origin(handler).rstrip("/")))
+            or site in {"cross-site", "same-site"}):
+        _write_json_response(handler, HTTPStatus.FORBIDDEN, {"error": "csrf_failed", "code": "csrf_failed"})
+        return
+    try:
+        body = _load_request_payload(handler, max_request_bytes=8192)
+        if parsed.query or set(body) - fields[action]:
+            raise ValueError("invalid fields")
+        if action in {"send", "claim"} and body.get("confirmed") is not True:
+            _write_json_response(handler, HTTPStatus.UNPROCESSABLE_ENTITY,
+                                 {"error": "confirmation_required", "code": "confirmation_required"})
+            return
+        if action == "claim" and body.get("text_basis_confirmed") is not True:
+            _write_json_response(handler, HTTPStatus.UNPROCESSABLE_ENTITY,
+                                 {"error": "text_basis_confirmation_required", "code": "text_basis_confirmation_required"})
+            return
+        cabinet = os.environ.get("WB_BUYER_SUPPORT_CABINET_ID", "").strip()
+        payload = getattr(entrypoint.buyer_support_pilot, action)(
+            cabinet, **body, actor=_current_web_user_actor(handler))
+    except BuyerSupportPilotError as exc:
+        error_payload = {"error": exc.code, "code": exc.code}
+        # These gates run before request reservation or any provider/WB attempt.
+        if exc.code in {"provider_not_configured", "wb_not_configured", "pilot_rate_class_not_supported"}:
+            error_payload.update(not_accepted=True, write_attempted=False, request_id=body.get("request_id"))
+        _write_json_response(handler, HTTPStatus(exc.http_status), error_payload)
+        return
+    except FfPoolSurfaceError:
+        _write_json_response(handler, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "request_too_large"})
+        return
+    except (ValueError, TypeError):
+        _write_json_response(handler, HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "invalid_buyer_support_command"})
+        return
+    except Exception:
+        _write_json_response(handler, HTTPStatus.SERVICE_UNAVAILABLE, {"error": "buyer_support_command_unavailable"})
+        return
+    _write_json_response(handler, HTTPStatus.OK, payload, extra_headers={"Cache-Control": "private, no-store"})
 
 
 def _ensure_autoanswers_csrf(handler: BaseHTTPRequestHandler, path: str) -> bool:
