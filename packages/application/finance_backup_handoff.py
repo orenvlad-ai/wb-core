@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -29,6 +30,10 @@ PROPERTIES = ('LoadState', 'ActiveState', 'SubState', 'Result', 'MainPID', 'Job'
               'WorkingDirectory', 'ExecStart', 'User', 'Group', 'DynamicUser',
               'Environment', 'EnvironmentFiles', 'RootDirectory', 'RootImage',
               'Type', 'ExecStartPre', 'ExecStartPost', 'ExecCondition')
+EMPTY_ARRAY_PROPERTIES = {'EnvironmentFiles': 'a(sb)',
+                          'ExecCondition': 'a(sasbttttuii)',
+                          'ExecStartPre': 'a(sasbttttuii)',
+                          'ExecStartPost': 'a(sasbttttuii)'}
 
 
 def _safe_file(path: Path, *, maximum: int = 65536) -> bytes:
@@ -61,8 +66,29 @@ class _FixedBackupService:
         if len(result.stdout) > 32768:
             raise BackupAdmissionStateError('fixed backup service metadata exceeds bound')
         values = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-        if set(PROPERTIES) - values.keys():
+        missing = set(PROPERTIES) - values.keys()
+        if missing - EMPTY_ARRAY_PROPERTIES.keys():
             raise BackupAdmissionStateError('fixed backup service metadata incomplete')
+        if missing:
+            # systemctl omits empty array properties even with --all on the
+            # deployed systemd. Absence alone is not proof of an empty setting:
+            # require the actual Service properties and their exact D-Bus types.
+            names = sorted(missing)
+            command = ['/usr/bin/busctl', '--system', '--json=short', 'get-property',
+                       'org.freedesktop.systemd1',
+                       '/org/freedesktop/systemd1/unit/wb_2dcore_2dfinance_2dbackup_2drotation_2eservice',
+                       'org.freedesktop.systemd1.Service', *names]
+            arrays = subprocess.run(command, capture_output=True, text=True, timeout=3, check=True)
+            if len(arrays.stdout) > 32768 or len(arrays.stdout.splitlines()) != len(names):
+                raise BackupAdmissionStateError('fixed backup service array proof incomplete')
+            for name, line in zip(names, arrays.stdout.splitlines(), strict=True):
+                try:
+                    proof = json.loads(line)
+                except (ValueError, TypeError) as exc:
+                    raise BackupAdmissionStateError('fixed backup service array proof invalid') from exc
+                if proof != {'type': EMPTY_ARRAY_PROPERTIES[name], 'data': []}:
+                    raise BackupAdmissionStateError('fixed backup service array override or type refused')
+                values[name] = ''
         return values
 
     def inspect(self) -> dict:
