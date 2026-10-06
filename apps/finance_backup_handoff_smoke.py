@@ -444,6 +444,33 @@ with patch.object(h,'_FixedBackupService',return_value=s):
                         handoff.cycle_backup_priority(runtime)
                 self.assertEqual(service.starts, 0)
 
+    def test_systemctl_omitted_arrays_require_actual_typed_empty_properties(self):
+        service = object.__new__(handoff._FixedBackupService)
+        values = {key: '' for key in handoff.PROPERTIES if key not in handoff.EMPTY_ARRAY_PROPERTIES}
+        shown = '\n'.join(key+'='+value for key, value in values.items())
+        names = sorted(handoff.EMPTY_ARRAY_PROPERTIES)
+        empty = '\n'.join(json.dumps({'type': handoff.EMPTY_ARRAY_PROPERTIES[key], 'data': []}) for key in names)
+        replies = [subprocess.CompletedProcess([], 0, shown, ''), subprocess.CompletedProcess([], 0, empty, '')]
+        with patch.object(handoff.subprocess, 'run', side_effect=replies) as run:
+            observed = service._show()
+        self.assertEqual(observed, {**values, **{key: '' for key in names}})
+        command = run.call_args_list[1].args[0]
+        self.assertEqual(command[:3], ['/usr/bin/busctl', '--system', '--json=short'])
+        self.assertEqual(command[-4:], names)
+        self.assertEqual(run.call_args_list[1].kwargs['timeout'], 3)
+
+        for proof in ('', 'not json', empty.replace('a(sb)', 'as'),
+                      empty.replace('"data": []', '"data": ["unexpected"]', 1)):
+            with self.subTest(proof=proof), patch.object(handoff.subprocess, 'run', side_effect=[
+                    replies[0], subprocess.CompletedProcess([], 0, proof, '')]):
+                with self.assertRaises(BackupAdmissionStateError):
+                    service._show()
+        with patch.object(handoff.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                [], 0, shown.replace('LoadState=\n', ''), '')) as run:
+            with self.assertRaises(BackupAdmissionStateError):
+                service._show()
+            self.assertEqual(run.call_count, 1)
+
     def test_real_fixed_service_rejects_arbitrary_runtime_and_unit_dropins_before_start(self):
         with self.assertRaises(BackupAdmissionStateError):
             handoff._FixedBackupService(Path('/tmp/not-a-deploy'))
