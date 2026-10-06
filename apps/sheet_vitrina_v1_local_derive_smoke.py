@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, closing
+from dataclasses import asdict
+import gc
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -56,6 +59,143 @@ class LocalDeriveTests(unittest.TestCase):
         with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
             amount = conn.execute(f"SELECT max(amount)+1 FROM {FBS_TABLE}").fetchone()[0]
             conn.execute(f"INSERT INTO {FBS_TABLE}(run_id,seller_warehouse_id,chrt_id,nm_id,amount,evidence_digest) VALUES(?,1,1,920001,?,'fixture')", (f"generation-{amount}", amount))
+
+    def test_public_collect_derive_matches_composed_plan_and_source_calls(self):
+        with patch.object(live_plan.time, 'perf_counter', return_value=1.0), \
+             patch.object(self.source, "fetch", wraps=self.source.fetch) as fetch:
+            composed = self.block.build_plan(**self.kwargs)
+            self.assertEqual(fetch.call_count, 2)  # closed + current slots
+            fetch.reset_mock()
+            captured = self.block.collect_sources(**self.kwargs)
+            staged = self.block.derive_collected(captured)
+            self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(asdict(staged), asdict(composed))
+
+    def test_public_collect_returns_without_materialization_or_publication(self):
+        with patch.object(live_plan, "_MetricEvaluator", side_effect=AssertionError("collect derived rows")), \
+             patch.object(self.runtime, "save_sheet_vitrina_ready_snapshot", side_effect=AssertionError("collect published")):
+            captured = self.block.collect_sources(**self.kwargs)
+        self.assertIsInstance(captured, live_plan.CollectedLivePlanSources)
+        with self.assertRaises(AttributeError):
+            captured.slots = {}
+        with publication.readonly(self.runtime.db_path) as conn:
+            self.assertEqual(conn.execute(f"SELECT count(*) FROM {publication.TABLE}").fetchone()[0], 0)
+        ref = weakref.ref(captured)
+        del captured
+        gc.collect()
+        self.assertIsNone(ref())
+        self.assertEqual(len(self.block._source_collections), 0)
+
+    def test_public_selectors_are_normalized_once_and_cannot_be_overridden(self):
+        visited = []
+        def source_keys():
+            visited.append('source')
+            yield 'onec_stocks'
+        def metric_keys():
+            for key in (FF_QTY, FF_COST):
+                visited.append(key)
+                yield key
+        captured = self.block.collect_sources(TARGET_DATE, None, 'manual_operator',
+            source_keys(), metric_keys(), True)
+        with patch.object(self.source, "fetch", side_effect=AssertionError("derive refetched")):
+            plan = self.block.derive_collected(captured)
+            self.block.derive_collected(captured)
+        self.assertEqual(visited, ['source', FF_QTY, FF_COST])
+        self.assertIn('TOTAL|' + FF_QTY, _data_rows(plan))
+        with self.assertRaises(TypeError):
+            self.block.derive_collected(captured, as_of_date='2026-05-18')
+
+    def test_public_handle_rejects_foreign_owner_runtime_and_forgery_before_derive(self):
+        captured = self.block.collect_sources(**self.kwargs)
+        other = SheetVitrinaV1LivePlanBlock(self.runtime, now_factory=lambda: NOW)
+        with patch.object(other, '_build_plan', side_effect=AssertionError('foreign derive ran')):
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, 'ready_collection_context_changed'):
+                other.derive_collected(captured)
+        with patch.object(self.block, '_build_plan', side_effect=AssertionError('invalid derive ran')):
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, 'ready_collection_context_changed'):
+                self.block.derive_collected(live_plan.CollectedLivePlanSources())
+            replacement = SimpleNamespace(runtime_dir=self.runtime.runtime_dir, db_path=self.runtime.db_path)
+            with patch.object(self.block, 'runtime', replacement):
+                with self.assertRaisesRegex(publication.ReadyPublicationConflict, 'ready_collection_context_changed'):
+                    self.block.derive_collected(captured)
+            for key in ('runtime_dir', 'db_path'):
+                with patch.object(self.runtime, key, Path(str(getattr(self.runtime, key)) + '-foreign')):
+                    with self.assertRaisesRegex(publication.ReadyPublicationConflict, 'ready_collection_context_changed'):
+                        self.block.derive_collected(captured)
+
+    def test_public_handle_keeps_selectors_when_caller_lists_change(self):
+        captured = self.block.collect_sources(**self.kwargs)
+        self.kwargs['source_keys'].append('prices_snapshot')
+        self.kwargs['metric_keys'].clear()
+        with patch.object(self.source, 'fetch', side_effect=AssertionError('derive refetched')):
+            plan = self.block.derive_collected(captured)
+        self.assertIn('TOTAL|' + FF_QTY, _data_rows(plan))
+
+    def test_public_material_is_fresh_between_phases_without_recollection(self):
+        observed = []
+        original = self.block._load_live_sources
+        def local(*args, **kwargs):
+            self.assertFalse(kwargs.get('_collect_only', False))
+            with publication.readonly(self.runtime.db_path) as conn:
+                observed.append(conn.execute(f'SELECT max(amount) FROM {FBS_TABLE}').fetchone()[0])
+            return original(*args, **kwargs)
+        with patch.object(self.source, 'fetch', wraps=self.source.fetch) as fetch:
+            captured = self.block.collect_sources(**self.kwargs)
+            self.assertEqual(fetch.call_count, 2)
+            self.change_fbs()
+            with patch.object(self.block, '_load_live_sources', side_effect=local):
+                plan = self.block.derive_collected(captured)
+            self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(observed, [8])
+        with publication.readonly(self.runtime.db_path) as conn:
+            publication.check_build_inputs(conn, plan.metadata['publication_inputs'])
+
+    def test_public_consumed_source_and_date_drift_fail_without_refetch(self):
+        captured = self.block.collect_sources(**self.kwargs)
+        with patch.object(self.source, 'fetch', side_effect=AssertionError('derive refetched')):
+            with patch.object(self.block, 'now_factory', return_value=NOW + timedelta(days=1)):
+                with self.assertRaisesRegex(publication.ReadyPublicationConflict, 'ready_collection_scope_or_date_changed'):
+                    self.block.derive_collected(captured)
+            with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+                conn.execute("UPDATE temporal_source_slot_snapshots SET captured_at='2026-05-20T09:00:00Z' WHERE source_key='onec_stocks'")
+            with self.assertRaisesRegex(publication.ReadyPublicationConflict, 'ready_source_changed:onec_stocks'):
+                self.block.derive_collected(captured)
+
+    def test_public_source_error_stays_failure_and_does_not_become_zero(self):
+        self.source.mode = 'error'
+        with patch.object(self.source, 'fetch', wraps=self.source.fetch) as fetch:
+            captured = self.block.collect_sources(**self.kwargs)
+            plan = self.block.derive_collected(captured)
+            self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(_data_rows(plan)['TOTAL|' + FF_QTY][-1], '')
+        slots = plan.metadata['refresh_diagnostics']['source_slots']
+        self.assertTrue(all(item['status'] == 'error' for item in slots))
+        errors = [row for sheet in plan.sheets if sheet.sheet_name == 'STATUS'
+            for row in sheet.rows if str(row[0]).startswith('onec_stocks[')]
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(row[1] == 'error' and row[-1] == 'source_error_for_zero_stock_smoke'
+            for row in errors))
+
+    def test_public_mutable_results_and_plan_metadata_do_not_mutate_retained_sources(self):
+        returned = []
+        original = self.block.onec_stocks_block.execute
+        def execute(request):
+            envelope = original(request)
+            returned.append(envelope)
+            return envelope
+        with patch.object(self.block.onec_stocks_block, 'execute', side_effect=execute):
+            captured = self.block.collect_sources(**self.kwargs)
+        for envelope in returned:
+            envelope.result.items.clear()
+        with patch.object(self.source, 'fetch', side_effect=AssertionError('derive refetched')):
+            before = self.block.derive_collected(captured)
+            self.assertEqual(_data_rows(before)['TOTAL|' + FF_QTY][-1], 12)
+            before.metadata['refresh_diagnostics']['source_slots'].clear()
+            before.metadata['publication_inputs']['consumed'].clear()
+            after = self.block.derive_collected(captured)
+        self.assertEqual(_data_rows(after)['TOTAL|' + FF_QTY][-1], 12)
+        self.assertEqual(len(after.metadata['refresh_diagnostics']['source_slots']), 2)
+        self.assertTrue(after.metadata['publication_inputs']['consumed'])
 
     def test_fbs_changes_during_collection_are_reloaded_without_another_source_call(self):
         original = self.block._load_live_sources
@@ -257,8 +397,10 @@ class LocalDeriveTests(unittest.TestCase):
             runtime = active_fixture.seed(root)
             runtime.save_nomenclature_item({"item_id": "september-1", "nm_id": 1,
                 "our_sku": "september-1", "is_active": True, "created_at": stamp, "updated_at": stamp})
-            active_fixture.save(runtime, active_fixture.make_plan(),
-                prepared=active_fixture.make_book(root, opening=True))
+            # These fixture helpers have definition-time date/clock defaults.
+            # Bind all three explicitly to the September scenario.
+            active_fixture.save(runtime, active_fixture.make_plan(as_of_date=outer, day=day), now=now,
+                prepared=active_fixture.make_book(root, opening=True, now=now))
             counters = source_fixture._build_counting_blocks()
             sync = SimpleNamespace(ensure_snapshot=lambda *_: None,
                 ensure_closed_day_snapshot=lambda **_: None)
@@ -328,7 +470,7 @@ class LocalDeriveTests(unittest.TestCase):
             phase[0] = "publish"
             current = runtime.load_current_state()
             expected = runtime.prepare_sheet_vitrina_ready_publication(bundle_version=current.bundle_version, as_of_date=outer)
-            with active_fixture.clock():
+            with active_fixture.clock(now):
                 runtime.save_sheet_vitrina_ready_snapshot(current_state=current, plan=plan,
                     expected=expected, refreshed_at="2026-09-11T14:01:00Z")
             receipt = active_fixture.book.current_publication_receipt(runtime, now=now)
