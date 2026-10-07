@@ -30,6 +30,9 @@ from packages.application.promo_historical_recovery import (
     PromoHistoricalRecoveryError, find_reconstruction, qualified_reconstruction,
     read_reconstruction_run, reconstruction_artifact_proof,
 )
+from packages.application.inventory_retention import (
+    prove_inventory_retention, publish_inventory_retention, retention_receipts_match,
+)
 from packages.application.ready_publication import (
     ExpectedReady,
     check_authority,
@@ -440,6 +443,7 @@ def _create_scoped_backup(candidate: dict[str, Any], operation_id: str, backup_p
             "exact": [row[1] for row in rows["temporal_source_snapshots"]],
             "ready": [row[2] for row in rows["sheet_vitrina_v1_ready_snapshots"]],
         },
+        "inventory_retention": candidate.get("inventory_retention", {}),
         "rows_sha256": _digest(rows), "created_at": datetime.now(timezone.utc).isoformat(),
     }
     backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -724,10 +728,20 @@ def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, Any] |
                         "slots": old_slots, "exact": old_exact,
                         "ready": [(row["as_of_date"], row["plan_json"]) for row in ready_rows if row["as_of_date"] in {u["as_of_date"] for u in ready_updates}]})
     source_sha = _digest({"archive_and_runs": source_sha, "reconstruction": reconstruction_proof})
-    candidate_sha = _digest({"source": source_sha, "days": results, "roles": roles,
+    inventory_retention = {}
+    with closing(_connect(db_path, readonly=True)) as inventory_conn:
+        inventory_conn.execute("BEGIN")
+        for update in ready_updates:
+            before = dict(inventory_conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                (bundle, update["as_of_date"])).fetchone())
+            if before["plan_json"] != update["old_plan_json"]:
+                raise AdapterError("promo-inventory-before-ready-drift")
+            inventory_retention[update["as_of_date"]] = prove_inventory_retention(inventory_conn,
+                runtime_dir=runtime, before=before, after={**before, "plan_json": update["plan_json"]})
+    candidate_sha = _digest({"inventory_retention": inventory_retention, "source": source_sha, "days": results, "roles": roles,
                              "ready": [(u["as_of_date"], u["plan_json"]) for u in ready_updates]})
     candidate = {"authority": authority, "db_path": db_path, "bundle": bundle, "ids": ids,
-            "dates": dates, "results": results, "ready_updates": ready_updates,
+            "inventory_retention": inventory_retention, "dates": dates, "results": results, "ready_updates": ready_updates,
             "roles": roles, "source_sha": source_sha, "prestate_sha": prestate, "candidate_sha": candidate_sha,
             "non_target_sha": _digest(non_target), "changes": all_changes, "reconstruction_proof": reconstruction_proof}
     candidate["expected_target_sha"] = _digest(_expected_target_image(candidate))
@@ -775,6 +789,8 @@ def _verified_superseded(conn: sqlite3.Connection, scope: dict[str, Any], before
 
 class PromoArchivePublicationAdapter:
     def preview(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]:
+        if request.get("mode") == "repair_inventory_retention":
+            return _inventory_repair_preview(request, operation_id)
         if request.get("mode") == "repair_ready_geometry":
             return _geometry_preview(request, operation_id)
         runtime, dates, reconstruction = _request(request)
@@ -796,6 +812,7 @@ class PromoArchivePublicationAdapter:
                       "source_sha256": candidate["source_sha"], "non_target_sha256": candidate["non_target_sha"],
                       "expected_target_sha256": candidate["expected_target_sha"],
                       "historical_reconstruction": candidate["reconstruction_proof"],
+                      "inventory_retention": candidate["inventory_retention"],
                       "date_totals": {day: {
                           TOTAL_METRICS[metric]: round(
                               sum(float(item[metric]) for item in value["items"]) /
@@ -809,6 +826,8 @@ class PromoArchivePublicationAdapter:
         }
 
     def apply(self, request: dict[str, Any], operation_id: str, preview: dict[str, Any]) -> dict[str, Any]:
+        if request.get("mode") == "repair_inventory_retention":
+            return _inventory_repair_apply(request, operation_id, preview)
         if request.get("mode") == "repair_ready_geometry":
             return _geometry_apply(request, operation_id, preview)
         runtime, dates, reconstruction = _request(request)
@@ -843,6 +862,8 @@ class PromoArchivePublicationAdapter:
                                              roles=fresh["roles"])) != before_backup_target_sha:
                         raise AdapterError("promo-scoped-backup-preimage-drift")
                     conn.execute(f"CREATE TABLE IF NOT EXISTS {LEDGER}(operation_id TEXT PRIMARY KEY,request_sha256 TEXT NOT NULL,preview_json TEXT NOT NULL,candidate_sha256 TEXT NOT NULL,before_target_sha256 TEXT NOT NULL,after_target_sha256 TEXT NOT NULL,after_target_json TEXT NOT NULL,after_ready_metadata_json TEXT NOT NULL,applied_at TEXT NOT NULL,backup_path TEXT NOT NULL,backup_sha256 TEXT NOT NULL)")
+                    if "inventory_retention_json" not in {r[1] for r in conn.execute(f"PRAGMA table_info({LEDGER})")}:
+                        conn.execute(f"ALTER TABLE {LEDGER} ADD COLUMN inventory_retention_json TEXT NOT NULL DEFAULT '[]'")
                     if _ledger_row(conn, operation_id) is not None:
                         raise AdapterError("promo-operation-already-submitted")
                     ready_asofs = [update["as_of_date"] for update in fresh["ready_updates"]]
@@ -855,8 +876,23 @@ class PromoArchivePublicationAdapter:
                         for role in fresh["roles"][day]:
                             conn.execute("INSERT INTO temporal_source_slot_snapshots(source_key,snapshot_date,snapshot_role,captured_at,payload_json) VALUES(?,?,?,?,?) ON CONFLICT(source_key,snapshot_date,snapshot_role) DO UPDATE SET captured_at=excluded.captured_at,payload_json=excluded.payload_json", (SOURCE, day, role, captured_at, body))
                         conn.execute("INSERT INTO temporal_source_snapshots(source_key,snapshot_date,captured_at,payload_json) VALUES(?,?,?,?) ON CONFLICT(source_key,snapshot_date) DO UPDATE SET captured_at=excluded.captured_at,payload_json=excluded.payload_json", (SOURCE, day, captured_at, body))
+                    inventory_receipts = []
+                    inventory_before_rows = {}
                     for update in fresh["ready_updates"]:
+                        before = dict(conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                            (fresh["bundle"], update["as_of_date"])).fetchone())
+                        inventory_before_rows[update["as_of_date"]] = before
+                        pointer = prove_inventory_retention(conn, runtime_dir=runtime, before=before,
+                            after={**before, "plan_json": update["plan_json"]})
+                        if pointer != fresh["inventory_retention"][update["as_of_date"]]:
+                            raise AdapterError("promo-inventory-proof-drift")
                         replace_ready(conn, expected=ExpectedReady(fresh["bundle"], update["as_of_date"], update["old_plan_json"]), plan_json=update["plan_json"])
+                        receipt = publish_inventory_retention(conn, operation_id=operation_id,
+                            pointer=pointer, now=captured_at)
+                        if receipt is not None:
+                            inventory_receipts.append(receipt)
+                    if not retention_receipts_match(conn, inventory_receipts):
+                        raise AdapterError("promo-inventory-receipt-poststate-mismatch")
                     actual_target_image = _target_image(conn, bundle=fresh["bundle"], dates=dates,
                                                          ready_asofs=ready_asofs, roles=fresh["roles"])
                     actual_target_sha = _digest(actual_target_image)
@@ -870,8 +906,14 @@ class PromoArchivePublicationAdapter:
                         replay_proof[day]["artifact_sha256"] = _reconstruction_artifact_proof(runtime, day, run_path, run_summary, observed)
                     if _digest({"archive_and_runs": replay_source_sha, "reconstruction": replay_proof}) != fresh["source_sha"]:
                         raise AdapterError("promo-source-changed-during-submit")
+                    for update in fresh["ready_updates"]:
+                        after_row = dict(conn.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                            (fresh["bundle"], update["as_of_date"])).fetchone())
+                        if prove_inventory_retention(conn, runtime_dir=runtime,
+                            before=inventory_before_rows[update["as_of_date"]], after=after_row) != fresh["inventory_retention"][update["as_of_date"]]:
+                            raise AdapterError("promo-inventory-proof-changed-during-submit")
                     after_ready_metadata = _ready_metadata(conn, bundle=fresh["bundle"], ready_asofs=ready_asofs)
-                    conn.execute(f"INSERT INTO {LEDGER} VALUES(?,?,?,?,?,?,?,?,?,?,?)", (operation_id, _digest(request), json.dumps(preview, ensure_ascii=False), fresh["candidate_sha"], before_target_sha, actual_target_sha, json.dumps(actual_target_image, ensure_ascii=False, separators=(",", ":")), json.dumps(after_ready_metadata, ensure_ascii=False), captured_at, str(backup_path), backup_sha))
+                    conn.execute(f"INSERT INTO {LEDGER}(operation_id,request_sha256,preview_json,candidate_sha256,before_target_sha256,after_target_sha256,after_target_json,after_ready_metadata_json,applied_at,backup_path,backup_sha256,inventory_retention_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (operation_id, _digest(request), json.dumps(preview, ensure_ascii=False), fresh["candidate_sha"], before_target_sha, actual_target_sha, json.dumps(actual_target_image, ensure_ascii=False, separators=(",", ":")), json.dumps(after_ready_metadata, ensure_ascii=False), captured_at, str(backup_path), backup_sha, json.dumps(inventory_receipts, ensure_ascii=False)))
                     conn.commit()
                 except Exception:
                     conn.rollback()
@@ -879,6 +921,8 @@ class PromoArchivePublicationAdapter:
         return {"operation_id": operation_id, "disposition": "submitted", "backup_path": str(backup_path)}
 
     def readback(self, request: dict[str, Any], operation_id: str) -> dict[str, Any]:
+        if request.get("mode") == "repair_inventory_retention":
+            return _inventory_repair_readback(request, operation_id)
         if request.get("mode") == "repair_ready_geometry":
             return _geometry_readback(request, operation_id)
         runtime, _dates, _reconstruction = _request(request)
@@ -893,6 +937,8 @@ class PromoArchivePublicationAdapter:
                     dates=scope["dates"], ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"],
                 )
                 actual_target_sha = _digest(actual_target_image)
+                inventory_receipts = json.loads(row["inventory_retention_json"]) if "inventory_retention_json" in row.keys() else []
+                inventory_matches = retention_receipts_match(conn, inventory_receipts)
                 superseded = (actual_target_sha != row["after_target_sha256"]
                               and _verified_superseded(conn, scope, json.loads(row["after_target_json"]),
                                                        actual_target_image, row["applied_at"]))
@@ -900,13 +946,14 @@ class PromoArchivePublicationAdapter:
             return {"operation_id": operation_id, "state": "not_submitted"}
         if row["request_sha256"] != _digest(request):
             return {"operation_id": operation_id, "state": "failed", "reason": "request-mismatch"}
-        state = "applied" if actual_target_sha == row["after_target_sha256"] or superseded else "ambiguous"
+        state = "applied" if inventory_matches and (actual_target_sha == row["after_target_sha256"] or superseded) else "ambiguous"
         return {"operation_id": operation_id, "state": state, "candidate_sha256": row["candidate_sha256"],
                 "before_target_sha256": row["before_target_sha256"],
                 "expected_target_sha256": row["after_target_sha256"], "actual_target_sha256": actual_target_sha,
                 "applied_at": row["applied_at"], "backup_path": row["backup_path"],
                 "backup_sha256": row["backup_sha256"],
-                "superseded": bool(superseded)}
+                "superseded": bool(superseded), "inventory_retention_receipts": len(inventory_receipts),
+                "inventory_retention_verified": inventory_matches}
 
 
 def _geometry_request(request: dict[str, Any]) -> tuple[Path, str, int, str]:
@@ -1221,9 +1268,10 @@ def rollback_apply(runtime: Path, operation_id: str, expected_after_target_sha: 
                                   before_target_sha=publication_before["before_target_sha256"],
                                   candidate_sha=publication_before["candidate_sha256"])
             old_rows = _source_rows(backup, dates=dates, roles=roles)
-            old_plans = {as_of: json.loads(backup.execute(
-                "SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
-                (bundle, as_of)).fetchone()[0]) for as_of in ready_asofs}
+            old_ready_rows = {as_of: dict(backup.execute(
+                "SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                (bundle, as_of)).fetchone()) for as_of in ready_asofs}
+            old_plans = {as_of: json.loads(row["plan_json"]) for as_of, row in old_ready_rows.items()}
             current.execute("BEGIN IMMEDIATE")
             try:
                 check_authority(runtime, authority)
@@ -1257,6 +1305,7 @@ def rollback_apply(runtime: Path, operation_id: str, expected_after_target_sha: 
                         raise AdapterError("promo-rollback-exact-cas-failed")
                     if old_row is not None:
                         current.execute("INSERT INTO temporal_source_snapshots(source_key,snapshot_date,captured_at,payload_json) VALUES(?,?,?,?)", old_row)
+                inventory_receipts = []
                 for as_of in ready_asofs:
                     row = current.execute("SELECT plan_json FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?", (bundle, as_of)).fetchone()
                     if row is None:
@@ -1264,16 +1313,177 @@ def rollback_apply(runtime: Path, operation_id: str, expected_after_target_sha: 
                     restored = _restore_plan_target(json.loads(row[0]), old_plans[as_of], set(dates))
                     if _plan_non_target(restored, set(dates)) != _plan_non_target(json.loads(row[0]), set(dates)):
                         raise AdapterError("promo-rollback-non-target-drift")
-                    replace_ready(current, expected=ExpectedReady(bundle, as_of, row[0]),
-                                  plan_json=json.dumps(restored, ensure_ascii=False, separators=(",", ":")))
+                    # Restore the publisher's original bytes when no unrelated
+                    # edit remains. Its original complete digest must still match.
+                    restored_raw = (old_ready_rows[as_of]["plan_json"] if restored == old_plans[as_of]
+                        else json.dumps(restored, ensure_ascii=False, separators=(",", ":")))
+                    after_row = dict(current.execute("SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?",
+                        (bundle, as_of)).fetchone())
+                    after_row["plan_json"] = restored_raw
+                    pointer = prove_inventory_retention(current, runtime_dir=runtime,
+                        before=old_ready_rows[as_of], after=after_row)
+                    replace_ready(current, expected=ExpectedReady(bundle, as_of, row[0]), plan_json=restored_raw)
+                    if restored_raw != old_ready_rows[as_of]["plan_json"]:
+                        receipt = publish_inventory_retention(current, operation_id=operation_id + ":rollback",
+                            pointer=pointer, now=datetime.now(timezone.utc).isoformat())
+                        if receipt is not None:
+                            inventory_receipts.append(receipt)
+                if not retention_receipts_match(current, inventory_receipts):
+                    raise AdapterError("promo-rollback-inventory-receipt-mismatch")
                 restored_sha = _digest(_target_image(current, bundle=bundle, dates=dates,
                                                      ready_asofs=ready_asofs, roles=roles))
                 if restored_sha != preview["restored_target_sha256"]:
                     raise AdapterError("promo-rollback-restored-target-mismatch")
-                current.execute(f"INSERT INTO {ROLLBACK_LEDGER} VALUES(?,?,?,?)",
-                                (operation_id, expected_after_target_sha, restored_sha, datetime.now(timezone.utc).isoformat()))
+                if "inventory_retention_json" not in {r[1] for r in current.execute(f"PRAGMA table_info({ROLLBACK_LEDGER})")}:
+                    current.execute(f"ALTER TABLE {ROLLBACK_LEDGER} ADD COLUMN inventory_retention_json TEXT NOT NULL DEFAULT '[]'")
+                current.execute(f"INSERT INTO {ROLLBACK_LEDGER}(operation_id,after_target_sha256,restored_target_sha256,restored_at,inventory_retention_json) VALUES(?,?,?,?,?)",
+                    (operation_id, expected_after_target_sha, restored_sha, datetime.now(timezone.utc).isoformat(),
+                     json.dumps(inventory_receipts, ensure_ascii=False)))
                 current.commit()
             except Exception:
                 current.rollback()
                 raise
     return {"operation_id": operation_id, "state": "restored", "restored_target_sha256": preview["restored_target_sha256"]}
+
+
+INVENTORY_REPAIR_LEDGER = 'promo_inventory_retention_repairs'
+
+
+def _inventory_repair_request(request):
+    if set(request) != {'mode', 'runtime_dir', 'publication_operation_id'} or request['mode'] != 'repair_inventory_retention':
+        raise AdapterError('promo-inventory-repair-request-invalid')
+    runtime = Path(str(request['runtime_dir'])).resolve()
+    operation = request['publication_operation_id']
+    if not runtime.is_dir() or not isinstance(operation, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,160}', operation):
+        raise AdapterError('promo-inventory-repair-request-invalid')
+    return runtime, operation
+
+
+def _inventory_repair_row(conn, operation_id):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (INVENTORY_REPAIR_LEDGER,)).fetchone():
+        return None
+    return conn.execute(f'SELECT * FROM {INVENTORY_REPAIR_LEDGER} WHERE operation_id=?', (operation_id,)).fetchone()
+
+
+def _inventory_repair_candidate(runtime, owner, conn):
+    """Attest a completed owner's exact before/after transition, never a latest plan."""
+    publication = _ledger_row(conn, owner)
+    if publication is None:
+        raise AdapterError('promo-inventory-repair-owner-missing')
+    scope = json.loads(publication['preview_json'])['scope']
+    if not 1 <= len(scope['dates']) <= 7 or not 1 <= len(scope['ready_snapshots']) <= 14:
+        raise AdapterError('promo-inventory-repair-scope-invalid')
+    backup_path = Path(publication['backup_path'])
+    if not backup_path.is_file() or backup_path.stat().st_size > 64 * 1024 * 1024:
+        raise AdapterError('promo-inventory-repair-backup-missing-or-too-large')
+    if 'sha256:' + hashlib.sha256(backup_path.read_bytes()).hexdigest() != publication['backup_sha256']:
+        raise AdapterError('promo-inventory-repair-backup-drift')
+    actual = _target_image(conn, bundle=scope['bundle_version'], dates=scope['dates'],
+                           ready_asofs=scope['ready_snapshots'], roles=scope['snapshot_roles'])
+    if _digest(actual) != publication['after_target_sha256'] or _digest(actual) != _digest(json.loads(publication['after_target_json'])):
+        raise AdapterError('promo-inventory-repair-after-target-drift')
+    if (not _after_row_timestamps_match(conn, dates=scope['dates'], roles=scope['snapshot_roles'], captured_at=publication['applied_at'])
+            or _digest(_ready_metadata(conn, bundle=scope['bundle_version'], ready_asofs=scope['ready_snapshots']))
+            != _digest(json.loads(publication['after_ready_metadata_json']))):
+        raise AdapterError('promo-inventory-repair-after-metadata-drift')
+    pointers = {}
+    with closing(_connect(backup_path, readonly=True)) as backup:
+        _verify_scoped_backup(backup, operation_id=owner, before_target_sha=publication['before_target_sha256'],
+                              candidate_sha=publication['candidate_sha256'])
+        results = {day: actual['slots'][day][scope['snapshot_roles'][day][0]] for day in scope['dates']}
+        for as_of in scope['ready_snapshots']:
+            key = (scope['bundle_version'], as_of)
+            before = dict(backup.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?', key).fetchone())
+            after = dict(conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?', key).fetchone())
+            # Replay only the original scoped cell transformation: this attests
+            # exact full bytes, not merely the promo subset or inventory values.
+            expected = json.loads(before['plan_json'])
+            _update_plan(expected, results, set(scope['dates']))
+            expected_raw = json.dumps(expected, ensure_ascii=False, separators=(',', ':'))
+            if after['plan_json'] != expected_raw or _plan_non_target(expected, set(scope['dates'])) != _plan_non_target(json.loads(before['plan_json']), set(scope['dates'])):
+                raise AdapterError('promo-inventory-repair-full-ready-drift')
+            pointer = prove_inventory_retention(conn, runtime_dir=runtime, before=before, after=after)
+            pointer['transition_operation_id'] = owner
+            pointer['transition_candidate_sha256'] = publication['candidate_sha256']
+            pointer['transition_backup_sha256'] = publication['backup_sha256']
+            pointer['transition_after_target_sha256'] = publication['after_target_sha256']
+            pointers[as_of] = pointer
+    if not any(pointer['dates'] for pointer in pointers.values()):
+        raise AdapterError('promo-inventory-repair-no-accepted-captures')
+    return {'owner': dict(publication), 'scope': scope, 'inventory_retention': pointers}
+
+
+def _inventory_repair_preview(request, operation_id):
+    runtime, owner = _inventory_repair_request(request)
+    authority = operational_authority(runtime)
+    with closing(_connect(authority[0], readonly=True)) as conn:
+        conn.execute('BEGIN')
+        prior = _inventory_repair_row(conn, operation_id)
+        if prior is not None:
+            if prior['request_sha256'] != _digest(request):
+                raise AdapterError('promo-inventory-repair-request-mismatch')
+            return json.loads(prior['preview_json'])
+        candidate = _inventory_repair_candidate(runtime, owner, conn)
+    return {'operation_id': operation_id, 'target': str(authority[0]),
+        'scope': {'kind': 'inventory acceptance only', **candidate['scope']},
+        'prestate_sha256': _digest(candidate['owner']), 'candidate_sha256': _digest(candidate),
+        'candidate': candidate,
+        'recovery': {'method': 'additive inventory_retention receipt; no READY/source/book changes',
+                     'backup_path': candidate['owner']['backup_path'], 'backup_sha256': candidate['owner']['backup_sha256']}}
+
+
+def _inventory_repair_apply(request, operation_id, preview):
+    runtime, owner = _inventory_repair_request(request)
+    authority = operational_authority(runtime)
+    with promo_archive_fence(runtime), closing(_connect(authority[0], readonly=False)) as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            check_authority(runtime, authority)
+            candidate = _inventory_repair_candidate(runtime, owner, conn)
+            if (_digest(candidate['owner']), _digest(candidate)) != (preview['prestate_sha256'], preview['candidate_sha256']):
+                raise AdapterError('promo-inventory-repair-preview-drift')
+            conn.execute(f'''CREATE TABLE IF NOT EXISTS {INVENTORY_REPAIR_LEDGER}(
+                operation_id TEXT PRIMARY KEY,request_sha256 TEXT NOT NULL,preview_json TEXT NOT NULL,
+                receipts_json TEXT NOT NULL,applied_at TEXT NOT NULL)''')
+            if _inventory_repair_row(conn, operation_id) is not None:
+                raise AdapterError('promo-inventory-repair-already-submitted')
+            now = datetime.now(timezone.utc).isoformat()
+            receipts = []
+            for pointer in candidate['inventory_retention'].values():
+                receipt = publish_inventory_retention(conn, operation_id=operation_id, pointer=pointer, now=now)
+                if receipt is not None:
+                    receipts.append(receipt)
+            # Re-prove source/READY/backup after append; receipt writes themselves
+            # are outside the original owner's ledger/READY images.
+            if _inventory_repair_candidate(runtime, owner, conn) != candidate or not retention_receipts_match(conn, receipts):
+                raise AdapterError('promo-inventory-repair-poststate-drift')
+            conn.execute(f'INSERT INTO {INVENTORY_REPAIR_LEDGER} VALUES(?,?,?,?,?)',
+                (operation_id, _digest(request), json.dumps(preview, ensure_ascii=False),
+                 json.dumps(receipts, ensure_ascii=False), now))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return {'operation_id': operation_id, 'disposition': 'submitted'}
+
+
+def _inventory_repair_readback(request, operation_id):
+    runtime, owner = _inventory_repair_request(request)
+    authority = operational_authority(runtime)
+    with closing(_connect(authority[0], readonly=True)) as conn:
+        conn.execute('BEGIN')
+        row = _inventory_repair_row(conn, operation_id)
+        if row is None:
+            return {'operation_id': operation_id, 'state': 'not_submitted'}
+        if row['request_sha256'] != _digest(request):
+            return {'operation_id': operation_id, 'state': 'failed', 'reason': 'request-mismatch'}
+        preview = json.loads(row['preview_json'])
+        receipts = json.loads(row['receipts_json'])
+        try:
+            candidate = _inventory_repair_candidate(runtime, owner, conn)
+            verified = _digest(candidate) == preview['candidate_sha256'] and retention_receipts_match(conn, receipts)
+        except (ValueError, AdapterError, sqlite3.Error, OSError):
+            verified = False
+    return {'operation_id': operation_id, 'state': 'applied' if verified else 'ambiguous',
+            'candidate_sha256': preview['candidate_sha256'], 'inventory_retention_receipts': len(receipts),
+            'inventory_retention_verified': verified, 'source_ready_book_unchanged': verified}
