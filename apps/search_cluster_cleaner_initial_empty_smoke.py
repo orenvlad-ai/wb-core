@@ -4,7 +4,7 @@ from pathlib import Path
 import sys,json,unittest
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from apps.search_cluster_cleaner_write_fixture import fixture,OWNER,Q1
+from apps.search_cluster_cleaner_write_fixture import fixture,OWNER,Q1,PROFILE
 from packages.application.search_cluster_cleaner_initial_empty import execute,journal,sha,SCHEMA,InitialEmptyPolicy,build_declaration
 from packages.application.search_cluster_cleaner_worker import ManualCleanerWorker
 from packages.application.search_cluster_cleaner_self_service import ManualCleanerCoordinator
@@ -204,6 +204,7 @@ class InitialEmptyTests(unittest.TestCase):
             self.assertEqual(f.count('cleaner_write_operations'),0)
             self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'claimed')
             f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1',job['run_id'])
+            f.app.rules_digest='f'*64 # A foreign/stranded claim never uses stale bootstrap bindings.
             self.assertFalse(f.source.snapshot(t).complete);self.assertEqual(f.fake.writes,[])
 
     def test_empty_queries_repeat_without_consumption_and_daily_cannot_use_evidence(self):
@@ -245,6 +246,37 @@ class InitialEmptyTests(unittest.TestCase):
             f.fake.targets[11]['minus']=['Existing exact phrase']
             snap=f.source.snapshot(t);self.assertTrue(snap.complete);self.assertEqual(snap.minus,('Existing exact phrase',))
             f.fake.targets[11]['minus']=[];missing_when_empty(f);self.assertFalse(f.source.snapshot(t).complete)
+
+    def test_historical_evidence_does_not_gate_authoritative_closed_or_legacy_snapshots(self):
+        for drift in ('rules','profile'):
+            with self.subTest(drift=drift),fixture() as f:
+                f.fake.targets[11].update(minus=[],stats=[]);install(f)
+                t,job,_=scan(f,'native-evidence-lifecycle-'+drift)
+                if drift=='rules':f.app.rules_digest='f'*64
+                else:
+                    revision=f.app.get_profile(101,OWNER)['revision']
+                    created=f.app.create_profile(101,dict(request_id='lifecycle-profile-draft',expected_revision=revision,profile=dict(PROFILE,models=['15 promax'])),OWNER)
+                    f.app.activate_profile(101,dict(request_id='lifecycle-profile-activate',expected_revision=created['profile_revision'],version=created['profile_version']),OWNER)
+                # Authoritative empty WB state is ordinary, even while available.
+                snapshot=f.source.snapshot(t);self.assertTrue(snapshot.complete)
+                self.assertIsNone(snapshot.initial_empty_evidence)
+                f.fake.targets[11]['active']=[Q1]
+                self.assertTrue(f.source.snapshot(t).complete) # Exact nonempty list/full empty minus.
+                original=f.fake.response;missing_when_empty(f)
+                with self.assertRaises(CleanerError) as error:f.source.snapshot(t)
+                self.assertEqual(error.exception.code,'initial_empty_binding_mismatch' if drift=='rules' else 'initial_empty_profile_mismatch')
+                self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'available')
+                # Legacy/no-intent missing is still unknown, without applying stale evidence.
+                f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1','legacy')
+                self.assertFalse(f.source.snapshot(t).complete)
+                # A real nonempty observation closes the historical declaration.
+                f.source.initial_empty_policy=InitialEmptyPolicy(f.app,f.guard.directory,'g1',job['run_id'])
+                f.fake.targets[11]['minus']=['Existing phrase'];self.assertTrue(f.source.snapshot(t).complete)
+                self.assertEqual(journal(f.guard.directory)['pairs']['11:101']['state'],'closed')
+                f.fake.targets[11]['minus']=[];self.assertFalse(f.source.snapshot(t).complete)
+                f.fake.response=original;self.assertTrue(f.source.snapshot(t).complete)
+                f.fake.targets[11]['active']=[];self.assertTrue(f.source.snapshot(t).complete)
+                self.assertEqual(f.fake.writes,[])
 
     def test_unknown_readback_after_one_timeout_write_never_confirms_or_retries(self):
         with fixture() as f:

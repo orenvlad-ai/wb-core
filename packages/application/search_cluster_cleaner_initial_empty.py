@@ -225,11 +225,10 @@ class InitialEmptyPolicy:
             if snapshot.minus or 'excluded' in snapshot.queries.values():
                 if pair['state']!='closed':pair.update(state='closed',closed_at=app.clock(),reason='nonempty_observed');save(self.directory,state)
                 return snapshot
-            body=state['installations'][pair['installation']]['candidate']
-            bound(body,app,self.generation)
-            if (t.unsupported_reason or snapshot.reasons!=('minus_pair_omitted',) or not self.manual_intent(c,state['installations'][pair['installation']])
+            # Historical evidence must not gate ordinary authoritative WB
+            # snapshots after rules/profiles change. Bind only an actual use.
+            if (pair['state']=='closed' or t.unsupported_reason or snapshot.reasons!=('minus_pair_omitted',) or not self.manual_intent(c,state['installations'][pair['installation']])
                     or app._settings(c)['enabled']):return snapshot
-            if pair['state']=='closed':return snapshot
             own=self.operation if pair['state']=='claimed' else None
             if pair['state']=='claimed':
                 if not own or any(pair.get(k)!=v for k,v in dict(operation_id=own,run_id=self.run_id,worker_token=self.token,generation=self.generation).items()):return snapshot
@@ -239,6 +238,8 @@ class InitialEmptyPolicy:
             if reason:
                 pair.update(state='closed',closed_at=app.clock(),reason=reason);save(self.directory,state)
                 return snapshot
+            body=state['installations'][pair['installation']]['candidate']
+            bound(body,app,self.generation)
             proof=dict(evidence_id=body['evidence_id'],evidence_sha256=state['installations'][pair['installation']]['evidence_sha256'],installation=pair['installation'],target=t.key,owner_username=body['owner_username'],confirmed_at=body['confirmed_at'],basis='owner_confirmed_initial_empty')
             return replace(snapshot,complete=True,reasons=(),initial_empty_evidence=proof)
 
