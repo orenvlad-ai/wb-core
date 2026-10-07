@@ -2,7 +2,7 @@
   "candidate_root": "/mnt/wb-core-extra100/web-vitrina-history",
   "mount": "/mnt/wb-core-extra100 /dev/disk/by-uuid/9fcfe929-827e-4f81-b2ef-186fd794e671 ext4   rw,nosuid,nodev,noexec,noatime",
   "reserve_bytes": 10871635968,
-  "formula_epoch": "wbc0069k16-reviewed-native-v1:69002b74cce8e98e611182328a3fef342b29b7d21f56c3f38b7e99277615149d",
+  "formula_epoch": "wbc0069k16-reviewed-native-v1:0833e0b5ca79728e2aa6d5a0da4595e60cd8019d66e6187306fe47702af4312e",
   "formula_code_hashes": {
     "packages/application/web_vitrina_history_compiler.py": "24d0f34c38458c88decddd4350ba758fb41850490cdd1eb5d52aec3bb579575b",
     "packages/application/sheet_vitrina_v1_web_vitrina.py": "09bff338c9c04d42aed0a07c2970352ac57039da4f865e9d6cb496f9c504b6bf",
@@ -27,7 +27,7 @@
     "packages/application/sheet_vitrina_v1_live_plan.py": "9581531f628125baeb58a20729665b83476e7ef883e658a7a86a3d83b3a78d2a",
     "packages/application/web_vitrina_group_blocks.py": "038bfe3303a55ac85423d0becb2a403585cf5fa37a7c1419787b932863015343",
     "packages/application/vitrina_catalog.py": "22bc533476dc7452d4f0fd4b2ca62265fd8bca1263133196bf1a322cf57ea1e1",
-    "packages/application/promo_historical_recovery.py": "5333b7fcdb5c6e4ff86813cc82bd553b260137067e764d0e227851dee34a1292"
+    "packages/application/promo_historical_recovery.py": "9b97deeb91faa662cd89023b2dc197fabfc9a6ee17a519f92f30c57d167d6f55"
   },
   "group_migration_root": "/mnt/wb-core-extra100/web-vitrina-history-groups-candidate",
   "repair_code_hashes": {

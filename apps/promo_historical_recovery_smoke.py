@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import ExitStack, closing
 from datetime import datetime
 import json
+import os
+import shutil
 from pathlib import Path
 import sqlite3
 import sys
@@ -73,9 +75,77 @@ def recover(runtime, ids):
     return recover_promo_display(runtime_dir=runtime.runtime_dir, db_path=runtime.db_path, snapshot_date=DAY, requested_nm_ids=ids)
 
 
+def assert_missing_run_archive(runtime, ids):
+    from apps.production_apply_contract import AdapterError
+    from packages.application.promo_historical_recovery import PromoHistoricalRecoveryError
+    run=runtime.runtime_dir/'promo_xlsx_collector_runs'/(DAY+'__fixture')
+    summary_path=run/'run_summary.json'; original=summary_path.read_bytes()
+    missing=run/'promos/2500__2501__missing'; missing.mkdir()
+    raw=json.loads((run/'promos/2400__2300__promo/metadata.json').read_text())
+    raw.update(promo_id=2500,period_id=2501,promo_title='Missing current campaign')
+    (missing/'metadata.json').write_text(json.dumps(raw))
+    for status in ('downloaded','reused_archive','blocked_before_download'):
+        summary=json.loads(original); summary.update(timeline_candidates_found=2,card_confirmed_count=2)
+        summary['hydration_attempts'][0]['timeline_count']=2
+        summary['promos'].append({'promo_id':2500,'timeline_block_index':1,'promo_title':'Missing current campaign',
+            'status':status,'metadata_path':str(missing/'metadata.json'),'saved_path':str(missing/'workbook.xlsx'),
+            'metadata':raw})
+        summary_path.write_text(json.dumps(summary))
+        assert recover(runtime,ids) is None
+        try:
+            _candidate(runtime.runtime_dir,[DAY],{DAY:{'identity_run':DAY+'__fixture','price_checkpoint_id':'crcp_fixture'}})
+        except AdapterError as exc:
+            assert 'run-archive-roster-mismatch' in str(exc) or 'run-material-incomplete' in str(exc),exc
+        else: raise AssertionError('publication accepted a missing full campaign archive')
+        try: _candidate(runtime.runtime_dir,[DAY],{DAY:'auto'})
+        except AdapterError: pass
+        else: raise AssertionError('auto publication accepted a missing full campaign archive')
+    summary_path.write_bytes(original); shutil.rmtree(missing)
+    assert recover(runtime,ids) is not None
+
+
+def assert_downloaded_window(runtime, ids):
+    from apps.production_apply_contract import AdapterError
+    run=runtime.runtime_dir/'promo_xlsx_collector_runs'/(DAY+'__fixture')
+    summary_path=run/'run_summary.json'; summary_original=summary_path.read_bytes()
+    raw_path=run/'promos/2400__2300__promo/metadata.json'; raw_original=raw_path.read_bytes()
+    workbook=raw_path.parent/'workbook.xlsx'; workbook_original=workbook.read_bytes(); old_time=workbook.stat().st_mtime
+    stamp=datetime.fromisoformat(DAY+'T09:10:00+05:00').timestamp()
+    os.utime(workbook,(stamp,stamp))
+    summary=json.loads(summary_original); summary['finished_at']=DAY+'T09:20:00+05:00'
+    summary['promos'][0].update(status='downloaded',saved_path=str(workbook))
+    raw=json.loads(raw_original); raw['collected_at']=DAY+'T09:10:01+05:00'
+    raw_path.write_text(json.dumps(raw)); summary_path.write_text(json.dumps(summary))
+    result=recover(runtime,ids)
+    assert result and result.diagnostics['historical_reconstruction']['material_observed_at_max']==DAY+'T04:10:01+00:00'
+    assert result.diagnostics['historical_reconstruction']['identity_window_finished_at']==DAY+'T09:20:00+05:00'
+    assert _candidate(runtime.runtime_dir,[DAY],{DAY:'auto'})['results'][DAY]['observation_quality']=='historical_composite_observation_only'
+    for invalid in (None, DAY+'T09:05:00+05:00','2026-05-04T09:20:00+05:00',DAY+'T09:20:00'):
+        summary['finished_at']=invalid; summary_path.write_text(json.dumps(summary))
+        assert recover(runtime,ids) is None
+        try: _candidate(runtime.runtime_dir,[DAY],{DAY:'auto'})
+        except AdapterError: pass
+        else: raise AssertionError('publication accepted an unqualified download window')
+        try: _candidate(runtime.runtime_dir,[DAY],{DAY:{'identity_run':DAY+'__fixture','price_checkpoint_id':'crcp_fixture'}})
+        except AdapterError: pass
+        else: raise AssertionError('explicit publication accepted an unqualified download window')
+
+    summary['finished_at']=DAY+'T09:20:00+05:00';summary_path.write_text(json.dumps(summary))
+    raw['collected_at']=DAY+'T09:30:00+05:00';raw_path.write_text(json.dumps(raw))
+    assert recover(runtime,ids) is None
+    raw['collected_at']=DAY+'T09:10:01+05:00';raw_path.write_text(json.dumps(raw))
+    workbook.write_bytes(workbook_original+b'tamper');os.utime(workbook,(stamp,stamp))
+    assert recover(runtime,ids) is None
+    workbook.write_bytes(workbook_original);os.utime(workbook,(old_time,old_time))
+    raw_path.write_bytes(raw_original);summary_path.write_bytes(summary_original)
+    assert recover(runtime,ids) is not None
+
+
 def main():
     with TemporaryDirectory(prefix='promo-recovery-') as tmp:
         runtime, ids = seed(Path(tmp)/'runtime')
+        assert_missing_run_archive(runtime, ids)
+        assert_downloaded_window(runtime, ids)
         before = footprint(runtime)
         with patch('packages.application.promo_campaign_archive.sync_promo_campaign_archive', side_effect=AssertionError('no sync')):
             composite = recover(runtime, ids)

@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo
 
 from packages.application.promo_campaign_archive import (
     DailyPriceTruthResolution, PromoCampaignArchiveRecord, PromoCampaignArchiveSyncSummary,
-    _complete_identity_discovery, materialize_promo_result_from_archive,
+    _complete_identity_discovery, _metadata_indicates_announced_without_list,
+    _metadata_indicates_ended_without_download, materialize_promo_result_from_archive,
     promo_campaign_has_normalized_rows,
 )
 from packages.contracts.promo_live_source import PromoLiveSourceIncomplete
@@ -134,13 +135,48 @@ def read_reconstruction_run(runtime: Path, day: str, run_name: str, *, budget: R
     return path, summary, observed
 
 
-def reconstruction_artifact_proof(runtime: Path, day: str, run_path: Path, summary: dict[str, Any], observed: datetime, *, budget: RecoveryBudget | None = None) -> str:
+def reconstruction_artifact_proof(runtime: Path, day: str, run_path: Path, summary: dict[str, Any], observed: datetime, *, budget: RecoveryBudget | None = None, details: dict | None = None) -> str:
     """Pin original run metadata and pre-observation archive workbooks."""
     budget = budget or RecoveryBudget()
     run_items = {item.get("promo_id"): item for item in summary.get("promos") or []
                  if isinstance(item, dict) and type(item.get("promo_id")) is int}
+    records = bounded_archive_records(runtime, budget)
+    required_ids = set()
+    metadata_proof = []
+    for promo_id, item in run_items.items():
+        raw_path = Path(str(item.get("metadata_path") or ""))
+        if raw_path.parent.parent.parent.resolve() != run_path.parent.resolve() or not raw_path.is_file():
+            raise PromoHistoricalRecoveryError(f"promo-reconstruction-run-metadata-missing:{day}:{promo_id}")
+        raw_bytes = budget.read(raw_path)
+        raw = PromoMetadata(**json.loads(raw_bytes))
+        identity_fields = ("promo_id", "period_id", "promo_start_at", "promo_end_at", "promo_status",
+                           "ui_status", "ui_status_confidence", "download_action_state",
+                           "status_evidence_sources", "ui_loaded_success", "campaign_identity_match")
+        inline = item.get("metadata") or {}
+        if (raw.promo_id != promo_id or ("period_id" in item and item["period_id"] != raw.period_id)
+                or any(inline[key] != getattr(raw, key) for key in identity_fields if key in inline)):
+            raise PromoHistoricalRecoveryError(f"promo-reconstruction-run-metadata-identity-drift:{day}:{promo_id}")
+        metadata_proof.append((promo_id, hashlib.sha256(raw_bytes).hexdigest()))
+        if _metadata_indicates_announced_without_list(raw) or _metadata_indicates_ended_without_download(raw):
+            # Reuse only the existing strict expected-nonmaterializable rules.
+            continue
+        if raw.period_parse_confidence != "high" or not raw.promo_start_at or not raw.promo_end_at:
+            raise PromoHistoricalRecoveryError(f"promo-reconstruction-run-period-unqualified:{day}:{promo_id}")
+        start, end = date.fromisoformat(raw.promo_start_at[:10]), date.fromisoformat(raw.promo_end_at[:10])
+        if not start <= date.fromisoformat(day) <= end:
+            continue
+        if item.get("status") not in {"reused_archive", "downloaded"}:
+            raise PromoHistoricalRecoveryError(f"promo-reconstruction-run-material-incomplete:{day}:{promo_id}")
+        matches = [record for record in records if all(getattr(record.metadata, key) == getattr(raw, key)
+                   for key in ("promo_id", "period_id", "promo_start_at", "promo_end_at", "promo_status"))]
+        if len(matches) != 1:
+            raise PromoHistoricalRecoveryError(f"promo-reconstruction-run-archive-roster-mismatch:{day}:{promo_id}")
+        required_ids.add(promo_id)
     proof: list[Any] = []
-    for record in bounded_archive_records(runtime, budget):
+    proven_ids = set()
+    material_times = []
+    has_downloaded = False
+    for record in records:
         metadata = record.metadata
         if not (metadata.promo_start_at and metadata.promo_end_at and metadata.promo_start_at[:10] <= day <= metadata.promo_end_at[:10]):
             continue
@@ -160,7 +196,10 @@ def reconstruction_artifact_proof(runtime: Path, day: str, run_path: Path, summa
             raise PromoHistoricalRecoveryError(f"promo-reconstruction-workbook-not-in-run:{day}:{metadata.promo_id}")
         workbook = Path(record.workbook_path) if record.workbook_path else Path(record.archive_dir) / "workbook.xlsx"
         raw_path = Path(str(item.get("metadata_path") or ""))
-        if (not (workbook.is_file() or normalized) or Path(str(item.get("saved_path") or "")).resolve() != workbook.resolve()
+        original_workbook = Path(str(item.get("saved_path") or ""))
+        saved_path_valid = (original_workbook.resolve() == workbook.resolve() if item.get("status") == "reused_archive"
+                            else original_workbook.is_file() and original_workbook.parent.resolve() == raw_path.parent.resolve())
+        if (not (workbook.is_file() or normalized) or not saved_path_valid
                 or raw_path.parent.parent.parent.resolve() != run_path.parent.resolve()
                 or not raw_path.is_file()):
             raise PromoHistoricalRecoveryError(f"promo-reconstruction-artifact-path-invalid:{day}:{metadata.promo_id}")
@@ -179,9 +218,9 @@ def reconstruction_artifact_proof(runtime: Path, day: str, run_path: Path, summa
             reuse_bytes = b""
         raw_bytes = budget.read(raw_path)
         raw = json.loads(raw_bytes)
-        if any(raw.get(field) != getattr(metadata, field) for field in ("promo_id", "promo_start_at", "promo_end_at", "promo_status")):
+        if any(raw.get(field) != getattr(metadata, field) for field in ("promo_id", "period_id", "promo_start_at", "promo_end_at", "promo_status")):
             raise PromoHistoricalRecoveryError(f"promo-reconstruction-artifact-identity-drift:{day}:{metadata.promo_id}")
-        if workbook.is_file() and datetime.fromtimestamp(workbook.stat().st_mtime, tz=timezone.utc) > observed.astimezone(timezone.utc):
+        if item.get("status") == "reused_archive" and workbook.is_file() and datetime.fromtimestamp(workbook.stat().st_mtime, tz=timezone.utc) > observed.astimezone(timezone.utc):
             raise PromoHistoricalRecoveryError(f"promo-reconstruction-workbook-too-new:{day}:{metadata.promo_id}")
         if normalized:
             if item.get("status") != "reused_archive" or not record.workbook_fingerprint:
@@ -191,11 +230,35 @@ def reconstruction_artifact_proof(runtime: Path, day: str, run_path: Path, summa
             material_sha = _digest([record.workbook_fingerprint, *[hashlib.sha256(data).hexdigest() for data in normalized_bytes]])
         else:
             material_sha = hashlib.sha256(budget.read(workbook)).hexdigest()
+        material_observed = None
+        if item.get("status") == "downloaded":
+            has_downloaded = True
+            try:
+                finished = datetime.fromisoformat(str(summary.get("finished_at") or "").replace("Z", "+00:00"))
+                collected = datetime.fromisoformat(str(raw.get("collected_at") or "").replace("Z", "+00:00"))
+            except ValueError:
+                raise PromoHistoricalRecoveryError(f"promo-reconstruction-download-window-invalid:{day}:{metadata.promo_id}") from None
+            original_time = datetime.fromtimestamp(original_workbook.stat().st_mtime, tz=timezone.utc)
+            if (normalized or finished.tzinfo is None or collected.tzinfo is None
+                    or finished.astimezone(BUSINESS_TIMEZONE).date().isoformat() != day
+                    or not observed <= collected <= finished or not observed <= original_time <= finished
+                    or hashlib.sha256(budget.read(original_workbook)).hexdigest() != material_sha):
+                raise PromoHistoricalRecoveryError(f"promo-reconstruction-original-workbook-mismatch:{day}:{metadata.promo_id}")
+            material_observed = max(original_time, collected).astimezone(timezone.utc).isoformat()
+            material_times.append(material_observed)
+        proven_ids.add(metadata.promo_id)
         proof.append((metadata.promo_id, hashlib.sha256(raw_bytes).hexdigest(),
-                      hashlib.sha256(reuse_bytes).hexdigest(), material_sha))
+                      hashlib.sha256(reuse_bytes).hexdigest(), material_sha, material_observed,
+                      summary.get("finished_at") if item.get("status") == "downloaded" else None))
+    if not required_ids.issubset(proven_ids):
+        raise PromoHistoricalRecoveryError(f"promo-reconstruction-run-archive-roster-incomplete:{day}")
     if not proof:
         raise PromoHistoricalRecoveryError(f"promo-reconstruction-no-usable-artifacts:{day}")
-    return _digest(sorted(proof))
+    if details is not None:
+        details.update(identity_window_started_at=summary["started_at"],
+                       identity_window_finished_at=summary.get("finished_at") if has_downloaded else None,
+                       material_observed_at_max=max(material_times) if material_times else None)
+    return _digest({"materials": sorted(proof), "discovery_metadata": sorted(metadata_proof)})
 
 
 def qualified_reconstruction(runtime: Path, day: str, spec: dict[str, str], conn: sqlite3.Connection,
@@ -224,7 +287,8 @@ def qualified_reconstruction(runtime: Path, day: str, spec: dict[str, str], conn
         prices[nm_id] = minor / 100.0
     if set(prices) != price_ids or len(prices) != manifest[1] or not prices:
         raise PromoHistoricalRecoveryError(f"promo-reconstruction-price-sku-scope-mismatch:{day}")
-    artifact_sha = reconstruction_artifact_proof(runtime, day, run_path, summary, identity_observed, budget=budget)
+    material_details = {}
+    artifact_sha = reconstruction_artifact_proof(runtime, day, run_path, summary, identity_observed, budget=budget, details=material_details)
     paths = exact_day_runs(runtime, day, budget)
     later = [path for path in paths if path.parent.name > run_path.parent.name]
     latest = None
@@ -241,7 +305,7 @@ def qualified_reconstruction(runtime: Path, day: str, spec: dict[str, str], conn
              "price_rows_sha256": rows_sha, "price_values_sha256": _digest([[row[0], row[1], row[3]] for row in observed_rows]),
              "price_manifest_evidence_digest": manifest[3], "artifact_sha256": artifact_sha,
              "later_run_count_not_used": len(later), "latest_later_attempt": latest,
-             "freshness": "historical_composite_observation_only"}
+             "freshness": "historical_composite_observation_only", **material_details}
     truth = DailyPriceTruthResolution(price_by_nm_id=prices,
         source_note=f"daily_price_source=change_registry_checkpoint; checkpoint_id={spec['price_checkpoint_id']}; price_observed_at={checkpoint[1]}; identities_observed_at={summary['started_at']}; historical_composite_reconstruction=true",
         captured_at=str(checkpoint[1]), fingerprint=rows_sha)
@@ -330,8 +394,12 @@ def composite_cell_presentation(*, rows: list, day: str, proof: dict) -> dict:
     """Warning accompanies every numeric promo cell, including materialized totals."""
     observed = str(proof.get("identity_observed_at") or "")
     price_observed = str(proof.get("price_observed_at") or "")
-    reason = (f"Составное наблюдение: цены {price_observed}, акции {observed}. "
-              "Полнота на конец дня не подтверждена.")
+    finished = proof.get("identity_window_finished_at")
+    material = proof.get("material_observed_at_max")
+    campaign_window = f"окно {observed} — {finished}" if finished else observed
+    reason = (f"Составное наблюдение: цены {price_observed}, акции {campaign_window}. "
+              + (f"Файлы наблюдались не позже {material}. " if material else "")
+              + "Полнота на конец дня не подтверждена.")
     result = {}
     for row in rows:
         if len(row) < 2:

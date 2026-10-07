@@ -320,3 +320,23 @@ algorithm; storage roots/reserve are unchanged. The recovery smoke also builds
 a new native edition with the ordinary two-date range and max_recomputes=2,
 and verifies that older historical day objects retain their hashes. No full
 history migration is needed for this bounded recovery.
+
+Proof checks both directions: every covering materializable campaign in the
+complete selected run must have a matching archive identity/period/date and
+validated material. A deleted entire campaign directory or a covering
+blocked/failed material item is fatal even when all remaining archive records
+are valid. Scoped original sidecar evidence for every discovered campaign is
+hashed and checked against the selected summary; only the existing strict
+expected announcement/ended-without-download rules can omit material.
+
+For `reused_archive`, material/reuse times remain no later than run start. For
+`downloaded`, a retained workbook in the selected campaign folder must equal
+canonical workbook bytes; its filesystem material time and collected metadata
+time must lie in the timezone-aware exact-day started-to-finished window. Missing,
+naive or cross-day `finished_at`, after-finished material and byte drift reject
+proof. Normalized-only downloaded recovery is not qualified without this
+original/canonical byte equality. Provenance includes the observation window and
+`material_observed_at_max`; cell warnings describe the campaign window and latest
+material observation instead of claiming that all files were observed at start.
+Finished time still never certifies end-of-day completeness. Postmaterialization
+rechecks repeat the same proof before routine numeric display.

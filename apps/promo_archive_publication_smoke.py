@@ -356,6 +356,9 @@ def _seed_reconstruction_fixture(runtime_dir: Path, ids: list[int]) -> None:
         "archive_key": archive_dir.name, "reused_workbook_path": str(workbook),
         "downloaded_at": "2026-05-03T08:30:00+05:00",
     }), encoding="utf-8")
+    raw_metadata = json.loads((raw_dir / "metadata.json").read_text())
+    raw_metadata.update(ui_loaded_success=True, campaign_identity_match=True)
+    (raw_dir / "metadata.json").write_text(json.dumps(raw_metadata))
     (run_dir / "run_summary.json").write_text(json.dumps({
         "run_dir": str(run_dir), "status": "partial", "started_at": "2026-05-03T09:00:00+05:00",
         "timeline_candidates_found": 1, "card_confirmed_count": 1, "blocked_before_card_count": 0,
@@ -363,7 +366,7 @@ def _seed_reconstruction_fixture(runtime_dir: Path, ids: list[int]) -> None:
         "promos": [{"promo_id": 2400, "timeline_block_index": 0, "promo_title": "Promo",
                     "status": "reused_archive", "metadata_path": str(raw_dir / "metadata.json"),
                     "saved_path": str(workbook),
-                    "metadata": {"campaign_identity_match": True, "ui_loaded_success": True}}],
+                    "metadata": raw_metadata}],
     }), encoding="utf-8")
     evidence_digest = "sha256:" + "0" * 64
     with sqlite3.connect(str(db_path)) as conn:
