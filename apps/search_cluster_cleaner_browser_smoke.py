@@ -152,13 +152,13 @@ def run(output:Path):
             page.close()
         # The browser renders exact worker receipts without treating pending or
         # missing confirmation as an exclusion. HTTP is synthetic and local.
-        for outcome in ('complete','partial','failed','detail-missing'):
+        for outcome in ('complete','partial','failed','detail-missing','unknown-minus','unknown-minus-empty'):
             with running_fixture() as f:
                 with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
                 page=browser.new_page();browser_login(page,f);polls=[];rechecks=[];completed_backend=set()
                 def manual_status(route):
                     polls.append(1);job_id=route.request.url.rsplit('/',1)[-1]
-                    state='running' if len(polls)==1 else ('complete' if outcome=='detail-missing' else outcome)
+                    state='running' if len(polls)==1 else ('partial' if outcome.startswith('unknown-minus') else 'complete' if outcome=='detail-missing' else outcome)
                     body=dict(job_id=job_id,run_id='synthetic-scan',advert_id=10101,nm_id=101,state=state,
                               stage='classifying' if state=='running' else 'finished',updated_at='2026-09-25T12:00:0'+str(min(len(polls),9))+'Z',
                               scan_decisions=[dict(query='стекло iphone 16 pro max',verdict='allow',state='allow',observed_state='active',reason='Подходит товару',rule_id='MATCH'),
@@ -167,6 +167,10 @@ def run(output:Path):
                     if state=='complete':body.update(result='applied',write_run_id='synthetic-write')
                     if state=='partial':body.update(result='ambiguous',write_run_id='synthetic-write',error='WB ещё не подтвердил исключение',can_recheck=True,stage='write_apply_claimed')
                     if state=='failed':body.update(error='WB не ответил; запись не подтверждена')
+                    if outcome.startswith('unknown-minus') and state=='partial':
+                        body.update(scan_minus_known=False,scan_result='partial',write_run_id=None,can_recheck=False,stage='finished',result='partial',
+                                    error_code='minus_pair_omitted',error=None,
+                                    scan_decisions=[] if outcome.endswith('-empty') else [dict(query='стекло iphone 16 pro max',verdict='allow',state='preview_only',observed_state='active',before='unknown',desired='allowed',reason='Подходит товару',preliminary=True,technical_reason='minus_pair_omitted')])
                     if state=='complete' and job_id not in completed_backend:
                         f.cleaner.record_manual_job(job_id,state='complete',stage='finished',result='applied')
                         scan=f.cleaner.manual_job(job_id,OWNER)['scan_run_id']
@@ -190,7 +194,7 @@ def run(output:Path):
                 expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
                 expect(page.locator('[data-kc-stage-text]')).to_contain_text('Сверяем правила товара',timeout=7000)
                 if outcome=='complete':page.screenshot(path=str(output/'manual-running.png'),full_page=True);screens.append('manual-running.png')
-                expect(page.locator('[data-kc-manual-result]')).to_contain_text('стекло iphone 16 pro max',timeout=7000)
+                expect(page.locator('[data-kc-manual-result]')).to_contain_text('полный список исключений' if outcome=='unknown-minus-empty' else 'стекло iphone 16 pro max',timeout=7000)
                 result_text=page.locator('[data-kc-manual-result]').inner_text()
                 if outcome=='complete':
                     check('manual_confirmed_phrase_and_reason',all(value in result_text for value in ('WB подтвердил','лишний ключ','Другая модель','Оставлено')))
@@ -226,6 +230,16 @@ def run(output:Path):
                     expect(page.locator('[data-kc-manual-result] .kc-manual-group').filter(has=page.get_by_role('heading',name='Уже были в исключениях'))).to_have_count(0)
                     expect(page.locator('[data-kc-manual-result] .kc-manual-stat').filter(has_text='Уже были исключены').locator('strong')).to_have_text('—')
                     check('missing_write_detail_does_not_invent_already_excluded')
+                if outcome.startswith('unknown-minus'):
+                    expect(page.locator('[data-kc-manual-result]')).to_contain_text('запись заблокирована')
+                    expect(page.locator('[data-kc-manual-result] .kc-manual-stat').filter(has_text='Доступно ключей').locator('strong')).to_have_text('0' if outcome.endswith('-empty') else '1')
+                    for label in ('Проверено полностью','WB подтвердил исключений','Возвращено','Без изменений'):
+                        expect(page.locator('[data-kc-manual-result] .kc-manual-stat').filter(has_text=label).locator('strong')).to_have_text('—')
+                    expect(page.get_by_role('button',name='Проверить результат WB')).to_have_count(0)
+                    if not outcome.endswith('-empty'):
+                        expect(page.locator('[data-kc-manual-result] .kc-result-table tbody')).to_contain_text('Неизвестно')
+                        expect(page.locator('[data-kc-manual-result]')).to_contain_text('Предварительно: Подходит товару')
+                    check(outcome+'_never_reports_checked_or_confirmed_zero',not rechecks)
                 check('manual_result_has_no_script',page.locator('[data-kc-manual-result] script').count()==0)
                 if outcome=='complete':
                     page.screenshot(path=str(output/'manual-result.png'),full_page=True);screens.append('manual-result.png')

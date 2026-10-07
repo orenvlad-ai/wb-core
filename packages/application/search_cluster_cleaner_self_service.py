@@ -277,6 +277,11 @@ class ManualCleanerCoordinator:
         if phase=='scan':
             if state=='failed':
                 detail=self.cleaner.run_detail(self._job(job_id)['scan_run_id'],self.owner)
+                if any(target['reason']=='minus_pair_omitted' for target in detail['targets']):
+                    self._save(job_id,state='partial',stage='finished',can_recheck=False,
+                        error_code='minus_pair_omitted',error='WB не вернул полный список исключений. Доступные ключи показаны предварительно; запись заблокирована.',
+                        scan_result='partial')
+                    return
                 self._save(job_id,state='failed',stage='finished',error_code=detail['reason'] or 'scan_partial',
                            error='Ручная проверка не завершилась полностью')
                 return

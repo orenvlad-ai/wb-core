@@ -7,7 +7,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import json
@@ -272,8 +272,16 @@ class CleanerWbSource:
         day=datetime.fromisoformat(self.clock().replace('Z','+00:00')).date()
         stats=self._pair(self._call('POST','/adv/v0/normquery/stats',{'from':(day-timedelta(days=STATS_WINDOW_DAYS-1)).isoformat(),'to':day.isoformat(),'items':[pair]},deadline=deadline),'stats',target).get('stats');times['statistics']=self.clock()
         if not isinstance(stats,list) or any(not isinstance(v,dict) or not isinstance(v.get('norm_query'),str) for v in stats):raise WbReadError('statistics_malformed')
-        minus=self._pair(self._call('POST','/adv/v0/normquery/get-minus',{'items':[pair]},deadline=deadline),'items',target).get('norm_queries');times['minus']=self.clock()
-        return union_snapshot(target,list_entry=listing,stats_queries=[v['norm_query'] for v in stats],minus_queries=minus,observed_at=self.clock(),source_times=times)
+        minus_body=self._call('POST','/adv/v0/normquery/get-minus',{'items':[pair]},deadline=deadline);times['minus']=self.clock()
+        # The exact pair was identified by list/statistics, but an omitted
+        # get-minus pair is not evidence of an empty full minus set. Keep the
+        # independently validated keys for a read-only preliminary report.
+        omitted=minus_body=={'items':[]}
+        minus=None if omitted else self._pair(minus_body,'items',target).get('norm_queries')
+        snapshot=union_snapshot(target,list_entry=listing,stats_queries=[v['norm_query'] for v in stats],minus_queries=minus,observed_at=self.clock(),source_times=times)
+        if omitted:
+            snapshot=replace(snapshot,reasons=tuple('minus_pair_omitted' if reason=='minus_missing_or_malformed' else reason for reason in snapshot.reasons))
+        return snapshot
 
     def read_minus(self,target):
         body=self._call('POST','/adv/v0/normquery/get-minus',{'items':[{'advert_id':target.advert_id,'nm_id':target.nm_id}]},deadline=self.monotonic()+20)

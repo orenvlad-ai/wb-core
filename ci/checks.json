@@ -267,6 +267,7 @@
           "apps/search_cluster_cleaner_holdout_smoke.py"
         ],
         ["python3", "apps/search_cluster_cleaner_write_smoke.py"],
+        ["python3", "apps/search_cluster_cleaner_unknown_minus_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_registry_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_http_smoke.py"],
         ["python3", "apps/search_cluster_cleaner_stage_e_smoke.py"],

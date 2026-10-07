@@ -193,6 +193,12 @@ def batch_status(cleaner, batch_id: str, principal: Principal) -> dict:
                  new_checked=None,checked_total=None,confirmed_excluded=None,returned=None,allowed=None,
                  controversial=None,unchanged=None,review_count=None,deferred_count=None,
                  pending_count=None,not_sent_count=None,delivery_state='unknown',already_excluded=None)
+        if job and job.get('scan_minus_known') is False:
+            row.update(minus_known=False,observed_only=job.get('observed_only'),
+                       preliminary_allow=sum(item.get('verdict')=='allow' for item in job.get('scan_decisions',[])),
+                       preliminary_exclude=sum(item.get('verdict')=='exclude' for item in job.get('scan_decisions',[])),
+                       preliminary_review=sum(item.get('verdict')=='review' for item in job.get('scan_decisions',[])),
+                       blocked_write_reason='minus_pair_omitted')
         if job:
             with cleaner.store.read() as c:
                 scan=c.execute("SELECT state,summary FROM cleaner_runs WHERE account=? AND run_id=?",(cleaner.key,job['scan_run_id'])).fetchone()
@@ -385,13 +391,27 @@ class BatchCleanerCoordinator:
         if (child.get('stage')!='finished' or child.get('write_run_id') or
                 not child.get('scan_run_id') or child.get('can_recheck')):return None
         with self.cleaner.store.read() as c:
-            run=c.execute('SELECT state FROM cleaner_runs WHERE account=? AND run_id=?',
+            run=c.execute('SELECT * FROM cleaner_runs WHERE account=? AND run_id=?',
                           (self.cleaner.key,child['scan_run_id'])).fetchone()
             if not run or run['state'] not in {'stopped','partial','failed'}:return None
             if c.execute('SELECT 1 FROM cleaner_write_operations WHERE account=? AND run_id=? LIMIT 1',
                          (self.cleaner.key,child['scan_run_id'])).fetchone():return None
-            target=c.execute('SELECT reason FROM cleaner_run_targets WHERE run_id=? AND target=?',
-                             (child['scan_run_id'],f"{item['advert_id']}:{item['nm_id']}")).fetchone()
+            target_key=f"{item['advert_id']}:{item['nm_id']}"
+            target=c.execute('SELECT * FROM cleaner_run_targets WHERE run_id=? AND target=?',
+                             (child['scan_run_id'],target_key)).fetchone()
+            if child.get('state')=='partial':
+                # Only this read-only omission may advance as a terminal partial.
+                # Other partial/ambiguous writes retain the existing batch stop.
+                if (child.get('error_code')!='minus_pair_omitted' or child.get('advert_id')!=item['advert_id']
+                        or child.get('nm_id')!=item['nm_id'] or run['kind']!='scan' or run['trigger']!='manual_exact'
+                        or run['state']!='partial' or run['phase']!='finished' or not run['scan_finished_at']
+                        or run['reason'] or json.loads(run['targets'])!=[dict(target=target_key,advert_id=item['advert_id'],nm_id=item['nm_id'])]
+                        or not target or target['complete']!=0 or target['state']!='partial'
+                        or target['reason']!='minus_pair_omitted'
+                        or c.execute('SELECT count(*) FROM cleaner_run_targets WHERE run_id=?',(child['scan_run_id'],)).fetchone()[0]!=1
+                        or c.execute("SELECT 1 FROM cleaner_events WHERE account=? AND kind='manual_apply_prepared' AND json_extract(facts,'$.scan_run_id')=?",
+                                     (self.cleaner.key,child['scan_run_id'])).fetchone()):return None
+
             return str(target['reason'] or child.get('error_code') or 'scan_incomplete') if target else str(child.get('error_code') or 'scan_incomplete')
 
     def _advance_unavailable(self,batch:dict,index:int,*,code:str,message:str,job_id:str|None=None) -> dict:
@@ -571,7 +591,7 @@ class BatchCleanerCoordinator:
                             error_code='statistics_missing',error=f'{deferred} ключей без точной статистики WB отложено',
                             deferred_count=deferred)))
                     return batch_status(self.cleaner,batch['batch_id'],self.owner)
-                if child['state']=='failed':
+                if child['state']=='failed' or (child['state']=='partial' and child.get('error_code')=='minus_pair_omitted'):
                     reason=self._failed_scan_without_write(child,item)
                     if reason:
                         if reason in RETRYABLE_READ_CODES:
@@ -580,9 +600,10 @@ class BatchCleanerCoordinator:
                             self._stop(batch,index,code=reason,message='Общая проверка WB остановлена')
                             return batch_status(self.cleaner,batch['batch_id'],self.owner)
                         card_reason=reason in CARD_EVIDENCE_CODES
-                        message=(child.get('error') if card_reason and any('\u0400'<=ch<='\u04ff'
+                        omitted_minus=reason=='minus_pair_omitted'
+                        message=(child.get('error') if (card_reason or omitted_minus) and any('\u0400'<=ch<='\u04ff'
                                 for ch in str(child.get('error') or '')) else reason)
-                        return self._advance_unavailable(batch,index,code=reason if card_reason else 'scan_incomplete',message=message,job_id=child['job_id'])
+                        return self._advance_unavailable(batch,index,code=reason if card_reason or omitted_minus else 'scan_incomplete',message=message,job_id=child['job_id'])
                 self._stop(batch,index,code=child.get('error_code') or 'child_failed',message=child.get('error') or 'Проверка пары не завершилась')
                 return batch_status(self.cleaner,batch['batch_id'],self.owner)
             if batch['state']!='running' or batch['stage']!=child['stage']:

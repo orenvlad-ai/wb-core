@@ -51,7 +51,7 @@ def union_snapshot(target: Target, *, list_entry: Mapping | None, stats_queries:
         if states.get(q) == "active": reasons.append("list_minus_conflict")
         states[q] = "excluded"
         sources[q].add("minus")
-    if isinstance(list_entry, Mapping) and isinstance(list_entry.get("excluded"), list):
+    if isinstance(minus_queries,list) and isinstance(list_entry, Mapping) and isinstance(list_entry.get("excluded"), list):
         if set(list_entry["excluded"]) - set(minus): reasons.append("list_minus_drift")
     if not observed_at or any(not source_times.get(s) for s in ("list", "statistics", "minus")):
         reasons.append("source_timestamp_missing")

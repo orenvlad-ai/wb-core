@@ -695,6 +695,15 @@ class KeywordCleaner:
               LEFT JOIN cleaner_auto_decisions d ON d.decision_id=o.decision_id
               WHERE o.account=? AND o.last_run_id=? AND o.target=? ORDER BY o.query""",
               (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}"))]
+            preview=c.execute("""SELECT facts FROM cleaner_events WHERE account=? AND run_id=?
+              AND kind='partial_snapshot_preview' AND json_extract(facts,'$.target')=? ORDER BY sequence DESC LIMIT 1""",
+              (self.key,result['scan_run_id'],f"{result['advert_id']}:{result['nm_id']}")).fetchone()
+            if preview:
+                facts=json.loads(preview['facts'])
+                result['scan_decisions']=facts['queries']
+                result['scan_minus_known']=False
+                result['observed_only']=len(facts['queries'])
+                result['scan_blocked_reason']=facts['reason']
             return result
 
     def record_manual_job(self,job_id:str,**facts) -> None:
@@ -1002,6 +1011,49 @@ class KeywordCleaner:
                 return Target(**json.loads(r["metadata"]))
             return None
 
+    def _partial_snapshot_preview(self,c,run_id,snapshot):
+        """Preserve validated keys without mutating actionable observations.
+
+        This is an immutable preliminary report, not auto-decisions or reviews.
+        Only the adapter's narrowly identified omitted-minus pair reaches here.
+        """
+        t=snapshot.target;p=self._profile(c,t.nm_id);queries=[]
+        if self._settings(c)['rules_version']!=self.rules_version:
+            raise CleanerError('rules_version_mismatch','Worker использует другую версию правил',409)
+        for query,observed in sorted(snapshot.queries.items()):
+            qh=query_hash(query);source='rules_preview'
+            result=dict(verdict=None,rule='PROFILE',reason='Нужен подтверждённый профиль товара')
+            if observed=='archived':
+                result=dict(verdict=None,rule='ARCHIVED',reason='Архивный ключ не обрабатывается')
+            elif p:
+                override=c.execute("""SELECT o.*,h.needs_revalidation FROM cleaner_manual_overrides o
+                  JOIN cleaner_override_heads h USING(account,nm_id,query_hash,revision)
+                  WHERE o.account=? AND o.nm_id=? AND o.query_hash=?""",(self.key,t.nm_id,qh)).fetchone()
+                baseline=c.execute("""SELECT b.query,d.verdict,d.fingerprint FROM cleaner_baselines b
+                  JOIN cleaner_auto_decisions d ON d.decision_id=b.decision_id
+                  WHERE b.account=? AND b.target=? AND b.query_hash=?""",(self.key,t.key,qh)).fetchone()
+                if override:
+                    if override['fingerprint']==p.semantic_fingerprint and not override['needs_revalidation']:
+                        source='owner_decision_preview'
+                        result=dict(verdict=override['verdict'],rule='OWNER_EXACT',reason='Точное решение владельца для этого товара')
+                elif baseline:
+                    if baseline['query']==query and baseline['fingerprint']==p.semantic_fingerprint:
+                        source='baseline_preview'
+                        result=dict(verdict=baseline['verdict'],rule='APPROVED_BASELINE',reason='Согласованная исходная база')
+                else:result=self.classifier(query,p)
+            queries.append(dict(query=query,query_hash=qh,state='preview_only',observed_state=observed,
+                sources=canonical(snapshot.sources.get(query,())),verdict=result['verdict'],rule_id=result['rule'],
+                reason=result['reason'],source=source,controversial=False,preliminary=True,
+                before='unknown',desired='excluded' if result['verdict']=='exclude' else 'allowed' if result['verdict']=='allow' else None,
+                technical_reason='minus_pair_omitted'))
+        self._event(c,'partial_snapshot_preview',dict(target=t.key,reason='minus_pair_omitted',minus_known=False,
+            observed_at=snapshot.observed_at,source_times=dict(snapshot.source_times),queries=queries,
+            rules_version=self.rules_version,rules_digest=self.rules_digest,
+            profile_fingerprint=p.semantic_fingerprint if p else None),run_id=run_id)
+        return dict(observed_only=len(queries),preliminary_allow=sum(row['verdict']=='allow' for row in queries),
+                    preliminary_exclude=sum(row['verdict']=='exclude' for row in queries),
+                    preliminary_review=sum(row['verdict']=='review' for row in queries))
+
     def record_snapshot(self,run_id:str,token:str,generation:str,snapshot:Snapshot,*,manual_only:bool=False) -> dict:
         t=snapshot.target;counts=dict(new_checked=0,checked_total=0,allow=0,would_exclude=0,would_return=0,
                                       controversial=0,review=0,profile_required=0,excluded_not_executed=0)
@@ -1010,6 +1062,8 @@ class KeywordCleaner:
             if manual_only and self._settings(c)["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
             reason=t.unsupported_reason or "; ".join(snapshot.reasons)
             if not snapshot.complete or reason:
+                if not snapshot.complete and not t.unsupported_reason and snapshot.reasons==('minus_pair_omitted',):
+                    counts.update(self._partial_snapshot_preview(c,run_id,snapshot))
                 self._record_target(c,run_id,t,"partial",False,reason or "incomplete_snapshot",snapshot.observed_at,counts,snapshot.source_times)
                 return counts
             if len(snapshot.minus)!=len(set(snapshot.minus)) or any(q not in snapshot.queries or snapshot.queries[q]!="excluded" for q in snapshot.minus):
@@ -1113,6 +1167,7 @@ class KeywordCleaner:
             if manual_only and s["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
             targets=c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=?",(run_id,)).fetchall()
             summary=dict(new_checked=0,checked_total=0,allow=0,would_exclude=0,would_return=0,controversial=0,
+                         observed_only=0,preliminary_allow=0,preliminary_exclude=0,preliminary_review=0,
                          review=0,profile_required=0,excluded_not_executed=0,confirmed_automatic=0,
                          confirmed_manual=0,confirmed_pilot=0,returned=0,pairs=len(targets),
                          campaigns=len({json.loads(t["metadata"])["advert_id"] for t in targets}),dry_run=not bool(run["transport_enabled"]))
@@ -1197,6 +1252,7 @@ class KeywordCleaner:
                     declared={str(item.get('target') or '') for item in json.loads(run['targets'])}
                     if {item['target'] for item in targets}==declared and targets:
                         summary.update(new_checked=0,allow=0,would_exclude=0,review=0,profile_required=0,
+                                       observed_only=0,preliminary_allow=0,preliminary_exclude=0,preliminary_review=0,
                                        excluded_not_executed=0,confirmed_automatic=0,confirmed_manual=0,
                                        unresolved_operations=0,requires_review_operations=0,rejected_not_executed=0,
                                        dry_run=True,pairs=len(targets),campaigns=len({item['target'].split(':')[0] for item in targets}))
@@ -1253,6 +1309,9 @@ class KeywordCleaner:
                 facts=json.loads(event[0])
                 for field in result['settlement']:result['settlement'][field]+=facts.get(field,0)
             result["targets"]=[dict(r) for r in c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=? ORDER BY target",(run_id,))]
+            result['partial_previews']=[json.loads(event[0]) for event in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='partial_snapshot_preview' ORDER BY sequence",
+                (self.key,run_id))]
             operations=[]
             for operation in c.execute("SELECT operation_id,target,state,additions,before_json,versions,evidence FROM cleaner_write_operations WHERE account=? AND run_id=? ORDER BY created_at,operation_id",(self.key,run_id)):
                 actions={item['query_hash']:item['action'] for item in json.loads(operation['versions']).get('items',[]) if item.get('action')}
