@@ -152,13 +152,13 @@ def run(output:Path):
             page.close()
         # The browser renders exact worker receipts without treating pending or
         # missing confirmation as an exclusion. HTTP is synthetic and local.
-        for outcome in ('complete','partial','failed','detail-missing','unknown-minus','unknown-minus-empty'):
+        for outcome in ('complete','partial','failed','detail-missing','unknown-minus','unknown-minus-empty','initial-empty'):
             with running_fixture() as f:
                 with f.cleaner.store.transaction() as c:c.execute('UPDATE cleaner_settings SET enabled=0,restore_hold=1,transport_enabled=0 WHERE account=?',(f.cleaner.key,))
                 page=browser.new_page();browser_login(page,f);polls=[];rechecks=[];completed_backend=set()
                 def manual_status(route):
                     polls.append(1);job_id=route.request.url.rsplit('/',1)[-1]
-                    state='running' if len(polls)==1 else ('partial' if outcome.startswith('unknown-minus') else 'complete' if outcome=='detail-missing' else outcome)
+                    state='running' if len(polls)==1 else ('partial' if outcome.startswith('unknown-minus') else 'no_change' if outcome=='initial-empty' else 'complete' if outcome=='detail-missing' else outcome)
                     body=dict(job_id=job_id,run_id='synthetic-scan',advert_id=10101,nm_id=101,state=state,
                               stage='classifying' if state=='running' else 'finished',updated_at='2026-09-25T12:00:0'+str(min(len(polls),9))+'Z',
                               scan_decisions=[dict(query='стекло iphone 16 pro max',verdict='allow',state='allow',observed_state='active',reason='Подходит товару',rule_id='MATCH'),
@@ -167,6 +167,9 @@ def run(output:Path):
                     if state=='complete':body.update(result='applied',write_run_id='synthetic-write')
                     if state=='partial':body.update(result='ambiguous',write_run_id='synthetic-write',error='WB ещё не подтвердил исключение',can_recheck=True,stage='write_apply_claimed')
                     if state=='failed':body.update(error='WB не ответил; запись не подтверждена')
+                    if outcome=='initial-empty' and state=='no_change':
+                        body.update(result='no_change',write_run_id=None,scan_decisions=body['scan_decisions'][:1],
+                                    scan_initial_empty_evidence=dict(basis='owner_confirmed_initial_empty'))
                     if outcome.startswith('unknown-minus') and state=='partial':
                         body.update(scan_minus_known=False,scan_result='partial',write_run_id=None,can_recheck=False,stage='finished',result='partial',
                                     error_code='minus_pair_omitted',error=None,
@@ -225,6 +228,10 @@ def run(output:Path):
                     expect(page.locator('[data-kc-manual-stage]')).to_be_visible()
                     check('recheck_uses_same_job_readback_only',len(rechecks)==1 and bool(rechecks[0].get('request_id')) and f.count('cleaner_runs')==2)
                 if outcome=='failed':check('manual_error_is_visible','Чистка не выполнена' in result_text and 'WB не ответил' in result_text)
+                if outcome=='initial-empty':
+                    expect(page.locator('[data-kc-manual-result]')).to_contain_text('подтверждён владельцем')
+                    expect(page.locator('[data-kc-manual-result]')).to_contain_text('WB не вернул пару')
+                    check('initial_empty_owner_basis_is_explicit_without_fake_wb_confirmation','WB подтвердил пустой' not in result_text and not rechecks)
                 if outcome=='detail-missing':
                     expect(page.locator('[data-kc-manual-result]')).to_contain_text('Подтверждения WB ещё не удалось загрузить')
                     expect(page.locator('[data-kc-manual-result] .kc-manual-group').filter(has=page.get_by_role('heading',name='Уже были в исключениях'))).to_have_count(0)

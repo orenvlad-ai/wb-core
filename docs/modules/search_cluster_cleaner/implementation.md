@@ -692,3 +692,110 @@ WB-результат остаётся `unknown`; CSV-ячейки с форму
 Новое событие или наступивший срок возобновляет полный проход. Завершённые
 задания и группы не перечитываются в каждом цикле ожидания; после сбоя
 неподтверждённая запись WB по-прежнему восстанавливается только чтением.
+
+#### Подтверждённое владельцем начальное пустое состояние
+
+`get-minus: {items: []}` по-прежнему означает `minus_pair_omitted`, а не ноль.
+Отдельный допуск первого заполнения разрешён только после явного подтверждения
+владельцем, что **точные пары** ещё никогда не имели minus-фраз. Он не выводится
+из возраста кампании, названия, отсутствия истории или пустого list/stats.
+Источник основания показывается в результате ручного задания и сохраняется в
+immutable событиях `initial_empty_basis`, prestate и versions операции:
+`owner_confirmed_initial_empty`. WB не считается подтвердившим полный ноль.
+
+Private declaration `initial-empty.<evidence_id>.json` находится в существующем
+admission directory (0700, файл 0600, вне Git и business SQLite backups).
+Её точный набор полей:
+
+```json
+{
+  "schema": "search_cluster_cleaner_initial_empty/v1",
+  "evidence_id": "reviewed-pilot-unique-id",
+  "account_key": "<current cleaner account key>",
+  "generation": "<current operational generation>",
+  "owner_username": "<configured owner, casefolded>",
+  "confirmed_at": "<owner confirmation time with timezone>",
+  "confirmation": "<exact owner confirmation wording for this scope>",
+  "scope_sha256": "sha256:<canonical sorted targets digest>",
+  "runtime_sha": "<released runtime 40-hex SHA>",
+  "rules_digest": "<deployed Python executable rules 64-hex digest>",
+  "targets": [{"advert_id": 1, "nm_id": 101, "profile_fingerprint": "<active profile 64-hex fingerprint>"}]
+}
+```
+
+Подготовка использует read-only helper
+`search_cluster_cleaner_initial_empty.build_declaration`: он читает account,
+generation, rules и активные fingerprints из штатного `KeywordCleaner`,
+принимает только exact `{advert_id, nm_id}` pairs и явные owner time/wording.
+Запускать его нужно **deployed Python**: workstation digest другой версии
+Python не является production identity. Пример подготовки данных без WB и
+изменения operational DB (переменные уже получены read-only оператором):
+
+```python
+from packages.application.search_cluster_cleaner_initial_empty import build_declaration, sha
+from packages.contracts.search_cluster_cleaner import canonical
+body = build_declaration(cleaner=service, evidence_id=evidence_id,
+                         pairs=exact_owner_confirmed_pairs,
+                         runtime_sha=released_runtime_sha,
+                         confirmed_at=owner_confirmation_time,
+                         confirmation=owner_confirmation_wording)
+raw = canonical(body).encode()
+request_json = dict(mode='initial_empty', evidence_id=evidence_id,
+                    evidence_sha256=sha(raw))
+```
+
+`service` создаётся из текущих registry/account/owner canonical Stage E config;
+его `store.read()` использует operational `mode=ro` / `query_only`. После
+проверки exact scope оператор отдельно сохраняет именно `raw` с указанными
+private permissions. Подготовка не изменяет текущий baseline, profiles,
+admission, settings или бюджеты и не выполняет API calls.
+
+Установка — существующий Production Apply adapter
+`search_cluster_cleaner_manual_v1`, request только
+`{"mode":"initial_empty","evidence_id":"...","evidence_sha256":"sha256:..."}`.
+Для каждого отдельного scope нужен новый installation operation ID.
+Preview связывает exact declaration hash, runtime/rules/generation/profiles,
+settings и journal prestate. Apply требует прежние prestate/candidate hashes,
+перечитывает их под lock и атомарно публикует fsynced private journal
+`initial-empty-journal.json`. Readback того же ID показывает `applied` либо
+`not_submitted`; неоднозначный ответ разрешается только этим чтением.
+Повторная установка не восстанавливает израсходованные пары; пересечение
+scope запрещено. Устанавливает существующий trusted server/GitHub Production
+Apply operator от имени документированного owner confirmation. Нового UI
+права на установку нет.
+
+Состояния пары — `available`, `claimed`, `closed`. Resolver действует только
+для нового native manual intent после installation, при выключенном
+расписании и полном точном list/stats CPM-контракте; единственная допустимая
+неполнота — `minus_pair_omitted`. Daily occurrence, legacy/старые задания,
+другие пары, CPC и malformed источники не получают fallback. При отсутствии
+плохих актуальных запросов результат `no_change`, WB запись не создаётся,
+допуск остаётся `available`. Правила и запросы перечитываются; старый trial
+не задаёт будущий список исключений.
+
+Непустой minus **или list.excluded**, известная историческая исключённая
+фраза, любая прежняя write operation или внешний dispatch seal навсегда
+закрывают fallback. Реальный полный список WB сохраняется и обслуживается
+прежним writer. При настоящем кандидате private `claimed` fsync выполняется
+внутри native `prepare` до commit операции. Потеря DB commit оставляет claim,
+а не второй допуск. Только тот же живой prepared operation/token/run с
+`dispatch_count=0` вправе выполнить собственный свежий preflight. Digest
+декларации проверяется ещё раз в admit. Любой новый процесс, новая попытка,
+dispatch, crash или ambiguous результат не получают этого исключения.
+После отправки readback всегда использует strict `read_minus`: omitted pair
+не подтверждает запись, задержка list не вызывает повторного POST.
+
+Recovery — чтение той же installation/write operation. Journal/declarations
+не восстанавливаются отдельно в старое `available`; для них сохраняется
+отдельная private копия, а business DB restore не снимает once-send claim.
+Stranded claim требует разбора и strict external state, автоматического rearm
+нет. Все прежние full-set/CAS/fresh card/decision/admission guards остаются.
+
+Rollout: отдельная declaration и installation для одной согласованной pilot
+пары → новый exact native manual clean → strict readback этой write operation.
+Только после подтверждённого pilot оператор готовит и устанавливает отдельные
+remaining pairs с новым evidence ID и installation ID. Оба scope берутся из
+owner-confirmed CPM списка, а не из общего каталога кампаний. Установка не
+запускает clean и не включает daily/hourly расписание. Отчёт сохраняет
+observed counts и owner basis; отсутствие запросов не означает проверку
+всех возможных будущих запросов.
