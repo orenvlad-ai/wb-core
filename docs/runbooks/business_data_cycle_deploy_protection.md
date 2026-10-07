@@ -141,11 +141,22 @@ Central release перед открытием admission сохраняет пр�
 включая failed/interrupted, никогда не переигрывается. Baseline pause не меняется.
 Latch связан с точными window ID, started_at и plan fingerprint; новое окно делает старую
 потребность obsolete и не получает права от её записи.
+Deadline fence для самого пропущенного слота сохраняется до следующего distinct
+слота даже после нового окна: superseded потребность не разрешает поздний
+Persistent catch-up или допуск прежней signed identity.
+При несовпадении generation тот же пропущенный слот консервативно закрыт до
+следующего distinct slot, включая раннее завершение второго окна. Проверка
+действует и при actual admission: старый coordinator не получает допуск после
+смены окна между prepare и POST/приёмом.
 
 Существующий registry HTTP server проверяет pending latch при startup и раз в
 30 секунд своим service hook. Короткий daemon worker использует существующий
-canonical loopback launcher, transport lock/journal и signed identity. Новых
-systemd units/drop-ins нет. GET/status/preflight показывают метаданные и причины,
+canonical loopback launcher, transport lock/journal и signed identity.
+Запуск coordinator привязан к точному пропущенному слоту: signed identity из
+GET prepare проверяется до journal/POST. Задержка до нового слота завершает старый
+долг ожиданием штатного таймера; новый слот не заимствуется этим worker. После
+prepare прежняя identity всё равно проходит свежую серверную проверку при допуске.
+Новых systemd units/drop-ins нет. GET/status/preflight показывают метаданные и причины,
 но не запускают работу и не меняют latch. Diagnostic `maintenance_wakeup` доступен
 в существующем read-only prepare endpoint `/v1/business-data-cycle/dispatch`.
 

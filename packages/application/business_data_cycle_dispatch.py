@@ -328,12 +328,14 @@ def _request(method, dispatch_id=None):
     return value
 
 
-def launch(runtime):
-    """Fixed warehouse launcher: short maintenance SH, no heavy/domain lease."""
+def launch(runtime, *, expected_slot=None):
+    """Fixed launcher; a maintenance wakeup may bind its one exact debt slot."""
     runtime = Path(runtime).resolve()
     _identity(runtime)
     if not selected(runtime):
         raise RuntimeError('selected cycle launcher cannot dispatch the legacy profile')
+    if expected_slot is not None and latest_slot(datetime.fromisoformat(expected_slot)) != expected_slot:
+        raise ValueError('maintenance launch requires an exact fixed UTC slot')
     try:
         with _launcher_lock(runtime):
             record = _read_record(runtime)
@@ -360,7 +362,12 @@ def launch(runtime):
             if prepared.get('status') != 'prepared':
                 return prepared
             identity = prepared['dispatch_id']
-            _decode(identity)
+            value = _decode(identity)
+            if expected_slot is not None and value['slot'] != expected_slot:
+                # The coordinator's clock snapshot may precede a delayed GET.
+                # Never journal or submit a different slot on behalf of old debt.
+                return {'status': 'wait_next_slot', 'accepted': False, 'source_effects_started': False,
+                        'reason': 'prepared_slot_differs_from_maintenance_debt', 'expected_slot': expected_slot}
             if record and record['dispatch_id'] == identity:
                 return _request('GET', identity)
             # Durable write precedes send; process death before send is conservatively uncertain.

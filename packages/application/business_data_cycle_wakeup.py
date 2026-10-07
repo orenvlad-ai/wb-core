@@ -116,9 +116,22 @@ def policy(runtime, now, *, expected_slot=None):
     value = load(runtime)
     if value is None:
         return clock_check()[1]
+    def slot_fence(*, bound):
+        current, expired = clock_check()
+        if expired:
+            return expired
+        if latest_slot(current) != value['missed_slot']:
+            return None
+        # A later maintenance generation revokes the coordinator, not the
+        # time fence for this still-current missed slot. It cannot turn a late
+        # Persistent/old signed dispatch into a timely normal scheduled launch.
+        if not bound or value['phase'] in {'wait_next_slot', 'superseded'}:
+            return 'wait_next_slot'
+        remaining = (instant(value['missed_slot']) + timedelta(hours=3) - current).total_seconds()
+        return 'wait_next_slot' if remaining < 7200 else None
     state = barrier._load_state(runtime)
     if not _bound(state, value):
-        return clock_check()[1]  # New barrier owns the boundary; old debt is stale.
+        return slot_fence(bound=False)
     if state.get('active') or state.get('phase') != 'released':
         return 'maintenance_not_released'
     from packages.application.business_data_maintenance_pause import load_state
@@ -129,15 +142,7 @@ def policy(runtime, now, *, expected_slot=None):
             or proof.get('status') != 'restored'):
         return 'exact_resume_not_proven'
     # At actual acceptance the clock is read only after bounded metadata proof.
-    now, expired = clock_check()
-    if expired:
-        return expired
-    if latest_slot(now) != value['missed_slot']:
-        return None
-    if value['phase'] in {'wait_next_slot', 'superseded'}:
-        return 'wait_next_slot'
-    remaining = (instant(value['missed_slot']) + timedelta(hours=3) - now).total_seconds()
-    return 'wait_next_slot' if remaining < 7200 else None
+    return slot_fence(bound=True)
 
 
 def catchup_slot(runtime, now):
@@ -186,7 +191,7 @@ def coordinate(runtime, now):
         return
     from packages.application.business_data_cycle_dispatch import launch, _read_record
     try:
-        result = launch(runtime)
+        result = launch(runtime, expected_slot=value['missed_slot'])
     except Exception as exc:
         _settle(runtime, value, 'pending', 'launch_error_' + type(exc).__name__)
         return  # Existing journal decides whether another tick may only read.
@@ -196,14 +201,16 @@ def coordinate(runtime, now):
         # launch only returns that readback early for an active/unknown request.
         from packages.application.business_data_cycle_dispatch import _decode
         slot = _decode(result['dispatch_id'])['slot']
-        if instant(slot) >= instant(value['missed_slot']):
+        if slot == value['missed_slot']:
             _settle(runtime, value, 'accepted', status)
+        elif instant(slot) > instant(value['missed_slot']):
+            _settle(runtime, value, 'wait_next_slot', 'distinct_slot_already_owned')
         else:
             _settle(runtime, value, 'pending', 'busy_previous_cycle')
     elif status == 'not_accepted':
         _settle(runtime, value, 'wait_next_slot', 'single_submit_not_accepted')
     elif status == 'wait_next_slot':
-        _settle(runtime, value, 'wait_next_slot', 'late_window')
+        _settle(runtime, value, 'wait_next_slot', result.get('reason', 'late_window'))
     elif status in {'unknown', 'expired_not_accepted'} and result.get('dispatch_id'):
         # Keep same-operation readback until expiration proves no acceptance.
         record = _read_record(runtime)

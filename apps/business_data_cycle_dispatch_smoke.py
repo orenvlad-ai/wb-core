@@ -718,6 +718,77 @@ class MaintenanceWakeupSmoke(unittest.TestCase):
         self.assertEqual(self.wake.load(self.root)['last_status'], 'canonical_slot_already_accepted')
         for worker in list(fake.operator_jobs._threads.values()): worker.join(5)
 
+    def test_prepare_rollover_rejects_distinct_signed_slot_before_journal_or_post(self):
+        self.hold(); self.resume()
+        snapshot = self.SLOT + timedelta(minutes=30)
+        fake = CycleFake(self.root); fake.now_factory = lambda: snapshot
+        calls = []
+        def request(method, identity=None):
+            calls.append(method)
+            if method == 'GET' and identity is None:
+                fake.now_factory = lambda: self.SLOT + timedelta(hours=3, minutes=1)
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request):
+            self.wake.coordinate(self.root, snapshot)
+            self.assertEqual(calls, ['GET'])
+            self.assertIsNone(d._read_record(self.root))
+            self.assertEqual(fake.events, [])
+            self.assertFalse((self.root / 'sheet-vitrina-cycles').exists())
+            value = self.wake.load(self.root)
+            self.assertEqual(value['phase'], 'wait_next_slot')
+            self.assertEqual(value['last_status'], 'prepared_slot_differs_from_maintenance_debt')
+            # The ordinary timer, with no debt binding, retains its normal slot.
+            result = d.launch(self.root)
+            self.assertTrue(result['accepted'])
+            self.assertEqual(d._decode(result['dispatch_id'])['slot'], (self.SLOT + timedelta(hours=3)).isoformat())
+            self.assertEqual(calls.count('POST'), 1)
+        for worker in list(fake.operator_jobs._threads.values()): worker.join(5)
+
+    def test_rollover_after_prepare_before_post_rejects_old_identity_without_new_cycle(self):
+        self.hold(); self.resume()
+        snapshot = self.SLOT + timedelta(minutes=30)
+        fake = CycleFake(self.root); fake.now_factory = lambda: snapshot
+        calls = []
+        def request(method, identity=None):
+            calls.append(method)
+            if method == 'POST':
+                fake.now_factory = lambda: self.SLOT + timedelta(hours=3, minutes=1)
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request):
+            self.wake.coordinate(self.root, snapshot)
+            record = d._read_record(self.root)
+            self.assertEqual(d._decode(record['dispatch_id'])['slot'], self.SLOT.isoformat())
+            self.assertEqual(record['phase'], 'terminal')
+            self.assertEqual(record['last_status'], 'not_accepted')
+            self.assertEqual(fake.events, [])
+            self.assertFalse((self.root / 'sheet-vitrina-cycles').exists())
+            self.assertEqual(self.wake.load(self.root)['phase'], 'wait_next_slot')
+            self.wake.coordinate(self.root, snapshot)
+            self.assertEqual(calls.count('POST'), 1)  # Old identity never resent.
+
+    def test_bound_launch_reads_unknown_old_record_without_new_prepare_or_submit(self):
+        self.hold(); self.resume()
+        old = d.prepare(self.root, self.SLOT - timedelta(hours=3))['dispatch_id']
+        d._write_record(self.root, {'schema': 1, 'dispatch_id': old, 'phase': 'uncertain', 'last_status': 'unknown'})
+        def request(method, identity=None):
+            self.assertEqual((method, identity), ('GET', old))
+            return {'status': 'unknown', 'accepted': None, 'dispatch_id': old}
+        with patch.object(d, '_request', side_effect=request) as transport:
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=30))
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=30))
+            self.assertEqual(transport.call_count, 2)
+        self.assertEqual(d._read_record(self.root)['dispatch_id'], old)
+        self.assertEqual(self.wake.load(self.root)['last_status'], 'uncertain_same_operation')
+
+    def test_invalid_prepared_identity_never_journals_or_spends_one_post(self):
+        self.hold(); self.resume()
+        with patch.object(d, '_request', return_value={'status': 'prepared', 'dispatch_id': 'invalid.identity'}) as transport:
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=30))
+        transport.assert_called_once_with('GET')
+        self.assertIsNone(d._read_record(self.root))
+        self.assertEqual(self.wake.load(self.root)['phase'], 'pending')
+        self.assertEqual(self.wake.load(self.root)['last_status'], 'launch_error_ValueError')
+
     def test_restart_after_rollover_expires_old_debt_without_borrowing_new_slot(self):
         self.hold(); self.resume()
         for age in (timedelta(hours=3), timedelta(hours=4, minutes=30)):
@@ -812,6 +883,88 @@ class MaintenanceWakeupSmoke(unittest.TestCase):
         self.assertEqual(self.wake.load(self.root)['phase'], 'wait_next_slot')
         self.assertEqual(self.wake.load(self.root)['last_status'], 'single_submit_not_accepted')
 
+    def test_new_maintenance_does_not_erase_same_slot_deadline_fence(self):
+        self.hold(); self.resume()
+        early = self.SLOT + timedelta(minutes=30)
+        identity = d.prepare(self.root, early)['dispatch_id']
+        self.options['window_id'] = 'wakeup-test-002'
+        self.hold(self.SLOT + timedelta(minutes=40))
+        with patch.object(d, 'launch', side_effect=AssertionError('old coordinator launched')):
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=41))
+        self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+        late = self.SLOT + timedelta(minutes=90)
+        self.resume(late)  # New window has no distinct missed fixed slot.
+        self.assertFalse(self.barrier.barrier_status(self.root)['active'])
+        self.assertEqual(self.wake.policy(self.root, late), 'wait_next_slot')
+        self.assertEqual(d.prepare(self.root, late)['status'], 'wait_next_slot')
+        fake = CycleFake(self.root); fake.now_factory = lambda: late
+        result = d.dispatch(fake, {'dispatch_id': identity})
+        self.assertFalse(result['accepted'])
+        self.assertEqual(fake.events, [])
+        calls = []
+        def request(method, dispatch_id=None):
+            calls.append(method)
+            return self.transport(fake, method, dispatch_id)
+        with patch.object(d, '_request', side_effect=request):
+            self.assertEqual(d.launch(self.root)['status'], 'wait_next_slot')
+        self.assertEqual(calls, ['GET'])
+        self.assertIsNone(d._read_record(self.root))
+        fake.now_factory = lambda: self.SLOT + timedelta(hours=3)
+        self.assertEqual(d.prepare(self.root, fake.now_factory())['status'], 'prepared')
+        self.assertIsNone(self.wake.policy(self.root, fake.now_factory()))
+
+    def test_early_new_window_after_prepare_blocks_coordinator_post_admission(self):
+        self.hold(); self.resume()
+        snapshot = self.SLOT + timedelta(minutes=30)
+        fake = CycleFake(self.root); fake.now_factory = lambda: snapshot
+        calls = []
+        def request(method, identity=None):
+            calls.append(method)
+            if method == 'POST':
+                self.options['window_id'] = 'wakeup-test-002'
+                self.hold(self.SLOT + timedelta(minutes=40))
+                self.resume(self.SLOT + timedelta(minutes=50))
+                fake.now_factory = lambda: self.SLOT + timedelta(minutes=50)
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request):
+            self.wake.coordinate(self.root, snapshot)
+        self.assertEqual(calls, ['GET', 'POST'])
+        self.assertEqual(fake.events, [])
+        self.assertFalse((self.root / 'sheet-vitrina-cycles').exists())
+        self.assertEqual(d._read_record(self.root)['last_status'], 'not_accepted')
+        self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+        self.assertEqual(d.prepare(self.root, fake.now_factory())['status'], 'wait_next_slot')
+
+    def test_early_new_window_between_dispatch_prepare_and_actual_ex_blocks_old_identity(self):
+        self.hold(); self.resume()
+        early = self.SLOT + timedelta(minutes=30)
+        identity = d.prepare(self.root, early)['dispatch_id']
+        fake = CycleFake(self.root); fake.now_factory = lambda: early
+        original = Entry._start_sheet_cycle_job
+        def changed_window(**kwargs):
+            self.options['window_id'] = 'wakeup-test-002'
+            self.hold(self.SLOT + timedelta(minutes=40))
+            self.resume(self.SLOT + timedelta(minutes=50))
+            fake.now_factory = lambda: self.SLOT + timedelta(minutes=50)
+            return original(fake, **kwargs)
+        with patch.object(fake, '_start_sheet_cycle_job', side_effect=changed_window):
+            result = d.dispatch(fake, {'dispatch_id': identity})
+        self.assertFalse(result['accepted'])
+        self.assertEqual(fake.events, [])
+        self.assertFalse((self.root / 'sheet-vitrina-cycles').exists())
+        self.assertEqual(self.wake.policy(self.root, fake.now_factory()), 'wait_next_slot')
+        self.assertIsNone(self.wake.policy(self.root, self.SLOT + timedelta(hours=3)))
+
+    def test_coordinator_readback_of_distinct_slot_does_not_ack_old_debt(self):
+        self.hold(); self.resume()
+        future = self.SLOT + timedelta(hours=3)
+        identity = d.prepare(self.root, future)['dispatch_id']
+        with patch.object(d, 'launch', return_value={'status': 'running', 'accepted': True, 'dispatch_id': identity}) as launch:
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=30))
+        launch.assert_called_once_with(self.root, expected_slot=self.SLOT.isoformat())
+        self.assertEqual(self.wake.load(self.root)['phase'], 'wait_next_slot')
+        self.assertEqual(self.wake.load(self.root)['last_status'], 'distinct_slot_already_owned')
+
     def test_reused_window_id_and_plan_cannot_revive_old_pending_debt(self):
         self.hold(); self.resume()
         old = self.wake.load(self.root)
@@ -823,7 +976,7 @@ class MaintenanceWakeupSmoke(unittest.TestCase):
         self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
         self.resume(self.SLOT + timedelta(minutes=40))
         self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
-        self.assertIsNone(self.wake.policy(self.root, self.SLOT + timedelta(minutes=45)))
+        self.assertEqual(self.wake.policy(self.root, self.SLOT + timedelta(minutes=45)), 'wait_next_slot')
 
     def test_new_maintenance_supersedes_old_pending_and_readonly_diagnostics_no_effects(self):
         self.hold(); self.resume()
