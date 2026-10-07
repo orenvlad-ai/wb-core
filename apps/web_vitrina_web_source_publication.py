@@ -113,17 +113,19 @@ def validate_observations(request):
             if report['data']['commonInfo']['totalProducts']!=len(ids):
                 raise ValueError('search-source-product-count-incomplete')
             preview_rows=[r for g in groups for r in g['items']]
-            if not _search_group_totals_match(groups,preview_rows):
-                raise ValueError('search-source-group-totals-incomplete')
             preview=_dedupe(_search_items(preview_rows))
+            if len(preview_rows)!=len(preview):
+                raise ValueError('search-source-pages-incomplete')
             batches=o.get('search_batches',[])
             if not batches:
                 if preview!=o['items'] or o['pages']!=1:
                     raise ValueError('search-source-pages-incomplete')
+                if not _search_group_totals_match(groups,preview_rows):
+                    raise ValueError('search-source-group-totals-incomplete')
                 continue
-            if not isinstance(batches,list) or o['pages']!=len(batches)+1 or len(preview_rows)!=len(preview):
+            if not isinstance(batches,list) or o['pages']!=len(batches)+1:
                 raise ValueError('search-source-pages-incomplete')
-            covered={i['nm_id']:i for i in preview};requested=set();seen=set()
+            covered={i['nm_id']:i for i in preview};requested=set();seen=set();complete_rows=[]
             for batch in batches:
                 nms=batch['requested_nm_ids'];answer=batch['response']
                 if (not isinstance(nms,list) or not 1<=len(nms)<=40 or any(type(n) is not int or n<=0 for n in nms)
@@ -145,9 +147,12 @@ def validate_observations(request):
                     if nm in seen or (nm in covered and covered[nm]!=item):
                         raise ValueError('search-source-batch-overlap-or-value-drift')
                     seen.add(nm);covered[nm]=item
+                complete_rows.extend(rows)
             if (not set(i['nm_id'] for i in preview).issubset(seen)
                 or [covered[nm] for nm in sorted(covered)]!=o['items']):
                 raise ValueError('search-source-product-count-incomplete')
+            if not _search_group_totals_match(groups,complete_rows):
+                raise ValueError('search-source-group-totals-incomplete')
     return observations
 
 

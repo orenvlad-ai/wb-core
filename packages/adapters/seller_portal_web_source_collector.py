@@ -130,13 +130,15 @@ def _search_complete_items(client, url, headers, body, report, candidate_nm_ids)
     if not isinstance(groups, list):
         raise CollectorError('seller_report_groups_missing')
     preview_rows = [row for group in groups for row in group.get('items', [])]
-    if not _search_group_totals_match(groups, preview_rows):
-        raise CollectorError('search_report_group_totals_incomplete')
     preview = _dedupe(_search_items(preview_rows))
+    if len(preview_rows) != len(preview):
+        raise CollectorError('search_report_product_count_incomplete')
     reported = data.get('commonInfo', {}).get('totalProducts')
     if not isinstance(reported, int) or isinstance(reported, bool) or reported <= 0:
         raise CollectorError('search_report_product_count_invalid')
     if len(preview) == reported:
+        if not _search_group_totals_match(groups, preview_rows):
+            raise CollectorError('search_report_group_totals_incomplete')
         return preview, []
     if len(preview) > reported:
         raise CollectorError('search_report_product_count_incomplete')
@@ -147,6 +149,7 @@ def _search_complete_items(client, url, headers, body, report, candidate_nm_ids)
     all_items = {item['nm_id']: item for item in preview}
     seen = set()
     batches = []
+    complete_rows = []
     for start in range(0, len(universe), SEARCH_BATCH_SIZE):
         requested = universe[start:start + SEARCH_BATCH_SIZE]
         response = _response_json(_post_report(client, url, headers=headers,
@@ -169,9 +172,14 @@ def _search_complete_items(client, url, headers, body, report, candidate_nm_ids)
                 raise CollectorError('search_report_batch_overlap_or_value_drift')
             all_items[nm] = item
             seen.add(nm)
+        complete_rows.extend(rows)
         batches.append({'requested_nm_ids': requested, 'response': response})
     if len(all_items) != reported or not {item['nm_id'] for item in preview}.issubset(seen):
         raise CollectorError('search_report_product_count_incomplete')
+    # The unfiltered report's metrics describe all products, while its items
+    # may be only a preview. Require the global sums after bounded completion.
+    if not _search_group_totals_match(groups, complete_rows):
+        raise CollectorError('search_report_group_totals_incomplete')
     return [all_items[nm] for nm in sorted(all_items)], batches
 
 
