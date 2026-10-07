@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 from apps import warehouse_fbs_material_rematerialization_smoke as material_fixture
 from apps.our_wb_costs_smoke import _seed_supplier_shipment, _seed_financial_inputs, SUPPLIER_BARCODE
 from packages.application.ff_pool_cutover import ensure_ff_pool_cutover_schema, MANIFESTS_TABLE
-from packages.application.ff_pool_documents import FfPoolDocumentService, DOCUMENTS_TABLE
+from packages.application.ff_pool_documents import FfPoolDocumentService, DOCUMENTS_TABLE, EXPENSE_LINES_TABLE
 from packages.application.ff_pool_documents_xlsx import build_china_acceptance_form_manifest, FfPoolXlsxError
 from packages.application.ff_pool_foundation import BALANCES_TABLE, canonical_decimal_ratio_text
 from packages.application.ff_pool_surfaces import FfPoolSurface, FfPoolSurfaceError
@@ -92,10 +92,21 @@ def _test_quantities_and_authority():
 def _test_post_and_replay(mode):
     with TemporaryDirectory(prefix='ff-form-'+mode+'-') as directory:
         runtime,surface=_fixture(Path(directory))
-        # Existing overhead is already in current pool capital and must remain once.
+        # This China-receipt fixture needs an already-posted prior expense.
+        # Operator durable acceptance/owned-cycle delivery is tested separately
+        # in operator_ff_overhead_smoke; seed this precondition via native post.
         overhead=surface.accept_pool_overhead_preview({'request_id':'prior:overhead','facility_id':FACILITY,'business_date':DAY,'scope':'FBS','amount_rub':'85553','category':'storage','comment':'Prior overhead','source_mode':'manual'},actor='fixture')
-        surface.confirm_document(overhead['request_id'])
+        assert overhead['acceptance'] is None
         with sqlite3.connect(runtime.db_path) as conn:
+            quantities_before=conn.execute(f'SELECT facility_id,pool,nm_id,quantity FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id').fetchall()
+        prior_service=FfPoolDocumentService(db_path=runtime.db_path,runtime_dir=runtime.runtime_dir,timestamp_factory=lambda:NOW,resume=False,bootstrap=False)
+        prior_posted=prior_service.post(overhead['request_id'],defer_replay=True)
+        assert prior_posted['state']=='posted' and prior_posted['document']['document_id'],prior_posted
+        assert prior_service.post(overhead['request_id'],defer_replay=True)['document']==prior_posted['document']
+        with sqlite3.connect(runtime.db_path) as conn:
+            assert conn.execute(f'SELECT facility_id,pool,nm_id,quantity FROM {BALANCES_TABLE} ORDER BY facility_id,pool,nm_id').fetchall()==quantities_before
+            assert conn.execute(f'SELECT COUNT(*) FROM {DOCUMENTS_TABLE} WHERE document_kind=\'pool_overhead\'').fetchone()[0]==1
+            assert sum(Decimal(row[0]) for row in conn.execute(f'SELECT amount_rub FROM {EXPENSE_LINES_TABLE}'))==Decimal('85553')
             prior_capital=Decimal(conn.execute(f'SELECT capital_rub FROM {BALANCES_TABLE} WHERE facility_id=? AND pool=\'FBS\' AND nm_id=?',(FACILITY,NM_ID)).fetchone()[0])
             # Overhead allocates to all existing FBS quantities, including the non-target SKU.
             prior_total= sum(Decimal(row[0]) for row in conn.execute(f'SELECT capital_rub FROM {BALANCES_TABLE}'))
@@ -154,6 +165,8 @@ def _test_post_and_replay(mode):
         service.resume_incomplete()
         with sqlite3.connect(runtime.db_path) as conn:
             assert conn.execute('SELECT COUNT(*) FROM sheet_vitrina_v1_supplier_ff_cost_layers WHERE supplier_shipment_id=?',(SHIPMENT,)).fetchone()[0]==1
+            assert conn.execute(f'SELECT COUNT(*) FROM {DOCUMENTS_TABLE} WHERE document_kind=\'pool_overhead\'').fetchone()[0]==1
+            assert sum(Decimal(row[0]) for row in conn.execute(f'SELECT amount_rub FROM {EXPENSE_LINES_TABLE}'))==Decimal('85553')
         print(f'form {mode}: factual={SOURCE_DAY}; current={DAY}; WAC={wac}; immutable_history_sha256={history_before}; resumed={resumed}')
 
 

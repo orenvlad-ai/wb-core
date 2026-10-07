@@ -7,6 +7,18 @@
   "proxy_send_timeout": "180s",
   "routes": [
     {
+      "name": "operator_operations",
+      "match": "exact",
+      "path": "/v1/sheet-vitrina-v1/operations",
+      "methods": ["GET"]
+    },
+    {
+      "name": "operator_operation_detail",
+      "match": "prefix",
+      "path": "/v1/sheet-vitrina-v1/operations/",
+      "methods": ["GET"]
+    },
+    {
       "name": "registry_upload_bundle",
       "match": "exact",
       "path": "/v1/registry-upload/bundle",
