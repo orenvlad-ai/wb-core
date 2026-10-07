@@ -120,5 +120,66 @@ owner после собственного полного readback, а явное
 
 Этот блок не восстанавливает старый uncertain цикл. Его canonical receipt
 остаётся interrupted с честным исходом; следующий distinct scheduled slot
-допустим после exact resume. Persistent timer catch-up может быть пропущен под
-barrier. Автоматического replay, resume или новой глобальной очереди нет.
+допустим после exact resume. Автоматического replay старой операции, resume или
+новой глобальной очереди нет.
+
+## Свежий цикл после обслуживания
+
+После полностью проверенного exact restore один свежий запуск допускается,
+если внутри этого окна пропущен фиксированный трёхчасовой слот и до следующего
+слота осталось **не меньше 7200 секунд**. Проверка использует полную длительность,
+без округления, и повторяется под actual heavy EX непосредственно перед записью
+canonical acceptance receipt. Persistent timer catch-up проходит ту же серверную
+проверку. Обычный distinct scheduled slot сохраняет прежнюю семантику; расписание
+не сдвигается, сбор FBS остаётся раз в 3 часа; 9 часов — максимальный допустимый
+возраст полного снимка. Тяжёлый single-flight сохраняется.
+
+Central release перед открытием admission сохраняет приватный
+`.business-data-cycle-wakeup.json`, только если latest fixed slot внутри окна
+не имеет canonical receipt и исходный восстановленный owner действительно
+включён. Несколько пропусков объединяются в один latest slot. Уже принятый слот,
+включая failed/interrupted, никогда не переигрывается. Baseline pause не меняется.
+Latch связан с точными window ID, started_at и plan fingerprint; новое окно делает старую
+потребность obsolete и не получает права от её записи.
+Deadline fence для самого пропущенного слота сохраняется до следующего distinct
+слота даже после нового окна: superseded потребность не разрешает поздний
+Persistent catch-up или допуск прежней signed identity.
+При несовпадении generation тот же пропущенный слот консервативно закрыт до
+следующего distinct slot, включая раннее завершение второго окна. Проверка
+действует и при actual admission: старый coordinator не получает допуск после
+смены окна между prepare и POST/приёмом.
+
+Существующий registry HTTP server проверяет pending latch при startup и раз в
+30 секунд своим service hook. Короткий daemon worker использует существующий
+canonical loopback launcher, transport lock/journal и signed identity.
+Запуск coordinator привязан к точному пропущенному слоту: signed identity из
+GET prepare проверяется до journal/POST. Задержка до нового слота завершает старый
+долг ожиданием штатного таймера; новый слот не заимствуется этим worker. После
+prepare прежняя identity всё равно проходит свежую серверную проверку при допуске.
+Новых systemd units/drop-ins нет. GET/status/preflight показывают метаданные и причины,
+но не запускают работу и не меняют latch. Diagnostic `maintenance_wakeup` доступен
+в существующем read-only prepare endpoint `/v1/business-data-cycle/dispatch`.
+
+Полное завершение resume доказывает released barrier того же окна и сохранённый
+до release exact restore receipt с совпадающим fingerprint. Поэтому crash между
+barrier release и финальным `phase=restored` не теряет потребность: service hook
+может прочитать этот proof после рестарта, а повторный exact resume завершает
+только bookkeeping. При отсутствии proof или новом обслуживании admission остаётся
+закрыт обычными guards. Initial target schedule transition не создаёт долг нового
+профиля за время старого расписания: fixed profile ещё не был выбран. Исходный
+baseline и штатные guards target transition не меняются.
+
+До отправки POST catch-up ждёт свободного heavy admission и обязательную backup
+priority через bounded read-only проверки. Если время ожидания вышло за первый час
+слота, coordinator сначала записывает `wait_next_slot` с причиной late/busy/uncertain
+и больше не запускает этот долг. Если гонка после prepare исчерпала единственный
+POST, сохраняется `single_submit_not_accepted` либо честная неопределённость той же
+identity. Blind resend запрещён; после deadline неопределённый старый transport
+разрешается только readback при следующем distinct scheduled slot. Сервис не
+обещает повторную попытку текущего слота. Неизвестный результат внешней операции
+и старый interrupted цикл этим механизмом не восстанавливаются.
+
+Текущий worker не убивается ради catch-up или следующего слота. Если сам HTTP
+service недоступен, durable latch и transport journal остаются до его штатного
+возврата; правило двух часов всё равно проверяется заново. Окно с выключенным
+owner, пауза без пропущенного слота и обычное чтение не создают новую потребность.

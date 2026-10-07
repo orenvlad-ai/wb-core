@@ -390,6 +390,75 @@ def _assert_timeout_single_flight_and_hidden_tab_no_storm(browser: Browser) -> N
         page.close()
 
 
+def _assert_embedded_visual_ownership_preserves_write_guards(browser: Browser) -> None:
+    # Production reports topology: shell -> iframe[title="Отчёты"] operator page.
+    parent = _fixture_html([{'kind': 'ok', 'payload': _status(active=True)}], poll_interval_ms=60000)
+    child = _fixture_html([{'kind': 'ok', 'payload': _status(active=True)}], poll_interval_ms=60000)
+    parent = parent.replace('</body>', '<iframe title="Отчёты" src="/sheet-vitrina-v1/operator?embedded_tab=reports"></iframe></body>')
+    context = browser.new_context()
+    context.route('http://fixture.test/sheet-vitrina-v1/vitrina?tab=reports', lambda route: route.fulfill(body=parent, content_type='text/html'))
+    context.route('http://fixture.test/sheet-vitrina-v1/operator?embedded_tab=reports', lambda route: route.fulfill(body=child, content_type='text/html'))
+    page = context.new_page()
+    try:
+        page.goto('http://fixture.test/sheet-vitrina-v1/vitrina?tab=reports')
+        frame = page.frame_locator('iframe[title="Отчёты"]')
+        page.wait_for_function('window.__wbCoreMaintenanceBarrierTest.snapshot().blocked')
+        frame.locator('#barrierOnly').wait_for()
+        child_frame = page.frames[1]
+        child_frame.wait_for_function('window.__wbCoreMaintenanceBarrierTest.snapshot().blocked')
+        assert page.locator('#wbCoreMaintenanceBarrier').is_visible()
+        assert not frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        assert frame.locator('#barrierOnly').get_attribute('data-wb-core-maintenance-disabled') == '1'
+        assert child_frame.evaluate("getComputedStyle(document.body).paddingTop") == '0px'
+        assert page.locator('#wbCoreMaintenanceBarrier').bounding_box()['height'] < 40
+        # Parent release while child's confirmed status remains blocked: child
+        # regains its bar, still blocks writes. Child release removes both guard
+        # and reserved space without changing native application disabled flags.
+        page.evaluate('(status) => window.__wbCoreMaintenanceBarrierTest.commit(status, 100)', _status(active=False, phase='released'))
+        assert frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        child_frame.evaluate('(status) => window.__wbCoreMaintenanceBarrierTest.commit(status, 100)', _status(active=False, phase='released'))
+        assert not frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        assert frame.locator('#barrierOnly').get_attribute('data-wb-core-maintenance-disabled') is None
+        assert frame.locator('#nativeDisabled').is_disabled()
+        # Tab visibility transition re-evaluates ownership, not just old CSS.
+        page.evaluate('(status) => window.__wbCoreMaintenanceBarrierTest.commit(status, 200)', _status(active=True))
+        child_frame.evaluate('(status) => window.__wbCoreMaintenanceBarrierTest.commit(status, 200)', _status(active=True))
+        assert not frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        page.evaluate('window.__barrierHidden = true; document.dispatchEvent(new Event("visibilitychange"))')
+        assert frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        page.evaluate('window.__barrierHidden = false; document.dispatchEvent(new Event("visibilitychange"))')
+        assert not frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        # bfcache page restoration restores visual ownership/listeners too.
+        page.evaluate('window.dispatchEvent(new PageTransitionEvent("pagehide", {persisted: true}))')
+        assert frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        page.evaluate('window.dispatchEvent(new PageTransitionEvent("pageshow", {persisted: true}))')
+        assert not frame.locator('#wbCoreMaintenanceBarrier').is_visible()
+        # Opening that embedded URL directly must display its own bar.
+        direct = context.new_page()
+        direct.goto('http://fixture.test/sheet-vitrina-v1/operator?embedded_tab=reports')
+        direct.wait_for_function('window.__wbCoreMaintenanceBarrierTest.snapshot().blocked')
+        assert direct.locator('#wbCoreMaintenanceBarrier').is_visible()
+        direct.close()
+    finally:
+        context.close()
+
+    # A parent without our injected controller and a cross-origin parent each
+    # leave the embedded page responsible for displaying the protection bar.
+    for host in ('fixture.test', 'other.test'):
+        context = browser.new_context()
+        context.route('http://other.test/shell', lambda route: route.fulfill(body='<iframe title="Отчёты" src="http://' + host + '/child"></iframe>', content_type='text/html'))
+        context.route('http://' + host + '/child', lambda route: route.fulfill(body=child, content_type='text/html'))
+        page = context.new_page()
+        try:
+            page.goto('http://other.test/shell')
+            child_frame = page.frames[1]
+            child_frame.wait_for_function('window.__wbCoreMaintenanceBarrierTest.snapshot().blocked')
+            assert page.frame_locator('iframe').locator('#wbCoreMaintenanceBarrier').is_visible()
+            assert page.frame_locator('iframe').locator('#barrierOnly').get_attribute('data-wb-core-maintenance-disabled') == '1'
+        finally:
+            context.close()
+
+
 def main() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -401,6 +470,7 @@ def main() -> int:
             _assert_released_transition_preserves_application_disabled_state(browser)
             _assert_stale_response_cannot_overwrite_newer_confirmation(browser)
             _assert_timeout_single_flight_and_hidden_tab_no_storm(browser)
+            _assert_embedded_visual_ownership_preserves_write_guards(browser)
         finally:
             browser.close()
     print("business_data_write_barrier_browser_smoke: OK")

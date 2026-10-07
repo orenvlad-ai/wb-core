@@ -491,11 +491,14 @@ def release_barrier(
             ),
             "readback_fingerprint": _fingerprint(restore_readback),
         }
+        released_at = _utc_now()
+        from packages.application.business_data_cycle_wakeup import arm_before_release
+        arm_before_release(runtime_dir, state, released_at, restore_readback)
         state.update(
             {
                 "phase": "released",
                 "active": False,
-                "released_at": _utc_now(),
+                "released_at": released_at,
                 "released_by": normalized_actor,
                 "release_reason": normalized_reason,
                 "restore": restore_evidence,
