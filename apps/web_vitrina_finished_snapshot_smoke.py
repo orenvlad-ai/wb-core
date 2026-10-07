@@ -261,14 +261,36 @@ def check_http_ui(server):
         page.wait_for_function("!document.querySelector('[data-snapshot-pilot-toolbar]').hidden")
         assert not calls, calls
         assert len(config_reads) == 1
+        # Catalog migrations may save during initial load. Wait for that existing
+        # background work before checking that modal edits do not submit writes.
+        page.wait_for_function("() => { const c=state.metricPresentation.serverConfig; return !c.saveTimer && !c.saveInFlight && !c.savePending && !c.dirty; }")
+        saves_before_edit = len(config_saves)
+        config_before_edit = page.evaluate('buildMetricPresentationPersistedPayload()')
         page.locator('[data-metrics-settings-open]').click()
         weighted = page.locator('[data-metric-config-row="' + WEIGHTED_SELLER_PRICE_LOGICAL_ID + '"]')
         assert weighted.get_attribute('data-metric-display-status') == 'collapsed'
-        assert page.locator('[data-metric-config-row="total::total_orderSum"]').get_attribute('data-metric-display-status') == 'hidden'
+        assert page.locator('[data-metric-list-filter]').input_value() == 'except_hidden'
+        hidden_order_sum = page.locator('[data-metric-config-row="total::total_orderSum"]')
+        assert hidden_order_sum.count() == 0, 'default modal list excludes globally hidden metrics'
+        page.locator('[data-metric-list-filter]').select_option('all')
+        assert hidden_order_sum.get_attribute('data-metric-display-status') == 'hidden'
+        assert len(config_saves) == saves_before_edit, 'list filtering must not save or change presentation'
         weighted.locator('[data-metric-display-select]').select_option('shown')
         page.wait_for_timeout(400)
-        assert config_saves, 'ready mode must retain server-side preference saving'
-        page.keyboard.press('Escape')
+        assert len(config_saves) == saves_before_edit, 'ready mode settings remain a draft until Save'
+        with page.expect_response(lambda response: '/web-vitrina/user-config' in response.url
+                                  and response.request.method == 'POST') as save_response:
+            page.locator('[data-metrics-settings-save]').click()
+        assert save_response.value.ok
+        assert len(config_saves) == saves_before_edit + 1, 'ready mode must save preferences once after Save'
+        saved = config_saves[-1]['payload']['config']
+        assert saved['presentation']['display'][WEIGHTED_SELLER_PRICE_LOGICAL_ID] == 'shown'
+        assert saved['presentation']['display']['total::total_orderSum'] == 'hidden'
+        assert saved['sku_presets'] == config_before_edit['sku_presets']
+        assert saved['sku_metric_selection'] == config_before_edit['sku_metric_selection']
+        assert saved['sku_metric_selection']['mode'] == 'preset'
+        assert saved['sku_metric_selection']['preset_id'] == 'focused'
+        assert page.locator('[data-metrics-presentation]').is_hidden()
         assert len(requests) == 1 and 'period_days=14' in requests[0], requests
         # Existing history capabilities survive persisted ready responses.
         assert page.locator('[data-history-preset="rolling_30"]').count() == 1

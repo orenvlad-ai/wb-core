@@ -59,6 +59,8 @@ def browser(base, *, edition, rating_expected):
             assert page.locator(selector).inner_text() == '4,75'
             assert page.locator('[data-table-body] td[data-row-id="TOTAL|avg_card_rating"][data-col-id="date:2026-10-05"]').inner_text() == '—'
             page.locator('[data-metrics-settings-open]').click()
+            # Pairing is a catalog assertion, independent of the modal list filter.
+            page.locator('[data-metric-list-filter]').select_option('all')
             logical = page.locator('[data-metric-config-row]').evaluate_all('rows => rows.map(row => ({sku:row.dataset.skuMetricKey,total:row.dataset.totalMetricKey}))')
             assert any(item == {'sku': 'card_rating', 'total': 'avg_card_rating'} for item in logical), logical
         else:
