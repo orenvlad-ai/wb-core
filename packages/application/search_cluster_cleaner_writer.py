@@ -188,11 +188,17 @@ class CleanerWriter:
             source=('owner_decision' if item_sources=={'owner_decision'} else
                     'manual_rules_pilot' if run['trigger']=='manual_exact_candidates' else 'automatic')
             versions=dict(settings_revision=s['revision'],rules_digest=app.rules_digest,items=sorted(exact,key=lambda r:r['query_hash']),removals=removals,
-                          target=asdict(t),membership=list(membership),before_at=snapshot.observed_at,source=source)
+                          target=asdict(t),membership=list(membership),before_at=snapshot.observed_at,source=source,
+                          initial_empty_evidence=snapshot.initial_empty_evidence)
             basis=dict(account=app.key,target=t.key,run_id=run_id,before=before,expected=expected,additions=additions,versions=versions)
             op=new_id();now=app.clock()
             c.execute('''INSERT INTO cleaner_write_operations(operation_id,account,target,run_id,state,before_json,expected_json,additions,candidate_digest,versions,worker_token,worker_generation,created_at,updated_at)
                 VALUES(?,?,?,?,'prepared',?,?,?,?,?,?,?,?,?)''',(op,app.key,t.key,run_id,canonical(before),canonical(expected),canonical(additions),digest(basis),canonical(versions),token,self.generation,now,now))
+            if snapshot.initial_empty_evidence:
+                policy=getattr(self.source,'initial_empty_policy',None)
+                if not self.manual_only or not self.session.manual or policy is None:
+                    raise CleanerError('initial_empty_manual_only','Начальный допуск действует только в ручном запуске',409)
+                policy.claim(c,op,run_id,token,snapshot)
             for row in exact:
                 c.execute("INSERT INTO cleaner_write_items(operation_id,query_hash,query,decision_id,override_revision,state) VALUES(?,?,?,?,?,'prepared')",(op,row['query_hash'],row['query'],row['decision_id'],row['override_revision']))
             app._event(c,'candidate_prepared',dict(target=t.key,additions=len(additions),returns=len(removals)),run_id=run_id,operation_id=op)
@@ -222,6 +228,8 @@ class CleanerWriter:
             if c.execute('SELECT 1 FROM cleaner_target_holds WHERE account=? AND target=?',(app.key,row['target'])).fetchone():raise CleanerError('target_hold','Цель приостановлена',409)
             if not fresh.complete or fresh.target.unsupported_reason or asdict(fresh.target)!=versions['target'] or list(membership)!=versions['membership'] or sorted(fresh.minus)!=before:
                 raise CleanerError('preflight_drift','Свежая цель изменилась',409)
+            if versions.get('initial_empty_evidence')!=fresh.initial_empty_evidence:
+                raise CleanerError('initial_empty_preflight_drift','Начальный допуск изменился',409)
             times=list(fresh.source_times.values())+[fresh.observed_at]
             if len(times)<4 or any(not 0<=(timestamp(app.clock())-timestamp(t)).total_seconds()<=self.preflight_max_age for t in times):raise CleanerError('preflight_stale','Предварительное чтение устарело',409)
             for item in versions['items']:

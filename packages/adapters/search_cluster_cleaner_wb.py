@@ -93,6 +93,7 @@ class CleanerWbSource:
         if not valid:raise CleanerError('account_mismatch','Неподтверждённый адрес WB')
         self.account,self.runtime,self.clock,self.monotonic=account,runtime,clock,monotonic
         self.limiter=limiter or AccountLimiter.shared(account.key)
+        self.initial_empty_policy=None
         self._slot=None;self._target_deadline=None
         self.timeout=min(float(runtime.timeout_seconds),20)
         if self.timeout<=0:raise CleanerError('invalid_timeout','Неверный таймаут')
@@ -281,7 +282,7 @@ class CleanerWbSource:
         snapshot=union_snapshot(target,list_entry=listing,stats_queries=[v['norm_query'] for v in stats],minus_queries=minus,observed_at=self.clock(),source_times=times)
         if omitted:
             snapshot=replace(snapshot,reasons=tuple('minus_pair_omitted' if reason=='minus_missing_or_malformed' else reason for reason in snapshot.reasons))
-        return snapshot
+        return self.initial_empty_policy.resolve(snapshot) if self.initial_empty_policy else snapshot
 
     def read_minus(self,target):
         body=self._call('POST','/adv/v0/normquery/get-minus',{'items':[{'advert_id':target.advert_id,'nm_id':target.nm_id}]},deadline=self.monotonic()+20)

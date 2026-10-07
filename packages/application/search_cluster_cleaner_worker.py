@@ -128,7 +128,7 @@ class ManualCleanerWorker:
 
     @staticmethod
     def _prestate_digest(run_id, snapshots):
-        value=dict(run_id=run_id,targets=[dict(target=t.key,membership=list(m),minus=sorted(s.minus),complete=s.complete) for t,m,s in snapshots])
+        value=dict(run_id=run_id,targets=[dict(target=t.key,membership=list(m),minus=sorted(s.minus),complete=s.complete,**({'initial_empty_evidence':dict(s.initial_empty_evidence)} if s.initial_empty_evidence else {})) for t,m,s in snapshots])
         return 'sha256:'+digest(value)
 
     def preview(self, *, run_id: str, targets: list[Target]) -> dict:
@@ -145,7 +145,7 @@ class ManualCleanerWorker:
             if declared != {t.key for t in targets}: raise CleanerError('manual_scope_drift','Область ручного запуска изменилась',409)
             candidates=[dict(v) for v in self.cleaner.pending_candidates(run_id)] if run['kind']=='manual_apply' else []
         snapshots=self._read(targets)
-        prestate=dict(run_id=run_id,targets=[dict(target=t.key,membership=list(m),minus=sorted(s.minus),complete=s.complete) for t,m,s in snapshots])
+        prestate=dict(run_id=run_id,targets=[dict(target=t.key,membership=list(m),minus=sorted(s.minus),complete=s.complete,**({'initial_empty_evidence':dict(s.initial_empty_evidence)} if s.initial_empty_evidence else {})) for t,m,s in snapshots])
         candidate=dict(prestate=prestate,kind=run['kind'],candidates=[dict(target=v['target'],query_hash=v['query_hash'],decision_id=v['decision_id'],execution_eligibility=v['execution_eligibility']) for v in candidates])
         return dict(run_id=run_id,target=','.join(sorted(t.key for t in targets)),scope=dict(target_count=len(targets),kind=run['kind']),prestate_sha256='sha256:'+digest(prestate),candidate_sha256='sha256:'+digest(candidate),recovery=dict(kind='held_manual_capability',scope_digest=self._scope(run_id,targets)))
 
@@ -197,6 +197,11 @@ def product_tick(cleaner,source,admission,*,generation,**options):
     Schema installation is a separate setup/release action, never part of tick.
     """
     from packages.application.search_cluster_cleaner_writer import CleanerWriter,CleanerReadback
+    # Observe/close first-fill evidence in legacy scans, without giving those
+    # jobs a manual resolver intent.
+    if hasattr(source,'initial_empty_policy') and source.initial_empty_policy is None:
+        from packages.application.search_cluster_cleaner_initial_empty import InitialEmptyPolicy
+        source.initial_empty_policy=InitialEmptyPolicy(cleaner,admission.directory,generation,'')
     readback=CleanerReadback(cleaner,source,generation=generation)
     try:
         with admission.session(account=cleaner.account,generation=generation) as session:

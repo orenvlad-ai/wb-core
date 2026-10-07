@@ -380,11 +380,17 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     if re.fullmatch(r'[0-9a-f]{40}',expected_sha) is None or not marker.is_file() or marker.read_text(encoding='utf-8').strip()!=expected_sha or deployment.get('commit')!=expected_sha or deployment.get('deployment_complete') is not True:_fail('deployed_runtime_sha_mismatch')
     mode=request.get('mode')
     allowed={'bootstrap':{'mode'},'bootstrap_recover':{'mode','original_operation_id'},'manual':{'mode','run_id','targets'},'manual_prepare':{'mode','scan_run_id','targets'},
+             'initial_empty':{'mode','evidence_id','evidence_sha256'},
              'admit_profiles':{'mode','extension_id','extension_sha256'},
              'admit_profiles_recover':{'mode','extension_id','extension_sha256','original_operation_id'}}
     if mode not in allowed or set(request)!=allowed[mode]:_fail('request_invalid')
     registry,account,generation,owner,package_path=_config(runtime_dir,bootstrap=mode in {'bootstrap','bootstrap_recover'},admission_dir=admission_dir)
     service=KeywordCleaner(CleanerStore(registry),account,owner_username=owner)
+    if mode=='initial_empty':
+        from packages.application.search_cluster_cleaner_initial_empty import execute as install_initial
+        return install_initial(action=action,operation_id=operation_id,request=request,cleaner=service,
+            directory=admission_dir.resolve(),generation=generation,runtime_sha=expected_sha,
+            expected_prestate=str(envelope.get('expected_prestate') or ''),expected_candidate=str(envelope.get('expected_candidate') or ''),actor=envelope.get('actor',''))
     if mode in {'admit_profiles','admit_profiles_recover'}:
         from packages.application.search_cluster_cleaner_onboarding import execute as onboard
         package=_package(package_path,account,generation)
@@ -482,6 +488,9 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     source=CleanerWbSource.from_env(account)
     worker=ManualCleanerWorker(service,source,AdmissionGuard(admission_dir.resolve(),service.store),generation=generation,
                                card_verifier=lambda target:_verify_fresh_card(package,target,admission_dir.resolve(),service,context=fresh_context())) if package else None
+    if package:
+        from packages.application.search_cluster_cleaner_initial_empty import InitialEmptyPolicy
+        source.initial_empty_policy=InitialEmptyPolicy(service,admission_dir.resolve(),generation,request['run_id'])
     def manual_preview():
         for target in targets:_verify_fresh_card(package,target,admission_dir.resolve(),service,context=fresh_context())
         result=worker.preview(run_id=request['run_id'],targets=targets)

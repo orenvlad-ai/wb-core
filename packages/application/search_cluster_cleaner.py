@@ -704,6 +704,9 @@ class KeywordCleaner:
                 result['scan_minus_known']=False
                 result['observed_only']=len(facts['queries'])
                 result['scan_blocked_reason']=facts['reason']
+            basis=c.execute("SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='initial_empty_basis' ORDER BY sequence DESC LIMIT 1",
+                            (self.key,result['scan_run_id'])).fetchone()
+            if basis:result['scan_initial_empty_evidence']=json.loads(basis[0])['evidence']
             return result
 
     def record_manual_job(self,job_id:str,**facts) -> None:
@@ -1060,6 +1063,10 @@ class KeywordCleaner:
         with self.store.transaction() as c:
             self._lease(c,run_id,token,generation)
             if manual_only and self._settings(c)["enabled"]: raise CleanerError("manual_mode_changed","Авточистка включена",409)
+            if snapshot.minus or 'excluded' in snapshot.queries.values():
+                self._event(c,'initial_empty_nonempty',dict(target=t.key),run_id=run_id)
+            if snapshot.initial_empty_evidence:
+                self._event(c,'initial_empty_basis',dict(target=t.key,evidence=dict(snapshot.initial_empty_evidence)),run_id=run_id)
             reason=t.unsupported_reason or "; ".join(snapshot.reasons)
             if not snapshot.complete or reason:
                 if not snapshot.complete and not t.unsupported_reason and snapshot.reasons==('minus_pair_omitted',):
@@ -1309,6 +1316,8 @@ class KeywordCleaner:
                 facts=json.loads(event[0])
                 for field in result['settlement']:result['settlement'][field]+=facts.get(field,0)
             result["targets"]=[dict(r) for r in c.execute("SELECT * FROM cleaner_run_targets WHERE run_id=? ORDER BY target",(run_id,))]
+            result['initial_empty_basis']=[json.loads(event[0]) for event in c.execute(
+                "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='initial_empty_basis' ORDER BY sequence",(self.key,run_id))]
             result['partial_previews']=[json.loads(event[0]) for event in c.execute(
                 "SELECT facts FROM cleaner_events WHERE account=? AND run_id=? AND kind='partial_snapshot_preview' ORDER BY sequence",
                 (self.key,run_id))]
