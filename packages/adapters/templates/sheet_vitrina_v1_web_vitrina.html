@@ -2963,7 +2963,7 @@
 
     .metrics-config-row {
       display: grid;
-      grid-template-columns: minmax(180px, 1.5fr) minmax(92px, 0.75fr) minmax(108px, 0.65fr);
+      grid-template-columns: minmax(180px, 1.5fr) minmax(82px, 0.55fr) minmax(100px, 0.55fr) 78px 70px;
       align-items: center;
       gap: 6px;
       min-width: 0;
@@ -2971,6 +2971,51 @@
       padding: 4px 6px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.055);
       color: var(--text);
+    }
+
+    .metrics-config-level-header {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      text-transform: none;
+    }
+
+    .metrics-config-level-clear {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    .metrics-config-level-clear:hover {
+      color: var(--text);
+      background: var(--panel-subtle);
+    }
+
+    .metrics-config-level-clear:focus-visible {
+      outline: 2px solid var(--accent-focus);
+    }
+
+    .metrics-config-level-cell {
+      display: flex;
+      justify-content: center;
+    }
+
+    .metrics-config-list-filter {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
     }
 
     .metrics-config-row:last-child {
@@ -3077,6 +3122,7 @@
 
     .metrics-presentation-actions {
       flex: 0 0 auto;
+      flex-wrap: wrap;
     }
 
     .metrics-config-drag-handle {
@@ -5532,7 +5578,8 @@
       }
 
       .metrics-config-row {
-        grid-template-columns: minmax(132px, 1fr) minmax(68px, 0.5fr) minmax(92px, 0.6fr);
+        grid-template-columns: minmax(150px, 1fr) 72px 96px 78px 70px;
+        min-width: 502px;
       }
 
       .metrics-presentation-modal-backdrop.operator-modal-backdrop {
@@ -5542,6 +5589,10 @@
       .metrics-presentation-modal.operator-modal-card {
         width: calc(100vw - 16px);
         max-height: calc(100vh - 16px);
+      }
+
+      .metrics-presentation-actions [data-metrics-settings-reset] {
+        flex-basis: 100%;
       }
 
       .metrics-config-scope-head {
@@ -7213,7 +7264,8 @@
       </div>
       <div class="ads-modal-actions metrics-presentation-actions">
         <button class="button secondary" type="button" data-metrics-settings-reset>Сбросить отображение</button>
-        <button class="button primary" type="button" data-metrics-settings-close>Готово</button>
+        <button class="button secondary" type="button" data-metrics-settings-close>Отмена</button>
+        <button class="button primary" type="button" data-metrics-settings-save>Сохранить</button>
       </div>
     </section>
   </div>
@@ -8163,6 +8215,9 @@
         unifiedOrder: [],
         unifiedDisplay: {},
         unifiedManual: false,
+        rowMetricAllowlists: {group: [], sku: []},
+        draft: null,
+        listFilter: "except_hidden",
         expandedAnchors: new Set(),
         selectionMode: false,
         selection: new Set(),
@@ -8718,13 +8773,18 @@
     }
     if (metricsSettingsResetButton) {
       metricsSettingsResetButton.addEventListener("click", function() {
-        resetMetricPresentationToDefault(state.composition);
-        renderMetricPresentationPanel(state.composition);
-        renderTable();
+        if (window.confirm("Сбросить отображение метрик к настройкам по умолчанию? Изменения вступят в силу после сохранения.")) {
+          resetMetricPresentationDraft();
+        }
       });
     }
     if (metricsPresentationPanelNode) {
       metricsPresentationPanelNode.addEventListener("click", function(event) {
+        if (event.target.closest("[data-metrics-settings-save]")) {
+          event.preventDefault();
+          saveMetricPresentationModal();
+          return;
+        }
         if (
           event.target === metricsPresentationPanelNode
           || event.target.closest("[data-metrics-settings-close]")
@@ -8755,7 +8815,8 @@
         event.stopPropagation();
         toggleMetricPresentationAnchor(
           String(toggle.getAttribute("data-metric-anchor-scope") || ""),
-          String(toggle.getAttribute("data-metric-anchor-key") || "")
+          String(toggle.getAttribute("data-metric-anchor-key") || ""),
+          String(toggle.getAttribute("data-metric-anchor-row-kind") || "")
         );
       });
     }
@@ -12961,6 +13022,7 @@
           display: presentationDisplay,
           manual: !!rawPresentation.manual
         },
+        row_metric_allowlists: normalizeRowMetricAllowlists(candidate.row_metric_allowlists),
         expanded_anchors: expandedAnchors,
         sku_presets: skuPresets,
         sku_highlight_metric_keys: uniqueMetricKeys(
@@ -13209,6 +13271,7 @@
         version: METRIC_PRESENTATION_VERSION,
         scopes: {},
         presentation: {order: [], display: {}, manual: false},
+        row_metric_allowlists: {group: [], sku: []},
         expanded_anchors: [],
         sku_presets: [],
         sku_highlight_metric_keys: [],
@@ -13415,6 +13478,14 @@
             ? !!remotePresentation.manual
             : !!localPresentation.manual
         },
+        row_metric_allowlists: ["group", "sku"].reduce(function(result, level) {
+          const baseKeys = (base.row_metric_allowlists || {})[level] || [];
+          const localKeys = (local.row_metric_allowlists || {})[level] || [];
+          result[level] = metricPresentationJsonEqual(baseKeys, localKeys)
+            ? ((remote.row_metric_allowlists || {})[level] || []).slice()
+            : localKeys.slice();
+          return result;
+        }, {}),
         expanded_anchors: mergeMetricPresentationOrderedValues(
           base.expanded_anchors,
           local.expanded_anchors,
@@ -13457,6 +13528,7 @@
           display: Object.assign({}, presentation.display || {}),
           manual: !!presentation.manual
         },
+        row_metric_allowlists: normalizeRowMetricAllowlists(normalized.row_metric_allowlists),
         expanded_anchors: uniqueLogicalMetricIds(normalized.expanded_anchors, 500),
         sku_presets: (normalized.sku_presets || []).map(function(preset) {
           return {
@@ -13924,6 +13996,9 @@
             : ((persisted.scopes || {}).total || {}).manual
         )
       );
+      state.metricPresentation.rowMetricAllowlists = normalizeRowMetricAllowlists(
+        forceDefault ? null : (persisted && persisted.row_metric_allowlists)
+      );
       state.metricPresentation.expandedAnchors = normalizedExpandedLogicalAnchors(
         model,
         forceDefault ? null : persisted
@@ -14018,6 +14093,7 @@
           display: display,
           manual: !!state.metricPresentation.unifiedManual
         },
+        row_metric_allowlists: normalizeRowMetricAllowlists(state.metricPresentation.rowMetricAllowlists),
         expanded_anchors: Array.from(state.metricPresentation.expandedAnchors || []),
         sku_presets: (state.metricPresentation.skuPresets || []).map(function(preset) {
           return {
@@ -14334,39 +14410,34 @@
       }
     }
 
-    function resetMetricPresentationToDefault(payload) {
-      const preservedSkuPresets = (state.metricPresentation.skuPresets || []).map(function(preset) {
-        return {
-          presetId: preset.presetId,
-          name: preset.name,
-          metricKeys: (preset.metricKeys || []).slice()
-        };
-      });
-      const preservedSkuMetricSelection = Object.assign({}, state.metricPresentation.skuMetricSelection || {}, {
-        metricKeys: ((state.metricPresentation.skuMetricSelection || {}).metricKeys || []).slice()
-      });
-      initializeMetricPresentation(payload, {
-        forceDefault: true,
-        preservedSkuPresets: preservedSkuPresets,
-        preservedSkuMetricSelection: preservedSkuMetricSelection
-      });
-      persistMetricPresentation();
+    // Store scoped keys, not transient logical pair IDs: history block loading can
+    // change a logical pair into a scope-only record without changing its metric.
+    // Missing catalog members remain selected; absence must never become "all".
+    function normalizeRowMetricAllowlists(candidate) {
+      const source = candidate && typeof candidate === "object" ? candidate : {};
+      return {group: uniqueMetricKeys(source.group, 500), sku: uniqueMetricKeys(source.sku, 500)};
     }
 
-    function metricPresentationUnifiedOrder() {
+    function metricPresentationEditingState() {
+      return state.metricPresentation.draft || state.metricPresentation;
+    }
+
+    function metricPresentationUnifiedOrder(editing) {
       const defaultOrder = (state.metricPresentation.logicalMetrics || []).map(function(record) {
         return record.logicalId;
       });
-      return sanitizeMetricOrder(state.metricPresentation.unifiedOrder, defaultOrder);
+      return sanitizeMetricOrder((editing ? metricPresentationEditingState() : state.metricPresentation).unifiedOrder, defaultOrder);
     }
 
-    function unifiedMetricDisplayStatus(logicalMetricId) {
+    function unifiedMetricDisplayStatus(logicalMetricId, editing) {
       const normalizedLogicalMetricId = String(logicalMetricId || "");
       if (!normalizedLogicalMetricId) {
         return "shown";
       }
       return normalizeMetricDisplayStatus(
-        state.metricPresentation.unifiedDisplay[normalizedLogicalMetricId] || "shown"
+        (editing ? metricPresentationEditingState() : state.metricPresentation).unifiedDisplay[normalizedLogicalMetricId]
+        || state.metricPresentation.unifiedDisplay[normalizedLogicalMetricId]
+        || "shown"
       );
     }
 
@@ -14408,6 +14479,16 @@
         closeSkuPresetModal();
       }
       state.metricPresentation.modalOpener = document.activeElement;
+      const base = buildMetricPresentationPersistedPayload();
+      state.metricPresentation.draft = {
+        base: base,
+        unifiedOrder: base.presentation.order.slice(),
+        unifiedDisplay: Object.assign({}, base.presentation.display),
+        unifiedManual: base.presentation.manual,
+        rowMetricAllowlists: normalizeRowMetricAllowlists(base.row_metric_allowlists),
+        reset: false
+      };
+      state.metricPresentation.listFilter = "except_hidden";
       renderMetricPresentationPanel(state.composition);
       metricsPresentationPanelNode.hidden = false;
       window.setTimeout(function() {
@@ -14424,6 +14505,7 @@
       }
       const opener = state.metricPresentation.modalOpener;
       state.metricPresentation.modalOpener = null;
+      state.metricPresentation.draft = null;
       state.metricPresentation.selectionMode = false;
       state.metricPresentation.selection = new Set();
       metricsPresentationPanelNode.hidden = true;
@@ -14432,13 +14514,54 @@
       }
     }
 
+    function resetMetricPresentationDraft() {
+      const draft = state.metricPresentation.draft;
+      if (!draft) { return; }
+      draft.unifiedOrder = state.metricPresentation.logicalMetrics.map(function(record) { return record.logicalId; });
+      draft.unifiedDisplay = {};
+      state.metricPresentation.logicalMetrics.forEach(function(record) {
+        draft.unifiedDisplay[record.logicalId] = defaultMetricDisplayStatus(record.totalKey || record.skuKey);
+      });
+      draft.unifiedManual = false;
+      draft.rowMetricAllowlists = {group: [], sku: []};
+      draft.reset = true;
+      state.metricPresentation.selectionMode = false;
+      state.metricPresentation.selection = new Set();
+      renderMetricPresentationPanel(state.composition);
+    }
+
+    function saveMetricPresentationModal() {
+      const draft = state.metricPresentation.draft;
+      if (!draft) { return; }
+      const local = Object.assign({}, draft.base, {
+        presentation: {order: draft.unifiedOrder, display: draft.unifiedDisplay, manual: draft.unifiedManual},
+        row_metric_allowlists: draft.rowMetricAllowlists
+      });
+      if (draft.reset) {
+        local.expanded_anchors = [];
+        local.sku_highlight_metric_keys = [];
+      }
+      const merged = rebaseMetricPresentationConfig(draft.base, local, buildMetricPresentationPersistedPayload());
+      state.metricPresentation.unifiedOrder = merged.presentation.order;
+      state.metricPresentation.unifiedDisplay = merged.presentation.display;
+      state.metricPresentation.unifiedManual = merged.presentation.manual;
+      state.metricPresentation.rowMetricAllowlists = normalizeRowMetricAllowlists(merged.row_metric_allowlists);
+      state.metricPresentation.expandedAnchors = new Set(merged.expanded_anchors);
+      state.metricPresentation.highlightMetricKeys = merged.sku_highlight_metric_keys;
+      closeMetricPresentationModal();
+      pruneExpandedMetricPresentationAnchors();
+      if (state.composition) { refreshSkuMetricFilterState(state.composition); }
+      persistMetricPresentation();
+      renderTable();
+    }
+
     function renderMetricPresentationPanel(payload) {
       void payload;
       if (!metricsPresentationPanelNode || !metricsPresentationBodyNode || !metricsPresentationSummaryNode) {
         return;
       }
       const scrollState = captureMetricPresentationScrollState();
-      const logicalMetrics = metricPresentationUnifiedOrder().map(function(logicalMetricId) {
+      const logicalMetrics = metricPresentationUnifiedOrder(true).map(function(logicalMetricId) {
         return state.metricPresentation.logicalById.get(logicalMetricId);
       }).filter(Boolean);
       const totalCount = logicalMetrics.length;
@@ -14448,7 +14571,7 @@
       let totalOnlyCount = 0;
       let skuOnlyCount = 0;
       logicalMetrics.forEach(function(record) {
-        const status = unifiedMetricDisplayStatus(record.logicalId);
+        const status = unifiedMetricDisplayStatus(record.logicalId, true);
         if (status === "collapsed") {
           collapsedCount += 1;
         } else if (status === "hidden") {
@@ -14476,7 +14599,15 @@
       if (totalCount && hiddenCount) {
         summaryParts.push("Скрыто: " + hiddenCount);
       }
-      const persistenceStatus = metricPresentationSaveStatusText();
+      const draft = state.metricPresentation.draft;
+      const draftChanged = !!draft && (
+        draft.reset
+        || !metricPresentationJsonEqual(draft.unifiedOrder, draft.base.presentation.order)
+        || !metricPresentationJsonEqual(draft.unifiedDisplay, draft.base.presentation.display)
+        || draft.unifiedManual !== draft.base.presentation.manual
+        || !metricPresentationJsonEqual(draft.rowMetricAllowlists, draft.base.row_metric_allowlists)
+      );
+      const persistenceStatus = draftChanged ? "есть несохранённые изменения" : metricPresentationSaveStatusText();
       if (persistenceStatus) {
         summaryParts.push("Настройки: " + persistenceStatus);
       }
@@ -14497,7 +14628,12 @@
     }
 
     function renderUnifiedMetricConfigTable(logicalMetrics) {
-      const rows = logicalMetrics.map(function(record) {
+      const visibleMetrics = logicalMetrics.filter(function(record) {
+        const hidden = unifiedMetricDisplayStatus(record.logicalId, true) === "hidden";
+        return state.metricPresentation.listFilter === "all"
+          || (state.metricPresentation.listFilter === "only_hidden" ? hidden : !hidden);
+      });
+      const rows = visibleMetrics.map(function(record) {
         return renderUnifiedMetricConfigRow(record);
       }).join("");
       const selectionActive = metricPresentationSelectionMode();
@@ -14506,7 +14642,11 @@
         '<section class="metrics-config-scope-table" data-metrics-config-scope-table data-metrics-config-scope="unified">',
         '<div class="metrics-config-scope-head">',
         '<div class="metrics-config-scope-title-group">',
-        '<h3 class="metrics-config-scope-title">Единый список</h3>',
+        '<label class="metrics-config-list-filter">Список <select class="metrics-config-bulk-select" data-metric-list-filter aria-label="Фильтр списка метрик">',
+        [["all", "Все"], ["except_hidden", "Кроме скрытых"], ["only_hidden", "Только скрытые"]].map(function(option) {
+          return '<option value="' + option[0] + '"' + (state.metricPresentation.listFilter === option[0] ? " selected" : "") + '>' + option[1] + '</option>';
+        }).join(""),
+        '</select></label>',
         '<span class="metrics-config-scope-meta">' + escapeHtml(String(logicalMetrics.length)) + ' метрик' + (selectionActive ? " · выбрано " + String(selectedCount) : "") + '</span>',
         "</div>",
         '<div class="metrics-config-scope-actions">',
@@ -14524,6 +14664,11 @@
         '<span role="columnheader">Метрика</span>',
         '<span role="columnheader">Группа</span>',
         '<span role="columnheader">Отображение</span>',
+        ["group", "sku"].map(function(level) {
+          const label = level === "group" ? "Группы" : "SKU";
+          const title = "Снять выбор метрик для строк " + (level === "group" ? "групп" : "SKU") + ": показывать все доступные";
+          return '<span class="metrics-config-level-header" role="columnheader" title="Пустой выбор: все доступные метрики. Есть выбор: только выбранные.">' + label + '<button class="metrics-config-level-clear" type="button" data-metric-level-clear="' + level + '" title="' + title + '" aria-label="' + title + '"><span aria-hidden="true">×</span></button></span>';
+        }).join(""),
         "</div>",
         rows || '<p class="metrics-presentation-empty">Нет метрик.</p>',
         "</div>",
@@ -14536,7 +14681,7 @@
       const captionKey=record.skuKey === "ctr" ? "ctr" : (record.totalKey || record.skuKey);
       const label = webVitrinaMetricCaption(captionKey,record.label || logicalMetricId);
       const groupLabel = String(record.sectionLabel || "Без секции");
-      const status = unifiedMetricDisplayStatus(logicalMetricId);
+      const status = unifiedMetricDisplayStatus(logicalMetricId, true);
       const selectionActive = metricPresentationSelectionMode();
       const selected = metricPresentationSelectionSet().has(logicalMetricId);
       const availabilityLabel = record.availability === "sku"
@@ -14563,11 +14708,25 @@
           return '<option value="' + escapeHtml(candidate) + '"' + (candidate === status ? " selected" : "") + ">" + escapeHtml(metricDisplayStatusLabel(candidate)) + "</option>";
         }).join(""),
         "</select>",
+        ["group", "sku"].map(function(level) {
+          const available = !!(level === "group" ? record.totalKey : record.skuKey);
+          const keys = metricPresentationEditingState().rowMetricAllowlists[level] || [];
+          const metricKey = level === "group" ? record.totalKey : record.skuKey;
+          const checked = keys.indexOf(metricKey) !== -1;
+          return '<span class="metrics-config-level-cell" role="cell"><input class="metrics-config-select-checkbox" type="checkbox" data-metric-level-checkbox="' + level + '" data-metric-level-key="' + escapeHtml(metricKey || "") + '" data-metric-config-key="' + escapeHtml(logicalMetricId) + '" aria-label="' + escapeHtml("Метрика для строк " + (level === "group" ? "групп" : "SKU") + ": " + label) + '"' + (checked ? " checked" : "") + (available ? "" : ' disabled title="Метрика недоступна для этого уровня"') + '></span>';
+        }).join(""),
         "</div>"
       ].join("");
     }
 
     function handleMetricPresentationClick(event) {
+      const clear = event.target.closest("[data-metric-level-clear]");
+      if (clear && state.metricPresentation.draft) {
+        event.preventDefault();
+        state.metricPresentation.draft.rowMetricAllowlists[clear.getAttribute("data-metric-level-clear")] = [];
+        renderMetricPresentationPanel(state.composition);
+        return;
+      }
       const toggle = event.target.closest("[data-metric-selection-toggle]");
       if (!toggle) {
         return;
@@ -14577,6 +14736,22 @@
     }
 
     function handleMetricPresentationChange(event) {
+      const filter = event.target.closest("[data-metric-list-filter]");
+      if (filter) {
+        state.metricPresentation.listFilter = String(filter.value || "except_hidden");
+        renderMetricPresentationPanel(state.composition);
+        return;
+      }
+      const levelCheckbox = event.target.closest("[data-metric-level-checkbox]");
+      if (levelCheckbox && state.metricPresentation.draft) {
+        const level = levelCheckbox.getAttribute("data-metric-level-checkbox");
+        const id = levelCheckbox.getAttribute("data-metric-level-key");
+        const keys = new Set(state.metricPresentation.draft.rowMetricAllowlists[level] || []);
+        if (levelCheckbox.checked) { keys.add(id); } else { keys.delete(id); }
+        state.metricPresentation.draft.rowMetricAllowlists[level] = Array.from(keys);
+        renderMetricPresentationPanel(state.composition);
+        return;
+      }
       const checkbox = event.target.closest("[data-metric-selection-checkbox]");
       if (checkbox) {
         updateMetricPresentationSelection(
@@ -14719,7 +14894,7 @@
 
     function metricPresentationSelectedKeys() {
       const selected = metricPresentationSelectionSet();
-      return metricPresentationUnifiedOrder().filter(function(logicalMetricId) {
+      return metricPresentationUnifiedOrder(true).filter(function(logicalMetricId) {
         return selected.has(logicalMetricId);
       });
     }
@@ -14739,7 +14914,7 @@
       const normalizedLogicalMetricId = String(logicalMetricId || "");
       if (
         !metricPresentationSelectionMode()
-        || metricPresentationUnifiedOrder().indexOf(normalizedLogicalMetricId) === -1
+        || metricPresentationUnifiedOrder(true).indexOf(normalizedLogicalMetricId) === -1
       ) {
         return;
       }
@@ -14753,6 +14928,7 @@
     }
 
     function applyBulkMetricDisplayStatus(status) {
+      if (!state.metricPresentation.draft) { return; }
       const normalizedStatus = normalizeMetricDisplayStatus(status);
       if (!status || !metricPresentationSelectionMode()) {
         renderMetricPresentationPanel(state.composition);
@@ -14764,39 +14940,29 @@
         return;
       }
       selectedKeys.forEach(function(logicalMetricId) {
-        state.metricPresentation.unifiedDisplay[logicalMetricId] = normalizedStatus;
+        metricPresentationEditingState().unifiedDisplay[logicalMetricId] = normalizedStatus;
       });
-      state.metricPresentation.unifiedManual = true;
-      pruneExpandedMetricPresentationAnchors();
-      if (state.composition) {
-        refreshSkuMetricFilterState(state.composition);
-      }
-      persistMetricPresentation();
+      metricPresentationEditingState().unifiedManual = true;
       renderMetricPresentationPanel(state.composition);
-      renderTable();
     }
 
     function updateMetricDisplayStatus(logicalMetricId, status) {
+      if (!state.metricPresentation.draft) { return; }
       const normalizedLogicalMetricId = String(logicalMetricId || "");
       if (!normalizedLogicalMetricId) {
         return;
       }
-      if (metricPresentationUnifiedOrder().indexOf(normalizedLogicalMetricId) === -1) {
+      if (metricPresentationUnifiedOrder(true).indexOf(normalizedLogicalMetricId) === -1) {
         return;
       }
-      state.metricPresentation.unifiedDisplay[normalizedLogicalMetricId] =
+      metricPresentationEditingState().unifiedDisplay[normalizedLogicalMetricId] =
         normalizeMetricDisplayStatus(status);
-      state.metricPresentation.unifiedManual = true;
-      pruneExpandedMetricPresentationAnchors();
-      if (state.composition) {
-        refreshSkuMetricFilterState(state.composition);
-      }
-      persistMetricPresentation();
+      metricPresentationEditingState().unifiedManual = true;
       renderMetricPresentationPanel(state.composition);
-      renderTable();
     }
 
     function moveLogicalMetricsInPresentationByDrag(logicalMetricIds, targetLogicalMetricId, placement) {
+      if (!state.metricPresentation.draft) { return; }
       const movingKeys = Array.isArray(logicalMetricIds) ? logicalMetricIds.map(function(logicalMetricId) {
         return String(logicalMetricId || "");
       }).filter(Boolean) : [];
@@ -14807,7 +14973,7 @@
       ) {
         return;
       }
-      const order = metricPresentationUnifiedOrder();
+      const order = metricPresentationUnifiedOrder(true);
       const movingSet = new Set(movingKeys);
       const sourceMetrics = order.filter(function(logicalMetricId) {
         return movingSet.has(logicalMetricId);
@@ -14827,19 +14993,13 @@
         insertIndex += 1;
       }
       remaining.splice.apply(remaining, [insertIndex, 0].concat(sourceMetrics));
-      state.metricPresentation.unifiedOrder = remaining;
-      state.metricPresentation.unifiedManual = true;
-      pruneExpandedMetricPresentationAnchors();
-      if (state.composition) {
-        refreshSkuMetricFilterState(state.composition);
-      }
-      persistMetricPresentation();
+      metricPresentationEditingState().unifiedOrder = remaining;
+      metricPresentationEditingState().unifiedManual = true;
       renderMetricPresentationPanel(state.composition);
-      renderTable();
     }
 
-    function toggleMetricPresentationAnchor(scopeId, metricKey) {
-      if (!scopeId || !metricKey || !metricAnchorCollapsedMetricKeys(scopeId, metricKey).length) {
+    function toggleMetricPresentationAnchor(scopeId, metricKey, rowKind) {
+      if (!scopeId || !metricKey || !metricAnchorCollapsedMetricKeys(scopeId, metricKey, rowKind).length) {
         return;
       }
       const token = metricPresentationAnchorToken(scopeId, metricKey);
@@ -14858,8 +15018,9 @@
     function logicalMetricHasCollapsedChildren(logicalMetricId) {
       const record = state.metricPresentation.logicalById.get(logicalMetricId) || {};
       return !!(
-        (record.totalKey && metricAnchorCollapsedMetricKeys("total", record.totalKey).length)
-        || (record.skuKey && metricAnchorCollapsedMetricKeys("sku", record.skuKey).length)
+        (record.totalKey && metricAnchorCollapsedMetricKeys("total", record.totalKey, "total").length)
+        || (record.totalKey && metricAnchorCollapsedMetricKeys("total", record.totalKey, "group").length)
+        || (record.skuKey && metricAnchorCollapsedMetricKeys("sku", record.skuKey, "sku").length)
       );
     }
 
@@ -14915,9 +15076,17 @@
       return index === -1 ? 999999 : index;
     }
 
+    function metricAllowedForRowLevel(rowKind, scopeId, metricKey) {
+      const level = String(rowKind || "").toLowerCase();
+      if (level !== "group" && level !== "sku") { return true; }
+      const keys = state.metricPresentation.rowMetricAllowlists[level] || [];
+      return !keys.length || keys.indexOf(metricKey) !== -1;
+    }
+
     function isMetricHiddenByPresentation(row) {
       const scopeId = rowMetricPresentationScopeId(row);
       const metricKey = String(cellValue(row, "metric_key") || "");
+      if (!metricAllowedForRowLevel(row.row_kind, scopeId, metricKey)) { return true; }
       const status = metricDisplayStatusForScope(scopeId, metricKey);
       if (status === "hidden") {
         return true;
@@ -14925,7 +15094,7 @@
       if (status !== "collapsed") {
         return false;
       }
-      const anchor = metricCollapsedAnchorMetricKey(scopeId, metricKey);
+      const anchor = metricCollapsedAnchorMetricKey(scopeId, metricKey, row.row_kind);
       if (!anchor) {
         return false;
       }
@@ -14935,12 +15104,12 @@
     function isMetricExpandedChildRow(row) {
       const scopeId = rowMetricPresentationScopeId(row);
       const metricKey = String(cellValue(row, "metric_key") || "");
-      const anchor = metricCollapsedAnchorMetricKey(scopeId, metricKey);
+      const anchor = metricCollapsedAnchorMetricKey(scopeId, metricKey, row.row_kind);
       return !!anchor && state.metricPresentation.expandedAnchors.has(metricPresentationAnchorToken(scopeId, anchor));
     }
 
-    function metricCollapsedAnchorMetricKey(scopeId, metricKey) {
-      const order = metricPresentationScopeOrder(scopeId);
+    function metricCollapsedAnchorMetricKey(scopeId, metricKey, rowKind) {
+      const order = metricPresentationScopeOrder(scopeId).filter(function(key) { return metricAllowedForRowLevel(rowKind, scopeId, key); });
       const metricIndex = order.indexOf(metricKey);
       if (metricIndex <= 0 || metricDisplayStatusForScope(scopeId, metricKey) !== "collapsed") {
         return "";
@@ -14955,8 +15124,8 @@
       return anchor;
     }
 
-    function metricAnchorCollapsedMetricKeys(scopeId, anchorMetricKey) {
-      const order = metricPresentationScopeOrder(scopeId);
+    function metricAnchorCollapsedMetricKeys(scopeId, anchorMetricKey, rowKind) {
+      const order = metricPresentationScopeOrder(scopeId).filter(function(key) { return metricAllowedForRowLevel(rowKind, scopeId, key); });
       const anchorIndex = order.indexOf(anchorMetricKey);
       if (anchorIndex < 0 || metricDisplayStatusForScope(scopeId, anchorMetricKey) !== "shown") {
         return [];
@@ -17771,13 +17940,13 @@
         const explanation = webVitrinaMetricExplanation(metricKey);
         const caption = webVitrinaMetricCaption(metricKey,formatCellValue(cell));
         const content = '<span class="metric-label-text"' + (explanation ? ' title="' + escapeHtml(explanation) + '"' : '') + '>' + escapeHtml(caption) + '</span>';
-        const collapsedMetricKeys = metricAnchorCollapsedMetricKeys(scopeId, metricKey);
+        const collapsedMetricKeys = metricAnchorCollapsedMetricKeys(scopeId, metricKey, row.row_kind);
         const hiddenCount = collapsedMetricKeys.length;
         if (hiddenCount > 0) {
           const expanded = state.metricPresentation.expandedAnchors.has(metricPresentationAnchorToken(scopeId, metricKey));
           return [
             '<span class="metric-label-with-disclosure">',
-            '<button class="metric-disclosure-toggle" type="button" data-metric-anchor-toggle data-metric-anchor-scope="' + escapeHtml(scopeId) + '" data-metric-anchor-key="' + escapeHtml(metricKey) + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-label="' + escapeHtml((expanded ? "Скрыть" : "Показать") + " свернутые метрики: " + hiddenCount) + '" title="' + escapeHtml((expanded ? "Скрыть" : "Показать") + " свернутые метрики: " + hiddenCount) + '">',
+            '<button class="metric-disclosure-toggle" type="button" data-metric-anchor-toggle data-metric-anchor-scope="' + escapeHtml(scopeId) + '" data-metric-anchor-key="' + escapeHtml(metricKey) + '" data-metric-anchor-row-kind="' + escapeHtml(row.row_kind || "") + '" aria-expanded="' + (expanded ? "true" : "false") + '" aria-label="' + escapeHtml((expanded ? "Скрыть" : "Показать") + " свернутые метрики: " + hiddenCount) + '" title="' + escapeHtml((expanded ? "Скрыть" : "Показать") + " свернутые метрики: " + hiddenCount) + '">',
             expanded ? "▾" : "▸",
             "</button>",
             content,
