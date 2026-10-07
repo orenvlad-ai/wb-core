@@ -41,6 +41,28 @@ before acceptance. This mapping is new profile policy, not a claim about legacy
 scheduler behavior. No owner flag narrows source groups, metrics, dates or
 selectors within full auto_daily. A false mandatory phase is blocked, never skipped.
 
+The full `auto_daily` collection completes all original external source groups
+and both native temporal slots once, including known missing/error/partial
+outcomes. This is capture evidence, not a claim that every source is accepted.
+The cycle receipt records exact accepted flags/digests separately from outcome
+digests and bounded status/coverage metadata; provider notes and raw data are not
+stored there. Native unavailable observations degrade the capture stage. An
+incomplete scope, inconsistent accepted proof, wrong-date consumed payload,
+fabricated zero-fill or unproved complete/qualified-partial payload fails closed.
+The current-only rollover and native backoff rules still determine whether a
+source is fetched; a completed slot is not a promise of a new provider request.
+
+Finance, full official FBS and warehouse phases validate their own canonical
+operands and versions. Missing vitrina SPP/buyer/display stocks do not replace
+those operands or prevent unrelated phases from running. The same retained
+capture is derived once after the material stages, with unchanged source/material
+CAS. A technically complete current ready publication with semantic warning/error
+remains a truthful degraded report; `ready_semantic_status` records the exact
+status. This does not fill missing cells with zero or claim accepted sources.
+Technical publication failures and native history guards still fail the cycle.
+Old dated publication and exact closed-date/native acknowledgement retain their
+stricter existing proofs; current report degradation cannot acknowledge old debt.
+
 `projected_schedule(runtime, raw_feature_intent)` exposes raw intent plus a
 separate effective schedule. Settings must preserve raw `activity.feature_intent`;
 substituting the projection would create false owner drift. The exact target

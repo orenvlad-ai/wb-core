@@ -3224,13 +3224,16 @@ class RegistryUploadHttpEntrypoint:
         result = self._publish_sheet_refresh_plan(plan=plan, current_state=current, expected_ready=expected, emit=_noop_log,
             execution_mode=EXECUTION_MODE_AUTO_DAILY, refresh_diagnostics=diagnostics, build_plan_phase=phase,
             refresh_started_at=started, refresh_started_perf=time.perf_counter())
-        if result.get('status') == 'error' or result.get('semantic_status') == 'error' or not result.get('publication_operation_id'):
-            raise CycleStageFailure('final_ready_semantic_failure')
+        if (result.get('status') != 'success' or result.get('semantic_status') not in {'success', 'warning', 'error'}
+                or not result.get('publication_operation_id') or not result.get('publication_attempt_id')):
+            raise CycleStageFailure('final_ready_publication_unproven')
         versions = {key: str(result.get(key) or '') for key in ('snapshot_id','plan_version','bundle_version','as_of_date','refreshed_at','publication_operation_id','publication_attempt_id')}
         versions['ready_fingerprint'] = self.runtime.prepare_sheet_vitrina_ready_publication(
             bundle_version=versions['bundle_version'], as_of_date=versions['as_of_date']).fingerprint
         self._cycle_verify_ready(versions)
-        warnings = () if result.get('semantic_status') == 'success' else ({'source_key': 'final_ready', 'policy': 'truthful_warning'},)
+        versions['ready_semantic_status'] = result['semantic_status']
+        warnings = () if result['semantic_status'] == 'success' else ({'source_key': 'final_ready',
+            'policy': 'truthful_report_degraded', 'semantic_status': result['semantic_status']},)
         return versions, StageProof(versions, warnings)
 
     def _cycle_publish_dated_ready(self, plan):

@@ -20,6 +20,9 @@ HEAVY_OPERATIONS = ('auto_update', 'refresh', 'refresh_group', OPERATION)
 STAGES = ('closed_sources', 'api_sources', 'finance_sources', 'fbs_generation', 'warehouse',
           'daily_projection', 'closed_ready', 'final_ready', 'rolling14')
 ACTIVE = {'accepted', 'running'}
+CAPTURE_UNAVAILABLE_KINDS = frozenset({'missing', 'error', 'empty', 'incomplete', 'not_available',
+    'blocked', 'rate_limited', 'not_found', 'closure_pending', 'closure_retrying',
+    'closure_rate_limited', 'closure_exhausted'})
 
 
 class CycleConflict(ValueError):
@@ -55,21 +58,32 @@ def _warning(source, policy):
         ('source_key', 'temporal_slot', 'date', 'kind', 'latest_attempt_kind', 'accepted_digest')} | {'policy': policy}
 
 
-def validate_collection(summary):
+def validate_collection(summary, *, require_full_scope=False):
     warnings = []
-    if not summary.get('slots'):
+    if not summary.get('slots') or summary.get('collection_complete') is not True:
         raise CycleStageFailure('collection_proof_missing')
+    if require_full_scope and summary.get('full_scope') is not True:
+        raise CycleStageFailure('collection_full_scope_required')
     for slot in summary['slots']:
         policy = slot['policy']
+        if slot.get('invalid_payload_reason'):
+            raise CycleStageFailure('collection_payload_invalid:' + slot['source_key'] + ':' + slot['invalid_payload_reason'])
+        if bool(slot['accepted']) != bool(slot['accepted_digest']):
+            raise CycleStageFailure('collection_accepted_proof_inconsistent:' + slot['source_key'])
+        if slot['accepted'] and slot.get('outcome_digest') != slot['accepted_digest']:
+            raise CycleStageFailure('collection_accepted_digest_changed:' + slot['source_key'])
         if policy in {'archive_only', 'temporal_role_unavailable'}:
             warnings.append(_warning(slot, policy))
-        elif not slot['accepted'] or not slot['accepted_digest']:
-            raise CycleStageFailure('source_not_admitted:' + slot['source_key'])
+        elif policy == 'unavailable' and not slot['accepted'] and slot['kind'] in CAPTURE_UNAVAILABLE_KINDS:
+            warnings.append(_warning(slot, 'captured_unavailable'))
         elif policy in {'accepted_partial', 'accepted_retained'}:
+            if not slot['accepted']:
+                raise CycleStageFailure('collection_accepted_proof_missing:' + slot['source_key'])
             warnings.append(_warning(slot, policy))
-        elif policy != 'accepted_complete':
+        elif policy != 'accepted_complete' or not slot['accepted']:
             raise CycleStageFailure('source_policy_unknown:' + slot['source_key'])
-    return StageProof({key: summary[key] for key in ('scope_fingerprint', 'provenance_fingerprint', 'bundle_version')}, tuple(warnings))
+    return StageProof({**{key: summary[key] for key in ('scope_fingerprint', 'provenance_fingerprint', 'bundle_version')},
+        'source_capture_outcomes': canonical(summary['slots'])}, tuple(warnings))
 
 
 class CycleReceiptStore:
@@ -310,7 +324,7 @@ def run_cycle(entrypoint, store, receipt, history_config, log):
         summary = source_adapter.collected_source_summary(handle)
         if summary['business_date'] != receipt['business_date']:
             raise CycleStageFailure('cycle_business_date_changed')
-        return validate_collection(summary)
+        return validate_collection(summary, require_full_scope=True)
     def finance_sources():
         nonlocal finance
         proof = entrypoint._cycle_finance_sources()
