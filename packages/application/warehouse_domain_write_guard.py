@@ -80,6 +80,7 @@ WAREHOUSE_DOMAIN_TABLES = (
     "sheet_vitrina_v1_ff_pool_feature_epochs",
     "sheet_vitrina_v1_ff_pool_balances",
     "sheet_vitrina_v1_ff_pool_documents",
+    "sheet_vitrina_v1_ff_pool_overhead_confirmations",
     "sheet_vitrina_v1_ff_pool_document_lines",
     "sheet_vitrina_v1_ff_pool_document_expense_lines",
     "sheet_vitrina_v1_ff_pool_document_relations",

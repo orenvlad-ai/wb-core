@@ -45,6 +45,13 @@ from packages.application.registry_upload_db_backed_runtime import (  # noqa: E4
     RegistryUploadDbBackedRuntime,
     _ensure_schema,
 )
+from packages.application.operator_ff_overhead import drain as drain_overheads
+from packages.application.warehouse_functional_lock import warehouse_functional_job_lock
+def drain(db_path, runtime_dir, **kwargs):
+    with warehouse_functional_job_lock(runtime_dir):
+        return drain_overheads(db_path, runtime_dir, **kwargs)
+
+from packages.application.operator_ff_overhead import read_acceptance  # noqa: E402
 from packages.contracts.ff_pool_documents import DocumentIdentity  # noqa: E402
 from apps.russian_payment_orders_smoke import _fixture, _render_pdf  # noqa: E402
 
@@ -402,8 +409,12 @@ def _overhead_operator_workflows() -> None:
         assert manual["state"] == "ready" and manual["confirm_allowed"]
         assert manual_summary["business_date"] == "2026-08-13"
         assert manual_summary["source_mode"] == "manual"
-        assert manual_summary["denominator_quantity"] == 5, manual_summary
-        manual_complete = surface.confirm_document(str(manual["request_id"]))
+        assert manual_summary["denominator_quantity"] is None and manual_summary["allocation_status"] == "pending", manual_summary
+        accepted = surface.confirm_document(str(manual["request_id"]))
+        assert accepted["acceptance"]["durable_saved"] and accepted["acceptance"]["state"] == "accepted"
+        assert accepted["document"] is None
+        drain(service.db_path, root, timestamp_factory=clock)
+        manual_complete = surface.request_status(str(manual["request_id"]))
         assert manual_complete["state"] == "posted"
         assert manual_complete["publication"]["status"] == "queued"
         assert _surface_quantities(service.db_path) == quantities_before
@@ -469,7 +480,10 @@ def _overhead_operator_workflows() -> None:
                 )
             )
         assert stored_manifest["payment_evidence"]["payer"]["account"]
-        wb_complete = surface.confirm_document(str(wb_preview["request_id"]))
+        wb_accepted = surface.confirm_document(str(wb_preview["request_id"]))
+        assert wb_accepted["acceptance"]["durable_saved"]
+        drain(service.db_path, root, timestamp_factory=clock)
+        wb_complete = surface.request_status(str(wb_preview["request_id"]))
         wb_document_id = str(wb_complete["document"]["document_id"])
         wb_detail = surface.document_detail(wb_document_id)["documents"][0]
         assert wb_detail["source_file_available"]
@@ -536,7 +550,9 @@ def _overhead_operator_workflows() -> None:
         )
         assert not vtb_preview["payment_duplicate"]
         assert vtb_preview["preview"]["summary"]["payment_evidence"]["adapter"] == "vtb_0401060_v2"
-        assert surface.confirm_document(str(vtb_preview["request_id"]))["state"] == "posted"
+        assert surface.confirm_document(str(vtb_preview["request_id"]))["acceptance"]["durable_saved"]
+        drain(service.db_path, root, timestamp_factory=clock)
+        assert surface.request_status(str(vtb_preview["request_id"]))["state"] == "posted"
 
         not_executed_pdf = _render_pdf(
             wb_text.replace("ИСПОЛНЕН\n19.08.2026 10:11:12", "НЕ ИСПОЛНЕН"),

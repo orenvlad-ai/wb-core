@@ -175,6 +175,8 @@ def _commit_book_intent(runtime_dir, book, *, expected, operation_id, inputs, ki
     with closing(sqlite3.connect(db, timeout=0)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         check_pinned_authority(conn, authority)
+        from packages.application.operator_ff_overhead import assert_book_closure
+        assert_book_closure(conn, book)
         if inputs:
             check_material(conn, inputs)
         if load(runtime_dir)[1] != expected:
@@ -185,6 +187,8 @@ def _commit_book_intent(runtime_dir, book, *, expected, operation_id, inputs, ki
         conn.commit()  # Deliberately durable before the other database commit.
         conn.execute("BEGIN IMMEDIATE")
         check_pinned_authority(conn, authority)
+        from packages.application.operator_ff_overhead import assert_book_closure
+        assert_book_closure(conn, book)
         if inputs:
             check_material(conn, inputs)
         version = _save_book(runtime_dir, book, expected=expected, operation_id=operation_id)
@@ -244,6 +248,8 @@ def _prepare_from_snapshot(runtime_dir, *, db, conn, now, opening, before, expec
     # quantity, then closes that day and starts the current one. No gap filling.
     target = state["last_attempt"].get("target_date", day)
     if target < day and target in state["periods"]:
+        from packages.application.operator_ff_overhead import assert_day_can_close
+        assert_day_can_close(conn, target)
         state = close_candidate_period(state, target, today=day)
         book["shared_days"][target] = build_shared_cost_day(state, book["wb_days"][target], target)
         book["presentations"][target] = FbsInventorySnapshot(fbs_state=state,

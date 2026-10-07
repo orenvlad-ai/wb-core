@@ -537,6 +537,8 @@ class RegistryUploadDbBackedRuntime:
                 raise ReadyPublicationConflict("ready_business_date_changed")
             book_version = expected_book
             if _prepared_book is not None:
+                from packages.application.operator_ff_overhead import assert_book_closure
+                assert_book_closure(conn, book)
                 check_pinned_authority(conn, book["publication_authority"])
                 book_version = _save_book(self.runtime_dir, book, expected=expected_book,
                                          operation_id=operation_id + ":" + attempt_id)

@@ -500,6 +500,8 @@ def _run_admitted(
             journal.phase_finished(durable_run_id, durable_phase, details=ff_state)
             durable_phase = "official_complete_wb_stocks"
             journal.phase_started(durable_run_id, durable_phase)
+            from packages.application.operator_ff_overhead import drain as drain_overheads, reconcile as reconcile_overheads
+            drain_overheads(runtime.db_path, runtime.runtime_dir)
             plan = _run_sync_phase(
                 "build_sync_plan",
                 phase_timings_ms,
@@ -592,6 +594,7 @@ def _run_admitted(
                     finance_cost_recalculation.get("fingerprint") or ""
                 ),
             )
+            reconcile_overheads(runtime)
             completed_backup = backup_result
             journal.phase_finished(
                 durable_run_id,

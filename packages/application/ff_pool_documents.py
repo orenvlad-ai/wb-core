@@ -467,6 +467,9 @@ def ensure_ff_pool_document_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    from packages.application.operator_ff_overhead import ensure_schema
+    ensure_schema(conn)
+
 
 def _ensure_targeted_recalc_queue_schema(conn: sqlite3.Connection) -> None:
     """Keep the canonical queue writable inside the document commit."""
@@ -518,10 +521,16 @@ class FfPoolDocumentService:
         runtime_dir: Path,
         timestamp_factory: Any | None = None,
         resume: bool = True,
+        bootstrap: bool = True,
     ) -> None:
         self.db_path = Path(db_path)
         self.runtime_dir = Path(runtime_dir)
         self.timestamp_factory = timestamp_factory or _utc_now
+        self.bootstrap = bool(bootstrap)
+        if not bootstrap:
+            if resume:
+                raise ValueError("native_post_without_bootstrap_requires_resume_false")
+            return
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             ensure_ff_pool_document_schema(conn)
@@ -1421,7 +1430,8 @@ class FfPoolDocumentService:
         canonical = "ffpdr_" + request_identity.removeprefix("sha256:")[:28]
         now = self._now()
         with _connect(self.db_path) as conn:
-            ensure_ff_pool_document_schema(conn)
+            if self.bootstrap:
+                ensure_ff_pool_document_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             existing_alias = conn.execute(
                 f"SELECT request_identity,request_id FROM {ALIASES_TABLE} WHERE client_request_id=?",
@@ -1588,8 +1598,11 @@ class FfPoolDocumentService:
         return result
 
     def _post_once_under_writer_lock(
-        self, request_id: str
+        self, request_id: str, *, defer_confirmed_overhead_projection: bool = False
     ) -> dict[str, Any] | None:
+        if defer_confirmed_overhead_projection:
+            from packages.application.warehouse_functional_lock import require_warehouse_job_owner
+            require_warehouse_job_owner(self.runtime_dir)
         with _connect(self.db_path, query_only=True) as conn:
             request = conn.execute(
                 f"SELECT * FROM {REQUESTS_TABLE} WHERE request_id=?",
@@ -1597,6 +1610,9 @@ class FfPoolDocumentService:
             ).fetchone()
             if request is None:
                 raise FfPoolDocumentError("request_not_found", "Document request was not found")
+            if defer_confirmed_overhead_projection:
+                from packages.application.operator_ff_overhead import assert_native_confirmation
+                assert_native_confirmation(conn, request)
             if str(request["state"]) in {"posted", "replay", "complete"}:
                 return None
             if str(request["state"]) != "ready":
@@ -1828,12 +1844,15 @@ class FfPoolDocumentService:
                         )
                     )
                 ):
-                    _apply_overhead_current_aggregate_projection(
-                        conn,
-                        plan=plan,
-                        request=current_request,
-                        posted_at=posted_at,
-                    )
+                    if defer_confirmed_overhead_projection:
+                        # Owned cycle immediately rebuilds the functional projection
+                        # from durable source. Keep dated command/ledger/queue intact;
+                        # never redate the document to an intermediate material day.
+                        assert_native_confirmation(conn, current_request)
+                    else:
+                        _apply_overhead_current_aggregate_projection(
+                            conn, plan=plan, request=current_request, posted_at=posted_at,
+                        )
                 root_document_id = str(plan["primary_document_id"])
                 manifest_sha = _fingerprint(plan["posted_manifest"])
                 now = self._now()

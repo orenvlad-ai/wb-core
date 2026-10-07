@@ -7322,6 +7322,8 @@ class RegistryUploadHttpEntrypoint:
                 "ff_ledger_reservations",
                 self.wb_supplies_block.reconcile_functional_ff_state,
             )
+            from packages.application.operator_ff_overhead import drain as drain_overheads, reconcile as reconcile_overheads
+            drain_overheads(self.runtime.db_path, self.runtime.runtime_dir)
             plan = run_phase(
                 "official_complete_wb_stocks",
                 self.warehouse_functional_block.build_sync_plan,
@@ -7373,6 +7375,7 @@ class RegistryUploadHttpEntrypoint:
                 }
 
             dependent = run_phase("dependent_replay_economics", dependent_replay)
+            reconcile_overheads(self.runtime)
             sync = dict(supply_payload.get("sync") or {})
             proxy_recalculation = dict(dependent.get("proxy_recalculation") or {})
             economics_publication = dict(dependent.get("economics_publication") or {})

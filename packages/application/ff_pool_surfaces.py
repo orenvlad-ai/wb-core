@@ -1054,11 +1054,15 @@ class FfPoolSurface:
                 "payment_evidence": payment_evidence,
             }
         guided_activation = self._guided_acceptance_activation()
+        acceptance = None
         if str(row["document_kind"]) == "pool_overhead":
-            from packages.application.fbs_overhead_presentation import apply_summary
-            preview_summary = apply_summary(preview_summary, self._overhead_accounting_view().resolve(
-                preview_summary, day=str(row["business_date"]),
-                document_id=str(row["posted_document_id"] or ""), posted=bool(row["posted_document_id"])))
+            from packages.application.operator_ff_overhead import read_acceptance
+            acceptance = read_acceptance(self.db_path, canonical)
+            # Receipt/recovery is source-only. Never run a fresh candidate
+            # or show technical legacy pool shares as the applied daily basis.
+            preview_summary.update(allocation_status="pending", allocation_label="Ожидает публикации в расчёте себестоимости",
+                denominator_quantity=None, denominator_sku_count=None, affected_sku_count=None,
+                allocation_total_rub=None, pool_allocations_rub={})
         payload = {
             "contract_name": CONTRACT_NAME,
             "workflow_contract": "ff_document_workflow_v1",
@@ -1103,6 +1107,15 @@ class FfPoolSurface:
             "events": [dict(item) for item in events],
             "steps": _workflow_steps(state),
         }
+        if str(row["document_kind"]) == "pool_overhead":
+            from packages.application.operator_ff_overhead import read_acceptance, source_confirmable
+            payload["acceptance"] = acceptance
+            if acceptance is None and not overhead_date_current and request_manifest.get("source_mode") == "payment_order_pdf":
+                from packages.application.operator_ff_overhead import stale_payment_reason
+                payload["confirmation_block_reason_code"] = "overhead_unconfirmed_payment_prior_day"
+                payload["confirmation_block_reason_ru"] = stale_payment_reason(str(row["business_date"]))
+            payload["confirm_allowed"] = (not payload["acceptance"] and bool(feature["writer_effective"])
+                and overhead_date_current and source_confirmable(self.db_path, canonical))
         return _etagged(payload)
 
     def request_preview(
@@ -2011,7 +2024,7 @@ class FfPoolSurface:
         )
         try:
             if eligible:
-                result = self._service().accept_preview(
+                result = self._service(resume=False, bootstrap=False).accept_preview(
                     identity=identity,
                     document_kind="pool_overhead",
                     manifest=manifest,
@@ -2020,7 +2033,7 @@ class FfPoolSurface:
                     source_content_type=str(content_type or ""),
                 )
             else:
-                result = self._service().accept_blocked(
+                result = self._service(resume=False, bootstrap=False).accept_blocked(
                     identity=identity,
                     document_kind="pool_overhead",
                     manifest=manifest,
@@ -2179,6 +2192,18 @@ class FfPoolSurface:
 
     def confirm_document(self, request_id: str) -> dict[str, Any]:
         selected = _identity_token(request_id, field="request_id")
+        with self._read() as conn:
+            canonical = self._resolve_request(conn, selected)
+            intrinsic = conn.execute(f"SELECT document_kind FROM {REQUESTS_TABLE} WHERE request_id=?", (canonical,)).fetchone() if canonical else None
+        if intrinsic is not None and intrinsic["document_kind"] == "pool_overhead":
+            self._require_writer()
+            from packages.application.operator_ff_overhead import confirm_source
+            try:
+                confirm_source(self.db_path, selected, now=self._now(), current_day="",
+                    runtime_dir=self.runtime_dir, timestamp_factory=self._now)
+            except FfPoolDocumentError as exc:
+                raise _surface_from_document_error(exc) from exc
+            return self.request_status(selected)
         status = self.request_status(selected)
         if status.get("document_kind") == "china_acceptance":
             activation = status.get("guided_acceptance_activation") or {}
@@ -2187,18 +2212,6 @@ class FfPoolSurface:
                     "guided_acceptance_not_activated",
                     str(activation.get("reason_ru") or "Проведение приёмки ещё не активировано."),
                     details=activation,
-                    http_status=409,
-                )
-        if status.get("document_kind") == "pool_overhead":
-            summary = _json_object((status.get("preview") or {}).get("summary") or {})
-            if not bool(summary.get("business_date_current")):
-                raise FfPoolSurfaceError(
-                    "overhead_business_date_stale",
-                    "Дата выбранного склада изменилась после preview. Выполните проверку заново.",
-                    details={
-                        "preview_business_date": str(status.get("business_date") or ""),
-                        "current_business_date": str(summary.get("current_business_date") or ""),
-                    },
                     http_status=409,
                 )
         self._require_writer()
@@ -2388,12 +2401,13 @@ class FfPoolSurface:
                 ).fetchall()
             ]
 
-    def _service(self, *, resume: bool = True) -> FfPoolDocumentService:
+    def _service(self, *, resume: bool = True, bootstrap: bool = True) -> FfPoolDocumentService:
         return FfPoolDocumentService(
             db_path=self.db_path,
             runtime_dir=self.runtime_dir,
             timestamp_factory=self.timestamp_factory,
             resume=resume,
+            bootstrap=bootstrap,
         )
 
     def _current_business_date_for_facility(self, facility_id: str) -> str:

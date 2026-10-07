@@ -5116,6 +5116,28 @@ def _build_handler(
                 _write_json_response(self, HTTPStatus.OK, payload)
                 return
 
+            if parsed.path == "/v1/sheet-vitrina-v1/operations" or parsed.path.startswith("/v1/sheet-vitrina-v1/operations/"):
+                if not _ensure_supply_operator_role(self, parsed.path):
+                    return
+                try:
+                    from packages.application.operator_ff_overhead import journal, read_acceptance
+                    prefix = "/v1/sheet-vitrina-v1/operations"
+                    if parsed.path == prefix:
+                        params = {key: values[-1] for key, values in urllib_parse.parse_qs(parsed.query).items()}
+                        payload = journal(entrypoint.runtime.db_path, page=int(params.get("page") or 1), limit=int(params.get("limit") or 25))
+                    else:
+                        identity = urllib_parse.unquote(parsed.path[len(prefix) + 1:])
+                        acceptance = read_acceptance(entrypoint.runtime.db_path, identity)
+                        if acceptance is None:
+                            _write_json_response(self, HTTPStatus.NOT_FOUND, {"code": "operation_not_found"})
+                            return
+                        payload = {"contract_name": "operator_operations_v1", "status": "ready", "operation": acceptance}
+                except (ValueError, TypeError) as exc:
+                    _write_json_response(self, HTTPStatus.UNPROCESSABLE_ENTITY, {"code": "operation_journal_invalid", "error": str(exc)})
+                    return
+                _write_json_response(self, HTTPStatus.OK, payload)
+                return
+
             if parsed.path == DEFAULT_FF_POOL_PATH or parsed.path.startswith(DEFAULT_FF_POOL_PREFIX):
                 if not _ensure_supply_operator_role(self, parsed.path):
                     return
@@ -8636,10 +8658,10 @@ def _inject_business_data_write_barrier_ui(
     font: 500 13px/1.4 system-ui, sans-serif; text-align: center;
   }}
   #wbCoreMaintenanceBarrier[data-tone="warning"] {{
-    background: #252033; color: #ece8f6; border-bottom: 1px solid #594476;
+    background: #fffbeb; color: #92400e; border-bottom: 1px solid #facc15;
   }}
   #wbCoreMaintenanceBarrier[data-tone="danger"] {{
-    background: #252033; color: #ece8f6; border-bottom: 1px solid #594476;
+    background: #fffbeb; color: #92400e; border-bottom: 1px solid #facc15;
   }}
   body.wb-core-maintenance-held {{ padding-top: var(--wb-core-maintenance-height, 0px) !important; }}
   [data-wb-core-maintenance-disabled="1"] {{
@@ -10674,6 +10696,8 @@ def _required_section_for_path(path: str) -> str:
         return WEB_AUTH_SECTION_SKU_MANAGEMENT
     if normalized.startswith("/v1/sheet-vitrina-v1/research/"):
         return WEB_AUTH_SECTION_RESEARCH
+    if normalized == "/v1/sheet-vitrina-v1/operations" or normalized.startswith("/v1/sheet-vitrina-v1/operations/"):
+        return WEB_AUTH_SECTION_SUPPLY
     if normalized == DEFAULT_WAREHOUSES_PATH or normalized.startswith(DEFAULT_WAREHOUSES_PREFIX):
         return WEB_AUTH_SECTION_SUPPLY
     if normalized.startswith("/v1/sheet-vitrina-v1/supply/"):
