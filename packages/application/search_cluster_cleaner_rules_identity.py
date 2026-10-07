@@ -15,6 +15,7 @@ from typing import Any
 
 from packages.contracts.search_cluster_cleaner import MODEL_CATALOG, Profile, canonical, query_hash
 from packages.domain import search_cluster_classifier as rules
+from packages.domain import search_cluster_card_semantics as cards
 
 
 def _value(value: Any) -> Any:
@@ -63,9 +64,24 @@ def _value(value: Any) -> Any:
 
 def executable_rules_digest(classifier=rules.classify) -> str:
     executable = (
-        classifier.__code__, rules.norm.__code__, rules.models.__code__,
+        classifier.__code__, rules.norm.__code__, rules.models.__code__, rules.frame_requests.__code__,
         Profile.parse.__func__.__code__, query_hash.__code__,
         rules.BRANDS, rules.PRODUCT, rules.VOCAB, rules.BROAD_WORDS,
+        rules.FRAMELESS, rules.FRAME_EDGE, rules.FRAME_GLASS_EDGE, rules.FRAME_NEGATION,
+        rules.FRAME_INSTALLER_BEFORE, rules.FRAME_INSTALLER_AFTER,
+        # Current-card projection controls whether a profile is admissible.
+        # Guard its executable semantics as well as the query classifier.
+        cards.project_card.__code__, cards.project_card.__kwdefaults__,
+        cards.norm.__code__, cards.frame_requests.__code__,
+        cards._unresolved.__code__, cards._single_characteristic.__code__,
+        cards._model.__code__, cards._check_model_claims.__code__, cards._check_model_claims.__kwdefaults__,
+        cards.PROJECTION_VERSION,
+        tuple((pattern.pattern,pattern.flags) for pattern in (
+            cards._MODEL, cards._COMPETITOR, cards._OTHER_PRODUCT, cards._ANTI,
+            cards._MATTE, cards._CLEAN, cards._STRUCTURED_CLEAR,
+            cards._EXPLICIT_KIND_NAME, cards._GENERIC_KIND_NAME, cards._NO_FRAME_KIND,
+            cards._MODEL_LIST,
+        )),
         tuple(sorted(MODEL_CATALOG)),
     )
     payload = {"schema": "cleaner-executable-rules/v2", "executable": _value(executable)}

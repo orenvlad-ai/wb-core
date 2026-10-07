@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from packages.contracts.search_cluster_cleaner import MODEL_CATALOG, CleanerError
+from packages.domain.search_cluster_classifier import frame_requests, norm
 
 PROJECTION_VERSION='phone_glass_v1'
 _MODEL=re.compile(r'^(?:apple\s*)?iphone\s*(?:(1[3-8])\s*(pro\s*max|promax|pro|e)?|(?:(?:17\s*)?air))$',re.I)
@@ -20,8 +21,7 @@ _CLEAN=re.compile(r'(?:прозрачн\w*\s+(?:защитн\w*\s+)?стекл\w
 _STRUCTURED_CLEAR=re.compile(r'\bпрозрачн(?:ый|ое|ая|ые|ого|ому|ым|ом|ую|ых|ыми)\b',re.I)
 _EXPLICIT_KIND_NAME=re.compile(r'^(?:(?:тип|вид)\s+(?:защитного\s+)?стекла|(?:тип|вид)\s+покрытия)$',re.I)
 _GENERIC_KIND_NAME=re.compile(r'^(?:покрытие|эффект)$',re.I)
-_NO_FRAME=re.compile(r'без\s+рамк\w*|\bno[\s-]*frame\b',re.I)
-_BLACK_FRAME=re.compile(r'(?:черн\w*|чёрн\w*|black)\s+рамк\w*|рамк\w*\s+(?:черн\w*|чёрн\w*|black)',re.I)
+_NO_FRAME_KIND=re.compile(r'^\s*no[\s-]*frame\s+(clean|matte|anti[\s-]*spy)\b',re.I)
 _PHONE_TOKEN=r'(?:\d{1,2}\s*(?:pro\s*max|promax|pro|e|air)?|[A-Za-z][A-Za-z0-9]*)'
 _MODEL_LIST=re.compile(r'iphone\s*'+_PHONE_TOKEN+r'(?:\s*[/,_]\s*(?:iphone\s*)?'+_PHONE_TOKEN+r')*',re.I)
 
@@ -117,18 +117,28 @@ def project_card(card:dict, *, require_subject:bool=False) -> dict:
     frame_value=_single_characteristic(card,195594,'Цвет рамки')
     if len(frame_value)!=1:_unresolved('Карточка WB: цвет рамки неоднозначен')
     frame_text=frame_value[0].strip().casefold().replace('ё','е')
+    frame_claims=[frame_requests(norm(text)) for text in (title,vendor)]
+    frameless=any(claim[0] for claim in frame_claims)
+    edged=any(claim[1] for claim in frame_claims)
     if frame_text in {'черный','черная','черное','black'}:frame='black'
     elif frame_text in {'без рамки','нет','отсутствует','none'}:frame='none'
+    # Colourless is not itself proof that an edge is absent. Require the
+    # reviewed No Frame naming as an independent, explicit corroboration.
+    elif frame_text=='бесцветный' and frameless:frame='none'
     else:_unresolved('Карточка WB: рамка не подтверждена')
-    if (_NO_FRAME.search(title) or _NO_FRAME.search(vendor)) and frame!='none':
+    if frameless and frame!='none':
         _unresolved('Карточка WB: сведения о рамке противоречат друг другу')
-    if (_BLACK_FRAME.search(title) or _BLACK_FRAME.search(vendor)) and frame!='black':
+    if edged and frame!='black':
         _unresolved('Карточка WB: сведения о рамке противоречат друг другу')
 
     claims=set()
     if re.search(r'^\s*\(\s*anti[\s-]*spy\s*\)',vendor,re.I):claims.add('anti')
     elif re.search(r'^\s*\(\s*matte\s*\)',vendor,re.I):claims.add('matte')
     elif re.search(r'^\s*\(\s*clean\s*\)',vendor,re.I) or re.search(r'^smk_iphone',vendor,re.I):claims.add('clean')
+    no_frame_kind=_NO_FRAME_KIND.match(vendor)
+    if no_frame_kind:
+        declared=no_frame_kind[1].lower()
+        claims.add('anti' if declared.startswith('anti') else declared)
     if _ANTI.search(title):claims.add('anti')
     if _MATTE.search(title):claims.add('matte')
     if _CLEAN.search(title):claims.add('clean')

@@ -172,7 +172,23 @@ def _approved_card_source(package:dict, admission_dir:Path) -> dict[int,dict]:
     return cards
 
 
-def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path) -> list[dict]:
+def _admitted_targets(package:dict, targets:list[Target], admission_dir:Path, *, context=None) -> list[dict]:
+    if context is not None:
+        receipts=[]
+        for target in targets:
+            approved=context.cards.get(target.nm_id)
+            actual=context.evidence.get(target.nm_id)
+            if target.nm_id not in context.profiles or not approved:_fail('manual_target_not_reconciled')
+            verified=bool(actual and actual['state']=='verified')
+            receipt=dict(advert_id=target.advert_id,nm_id=target.nm_id,card_digest=approved['card_digest'],
+                         verified_at=actual['verified_at'] if verified else None,
+                         state='verified' if verified else 'fresh_verification_required',
+                         basis='current_card_evidence' if verified else 'package_bound_source_fresh_check_required')
+            if target.nm_id in context.extension_hashes:
+                receipt['extension_sha256']=context.extension_hashes[target.nm_id]
+                receipt['approved_source_sha256']=context.source_hashes[target.nm_id]
+            receipts.append(receipt)
+        return receipts
     evidence=_card_evidence_rows(package,admission_dir)
     current={nm:row for nm,row in evidence.items() if row['state']=='verified'}
     source=_approved_card_source(package,admission_dir) if any(t.nm_id not in current for t in targets) else {}
@@ -218,12 +234,12 @@ def fetch_current_card(nm_id:int) -> dict:
                 description=card.get('description'),characteristics=card['characteristics'],
                 subject_id=card.get('subjectID',card.get('subjectId')))
 
-def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:KeywordCleaner) -> dict:
+def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:KeywordCleaner, *, context=None) -> dict:
     """Compare classifier-relevant card semantics with approved evidence."""
     try:
-        source=_approved_card_source(package,admission_dir)
+        source=context.cards if context is not None else _approved_card_source(package,admission_dir)
         approved=source.get(target.nm_id)
-        admitted=_admitted_targets(package,[target],admission_dir)[0]
+        admitted=_admitted_targets(package,[target],admission_dir,context=context)[0]
         if not approved or approved.get('card_digest')!=admitted['card_digest']:_fail('approved_card_source_mismatch')
         fresh=fetch_current_card(target.nm_id)
     except CleanerError:raise
@@ -246,7 +262,7 @@ def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:Key
     fresh_fields=business_fields(fresh)
     if approved_fields['nm_id']!=str(target.nm_id) or fresh_fields['nm_id']!=str(target.nm_id):
         _fail('current_card_drift')
-    approved_profile=next((Profile.parse(row) for row in package['profiles'] if row['nm_id']==target.nm_id),None)
+    approved_profile=context.profiles.get(target.nm_id) if context is not None else next((Profile.parse(row) for row in package['profiles'] if row['nm_id']==target.nm_id),None)
     with service.store.read() as c:active_profile=service._profile(c,target.nm_id)
     if not approved_profile or not active_profile or active_profile.semantic_fingerprint!=approved_profile.semantic_fingerprint:
         _fail('manual_profile_mismatch')
@@ -262,7 +278,7 @@ def _verify_fresh_card(package:dict,target:Target,admission_dir:Path,service:Key
     fresh_fields['subject_id']=fresh.get('subject_id')
     fresh_semantics=project_card(fresh_fields,require_subject=True)
     if fresh_semantics!=approved_semantics:_fail('current_card_drift')
-    return dict(nm_id=target.nm_id,approved_source_sha256=package['provenance']['fresh_cards_sha256'],
+    return dict(nm_id=target.nm_id,approved_source_sha256=context.source_hashes[target.nm_id] if context is not None else package['provenance']['fresh_cards_sha256'],
                 semantic_projection_version=PROJECTION_VERSION,
                 semantic_fingerprint_sha256='sha256:'+digest(fresh_semantics),verified_at=service_clock())
 
@@ -363,10 +379,19 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     except (OSError,ValueError):deployment={}
     if re.fullmatch(r'[0-9a-f]{40}',expected_sha) is None or not marker.is_file() or marker.read_text(encoding='utf-8').strip()!=expected_sha or deployment.get('commit')!=expected_sha or deployment.get('deployment_complete') is not True:_fail('deployed_runtime_sha_mismatch')
     mode=request.get('mode')
-    allowed={'bootstrap':{'mode'},'bootstrap_recover':{'mode','original_operation_id'},'manual':{'mode','run_id','targets'},'manual_prepare':{'mode','scan_run_id','targets'}}
+    allowed={'bootstrap':{'mode'},'bootstrap_recover':{'mode','original_operation_id'},'manual':{'mode','run_id','targets'},'manual_prepare':{'mode','scan_run_id','targets'},
+             'admit_profiles':{'mode','extension_id','extension_sha256'},
+             'admit_profiles_recover':{'mode','extension_id','extension_sha256','original_operation_id'}}
     if mode not in allowed or set(request)!=allowed[mode]:_fail('request_invalid')
     registry,account,generation,owner,package_path=_config(runtime_dir,bootstrap=mode in {'bootstrap','bootstrap_recover'},admission_dir=admission_dir)
     service=KeywordCleaner(CleanerStore(registry),account,owner_username=owner)
+    if mode in {'admit_profiles','admit_profiles_recover'}:
+        from packages.application.search_cluster_cleaner_onboarding import execute as onboard
+        package=_package(package_path,account,generation)
+        return onboard(action=action,operation_id=operation_id,request=request,cleaner=service,
+                       directory=admission_dir.resolve(),package=package,package_path=package_path,generation=generation,
+                       runtime_sha=expected_sha,expected_prestate=str(envelope.get('expected_prestate') or ''),
+                       expected_candidate=str(envelope.get('expected_candidate') or ''),actor=envelope.get('actor',''))
     if mode in {'bootstrap','bootstrap_recover'}:
         package=_package(package_path,account,generation)
         _admitted_targets(package,[Target(row['advert_id'],row['nm_id'],contract_verified=True) for row in package['manual_admission'] if row.get('state')=='verified'],admission_dir.resolve())
@@ -429,8 +454,10 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
         # Preparation has no Worker.preview; verify exact live CPM membership
         # before the new SKU-based admission can create its write run.
         CleanerWbSource.from_env(account).refresh_target(target)
-        admitted=_admitted_targets(package,targets,admission_dir.resolve())
-        _verify_fresh_card(package,target,admission_dir.resolve(),service)
+        from packages.application.search_cluster_cleaner_onboarding import load_context
+        context=load_context(package,admission_dir.resolve(),package_path=package_path,cleaner=service,generation=generation)
+        admitted=_admitted_targets(package,targets,admission_dir.resolve(),context=context)
+        _verify_fresh_card(package,target,admission_dir.resolve(),service,context=context)
         preview=service.manual_apply_preview(request['scan_run_id'],target)
         # The exact card receipt is part of the caller-visible candidate even
         # though preparation itself is entirely local and has no WB write.
@@ -445,12 +472,18 @@ def execute(envelope:Mapping[str,Any], *, runtime_dir:Path, env_file:Path, admis
     if mode!='manual' or not isinstance(request.get('run_id'),str):_fail('request_invalid')
     targets=_targets(request)
     package=_package(package_path,account,generation) if action!='readback' else None
-    admitted=_admitted_targets(package,targets,admission_dir.resolve()) if package else None
+    if package:
+        from packages.application.search_cluster_cleaner_onboarding import load_context
+        context=load_context(package,admission_dir.resolve(),package_path=package_path,cleaner=service,generation=generation)
+    else:context=None
+    def fresh_context():
+        return load_context(package,admission_dir.resolve(),package_path=package_path,cleaner=service,generation=generation)
+    admitted=_admitted_targets(package,targets,admission_dir.resolve(),context=context) if package else None
     source=CleanerWbSource.from_env(account)
     worker=ManualCleanerWorker(service,source,AdmissionGuard(admission_dir.resolve(),service.store),generation=generation,
-                               card_verifier=lambda target:_verify_fresh_card(package,target,admission_dir.resolve(),service)) if package else None
+                               card_verifier=lambda target:_verify_fresh_card(package,target,admission_dir.resolve(),service,context=fresh_context())) if package else None
     def manual_preview():
-        for target in targets:_verify_fresh_card(package,target,admission_dir.resolve(),service)
+        for target in targets:_verify_fresh_card(package,target,admission_dir.resolve(),service,context=fresh_context())
         result=worker.preview(run_id=request['run_id'],targets=targets)
         # Bind preview to the current approved fresh-card receipt as well as
         # the WB target snapshot. A package/card change cannot reuse a preview.

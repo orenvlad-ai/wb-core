@@ -19,7 +19,9 @@ class SearchClusterCleanerProductionAdapter:
     def readback(self,request:dict[str,Any],operation_id:str)->dict[str,Any]:return self._invoke(action='readback',request=request,operation_id=operation_id)
     def _invoke(self,*,action:str,request:Mapping[str,Any],operation_id:str,expected_prestate:str='',expected_candidate:str='')->dict[str,Any]:
         if not isinstance(request,Mapping):raise AdapterError('cleaner-manual-request-invalid')
-        mode=request.get('mode');allowed={'bootstrap':{'mode'},'bootstrap_recover':{'mode','original_operation_id'},'manual':{'mode','run_id','targets'},'manual_prepare':{'mode','scan_run_id','targets'}}
+        mode=request.get('mode');allowed={'bootstrap':{'mode'},'bootstrap_recover':{'mode','original_operation_id'},'manual':{'mode','run_id','targets'},'manual_prepare':{'mode','scan_run_id','targets'},
+                                        'admit_profiles':{'mode','extension_id','extension_sha256'},
+                                        'admit_profiles_recover':{'mode','extension_id','extension_sha256','original_operation_id'}}
         if mode not in allowed or set(request)!=allowed[mode]:raise AdapterError('cleaner-manual-request-invalid')
         target=json.loads(TARGET_PATH.read_text(encoding='utf-8'));destination=str(target.get('ssh_destination') or '').strip()
         if target.get('target_status')!='active' or target.get('target_role')!='primary_live' or target.get('target_lifecycle')!='current_live' or destination!='wb-core-eu-root':raise AdapterError('production-target-identity-invalid')

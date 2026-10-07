@@ -121,6 +121,18 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual(tuple(row[:3]),('allow','allow','rules_ambiguous'))
             self.assertIn('Автоматически оставлено',row['reason'])
             self.assertEqual(c.execute("SELECT count(*) FROM cleaner_events WHERE kind='review_auto_resolved'").fetchone()[0],1)
+    def test_no_frame_conflict_remains_exclude_in_application(self):
+        draft=self.app.create_profile(101,dict(profile=dict(P,frame='none'),expected_revision=1,request_id='noframe-profile-01'),OWNER)
+        self.app.activate_profile(101,dict(version=draft['profile_version'],expected_revision=2,request_id='noframe-activate-01'),OWNER)
+        conflict='стекло iphone 16 pro max с черной окантовкой неизвестное'
+        ambiguous='стекло iphone 16 pro max с рамкой неизвестное'
+        broad='защитное стекло no-frame'
+        self.record(self.snapshot([conflict,ambiguous,broad]))
+        with self.store.read() as c:
+            decisions={row['query']:(row['verdict'],row['source']) for row in c.execute('SELECT query,verdict,source FROM cleaner_auto_decisions WHERE account=?',(self.app.key,))}
+        self.assertEqual(decisions[conflict],('exclude','rules'))
+        self.assertEqual(decisions[broad],('exclude','rules'))
+        self.assertEqual(decisions[ambiguous],('allow','rules_ambiguous'))
     def test_stats_only_candidate_and_known_baseline_identity(self):
         q="стекло iphone 15 pro max"
         run,rid=self.record(self.snapshot([],statistics=[q]))
@@ -286,6 +298,69 @@ class CleanerTests(unittest.TestCase):
         print(json.dumps(dict(summary_gets=100,p95_ms=round(sorted(timings)[94]*1000,3),source_wait_seconds=30,network_calls=0)))
 
 class ClassifierDevelopmentTests(unittest.TestCase):
+    def test_frameless_aliases_and_existing_black_frame(self):
+        for alias in ('без рамки','без рамы','без окантовки','без черной окантовки','безрамочное','No Frame','no-frame','NoFrame'):
+            with self.subTest(alias=alias):
+                query='защитное стекло iphone 16 pro max '+alias
+                self.assertEqual(classify(query,dict(P,frame='none'))['verdict'],'allow')
+                black=classify(query,P)
+                self.assertEqual((black['verdict'],black['rule']),('exclude','NO_FRAME'))
+                self.assertEqual(classify('защитное стекло '+alias,dict(P,frame='none'))['rule'],'BROAD')
+        self.assertEqual(classify('стекло iphone 16 pro max безрамочное неопознанное',P)['rule'],'NO_FRAME')
+
+    def test_positive_edge_conflicts_and_installation_tools(self):
+        none=dict(P,frame='none')
+        for wording in ('с черной окантовкой','с окантовкой','с черной рамкой','рамка черная','рамка стекла'):
+            with self.subTest(wording=wording):
+                query='стекло iphone 16 pro max '+wording+' неопознанное'
+                self.assertEqual(classify(query,none)['rule'],'FRAME')
+                self.assertEqual(classify(query,P)['verdict'],'review')
+        for wording in ('с рамкой','с рамкой для установки','с установочной рамкой',
+                        'с боксом для установки','с черной рамкой для установки',
+                        'с черной рамкой для легкой установки','с черной рамкой для автоустановки',
+                        'с черной рамкой для наклеивания','с установочной черной рамкой',
+                        'без рамки для установки','no-frame с рамкой для установки'):
+            with self.subTest(wording=wording):
+                query='стекло iphone 16 pro max '+wording
+                self.assertNotEqual(classify(query,none)['verdict'],'exclude')
+                if not wording.startswith('no-frame'):
+                    self.assertNotEqual(classify(query,P)['verdict'],'exclude')
+        query='стекло iphone 16 pro max с черной окантовкой и рамкой для установки'
+        self.assertEqual(classify(query,none)['rule'],'FRAME')
+        query='стекло iphone 16 pro max с черной рамкой и боксом для установки'
+        self.assertEqual(classify(query,none)['rule'],'FRAME')
+        for wording in ('с черной окантовкой для установки','с окантовкой для наклеивания',
+                        'с рамкой стекла для установки','с установочной черной рамкой стекла'):
+            with self.subTest(explicit_edge=wording):
+                query='защитное стекло '+wording+' на iphone 16 pro max'
+                self.assertEqual(classify(query,none)['rule'],'FRAME')
+                self.assertEqual(classify(query,P)['verdict'],'allow')
+        self.assertEqual(classify('стекло iphone 16 pro max без окантовки для установки',P)['rule'],'NO_FRAME')
+
+    def test_frame_negations_do_not_assert_an_edge(self):
+        for wording in ('без черной окантовки','без черной рамки','не с рамкой',
+                        'не с черной рамкой','не с черной окантовкой','не безрамочное',
+                        'не no-frame','не без рамки'):
+            with self.subTest(wording=wording):
+                query='стекло iphone 16 pro max '+wording
+                self.assertNotEqual(classify(query,dict(P,frame='none'))['rule'],'FRAME')
+                if wording.startswith('не'):
+                    self.assertEqual(classify(query,P)['verdict'],'review')
+
+    def test_frame_is_independent_of_models_and_all_coatings(self):
+        for kind,coating in (('clean','прозрачное'),('matte','матовое'),('anti','антишпион')):
+            profile=dict(P,frame='none',kind=kind)
+            for wording in ('',' no frame'):
+                with self.subTest(kind=kind,wording=wording):
+                    self.assertEqual(classify(coating+' стекло iphone 16 pro max'+wording,profile)['verdict'],'allow')
+                    self.assertEqual(classify(coating+' стекло iphone 15 pro max'+wording,profile)['rule'],'MODEL_WRONG')
+                    self.assertEqual(classify(coating+' стекло iphone 16 pro max и 15 pro max'+wording,profile)['rule'],'MODEL_MIX')
+                    self.assertEqual(classify(coating+' стекло iphone 16 pro max с черной окантовкой'+wording,profile)['rule'],'FRAME')
+            wrong='матовое' if kind!='matte' else 'прозрачное'
+            self.assertEqual(classify(wrong+' стекло iphone 16 pro max noframe',profile)['rule'],'COATING')
+        profile=dict(P,frame='none',models=['16 promax','17 promax'])
+        self.assertEqual(classify('стекло iphone 16 pro max и 17 pro max no frame',profile)['verdict'],'allow')
+
     def test_decisive_bans_precede_unknown_vocabulary_but_negation_does_not(self):
         cases={
             'стекло iphone 15 pro max неопознанное':('exclude','MODEL_WRONG'),

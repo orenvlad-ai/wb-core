@@ -16,7 +16,8 @@ def approved_context(cleaner, generation: str, *, fixture_admission=None, config
         admitted = {(row['advert_id'], row['nm_id']) for row in fixture_admission if row.get('state') == 'verified'}
         return admitted, {}, set()
     else:
-        from apps.search_cluster_cleaner_stage_e import _package, _card_evidence_rows, _approved_card_source
+        from apps.search_cluster_cleaner_stage_e import _package
+        from packages.application.search_cluster_cleaner_onboarding import load_context
         try:
             config = json.loads(config_path.read_text(encoding='utf-8'))
             if set(config) != {'seller_id', 'account_scope', 'generation', 'owner_username', 'approved_package_path'}:
@@ -25,12 +26,9 @@ def approved_context(cleaner, generation: str, *, fixture_admission=None, config
                     or config['generation'] != generation or config['owner_username'] != cleaner.owner_username):
                 raise ValueError('Stage E identity mismatch')
             package = _package(Path(config['approved_package_path']), cleaner.account, generation)
-            evidence = _card_evidence_rows(package, config_path.parent)
-            source = _approved_card_source(package, config_path.parent)
-            for nm_id, row in evidence.items():
-                if nm_id not in source or row['current_card_sha256'] != source[nm_id]['card_digest']:
-                    raise ValueError('card source and evidence disagree')
-            approved_profiles = {p.nm_id: p for p in (Profile.parse(row) for row in package['profiles'])}
+            context=load_context(package,config_path.parent,package_path=Path(config['approved_package_path']),cleaner=cleaner,generation=generation)
+            source=context.cards
+            approved_profiles=context.profiles
         except (OSError, ValueError, TypeError, KeyError, CleanerError) as exc:
             raise CleanerError('manual_admission_unavailable', 'Не удалось проверить допуск ручной чистки', 409) from exc
     return set(), approved_profiles, set(source)

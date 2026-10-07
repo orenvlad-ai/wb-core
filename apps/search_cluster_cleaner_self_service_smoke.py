@@ -86,6 +86,39 @@ def semantic_projection_smoke():
         try:project_card(changed,require_subject=True)
         except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable'
         else:raise AssertionError('unknown model suffix admitted')
+    # Synthetic counterparts of the reviewed No Frame naming; no live card
+    # dump belongs in this regression fixture.
+    no_frame_traits=[dict(row,value=['бесцветный']) if row['id']==195594 else row for row in traits]
+    no_frame=dict(card,title='Защитное стекло без рамки на iPhone 15 / 16',
+                  vendor_code='No Frame Clean iPhone 15 / 16',characteristics=no_frame_traits)
+    for vendor,kind in (('No Frame Clean','clean'),('No Frame Matte','matte'),('No Frame Anti-Spy','anti')):
+        projected=project_card(dict(no_frame,vendor_code=vendor+' iPhone 15 / 16'),require_subject=True)
+        assert projected['frame']=='none' and projected['kind']==kind and projected['models']==['15','16']
+    for alias in ('без рамки','без окантовки','безрамочное','No Frame','No-Frame','NoFrame'):
+        assert project_card(dict(no_frame,title='Защитное стекло '+alias+' iPhone 15 / 16',
+                                 vendor_code='(Clean) iPhone 15 / 16'),require_subject=True)['frame']=='none'
+    combined=dict(no_frame,title='Защитное стекло без рамки iPhone 13 / 13 Pro / 14 / 16e / 17e',
+                  vendor_code='No Frame Clean iPhone 13 / 13 Pro / 14 / 16e / 17e',
+                  characteristics=[dict(no_frame_traits[0],value=['iPhone13','iPhone13Pro','iPhone14','iPhone16e','iPhone17e']),*no_frame_traits[1:]])
+    assert project_card(combined,require_subject=True)['models']==['13','13 pro','14','16 e','17 e']
+    for wording in ('с рамкой для установки','с черной рамкой для установки','с установочной рамкой'):
+        assert project_card(dict(no_frame,title=no_frame['title']+' '+wording),require_subject=True)['frame']=='none'
+    for changed in (
+        dict(no_frame,title='Защитное стекло iPhone 15 / 16',vendor_code='(Clean) iPhone 15 / 16'),
+        dict(no_frame,title='Защитное стекло iPhone 15 / 16',vendor_code='(Clean) iPhone 15 / 16',description='No Frame'),
+        dict(no_frame,title=no_frame['title']+' с черной окантовкой'),
+        dict(no_frame,title=no_frame['title']+' с черной окантовкой для установки'),
+        dict(no_frame,title=no_frame['title']+' с рамкой стекла для установки'),
+        dict(no_frame,title=no_frame['title']+' с установочной черной рамкой стекла'),
+        dict(no_frame,title=no_frame['title']+' антишпион'),
+        dict(no_frame,vendor_code='No Frame Anti iPhone 15 / 16'),
+        dict(no_frame,vendor_code='No Frame CleanPlus iPhone 15 / 16'),
+        dict(no_frame,characteristics=traits),
+        dict(no_frame,characteristics=[dict(row,value=['прозрачный']) if row['id']==195594 else row for row in traits]),
+    ):
+        try:project_card(changed,require_subject=True)
+        except CleanerError as exc:assert exc.code=='current_card_semantics_unavailable'
+        else:raise AssertionError('unconfirmed or contradictory No Frame semantics admitted')
 
 
 def main() -> None:

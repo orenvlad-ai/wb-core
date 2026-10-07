@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from packages.application.search_cluster_cleaner_worker import ManualCleanerWork
 from packages.application.storage_registry import StoreRegistry
 from packages.contracts.search_cluster_cleaner import Account, CleanerError, Principal, Target
 from packages.domain import search_cluster_classifier as rules
+from packages.domain import search_cluster_card_semantics as cards
 
 
 OLD_MARSHAL_HASH='a9bebf43bf118b28aac63fbca8464ed916067485a583486d59a72ea98cb25f46'
@@ -78,6 +80,17 @@ def cross_process_digest() -> None:
         assert executable_rules_digest(lambda *_: {'verdict':'allow'})!=values[0]
         with patch.object(rules,'VOCAB',rules.VOCAB+'|synthetic_extra'):
             assert executable_rules_digest()!=values[0]
+        for name in ('FRAMELESS','FRAME_EDGE','FRAME_GLASS_EDGE','FRAME_NEGATION','FRAME_INSTALLER_BEFORE','FRAME_INSTALLER_AFTER'):
+            with patch.object(rules,name,getattr(rules,name)+'|synthetic_extra'):
+                assert executable_rules_digest()!=values[0],name
+        with patch.object(rules,'frame_requests',lambda _: (False,False)):
+            assert executable_rules_digest()!=values[0]
+        with patch.object(cards,'project_card',lambda *_args,**_kwargs: {}):
+            assert executable_rules_digest()!=values[0]
+        for name in ('_MODEL','_COMPETITOR','_OTHER_PRODUCT','_ANTI','_MATTE','_CLEAN',
+                     '_STRUCTURED_CLEAR','_EXPLICIT_KIND_NAME','_GENERIC_KIND_NAME','_NO_FRAME_KIND','_MODEL_LIST'):
+            with patch.object(cards,name,re.compile(getattr(cards,name).pattern+'|synthetic_extra',getattr(cards,name).flags)):
+                assert executable_rules_digest()!=values[0],name
         print('cross-process stable digest:',values[0])
 
 
