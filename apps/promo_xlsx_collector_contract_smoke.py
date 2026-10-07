@@ -384,11 +384,13 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
     actions: list[str] = []
 
     class Accept:
+        controls = 1
+
         def count(self):
-            return 1
+            return self.controls
 
         def is_visible(self):
-            return True
+            return modal.visible
 
         def click(self, *, timeout):
             assert timeout == 5000
@@ -401,6 +403,9 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
             return 1
 
         def is_visible(self):
+            return False  # zero-size portal, visible fixed descendants
+
+        def evaluate(self, _script):
             return self.visible
 
         def get_by_text(self, text, *, exact):
@@ -408,6 +413,9 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
             return Accept()
 
     modal = Modal()
+    late_appearances = 0
+    click_attempts = 0
+    dispatched_clicks = 0
 
     class Block:
         def __init__(self, index):
@@ -419,9 +427,15 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
                 modal.visible = True
 
         def click(self, *, timeout):
+            nonlocal late_appearances, click_attempts, dispatched_clicks
             assert timeout == 8000
+            click_attempts += 1
+            if late_appearances:
+                late_appearances -= 1
+                modal.visible = True
             if modal.visible:
-                raise RuntimeError("cookie layer intercepted timeline click")
+                raise RuntimeError("#Portal-warning-cookies-modal intercepts pointer events")
+            dispatched_clicks += 1
             known.add(self.index)
 
     class Timeline:
@@ -444,12 +458,35 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
     driver = PlaywrightPromoCollectorDriver(Path("/tmp/wb-core-promo-cookie-smoke"))
     driver._page = Page()
     driver._record_action = lambda kind, payload: actions.append(kind)
-    driver._count = lambda _selector: 1
+    driver._count = lambda _selector: int(dispatched_clicks > 0)
     driver.capture_state = lambda label: label
     with patch("packages.adapters.promo_xlsx_collector_block.time.sleep", lambda _seconds: None):
         driver.open_timeline_candidate(SimpleNamespace(index=31, title="Скидки к новому сезону - 2"))
     assert len(known) == 41 and not modal.visible
     assert actions == ["click_cookie_accept_before_timeline", "click_timeline_candidate"]
+    assert dispatched_clicks == 1
+
+    # The layer can reappear after preflight. Only one proven obstructed click
+    # may be retried; the successful card click is dispatched once.
+    actions.clear()
+    dispatched_clicks = click_attempts = 0
+    late_appearances = 1
+    with patch("packages.adapters.promo_xlsx_collector_block.time.sleep", lambda _seconds: None):
+        driver.open_timeline_candidate(SimpleNamespace(index=31, title="late cookie"))
+    assert click_attempts == 2 and dispatched_clicks == 1
+    assert actions.count("retry_timeline_after_cookie_obstruction") == 1
+
+    dispatched_clicks = click_attempts = 0
+    late_appearances = 2
+    try:
+        driver.open_timeline_candidate(SimpleNamespace(index=31, title="repeated cookie"))
+    except RuntimeError as exc:
+        assert "intercepts pointer events" in str(exc)
+    else:
+        raise AssertionError("cookie retries must remain bounded")
+    assert click_attempts == 2 and dispatched_clicks == 0
+    late_appearances = 0
+
     modal.visible = True
     modal.get_by_text = lambda *_args, **_kwargs: SimpleNamespace(count=lambda: 0, is_visible=lambda: False)
     try:
@@ -458,6 +495,13 @@ def _assert_cookie_layer_cleared_before_timeline_identity() -> None:
         assert str(exc) == "visible cookie layer has no unique accept control"
     else:
         raise AssertionError("an unknown cookie layer must block identity confirmation")
+    modal.get_by_text = lambda *_args, **_kwargs: SimpleNamespace(count=lambda: 2, is_visible=lambda: True)
+    try:
+        driver.open_timeline_candidate(SimpleNamespace(index=31, title="ambiguous cookie"))
+    except RuntimeError as exc:
+        assert str(exc) == "visible cookie layer has no unique accept control"
+    else:
+        raise AssertionError("ambiguous accept controls must stop")
 
 
 def _assert_manifest_response_callback_never_reads_body() -> None:

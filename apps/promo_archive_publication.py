@@ -26,6 +26,10 @@ from packages.application.promo_campaign_archive import (
     materialize_promo_result_from_archive,
     promo_archive_fence,
 )
+from packages.application.promo_historical_recovery import (
+    PromoHistoricalRecoveryError, find_reconstruction, qualified_reconstruction,
+    read_reconstruction_run, reconstruction_artifact_proof,
+)
 from packages.application.ready_publication import (
     ExpectedReady,
     check_authority,
@@ -77,7 +81,7 @@ def _connect(db_path: Path, *, readonly: bool) -> sqlite3.Connection:
     return conn
 
 
-def _request(request: dict[str, Any]) -> tuple[Path, list[str], dict[str, dict[str, str]]]:
+def _request(request: dict[str, Any]) -> tuple[Path, list[str], dict[str, Any]]:
     if not {"runtime_dir", "dates"}.issubset(request) or set(request) - {"runtime_dir", "dates", "reconstruction"}:
         raise AdapterError("promo-request-fields-invalid")
     runtime = Path(str(request["runtime_dir"])).resolve()
@@ -95,8 +99,8 @@ def _request(request: dict[str, Any]) -> tuple[Path, list[str], dict[str, dict[s
         raise AdapterError("promo-future-date-invalid")
     reconstruction = request.get("reconstruction", {})
     if (not isinstance(reconstruction, dict) or not set(reconstruction).issubset(dates)
-            or any(not isinstance(value, dict) or set(value) != {"identity_run", "price_checkpoint_id"}
-                   or any(type(part) is not str or not part for part in value.values())
+            or any(value != "auto" and (not isinstance(value, dict) or set(value) != {"identity_run", "price_checkpoint_id"}
+                   or any(type(part) is not str or not part for part in value.values()))
                    for value in reconstruction.values())):
         raise AdapterError("promo-reconstruction-request-invalid")
     return runtime, dates, reconstruction
@@ -178,6 +182,15 @@ def _plan_non_target(plan: dict[str, Any], dates: set[str]) -> str:
             if match is None:
                 raise AdapterError("promo-ready-status-write-rect-invalid")
             sheet["write_rect"] = match.group(1) + str(int(match.group(2)) - removed)
+    presentation = (value.get("metadata") or {}).get("server_cell_presentation") or {}
+    for row_id in list(presentation):
+        if row_id.rsplit("|", 1)[-1] in {*SKU_METRICS, *[key.split("|", 1)[-1] for key in TOTAL_METRICS.values()]}:
+            for day in dates:
+                presentation[row_id].pop(day, None)
+            if not presentation[row_id]:
+                del presentation[row_id]
+    if not presentation:
+        (value.get("metadata") or {}).pop("server_cell_presentation", None)
     refresh = (value.get("metadata") or {}).get("refresh_diagnostics") or {}
     if "source_slots" in refresh:
         refresh["source_slots"] = [slot for slot in refresh["source_slots"]
@@ -503,6 +516,11 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
             status_row.append("")
         reconstruction = result.get("diagnostics", {}).get("historical_reconstruction")
         origin = "historical_composite_reconstruction" if reconstruction else "archive_replay"
+        if reconstruction:
+            from packages.application.promo_historical_recovery import composite_cell_presentation
+            presentation = plan.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
+            for row_id, by_day in composite_cell_presentation(rows=data["rows"], day=day, proof=reconstruction).items():
+                presentation.setdefault(row_id, {}).update(by_day)
         status_row[1:11] = ["success", day, day, "", day, day, len(items), len(items), "", result["detail"] + "; publication=" + origin]
         refresh = plan.setdefault("metadata", {}).setdefault("refresh_diagnostics", {})
         source_slots = refresh.setdefault("source_slots", [])
@@ -510,7 +528,7 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
             source_slots.append({"source_key": SOURCE, "slot_kind": slot_kind, "requested_date": day})
         for source_slot in source_slots:
             if source_slot.get("source_key") == SOURCE and source_slot.get("slot_kind") == slot_kind and source_slot.get("requested_date") == day:
-                source_slot.update(status="success", semantic_status="success", origin=origin,
+                source_slot.update(status="success", semantic_status=("warning" if reconstruction else "success"), origin=origin,
                                    started_at=None, finished_at=None, duration_ms=None,
                                    rows_fetched=0, rows_accepted=len(items), rows_reused=0, rows_skipped=0,
                                    requested_count=len(items), covered_count=len(items), missing_count=0,
@@ -537,66 +555,21 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
 
 
 def _reconstruction_run(runtime: Path, day: str, run_name: str) -> tuple[Path, dict[str, Any], datetime]:
-    if not run_name.startswith(day + "__") or "/" in run_name or ".." in run_name:
-        raise AdapterError(f"promo-reconstruction-run-invalid:{day}")
-    path = runtime / "promo_xlsx_collector_runs" / run_name / "run_summary.json"
-    if not path.is_file():
-        raise AdapterError(f"promo-reconstruction-run-missing:{day}")
-    summary = json.loads(path.read_text(encoding="utf-8"))
-    if Path(str(summary.get("run_dir") or "")).resolve() != path.parent.resolve():
-        raise AdapterError(f"promo-reconstruction-run-identity-drift:{day}")
-    observed = datetime.fromisoformat(str(summary.get("started_at") or ""))
-    if observed.tzinfo is None or observed.astimezone(BUSINESS_TIMEZONE).date().isoformat() != day:
-        raise AdapterError(f"promo-reconstruction-run-date-invalid:{day}")
-    return path, summary, observed
+    try:
+        return read_reconstruction_run(runtime, day, run_name)
+    except PromoHistoricalRecoveryError as exc:
+        raise AdapterError(str(exc)) from None
 
 
 def _reconstruction_artifact_proof(runtime: Path, day: str, run_path: Path, summary: dict[str, Any], observed: datetime) -> str:
-    """Pin original run metadata and pre-observation archive workbooks."""
-    run_items = {item.get("promo_id"): item for item in summary.get("promos") or []
-                 if isinstance(item, dict) and type(item.get("promo_id")) is int}
-    proof: list[Any] = []
-    for record in load_promo_campaign_archive(runtime):
-        metadata = record.metadata
-        if not (metadata.promo_start_at and metadata.promo_end_at and metadata.promo_start_at[:10] <= day <= metadata.promo_end_at[:10]
-                and record.workbook_present):
-            continue
-        item = run_items.get(metadata.promo_id)
-        if item is None or item.get("status") not in {"reused_archive", "downloaded"}:
-            raise AdapterError(f"promo-reconstruction-workbook-not-in-run:{day}:{metadata.promo_id}")
-        workbook = Path(str(record.workbook_path or ""))
-        raw_path = Path(str(item.get("metadata_path") or ""))
-        if (not workbook.is_file() or Path(str(item.get("saved_path") or "")).resolve() != workbook.resolve()
-                or raw_path.parent.parent.parent.resolve() != run_path.parent.resolve()
-                or not raw_path.is_file()):
-            raise AdapterError(f"promo-reconstruction-artifact-path-invalid:{day}:{metadata.promo_id}")
-        reuse_path = raw_path.parent / "archive_reuse.json"
-        if item.get("status") == "reused_archive":
-            if not reuse_path.is_file():
-                raise AdapterError(f"promo-reconstruction-reuse-proof-missing:{day}:{metadata.promo_id}")
-            reuse_bytes = reuse_path.read_bytes()
-            reuse = json.loads(reuse_bytes)
-            downloaded_at = datetime.fromisoformat(str(reuse.get("downloaded_at") or ""))
-            if (reuse.get("archive_key") != record.archive_key
-                    or Path(str(reuse.get("reused_workbook_path") or "")).resolve() != workbook.resolve()
-                    or downloaded_at.tzinfo is None or downloaded_at.astimezone(timezone.utc) > observed.astimezone(timezone.utc)):
-                raise AdapterError(f"promo-reconstruction-reuse-proof-invalid:{day}:{metadata.promo_id}")
-        else:
-            reuse_bytes = b""
-        raw_bytes = raw_path.read_bytes()
-        raw = json.loads(raw_bytes)
-        if any(raw.get(field) != getattr(metadata, field) for field in ("promo_id", "promo_start_at", "promo_end_at", "promo_status")):
-            raise AdapterError(f"promo-reconstruction-artifact-identity-drift:{day}:{metadata.promo_id}")
-        if datetime.fromtimestamp(workbook.stat().st_mtime, tz=timezone.utc) > observed.astimezone(timezone.utc):
-            raise AdapterError(f"promo-reconstruction-workbook-too-new:{day}:{metadata.promo_id}")
-        proof.append((metadata.promo_id, hashlib.sha256(raw_bytes).hexdigest(),
-                      hashlib.sha256(reuse_bytes).hexdigest(), hashlib.sha256(workbook.read_bytes()).hexdigest()))
-    if not proof:
-        raise AdapterError(f"promo-reconstruction-no-usable-artifacts:{day}")
-    return _digest(sorted(proof))
+    try:
+        return reconstruction_artifact_proof(runtime, day, run_path, summary, observed)
+    except PromoHistoricalRecoveryError as exc:
+        raise AdapterError(str(exc)) from None
 
-def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, dict[str, str]] | None = None) -> dict[str, Any]:
-    reconstruction = reconstruction or {}
+
+def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, Any] | None = None) -> dict[str, Any]:
+    reconstruction = dict(reconstruction or {})
     authority = operational_authority(runtime)
     db_path = authority[0]
     source_sha = _source_fingerprint(runtime, dates)
@@ -646,67 +619,20 @@ def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, dict[s
             )
             price_id_sets[day] = price_ids
         reconstruction_proof: dict[str, dict[str, Any]] = {}
-        for day, spec in reconstruction.items():
-            run_path, summary, identity_observed = _reconstruction_run(runtime, day, spec["identity_run"])
-            checkpoint = conn.execute(
-                "SELECT started_at,completed_at,completeness_status FROM change_registry_checkpoints WHERE checkpoint_id=?",
-                (spec["price_checkpoint_id"],),
-            ).fetchone()
-            manifest = conn.execute(
-                "SELECT completeness_status,expected_count,observed_count,evidence_digest FROM change_registry_checkpoint_source_manifests WHERE checkpoint_id=? AND source_name='prices'",
-                (spec["price_checkpoint_id"],),
-            ).fetchone()
-            if checkpoint is None or checkpoint[2] != "complete" or manifest is None or manifest[0] != "complete" or manifest[1] != manifest[2]:
-                raise AdapterError(f"promo-reconstruction-price-checkpoint-incomplete:{day}")
-            price_observed = datetime.fromisoformat(str(checkpoint[1]).replace("Z", "+00:00"))
-            if (price_observed.tzinfo is None or price_observed.astimezone(BUSINESS_TIMEZONE).date().isoformat() != day
-                    or price_observed >= identity_observed.astimezone(timezone.utc)):
-                raise AdapterError(f"promo-reconstruction-observation-order-invalid:{day}")
-            observed_rows = list(conn.execute(
-                "SELECT nm_id,observation_status,value_kind,value_integer,observed_at,evidence_digest FROM change_registry_observation_values WHERE checkpoint_id=? AND target_kind='price' AND parameter_field='seller_price_minor' ORDER BY nm_id",
-                (spec["price_checkpoint_id"],),
-            ))
-            checkpoint_prices: dict[int, float] = {}
-            for item in observed_rows:
-                nm_id, status, kind, minor, observed_at, _evidence = item
-                if (type(nm_id) is not int or nm_id <= 0 or nm_id in checkpoint_prices
-                        or status not in {"exact", "exact_zero"} or kind != "integer" or type(minor) is not int or minor < 0
-                        or datetime.fromisoformat(str(observed_at).replace("Z", "+00:00")) > identity_observed.astimezone(timezone.utc)):
-                    raise AdapterError(f"promo-reconstruction-price-observation-invalid:{day}")
-                checkpoint_prices[nm_id] = minor / 100.0
-            if set(checkpoint_prices) != price_id_sets[day] or len(checkpoint_prices) != manifest[1]:
-                raise AdapterError(f"promo-reconstruction-price-sku-scope-mismatch:{day}")
-            artifact_sha = _reconstruction_artifact_proof(runtime, day, run_path, summary, identity_observed)
-            price_rows_sha = _digest([tuple(row) for row in observed_rows])
-            price_truth[day] = DailyPriceTruthResolution(
-                price_by_nm_id=checkpoint_prices,
-                source_note=f"daily_price_source=change_registry_checkpoint; checkpoint_id={spec['price_checkpoint_id']}; price_observed_at={checkpoint[1]}; identities_observed_at={summary['started_at']}; historical_composite_reconstruction=true",
-                captured_at=str(checkpoint[1]), fingerprint=price_rows_sha,
-            )
-            later_runs = sorted((runtime / "promo_xlsx_collector_runs").glob(f"{day}__*/run_summary.json"))
-            later_runs = [path for path in later_runs if path.parent.name > run_path.parent.name]
-            latest_later = None
-            if later_runs:
-                latest_path = later_runs[-1]
-                latest_bytes = latest_path.read_bytes()
-                latest_summary = json.loads(latest_bytes)
-                latest_later = {"run_summary": str(latest_path), "status": latest_summary.get("status"),
-                                "started_at": latest_summary.get("started_at"),
-                                "blocked_before_card_count": latest_summary.get("blocked_before_card_count"),
-                                "unresolved_identity_count": sum(1 for item in latest_summary.get("promos") or []
-                                                                 if isinstance(item, dict) and item.get("promo_id") is None),
-                                "sha256": "sha256:" + hashlib.sha256(latest_bytes).hexdigest()}
-            price_values_sha = "sha256:" + hashlib.sha256(json.dumps(
-                [[row[0], row[1], row[3]] for row in observed_rows],
-                ensure_ascii=False, separators=(",", ":"),
-            ).encode("utf-8")).hexdigest()
-            reconstruction_proof[day] = {"identity_run": str(run_path), "identity_observed_at": summary["started_at"],
-                                         "price_checkpoint_id": spec["price_checkpoint_id"], "price_observed_at": checkpoint[1],
-                                         "price_rows_sha256": price_rows_sha, "price_values_sha256": price_values_sha,
-                                         "price_manifest_evidence_digest": manifest[3],
-                                         "artifact_sha256": artifact_sha, "later_run_count_not_used": len(later_runs),
-                                         "latest_later_attempt": latest_later,
-                                         "freshness": "historical_composite_observation_only"}
+        for day, spec in list(reconstruction.items()):
+            try:
+                if spec == "auto":
+                    selected = find_reconstruction(runtime, day, conn, price_id_sets[day])
+                    if selected is None:
+                        raise AdapterError(f"promo-reconstruction-no-qualified-evidence:{day}")
+                    spec, truth, proof = selected
+                    reconstruction[day] = spec
+                else:
+                    truth, proof = qualified_reconstruction(runtime, day, spec, conn, price_id_sets[day])
+            except PromoHistoricalRecoveryError as exc:
+                raise AdapterError(str(exc)) from None
+            price_truth[day] = truth
+            reconstruction_proof[day] = proof
         if not price_id_sets[dates[0]] or any(price_id_sets[day] != price_id_sets[dates[0]] for day in dates):
             raise AdapterError("promo-price-sku-scope-drift")
         ids = sorted(price_id_sets[dates[0]])
@@ -745,6 +671,8 @@ def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, dict[s
         }
         if day in reconstruction_proof:
             payload["diagnostics"]["historical_reconstruction"] = reconstruction_proof[day]
+            payload["observation_quality"] = "historical_composite_observation_only"
+            payload["detail"] += "; freshness=historical_composite_observation_only; closed_day_freshness_unproven=true"
         results[day] = payload
     ready_updates = []
     ready_covered_dates: set[str] = set()
@@ -936,8 +864,8 @@ class PromoArchivePublicationAdapter:
                         raise AdapterError("promo-poststate-mismatch-before-commit")
                     replay_source_sha = _source_fingerprint(runtime, dates)
                     replay_proof: dict[str, dict[str, Any]] = {}
-                    for day, spec in reconstruction.items():
-                        run_path, run_summary, observed = _reconstruction_run(runtime, day, spec["identity_run"])
+                    for day, proof in fresh["reconstruction_proof"].items():
+                        run_path, run_summary, observed = _reconstruction_run(runtime, day, Path(proof["identity_run"]).parent.name)
                         replay_proof[day] = dict(fresh["reconstruction_proof"][day])
                         replay_proof[day]["artifact_sha256"] = _reconstruction_artifact_proof(runtime, day, run_path, run_summary, observed)
                     if _digest({"archive_and_runs": replay_source_sha, "reconstruction": replay_proof}) != fresh["source_sha"]:

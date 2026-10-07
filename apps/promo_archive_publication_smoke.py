@@ -342,8 +342,8 @@ def _assert_geometry_repair(runtime_dir: Path, db_path: Path) -> None:
 
 
 
-def _assert_reconstruction_determinism(runtime_dir: Path, ids: list[int]) -> None:
-    """Independent processes must pin identical original checkpoint rows."""
+def _seed_reconstruction_fixture(runtime_dir: Path, ids: list[int]) -> None:
+    """Original exact-day identity and price checkpoint; no materialization."""
     db_path = operational_authority(runtime_dir)[0]
     run_dir = runtime_dir / "promo_xlsx_collector_runs" / "2026-05-03__fixture"
     raw_dir = run_dir / "promos" / "2400__2300__promo"
@@ -356,6 +356,9 @@ def _assert_reconstruction_determinism(runtime_dir: Path, ids: list[int]) -> Non
         "archive_key": archive_dir.name, "reused_workbook_path": str(workbook),
         "downloaded_at": "2026-05-03T08:30:00+05:00",
     }), encoding="utf-8")
+    raw_metadata = json.loads((raw_dir / "metadata.json").read_text())
+    raw_metadata.update(ui_loaded_success=True, campaign_identity_match=True)
+    (raw_dir / "metadata.json").write_text(json.dumps(raw_metadata))
     (run_dir / "run_summary.json").write_text(json.dumps({
         "run_dir": str(run_dir), "status": "partial", "started_at": "2026-05-03T09:00:00+05:00",
         "timeline_candidates_found": 1, "card_confirmed_count": 1, "blocked_before_card_count": 0,
@@ -363,7 +366,7 @@ def _assert_reconstruction_determinism(runtime_dir: Path, ids: list[int]) -> Non
         "promos": [{"promo_id": 2400, "timeline_block_index": 0, "promo_title": "Promo",
                     "status": "reused_archive", "metadata_path": str(raw_dir / "metadata.json"),
                     "saved_path": str(workbook),
-                    "metadata": {"campaign_identity_match": True, "ui_loaded_success": True}}],
+                    "metadata": raw_metadata}],
     }), encoding="utf-8")
     evidence_digest = "sha256:" + "0" * 64
     with sqlite3.connect(str(db_path)) as conn:
@@ -376,6 +379,13 @@ def _assert_reconstruction_determinism(runtime_dir: Path, ids: list[int]) -> Non
                      ("crsm_fixture", "crcp_fixture", "prices", "complete", len(ids), len(ids), "{}", evidence_digest, observed_at))
         conn.executemany("INSERT INTO change_registry_observation_values(observation_value_id,checkpoint_id,target_kind,nm_id,advert_id,placement,parameter_field,observation_status,value_kind,value_integer,health_code,health_detail,observed_at,evidence_digest,mapping_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          [(f"crobs_fixture_{nm_id}", "crcp_fixture", "price", nm_id, 0, "", "seller_price_minor", "exact", "integer", 50800, "", "", observed_at, evidence_digest, "wb_change_registry_mapping_v1") for nm_id in ids])
+
+
+def _assert_reconstruction_determinism(runtime_dir: Path, ids: list[int]) -> None:
+    """Independent processes must pin identical original checkpoint rows."""
+    _seed_reconstruction_fixture(runtime_dir, ids)
+    observed_at = "2026-05-03T03:00:00Z"
+    evidence_digest = "sha256:" + "0" * 64
     child = """import json,sys
 from pathlib import Path
 from apps.promo_archive_publication import _candidate

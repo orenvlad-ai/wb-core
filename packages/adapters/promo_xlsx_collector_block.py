@@ -261,17 +261,45 @@ class PlaywrightPromoCollectorDriver:
                 "url": page.url,
             },
         )
-        block.click(timeout=8000)
+        for attempt in range(2):
+            try:
+                block.click(timeout=8000)
+                break
+            except Exception as exc:
+                # Retry only a proven pre-dispatch obstruction of this read-only
+                # card click. Never replay an uncertain click or a download/write.
+                call_log = str(exc)
+                cookie_obstruction = (
+                    "intercepts pointer events" in call_log
+                    and "Portal-warning-cookies-modal" in call_log
+                    and "click action done" not in call_log
+                )
+                drawer_open = self._count(DRAWER_CLOSE_SELECTOR) > 0
+                if attempt or not cookie_obstruction or drawer_open:
+                    raise
+                if not self._dismiss_cookie_banner_before_timeline_click():
+                    raise
+                self._record_action("retry_timeline_after_cookie_obstruction", {
+                    "index": candidate.index,
+                    "retry_count": 1,
+                    "target_click_was_obstructed": True,
+                })
         self._wait_for(lambda: DRAWER_CLOSE_SELECTOR in page.content() or self._count(DRAWER_CLOSE_SELECTOR) > 0, timeout_sec=10)
         time.sleep(0.5)
         return self.capture_state(f"card__{_slug(getattr(candidate, 'title', 'candidate'))}")
 
-    def _dismiss_cookie_banner_before_timeline_click(self) -> None:
+    def _dismiss_cookie_banner_before_timeline_click(self) -> bool:
         """Dismiss only WB's identified cookie layer before it can intercept a card."""
         page = self._require_page()
         modal = page.locator(COOKIE_MODAL_SELECTOR)
-        if modal.count() == 0 or not modal.is_visible():
-            return
+        if modal.count() == 0:
+            return False
+        if modal.count() != 1:
+            raise RuntimeError("cookie layer identity is ambiguous")
+        # WB portal roots can have zero dimensions while fixed children remain
+        # visible and intercept pointer events. Inspect the scoped contents.
+        if not self._cookie_portal_has_visible_content(modal):
+            return False
         accept = modal.get_by_text(COOKIE_ACCEPT_TEXT, exact=True)
         if accept.count() != 1 or not accept.is_visible():
             raise RuntimeError("visible cookie layer has no unique accept control")
@@ -281,7 +309,16 @@ class PlaywrightPromoCollectorDriver:
             "url": page.url,
         })
         accept.click(timeout=5000)
-        self._wait_for(lambda: not modal.is_visible(), timeout_sec=5)
+        self._wait_for(lambda: not self._cookie_portal_has_visible_content(modal), timeout_sec=5)
+        return True
+
+    @staticmethod
+    def _cookie_portal_has_visible_content(modal: Any) -> bool:
+        return bool(modal.evaluate("""root => [root, ...root.querySelectorAll('*')].some(node => {
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility !== 'visible') return false;
+            return Array.from(node.getClientRects()).some(rect => rect.width > 0 && rect.height > 0);
+        })"""))
 
     def open_generate_screen(self, slug: str) -> CollectorStateSnapshot:
         page = self._require_page()

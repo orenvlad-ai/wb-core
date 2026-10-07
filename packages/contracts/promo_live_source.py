@@ -52,6 +52,7 @@ class PromoLiveSourceSuccess:
     ambiguous_promos: int
     current_download_export_kinds: list[str] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    observation_quality: str = "complete_observation"
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class PromoLiveSourceIncomplete:
     missing_nm_ids: list[int]
     current_download_export_kinds: list[str] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    observation_quality: str = "incomplete_observation"
 
 
 PromoLiveSourceResult = PromoLiveSourceSuccess | PromoLiveSourceIncomplete
