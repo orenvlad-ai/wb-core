@@ -257,3 +257,66 @@ Retention / GC guard:
 - отдельный public promo collector route;
 - Apps Script-side heavy promo logic;
 - какой-либо stale-value fallback, который подменяет source failure fake success path.
+
+# 10. Bounded exact-day historical composite recovery
+
+`packages/application/promo_historical_recovery.py` is the shared read-only proof
+boundary for routine promo display and explicit archive publication. It opens
+SQLite with `mode=ro` and `query_only`, and does not construct a runtime, collect,
+synchronize an archive, persist a source snapshot or submit a browser operation.
+It selects only complete campaign-identity observations and complete price
+checkpoints from the requested business date (Asia/Yekaterinburg). Price rows
+must cover the entire accepted exact-day price roster, have unique positive IDs,
+exact integer values and evidence, and precede checkpoint completion; the price
+checkpoint must precede campaign observation. All requested SKUs, including
+confirmed zero participation, are materialized from these operands.
+
+Original run metadata, original checkpoint rows/manifests and pre-observation
+workbook/reuse identity evidence are hashed. Canonical validated normalized
+campaign rows may replace a removed workbook; corrupt/missing canonical rows
+remain fatal. Metadata-only announcements are excluded only by the existing
+exact identity-discovery rule, never by a title. Later incomplete collector
+attempts are recorded in provenance and do not certify end-of-day completeness.
+
+Enumeration is bounded per exact date: at most 24 run summaries, 256 archive
+records, four qualified operand attempts, 24 queries, 1,024 reads and 64 MiB.
+The ten-second deadline is checked between filesystem/materialization operations
+and interrupts SQLite progress. Exceeding a limit returns no routine composite;
+there is no arbitrary history scan, hidden constructor or repeated collection.
+
+Ordinary refresh can recover only its yesterday slot after fresh replay and
+accepted fresh cache paths fail. It returns numeric `incomplete` display with
+`observation_quality=historical_composite_observation_only`, truthful observation
+times/hashes, `closed_day_freshness_unproven=true` and acceptance disabled. It does
+not write accepted current/closed roles or promote the source to success. A
+previously explicitly published current composite can also be revalidated for
+current display after an invalid attempt; this does not create an automatic
+current recovery path without such a publication. `_is_exact_snapshot_payload`
+rejects a composite even if its persisted publication kind is `success`.
+
+Explicit `promo_archive_publication` keeps its existing scoped backup, role
+matrix, CAS, one-submit/readback and rollback contract. A bounded request of up
+to seven exact dates can supply either the existing explicit run/checkpoint pair
+or `"reconstruction": {"2026-10-06": "auto"}`. Auto uses the same proof helper;
+no maximum age or 90-day limit is imposed. Publication records composite
+provenance in STATUS and source diagnostics. Explicit publication success means
+successful publication of these historical operands; it does not prove end-of-day
+freshness. Its source semantic status and numeric SKU/TOTAL/GROUP cells carry
+warnings with observation times and “Полнота на конец дня не подтверждена”. A
+subsequent ordinary refresh can revalidate the same proof and display its numbers
+without accepting the stored composite as a fresh closed-day observation.
+
+`apps/promo_historical_recovery_smoke.py` is selected by the promo CI gate. It
+covers shared auto/explicit proof, full roster/zero rows, read-only operation,
+explicit publication followed by refresh, real plan/web/native dated compilation
+and warnings at SKU/TOTAL/GROUP scope, invalid cross-day/incomplete evidence,
+normalized replay, true artifact loss, no-proof blanks and budget exhaustion.
+The module's existing live/public current invariant smoke remains mandatory
+before live closure; local fixture checks do not replace deployed readback.
+
+The native runtime manifest pins the shared helper and changed live-plan/group
+presentation hashes. The new epoch is derived by the existing canonical hash
+algorithm; storage roots/reserve are unchanged. The recovery smoke also builds
+a new native edition with the ordinary two-date range and max_recomputes=2,
+and verifies that older historical day objects retain their hashes. No full
+history migration is needed for this bounded recovery.

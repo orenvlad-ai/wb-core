@@ -391,7 +391,7 @@ def include_group_rows(rows, *, groups, config, metrics, formulas, dates,
                 preliminary = any(p.get('state') == 'unconfirmed' or p.get('quality_state') in {'preliminary', 'management_estimate'} for p in affected)
                 uncertain = partial or preliminary
                 inherited_reasons = list(dict.fromkeys(str(p.get('quality_reason') or p.get('reason') or '')
-                    for p in affected if input_incomplete(p)))
+                    for p in affected if input_incomplete(p) or p.get("state") == "unconfirmed"))
                 reason = ' '.join([reason, *[r for r in inherited_reasons if r][:3]])
                 undefined = value is None and aggregation.get('zero_denominator', False)
                 if undefined:

@@ -13355,6 +13355,16 @@ def _preserve_unconfirmed_source_cells_from_previous_plan(
         merged_row = list(row)
         for as_of_date, current_indexes in plan_indexes_by_date.items():
             source_key = _source_key_for_metric_key(_metric_key_from_row_id(row_id), as_of_date)
+            if source_key == "promo_by_price" and any(
+                ((dict(snapshot.metadata or {}).get("server_cell_presentation") or {})
+                 .get(row_id, {}).get(as_of_date, {}).get("observation_quality"))
+                == "historical_composite_observation_only"
+                for snapshot in (plan, previous_plan)
+            ):
+                # Composite cells need fresh read-only proof on every display.
+                # Generic old-cell preservation cannot silently bypass that gate
+                # or replace a newly qualified composite with an older number.
+                continue
             if _source_date_allows_cell_merge(
                 status_by_source_date,
                 source_key=source_key,

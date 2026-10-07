@@ -244,3 +244,19 @@ Campaign manifest metadata is a read-only Seller Portal network observation used
 - operator UI redesign или bulk operator wiring;
 - sheet-side/browser-side heavy logic вместо server-owned live wiring через module `28`;
 - перенос всего seller-site browser runtime внутрь `wb-core`.
+
+# 9. Cookie obstruction before campaign identity
+
+Before every timeline-card opening, the driver inspects the identified cookie
+portal and its visible descendants. A zero-size portal root does not imply that
+its fixed-position children are hidden. The exact scoped `Принять` control must
+be unique and visible; missing/ambiguous controls stop the attempt.
+
+If the cookie layer appears after preflight, the same read-only card opening may
+be tried once more only when the Playwright call log identifies that exact cookie
+portal as the pointer interceptor, reports no completed click, and no campaign
+drawer is open. The guard dismisses and verifies disappearance first. A second
+obstruction stops the attempt. No force-click, configure/generate/download retry,
+new campaign identity inferred from a title, or repeated submission is allowed.
+`apps/promo_xlsx_collector_contract_smoke.py` covers zero-size-root/visible-child,
+late reappearance, ambiguous controls, two-obstruction stop and dispatch counts.

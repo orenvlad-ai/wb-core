@@ -470,6 +470,7 @@ class SlotLookups:
     fin_storage_fee_total: float | None
     cost_price_lookup: dict[str, "ResolvedCostPrice"]
     promo_lookup: dict[int, dict[str, float]]
+    promo_reconstruction_proof: dict[str, Any] = field(default_factory=dict)
     incident_stocks_lookup: dict[int, dict[str, Any]] = field(default_factory=dict)
     incident_policy: dict[str, Any] = field(default_factory=dict)
     incident_projection_quality: dict[str, Any] = field(default_factory=dict)
@@ -1639,6 +1640,7 @@ class SheetVitrinaV1LivePlanBlock:
                     evaluator_scope_presentation(rows=data_rows, slots=temporal_slots,
                         evaluator=evaluator, current_date=current_date),
                     card_rating_presentation(rows=data_rows, slots=temporal_slots, live_sources=live_sources),
+                    _promo_composite_cell_presentation(rows=data_rows, slots=temporal_slots, live_sources=live_sources),
                     _finance_daily_cell_presentation(rows=data_rows, slots=temporal_slots,
                         live_sources=live_sources, nm_ids=[item.nm_id for item in enabled_config]),
                     weighted_price_presentation(slots=temporal_slots,
@@ -2142,6 +2144,7 @@ class SheetVitrinaV1LivePlanBlock:
                         )
                 elif source_key == "promo_by_price":
                     current_lookups.promo_lookup = _index_promo_items(payload)
+                    current_lookups.promo_reconstruction_proof = dict(_payload_diagnostics(payload).get("historical_reconstruction") or {})
 
             if _collect_only:
                 continue
@@ -2518,6 +2521,22 @@ class SheetVitrinaV1LivePlanBlock:
                 cached_payload,
             )
 
+        # A failed fresh replay may still have independently qualified same-day
+        # historical operands. This is numeric display only, never accepted closed.
+        from packages.application.promo_historical_recovery import recover_promo_display
+        composite = recover_promo_display(
+            runtime_dir=Path(self.runtime.runtime_dir), db_path=Path(self.runtime.db_path),
+            snapshot_date=column_date, requested_nm_ids=requested_nm_ids,
+        )
+        if composite is not None:
+            composite_status, composite_payload = _capture_live_source(
+                source_key=source_key, temporal_slot=temporal_slot, temporal_policy=temporal_policy,
+                column_date=column_date, requested_nm_ids=requested_nm_ids, loader=lambda: composite,
+            )
+            composite_status = _append_status_note(composite_status,
+                f"latest_attempt_kind={replay_status.kind}; closed_day_freshness_unproven=true; "
+                "snapshot_acceptance=disabled; freshness=historical_composite_observation_only")
+            return composite_status, composite_payload
         return replay_status, replay_payload
 
     def _capture_current_snapshot_closed_day_from_accepted_current(
@@ -2988,6 +3007,17 @@ class SheetVitrinaV1LivePlanBlock:
                                        missing_nm_ids=status.missing_nm_ids)
             return retry_status, partial_stock_payload
 
+        if source_key == "promo_by_price" and temporal_slot == TEMPORAL_SLOT_TODAY_CURRENT:
+            published, _ = self.runtime.load_temporal_source_slot_snapshot(
+                source_key=source_key, snapshot_date=column_date, snapshot_role=accepted_role)
+            if getattr(published, "observation_quality", "") == "historical_composite_observation_only":
+                from packages.application.promo_historical_recovery import recover_promo_display
+                composite = recover_promo_display(runtime_dir=Path(self.runtime.runtime_dir),
+                    db_path=Path(self.runtime.db_path), snapshot_date=column_date, requested_nm_ids=requested_nm_ids)
+                if composite is not None:
+                    return _capture_live_source(source_key=source_key, temporal_slot=temporal_slot,
+                        temporal_policy=temporal_policy, column_date=column_date,
+                        requested_nm_ids=requested_nm_ids, loader=lambda: composite)
         return status, partial_stock_payload
 
     def _load_slot_snapshot_status(
@@ -5638,6 +5668,8 @@ def _format_temporal_source_key(source_key: str, temporal_slot: str) -> str:
 
 
 def _is_exact_snapshot_payload(payload: Any, column_date: str) -> bool:
+    if getattr(payload, "observation_quality", "") == "historical_composite_observation_only":
+        return False
     kind = str(getattr(payload, "kind", ""))
     if kind == "success":
         return _resolve_freshness(payload) == column_date
@@ -6897,3 +6929,11 @@ def _noop_live_plan_log(_: str) -> None:
 
 def _load_json(path: Path) -> Mapping[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _promo_composite_cell_presentation(*, rows, slots, live_sources):
+    from packages.application.promo_historical_recovery import composite_cell_presentation
+    return _merge_cell_presentations(*[composite_cell_presentation(
+        rows=rows, day=slot.column_date, proof=live_sources.slot_lookups[slot.slot_key].promo_reconstruction_proof)
+        for slot in slots if live_sources.slot_lookups.get(slot.slot_key)
+        and live_sources.slot_lookups[slot.slot_key].promo_reconstruction_proof])
