@@ -208,7 +208,8 @@ def search_batch_checks():
         return {'error':False,'additionalErrors':{'errors':None},'data':{
             'groups':[{'items':rows,'metrics':{'views':{'current':sum(r['views']['current'] for r in rows)},
                 'orders':{'current':len(rows)}}}] if rows else [],'commonInfo':{'totalProducts':total}}}
-    global_report=response(raw[:50],65)
+    global_report=response(raw,65)
+    global_report['data']['groups'][0]['items']=raw[:50]
     class Client:
         def post(self,url,**kwargs):
             wanted=set(json.loads(kwargs['data'])['nmIds'])
@@ -217,6 +218,7 @@ def search_batch_checks():
     items,batches=_search_complete_items(Client(),'https://seller-content.wildberries.ru/search-report/report',
         {},{'currentPeriod':{'start':'2026-09-11','end':'2026-09-11'}},global_report,list(range(1,100)))
     assert len(items)==65 and len(batches)==3
+    assert sum(r['views']['current'] for r in raw[:50]) < global_report['data']['groups'][0]['metrics']['views']['current']
     o=deepcopy(observations()[1]);o.update(pages=4,reported_count=65,raw_report=global_report,
         items=items,search_batches=batches)
     request={'dates':['2026-09-11'],'observations':[o],'source_sha256':digest([o]),
@@ -231,6 +233,70 @@ def search_batch_checks():
         {},{'currentPeriod':{'start':'2026-09-11','end':'2026-09-11'}},global_report,list(range(1,65)))
     except CollectorError as exc:assert str(exc)=='search_report_product_count_incomplete'
     else:raise AssertionError('incomplete search universe accepted')
+
+    def reject_publication(observation,reason):
+        invalid={**request,'observations':[observation],'source_sha256':digest([observation])}
+        try:validate_observations(invalid)
+        except ValueError as exc:assert str(exc)==reason,(str(exc),reason)
+        else:raise AssertionError('invalid search observation accepted:'+reason)
+
+    def reject_collection(report,reason,client=None):
+        try:_search_complete_items(client or Client(),
+            'https://seller-content.wildberries.ru/search-report/report',{},
+            {'currentPeriod':{'start':'2026-09-11','end':'2026-09-11'}},report,list(range(1,100)))
+        except CollectorError as exc:assert str(exc)==reason,(str(exc),reason)
+        else:raise AssertionError('invalid search report accepted:'+reason)
+
+    # Full count and individually consistent batches cannot excuse a bad
+    # unfiltered total. Cover both additive fields, including missing metrics.
+    for metric in ('views','orders'):
+        bad_report=deepcopy(global_report)
+        bad_report['data']['groups'][0]['metrics'][metric]['current']+=1
+        reject_collection(bad_report,'search_report_group_totals_incomplete')
+        bad=deepcopy(o);bad['raw_report']=bad_report
+        reject_publication(bad,'search-source-group-totals-incomplete')
+    bad=deepcopy(o);bad['raw_report']['data']['groups'][0]['metrics'].pop('views')
+    reject_collection(bad['raw_report'],'search_report_group_totals_incomplete')
+    reject_publication(bad,'search-source-group-totals-incomplete')
+
+    # Equal duplicate preview rows must not disappear through _dedupe, on
+    # either the partial preview route or the already complete report route.
+    for base in (o,observations()[1]):
+        bad=deepcopy(base)
+        rows=bad['raw_report']['data']['groups'][0]['items']
+        rows.append(deepcopy(rows[0]))
+        reject_collection(bad['raw_report'],'search_report_product_count_incomplete')
+        reject_publication(bad,'search-source-pages-incomplete')
+    complete=deepcopy(observations()[1])
+    complete['raw_report']['data']['groups'][0]['metrics']['views']['current']+=1
+    reject_collection(complete['raw_report'],'search_report_group_totals_incomplete')
+    reject_publication(complete,'search-source-group-totals-incomplete')
+
+    # Preserve all filtered-report guards while deferring only global totals.
+    mutations=[
+        ('search_report_batch_group_totals_incomplete','search-source-batch-group-totals-incomplete',
+         lambda answer:answer['data']['groups'][0]['metrics']['views'].update(current=-1)),
+        ('search_report_batch_incomplete_or_unbound','search-source-batch-count-or-filter-invalid',
+         lambda answer:answer['data']['commonInfo'].update(totalProducts=999)),
+        ('search_report_batch_incomplete_or_unbound','search-source-batch-count-or-filter-invalid',
+         lambda answer:answer['data']['groups'][0]['items'][0].update(nmId=999)),
+        ('search_report_batch_overlap_or_value_drift','search-source-batch-overlap-or-value-drift',
+         lambda answer:answer['data']['groups'][0]['items'][0]['ctr'].update(current=99)),
+    ]
+    for collector_reason,publication_reason,mutate in mutations:
+        class MutatedClient(Client):
+            def post(self,url,**kwargs):
+                answer=deepcopy(super().post(url,**kwargs).json())
+                if 1 in json.loads(kwargs['data'])['nmIds']:mutate(answer)
+                return type('Result',(),{'status':200,'json':lambda self:answer})()
+        reject_collection(global_report,collector_reason,MutatedClient())
+        bad=deepcopy(o)
+        bad['search_batches'][0]['response']=deepcopy(bad['search_batches'][0]['response'])
+        mutate(bad['search_batches'][0]['response'])
+        reject_publication(bad,publication_reason)
+    bad=deepcopy(o)
+    bad['search_batches'][1]['requested_nm_ids'].insert(0,1)
+    reject_publication(bad,'search-source-batch-scope-invalid')
 
 
 def main():
