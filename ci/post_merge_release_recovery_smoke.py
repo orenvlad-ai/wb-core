@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -1462,7 +1463,7 @@ def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = F
         recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._predependency_diff_proof = originals
 
 
-def main() -> None:
+def legacy_tail_regressions() -> None:
     test_predependency_exact_source_and_dependency_proofs()
     test_predependency_previous_success_receipt()
     test_predependency_npm_once_then_tail()
@@ -1494,6 +1495,17 @@ def main() -> None:
         test_sqlite_activation_exact_tail_success_and_ssh_ambiguity(run_id)
     test_sqlite_activation_proof_drift_and_existing_claim_are_readback_only()
     print("post_merge_release_recovery_smoke: ok")
+
+
+def main() -> None:
+    # These existing fixtures represent pre-protection runtimes and intentionally
+    # use opaque object() targets/one-word stage commands. Owner phase, guarded
+    # command and completion failures have separate real-state coverage in the
+    # base-owned hosted_runtime_deploy_barrier_protection_smoke.
+    with patch.object(recovery, '_claim_deploy_protection', return_value=[]), \
+            patch.object(recovery, '_protect_deploy_command', side_effect=lambda _target, _source, command: command), \
+            patch.object(recovery, '_finish_deploy_protection', return_value={'status': 'legacy_profile'}):
+        legacy_tail_regressions()
 
 
 if __name__ == "__main__":

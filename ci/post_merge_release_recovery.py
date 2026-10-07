@@ -1478,6 +1478,37 @@ def _claim_marker(operation: str) -> str:
     return f"<!-- {CLAIM_MARKER} operation={operation} -->"
 
 
+def _deploy_protection_identity(target, source):
+    return dict(app_dir=target.target_dir,
+        runtime_dir=target.runtime_env['REGISTRY_UPLOAD_RUNTIME_DIR'],
+        env_file=target.environment_file,
+        operation=source.get('original_operation_id') or source['operation_id'],
+        expected_sha=source['merge_sha'])
+
+
+def _claim_deploy_protection(target, source):
+    from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+    from packages.application.business_data_deploy_protection import remote_shell
+    identity = _deploy_protection_identity(target, source)
+    return [_must_succeed('deploy-owner-' + action,
+        hosted._remote_shell_command(target, remote_shell(action, **identity)))
+        for action in ('claim', 'recovery-start')]
+
+
+def _protect_deploy_command(target, source, command):
+    from packages.application.business_data_deploy_protection import guarded_shell
+    return [*command[:-1], guarded_shell(command[-1], **_deploy_protection_identity(target, source))]
+
+
+def _finish_deploy_protection(target, source):
+    """Fresh owner phase + exact final markers; no restart/source/CAS replay."""
+    from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+    from packages.application.business_data_deploy_protection import remote_shell
+    identity = _deploy_protection_identity(target, source)
+    return _must_succeed('deploy-owner-final-readback',
+                        hosted._remote_shell_command(target, remote_shell('finish', **identity)))
+
+
 def existing_recovery_readback(
     client: release.GitHub,
     release_run_id: int,
@@ -1506,7 +1537,13 @@ def existing_recovery_readback(
         ):
             raise RecoveryError("recovery-receipt-binding-invalid")
         final = collect_prestate(target, original["merge_sha"], require_incomplete=False, case=case)
-        return {**receipt, "fresh_final_readback": final, "runner_readback": runner}
+        try:
+            owner = _finish_deploy_protection(target, original)
+        except RecoveryError:
+            return {**receipt, 'state': 'ambiguous', 'reason': 'deploy-owner-final-readback-unproven',
+                    'fresh_final_readback': final, 'runner_readback': runner}
+        return {**receipt, "fresh_final_readback": final, "runner_readback": runner,
+                'deploy_owner_readback': owner}
     if not claims:
         return None
     if len(claims) != 1:
@@ -1542,6 +1579,13 @@ def existing_recovery_readback(
             "reason": "existing-claim-without-complete-readback",
             "runner_readback": runner,
         }
+    try:
+        owner = _finish_deploy_protection(target, original)
+    except RecoveryError:
+        return {'schema': RECOVERY_SCHEMA, 'state': 'ambiguous', 'operation_id': operation,
+                'source': claim['source'], 'preview_fingerprint': expected_fingerprint,
+                'reason': 'deploy-owner-final-readback-unproven', 'final_readback': final,
+                'runner_readback': runner}
     completed = {
         "schema": RECOVERY_SCHEMA,
         "state": "complete",
@@ -1551,6 +1595,7 @@ def existing_recovery_readback(
         "final_readback": final,
         "finance_acceptance": final["finance_pilot"]["write_mode"],
         "recovered_from_existing_claim": True,
+        'deploy_owner_readback': owner,
     }
     _publish_once(client, pr, _receipt_marker(operation), completed)
     return completed
@@ -1575,12 +1620,17 @@ def apply_recovery(
     commands = build_stage_commands(
         target, preview["source"]["merge_sha"], preview["prestate"]["metadata_sha256"], int(preview["prestate"]["main_pid"]), case=case, release_run_id=int(preview["release_run_id"])
     )
+    def protected(command):
+        return _protect_deploy_command(target, preview['source'], command)
     # These stages precede the durable runtime mutation claim. The exact
     # predependency case refreshes only the derived storage status artifact. A
     # stale artifact or failed service/auth check must not consume the identity.
-    stages: list[dict[str, Any]] = []
+    # Every supported mutating tail owns the original deploy, including the
+    # status artifact, activation and stdin completion CAS. A missing old helper
+    # refuses recovery-start before any of those mutations.
+    stages: list[dict[str, Any]] = _claim_deploy_protection(target, preview['source'])
     if case is RecoveryCase.PREDEPENDENCY_STORAGE:
-        stages.append(_must_succeed("root-storage-status-refresh", commands["root_storage_status"]))
+        stages.append(_must_succeed("root-storage-status-refresh", protected(commands["root_storage_status"])))
     stages.extend([
         _must_succeed("root-storage-readback", commands["root_storage_readback"]),
         _must_succeed("status", commands["status"]),
@@ -1626,7 +1676,7 @@ def apply_recovery(
             if case is RecoveryCase.PREDEPENDENCY_STORAGE and not fresh["predependency_live_contract"]["dependency_versions"]["npm_modules"]["installed"]:
                 phase = "00-locked-npm-dependencies"
                 _publish_once(client, pr, _phase_marker(operation, "before-" + phase), {"schema": RECOVERY_SCHEMA, "state": "before", "operation_id": operation, "phase": phase, "preview_fingerprint": expected_fingerprint})
-                stages.append(_must_succeed("locked-npm-dependencies", commands["npm_dependencies"]))
+                stages.append(_must_succeed("locked-npm-dependencies", protected(commands["npm_dependencies"])))
                 installed = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
                 # The only admitted state change is the previously absent locked
                 # Node closure. A crash/SSH ambiguity consumes the identity; no
@@ -1647,6 +1697,7 @@ def apply_recovery(
                 if _matching_comments(client, pr, marker):
                     raise RecoveryError("normal-tail-phase-already-recorded")
                 _publish_once(client, pr, marker, {"schema": RECOVERY_SCHEMA, "state": "before", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
+                command = protected(command)
                 stages.append(_bounded_status_readback(command) if phase == "managed-service-status" else _must_succeed(phase, command))
                 _publish_once(client, pr, _phase_marker(operation, "after-" + phase_id), {"schema": RECOVERY_SCHEMA, "state": "after", "operation_id": operation, "phase": phase_id, "preview_fingerprint": expected_fingerprint})
             restarted = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
@@ -1657,7 +1708,7 @@ def apply_recovery(
                 raise RecoveryError("normal-tail-post-restart-drift")
             fresh = restarted
             commands = build_stage_commands(target, preview["source"]["merge_sha"], fresh["metadata_sha256"], int(fresh["main_pid"]), case=case, release_run_id=int(preview["release_run_id"]))
-        activation = _run_stage(commands["activation"])
+        activation = _run_stage(protected(commands["activation"]))
         if activation.returncode != 0:
             readback = _run_stage(commands["activation_readback"])
             if readback.returncode != 0:
@@ -1666,7 +1717,7 @@ def apply_recovery(
         else:
             stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
         if case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE}:
-            stages.append(_must_succeed("cleaner-before-complete-probe", commands["cleaner_precomplete_probe"]))
+            stages.append(_must_succeed("cleaner-before-complete-probe", protected(commands["cleaner_precomplete_probe"])))
         before_completion = collect_prestate(
             target, preview["source"]["merge_sha"], require_incomplete=True, case=case
         )
@@ -1675,7 +1726,7 @@ def apply_recovery(
         completion_runner = prove_repo_only_descendant(client, preview["source"])
         if canonical_bytes(completion_runner) != canonical_bytes(fresh_runner):
             raise RecoveryError("trusted-main-drift-before-completion")
-        completion = _run_stage(commands["completion"], input_text=commands["completion_input"])
+        completion = _run_stage(protected(commands["completion"]), input_text=commands["completion_input"])
         if completion.returncode != 0:
             # Never repeat the CAS write.  Accept only an exact complete target
             # readback, otherwise leave the durable claim unresolved.
@@ -1684,6 +1735,7 @@ def apply_recovery(
         else:
             stages.append({"stage": "completion", "stdout_sha256": digest(completion.stdout.encode())})
         final = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=False, case=case)
+        stages.append(_finish_deploy_protection(target, preview['source']))
     except Exception as exc:
         reason = exc.reason if isinstance(exc, RecoveryError) else type(exc).__name__
         return {

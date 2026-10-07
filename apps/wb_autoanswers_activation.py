@@ -96,12 +96,14 @@ def _schema_preparation_lock(runtime_dir: Path) -> Any:
 
 
 @contextmanager
-def _deployment_quiesce() -> Any:
+def _deployment_quiesce(runtime_dir: Path | None = None) -> Any:
     """Close timer admission and drain oneshots without killing provider calls."""
 
     if not _truthy(os.environ.get("WB_AUTOANSWERS_DEPLOY_SERVICE_QUIESCE")):
         yield {"applied": False, "units": []}
         return
+    from packages.application.business_data_deploy_protection import require_owner
+    require_owner(runtime_dir or Path(os.environ.get('REGISTRY_UPLOAD_RUNTIME_DIR', '.runtime/registry_upload')))
     timers = (
         "wb-core-autoanswers-worker.timer",
         "wb-core-autoanswers-readonly-sync.timer",
@@ -1221,6 +1223,9 @@ def _dependency_status(*, verify_boundary: bool) -> dict[str, Any]:
 
 
 def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
+    if action == 'prepare-deploy':
+        from packages.application.business_data_deploy_protection import require_owner
+        require_owner(runtime_dir)
     before = _pre_migration_safety(runtime_dir)
     force_off = _truthy(os.environ.get("WB_AUTOANSWERS_FORCE_OFF"))
     requires_persisted_off = action in {"prepare-capacity", "prepare-deploy"} and not before.get(
@@ -1262,7 +1267,7 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
         with (
             _schema_preparation_lock(runtime_dir),
             _capacity_heartbeat(),
-            _deployment_quiesce() as quiesce,
+            _deployment_quiesce(runtime_dir) as quiesce,
         ):
             if not bool(quiesce.get("applied")):
                 raise RuntimeError(
@@ -1287,7 +1292,7 @@ def run(*, action: str, runtime_dir: Path) -> dict[str, Any]:
         with (
             _schema_preparation_lock(runtime_dir),
             _capacity_heartbeat(),
-            _deployment_quiesce() as quiesce,
+            _deployment_quiesce(runtime_dir) as quiesce,
         ):
             locked_before = _pre_migration_safety(runtime_dir)
             if not force_off:

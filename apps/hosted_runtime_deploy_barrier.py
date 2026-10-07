@@ -94,6 +94,9 @@ def reconcile(
     from apps.business_data_maintenance import SystemdClient
     from packages.application import business_data_schedule_profile as profile
     runtime = runtime_dir.resolve()
+    if mutate:
+        from packages.application.business_data_deploy_protection import require_owner
+        require_owner(runtime)
     # Read-only validation before any enable/restart, including future deploys.
     profile.assert_no_partial_transition(runtime)
     selector = profile.load_selector(runtime)

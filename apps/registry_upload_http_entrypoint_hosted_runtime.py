@@ -1126,6 +1126,15 @@ def deploy_current_checkout(
     if dry_run:
         return summary
 
+    from packages.application.business_data_deploy_protection import remote_shell, guarded_shell, ENV_OPERATION
+    deploy_sha = _git_output(["git", "rev-parse", "HEAD"]).strip().lower()
+    deploy_operation = resolve_deploy_operation(deploy_sha)
+    protection_identity = dict(app_dir=target.target_dir,
+        runtime_dir=target.runtime_env['REGISTRY_UPLOAD_RUNTIME_DIR'],
+        env_file=target.environment_file, operation=deploy_operation, expected_sha=deploy_sha)
+    protection_started = False
+    protection_synced = False
+
     def reconcile_transport_failure(
         stage: str,
         exc: subprocess.CalledProcessError,
@@ -1161,6 +1170,7 @@ def deploy_current_checkout(
             require_deployment_complete=stage == "metadata-complete",
             allow_repairs=stage != "metadata-complete",
             allow_safe_finalize=stage == "metadata-complete",
+            deploy_operation=deploy_operation,
         )
         summary["transport_reconciliation"] = reconciliation
         if not bool(reconciliation.get("healthy")):
@@ -1174,6 +1184,13 @@ def deploy_current_checkout(
         *,
         allow_transport_reconciliation: bool = True,
     ) -> None:
+        if protection_started:
+            if command[0] == 'rsync':
+                command = [*command[:1], '--rsync-path',
+                    guarded_shell('exec rsync', receiver=True, bootstrap=True, **protection_identity), *command[1:]]
+            elif command[0] == 'ssh':
+                command = [*command[:-1], guarded_shell(command[-1],
+                    bootstrap=not protection_synced, **protection_identity)]
         try:
             _run_command(command)
         except subprocess.CalledProcessError as exc:
@@ -1187,8 +1204,16 @@ def deploy_current_checkout(
 
     # Never let a deploy/restart proceed against a missing hosted auth contour.
     run_stage("auth-preflight", auth_env_preflight_command)
+    # A prepared claim may originate before merge in the trusted runner. The
+    # bootstrap path proves the existing held old pause before loading new code.
+    # Both requests are bounded; ambiguity stops before any runtime mutation.
+    for owner_action in ('claim', 'start'):
+        subprocess.run(_remote_shell_command(target, remote_shell(owner_action, **protection_identity)),
+                       timeout=120, check=True)
+    protection_started = True
     run_stage("mkdir", mkdir_command)
     run_stage("sync", rsync_plan)
+    protection_synced = True
     run_stage("chown", chown_target_dir_command)
     # The just-synced exact-SHA code validates an active maintenance barrier
     # before any systemctl call, including retirement of obsolete units.
@@ -1263,7 +1288,23 @@ def deploy_current_checkout(
         "metadata-complete",
         deploy_completion_metadata_command,
     )
+    # Finish only after every restart/readback and exact complete markers. It
+    # releases ownership only; the explicit maintenance pause remains held.
+    if os.environ.get('WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH') != 'true':
+        subprocess.run(_remote_shell_command(target, remote_shell('finish', **protection_identity)),
+                       timeout=120, check=True)
     return summary
+
+
+def resolve_deploy_operation(deploy_sha: str) -> str:
+    from packages.application.business_data_deploy_protection import ENV_OPERATION
+    explicit = os.environ.get(ENV_OPERATION, '').strip()
+    if explicit:
+        return explicit
+    if any(os.environ.get(name, '').strip() for name in ('WB_CORE_RELEASE_PR', 'WB_CORE_RELEASE_HEAD')):
+        from apps.github_release_runner import bootstrap_deploy_operation
+        return bootstrap_deploy_operation(deploy_sha)
+    return 'manual-deploy-' + deploy_sha
 
 
 def _run_deploy_status_readback(
