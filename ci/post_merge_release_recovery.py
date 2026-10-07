@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed continuation for a proven post-merge deploy tail.
 
-The runner never merges, copies code, or installs runtime dependencies.  Its
-storage tail never restarts services; one exact b9 case resumes the canonical
+The runner never merges or copies code. One exact predependency failure may
+restore only missing locked npm modules; it never repeats OS/Python/browser
+installation. Its storage tail never restarts services; one exact b9 case resumes the canonical
 post-dependency activation stages only after strict receipt, prestate, and
 phase evidence.  Recovery code may be newer only when intervening commits are
 classified repo-only by the current trusted check map.
@@ -78,6 +79,25 @@ EXPECTED_ACTIVATION_GATE_RUN_ID = 36436062816
 EXPECTED_ACTIVATION_PR = 1341
 EXPECTED_ACTIVATION_MERGE_SHA = "7a9196e8af0d2113db7e42f0f4291fc2bc2c528c"
 
+# Exact first storage-status refusal after sync/metadata, before dependencies.
+PREDEPENDENCY_RELEASE_RUN_ID = 37598234406
+PREDEPENDENCY_PROFILE = {
+    "pull_request": 1409, "gate_run_id": 37597673218,
+    "base_sha": "91f3403fa9b757b088b6193b26bfe39674e62ac2",
+    "head_sha": "d86ec9b4901e7b6003c9103eb911657316cc8a2e",
+    "merge_sha": "e4c588c2ea10c47d08b08356a5fb7ac9b355bc3a",
+    "operation_id": "release-v3-7ca7bab1c8bd5f26688428dd71193570",
+}
+PREDEPENDENCY_PREVIOUS_RUN_ID = 37552375993
+PREDEPENDENCY_PREVIOUS_PROFILE = {
+    "pull_request": 1408, "gate_run_id": 37549993481,
+    "base_sha": "2288678a2a96e9c71bf8ec79adf9aa0c3b09f1c6",
+    "head_sha": "93e65c585155ac0ce04a0b264978d72897fb5ca8",
+    "merge_sha": PREDEPENDENCY_PROFILE["base_sha"],
+    "deployed_sha": PREDEPENDENCY_PROFILE["base_sha"],
+    "operation_id": "release-v3-54152c265a0e767031310ac6a80fe55c",
+}
+
 # Only these reviewed receipts admit the local commit-before-job failure lane.
 SQLITE_ACTIVATION_PROFILES = {
     EXPECTED_ACTIVATION_RELEASE_RUN_ID: {
@@ -105,6 +125,7 @@ def _sqlite_activation_profile(release_run_id: int) -> Mapping[str, Any]:
 
 class RecoveryCase(str, Enum):
     STORAGE_TAIL = "storage-tail"
+    PREDEPENDENCY_STORAGE = "exact-predependency-storage-tail"
     SELECTIVE_B9_ACTIVATION = "normal-b9-activation-tail"
     REGISTRY_PRECHECK_ACTIVATION = "normal-registry-precheck-activation-tail"
     WORKER_HEALTH_PRECHECK_ACTIVATION = "normal-worker-health-precheck-activation-tail"
@@ -112,6 +133,8 @@ class RecoveryCase(str, Enum):
 
 
 def recovery_case(release_run_id: int) -> RecoveryCase:
+    if release_run_id == PREDEPENDENCY_RELEASE_RUN_ID:
+        return RecoveryCase.PREDEPENDENCY_STORAGE
     if release_run_id in SQLITE_ACTIVATION_PROFILES:
         return RecoveryCase.SQLITE_ACTIVATION
     if release_run_id == EXPECTED_SELECTIVE_RUN_ID:
@@ -121,6 +144,7 @@ def recovery_case(release_run_id: int) -> RecoveryCase:
 
 def normal_activation_tail_case(case: RecoveryCase) -> bool:
     return case in {
+        RecoveryCase.PREDEPENDENCY_STORAGE,
         RecoveryCase.SELECTIVE_B9_ACTIVATION,
         RecoveryCase.REGISTRY_PRECHECK_ACTIVATION,
         RecoveryCase.WORKER_HEALTH_PRECHECK_ACTIVATION,
@@ -299,6 +323,9 @@ def _validate_original_receipt(
         or normalized["merge_sha"] != EXPECTED_SELECTIVE_MERGE_SHA
     ):
         raise RecoveryError("original-receipt-not-exact-selective-b9")
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        if release_run_id != PREDEPENDENCY_RELEASE_RUN_ID or any(normalized.get(key) != expected for key, expected in PREDEPENDENCY_PROFILE.items()):
+            raise RecoveryError("original-receipt-not-exact-predependency-storage")
     if case is RecoveryCase.SQLITE_ACTIVATION:
         profile = _sqlite_activation_profile(release_run_id)
         if any(normalized.get(key) != profile[key]
@@ -313,6 +340,20 @@ def _prove_failed_stage(
     release_run_id: int = EXPECTED_ACTIVATION_RELEASE_RUN_ID,
 ) -> dict[str, Any]:
     text = raw_log.decode("utf-8", errors="replace")
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        required = (
+            "deploy_current_checkout", "line 1206, in deploy_current_checkout",
+            'run_stage("root-storage-status", root_storage_commands["status"])',
+            "apps/root_storage_policy.py", "status --output", "--fail-on-unregistered",
+            "returned non-zero exit status 2.", f'--workflow-run-id "{gate_run_id}"',
+        )
+        if release_run_id != PREDEPENDENCY_RELEASE_RUN_ID or gate_run_id != PREDEPENDENCY_PROFILE["gate_run_id"] or any(item not in text for item in required):
+            raise RecoveryError("failed-stage-not-exact-predependency-storage-exit2")
+        failures = re.findall(r"(?:subprocess\.)?CalledProcessError:.*?returned non-zero exit status (\d+)", text, re.DOTALL)
+        if failures != ["2"] or "exit status 255" in text or "line 1238, in deploy_current_checkout" in text:
+            raise RecoveryError("failed-stage-not-definite-single-exit2")
+        return {"job_name": job_name, "job_log_sha256": digest(raw_log),
+                "stage": "first-root-storage-status-before-dependencies", "exit_status": 2}
     if case is RecoveryCase.SQLITE_ACTIVATION:
         profile = _sqlite_activation_profile(release_run_id)
         if gate_run_id != profile["gate_run_id"]:
@@ -952,14 +993,14 @@ def _selective_b9_diff_proof() -> dict[str, Any]:
             "paths_sha256": digest(canonical_bytes(paths)), "immutable_paths_changed": changed}
 
 
-def _selective_live_contract_script(target: Any) -> str:
+def _selective_live_contract_script(target: Any, *, merge: str = EXPECTED_SELECTIVE_MERGE_SHA) -> str:
     # Commands are read-only: file hashes, stable unit metadata, installed versions, and nginx config.
     prefixes = ("apps/wb_autoanswers", "packages/application/wb_autoanswers", "packages/adapters/wb_autoanswers", "packages/node/wb_autoanswers", "artifacts/registry_upload_http_entrypoint/systemd/")
     direct = ("apps/registry_upload_http_entrypoint_hosted_runtime.py", "apps/change_registry_observer.py", "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json", "artifacts/registry_upload_http_entrypoint/nginx/public_route_allowlist.json")
-    files = sorted(set(filter(None, _git(["ls-tree", "-r", "--name-only", EXPECTED_SELECTIVE_MERGE_SHA, "--", *prefixes, *direct]).stdout.splitlines())) | set(direct))
+    files = sorted(set(filter(None, _git(["ls-tree", "-r", "--name-only", merge, "--", *prefixes, *direct]).stdout.splitlines())) | set(direct))
     expected = {"files": files, "units": [unit.name for unit in target.managed_systemd_units],
                 "autoanswers_units": ["wb-core-autoanswers-worker.service", "wb-core-autoanswers-worker.timer", "wb-core-autoanswers-readonly-sync.service", "wb-core-autoanswers-readonly-sync.timer"]}
-    blobs = {path: _git(["rev-parse", f"{EXPECTED_SELECTIVE_MERGE_SHA}:{path}"]).stdout.strip() for path in expected["files"]}
+    blobs = {path: _git(["rev-parse", f"{merge}:{path}"]).stdout.strip() for path in expected["files"]}
     return f'''import hashlib,json,subprocess
 from importlib.metadata import version
 from pathlib import Path
@@ -993,6 +1034,65 @@ nginx=subprocess.run(["nginx","-T"],check=True,text=True,capture_output=True).st
 print(json.dumps({{"installed_unit_contract":units,"stable_autoanswers_units":stable,"dependency_versions":versions,"nginx_sha256":hashlib.sha256(nginx).hexdigest()}},sort_keys=True))'''
 
 
+def _predependency_diff_proof() -> dict[str, Any]:
+    """The prior successful runtime already owns this unchanged dependency closure."""
+    previous, merge = PREDEPENDENCY_PROFILE["base_sha"], PREDEPENDENCY_PROFILE["merge_sha"]
+    paths = sorted(filter(None, _git(["diff", "--name-only", f"{previous}..{merge}"]).stdout.splitlines()))
+    deploy_source = _git(["show", f"{merge}:apps/registry_upload_http_entrypoint_hosted_runtime.py"]).stdout
+    lines = deploy_source.splitlines()
+    if (len(lines) < 1238 or lines[1205].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'
+            or lines[1206].strip() != 'run_stage("dependencies", seller_recovery_os_dependencies_command)'
+            or lines[1237].strip() != 'run_stage("root-storage-status", root_storage_commands["status"])'):
+        raise RecoveryError("predependency-exact-source-phase-invalid")
+    protected_prefixes = ("packages/node/", "artifacts/registry_upload_http_entrypoint/systemd/",
+                          "artifacts/registry_upload_http_entrypoint/nginx/", "artifacts/finance_liquidity_cash/pilot/")
+    protected_direct = set(RUNTIME_GUARD_PATHS) | {"package.json", "package-lock.json", "pyproject.toml", "uv.lock", "requirements.txt", "apps/wb_buyer_chrome_runtime.py"}
+    changed = [path for path in paths if path.startswith(protected_prefixes) or path in protected_direct
+               or Path(path).name.startswith("requirements") or Path(path).name in {"package.json", "package-lock.json", "pyproject.toml", "uv.lock"}]
+    if changed:
+        raise RecoveryError("predependency-dependency-or-deploy-contract-changed")
+    return {"previous_deployed_sha": previous, "target_merge_sha": merge,
+            "paths_sha256": digest(canonical_bytes(paths)), "protected_paths_changed": [],
+            "deploy_source_sha256": digest(deploy_source.encode()), "failed_source_line": 1206}
+
+
+def _predependency_live_contract_script(target: Any) -> str:
+    source = _selective_live_contract_script(target, merge=PREDEPENDENCY_PROFILE["merge_sha"])
+    # Reuse the already-reviewed installed Python/Node/unit/Finance-independent
+    # probe, adding the immutable npm dependency closure and required OS tools.
+    extra = """
+for tool in ('ffmpeg', 'zstd', 'psql', 'xvfb-run', 'Xvfb', 'x11vnc', 'websockify', 'openbox'):
+    subprocess.run(['sh', '-c', 'command -v ' + tool], check=True, text=True, capture_output=True)
+subprocess.run(['systemctl', 'is-active', '--quiet', 'postgresql'], check=True)
+if not Path('/usr/share/novnc').is_dir(): raise SystemExit(47)
+browsers = [Path('/root/.cache/ms-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell'),
+            Path('/dev/shm/wb-buyer-chrome-154.0.8037.57-1/opt/google/chrome/chrome')]
+for browser in browsers:
+    if not browser.is_file(): raise SystemExit(48)
+    libraries = subprocess.run(['ldd', str(browser)], check=True, text=True, capture_output=True).stdout
+    if 'not found' in libraries: raise SystemExit(49)
+chrome_package = Path('/opt/wb-core-runtime/wb-buyer-chrome/google-chrome-stable_154.0.8037.57-1_amd64.deb')
+if not chrome_package.is_file() or chrome_package.stat().st_size != 142114088: raise SystemExit(50)
+sha = hashlib.sha256()
+with chrome_package.open('rb') as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b''): sha.update(block)
+if sha.hexdigest() != '66c0645f6a19871bab2844b8537c11a0db2e7d3bea8ef85a1c7cb52a54e65a3e': raise SystemExit(51)
+versions['browser_contract'] = {'playwright_revision': '1208', 'buyer_chrome': '154.0.8037.57-1', 'libraries_available': True, 'buyer_package_sha256': sha.hexdigest()}
+package = Path(e['target']) / 'packages/node/wb_autoanswers_v1_4_2/make_mvp'
+modules = None
+if (package / 'node_modules').exists():
+    modules = subprocess.run(['node', '-e', "require('ajv');require('ajv-formats');console.log(require('ajv/package.json').version,require('ajv-formats/package.json').version)"], cwd=package, check=True, text=True, capture_output=True).stdout.strip()
+    if modules != '8.17.1 3.0.1': raise SystemExit(46)
+versions['npm_modules'] = {'installed': modules is not None, 'versions': modules}
+
+"""
+    # Keep one final JSON object; SSH version probes never execute application
+    # code or package installers and disclose no credentials/process secrets.
+    marker = 'print(json.dumps('
+    pos = source.rindex(marker)
+    return source[:pos] + extra + source[pos:]
+
+
 def collect_prestate(target: Any, merge: str, *, require_incomplete: bool, case: RecoveryCase = RecoveryCase.STORAGE_TAIL) -> dict[str, Any]:
     state = _run_remote_json(target, _prestate_script(target, merge))
     complete = state.get("metadata", {}).get("deployment_complete")
@@ -1002,6 +1102,12 @@ def collect_prestate(target: Any, merge: str, *, require_incomplete: bool, case:
         raise RecoveryError("target-marker-not-complete")
     if case is RecoveryCase.SELECTIVE_B9_ACTIVATION:
         state["selective_live_contract"] = _run_remote_json(target, _selective_live_contract_script(target))
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        if merge != PREDEPENDENCY_PROFILE["merge_sha"] or target.target_id != "wb_core_eu_hosted_runtime_active":
+            raise RecoveryError("predependency-target-not-exact")
+        state["predependency_live_contract"] = _run_remote_json(target, _predependency_live_contract_script(target))
+        if not require_incomplete and state["predependency_live_contract"]["dependency_versions"]["npm_modules"] != {"installed": True, "versions": "8.17.1 3.0.1"}:
+            raise RecoveryError("predependency-complete-npm-closure-missing")
     return state
 
 
@@ -1118,6 +1224,8 @@ def preview_fingerprint(payload: Mapping[str, Any]) -> str:
         "failure": payload["failure"],
         "recovery_case": payload.get("recovery_case"),
         "activation_failure_proof": payload.get("activation_failure_proof"),
+        "predependency_previous_release": payload.get("predependency_previous_release"),
+        "predependency_diff": payload.get("predependency_diff"),
         "selective_b9_diff": payload.get("selective_b9_diff"),
         "selective_previous_recovery": payload.get("selective_previous_recovery"),
         "prestate": payload["prestate"],
@@ -1190,13 +1298,17 @@ print(json.dumps({{'before_sha256':expected_sha,'after_sha256':hashlib.sha256(ne
         "completion": completion,
         "completion_input": completion_script,
     }
-    if case is RecoveryCase.SQLITE_ACTIVATION:
-        if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != _sqlite_activation_profile(release_run_id)["merge_sha"]:
+    if case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE}:
+        expected_merge = _sqlite_activation_profile(release_run_id)["merge_sha"] if case is RecoveryCase.SQLITE_ACTIVATION else PREDEPENDENCY_PROFILE["merge_sha"]
+        if target.target_id != "wb_core_eu_hosted_runtime_active" or runtime_dir != "/opt/wb-core-runtime/state" or merge != expected_merge:
             raise RecoveryError("sqlite-activation-target-contract-invalid")
         commands["cleaner_precomplete_probe"] = hosted._remote_shell_command(
             target, f"cd {shlex.quote(target.target_dir)} && /usr/bin/python3 apps/search_cluster_cleaner_release_probe.py "
             f"--phase before_complete --expected-sha {shlex.quote(merge)} --runtime-dir {shlex.quote(runtime_dir)}"
         )
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        commands["root_storage_status"] = hosted._build_root_storage_policy_commands(target)["status"]
+        commands["npm_dependencies"] = hosted._build_autoanswers_node_dependencies_command(target)
     if normal_activation_tail_case(case):
         if target.service_name != "wb-core-registry-http.service" or target.restart_command != "systemctl restart wb-core-registry-http.service":
             raise RecoveryError("normal-tail-restart-contract-invalid")
@@ -1284,6 +1396,27 @@ def _selective_previous_recovery_proof(client: release.GitHub) -> dict[str, Any]
             "receipt_sha256": digest(canonical_bytes(receipt)), "source_merge_sha": EXPECTED_SELECTIVE_PREVIOUS_DEPLOYED_SHA}
 
 
+def _predependency_previous_release_proof(client: release.GitHub) -> dict[str, Any]:
+    run = client.get(f"/actions/runs/{PREDEPENDENCY_PREVIOUS_RUN_ID}")
+    if (run.get("name"), run.get("path"), run.get("event"), run.get("run_attempt"), run.get("status"), run.get("conclusion"), run.get("head_sha")) != (
+        RELEASE_WORKFLOW, RELEASE_WORKFLOW_PATH, "workflow_run", 1, "completed", "success", PREDEPENDENCY_PREVIOUS_PROFILE["base_sha"]
+    ):
+        raise RecoveryError("predependency-previous-release-run-invalid")
+    artifacts = client.get(f"/actions/runs/{PREDEPENDENCY_PREVIOUS_RUN_ID}/artifacts?per_page=100")
+    expected_name = f"release-receipt-{PREDEPENDENCY_PREVIOUS_PROFILE['gate_run_id']}"
+    candidates = [item for item in artifacts.get("artifacts", []) if item.get("name") == expected_name and item.get("expired") is not True]
+    if len(candidates) != 1:
+        raise RecoveryError("predependency-previous-release-artifact-invalid")
+    raw = client.request("GET", f"/actions/artifacts/{int(candidates[0]['id'])}/zip", raw=True)
+    receipt = _json_file(_zip_files(raw, "predependency-previous-release-artifact"), "release-receipt.json", "predependency-previous-release-receipt")
+    if any(receipt.get(key) != value for key, value in PREDEPENDENCY_PREVIOUS_PROFILE.items()) or (
+        receipt.get("schema"), receipt.get("state"), receipt.get("reason"), receipt.get("release_kind")
+    ) != (release.RECEIPT_SCHEMA, "done", None, "live_runtime"):
+        raise RecoveryError("predependency-previous-release-receipt-invalid")
+    return {"run_id": PREDEPENDENCY_PREVIOUS_RUN_ID, "artifact_id": int(candidates[0]["id"]),
+            "receipt_sha256": digest(canonical_bytes(receipt)), "previous_deployed_sha": receipt["deployed_sha"]}
+
+
 def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> dict[str, Any]:
     evidence = collect_evidence(client, release_run_id)
     original = evidence["original_receipt"]
@@ -1314,6 +1447,8 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "failure": evidence["failure"],
         "recovery_case": case.value,
         "activation_failure_proof": activation_failure_proof,
+        "predependency_previous_release": _predependency_previous_release_proof(client) if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
+        "predependency_diff": _predependency_diff_proof() if case is RecoveryCase.PREDEPENDENCY_STORAGE else None,
         "selective_b9_diff": _selective_b9_diff_proof() if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "selective_previous_recovery": _selective_previous_recovery_proof(client) if case is RecoveryCase.SELECTIVE_B9_ACTIVATION else None,
         "prestate": prestate,
@@ -1321,6 +1456,12 @@ def build_preview(client: release.GitHub, release_run_id: int, target: Any) -> d
         "stages": (["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "cleaner-before-complete-probe", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if case is RecoveryCase.SQLITE_ACTIVATION else ["root-storage-status-artifact-readback", "managed-service-status", "auth-preflight", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"] if not normal_activation_tail_case(case) else ["auth-preflight", "root-storage-status", "systemd-barrier-preflight", "autoanswers-prepare-deploy", "systemd-install", "daemon-reload", "nginx", "registry-http-restart", "systemd-reconcile", "root-storage-readback", "managed-service-status", "auth-readback", "change-registry-activation-exact-target", "deployment-metadata-cas-complete", "final-runtime-services-health-finance-pilot-readback"]),
         "forbidden_stages": (["merge", "rsync", "dependencies", "systemd-install", "restart", "nginx"] if not normal_activation_tail_case(case) else ["merge", "rsync", "chown", "dependency-install"]),
     }
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        result["stages"].insert(0, "root-storage-status-refresh")
+        if not prestate["predependency_live_contract"]["dependency_versions"]["npm_modules"]["installed"]:
+            result["stages"].insert(result["stages"].index("autoanswers-prepare-deploy"), "locked-npm-dependencies-once-and-readback")
+        result["forbidden_stages"] = ["merge", "rsync", "chown", "os-pip-browser-dependency-install"]
+        result["stages"].insert(result["stages"].index("deployment-metadata-cas-complete"), "cleaner-before-complete-probe")
     result["preview_fingerprint"] = preview_fingerprint(result)
     return result
 
@@ -1434,13 +1575,20 @@ def apply_recovery(
     commands = build_stage_commands(
         target, preview["source"]["merge_sha"], preview["prestate"]["metadata_sha256"], int(preview["prestate"]["main_pid"]), case=case, release_run_id=int(preview["release_run_id"])
     )
-    # These stages are read-only and precede the durable mutation claim.  A
+    # These stages precede the durable runtime mutation claim. The exact
+    # predependency case refreshes only the derived storage status artifact. A
     # stale artifact or failed service/auth check must not consume the identity.
-    stages: list[dict[str, Any]] = [
+    stages: list[dict[str, Any]] = []
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        stages.append(_must_succeed("root-storage-status-refresh", commands["root_storage_status"]))
+    stages.extend([
         _must_succeed("root-storage-readback", commands["root_storage_readback"]),
         _must_succeed("status", commands["status"]),
         _must_succeed("auth", commands["auth"]),
-    ]
+    ])
+
+    if case is RecoveryCase.PREDEPENDENCY_STORAGE:
+        stages.append(_must_succeed("systemd-barrier-preflight", commands["normal_activation_tail"]["barrier"]))
 
     claim = {
         "schema": RECOVERY_SCHEMA,
@@ -1469,10 +1617,28 @@ def apply_recovery(
             if canonical_bytes(current_proof) != canonical_bytes(preview.get("activation_failure_proof")):
                 raise RecoveryError("sqlite-activation-failure-proof-drift-after-claim")
         if normal_activation_tail_case(case):
+            if case is RecoveryCase.PREDEPENDENCY_STORAGE and canonical_bytes(_predependency_diff_proof()) != canonical_bytes(preview["predependency_diff"]):
+                raise RecoveryError("predependency-dependency-proof-drift-after-claim")
             if case is RecoveryCase.SELECTIVE_B9_ACTIVATION and canonical_bytes(
                 _selective_b9_diff_proof()
             ) != canonical_bytes(preview["selective_b9_diff"]):
                 raise RecoveryError("normal-tail-diff-drift-after-claim")
+            if case is RecoveryCase.PREDEPENDENCY_STORAGE and not fresh["predependency_live_contract"]["dependency_versions"]["npm_modules"]["installed"]:
+                phase = "00-locked-npm-dependencies"
+                _publish_once(client, pr, _phase_marker(operation, "before-" + phase), {"schema": RECOVERY_SCHEMA, "state": "before", "operation_id": operation, "phase": phase, "preview_fingerprint": expected_fingerprint})
+                stages.append(_must_succeed("locked-npm-dependencies", commands["npm_dependencies"]))
+                installed = collect_prestate(target, preview["source"]["merge_sha"], require_incomplete=True, case=case)
+                # The only admitted state change is the previously absent locked
+                # Node closure. A crash/SSH ambiguity consumes the identity; no
+                # installer is resubmitted on readback of that claim.
+                before = json.loads(json.dumps(fresh))
+                after = json.loads(json.dumps(installed))
+                modules = after["predependency_live_contract"]["dependency_versions"].pop("npm_modules")
+                before["predependency_live_contract"]["dependency_versions"].pop("npm_modules")
+                if modules != {"installed": True, "versions": "8.17.1 3.0.1"} or canonical_bytes(before) != canonical_bytes(after):
+                    raise RecoveryError("predependency-npm-readback-or-target-drift")
+                _publish_once(client, pr, _phase_marker(operation, "after-" + phase), {"schema": RECOVERY_SCHEMA, "state": "after", "operation_id": operation, "phase": phase, "preview_fingerprint": expected_fingerprint})
+                fresh = installed
             tail = commands["normal_activation_tail"]
             phases = (("auth-preflight", tail["auth"]), ("root-storage-status", tail["storage"]), ("systemd-barrier-preflight", tail["barrier"]), ("autoanswers-prepare-deploy", tail["prepare"]), ("systemd-install", tail["install"]), ("daemon-reload", tail["daemon_reload"]), ("nginx", tail["nginx"]), ("registry-http-restart", tail["restart"]), ("systemd-reconcile", tail["reconcile"]), ("root-storage-status", tail["storage"]), ("root-storage-readback", tail["storage_readback"]), ("managed-service-status", tail["status"]), ("auth-readback", tail["auth"]))
             for ordinal, (phase, command) in enumerate(phases, start=1):
@@ -1499,7 +1665,7 @@ def apply_recovery(
             stages.append({"stage": "activation-readback", "stdout_sha256": digest(readback.stdout.encode())})
         else:
             stages.append({"stage": "activation", "stdout_sha256": digest(activation.stdout.encode())})
-        if case is RecoveryCase.SQLITE_ACTIVATION:
+        if case in {RecoveryCase.SQLITE_ACTIVATION, RecoveryCase.PREDEPENDENCY_STORAGE}:
             stages.append(_must_succeed("cleaner-before-complete-probe", commands["cleaner_precomplete_probe"]))
         before_completion = collect_prestate(
             target, preview["source"]["merge_sha"], require_incomplete=True, case=case
