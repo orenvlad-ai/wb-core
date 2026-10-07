@@ -1309,7 +1309,141 @@ def test_sqlite_activation_proof_drift_and_existing_claim_are_readback_only() ->
     assert readback['state'] == 'ambiguous' and len(client.values) == 1
 
 
+def predependency_log(*, line: int = 1206, exit_status: int = 2, gate: int = recovery.PREDEPENDENCY_PROFILE['gate_run_id']) -> bytes:
+    return f'''python3 apps/github_release_runner.py run --workflow-run-id "{gate}"
+File "apps/registry_upload_http_entrypoint_hosted_runtime.py", line {line}, in deploy_current_checkout
+    run_stage("root-storage-status", root_storage_commands["status"])
+subprocess.CalledProcessError: Command ['ssh', 'apps/root_storage_policy.py status --output /var/lib/status.json --fail-on-unregistered'] returned non-zero exit status {exit_status}.
+'''.encode()
+
+
+def test_predependency_exact_source_and_dependency_proofs() -> None:
+    run = recovery.PREDEPENDENCY_RELEASE_RUN_ID
+    case = recovery.RecoveryCase.PREDEPENDENCY_STORAGE
+    profile = recovery.PREDEPENDENCY_PROFILE
+    assert recovery.recovery_case(run) is case
+    raw = predependency_log()
+    assert recovery._prove_failed_stage(raw, profile['gate_run_id'], 'One-shot deployed release', case=case, release_run_id=run)['stage'] == 'first-root-storage-status-before-dependencies'
+    for bad in (predependency_log(line=1238), predependency_log(exit_status=3), predependency_log(exit_status=255), predependency_log(gate=1)):
+        expect_reason('failed-stage-not-exact-predependency-storage-exit2', lambda bad=bad: recovery._prove_failed_stage(bad, profile['gate_run_id'], 'One-shot deployed release', case=case, release_run_id=run))
+    expect_reason('failed-stage-not-definite-single-exit2', lambda: recovery._prove_failed_stage(raw + raw, profile['gate_run_id'], 'One-shot deployed release', case=case, release_run_id=run))
+    expect_reason('failed-stage-not-definite-single-exit2', lambda: recovery._prove_failed_stage(raw + b'line 1238, in deploy_current_checkout', profile['gate_run_id'], 'One-shot deployed release', case=case, release_run_id=run))
+    receipt = {**profile, 'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'blocked', 'reason': 'CalledProcessError', 'release_kind': 'live_runtime', 'deployed_sha': None}
+    assert recovery._validate_original_receipt(receipt, case=case, release_run_id=run)['merge_sha'] == profile['merge_sha']
+    for key in profile:
+        wrong = 1 if isinstance(profile[key], int) else 'release-v3-wrong' if key == 'operation_id' else 'a' * 40
+        expect_reason('original-receipt-not-exact-predependency-storage', lambda key=key, wrong=wrong: recovery._validate_original_receipt({**receipt, key: wrong}, case=case, release_run_id=run))
+    original = recovery._git
+    proof = recovery._predependency_diff_proof()
+    assert proof['previous_deployed_sha'] == profile['base_sha'] and proof['failed_source_line'] == 1206
+    try:
+        for path in ('requirements.txt', 'packages/node/x/runner.mjs', 'apps/registry_upload_http_entrypoint_hosted_runtime.py', 'apps/wb_buyer_chrome_runtime.py', 'artifacts/registry_upload_http_entrypoint/systemd/x.service'):
+            recovery._git = lambda args, path=path: _completed(args, stdout=path + '\n') if args[0] == 'diff' else original(args)
+            expect_reason('predependency-dependency-or-deploy-contract-changed', recovery._predependency_diff_proof)
+        source = original(['show', f"{profile['merge_sha']}:apps/registry_upload_http_entrypoint_hosted_runtime.py"]).stdout
+        recovery._git = lambda args: _completed(args, stdout=source.replace('run_stage("dependencies", seller_recovery_os_dependencies_command)', 'pass')) if args[0] == 'show' else original(args)
+        expect_reason('predependency-exact-source-phase-invalid', recovery._predependency_diff_proof)
+    finally:
+        recovery._git = original
+    from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+    target = hosted.load_hosted_runtime_target(recovery.TARGET_FILE)
+    script = recovery._predependency_live_contract_script(target)
+    ast.parse(script)
+    assert "modules = None" in script and "(package / 'node_modules').exists()" in script
+    assert "'ldd'" in script and 'not found' in script and '66c0645f' in script
+    assert 'npm ci' not in script and 'pip install' not in script and 'apt-get' not in script
+    remote = recovery._run_remote_json
+    try:
+        recovery._run_remote_json = lambda _target, code: {'metadata': {'deployment_complete': True}} if 'predependency' not in code and 'versions=' not in code else {'dependency_versions': {'npm_modules': {'installed': False, 'versions': None}}}
+        expect_reason('predependency-complete-npm-closure-missing', lambda: recovery.collect_prestate(target, profile['merge_sha'], require_incomplete=False, case=case))
+    finally:
+        recovery._run_remote_json = remote
+    commands_value = recovery.build_stage_commands(target, profile['merge_sha'], 'f' * 64, 42, case=case, release_run_id=run)
+    assert commands_value['npm_dependencies'] == hosted._build_autoanswers_node_dependencies_command(target)
+    assert 'npm ci --omit=dev --ignore-scripts --no-audit --no-fund' in commands_value['npm_dependencies'][-1]
+    assert 'rsync' not in str(commands_value) and 'apt-get' not in str(commands_value) and 'pip install' not in str(commands_value)
+
+
+def test_predependency_previous_success_receipt() -> None:
+    profile = recovery.PREDEPENDENCY_PREVIOUS_PROFILE
+    class Client:
+        bad_run = False
+        expired = False
+        receipt = {**profile, 'schema': recovery.release.RECEIPT_SCHEMA, 'state': 'done', 'reason': None, 'release_kind': 'live_runtime'}
+        def get(self, path):
+            if '/artifacts?' in path:
+                return {'artifacts': [{'name': f"release-receipt-{profile['gate_run_id']}", 'expired': self.expired, 'id': 1}]}
+            return {'name': recovery.RELEASE_WORKFLOW, 'path': recovery.RELEASE_WORKFLOW_PATH, 'event': 'workflow_run', 'run_attempt': 1, 'status': 'completed', 'conclusion': 'failure' if self.bad_run else 'success', 'head_sha': profile['base_sha']}
+        def request(self, *_args, **_kwargs):
+            result = recovery.io.BytesIO()
+            with recovery.zipfile.ZipFile(result, 'w') as archive:
+                archive.writestr('release-receipt.json', json.dumps(self.receipt))
+            return result.getvalue()
+    client = Client()
+    assert recovery._predependency_previous_release_proof(client)['previous_deployed_sha'] == recovery.PREDEPENDENCY_PROFILE['base_sha']
+    client.bad_run = True
+    expect_reason('predependency-previous-release-run-invalid', lambda: recovery._predependency_previous_release_proof(client))
+    client.bad_run = False; client.expired = True
+    expect_reason('predependency-previous-release-artifact-invalid', lambda: recovery._predependency_previous_release_proof(client))
+    client.expired = False
+    for key, wrong in [('state', 'blocked'), ('deployed_sha', M), ('operation_id', 'release-v3-wrong')]:
+        client.receipt = {**Client.receipt, key: wrong}
+        expect_reason('predependency-previous-release-receipt-invalid', lambda: recovery._predependency_previous_release_proof(client))
+
+
+def test_predependency_npm_once_then_tail(*, fail: bool = False, drift: bool = False, already_installed: bool = False) -> None:
+    value = preview()
+    value['recovery_case'] = recovery.RecoveryCase.PREDEPENDENCY_STORAGE.value
+    value['predependency_diff'] = {'exact': True}
+    missing = {'installed': False, 'versions': None}
+    present = {'installed': True, 'versions': '8.17.1 3.0.1'}
+    value['prestate']['predependency_live_contract'] = {'dependency_versions': {'npm_modules': present if already_installed else missing, 'system': 'pinned'}}
+    commands_value = commands()
+    commands_value['root_storage_status'] = ['storage-refresh']
+    commands_value['npm_dependencies'] = ['npm-locked']
+    commands_value['cleaner_precomplete_probe'] = ['cleaner-probe']
+    commands_value['normal_activation_tail'] = {name: [name] for name in ('prepare', 'install', 'daemon_reload', 'nginx', 'restart', 'reconcile', 'barrier', 'storage', 'storage_readback', 'status', 'auth')}
+    initial = value['prestate']
+    installed = json.loads(json.dumps(initial))
+    installed['predependency_live_contract']['dependency_versions']['npm_modules'] = present
+    if drift:
+        installed['predependency_live_contract']['dependency_versions']['system'] = 'changed'
+    restarted = {**installed, 'main_pid': 43}
+    complete = {**restarted, 'metadata': {**restarted['metadata'], 'deployment_complete': True}, 'metadata_sha256': '7' * 64}
+    states = [initial, restarted, restarted, complete] if already_installed else [initial, installed, restarted, restarted, complete]
+    calls = []
+    originals = recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._predependency_diff_proof
+    recovery.build_stage_commands = lambda *_args, **_kwargs: commands_value
+    recovery._run_stage = lambda command, **_kwargs: (calls.append(command[0]) or subprocess.CompletedProcess(command, 255 if fail and command[0] == 'npm-locked' else 0, stdout=command[0], stderr=''))
+    recovery.collect_prestate = lambda *_args, **_kwargs: states.pop(0)
+    recovery.prove_repo_only_descendant = lambda *_args, **_kwargs: value['runner']
+    recovery._predependency_diff_proof = lambda: value['predependency_diff']
+    client = CommentsClient()
+    try:
+        result = recovery.apply_recovery(client, value, FINGERPRINT, object())
+        assert result['state'] == ('ambiguous' if fail or drift else 'complete'), result
+        assert calls.count('npm-locked') == (0 if already_installed else 1)
+        if fail or drift:
+            assert 'restart' not in calls and 'completion' not in calls
+        else:
+            assert calls.index('prepare') < calls.index('restart') < calls.index('cleaner-probe') < calls.index('completion')
+            if not already_installed:
+                assert calls.index('barrier') < calls.index('npm-locked') < calls.index('prepare')
+        previous_calls = list(calls)
+        expect_reason('recovery-identity-already-claimed', lambda: recovery.apply_recovery(client, value, FINGERPRINT, object()))
+        assert calls == previous_calls
+        assert sum('before-00-locked-npm-dependencies' in body for body in client.values) == (0 if already_installed else 1)
+    finally:
+        recovery.build_stage_commands, recovery._run_stage, recovery.collect_prestate, recovery.prove_repo_only_descendant, recovery._predependency_diff_proof = originals
+
+
 def main() -> None:
+    test_predependency_exact_source_and_dependency_proofs()
+    test_predependency_previous_success_receipt()
+    test_predependency_npm_once_then_tail()
+    test_predependency_npm_once_then_tail(already_installed=True)
+    test_predependency_npm_once_then_tail(fail=True)
+    test_predependency_npm_once_then_tail(drift=True)
     test_failure_evidence()
     test_every_intervening_commit_is_repo_only()
     test_empty_intervening_commit_is_rejected()
