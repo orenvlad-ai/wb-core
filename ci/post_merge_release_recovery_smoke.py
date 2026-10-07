@@ -1334,34 +1334,59 @@ def test_predependency_exact_source_and_dependency_proofs() -> None:
         wrong = 1 if isinstance(profile[key], int) else 'release-v3-wrong' if key == 'operation_id' else 'a' * 40
         expect_reason('original-receipt-not-exact-predependency-storage', lambda key=key, wrong=wrong: recovery._validate_original_receipt({**receipt, key: wrong}, case=case, release_run_id=run))
     original = recovery._git
-    proof = recovery._predependency_diff_proof()
-    assert proof['previous_deployed_sha'] == profile['base_sha'] and proof['failed_source_line'] == 1206
+    # Gate checks run in a shallow candidate checkout. Synthetic Git responses
+    # exercise exact source/closure guards without historical objects/network.
+    source_lines = ['# immutable source fixture'] * 1238
+    source_lines[1205] = 'run_stage("root-storage-status", root_storage_commands["status"])'
+    source_lines[1206] = 'run_stage("dependencies", seller_recovery_os_dependencies_command)'
+    source_lines[1237] = source_lines[1205]
+    source_fixture = '\n'.join(source_lines) + '\n'
+    def fixture_git(args):
+        if args[0] == 'diff':
+            assert args[-1] == f"{profile['base_sha']}..{profile['merge_sha']}"
+            return _completed(args, stdout='apps/wb_autoanswers_worker.py\n')
+        if args[0] == 'show':
+            assert args[-1] == f"{profile['merge_sha']}:apps/registry_upload_http_entrypoint_hosted_runtime.py"
+            return _completed(args, stdout=source_fixture)
+        if args[0] == 'ls-tree':
+            assert profile['merge_sha'] in args
+            return _completed(args)
+        if args[0] == 'rev-parse':
+            assert args[-1].startswith(profile['merge_sha'] + ':')
+            return _completed(args, stdout='1' * 40)
+        raise AssertionError(args)
+    recovery._git = fixture_git
     try:
-        for path in ('requirements.txt', 'packages/node/x/runner.mjs', 'apps/registry_upload_http_entrypoint_hosted_runtime.py', 'apps/wb_buyer_chrome_runtime.py', 'artifacts/registry_upload_http_entrypoint/systemd/x.service'):
-            recovery._git = lambda args, path=path: _completed(args, stdout=path + '\n') if args[0] == 'diff' else original(args)
-            expect_reason('predependency-dependency-or-deploy-contract-changed', recovery._predependency_diff_proof)
-        source = original(['show', f"{profile['merge_sha']}:apps/registry_upload_http_entrypoint_hosted_runtime.py"]).stdout
-        recovery._git = lambda args: _completed(args, stdout=source.replace('run_stage("dependencies", seller_recovery_os_dependencies_command)', 'pass')) if args[0] == 'show' else original(args)
-        expect_reason('predependency-exact-source-phase-invalid', recovery._predependency_diff_proof)
+        proof = recovery._predependency_diff_proof()
+        assert proof['previous_deployed_sha'] == profile['base_sha'] and proof['failed_source_line'] == 1206
+        try:
+            for path in ('requirements.txt', 'packages/node/x/runner.mjs', 'apps/registry_upload_http_entrypoint_hosted_runtime.py', 'apps/wb_buyer_chrome_runtime.py', 'artifacts/registry_upload_http_entrypoint/systemd/x.service'):
+                recovery._git = lambda args, path=path: _completed(args, stdout=path + '\n') if args[0] == 'diff' else fixture_git(args)
+                expect_reason('predependency-dependency-or-deploy-contract-changed', recovery._predependency_diff_proof)
+            source = fixture_git(['show', f"{profile['merge_sha']}:apps/registry_upload_http_entrypoint_hosted_runtime.py"]).stdout
+            recovery._git = lambda args: _completed(args, stdout=source.replace('run_stage("dependencies", seller_recovery_os_dependencies_command)', 'pass')) if args[0] == 'show' else fixture_git(args)
+            expect_reason('predependency-exact-source-phase-invalid', recovery._predependency_diff_proof)
+        finally:
+            recovery._git = fixture_git
+        from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+        target = hosted.load_hosted_runtime_target(recovery.TARGET_FILE)
+        script = recovery._predependency_live_contract_script(target)
+        ast.parse(script)
+        assert "modules = None" in script and "(package / 'node_modules').exists()" in script
+        assert "'ldd'" in script and 'not found' in script and '66c0645f' in script
+        assert 'npm ci' not in script and 'pip install' not in script and 'apt-get' not in script
+        remote = recovery._run_remote_json
+        try:
+            recovery._run_remote_json = lambda _target, code: {'metadata': {'deployment_complete': True}} if 'predependency' not in code and 'versions=' not in code else {'dependency_versions': {'npm_modules': {'installed': False, 'versions': None}}}
+            expect_reason('predependency-complete-npm-closure-missing', lambda: recovery.collect_prestate(target, profile['merge_sha'], require_incomplete=False, case=case))
+        finally:
+            recovery._run_remote_json = remote
+        commands_value = recovery.build_stage_commands(target, profile['merge_sha'], 'f' * 64, 42, case=case, release_run_id=run)
+        assert commands_value['npm_dependencies'] == hosted._build_autoanswers_node_dependencies_command(target)
+        assert 'npm ci --omit=dev --ignore-scripts --no-audit --no-fund' in commands_value['npm_dependencies'][-1]
+        assert 'rsync' not in str(commands_value) and 'apt-get' not in str(commands_value) and 'pip install' not in str(commands_value)
     finally:
         recovery._git = original
-    from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
-    target = hosted.load_hosted_runtime_target(recovery.TARGET_FILE)
-    script = recovery._predependency_live_contract_script(target)
-    ast.parse(script)
-    assert "modules = None" in script and "(package / 'node_modules').exists()" in script
-    assert "'ldd'" in script and 'not found' in script and '66c0645f' in script
-    assert 'npm ci' not in script and 'pip install' not in script and 'apt-get' not in script
-    remote = recovery._run_remote_json
-    try:
-        recovery._run_remote_json = lambda _target, code: {'metadata': {'deployment_complete': True}} if 'predependency' not in code and 'versions=' not in code else {'dependency_versions': {'npm_modules': {'installed': False, 'versions': None}}}
-        expect_reason('predependency-complete-npm-closure-missing', lambda: recovery.collect_prestate(target, profile['merge_sha'], require_incomplete=False, case=case))
-    finally:
-        recovery._run_remote_json = remote
-    commands_value = recovery.build_stage_commands(target, profile['merge_sha'], 'f' * 64, 42, case=case, release_run_id=run)
-    assert commands_value['npm_dependencies'] == hosted._build_autoanswers_node_dependencies_command(target)
-    assert 'npm ci --omit=dev --ignore-scripts --no-audit --no-fund' in commands_value['npm_dependencies'][-1]
-    assert 'rsync' not in str(commands_value) and 'apt-get' not in str(commands_value) and 'pip install' not in str(commands_value)
 
 
 def test_predependency_previous_success_receipt() -> None:
