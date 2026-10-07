@@ -10152,6 +10152,22 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
             "manual": bool(raw_scope_payload.get("manual")),
         }
 
+    raw_allowlists = source.get("row_metric_allowlists")
+    allowlists_source = raw_allowlists if isinstance(raw_allowlists, Mapping) else {}
+    row_metric_allowlists: dict[str, list[str]] = {}
+    for level in ("group", "sku"):
+        raw_keys = allowlists_source.get(level)
+        keys: list[str] = []
+        seen_keys: set[str] = set()
+        for raw_key in raw_keys if isinstance(raw_keys, list) else []:
+            key = str(raw_key or "").strip()
+            if key and len(key) <= 160 and key not in seen_keys:
+                keys.append(key)
+                seen_keys.add(key)
+            if len(keys) >= WEB_VITRINA_SKU_METRIC_PRESET_MEMBER_LIMIT:
+                break
+        row_metric_allowlists[level] = keys
+
     expanded_anchors: list[str] = []
     seen_anchors: set[str] = set()
     for token in source.get("expanded_anchors") if isinstance(source.get("expanded_anchors"), list) else []:
@@ -10321,6 +10337,7 @@ def _sanitize_web_vitrina_metric_presentation_config(value: Any) -> dict[str, An
                 "display": presentation_display,
                 "manual": bool(presentation_source.get("manual")),
             },
+            "row_metric_allowlists": row_metric_allowlists,
             "expanded_anchors": expanded_anchors,
             "sku_presets": sku_presets,
             "sku_highlight_metric_keys": sku_highlight_metric_keys,
