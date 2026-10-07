@@ -132,8 +132,9 @@ TIMER_ROLES = {
 class _ExclusiveRestoreLock:
     """Reject overlapping foreground or detached maintenance restores."""
 
-    def __init__(self, runtime_dir: Path) -> None:
+    def __init__(self, runtime_dir: Path, *, _deploy_owner: bool = False) -> None:
         self.path = Path(runtime_dir).resolve() / RESTORE_LOCK_FILENAME
+        self._deploy_owner = _deploy_owner
         self.handle: Any | None = None
 
     def __enter__(self) -> "_ExclusiveRestoreLock":
@@ -155,6 +156,14 @@ class _ExclusiveRestoreLock:
             raise RuntimeError(
                 "another business-data maintenance restore is active"
             ) from exc
+        if not self._deploy_owner:
+            try:
+                from packages.application.business_data_deploy_protection import assert_releasable
+                assert_releasable(self.path.parent)
+            except BaseException:
+                self.handle.close()
+                self.handle = None
+                raise
         return self
 
     def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:

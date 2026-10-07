@@ -27,6 +27,14 @@ Runner подтверждает, что родитель merge равен про
 точный merge и проверяет фактическую версию. Если изменение подготавливает
 отдельную запись данных, выпуск заканчивается до неё.
 
+При выбранном трёхчасовом профиле `live_runtime` требует заранее held/quiet
+maintenance pause. Bounded ownership claim выполняется до merge; drain не ждут
+внутри 45-минутного workflow. Owner удерживается до внешнего runtime readback,
+а само окно автоматически не открывается. Recovery сохраняет exact original
+operation и те же guards. См.
+[защиту цикла при выпуске](../runbooks/business_data_cycle_deploy_protection.md),
+включая обязательную single-writer границу первого выпуска со старым Runner.
+
 Receipt содержит только нужные связи: PR, Gate run, base, head, merge,
 фактически выпущенную версию, результат и причину ошибки. Блокировка завершает
 workflow ошибкой, а не зелёным статусом.

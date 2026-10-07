@@ -114,6 +114,10 @@ def main() -> None:
         assert paused["enabled_units"] == [safety, OTHER_UNIT]
         assert paused["restarted_units"] == [safety, OTHER_UNIT]
     print("hosted_runtime_deploy_barrier_smoke: OK")
+    # Existing base-owned CI selection executes the new protection regressions
+    # on their first PR; no candidate-only check-map entry is needed.
+    from apps.hosted_runtime_deploy_barrier_protection_smoke import main as protection_smoke
+    protection_smoke()
 
 
 if __name__ == "__main__":

@@ -160,6 +160,77 @@ def collect_plan(client: GitHub, run_id: int) -> tuple[dict[str, Any], dict[str,
     return run, _extract_plan(raw)
 
 
+def bootstrap_deploy_operation(merge: str) -> str:
+    """Recover the OLD trusted Runner's v3 identity after its merge checkout.
+
+    Only immutable successful Gate evidence and exact merged PR/parent are
+    admitted. Six bounded read-only GitHub requests; no merge or runtime write.
+    This never renames an owner or permits a manual release-context fallback.
+    """
+    merge = exact_sha(merge, 'bootstrap-merge')
+    raw_pr = os.environ.get('WB_CORE_RELEASE_PR', '').strip()
+    head = exact_sha(os.environ.get('WB_CORE_RELEASE_HEAD'), 'bootstrap-head')
+    if not raw_pr.isdigit() or int(raw_pr) <= 0:
+        raise RunnerError('bootstrap-pr-invalid')
+    pr_number = int(raw_pr)
+    if (os.environ.get('GITHUB_EVENT_NAME') != 'workflow_run'
+            or os.environ.get('GITHUB_REPOSITORY') != REPOSITORY
+            or os.environ.get('GITHUB_WORKFLOW') != 'Release Runner'
+            or not os.environ.get('GITHUB_TOKEN')):
+        raise RunnerError('bootstrap-workflow-context-invalid')
+    try:
+        path = Path(os.environ['GITHUB_EVENT_PATH'])
+        if path.stat().st_size > 1024 * 1024:
+            raise ValueError('event exceeds bound')
+        event = json.loads(path.read_text())
+        triggered = event['workflow_run']
+        run_id = triggered['id']
+        if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id <= 0:
+            raise ValueError('invalid run')
+    except (KeyError, OSError, ValueError, TypeError):
+        raise RunnerError('bootstrap-event-invalid') from None
+    if event.get('repository', {}).get('full_name') != REPOSITORY:
+        raise RunnerError('bootstrap-event-repository-mismatch')
+    client = GitHub(REPOSITORY, os.environ['GITHUB_TOKEN'])
+    try:
+        run, plan = collect_plan(client, run_id)
+        jobs_ok = successful_jobs(client, run_id)
+        pr = client.get(f'/pulls/{pr_number}')
+        commit = client.get(f'/git/commits/{merge}')
+    except Exception:
+        # Existing API errors may include provider response bodies. Keep the
+        # bootstrap refusal small and never expose token/event payloads.
+        raise RunnerError('bootstrap-github-evidence-unavailable') from None
+    for evidence in (triggered, run):
+        if (evidence.get('id') != run_id or evidence.get('name') != WORKFLOW_NAME
+                or evidence.get('path') != WORKFLOW_PATH
+                or evidence.get('event') != 'pull_request' or evidence.get('run_attempt') != 1
+                or evidence.get('status') != 'completed' or evidence.get('conclusion') != 'success'
+                or evidence.get('repository', {}).get('full_name') != REPOSITORY
+                or exact_sha(evidence.get('head_sha'), 'bootstrap-gate-head') != head):
+            raise RunnerError('bootstrap-gate-binding-invalid')
+        # GitHub removes the run's PR links after merge. The exact checked plan,
+        # env PR/head and merged PR/parent below are the authoritative binding.
+        # An empty list is legitimate; a nonempty conflicting list never is.
+        links = evidence.get('pull_requests')
+        if not isinstance(links, list) or (links and workflow_pr(evidence) != pr_number):
+            raise RunnerError('bootstrap-gate-pr-links-invalid')
+    base = exact_sha(plan.get('base_sha'), 'bootstrap-plan-base')
+    if (not jobs_ok or plan.get('pull_request') != pr_number or plan.get('head_sha') != head
+            or plan.get('release_kind') != 'live_runtime'
+            or pr.get('number') != pr_number or pr.get('merged') is not True
+            or exact_sha(pr.get('merge_commit_sha'), 'bootstrap-pr-merge') != merge
+            or exact_sha(pr.get('head', {}).get('sha'), 'bootstrap-pr-head') != head
+            or pr.get('head', {}).get('repo', {}).get('full_name') != REPOSITORY
+            or pr.get('base', {}).get('ref') != 'main'
+            or pr.get('base', {}).get('repo', {}).get('full_name') != REPOSITORY
+            or commit.get('sha') != merge
+            or [parent.get('sha') for parent in commit.get('parents', [])] != [base]
+            or trusted_main_sha() != merge):
+        raise RunnerError('bootstrap-merge-plan-binding-invalid')
+    return operation_id(run_id, pr_number, base, head, plan['plan_sha256'])
+
+
 def workflow_pr(run: Mapping[str, Any]) -> int:
     values = run.get("pull_requests")
     if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0].get("number"), int):
@@ -408,12 +479,27 @@ print(json.dumps({{"commit": commit, "services": expected["services"], "urls": e
     raise RunnerError("deploy-readback-failed")
 
 
-def deploy_exact(pr: int, head: str, merge: str) -> str:
+def prepare_deploy_ownership(operation: str) -> None:
+    """Bounded pre-merge claim; no timer stop, drain wait, sync or restart."""
+    from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+    from packages.application.business_data_deploy_protection import remote_shell
+    with tempfile.TemporaryDirectory(prefix="wb-core-premerge-") as directory:
+        configure_ssh(Path(directory))
+        target = hosted.load_hosted_runtime_target(hosted.resolve_target_file())
+        shell = remote_shell('claim', app_dir=target.target_dir,
+            runtime_dir=target.runtime_env['REGISTRY_UPLOAD_RUNTIME_DIR'],
+            env_file=target.environment_file, operation=operation)
+        subprocess.run(hosted._remote_shell_command(target, shell), timeout=120, check=True)
+
+
+def deploy_exact(pr: int, head: str, merge: str, *, operation: str) -> str:
     with tempfile.TemporaryDirectory(prefix="wb-core-deploy-") as directory:
         configure_ssh(Path(directory))
         env = os.environ.copy()
         env["WB_CORE_RELEASE_PR"] = str(pr)
         env["WB_CORE_RELEASE_HEAD"] = head
+        env["WB_CORE_RELEASE_OPERATION_ID"] = operation
+        env['WB_CORE_RELEASE_DEFER_DEPLOY_OWNER_FINISH'] = 'true'
         subprocess.run(
             [sys.executable, "apps/registry_upload_http_entrypoint_hosted_runtime.py", "deploy"],
             cwd=ROOT,
@@ -424,6 +510,13 @@ def deploy_exact(pr: int, head: str, merge: str) -> str:
             (ROOT / "artifacts/registry_upload_http_entrypoint/input/hosted_runtime_target__europe_api.json").read_text()
         )
         runtime_readback(target, merge)
+        from apps import registry_upload_http_entrypoint_hosted_runtime as hosted
+        from packages.application.business_data_deploy_protection import remote_shell
+        finish = remote_shell('finish', app_dir=target['target_dir'],
+            runtime_dir=target['runtime_env']['REGISTRY_UPLOAD_RUNTIME_DIR'],
+            env_file=target['environment_file'], operation=operation, expected_sha=merge)
+        subprocess.run(hosted._remote_shell_command(hosted.load_hosted_runtime_target(), finish),
+                       timeout=120, check=True)
     if trusted_main_sha() != merge:
         raise RunnerError("deploy-readback-failed")
     return merge
@@ -480,11 +573,14 @@ def run(client: GitHub, run_id: int, output: Path) -> dict[str, Any]:
     merge: str | None = None
     deployed: str | None = None
     try:
+        kind = str(plan["release_kind"])
+        operation = operation_id(run_id, pr, base, head, str(plan.get('plan_sha256') or ''))
+        if kind == 'live_runtime':
+            prepare_deploy_ownership(operation)
         merge = merge_exact(client, pr, base, head)
         checkout_merge(merge)
-        kind = str(plan["release_kind"])
         if kind == "live_runtime":
-            deployed = deploy_exact(pr, head, merge)
+            deployed = deploy_exact(pr, head, merge, operation=operation)
         data = receipt(state="done", run_id=run_id, pr=pr, base=base, head=head, plan=plan, merge=merge, deployed=deployed)
     except Exception as exc:
         reason = exc.reason if isinstance(exc, RunnerError) else f"{type(exc).__name__}"

@@ -282,6 +282,8 @@ def acquire_barrier(
     if not normalized_reason:
         raise BusinessDataWriteBarrierError("audited barrier reason is required")
     with _BarrierLock(runtime_dir):
+        from packages.application.business_data_deploy_protection import assert_releasable
+        assert_releasable(runtime_dir)
         existing = _load_state(runtime_dir)
         if existing is not None and str(existing.get("phase") or "") in {
             "acquiring",
@@ -355,6 +357,8 @@ def confirm_barrier_hold(
             "exact quiet business-data maintenance hold is required"
         )
     with _BarrierLock(runtime_dir):
+        from packages.application.business_data_deploy_protection import assert_releasable
+        assert_releasable(runtime_dir)
         state = _load_state(runtime_dir)
         if (
             state is None
@@ -441,6 +445,8 @@ def release_barrier(
     with _BarrierLock(runtime_dir):
         # Transition's first prepared record uses this same lock and rechecks
         # held binding. A competing ordinary release cannot strand that record.
+        from packages.application.business_data_deploy_protection import assert_releasable
+        assert_releasable(runtime_dir)
         schedule_release_guard()
         state = _load_state(runtime_dir)
         if state is None:
@@ -562,6 +568,8 @@ def release_schedule_target_barrier(
         if unit.endswith(".timer") and [actual.get("is_enabled"), actual.get("is_active")] != target["target_timer_states"][unit]:
             raise BusinessDataWriteBarrierError("target receipt timer state differs")
     with _BarrierLock(runtime):
+        from packages.application.business_data_deploy_protection import assert_releasable
+        assert_releasable(runtime)
         state = _load_state(runtime)
         if (not state or state.get("window_id") != window or state.get("plan_fingerprint") != exact_plan
                 or state.get("window_kind") != "maintenance_pause" or not state.get("hold_confirmed")
@@ -613,6 +621,8 @@ def abort_barrier_acquire(
             "maintenance restore"
         )
     with _BarrierLock(runtime_dir):
+        from packages.application.business_data_deploy_protection import assert_releasable
+        assert_releasable(runtime_dir)
         state = _load_state(runtime_dir)
         if state is None:
             raise BusinessDataWriteBarrierError(
@@ -722,6 +732,8 @@ def mark_barrier_restoring(
     exact_window_id = _validate_identifier(window_id, label="window_id")
     exact_plan = _validate_fingerprint(plan_fingerprint)
     with _BarrierLock(runtime_dir):
+        from packages.application.business_data_deploy_protection import assert_releasable
+        assert_releasable(runtime_dir)
         state = _load_state(runtime_dir)
         if (
             state is None

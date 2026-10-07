@@ -105,6 +105,7 @@ def _remote_command(
     expected_runtime_sha256: str = "",
     expected_main_pid: int = 0,
     expected_post_metadata_sha256: str = "",
+    deploy_operation: str = "",
 ) -> list[str]:
     target_dir = shlex.quote(target.target_dir.rstrip("/"))
     service = shlex.quote(target.service_name)
@@ -219,6 +220,12 @@ def _remote_command(
         )
     else:
         raise ValueError(f"unsafe reconciliation operation: {operation}")
+    if operation in {'daemon-reload', 'restart', 'safe-finalize'}:
+        from packages.application.business_data_deploy_protection import guarded_shell
+        shell = guarded_shell(shell, app_dir=target.target_dir,
+            runtime_dir=target.runtime_env['REGISTRY_UPLOAD_RUNTIME_DIR'],
+            env_file=target.environment_file, operation=deploy_operation,
+            expected_sha=expected_sha)
     return ["ssh", "-o", "BatchMode=yes", target.ssh_destination, shell]
 
 
@@ -339,6 +346,7 @@ def reconcile(
     require_deployment_complete: bool = True,
     allow_repairs: bool = True,
     allow_safe_finalize: bool = False,
+    deploy_operation: str = "",
     runner: Runner = _default_runner,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, object]:
@@ -435,6 +443,7 @@ def reconcile(
                             expected_metadata_sha256=evidence.metadata_sha256,
                             expected_runtime_sha256=evidence.runtime_sha256,
                             expected_main_pid=evidence.main_pid,
+                            deploy_operation=deploy_operation,
                             expected_post_metadata_sha256=str(
                                 safe_finalize_plan["expected_effects"][
                                     "post_metadata_sha256"
@@ -514,7 +523,8 @@ def reconcile(
                 or evidence.main_pid <= 0
             ):
                 for operation in ("daemon-reload", "restart", "probes"):
-                    result = runner(_remote_command(target, operation))
+                    result = runner(_remote_command(target, operation, expected_sha=expected,
+                        deploy_operation=deploy_operation))
                     history.append(
                         {"attempt": attempt, "operation": operation, "returncode": result.returncode}
                     )
@@ -570,6 +580,7 @@ def main() -> int:
         ),
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument('--deploy-operation', default='', help='Exact existing deploy owner; required for selected-profile repair.')
     args = parser.parse_args()
     if args.read_only and args.safe_finalize_incomplete:
         parser.error("--read-only cannot be combined with --safe-finalize-incomplete")
@@ -583,6 +594,7 @@ def main() -> int:
         attempts=args.attempts,
         allow_repairs=not args.read_only,
         allow_safe_finalize=bool(args.safe_finalize_incomplete),
+        deploy_operation=args.deploy_operation,
     )
     rendered = json.dumps(payload, sort_keys=True)
     if args.output:
