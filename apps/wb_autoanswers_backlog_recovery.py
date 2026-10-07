@@ -486,6 +486,60 @@ def _mutation_safety_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _legacy_safe_public_repair(
+    conn: sqlite3.Connection, job: Mapping[str, Any], feedback: Mapping[str, Any],
+    publication: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Repair only an exact archived deterministic replacement, never chat proof."""
+    try:
+        result = json.loads(str(job["result_json"] or "{}"))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    metadata = result.get("server_policy_transform")
+    if not isinstance(metadata, dict) or metadata.get("contract") != "wb_autoanswers_safe_public_policy_v1":
+        return None
+    selected = safe_public_template(str(job["feedback_id"]), int(feedback["rating"] or 0))
+    reply = str(selected["reply"])
+    sha = final_reply_hash(reply)
+    revision = conn.execute(
+        "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_job_revisions WHERE processing_key=? AND reason='seller_chat_safe_public_policy_v4' AND final_route='seller_chat'",
+        (job["processing_key"],),
+    ).fetchone()
+    valid = (
+        metadata.get("source_route") == "seller_chat"
+        and metadata.get("template_id") == selected["template_id"]
+        and metadata.get("operator_handoff") is False and metadata.get("model_calls") == 0
+        and revision is not None
+        and metadata.get("source_reply_sha256") == str(revision["final_reply_sha256"])
+        and final_reply_hash(str(revision["final_reply"] or "")) == str(revision["final_reply_sha256"])
+        and str(job["final_route"]) == result.get("final_route") == "public_only"
+        and str(job["final_reply"]) == result.get("final_reply") == str(publication["exact_reply"]) == reply
+        and str(job["final_reply_sha256"]) == str(publication["normalized_reply_sha256"]) == sha
+        and not job["case_code"] and not result.get("case_code")
+        and bool(job["hard_gates_passed"]) and bool(job["node_contract_valid"])
+        and result.get("hard_gates_passed") is True and result.get("node_contract_valid") is True
+        and not job["fallback_used"] and not job["media_uncertain"] and not job["regeneration_required"]
+        and result.get("fallback_used") is False and result.get("media_uncertain") is False
+        and publication["request_source"] == "automatic"
+        and publication["state"] in {"approved", "needs_review"}
+        and not publication["lease_owner"] and not publication["lease_until"]
+        and not publication["write_started_at"] and not int(publication["attempts"] or 0)
+        and not conn.execute("SELECT 1 FROM sheet_vitrina_v1_wb_publication_attempts WHERE publication_key=?", (publication["publication_key"],)).fetchone()
+    )
+    if not valid:
+        raise RuntimeError(f"invalid deterministic safe-public provenance: {job['feedback_id']}")
+    repaired = dict(result)
+    repaired.pop("server_policy_transform")
+    repaired["server_policy_recovery"] = {
+        **metadata, "publication_route": "public_only", "publication_reply_sha256": sha,
+        "template_policy_version": selected["template_policy_version"],
+    }
+    return repaired, {"revision_id": revision["revision_id"], "revision_sha256": _fingerprint(dict(revision)),
+                      "previous_result_sha256": sha256_text(str(job["result_json"])), "publication_reply_sha256": sha}
+
+
 def _classify_action(
     row: Mapping[str, Any] | None,
     *,
@@ -499,7 +553,7 @@ def _classify_action(
     if row.get("publication_key"):
         if row.get("write_started_at") or int(row.get("write_attempt_count") or 0):
             return "readback_only"
-        return "rebind_publication"
+        return "repair_safe_public_provenance" if row.get("safe_public_provenance_repair") else "rebind_publication"
     if row.get("last_error_code") == "owner_policy_unsafe_public_reply":
         return "safe_public_recovery"
     if str(row.get("final_route") or "") == "seller_chat":
@@ -541,6 +595,15 @@ def build_plan(
                 completed_evidence is not None
                 and completed_evidence.get("outcome") == "ready"
             )
+        repair_proof = None
+        if row is not None and row.get("publication_key") and not details_by_id[feedback_id]["answer_present"] and not row.get("write_started_at") and not row.get("write_attempt_count"):
+            full_job = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (row["processing_key"],)).fetchone()
+            full_feedback = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_feedbacks WHERE feedback_id=?", (feedback_id,)).fetchone()
+            full_publication = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE publication_key=?", (row["publication_key"],)).fetchone()
+            repaired = _legacy_safe_public_repair(conn, full_job, full_feedback, full_publication)
+            if repaired is not None:
+                repair_proof = repaired[1]
+                row["safe_public_provenance_repair"] = True
         action = _classify_action(
             row,
             answer_present=bool(details_by_id[feedback_id]["answer_present"]),
@@ -556,6 +619,7 @@ def build_plan(
             {
                 "feedback_id": feedback_id,
                 "action": action,
+                "safe_public_provenance_repair": repair_proof,
                 "remote_content_hash": details_by_id[feedback_id]["content_hash"],
                 "content_version": row.get("content_version") if row else None,
                 "content_version_hash": row.get("content_version_hash") if row else None,
@@ -784,6 +848,9 @@ def _set_generated_and_enqueue(
             "source_route": route,
             "source_reply_sha256": final_reply_hash(reply),
             "template_id": selected["template_id"],
+            "template_policy_version": selected["template_policy_version"],
+            "publication_route": selected_route,
+            "publication_reply_sha256": final_reply_hash(selected_reply),
             "operator_handoff": False,
             "model_calls": 0,
         }
@@ -809,7 +876,7 @@ def _set_generated_and_enqueue(
         },
     }
     if transform:
-        result["server_policy_transform"] = transform
+        result["server_policy_recovery"] = transform
     conn.execute(
         """
         UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
@@ -1102,6 +1169,17 @@ def apply_plan(
                     adopted_result = {}
                 if not isinstance(adopted_result, dict):
                     adopted_result = {}
+                repaired = _legacy_safe_public_repair(conn, job, feedback, publication)
+                if repaired is not None:
+                    adopted_result, repair_proof = repaired
+                    if planned["action"] != "repair_safe_public_provenance" or repair_proof != planned["safe_public_provenance_repair"]:
+                        raise RuntimeError(f"safe-public provenance changed after preview: {feedback_id}")
+                    repo._audit(conn, aggregate_type="processing_job", aggregate_id=str(job["processing_key"]),
+                                event_type="safe_public_recovery_provenance_repaired", actor_type="recovery", actor_id=actor,
+                                details={"previous_result": json.loads(str(job["result_json"])), "proof": repair_proof, "provider_calls": 0, "wb_posts": 0},
+                                at=at, previous_state=str(job["state"]), next_state=STATE_APPROVED)
+                elif planned["action"] == "repair_safe_public_provenance":
+                    raise RuntimeError(f"safe-public provenance disappeared after preview: {feedback_id}")
                 if adopted_route != str(job["final_route"] or ""):
                     adopted_result["server_policy_rebind"] = {
                         "contract": CONTRACT,
@@ -1164,7 +1242,7 @@ def apply_plan(
                     previous_state=str(publication["state"]),
                     next_state=STATE_APPROVED,
                 )
-                applied_actions.append({"feedback_id": feedback_id, "action": "publication_rebound"})
+                applied_actions.append({"feedback_id": feedback_id, "action": "safe_public_provenance_repaired" if repaired is not None else "publication_rebound"})
                 continue
             evidence = AutoanswersRepository._completed_node_evidence(
                 conn, str(job["processing_key"])

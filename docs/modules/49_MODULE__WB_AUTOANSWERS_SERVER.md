@@ -127,3 +127,16 @@ recovery для `owner_policy_unsafe_public_reply` выбирает safe templat
 наличии старого audited ready result: забракованный текст не переутверждается.
 Original job evidence архивируется. Автоматический recovery сохраняет этот
 policy exclusion. Сам adapter не вызывает provider и не выполняет WB POST.
+
+Safe-public замена старого seller-chat решения сохраняет provenance в
+`server_policy_recovery`, отдельно от `server_policy_transform` настоящего
+чат-приглашения. Текст остаётся точным детерминированным public template без
+case code; общий chat guard не изменён. Для старой zero-write публикации с
+legacy safe-public metadata новый exact-cohort preview показывает действие
+`repair_safe_public_provenance`. Оно проверяет исходную archived seller-chat
+revision, source hash, текущий template ID/rating, точный reply/hash, result gates
+и отсутствие write marker/attempts. Apply сохраняет прежний result в аудите,
+исправляет только provenance и rebinds те же processing/publication keys.
+Требуется новая одобренная операция зарегистрированного adapter; предыдущая
+применённая операция не отправляется повторно. Поддельное доказательство,
+реальные chat/case-code сведения и возможный прошлый POST не переоткрываются.
