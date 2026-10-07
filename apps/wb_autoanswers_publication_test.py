@@ -498,6 +498,20 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(self.transport.write_calls, [])
         self.assertEqual(self.repo.get_feedback("publish")["ai_jobs"][0]["state"], "needs_review")
 
+    def test_safe_recovery_label_never_bypasses_chat_text_or_case_code(self) -> None:
+        for case_code, reply in (("", "Здравствуйте. Напишите в чат с продавцом."), ("А1234", "Спасибо за отзыв!")):
+            with self.subTest(case_code=case_code):
+                processing, publication = self.approved("forged-" + str(len(reply)))
+                with self.repo.transaction() as conn:
+                    row = conn.execute("SELECT result_json FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (processing,)).fetchone()
+                    result = json.loads(row["result_json"])
+                    result.update(final_reply=reply, case_code=case_code, server_policy_recovery={"contract": "wb_autoanswers_safe_public_policy_v1"})
+                    conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET final_reply=?,final_reply_sha256=?,case_code=?,result_json=? WHERE processing_key=?", (reply, final_reply_hash(reply), case_code, json.dumps(result), processing))
+                    conn.execute("UPDATE sheet_vitrina_v1_wb_publication_jobs SET exact_reply=?,normalized_reply_sha256=? WHERE publication_key=?", (reply, final_reply_hash(reply), publication))
+                self.assertIsNone(self.worker.run_once())
+                self.assertEqual(self.transport.write_calls, [])
+                self.assertEqual(self.repo.get_feedback("forged-" + str(len(reply)))["publications"][0]["last_error_code"], "chat_invitation_invalid")
+
     def test_seller_chat_invitation_is_preserved_for_publication_without_operator(self) -> None:
         self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
         outcome = self.repo.upsert_feedback(feedback("chat"), source_stream="unanswered", run_kind="steady")

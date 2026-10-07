@@ -21,6 +21,8 @@ from apps.wb_autoanswers_backlog_recovery import (
     reconcile_readback,
 )
 from apps.wb_autoanswers_runtime_test import MutableClock, feedback, successful_result
+from apps.wb_autoanswers_publication_test import FakeWbTransport
+from packages.application.wb_autoanswers_publication import AutoanswersPublicationWorker
 from packages.adapters.wb_autoanswers import FeedbackPage, WbAutoanswersHttpError
 from packages.application.wb_autoanswers_runtime import (
     DEFAULT_POLICY_VERSION,
@@ -62,6 +64,128 @@ class FakeSource:
 
 
 class BacklogRecoveryTest(unittest.TestCase):
+    def prepare_safe_public_cohort(self, runtime_dir: Path) -> tuple:
+        clock = MutableClock()
+        repo = AutoanswersRepository(runtime_dir=runtime_dir, now_factory=clock, env={})
+        repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
+        detail = feedback("safe-public", text="Очень понравился товар")
+        detail["productValuation"] = 5
+        repo.upsert_feedback(detail, source_stream="unanswered", run_kind="steady")
+        job = repo.enqueue_processing("safe-public", trigger_source="steady_sync", actor_id="sync")
+        repo.claim_processing_job(worker_id="ai")
+        repo.settle_budget(job["processing_key"], actual_cost_usd="0")
+        repo.complete_generation(job["processing_key"], result=successful_result(
+            "seller_chat", final_reply="Напишите в чат продавца по коду А1234.", case_code="А1234"
+        ), worker_id="ai")
+        backup = runtime_dir / "backups" / f"wb_autoanswers_schema_v{SCHEMA_VERSION}" / "verified.sqlite3"
+        backup.parent.mkdir(parents=True)
+        with sqlite3.connect(repo.db_path) as source, sqlite3.connect(backup) as target:
+            source.backup(target)
+        source = FakeSource({"safe-public": detail})
+        manifest = capture_t0_manifest(source)
+        remote, details = fetch_remote_evidence(source, manifest)
+        with _open(runtime_dir, read_only=True) as conn:
+            plan = build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote)
+        self.assertEqual(plan["target_actions"][0]["action"], "safe_public_transform")
+        with patch("apps.wb_autoanswers_backlog_recovery._now", clock):
+            applied = apply_plan(runtime_dir, manifest=manifest, remote=remote, details=details,
+                                 expected_fingerprint=plan["plan_fingerprint"], actor="test", approval_reference="approved-exact-cohort")
+        self.assertEqual(applied["wb_posts_by_runner"], 0)
+        return repo, clock, detail, manifest, source
+
+    @staticmethod
+    def emulate_legacy_provenance(repo: AutoanswersRepository) -> dict:
+        stored = repo.get_feedback("safe-public")
+        job, publication = stored["ai_jobs"][0], stored["publications"][0]
+        result = json.loads(job["result_json"])
+        metadata = result.pop("server_policy_recovery")
+        for key in ("publication_route", "publication_reply_sha256", "template_policy_version"):
+            metadata.pop(key)
+        result["server_policy_transform"] = metadata
+        with repo.transaction() as conn:
+            conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET result_json=? WHERE processing_key=?", (canonical_json(result), job["processing_key"]))
+        return publication
+
+    def test_safe_public_transform_and_legacy_rebind_publish_exactly_once(self) -> None:
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), TemporaryDirectory() as directory:
+                runtime_dir = Path(directory)
+                repo, clock, detail, manifest, source = self.prepare_safe_public_cohort(runtime_dir)
+                events = []
+                class Transport(FakeWbTransport):
+                    def create_answer(self, *, feedback_id, text):
+                        events.append("POST")
+                        return super().create_answer(feedback_id=feedback_id, text=text)
+                    def fetch_detail(self, feedback_id):
+                        events.append("GET")
+                        return super().fetch_detail(feedback_id)
+                transport = Transport()
+                transport.current_details["safe-public"] = detail
+                worker = AutoanswersPublicationWorker(repository=repo, transport=transport, worker_id="publisher")
+                before = repo.get_feedback("safe-public")
+                with _open(runtime_dir, read_only=True) as conn:
+                    revision_before = dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_job_revisions").fetchone())
+                if legacy:
+                    original_publication = self.emulate_legacy_provenance(repo)
+                    self.assertIsNone(worker.run_once())
+                    self.assertEqual(events, [])
+                    blocked = repo.get_feedback("safe-public")["publications"][0]
+                    self.assertEqual(blocked["last_error_code"], "chat_invitation_invalid")
+                    self.assertEqual(blocked["attempts"], 0)
+                    remote, details = fetch_remote_evidence(source, manifest)
+                    with _open(runtime_dir, read_only=True) as conn:
+                        plan = build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote)
+                    self.assertEqual(plan["target_actions"][0]["action"], "repair_safe_public_provenance")
+                    self.assertIsNotNone(plan["target_actions"][0]["safe_public_provenance_repair"]["revision_sha256"])
+                    with patch("apps.wb_autoanswers_backlog_recovery._now", clock):
+                        apply_plan(runtime_dir, manifest=manifest, remote=remote, details=details,
+                                   expected_fingerprint=plan["plan_fingerprint"], actor="test", approval_reference="approved-repair-exact-cohort")
+                        replay = apply_plan(runtime_dir, manifest=manifest, remote=remote, details=details,
+                                            expected_fingerprint=plan["plan_fingerprint"], actor="test", approval_reference="approved-repair-exact-cohort")
+                    self.assertTrue(replay["idempotent"])
+                    self.assertEqual(transport.write_calls, [])
+                    repaired = repo.get_feedback("safe-public")["publications"][0]
+                    for key in ("publication_key", "exact_reply", "normalized_reply_sha256"):
+                        self.assertEqual(repaired[key], original_publication[key])
+                stored = repo.get_feedback("safe-public")
+                job, publication = stored["ai_jobs"][0], stored["publications"][0]
+                self.assertEqual(job["attempts"], before["ai_jobs"][0]["attempts"])
+                with _open(runtime_dir, read_only=True) as conn:
+                    self.assertEqual(dict(conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_job_revisions").fetchone()), revision_before)
+                result = json.loads(job["result_json"])
+                self.assertNotIn("server_policy_transform", result)
+                self.assertEqual(result["server_policy_recovery"]["publication_reply_sha256"], publication["normalized_reply_sha256"])
+                transport.readbacks = [{**detail, "answer": {"text": publication["exact_reply"]}}]
+                self.assertEqual(worker.run_once()["state"], "publish_pending_readback")
+                self.assertEqual(worker.run_once()["state"], "published")
+                self.assertIsNone(worker.run_once())
+                self.assertEqual(events, ["GET", "POST", "GET"])
+                self.assertEqual(len(transport.write_calls), 1)
+
+    def test_legacy_provenance_repair_rejects_forgery_and_write_evidence(self) -> None:
+        for forged in ("template", "source_hash", "case_code", "reply", "revision", "write_marker", "attempts", "lease"):
+            with self.subTest(forged=forged), TemporaryDirectory() as directory:
+                runtime_dir = Path(directory)
+                repo, _clock, _detail, manifest, source = self.prepare_safe_public_cohort(runtime_dir)
+                publication = self.emulate_legacy_provenance(repo)
+                stored = repo.get_feedback("safe-public")["ai_jobs"][0]
+                result = json.loads(stored["result_json"])
+                with repo.transaction() as conn:
+                    if forged == "template": result["server_policy_transform"]["template_id"] = "forged"
+                    if forged == "source_hash": result["server_policy_transform"]["source_reply_sha256"] = "f" * 64
+                    if forged == "case_code": result["case_code"] = "А1234"
+                    if forged == "reply": result["final_reply"] = "Здравствуйте. Напишите в чат с продавцом."
+                    if forged == "revision": conn.execute("DELETE FROM sheet_vitrina_v1_wb_autoanswer_job_revisions")
+                    if forged == "write_marker": conn.execute("UPDATE sheet_vitrina_v1_wb_publication_jobs SET write_started_at='2026-07-20T12:00:00Z'")
+                    if forged == "attempts": conn.execute("UPDATE sheet_vitrina_v1_wb_publication_jobs SET attempts=1")
+                    if forged == "lease": conn.execute("UPDATE sheet_vitrina_v1_wb_publication_jobs SET lease_owner='active-worker'")
+                    conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET result_json=? WHERE processing_key=?", (canonical_json(result), stored["processing_key"]))
+                remote, _details = fetch_remote_evidence(source, manifest)
+                with _open(runtime_dir, read_only=True) as conn:
+                    with self.assertRaisesRegex(RuntimeError, "invalid deterministic safe-public provenance|ambiguous prior WB write"):
+                        build_plan(conn, runtime_dir=runtime_dir, manifest=manifest, remote=remote)
+                self.assertEqual(repo.get_feedback("safe-public")["publications"][0]["publication_key"], publication["publication_key"])
+
     def test_recovery_gets_are_paced_and_retry_429_with_server_delay(self) -> None:
         class Clock:
             def __init__(self) -> None:
