@@ -41,6 +41,34 @@ class AutoanswersPublicationWorker:
         if claimed["action"] == "readback":
             return self._readback(claimed)
 
+        # The local unanswered observation can be old (or an operator can have
+        # answered since sync). Fail closed on a fresh official detail GET.
+        try:
+            detail = self.transport.fetch_detail(str(claimed["feedback_id"]))
+        except (WbAutoanswersHttpError, WbAutoanswersTransportError) as exc:
+            retryable = not isinstance(exc, WbAutoanswersHttpError) or exc.status_code == 429 or exc.status_code >= 500
+            return self.repository.record_publication_preflight_failure(
+                key, worker_id=self.worker_id,
+                error_code=f"wb_preflight_http_{exc.status_code}" if isinstance(exc, WbAutoanswersHttpError) else "wb_preflight_transport",
+                retry_after_seconds=(getattr(exc, "retry_after_seconds", None) or 60) if retryable else None,
+            )
+        if detail is None:
+            return self.repository.record_publication_preflight_failure(
+                key, worker_id=self.worker_id, error_code="wb_preflight_detail_missing", retry_after_seconds=60,
+            )
+        if str(detail.get("id") or "") != str(claimed["feedback_id"]):
+            return self.repository.record_publication_preflight_failure(
+                key, worker_id=self.worker_id, error_code="wb_preflight_identity_mismatch",
+            )
+        observed = self.repository.upsert_feedback(detail, source_stream="publication_preflight", run_kind="detail_readback")
+        reason = (
+            "external_answer_present" if observed["has_external_answer"] or observed["officially_processed_without_answer"]
+            else "stale_content_version" if observed["content_version_hash"] != str(claimed["content_version_hash"])
+            else None
+        )
+        if reason:
+            return self.repository.record_publication_preflight_failure(key, worker_id=self.worker_id, error_code=reason)
+
         # begin_publication_write is the last durable OFF/invariant gate.  From
         # this point any transport exception is ambiguous and can only read back.
         attempt = self.repository.begin_publication_write(key, worker_id=self.worker_id)

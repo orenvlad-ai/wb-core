@@ -11,6 +11,8 @@ from pathlib import Path
 import subprocess
 from typing import Any, Mapping
 
+from packages.application.wb_autoanswers_failures import transient_provider_failure
+
 from packages.contracts.wb_autoanswers import (
     EVALUATION_SIGNATURE,
     NODE_BOUNDARY_VERSION,
@@ -20,6 +22,32 @@ from packages.contracts.wb_autoanswers import (
 
 DEFAULT_TIMEOUT_SECONDS = 180
 MAX_EMBEDDED_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _live_provider_failure(code: str, message: str) -> tuple[str, bool]:
+    """Normalize the existing Node error envelope without changing the runner.
+
+    The original runner does not export Retry-After. The worker uses its
+    persistent bounded cooldown instead. Prior successful roles may already
+    have usage, while the failed network/5xx role still has unknown cost.
+    """
+    network_codes = {
+        "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND",
+        "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+        "UND_ERR_SOCKET",
+    }
+    text = message.strip().casefold()
+    if code.startswith("OPENAI_HTTP_2"):
+        return "OPENAI_RESPONSE_INVALID", True
+    if code.startswith("OPENAI_HTTP_5"):
+        return code, True
+    if code in network_codes or (code == "NODE_BOUNDARY_ERROR" and text in {"fetch failed", "failed to fetch"}):
+        return "OPENAI_NETWORK", True
+    if code in {"20", "23", "ABORT_ERR", "TimeoutError", "AbortError", "NODE_BOUNDARY_ERROR"} and (
+        "timeout" in text or "timed out" in text or "operation was aborted" in text
+    ):
+        return "OPENAI_TIMEOUT", True
+    return code, False
 
 
 class NodeBoundaryError(RuntimeError):
@@ -33,6 +61,8 @@ class NodeBoundaryError(RuntimeError):
         partial_usage: Mapping[str, Any] | None = None,
         partial_role_calls: int = 0,
         diagnostics: Mapping[str, Any] | None = None,
+        retry_after_seconds: int = 0,
+        provider_cost_uncertain: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -41,6 +71,8 @@ class NodeBoundaryError(RuntimeError):
         self.partial_usage = dict(partial_usage or {})
         self.partial_role_calls = max(0, int(partial_role_calls or 0))
         self.diagnostics = dict(diagnostics or {})
+        self.retry_after_seconds = max(0, int(retry_after_seconds or 0))
+        self.provider_cost_uncertain = provider_cost_uncertain
 
 
 def _data_url(path_value: str | None, mime_type: str | None = None) -> str | None:
@@ -329,14 +361,20 @@ class NodeAutoanswersBridge:
         if completed.returncode != 0 or not bool(response.get("ok")):
             error = response.get("error") if isinstance(response.get("error"), Mapping) else {}
             code = str(error.get("code") or "node_boundary_error")
-            retryable = code.startswith("OPENAI_HTTP_429") or code.startswith("OPENAI_HTTP_5") or code == "node_timeout"
+            message = str(error.get("message") or "Node boundary failed")
+            uncertain_provider_outcome = False
+            if payload.get("operation") == "run" and payload.get("execution_mode") == "live":
+                code, uncertain_provider_outcome = _live_provider_failure(code, message)
+            retryable = transient_provider_failure(code)
             partial_usage = error.get("partial_usage") if isinstance(error.get("partial_usage"), Mapping) else {}
             raise NodeBoundaryError(
-                str(error.get("message") or "Node boundary failed"),
+                message,
                 code=code,
                 retryable=retryable,
                 partial_cost_usd=float(error.get("partial_cost_usd") or 0),
                 partial_usage=partial_usage,
                 partial_role_calls=int(error.get("partial_role_calls") or 0),
+                retry_after_seconds=int(error.get("retry_after_seconds") or 0),
+                provider_cost_uncertain=uncertain_provider_outcome or bool(error.get("provider_cost_uncertain")),
             )
         return dict(response["data"])

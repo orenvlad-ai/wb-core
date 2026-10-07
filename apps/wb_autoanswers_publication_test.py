@@ -19,6 +19,7 @@ class FakeWbTransport:
         self.write_calls: list[tuple[str, str]] = []
         self.status: int | Exception = 204
         self.readbacks: list[dict | None | Exception] = []
+        self.current_details: dict[str, dict] = {}
 
     def create_answer(self, *, feedback_id: str, text: str) -> int:
         self.write_calls.append((feedback_id, text))
@@ -27,6 +28,11 @@ class FakeWbTransport:
         return self.status
 
     def fetch_detail(self, feedback_id: str) -> dict | None:
+        if not any(item[0] == feedback_id for item in self.write_calls):
+            detail = self.current_details.get(feedback_id)
+            if isinstance(detail, Exception):
+                raise detail
+            return detail
         value = self.readbacks.pop(0) if self.readbacks else None
         if isinstance(value, Exception):
             raise value
@@ -48,6 +54,7 @@ class PublicationTest(unittest.TestCase):
         self.temp.cleanup()
 
     def approved(self, feedback_id: str = "publish", *, route: str = "public_only") -> tuple[str, str]:
+        self.transport.current_details[feedback_id] = feedback(feedback_id)
         self.repo.update_settings(master_enabled=True, mode="auto_all", actor_id="admin")
         outcome = self.repo.upsert_feedback(
             feedback(feedback_id), source_stream="unanswered", run_kind="steady"
@@ -73,6 +80,7 @@ class PublicationTest(unittest.TestCase):
         return row
 
     def manual_reviewed(self, feedback_id: str = "manual", *, route: str = "public_only") -> dict:
+        self.transport.current_details[feedback_id] = feedback(feedback_id)
         self.env["WB_CORE_WEB_AUTH_USERNAME"] = "reviewer"
         self.repo.update_settings(master_enabled=True, mode="manual", actor_id="admin")
         self.repo.upsert_feedback(feedback(feedback_id), source_stream="unanswered", run_kind="steady")
@@ -92,6 +100,42 @@ class PublicationTest(unittest.TestCase):
         )
         self.assertIn(stored["state"], {"generated", "needs_review"})
         return reviewed
+
+    def test_fresh_preflight_external_answer_and_wbru_never_post(self) -> None:
+        for state in ("answer", "wbRu"):
+            with self.subTest(state=state):
+                name = "preflight-" + state
+                self.approved(name)
+                current = feedback(name, answer="Ответ оператора" if state == "answer" else "")
+                if state == "wbRu": current["state"] = "wbRu"
+                self.transport.current_details[name] = current
+                result = self.worker.run_once()
+                self.assertFalse(result["write_attempted"])
+                self.assertEqual(self.transport.write_calls, [])
+                self.assertEqual(self.repo.local_unanswered_count(), 0)
+    def test_preflight_content_change_and_429_allow_no_duplicate_write(self) -> None:
+        self.approved("changed")
+        self.transport.current_details["changed"] = feedback("changed", text="Изменённый отзыв")
+        self.assertFalse(self.worker.run_once()["write_attempted"])
+        self.assertEqual(self.transport.write_calls, [])
+        self.approved("limited")
+        self.transport.current_details["limited"] = WbAutoanswersHttpError(429, "limited", retry_after_seconds=90)
+        first = self.worker.run_once()
+        self.assertEqual(first["state"], "approved")
+        self.assertFalse(first["write_attempted"])
+        self.clock.advance(90)
+        self.transport.current_details["limited"] = feedback("limited")
+        self.worker.run_once()
+        self.worker.run_once()
+        self.assertEqual(len(self.transport.write_calls), 1)
+    def test_provider_cooldown_does_not_block_ready_publication_or_readback(self) -> None:
+        self.approved("ready")
+        self.repo.record_provider_failure(error_code="OPENAI_HTTP_429")
+        reply = self.repo.get_feedback("ready")["generated_reply"]
+        self.transport.readbacks = [feedback("ready", answer=reply)]
+        self.assertTrue(self.worker.run_once()["write_attempted"])
+        self.assertEqual(self.worker.run_once()["state"], "published")
+        self.assertEqual(len(self.transport.write_calls), 1)
 
     def test_204_requires_matching_detail_readback(self) -> None:
         _processing, publication = self.approved()

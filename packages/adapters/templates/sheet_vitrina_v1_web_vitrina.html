@@ -6407,6 +6407,7 @@
 	              </div>
 	              <p class="feedbacks-source-helper"><span data-autoanswers-budget-updated>Расходы ещё не обновлялись</span> · Точный остаток доступен в кабинете OpenAI · <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener noreferrer">Баланс и пополнение OpenAI</a></p>
 	              <p class="autoanswers-progress" data-autoanswers-progress></p>
+	              <p class="autoanswers-warning" data-autoanswers-live-backlog>Текущая очередь Wildberries ещё не сверена.</p>
 	              <section class="autoanswers-queue-dashboard" aria-label="Обработка отзывов"><strong>Обработка отзывов</strong><p class="feedbacks-source-helper" data-autoanswers-queue-context></p><div class="autoanswers-queue-grid" data-autoanswers-queue-metrics></div><section class="autoanswers-progress-card" data-autoanswers-progress-card="all"><h4>Все отзывы</h4><div data-autoanswers-progress-bars data-autoanswers-all-progress-bars></div></section><section class="autoanswers-progress-card is-content" data-autoanswers-progress-card="content-bearing"><h4>Отзывы с содержанием</h4><div data-autoanswers-content-progress-bars></div><p class="autoanswers-rating-barrier-note">Живая очередь соблюдает буквальный порядок: отзывы с содержанием 1★ → 2★ → 3★ → 4★ → 5★ → пустые. Новый более приоритетный отзыв будет выбран на следующем безопасном claim.</p></section><p class="autoanswers-stop-reason"><span data-autoanswers-stop-reason></span><button class="button secondary" type="button" data-autoanswers-increase-limit hidden>Увеличить лимит</button></p></section>
 	            </section>
 
@@ -18824,6 +18825,18 @@
       }
       const reconciliation = server.reconciliation || {};
       const queue = server.runtime && server.runtime.progress ? server.runtime.progress : {};
+      const liveBacklogNode = document.querySelector("[data-autoanswers-live-backlog]");
+      if (liveBacklogNode) {
+        const live = queue.live_backlog || {};
+        liveBacklogNode.textContent = live.verified
+          ? "Текущая очередь Wildberries: без ответа " + Number(live.unresolved || 0) +
+            " · с содержанием " + Number(live.content_bearing || 0) + " · пустые " + Number(live.rating_only || 0) +
+            " · технические ошибки " + Number(live.technical_error || 0) +
+            " · требуется проверка " + (Number(live.needs_review || 0) + Number(live.policy_error || 0) + Number(live.indeterminate || 0)) +
+            " · сверка " + (live.completed_at || "—") + (live.fresh ? "" : " (нужна новая сверка)")
+          : "Текущая очередь Wildberries ещё не сверена. Исторический прогресс не подтверждает отсутствие новых отзывов.";
+        if ((queue.provider_pause || {}).active) liveBacklogNode.textContent += " · Вызовы AI приостановлены до " + queue.provider_pause.until;
+      }
       const rolling = queue.rolling_admission || {};
       if (autoanswersProgressNode) {
         const progress = reconciliation.progress || {};
@@ -18870,7 +18883,7 @@
       }
       if (autoanswersProgressBarsNode) {
         const statusLabels = {paused_manual:"Приостановлено вручную",content_readback:"Проверяем публикацию содержательного отзыва",content_processing:"Обрабатывается отзыв с содержанием",content_waiting:"Ожидают отзывы с содержанием",rating_only_waiting:"Ожидают пустые отзывы",complete:"Завершено"};
-        const pauseLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",no_eligible_jobs:"Нет доступных задач"};
+        const pauseLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",provider_cooldown:"Пауза после сбоя сервиса генерации",unresolved_work:"В текущей очереди WB остались неотвеченные отзывы",no_eligible_jobs:"Нет доступных задач"};
         const renderProgressStage = function(label, stage, kind) {
           const data = stage || {};
           const done = Number(data.done || 0);
@@ -18905,7 +18918,7 @@
         }
       }
       if (autoanswersStopReasonNode) {
-        const stopLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена; paid processing заблокирован",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена; materialization продолжится после обработки",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",no_eligible_jobs:"Нет доступных задач"};
+        const stopLabels = {hourly_budget_reached:"Достигнут часовой лимит",daily_budget_reached:"Достигнут дневной лимит",monthly_budget_reached:"Достигнут месячный лимит",run_budget_reached:"Достигнут лимит текущего запуска",run_review_limit_reached:"Достигнут лимит отзывов запуска",run_cap_missing:"У запуска отсутствует обязательный лимит",paid_reviews_hourly_limit:"Достигнут лимит платных отзывов в час",concurrency_limit:"Достигнут лимит одновременной обработки",budget_state_unknown:"Стоимость оборванного вызова не подтверждена; paid processing заблокирован",openai_quota_exhausted:"Квота OpenAI исчерпана",rate_limited:"Внешний сервис ограничил частоту запросов",worker_error:"Ошибка worker",retry_backoff:"Ожидание повторной попытки",processing_queue_depth_limit:"Очередь заполнена; materialization продолжится после обработки",stale_lease:"Обнаружен просроченный lease",worker_unavailable:"Worker не выполнял scheduler ticks",manual_pause:"Пауза: ручной режим",emergency_stop:"Аварийная остановка",master_switch_off:"Автоответы выключены",provider_cooldown:"Пауза после сбоя сервиса генерации",unresolved_work:"В текущей очереди WB остались неотвеченные отзывы",no_eligible_jobs:"Нет доступных задач"};
         const reason = String(queue.stop_reason || "no_eligible_jobs");
         const eta = queue.eta_hours === null || queue.eta_hours === undefined ? "ETA пока недоступно" : ("ETA около " + Number(queue.eta_hours).toFixed(1) + " ч.");
         autoanswersStopReasonNode.textContent = (stopLabels[reason] || friendlyAutoanswersStatus(reason)) + " · run $" + Number(queue.run_actual_usd || 0).toFixed(2) + " · reserved $" + Number(queue.run_active_reserved_usd || 0).toFixed(2) + " · " + eta + " · policy epoch " + Number(queue.policy_epoch || 0);

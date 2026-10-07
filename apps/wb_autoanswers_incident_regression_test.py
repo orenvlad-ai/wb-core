@@ -813,6 +813,15 @@ class IncidentRegressionTest(unittest.TestCase):
         )
 
         class Repository:
+            runtime_dir = self.repo.runtime_dir
+
+            def settings(_self):
+                from types import SimpleNamespace
+                return SimpleNamespace(policy_epoch=0, policy_version="legacy")
+
+            def recover_unanswered_inventory(_self, **_kwargs):
+                return None
+
             def sync_cursor(_self, _name: str) -> dict:
                 return {"cursor": {"tick": 7}}
 
@@ -853,6 +862,9 @@ class IncidentRegressionTest(unittest.TestCase):
                 raise tick_failure
 
         class Sync:
+            def reconcile_absent_unanswered_tick(_self):
+                return {}
+
             def steady_sync_tick(_self, *, is_answered: bool) -> dict:
                 return {"answered": is_answered}
 

@@ -18,6 +18,9 @@ class Adapter(Protocol):
 
 
 _ADAPTER_TYPES: dict[str, tuple[str, str]] = {
+    "wb_autoanswers_recovery_v1": (
+        "apps.wb_autoanswers_recovery_production_adapter", "WbAutoanswersRecoveryProductionAdapter",
+    ),
     "inventory_retention_publication_v1": (
         "apps.inventory_retention_publication", "InventoryRetentionPublicationAdapter",
     ),

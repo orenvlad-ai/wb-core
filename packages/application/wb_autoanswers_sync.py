@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
@@ -272,6 +273,7 @@ class WbFeedbackSyncService:
                 "window_end": iso_utc(now),
                 "started_at": iso_utc(now),
                 "remote_count_at_start": int(self.source.count_unanswered()),
+                "observed_ids": [],
             }
         window_end = parse_timestamp(cursor.get("window_end"))
         if window_end is None:
@@ -295,6 +297,7 @@ class WbFeedbackSyncService:
             )
             upserted = 0
             enqueued = 0
+            observed_ids = list(cursor.get("observed_ids") or [])
             for row in page.rows:
                 outcome = self.repository.upsert_feedback(
                     row,
@@ -302,6 +305,7 @@ class WbFeedbackSyncService:
                     run_kind="steady",
                     sync_run_id=run_id,
                 )
+                observed_ids.append(str(outcome["feedback_id"]))
                 upserted += int(
                     outcome["is_new"]
                     or outcome["content_changed"]
@@ -319,13 +323,19 @@ class WbFeedbackSyncService:
                 next_cursor = {
                     **cursor,
                     "skip": int(cursor.get("skip") or 0) + page.take,
+                    "observed_ids": observed_ids,
                 }
                 successful = False
             else:
+                remote_count_at_end = int(self.source.count_unanswered())
                 next_cursor = {
                     "active": False,
                     "skip": 0,
                     "completed_at": iso_utc(now),
+                    "feedback_ids": sorted(set(observed_ids)),
+                    "remote_count_at_end": remote_count_at_end,
+                    "coverage_confirmed": len(observed_ids) == len(set(observed_ids))
+                    == int(cursor.get("remote_count_at_start") or 0) == remote_count_at_end,
                     "remote_count_at_start": int(
                         cursor.get("remote_count_at_start") or len(page.rows)
                     ),
@@ -364,6 +374,43 @@ class WbFeedbackSyncService:
                 error_code=error.code,
             )
             raise error from exc
+
+    def reconcile_absent_unanswered_tick(self, *, batch_size: int = 2) -> dict[str, Any]:
+        """Resolve a bounded local tail by detail GET, never by list absence."""
+        inventory = self.repository.sync_cursor("wb_feedback_full_unanswered_inventory")
+        observed = dict((inventory or {}).get("cursor") or {})
+        completed = parse_timestamp(observed.get("completed_at"))
+        if not observed.get("coverage_confirmed") or not completed or completed < self._now() - timedelta(minutes=15):
+            return {"checked": 0, "resolved": 0, "inventory_pending": True}
+        stream = "wb_feedback_absent_unanswered_details"
+        saved = self.repository.sync_cursor(stream)
+        cursor = dict((saved or {}).get("cursor") or {})
+        # The rotating pass survives repeated inventories, so an unresolved
+        # early row cannot starve the rest of the local tail. Missing details
+        # remain unresolved and are revisited after the pass ends.
+        after = str(cursor.get("after") or "")
+        official = set(observed.get("feedback_ids") or [])
+        with closing(self.repository._connect()) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            rows = conn.execute("""SELECT feedback_id FROM sheet_vitrina_v1_wb_feedbacks
+                WHERE COALESCE(answer_text,'')='' AND COALESCE(json_extract(raw_json,'$.state'),'')<>'wbRu'
+                  AND feedback_id>? ORDER BY feedback_id LIMIT ?""", (after, min(100, max(1, batch_size)) + len(official))).fetchall()
+        selected = [str(row["feedback_id"]) for row in rows if str(row["feedback_id"]) not in official][:max(1, min(100, batch_size))]
+        resolved = 0
+        for feedback_id in selected:
+            try:
+                detail = self.source.fetch_detail(feedback_id)
+                # Identity and official answer/state are required. An empty or
+                # missing detail does not manufacture a resolved local row.
+                answer = (detail or {}).get("answer")
+                answer_text = str(answer.get("text") or "") if isinstance(answer, dict) else str(answer or "")
+                if detail and str(detail.get("id") or "") == feedback_id and (answer_text.strip() or detail.get("state") == "wbRu"):
+                    self.repository.upsert_feedback(detail, source_stream="absent_inventory_detail", run_kind="detail_readback")
+                    resolved += 1
+            except Exception as exc:
+                raise self._map_error(exc) from exc
+        self.repository.save_sync_cursor(stream, cursor={"inventory_at": observed["completed_at"], "after": selected[-1] if selected else ""}, successful=True)
+        return {"checked": len(selected), "resolved": resolved}
 
     def reconcile_archive_tick(
         self,

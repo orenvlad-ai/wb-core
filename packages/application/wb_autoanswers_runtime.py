@@ -64,6 +64,9 @@ from packages.contracts.wb_autoanswers import (
     validate_mode,
 )
 from packages.application.sqlite_contention import connect_sqlite
+from packages.application.wb_autoanswers_failures import (
+    provider_backoff, provider_cost_uncertain, recoverable_technical_failure,
+)
 from packages.application.root_storage_policy import (
     admit_root_write,
     predict_sqlite_backup_bytes,
@@ -3553,6 +3556,8 @@ class AutoanswersRepository:
         """Build queue and progress evidence entirely from the local database."""
 
         settings = self.settings()
+        live_backlog = self.unanswered_inventory_status()
+        provider_pause = self.provider_pause_status()
         now = self._now()
         hour_start = iso_utc(now - timedelta(hours=1))
         with closing(self._connect()) as conn:
@@ -4375,7 +4380,13 @@ class AutoanswersRepository:
             "run_uncertainty_hold_usd": float(run_spend["uncertainty"] or 0),
             "throughput_last_hour": throughput,
             "eta_hours": eta,
-            "stop_reason": stop_reason or "no_eligible_jobs",
+            "live_backlog": live_backlog,
+            "provider_pause": provider_pause,
+            "stop_reason": (
+                "provider_cooldown" if provider_pause["active"]
+                else "unresolved_work" if live_backlog["unresolved"] and stop_reason in {None, "", "no_eligible_jobs"}
+                else stop_reason or "no_eligible_jobs"
+            ),
             "last_sync_at": last_sync,
             "last_scheduler_tick_at": runtime["last_scheduler_tick_at"] if runtime is not None else None,
             "last_successful_ai_call_at": runtime["last_successful_ai_call_at"] if runtime is not None else None,
@@ -6207,6 +6218,7 @@ class AutoanswersRepository:
     def claim_processing_job(self, *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> dict[str, Any] | None:
         settings = self.assert_effective_on(operation="AI processing")
         now = self._now()
+        provider_pause = self.provider_pause_status()
         lease_until = now + timedelta(seconds=max(1, int(lease_seconds)))
         with self.transaction() as conn:
             uncertain = int(
@@ -6250,14 +6262,21 @@ class AutoanswersRepository:
                     },
                     at=now,
                 )
+            if self._has_unquantified_orphan_boundary(conn, now):
+                self._set_stop_reason(conn, "budget_state_unknown", details={"orphan_boundary_unquantified": True}, at=now)
             runtime = conn.execute(
                 "SELECT stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1"
             ).fetchone()
-            if runtime is not None and str(runtime["stop_reason"] or "") in {
+            paid_blocked = runtime is not None and str(runtime["stop_reason"] or "") in {
                 "budget_state_unknown",
                 "openai_quota_exhausted",
-            }:
-                return None
+            }
+            # New quota failures use a durable cooldown and one bounded probe.
+            # Historical quota latches require a proved success or ON epoch
+            # before recovery clears them; no speculative paid replay.
+            if runtime and str(runtime["stop_reason"] or "") == "openai_quota_exhausted" and provider_pause.get("until") and not provider_pause["active"]:
+                paid_blocked = False
+            paid_blocked = paid_blocked or bool(provider_pause["active"])
             active_paid = int(
                 conn.execute(
                     """
@@ -6273,7 +6292,7 @@ class AutoanswersRepository:
             )
             if active_paid >= effective_concurrency:
                 self._set_stop_reason(conn, "concurrency_limit", at=now)
-                return None
+                paid_blocked = True
             # Retain stale jobs as review evidence, but remove them from every
             # automatic claim path before applying content priority.  Joining
             # claims to the current content version alone would make these
@@ -6331,6 +6350,7 @@ class AutoanswersRepository:
                     (j.state=? AND j.retry_stage='processing' AND j.available_at<=?)
                 )
                   AND j.policy_epoch=?
+                  AND (?=0 OR j.processing_kind<>?)
                   AND COALESCE(f.answer_text,'')=''
                   AND COALESCE(json_extract(f.raw_json,'$.state'),'')<>'wbRu'
                   AND (? <> ? OR j.trigger_source='manual_generate')
@@ -6338,6 +6358,7 @@ class AutoanswersRepository:
                   AND (
                     j.trigger_source='manual_generate'
                     OR ?=''
+                    OR ?=1
                     OR (
                         CASE f.content_classification
                           WHEN ? THEN CASE WHEN f.rating BETWEEN 1 AND 5
@@ -6361,11 +6382,14 @@ class AutoanswersRepository:
                     STATE_RETRYABLE_ERROR,
                     iso_utc(now),
                     settings.policy_epoch,
+                    int(paid_blocked),
+                    PROCESSING_KIND_FROZEN_AI,
                     settings.mode,
                     MODE_MANUAL,
                     active_run_id,
                     active_run_id,
                     active_run_id,
+                    int(paid_blocked),
                     CONTENT_CLASS_CONTENT_BEARING,
                     AUTOMATIC_PRIORITY_INDETERMINATE,
                     CONTENT_CLASS_INDETERMINATE,
@@ -6400,11 +6424,8 @@ class AutoanswersRepository:
                     if priority_bucket is not None
                     else "no_eligible_jobs"
                 )
-                self._set_stop_reason(
-                    conn,
-                    no_job_reason,
-                    at=now,
-                )
+                if not paid_blocked:
+                    self._set_stop_reason(conn, no_job_reason, at=now)
                 return None
             if int(row["enable_epoch"]) != settings.enable_epoch:
                 conn.execute(
@@ -6490,8 +6511,295 @@ class AutoanswersRepository:
                 "SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?",
                 (row["processing_key"],),
             ).fetchone()
-            self._set_stop_reason(conn, None, at=now)
+            if not paid_blocked:
+                self._set_stop_reason(conn, None, at=now)
             return dict(claimed)
+
+    def provider_pause_status(self) -> dict[str, Any]:
+        saved = self.sync_cursor("wb_autoanswers_provider_pause")
+        value = dict((saved or {}).get("cursor") or {})
+        until = parse_timestamp(value.get("until"))
+        return {**value, "active": bool(until and until > self._now())}
+
+    def unanswered_inventory_status(self) -> dict[str, Any]:
+        saved = self.sync_cursor("wb_feedback_full_unanswered_inventory")
+        cursor = dict((saved or {}).get("cursor") or {})
+        completed = parse_timestamp(cursor.get("completed_at"))
+        verified = bool(cursor.get("coverage_confirmed") and completed)
+        result: dict[str, Any] = {
+            "verified": verified, "completed_at": cursor.get("completed_at"),
+            "fresh": bool(verified and completed >= self._now() - timedelta(minutes=15)),
+            "observed_count": len(cursor.get("feedback_ids") or []) if verified else None,
+            "unresolved": 0, "content_bearing": 0, "rating_only": 0, "indeterminate": 0,
+            "missing_job": 0, "technical_error": 0, "policy_error": 0, "needs_review": 0,
+            "awaiting_work": 0,
+        }
+        if not verified:
+            return result
+        ids = list(cursor.get("feedback_ids") or [])
+        with closing(self._connect()) as conn:
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset:offset + 500]
+                rows = conn.execute(
+                    f"""SELECT f.*,j.state AS job_state,j.last_error_code FROM sheet_vitrina_v1_wb_feedbacks f
+                        LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j ON j.feedback_id=f.feedback_id
+                          AND j.content_version=f.content_version AND j.bundle_version=?
+                        WHERE f.feedback_id IN ({','.join('?' for _ in batch)})""", (PROMPT_BUNDLE_VERSION, *batch),
+                ).fetchall()
+                for row in rows:
+                    if _feedback_row_officially_resolved(row):
+                        continue
+                    result["unresolved"] += 1
+                    result[str(row["content_classification"] or CONTENT_CLASS_INDETERMINATE)] += 1
+                    state = str(row["job_state"] or "")
+                    bucket = "missing_job" if not state else "needs_review" if state == STATE_NEEDS_REVIEW else (
+                        "technical_error" if recoverable_technical_failure(str(row["last_error_code"] or "")) else "policy_error"
+                    ) if state == STATE_TERMINAL_ERROR else "awaiting_work"
+                    result[bucket] += 1
+        return result
+
+    def record_provider_failure(self, *, error_code: str, retry_after_seconds: int = 0) -> int:
+        """Persist a circuit cooldown shared by every paid processing key."""
+        previous = self.provider_pause_status()
+        failures = int(previous.get("failures") or 0) + 1
+        delay = provider_backoff(failures, max(900, retry_after_seconds) if error_code == "OPENAI_INSUFFICIENT_QUOTA" else retry_after_seconds)
+        self.save_sync_cursor(
+            "wb_autoanswers_provider_pause",
+            cursor={"until": iso_utc(self._now() + timedelta(seconds=delay)),
+                    "failures": failures, "error_code": error_code},
+            successful=False,
+        )
+        return delay
+
+    def record_provider_success(self) -> None:
+        self.save_sync_cursor("wb_autoanswers_provider_pause", cursor={"failures": 0}, successful=True)
+
+    def _hold_legacy_uncertain_failure(self, conn: sqlite3.Connection, job: Mapping[str, Any], settings: AutoanswersSettings, now: datetime, *, crash: bool = False) -> None:
+        """Hold only ambiguous failure evidence; a 429 is never inferred spend."""
+        if not crash and not provider_cost_uncertain(str(job["last_error_code"] or "")):
+            return
+        reservation = conn.execute(
+            "SELECT * FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations WHERE processing_key=?",
+            (job["processing_key"],),
+        ).fetchone()
+        if reservation is None or not reservation["provider_call_started_at"]:
+            return
+        attempt = int(job["attempts"] or 0)
+        known = conn.execute(
+            """SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts
+               WHERE processing_key=? AND attempt_number=?
+               UNION ALL SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events
+               WHERE processing_key=? AND attempt_number=? AND (error_code LIKE 'OPENAI_HTTP_4%' OR error_code IN ('OPENAI_INSUFFICIENT_QUOTA','OPENAI_OUTPUT_NOT_JSON','OPENAI_OUTPUT_MISSING'))
+               UNION ALL SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds
+               WHERE processing_key=? LIMIT 1""",
+            (job["processing_key"], attempt, job["processing_key"], attempt, job["processing_key"]),
+        ).fetchone()
+        if known or str(reservation["status"]) == "settled":
+            return
+        # Historical attempt totals include explicit 429s. Count only audited
+        # ambiguous failures, never multiply a hold by the raw attempts total.
+        failure_events = conn.execute(
+            """SELECT details_json FROM sheet_vitrina_v1_wb_autoanswers_audit_events
+               WHERE aggregate_id=? AND event_type IN ('processing_terminal_error','processing_retry_scheduled')""",
+            (job["processing_key"],),
+        ).fetchall()
+        ambiguous_count = sum(
+            provider_cost_uncertain(str(json.loads(row["details_json"]).get("error_code") or ""))
+            for row in failure_events
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
+               uncertainty_id,processing_key,attempt_number,transition_run_id,upper_bound_usd,
+               effective_at,error_code,evidence_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+            ("legacy-technical:" + sha256_text(str(job["processing_key"])), job["processing_key"],
+             attempt, job["transition_run_id"],
+             str(_money(settings.max_reservation_per_review_usd) * max(1, ambiguous_count)),
+             reservation["provider_call_started_at"], "provider_worker_crash" if crash else job["last_error_code"],
+             canonical_json({"amount_semantics": "conservative_cap_hold_not_actual_cost",
+                             "ambiguous_failure_count": max(1, ambiguous_count),
+                             "attempts_preserved": attempt, "confirmed_429_excluded": True}), iso_utc(now)),
+        )
+
+    @staticmethod
+    def _has_unquantified_orphan_boundary(conn: sqlite3.Connection, now: datetime) -> bool:
+        """Check the current boundary, independent of prior attempt error/state.
+
+        Partial role usage is not evidence that a later failed role cost zero.
+        A crash outside the current WB inventory still blocks paid replay.
+        """
+        return bool(conn.execute("""SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations r
+                LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j ON j.processing_key=r.processing_key
+                WHERE r.provider_call_started_at IS NOT NULL AND CAST(COALESCE(r.actual_cost_usd,'0') AS REAL)=0
+                  AND ((r.status='reserved' AND NOT (COALESCE(j.state,'')='processing' AND COALESCE(j.lease_until,'')>?))
+                    OR (r.status='released' AND (r.released_reason='stale_or_orphaned' OR
+                      (r.released_reason='processing_failed_after_usage' AND j.state='processing' AND COALESCE(j.lease_until,'')<=?))))
+                  AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts u
+                    WHERE u.processing_key=r.processing_key AND u.effective_at=r.provider_call_started_at)
+                  AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_budget_uncertainty_holds h
+                    WHERE h.processing_key=r.processing_key)
+                  AND NOT EXISTS(SELECT 1 FROM sheet_vitrina_v1_wb_autoanswers_failed_cost_events f
+                    WHERE f.processing_key=r.processing_key AND f.attempt_number=j.attempts
+                      AND (f.error_code LIKE 'OPENAI_HTTP_4%' OR f.error_code IN ('OPENAI_INSUFFICIENT_QUOTA','OPENAI_OUTPUT_NOT_JSON','OPENAI_OUTPUT_MISSING')))
+                LIMIT 1""", (iso_utc(now), iso_utc(now))).fetchone())
+
+    def recover_unanswered_inventory(self, *, actor_id: str) -> dict[str, Any]:
+        """Admit/recover bounded work exclusively from a fresh official inventory.
+
+        OFF/manual observations may be admitted by current automatic intent.
+        Manual jobs, semantic refusals and every publication aggregate survive.
+        Historical technical dead ends use the existing zero-cost policy.
+        """
+        settings = self.settings()
+        result: dict[str, Any] = {"admitted": 0, "technical_recovered": 0, "rebound": 0, "crash_recovered": 0}
+        if not settings.effective_enabled or settings.mode == MODE_MANUAL:
+            return result
+        inventory = self.sync_cursor("wb_feedback_full_unanswered_inventory")
+        cursor = dict((inventory or {}).get("cursor") or {})
+        completed = parse_timestamp(cursor.get("completed_at"))
+        if not cursor.get("coverage_confirmed") or not completed or completed < self._now() - timedelta(minutes=15):
+            return {**result, "inventory_pending": True}
+        ids = list(cursor.get("feedback_ids") or [])
+        if not ids:
+            return result
+        now = self._now()
+        with self.transaction() as conn:
+            # Re-read intent inside the mutation lock; never undo a concurrent
+            # OFF/manual transition on behalf of an earlier scheduler tick.
+            current = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_settings WHERE singleton=1").fetchone()
+            if not current or not bool(current["master_enabled"]) or str(current["mode"]) == MODE_MANUAL or int(current["policy_epoch"]) != settings.policy_epoch:
+                return result
+            sweep = self._active_automatic_sweep(conn, policy_epoch=settings.policy_epoch)
+            run_id = str(sweep["transition_run_id"] or sweep["sweep_id"]) if sweep else None
+            capacity = settings.max_materialized_processing_jobs - int(conn.execute(
+                "SELECT COUNT(*) FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE state IN ('queued','processing','retryable_error')",
+            ).fetchone()[0])
+            candidates: list[dict[str, Any]] = []
+            for offset in range(0, len(ids), 500):
+                batch = ids[offset:offset + 500]
+                candidates.extend(dict(row) for row in conn.execute(
+                    f"""SELECT f.*,j.processing_key,j.state AS job_state,j.last_error_code,
+                           j.manual_started,j.final_reply,j.media_uncertain,j.regeneration_required,j.lease_until,j.policy_epoch AS job_policy_epoch,j.enable_epoch AS job_enable_epoch
+                        FROM sheet_vitrina_v1_wb_feedbacks f
+                        LEFT JOIN sheet_vitrina_v1_wb_autoanswer_jobs j
+                          ON j.feedback_id=f.feedback_id AND j.content_version=f.content_version AND j.bundle_version=?
+                        WHERE f.feedback_id IN ({','.join('?' for _ in batch)})""",
+                    (PROMPT_BUNDLE_VERSION, *batch),
+                ).fetchall())
+            candidates.sort(key=lambda row: (
+                int(row["rating"]) if row["content_classification"] == CONTENT_CLASS_CONTENT_BEARING and row["rating"] in range(1, 6)
+                else AUTOMATIC_PRIORITY_RATING_ONLY if row["content_classification"] == CONTENT_CLASS_RATING_ONLY else AUTOMATIC_PRIORITY_INDETERMINATE,
+                str(row["created_at_wb"] or row["first_seen_at"]), row["feedback_id"],
+            ))
+            recovered_count = 0
+            for row in candidates:
+                if recovered_count >= min(25, settings.max_materialized_processing_jobs):
+                    break
+                if _feedback_row_officially_resolved(row) or row["content_classification"] == CONTENT_CLASS_INDETERMINATE:
+                    continue
+                day = str(row["created_at_wb"] or row["first_seen_at"])[:10]
+                if sweep and (day < str(sweep["scope_from"] or BACKFILL_FROM_DATE) or (sweep["scope_to"] and day > str(sweep["scope_to"]))):
+                    continue
+                key = row["processing_key"]
+                consumes_capacity = True
+                if key:
+                    if row["manual_started"] or row["final_reply"] or row["media_uncertain"] or row["regeneration_required"] or settings.policy_version != DEFAULT_POLICY_VERSION:
+                        continue
+                    if conn.execute("SELECT 1 FROM sheet_vitrina_v1_wb_publication_jobs WHERE processing_key=?", (key,)).fetchone():
+                        continue
+                    job = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswer_jobs WHERE processing_key=?", (key,)).fetchone()
+                    if str(job["trigger_source"]) == "manual_generate":
+                        continue
+                    state = str(row["job_state"] or "")
+                    terminal = state == STATE_TERMINAL_ERROR and recoverable_technical_failure(str(row["last_error_code"] or ""))
+                    quota = str(row["last_error_code"] or "") == "OPENAI_INSUFFICIENT_QUOTA"
+                    if quota and terminal:
+                        runtime = conn.execute("SELECT last_successful_ai_call_at,stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1").fetchone()
+                        successful = parse_timestamp(runtime["last_successful_ai_call_at"]) if runtime else None
+                        failed = parse_timestamp(job["completed_at"] or job["updated_at"])
+                        if not (row["job_policy_epoch"] != settings.policy_epoch or (successful and failed and successful > failed)):
+                            continue
+                        if runtime and runtime["stop_reason"] == "openai_quota_exhausted":
+                            self._set_stop_reason(conn, None, details={"quota_recovery": "explicit_resume_or_confirmed_provider_success"}, at=now)
+                    expired = state == STATE_PROCESSING and bool(parse_timestamp(row["lease_until"]) and parse_timestamp(row["lease_until"]) <= now)
+                    outdated = (state in {STATE_QUEUED, STATE_RETRYABLE_ERROR} and
+                                (row["job_policy_epoch"] != settings.policy_epoch or row["job_enable_epoch"] != settings.enable_epoch))
+                    if not (terminal or expired or outdated):
+                        continue
+                    if state == STATE_RETRYABLE_ERROR and not (recoverable_technical_failure(str(row["last_error_code"] or "")) or str(row["last_error_code"] or "") in {"master_switch_off", "emergency_force_off", "enable_epoch_stale", "policy_epoch_stale", "manual_pause"}):
+                        continue
+                    consumes_capacity = terminal
+                    if consumes_capacity and capacity <= 0:
+                        continue
+                    reservation = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_autoanswers_budget_reservations WHERE processing_key=?", (key,)).fetchone()
+                    crashed_boundary = expired and bool(reservation and reservation["provider_call_started_at"] and str(reservation["status"]) != "settled")
+                    self._hold_legacy_uncertain_failure(conn, job, settings, now, crash=crashed_boundary)
+                    kind = PROCESSING_KIND_SAFE_PUBLIC_TEMPLATE if terminal or crashed_boundary else str(job["processing_kind"])
+                    if terminal:
+                        result["technical_recovered"] += 1
+                    elif crashed_boundary:
+                        result["crash_recovered"] += 1
+                    else:
+                        result["rebound"] += 1
+                    conn.execute(
+                        """UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations SET reserved_usd=0,
+                           status=CASE WHEN status='reserved' THEN 'released' ELSE status END,expires_at=NULL,
+                           updated_at=? WHERE processing_key=?""", (iso_utc(now), key),
+                    )
+                    conn.execute(
+                        """UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state=?,processing_kind=?,
+                           enable_epoch=?,policy_epoch=?,policy_version=?,transition_run_id=?,available_at=?,
+                           completed_at=NULL,lease_owner=NULL,lease_until=NULL,retry_stage=NULL,updated_at=?
+                           WHERE processing_key=?""",
+                        (STATE_QUEUED, kind, settings.enable_epoch, settings.policy_epoch,
+                         settings.policy_version, run_id, iso_utc(now), iso_utc(now), key),
+                    )
+                    event = "technical_failure_recovered" if terminal else "provider_worker_crash_recovered" if crashed_boundary else "inventory_unanswered_rebound"
+                else:
+                    if capacity <= 0:
+                        continue
+                    key = processing_key(str(row["feedback_id"]), int(row["content_version"]))
+                    kind = PROCESSING_KIND_RATING_ONLY_TEMPLATE if row["content_classification"] == CONTENT_CLASS_RATING_ONLY else PROCESSING_KIND_FROZEN_AI
+                    conn.execute(
+                        """INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswer_jobs(
+                           processing_key,feedback_id,content_version,content_version_hash,state,trigger_source,
+                           bundle_version,evaluation_signature,policy_version,enable_epoch,policy_epoch,
+                           processing_kind,transition_run_id,available_at,attempts,created_at,updated_at)
+                           VALUES(?,?,?,?,?,'unanswered_inventory_recovery',?,?,?,?,?,?,?,?,0,?,?)""",
+                        (key, row["feedback_id"], row["content_version"], row["content_version_hash"], STATE_QUEUED,
+                         PROMPT_BUNDLE_VERSION, EVALUATION_SIGNATURE, settings.policy_version, settings.enable_epoch,
+                         settings.policy_epoch, kind, run_id, iso_utc(now), iso_utc(now), iso_utc(now)),
+                    )
+                    result["admitted"] += 1
+                    event = "inventory_unanswered_admitted"
+                conn.execute("UPDATE sheet_vitrina_v1_wb_feedbacks SET auto_eligible_epoch=? WHERE feedback_id=?", (settings.enable_epoch, row["feedback_id"]))
+                if sweep:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO sheet_vitrina_v1_wb_autoanswers_rolling_admissions(
+                           admission_id,sweep_id,transition_run_id,feedback_id,content_version,content_version_hash,
+                           content_classification,rating,source_stream,source_sync_run_id,admission_source,
+                           version_created_at,admitted_at,evidence_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (uuid4().hex, sweep["sweep_id"], run_id, row["feedback_id"], row["content_version"], row["content_version_hash"],
+                         row["content_classification"], row["rating"], "unanswered_full_inventory", row["last_sync_run_id"],
+                         "inventory_recovery", row["first_seen_at"], iso_utc(now), canonical_json({"official_inventory_completed_at": cursor["completed_at"]})),
+                    )
+                self._audit(conn, aggregate_type="processing_job", aggregate_id=str(key), event_type=event,
+                            actor_type="recovery", actor_id=actor_id, at=now, previous_state=row["job_state"] or STATE_SYNCED,
+                            next_state=STATE_QUEUED, details={"source_error_code": row["last_error_code"], "attempts_preserved": True,
+                                "official_inventory_completed_at": cursor["completed_at"], "model_calls": 0})
+                capacity -= int(consumes_capacity)
+                recovered_count += 1
+            runtime = conn.execute("SELECT stop_reason FROM sheet_vitrina_v1_wb_autoanswers_runtime_state WHERE singleton=1").fetchone()
+            unquantified_boundary = self._has_unquantified_orphan_boundary(conn, now)
+            if unquantified_boundary:
+                self._set_stop_reason(conn, "budget_state_unknown", details={"orphan_boundary_unquantified": True}, at=now)
+            if runtime and runtime["stop_reason"] == "budget_state_unknown" and not unquantified_boundary and not self._budget_uncertainty_candidates(conn):
+                # Capped holds remain in every budget computation. Once all
+                # unknown boundaries are quantified they no longer require an
+                # indefinite global latch on unrelated paid work.
+                self._set_stop_reason(conn, None, details={"uncertainty_quantified": True}, at=now)
+                self._audit(conn, aggregate_type="runtime", aggregate_id="singleton", event_type="provider_uncertainty_quantified",
+                            actor_type="recovery", actor_id=actor_id, at=now, details={"holds_preserved": True})
+        return result
 
     def mark_provider_call_started(self, processing_key_value: str, *, worker_id: str) -> None:
         """Persist the exact point after which crash cost may be unknowable."""
@@ -6601,11 +6909,13 @@ class AutoanswersRepository:
         worker_id: str,
         diagnostics: Mapping[str, Any] | None = None,
         max_attempts: int = 2,
+        cost_uncertain: bool = True,
+        retry_after_seconds: int = 0,
     ) -> dict[str, Any]:
         """Conservatively account an opaque provider boundary before retry."""
 
         code = _clean_text(error_code)
-        if code not in {"node_timeout", "node_invalid_json", "node_process_exit_1"}:
+        if not recoverable_technical_failure(code):
             raise ValueError("unsupported opaque boundary failure")
         now = self._now()
         with self.transaction() as conn:
@@ -6637,7 +6947,6 @@ class AutoanswersRepository:
                 )
             if (
                 reservation is None
-                or str(reservation["status"]) != "reserved"
                 or not reservation["provider_call_started_at"]
             ):
                 raise AutoanswersRuntimeError(
@@ -6669,7 +6978,8 @@ class AutoanswersRepository:
                 "amount_semantics": "conservative_cap_hold_not_actual_cost",
                 "diagnostics": safe_diagnostics,
             }
-            conn.execute(
+            if cost_uncertain:
+                conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_wb_autoanswers_provider_uncertainty_attempts(
                     uncertainty_id,processing_key,attempt_number,transition_run_id,
@@ -6693,11 +7003,11 @@ class AutoanswersRepository:
                 """
                 UPDATE sheet_vitrina_v1_wb_autoanswers_budget_reservations
                 SET reserved_usd=0,status='released',expires_at=NULL,
-                    released_reason='provider_boundary_uncertain_attempt',
+                    released_reason=?,
                     updated_at=?
                 WHERE processing_key=?
                 """,
-                (iso_utc(now), processing_key_value),
+                ("provider_boundary_uncertain_attempt" if cost_uncertain else "provider_boundary_confirmed_failure", iso_utc(now), processing_key_value),
             )
             retry = attempt < max(1, int(max_attempts))
             safe_recovery = not retry and str(settings["policy_version"] or "") == DEFAULT_POLICY_VERSION
@@ -6729,7 +7039,7 @@ class AutoanswersRepository:
                 (
                     next_state,
                     "processing" if retry else None,
-                    iso_utc(now + timedelta(seconds=60 * max(1, attempt)))
+                    iso_utc(now + timedelta(seconds=provider_backoff(attempt, retry_after_seconds)))
                     if retry
                     else iso_utc(now),
                     next_code,
@@ -8696,6 +9006,30 @@ class AutoanswersRepository:
                 case_code=code,
             ):
                 raise AutoanswersRuntimeError("public chat invitation evidence is invalid", code="chat_invitation_invalid")
+
+    def record_publication_preflight_failure(self, publication_key_value: str, *, worker_id: str,
+                                            error_code: str, retry_after_seconds: int | None = None) -> dict[str, Any]:
+        """A failed GET before POST is retryable without creating write evidence."""
+        now = self._now()
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM sheet_vitrina_v1_wb_publication_jobs WHERE publication_key=?",
+                               (publication_key_value,)).fetchone()
+            if not row or row["write_started_at"] or row["lease_owner"] != worker_id:
+                raise AutoanswersRuntimeError("publication preflight lease changed", code="publication_not_write_ready")
+            state = STATE_APPROVED if retry_after_seconds is not None else STATE_NEEDS_REVIEW
+            conn.execute(
+                """UPDATE sheet_vitrina_v1_wb_publication_jobs SET state=?,last_error_code=?,available_at=?,
+                   lease_owner=NULL,lease_until=NULL,updated_at=? WHERE publication_key=?""",
+                (state, error_code, iso_utc(now + timedelta(seconds=max(1, retry_after_seconds or 0))),
+                 iso_utc(now), publication_key_value),
+            )
+            conn.execute("UPDATE sheet_vitrina_v1_wb_autoanswer_jobs SET state=?,last_error_code=?,updated_at=? WHERE processing_key=?",
+                         (state, error_code, iso_utc(now), row["processing_key"]))
+            self._audit(conn, aggregate_type="publication_job", aggregate_id=publication_key_value,
+                        event_type="publication_preflight_failed", actor_type="worker", actor_id=worker_id,
+                        details={"error_code": error_code, "retry_after_seconds": retry_after_seconds, "wb_post_count": 0},
+                        at=now, previous_state=str(row["state"]), next_state=state)
+            return {"publication_key": publication_key_value, "state": state, "write_attempted": False}
 
     def begin_publication_write(self, publication_key_value: str, *, worker_id: str) -> dict[str, Any]:
         """Last durable gate immediately before the transport POST."""

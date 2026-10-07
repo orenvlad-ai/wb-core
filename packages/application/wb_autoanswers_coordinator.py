@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from packages.application.wb_autoanswers_control_lock import autoanswers_control_lock
 
 from packages.application.wb_autoanswers_publication import AutoanswersPublicationWorker
 from packages.application.wb_autoanswers_runtime import (
@@ -50,6 +51,13 @@ class AutoanswersCoordinator:
         self.worker_id = worker_id
 
     def run_once(self) -> dict[str, Any]:
+        try:
+            with autoanswers_control_lock(self.repository.runtime_dir):
+                return self._run_once_locked()
+        except BlockingIOError:
+            return {"errors": [], "control_busy": True}
+
+    def _run_once_locked(self) -> dict[str, Any]:
         startup_errors: list[dict[str, Any]] = []
         try:
             coordinator = self.repository.sync_cursor(
@@ -64,6 +72,7 @@ class AutoanswersCoordinator:
             "sync": [],
             "full_unanswered_inventory": None,
             "rolling_admission": None,
+            "inventory_recovery": None,
             "reconciliation": None,
             "processing": None,
             "publication": None,
@@ -107,9 +116,19 @@ class AutoanswersCoordinator:
             inventory_active = bool(
                 (inventory_cursor or {}).get("cursor", {}).get("active")
             )
+            settings = self.repository.settings()
+            previous_cursor = dict((coordinator or {}).get("cursor") or {})
+            # Discovery runs immediately after startup, a mode epoch change or
+            # a long scheduler pause, then remains bounded to one official page.
+            from packages.application.wb_autoanswers_runtime import parse_timestamp
+            last_run = parse_timestamp((coordinator or {}).get("updated_at"))
+            startup_or_resume = (
+                tick == 1 or previous_cursor.get("recovery_contract") != 1 or previous_cursor.get("policy_epoch") != settings.policy_epoch
+                or last_run is None or self.repository._now().timestamp() - last_run.timestamp() > 180
+            )
             if (
-                (inventory_active or tick % 12 == 0)
-                and self.repository.settings().policy_version == DEFAULT_POLICY_VERSION
+                (inventory_active or startup_or_resume or command or tick % 12 == 0)
+                and settings.policy_version == DEFAULT_POLICY_VERSION
             ):
                 report["full_unanswered_inventory"] = (
                     self.sync_service.full_unanswered_inventory_tick()
@@ -129,13 +148,21 @@ class AutoanswersCoordinator:
         try:
             self.repository.save_sync_cursor(
                 "wb_autoanswers_coordinator",
-                cursor={"tick": tick},
+                cursor={"tick": tick, "policy_epoch": self.repository.settings().policy_epoch, "recovery_contract": 1},
                 successful=not report["errors"],
             )
         except Exception as exc:
             report["errors"].append(
                 _error_evidence("coordinator_cursor_write", exc)
             )
+        try:
+            report["absent_unanswered_reconciliation"] = self.sync_service.reconcile_absent_unanswered_tick()
+        except Exception as exc:
+            report["errors"].append(_error_evidence("absent_unanswered_reconciliation", exc))
+        try:
+            report["inventory_recovery"] = self.repository.recover_unanswered_inventory(actor_id=self.worker_id)
+        except Exception as exc:
+            report["errors"].append(_error_evidence("inventory_recovery", exc))
         try:
             report["rolling_admission"] = self.repository.refresh_rolling_admissions(
                 actor_id=self.worker_id,

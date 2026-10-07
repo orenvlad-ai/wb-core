@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.application.wb_autoanswers_failures import (
+    provider_cost_uncertain, transient_provider_failure,
+)
+
 from packages.application.wb_autoanswers_media import AutoanswersMediaProcessor
 from packages.application.wb_autoanswers_node_bridge import (
     NodeAutoanswersBridge,
@@ -109,6 +113,7 @@ class AutoanswersProcessingWorker:
                 return {"processing_key": key, "state": stored["state"], "model_calls": 0}
             actual_cost = pipeline.get("estimated_cost_usd") or 0
             self.repository.settle_budget(key, actual_cost_usd=actual_cost)
+            self.repository.record_provider_success()
             pipeline_result = dict(result)
             if node.get("boundary_adapter"):
                 pipeline_result["server_boundary_adapter"] = dict(
@@ -146,27 +151,28 @@ class AutoanswersProcessingWorker:
                     error_code=exc.code,
                     worker_id=self.worker_id,
                 )
-            if (
-                exc.partial_cost_usd <= 0
-                and exc.code in {
-                    "node_timeout",
-                    "node_invalid_json",
-                    "node_process_exit_1",
-                }
-            ):
+            if transient_provider_failure(exc.code):
+                delay = self.repository.record_provider_failure(
+                    error_code=exc.code, retry_after_seconds=exc.retry_after_seconds,
+                )
+                uncertain_cost = exc.provider_cost_uncertain or (
+                    exc.partial_cost_usd <= 0 and provider_cost_uncertain(exc.code)
+                )
                 stored = self.repository.record_processing_boundary_failure(
                     key,
                     error_code=exc.code,
                     worker_id=self.worker_id,
                     diagnostics=exc.diagnostics,
                     max_attempts=2,
+                    cost_uncertain=uncertain_cost,
+                    retry_after_seconds=delay,
                 )
                 return {
                     "processing_key": key,
                     "state": stored["state"],
                     "error_code": stored["last_error_code"],
                     "bounded_retry": stored["state"] == "retryable_error",
-                    "uncertainty_accounting": "conservative_upper_bound",
+                    "uncertainty_accounting": "conservative_upper_bound" if uncertain_cost else "confirmed_failure_usage_only",
                     "model_calls": 0,
                 }
             if exc.retryable:
