@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from apps.promo_archive_publication_smoke import _ready, _seed_reconstruction_fixture
-from apps.promo_archive_publication import _candidate
+from apps.promo_archive_publication import TOTAL_METRICS, _candidate
 from apps.sheet_vitrina_v1_promo_live_source_smoke import _write_promo_run_fixture, _build_entrypoint, _MutableNowFactory
 from packages.application.registry_upload_db_backed_runtime import RegistryUploadDbBackedRuntime
 from packages.application.promo_campaign_archive import sync_promo_campaign_archive
@@ -169,7 +169,13 @@ def main():
         receipt=execute(action='apply',adapter_name='promo_archive_publication_v1',operation_id='fixture-composite-publication',
             request=request,expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
         assert receipt['state']=='applied' and adapter.readback(request,'fixture-composite-publication')['state']=='applied'
-        assert runtime.load_sheet_vitrina_ready_snapshot(as_of_date=DAY).metadata['server_cell_presentation']
+        published_presentation = runtime.load_sheet_vitrina_ready_snapshot(as_of_date=DAY).metadata['server_cell_presentation']
+        for row_id in TOTAL_METRICS.values():
+            cell = published_presentation[row_id][DAY]
+            assert cell['completeness_state'] == 'complete' and cell['missing_sku_count'] == 0, cell
+            assert len(cell['metric_scope_evidence']['applicable_scope']) == len(ids), cell
+            assert not cell['metric_scope_evidence']['missing_scope'], cell
+            assert cell['quality_state'] == 'preliminary' and 'Полнота на конец дня не подтверждена' in cell['quality_reason'], cell
         accepted_before = footprint(runtime)
         block = PromoLiveSourceBlock(runtime_dir=runtime.runtime_dir,now_factory=lambda: datetime.fromisoformat('2099-05-04T12:00:00+05:00'))
         entry = _build_entrypoint(runtime=runtime,promo_source_block=block,now_factory=_MutableNowFactory('2026-05-04T12:00:00+05:00'))

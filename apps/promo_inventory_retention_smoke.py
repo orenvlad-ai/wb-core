@@ -35,6 +35,14 @@ class PromoInventoryRetentionTests(unittest.TestCase):
         self.fixture = inventory_fixture.ManagementInventoryTests()
         self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
         self.runtime = self.fixture.runtime
+        bundle=json.loads((ROOT/'artifacts/registry_upload_http_entrypoint/input/registry_upload_bundle__fixture.json').read_text())
+        bundle['bundle_version']+='__94_sku_retention'
+        bundle['config_v2'] += [{'nm_id':2000000000+i,'enabled':True,'display_name':f'Fixture {i}',
+            'group':'Other','display_order':34+i} for i in range(94-len(bundle['config_v2']))]
+        self.assertEqual(self.runtime.ingest_bundle(bundle,activated_at='2026-09-07T10:01:00Z').status,'accepted')
+        self.fixture.state=self.runtime.load_current_state()
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+            conn.execute("DELETE FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version<>?",(self.fixture.state.bundle_version,))
         ids = [c.nm_id for c in self.fixture.state.config_v2 if c.enabled]
         self.fixture.prepare_quantities(ids)
         plan = self.fixture.plan
@@ -52,7 +60,7 @@ class PromoInventoryRetentionTests(unittest.TestCase):
         _write_promo_run_fixture(runtime_dir=self.runtime.runtime_dir, run_name=DAY+'__fixture',
             promo_folder='2400__2300__promo', promo_id=2400, period_id=2300, promo_title='Promo',
             promo_period_text='07 октября 02:00 -> 07 октября 23:59', promo_start_at=DAY+'T02:00', promo_end_at=DAY+'T23:59',
-            workbook_rows=[{'nm_id':ids[0],'plan_price':508.0}])
+            workbook_rows=[{'nm_id':nm,'plan_price':508.0} for nm in ids[:7]])
         sync_promo_campaign_archive(self.runtime.runtime_dir)
         from types import SimpleNamespace
         self.runtime.save_temporal_source_slot_snapshot(source_key='prices_snapshot', snapshot_date=DAY,
@@ -68,7 +76,7 @@ class PromoInventoryRetentionTests(unittest.TestCase):
 
     def ready(self):
         with closing(_connect(self.runtime.db_path, readonly=True)) as conn:
-            return dict(conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE as_of_date=?',(DAY,)).fetchone())
+            return dict(conn.execute('SELECT * FROM sheet_vitrina_v1_ready_snapshots WHERE bundle_version=? AND as_of_date=?',(self.fixture.state.bundle_version,DAY)).fetchone())
 
     def native(self):
         with window_read_context(self.runtime.db_path, runtime_dir=self.runtime.runtime_dir):
@@ -121,6 +129,110 @@ class PromoInventoryRetentionTests(unittest.TestCase):
         self.assertEqual(next(row for row in restored['sheets'][0]['rows'] if row[1].endswith('|our_wb_unit_cost_rub'))[2],778)
         with closing(_connect(self.runtime.db_path,readonly=True)) as conn:
             self.assertIsNotNone(conn.execute("SELECT 1 FROM sheet_vitrina_v1_ready_publications WHERE operation_id='promo-owner:rollback:inventory_retention:2026-10-07'").fetchone())
+
+    def test_stale_full_missing_scope_is_replaced_and_cas_covers_quality(self):
+        from packages.application.ready_publication import digest
+        from apps.promo_archive_publication import _update_plan
+        scopes=[f'SKU:{nm}' for nm in self.fixture.nms]
+        before=self.ready();raw=json.loads(before['plan_json'])
+        cells=raw['metadata'].setdefault('server_cell_presentation',{})
+        for metric in SKU_METRICS:
+            cells[TOTAL_METRICS[metric]]={DAY:{'quality_state':'partial','quality_reason':'stale missing evidence',
+                'completeness_state':'partial','missing_sku_count':94,
+                'metric_scope_evidence':{'operand_date':DAY,'applicable_scope':scopes,
+                    'sku_metric_keys':[metric],'missing_scope':scopes,'partial_scope':[],'group_scopes':{}}}}
+            for nm in self.fixture.nms:
+                cells[f'SKU:{nm}|{metric}']={DAY:{'quality_state':'partial','reason':'stale observation'}}
+        original_raw=json.dumps(raw,ensure_ascii=False,separators=(',',':'))
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+            # This disposable fixture's initial READY owner accepted its original
+            # inventory and a missing promo source in this same old publication.
+            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',(original_raw,DAY))
+            conn.execute('UPDATE sheet_vitrina_v1_ready_publications SET after_digest=? WHERE after_digest=?',(digest(original_raw),digest(before['plan_json'])))
+        old_native=self.native();stock_before=self.accepted()
+        self.assertEqual(old_native['TOTAL|total_promo_participation']['missing_sku_count'],94)
+        self.assertEqual(old_native['TOTAL|total_promo_participation']['completeness_state'],'partial')
+        self.apply('complete-roster')
+        complete_row=self.ready();complete=json.loads(complete_row['plan_json']);native=self.native()
+        for metric in SKU_METRICS:
+            key=TOTAL_METRICS[metric];cell=native[key]
+            self.assertEqual(cell['completeness_state'],'complete',key)
+            self.assertEqual(cell['missing_sku_count'],0,key)
+            self.assertNotIn('SKU с отсутствующей',cell['quality_reason'],key)
+            self.assertNotIn('stale',cell['quality_reason'],key)
+            evidence=complete['metadata']['server_cell_presentation'][key][DAY]['metric_scope_evidence']
+            self.assertEqual(set(evidence['applicable_scope']),set(scopes));self.assertEqual(evidence['missing_scope'],[])
+            self.assertEqual(evidence['partial_scope'],[])
+        self.assertEqual(native['TOTAL|total_promo_participation']['value'],7.0)
+        self.assertEqual(self.accepted()['scopes']['TOTAL']['total'],stock_before['scopes']['TOTAL']['total'])
+        # Partial input never promotes numeric remnants to proven completeness.
+        with closing(_connect(self.runtime.db_path,readonly=True)) as conn:
+            source=json.loads(conn.execute("SELECT payload_json FROM temporal_source_snapshots WHERE source_key='promo_by_price' AND snapshot_date=?",(DAY,)).fetchone()[0])
+        partial=deepcopy(source);partial['kind']='incomplete';partial['covered_count']=93;partial['items']=partial['items'][:-1]
+        unchanged=deepcopy(raw)
+        with self.assertRaisesRegex(AdapterError,'completeness-unproven'):
+            _update_plan(unchanged,{DAY:partial},{DAY})
+        self.assertEqual(unchanged,raw)
+        for invalid in (float('nan'),float('inf'),float('-inf'),None):
+            bad=deepcopy(source);bad['items'][0]['promo_count_by_price']=invalid
+            unchanged=deepcopy(raw)
+            with self.assertRaisesRegex(AdapterError,'completeness-value-invalid'):
+                _update_plan(unchanged,{DAY:bad},{DAY})
+            self.assertEqual(unchanged,raw)
+        # Completeness of these composite operands does not establish end-of-day
+        # freshness: keep the source-owned warning and marker on SKU and TOTAL.
+        composite=deepcopy(source);composite['observation_quality']='historical_composite_observation_only'
+        composite['diagnostics']['historical_reconstruction']={'identity_observed_at':DAY+'T18:19:00Z','price_observed_at':DAY+'T18:12:00Z'}
+        observed=deepcopy(raw);_update_plan(observed,{DAY:composite},{DAY})
+        for key in [*TOTAL_METRICS.values(),f'SKU:{self.fixture.nms[0]}|promo_participation']:
+            cell=observed['metadata']['server_cell_presentation'][key][DAY]
+            self.assertEqual(cell['completeness_state'],'complete');self.assertEqual(cell['missing_sku_count'],0)
+            self.assertEqual(cell['quality_state'],'preliminary');self.assertEqual(cell['state'],'unconfirmed')
+            self.assertIn('Полнота на конец дня не подтверждена',cell['quality_reason'])
+        # A metadata-only drift must invalidate both readback and inverse CAS.
+        tampered=deepcopy(complete)
+        tampered['metadata']['server_cell_presentation'][TOTAL_METRICS['promo_participation']][DAY]['missing_sku_count']=1
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',(json.dumps(tampered),DAY))
+        self.assertEqual(self.adapter.readback(self.request,'complete-roster')['state'],'ambiguous')
+        with self.assertRaisesRegex(AdapterError,'after-target-drift'):
+            rollback_preview(self.runtime.runtime_dir,'complete-roster')
+        with closing(sqlite3.connect(self.runtime.db_path)) as conn, conn:
+            conn.execute('UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=? WHERE as_of_date=?',(complete_row['plan_json'],DAY))
+        inverse=rollback_preview(self.runtime.runtime_dir,'complete-roster')
+        rollback_apply(self.runtime.runtime_dir,'complete-roster',inverse['after_target_sha256'])
+        self.assertEqual(self.ready()['plan_json'],original_raw)
+        restored=self.native()
+        self.assertEqual(restored['TOTAL|total_promo_participation']['missing_sku_count'],94)
+        self.assertIsNotNone(self.accepted())
+
+    def test_legacy_projection_receipt_and_repair_remain_verifiable(self):
+        import apps.promo_archive_publication as owner
+        candidate_factory=owner._candidate;update=owner._update_plan
+        def legacy_update(plan,results,dates):
+            return update(plan,results,dates,update_completeness=False)
+        def legacy_candidate(*args,**kwargs):
+            with patch.object(owner,'_update_plan',side_effect=legacy_update):
+                candidate=candidate_factory(*args,**kwargs)
+            candidate.pop('presentation_contract')
+            candidate['expected_target_sha']=owner._digest(owner._expected_target_image(candidate))
+            return candidate
+        # Exercise the previous transform and projection, then use only the new
+        # reader/repair/rollback code against that retained unversioned journal.
+        with patch.object(owner,'_candidate',side_effect=legacy_candidate), patch.object(owner,'publish_inventory_retention',return_value=None):
+            preview=self.adapter.preview(self.request,'legacy-projection')
+            self.adapter.apply(self.request,'legacy-projection',preview)
+        self.assertFalse(preview['scope'].get('presentation_contract'))
+        self.assertEqual(self.adapter.readback(self.request,'legacy-projection')['state'],'applied')
+        self.assertIsNone(self.accepted())
+        request={'runtime_dir':str(self.runtime.runtime_dir),'mode':'repair_inventory_retention','publication_operation_id':'legacy-projection'}
+        repair=self.adapter.preview(request,'legacy-projection-retention')
+        self.adapter.apply(request,'legacy-projection-retention',repair)
+        self.assertEqual(self.adapter.readback(request,'legacy-projection-retention')['state'],'applied')
+        self.assertIsNotNone(self.accepted())
+        inverse=rollback_preview(self.runtime.runtime_dir,'legacy-projection')
+        rollback_apply(self.runtime.runtime_dir,'legacy-projection',inverse['after_target_sha256'])
+        self.assertIsNotNone(self.accepted())
 
     def test_uncertified_absence_and_unrelated_capture_stay_absent(self):
         from packages.application.sheet_vitrina_v1_inventory_history import CAPTURES_TABLE

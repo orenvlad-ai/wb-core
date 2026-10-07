@@ -12,6 +12,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -58,6 +59,7 @@ LEDGER = "promo_archive_publication_runs"
 ROLLBACK_LEDGER = "promo_archive_publication_rollbacks"
 GEOMETRY_LEDGER = "promo_ready_geometry_repairs"
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+PRESENTATION_CONTRACT = "promo_scope_completeness_v1"
 SCOPED_BACKUP_TABLES = (
     "temporal_source_slot_snapshots",
     "temporal_source_snapshots",
@@ -204,7 +206,7 @@ def _plan_non_target(plan: dict[str, Any], dates: set[str]) -> str:
     return _digest(value)
 
 
-def _plan_target(plan: dict[str, Any], dates: set[str]) -> dict[str, Any]:
+def _plan_target(plan: dict[str, Any], dates: set[str], *, include_presentation: bool = False) -> dict[str, Any]:
     columns = {index: day for index, day in enumerate(plan.get("date_columns") or []) if day in dates}
     slots = list(plan.get("temporal_slots") or [])
     target: dict[str, Any] = {"dates": columns, "data": [], "status": [], "source_slots": [], "source_summary": []}
@@ -222,10 +224,23 @@ def _plan_target(plan: dict[str, Any], dates: set[str]) -> dict[str, Any]:
     refresh = (plan.get("metadata") or {}).get("refresh_diagnostics") or {}
     target["source_slots"] = [slot for slot in refresh.get("source_slots") or [] if slot.get("source_key") == SOURCE and slot.get("requested_date") in dates]
     target["source_summary"] = [summary for summary in refresh.get("source_summary") or [] if summary.get("source_key") == SOURCE]
+    if include_presentation:
+        presentation = (plan.get("metadata") or {}).get("server_cell_presentation") or {}
+        metrics = {*SKU_METRICS, *[key.split("|", 1)[-1] for key in TOTAL_METRICS.values()]}
+        target["presentation"] = {key: {day: deepcopy(cell) for day, cell in by_day.items() if day in dates}
+            for key, by_day in presentation.items() if key.rsplit("|", 1)[-1] in metrics
+            and any(day in dates for day in by_day)}
     return target
 
 
-def _target_image(conn: sqlite3.Connection, *, bundle: str, dates: list[str], ready_asofs: list[str], roles: dict[str, list[str]]) -> dict[str, Any]:
+def _scope_presentation(scope):
+    contract = scope.get("presentation_contract")
+    if contract not in (None, PRESENTATION_CONTRACT):
+        raise AdapterError("promo-presentation-contract-unsupported")
+    return contract == PRESENTATION_CONTRACT
+
+
+def _target_image(conn: sqlite3.Connection, *, bundle: str, dates: list[str], ready_asofs: list[str], roles: dict[str, list[str]], include_presentation: bool = False) -> dict[str, Any]:
     slots = {}
     exact = {}
     for day in dates:
@@ -241,7 +256,7 @@ def _target_image(conn: sqlite3.Connection, *, bundle: str, dates: list[str], re
         if row is None:
             raise AdapterError("promo-ready-readback-missing")
         plan = json.loads(row[0])
-        plans[as_of] = _plan_target(plan, set(dates))
+        plans[as_of] = _plan_target(plan, set(dates), include_presentation=include_presentation)
     return {"slots": slots, "exact": exact, "ready": plans}
 
 
@@ -249,7 +264,7 @@ def _expected_target_image(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "slots": {day: {role: candidate["results"][day] for role in candidate["roles"][day]} for day in candidate["dates"]},
         "exact": {day: candidate["results"][day] for day in candidate["dates"]},
-        "ready": {update["as_of_date"]: _plan_target(json.loads(update["plan_json"]), set(candidate["dates"]))
+        "ready": {update["as_of_date"]: _plan_target(json.loads(update["plan_json"]), set(candidate["dates"]), include_presentation=_scope_presentation(candidate))
                   for update in candidate["ready_updates"]},
     }
 
@@ -292,6 +307,20 @@ def _restore_plan_target(current: dict[str, Any], old: dict[str, Any], dates: se
     refresh_now["source_summary"] = [item for item in refresh_now.get("source_summary") or [] if item.get("source_key") != SOURCE]
     refresh_now["source_summary"].extend(deepcopy(item) for item in refresh_old.get("source_summary") or []
                                          if item.get("source_key") == SOURCE)
+    presentation_now = restored.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
+    presentation_old = (old.get("metadata") or {}).get("server_cell_presentation") or {}
+    metrics = {*SKU_METRICS, *[key.split("|", 1)[-1] for key in TOTAL_METRICS.values()]}
+    for key in set(presentation_now) | set(presentation_old):
+        if key.rsplit("|", 1)[-1] not in metrics:
+            continue
+        for day in dates:
+            presentation_now.get(key, {}).pop(day, None)
+            if day in presentation_old.get(key, {}):
+                presentation_now.setdefault(key, {})[day] = deepcopy(presentation_old[key][day])
+        if key in presentation_now and not presentation_now[key]:
+            del presentation_now[key]
+    if not presentation_now:
+        restored["metadata"].pop("server_cell_presentation", None)
     return restored
 
 
@@ -399,7 +428,7 @@ def _verify_scoped_backup(conn: sqlite3.Connection, *, operation_id: str,
             or manifest["present_keys"]["ready"] != target_keys["ready"]):
         raise AdapterError("promo-scoped-backup-other-target-row")
     if _digest(_target_image(conn, bundle=manifest["bundle_version"], dates=manifest["dates"],
-                             ready_asofs=manifest["ready_asofs"], roles=manifest["roles"])) != before_target_sha:
+                             ready_asofs=manifest["ready_asofs"], roles=manifest["roles"], include_presentation=_scope_presentation(manifest))) != before_target_sha:
         raise AdapterError("promo-scoped-backup-target-mismatch")
     return manifest
 
@@ -413,7 +442,7 @@ def _create_scoped_backup(candidate: dict[str, Any], operation_id: str, backup_p
         before_target_sha = _digest(_target_image(
             source, bundle=candidate["bundle"], dates=candidate["dates"],
             ready_asofs=[update["as_of_date"] for update in candidate["ready_updates"]],
-            roles=candidate["roles"],
+            roles=candidate["roles"], include_presentation=_scope_presentation(candidate),
         ))
         schemas = {}
         for table in SCOPED_BACKUP_TABLES:
@@ -428,6 +457,7 @@ def _create_scoped_backup(candidate: dict[str, Any], operation_id: str, backup_p
                          predicted_output_bytes=predicted_bytes)
     manifest = {
         "schema": "wb_core_promo_scoped_backup_v1", "operation_id": operation_id,
+        "presentation_contract": candidate.get("presentation_contract"),
         "source_path": str(candidate["db_path"]), "bundle_version": candidate["bundle"],
         "dates": candidate["dates"], "ready_asofs": sorted(update["as_of_date"] for update in candidate["ready_updates"]),
         "roles": candidate["roles"], "prestate_sha256": candidate["prestate_sha"],
@@ -472,7 +502,7 @@ def _create_scoped_backup(candidate: dict[str, Any], operation_id: str, backup_p
     return before_target_sha, manifest["rows_sha256"], "sha256:" + hashlib.sha256(backup_path.read_bytes()).hexdigest()
 
 
-def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], dates: set[str]) -> dict[str, int]:
+def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], dates: set[str], *, update_completeness: bool = True) -> dict[str, int]:
     changes = {metric: 0 for metric in SKU_METRICS}
     changes["TOTAL"] = 0
     sheets = {sheet.get("sheet_name"): sheet for sheet in plan.get("sheets") or []}
@@ -488,7 +518,26 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
             continue
         result = day_results[day]
         items = {int(item["nm_id"]): item for item in result["items"]}
+        reconstruction = result.get("diagnostics", {}).get("historical_reconstruction")
         cell_index = 2 + index
+        if update_completeness:
+            if (result.get("kind") != "success" or result.get("snapshot_date") != day
+                    or result.get("requested_count") != len(items) or result.get("covered_count") != len(items)
+                    or len(result["items"]) != len(items) or not items or result.get("missing_nm_ids")):
+                raise AdapterError("promo-ready-completeness-unproven")
+            if result.get("observation_quality") == "historical_composite_observation_only" and not reconstruction:
+                raise AdapterError("promo-ready-composite-proof-missing")
+            try:
+                finite = all(math.isfinite(float(item[metric])) for item in items.values() for metric in SKU_METRICS)
+            except (KeyError, TypeError, ValueError):
+                finite = False
+            if not finite:
+                raise AdapterError("promo-ready-completeness-value-invalid")
+            for metric in SKU_METRICS:
+                expected = {int(key.split(":", 1)[1].split("|", 1)[0]) for key in rows
+                    if key.startswith("SKU:") and key.endswith("|" + metric)}
+                if set(items) != expected:
+                    raise AdapterError("promo-ready-completeness-roster-mismatch")
         for metric in SKU_METRICS:
             values: list[float] = []
             for nm_id, item in items.items():
@@ -518,13 +567,29 @@ def _update_plan(plan: dict[str, Any], day_results: dict[str, dict[str, Any]], d
             status_rows[str(status_row[0])] = status_row
         while len(status_row) < 11:
             status_row.append("")
-        reconstruction = result.get("diagnostics", {}).get("historical_reconstruction")
         origin = "historical_composite_reconstruction" if reconstruction else "archive_replay"
+        if update_completeness:
+            presentation = plan.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
+            scope = [f"SKU:{nm_id}" for nm_id in sorted(items)]
+            for metric in SKU_METRICS:
+                for nm_id in items:
+                    presentation.setdefault(f"SKU:{nm_id}|{metric}", {})[day] = {
+                        "source": "WB · архив акций", "source_as_of_date": day,
+                        "completeness_state": "complete", "missing_sku_count": 0}
+                presentation.setdefault(TOTAL_METRICS[metric], {})[day] = {
+                    "source": "WB · архив акций", "source_as_of_date": day,
+                    "completeness_state": "complete", "missing_sku_count": 0,
+                    "metric_scope_evidence": {"operand_date": day, "applicable_scope": scope,
+                        "sku_metric_keys": [metric], "missing_scope": [], "partial_scope": [],
+                        "inactive_scope": [], "inapplicable_scope": [], "group_scopes": {}}}
         if reconstruction:
             from packages.application.promo_historical_recovery import composite_cell_presentation
             presentation = plan.setdefault("metadata", {}).setdefault("server_cell_presentation", {})
             for row_id, by_day in composite_cell_presentation(rows=data["rows"], day=day, proof=reconstruction).items():
-                presentation.setdefault(row_id, {}).update(by_day)
+                if update_completeness:
+                    presentation.setdefault(row_id, {}).setdefault(day, {}).update(by_day[day])
+                else:
+                    presentation.setdefault(row_id, {}).update(by_day)
         status_row[1:11] = ["success", day, day, "", day, day, len(items), len(items), "", result["detail"] + "; publication=" + origin]
         refresh = plan.setdefault("metadata", {}).setdefault("refresh_diagnostics", {})
         source_slots = refresh.setdefault("source_slots", [])
@@ -740,7 +805,7 @@ def _candidate(runtime: Path, dates: list[str], reconstruction: dict[str, Any] |
                 runtime_dir=runtime, before=before, after={**before, "plan_json": update["plan_json"]})
     candidate_sha = _digest({"inventory_retention": inventory_retention, "source": source_sha, "days": results, "roles": roles,
                              "ready": [(u["as_of_date"], u["plan_json"]) for u in ready_updates]})
-    candidate = {"authority": authority, "db_path": db_path, "bundle": bundle, "ids": ids,
+    candidate = {"presentation_contract": PRESENTATION_CONTRACT, "authority": authority, "db_path": db_path, "bundle": bundle, "ids": ids,
             "inventory_retention": inventory_retention, "dates": dates, "results": results, "ready_updates": ready_updates,
             "roles": roles, "source_sha": source_sha, "prestate_sha": prestate, "candidate_sha": candidate_sha,
             "non_target_sha": _digest(non_target), "changes": all_changes, "reconstruction_proof": reconstruction_proof}
@@ -758,7 +823,7 @@ def _later_timestamp(value: str | None, reference: str) -> bool:
 
 
 def _verified_superseded(conn: sqlite3.Connection, scope: dict[str, Any], before: dict[str, Any],
-                         now: dict[str, Any], applied_at: str) -> bool:
+                         now: dict[str, Any], applied_at: str, after_ready_metadata: dict[str, Any] | None = None) -> bool:
     """Recognize newer canonical source/ready captures; never excuse unexplained drift."""
     changed = False
     for day, roles in scope["snapshot_roles"].items():
@@ -784,6 +849,12 @@ def _verified_superseded(conn: sqlite3.Connection, scope: dict[str, Any], before
                            (scope["bundle_version"], as_of)).fetchone()
         if row is None or not _later_timestamp(row[0], applied_at):
             return False
+        if _scope_presentation(scope):
+            retained = (after_ready_metadata or {}).get(as_of)
+            if retained is None or row[0] == retained[3]:
+                # A pre-existing future timestamp is not evidence of a later
+                # canonical refresh. Presentation-only edits require a new one.
+                return False
     return changed
 
 
@@ -805,7 +876,7 @@ class PromoArchivePublicationAdapter:
         return {
             "operation_id": operation_id,
             "target": str(candidate["db_path"]),
-            "scope": {"dates": dates, "bundle_version": candidate["bundle"], "enabled_sku_count": len(candidate["ids"]),
+            "scope": {"presentation_contract": candidate.get("presentation_contract"), "dates": dates, "bundle_version": candidate["bundle"], "enabled_sku_count": len(candidate["ids"]),
                       "ready_snapshots": [u["as_of_date"] for u in candidate["ready_updates"]],
                       "snapshot_roles": candidate["roles"],
                       "metric_cells_changed": candidate["changes"],
@@ -859,7 +930,7 @@ class PromoArchivePublicationAdapter:
                         raise AdapterError("promo-scoped-backup-full-row-drift")
                     if _digest(_target_image(conn, bundle=fresh["bundle"], dates=dates,
                                              ready_asofs=[update["as_of_date"] for update in fresh["ready_updates"]],
-                                             roles=fresh["roles"])) != before_backup_target_sha:
+                                             roles=fresh["roles"], include_presentation=_scope_presentation(fresh))) != before_backup_target_sha:
                         raise AdapterError("promo-scoped-backup-preimage-drift")
                     conn.execute(f"CREATE TABLE IF NOT EXISTS {LEDGER}(operation_id TEXT PRIMARY KEY,request_sha256 TEXT NOT NULL,preview_json TEXT NOT NULL,candidate_sha256 TEXT NOT NULL,before_target_sha256 TEXT NOT NULL,after_target_sha256 TEXT NOT NULL,after_target_json TEXT NOT NULL,after_ready_metadata_json TEXT NOT NULL,applied_at TEXT NOT NULL,backup_path TEXT NOT NULL,backup_sha256 TEXT NOT NULL)")
                     if "inventory_retention_json" not in {r[1] for r in conn.execute(f"PRAGMA table_info({LEDGER})")}:
@@ -868,7 +939,7 @@ class PromoArchivePublicationAdapter:
                         raise AdapterError("promo-operation-already-submitted")
                     ready_asofs = [update["as_of_date"] for update in fresh["ready_updates"]]
                     before_target_sha = _digest(_target_image(conn, bundle=fresh["bundle"], dates=dates,
-                                                             ready_asofs=ready_asofs, roles=fresh["roles"]))
+                                                             ready_asofs=ready_asofs, roles=fresh["roles"], include_presentation=_scope_presentation(fresh)))
                     if before_target_sha != before_backup_target_sha:
                         raise AdapterError("promo-scoped-backup-preimage-drift")
                     for day, payload in fresh["results"].items():
@@ -894,7 +965,7 @@ class PromoArchivePublicationAdapter:
                     if not retention_receipts_match(conn, inventory_receipts):
                         raise AdapterError("promo-inventory-receipt-poststate-mismatch")
                     actual_target_image = _target_image(conn, bundle=fresh["bundle"], dates=dates,
-                                                         ready_asofs=ready_asofs, roles=fresh["roles"])
+                                                         ready_asofs=ready_asofs, roles=fresh["roles"], include_presentation=_scope_presentation(fresh))
                     actual_target_sha = _digest(actual_target_image)
                     if actual_target_sha != fresh["expected_target_sha"]:
                         raise AdapterError("promo-poststate-mismatch-before-commit")
@@ -934,14 +1005,14 @@ class PromoArchivePublicationAdapter:
                 scope = preview["scope"]
                 actual_target_image = _target_image(
                     conn, bundle=scope["bundle_version"],
-                    dates=scope["dates"], ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"],
+                    dates=scope["dates"], ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"], include_presentation=_scope_presentation(scope),
                 )
                 actual_target_sha = _digest(actual_target_image)
                 inventory_receipts = json.loads(row["inventory_retention_json"]) if "inventory_retention_json" in row.keys() else []
                 inventory_matches = retention_receipts_match(conn, inventory_receipts)
                 superseded = (actual_target_sha != row["after_target_sha256"]
                               and _verified_superseded(conn, scope, json.loads(row["after_target_json"]),
-                                                       actual_target_image, row["applied_at"]))
+                                                       actual_target_image, row["applied_at"], json.loads(row["after_ready_metadata_json"])))
         if row is None:
             return {"operation_id": operation_id, "state": "not_submitted"}
         if row["request_sha256"] != _digest(request):
@@ -1225,11 +1296,11 @@ def rollback_preview(runtime: Path, operation_id: str) -> dict[str, Any]:
                                   before_target_sha=row["before_target_sha256"],
                                   candidate_sha=row["candidate_sha256"])
             before_image = _target_image(backup, bundle=scope["bundle_version"], dates=dates,
-                                         ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"])
+                                         ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"], include_presentation=_scope_presentation(scope))
             if _digest(before_image) != row["before_target_sha256"]:
                 raise AdapterError("promo-rollback-backup-target-mismatch")
         actual_image = _target_image(current, bundle=scope["bundle_version"], dates=dates,
-                                     ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"])
+                                     ready_asofs=scope["ready_snapshots"], roles=scope["snapshot_roles"], include_presentation=_scope_presentation(scope))
         if _digest(actual_image) != row["after_target_sha256"]:
             raise AdapterError("promo-rollback-after-target-drift")
         if not _after_row_timestamps_match(current, dates=dates, roles=scope["snapshot_roles"], captured_at=row["applied_at"]):
@@ -1275,7 +1346,7 @@ def rollback_apply(runtime: Path, operation_id: str, expected_after_target_sha: 
             current.execute("BEGIN IMMEDIATE")
             try:
                 check_authority(runtime, authority)
-                if _digest(_target_image(current, bundle=bundle, dates=dates, ready_asofs=ready_asofs, roles=roles)) != expected_after_target_sha:
+                if _digest(_target_image(current, bundle=bundle, dates=dates, ready_asofs=ready_asofs, roles=roles, include_presentation=_scope_presentation(scope))) != expected_after_target_sha:
                     raise AdapterError("promo-rollback-after-target-drift")
                 publication = _ledger_row(current, operation_id)
                 if publication is None or not _after_row_timestamps_match(current, dates=dates, roles=roles, captured_at=publication["applied_at"]):
@@ -1331,7 +1402,7 @@ def rollback_apply(runtime: Path, operation_id: str, expected_after_target_sha: 
                 if not retention_receipts_match(current, inventory_receipts):
                     raise AdapterError("promo-rollback-inventory-receipt-mismatch")
                 restored_sha = _digest(_target_image(current, bundle=bundle, dates=dates,
-                                                     ready_asofs=ready_asofs, roles=roles))
+                                                     ready_asofs=ready_asofs, roles=roles, include_presentation=_scope_presentation(scope)))
                 if restored_sha != preview["restored_target_sha256"]:
                     raise AdapterError("promo-rollback-restored-target-mismatch")
                 if "inventory_retention_json" not in {r[1] for r in current.execute(f"PRAGMA table_info({ROLLBACK_LEDGER})")}:
@@ -1379,7 +1450,7 @@ def _inventory_repair_candidate(runtime, owner, conn):
     if 'sha256:' + hashlib.sha256(backup_path.read_bytes()).hexdigest() != publication['backup_sha256']:
         raise AdapterError('promo-inventory-repair-backup-drift')
     actual = _target_image(conn, bundle=scope['bundle_version'], dates=scope['dates'],
-                           ready_asofs=scope['ready_snapshots'], roles=scope['snapshot_roles'])
+                           ready_asofs=scope['ready_snapshots'], roles=scope['snapshot_roles'], include_presentation=_scope_presentation(scope))
     if _digest(actual) != publication['after_target_sha256'] or _digest(actual) != _digest(json.loads(publication['after_target_json'])):
         raise AdapterError('promo-inventory-repair-after-target-drift')
     if (not _after_row_timestamps_match(conn, dates=scope['dates'], roles=scope['snapshot_roles'], captured_at=publication['applied_at'])
@@ -1398,7 +1469,7 @@ def _inventory_repair_candidate(runtime, owner, conn):
             # Replay only the original scoped cell transformation: this attests
             # exact full bytes, not merely the promo subset or inventory values.
             expected = json.loads(before['plan_json'])
-            _update_plan(expected, results, set(scope['dates']))
+            _update_plan(expected, results, set(scope['dates']), update_completeness=_scope_presentation(scope))
             expected_raw = json.dumps(expected, ensure_ascii=False, separators=(',', ':'))
             if after['plan_json'] != expected_raw or _plan_non_target(expected, set(scope['dates'])) != _plan_non_target(json.loads(before['plan_json']), set(scope['dates'])):
                 raise AdapterError('promo-inventory-repair-full-ready-drift')

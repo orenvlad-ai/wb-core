@@ -380,3 +380,25 @@ retention chains, inverse publication with later unrelated edits, transactional
 failure, uncertified absence, missing original receipt, whole-READY/inventory
 drift, backup hash rejection and additive repair without a second submission.
 Reader/formula code is unchanged by this publication fix.
+
+A successful scoped promo publication also replaces stale dated SKU/TOTAL
+coverage evidence. Qualification requires success for the exact day, a unique
+full roster matching every target promo metric, equal requested/covered counts,
+no missing IDs and finite values. The source owner writes fresh applicable scope,
+empty missing/partial scope and complete/zero counters; the generic completeness
+reader continues to honor frozen missing evidence for other/partial sources.
+Composite operands can cover this roster completely while still carrying the
+preliminary warning that end-of-day freshness is unproven. Completeness evidence
+and freshness are separate, and publication merges rather than discards that
+warning.
+
+New operations persist `presentation_contract=promo_scope_completeness_v1` in
+preview/backup scope. Their target digest, CAS, readback and inverse include exact
+promo cell presentation as well as numeric values. A metadata-only drift without
+a newly observed canonical READY refresh is ambiguous. Rollback restores old
+presentation and its exact bytes/retained inventory acceptance. Older unversioned
+owner journals retain the original target projection and transform during
+readback/retention repair; upgrading code does not reinterpret their stored proof.
+The regression uses 94 SKU, all three native TOTAL cells, finite-value rejection,
+partial/composite quality, presentation drift/inverse CAS, original inventory
+retention and old-journal repair compatibility. Reader/formula pins are unchanged.
