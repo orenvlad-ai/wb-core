@@ -68,7 +68,9 @@ steady-очередь.
 
 429, 5xx и ошибки сети/ответа провайдера получают общий persistent cooldown,
 экспоненциальный backoff 60–960 секунд и максимум две paid attempts для ключа;
-после этого действует существующая безопасная политика. Quota failures имеют
+после этого действует существующая безопасная политика. Исходный Node runner
+не экспортирует provider Retry-After: Python boundary классифицирует его
+существующие ошибки, а повтор регулирует общий bounded cooldown. Quota failures имеют
 cooldown минимум 900 секунд. Исторический terminal quota восстанавливается
 только после явного нового ON epoch или доказанного более позднего AI success.
 Auth/config ошибки остаются видимыми блокерами. Cooldown блокирует paid claims,
@@ -95,7 +97,9 @@ Rating-only `wbRu` не попадает в этот tail. UI отдельно �
 `wb_autoanswers_recovery_v1` работает через штатный
 `apps/production_apply_launcher.py`. Общий launcher не изменён. Транспорт
 ограничен active primary target `wb-core-eu-root`, canonical state directory и
-точным SHA из trusted main, подтверждённым runtime/deploy metadata.
+точным SHA из trusted main, подтверждённым runtime/deploy metadata. Trusted SSH
+transport явно включает `WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true` только для
+процесса зарегистрированного adapter; allowlist env loader не расширяется.
 
 Read-only capture request: `{"capture_only":true}`. Запускать только preview;
 полный `wb_autoanswers_t0_manifest_v1` находится в `receipt.scope.manifest`.

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Free regression tests for pause recovery, provider outages and exact apply."""
 from contextlib import closing
+import json
+from types import SimpleNamespace
 from datetime import timedelta
 from pathlib import Path
 import sqlite3
@@ -16,7 +18,9 @@ from apps import wb_autoanswers_recovery_apply as adapter
 from apps.production_apply_contract import AmbiguousSubmit
 from packages.application.wb_autoanswers_runtime import AutoanswersRepository, SCHEMA_VERSION, iso_utc
 from packages.application.wb_autoanswers_worker import AutoanswersProcessingWorker
-from packages.application.wb_autoanswers_node_bridge import NodeBoundaryError
+from packages.application.wb_autoanswers_node_bridge import NodeAutoanswersBridge, NodeBoundaryError
+from packages.contracts.wb_autoanswers import NODE_BOUNDARY_VERSION, PROMPT_BUNDLE_VERSION, EVALUATION_SIGNATURE
+from apps import wb_autoanswers_recovery_production_adapter as transport
 from packages.application.wb_autoanswers_sync import WbFeedbackSyncService
 from packages.application.wb_autoanswers_coordinator import AutoanswersCoordinator
 
@@ -278,6 +282,61 @@ class RecoveryTest(unittest.TestCase):
             result = coordinator.run_once()
             self.assertIsNotNone(result["full_unanswered_inventory"], (event, result["errors"]))
             self.assertFalse(result["errors"])
+
+
+class BoundaryCompatibilityTest(unittest.TestCase):
+    def invoke_failure(self, code, message, *, partial_cost=0, operation="run", execution_mode="live"):
+        envelope = {"boundary_version": NODE_BOUNDARY_VERSION, "bundle_version": PROMPT_BUNDLE_VERSION,
+                    "evaluation_signature": EVALUATION_SIGNATURE, "ok": False,
+                    "error": {"code": code, "message": message, "partial_cost_usd": partial_cost,
+                              "partial_usage": {"input_tokens": 100}, "partial_role_calls": int(partial_cost > 0)}}
+        completed = SimpleNamespace(returncode=1, stdout=json.dumps(envelope), stderr="")
+        with patch("packages.application.wb_autoanswers_node_bridge.subprocess.run", return_value=completed):
+            with self.assertRaises(NodeBoundaryError) as failure:
+                NodeAutoanswersBridge(env={})._invoke({"operation": operation, "execution_mode": execution_mode})
+        return failure.exception
+    def test_original_runner_network_timeouts_and_invalid_response_are_retryable_unknown(self):
+        for original, message, normalized in (
+            ("NODE_BOUNDARY_ERROR", "fetch failed", "OPENAI_NETWORK"),
+            ("ECONNRESET", "socket closed", "OPENAI_NETWORK"),
+            ("23", "The operation was aborted due to timeout", "OPENAI_TIMEOUT"),
+            ("20", "This operation was aborted", "OPENAI_TIMEOUT"),
+            ("OPENAI_HTTP_200", "Responses API HTTP 200", "OPENAI_RESPONSE_INVALID"),
+            ("OPENAI_HTTP_204", "Responses API HTTP 204", "OPENAI_RESPONSE_INVALID"),
+            ("OPENAI_HTTP_503", "Responses API HTTP 503", "OPENAI_HTTP_503"),
+        ):
+            with self.subTest(original=original):
+                error = self.invoke_failure(original, message, partial_cost=.01)
+                self.assertEqual(error.code, normalized)
+                self.assertTrue(error.retryable)
+                self.assertTrue(error.provider_cost_uncertain)
+                self.assertEqual(error.partial_cost_usd, .01)
+                self.assertEqual(error.partial_role_calls, 1)
+    def test_confirmed_429_quota_auth_and_domain_failures_do_not_gain_unknown_cost(self):
+        for code, retryable in (("OPENAI_HTTP_429", True), ("OPENAI_INSUFFICIENT_QUOTA", True),
+                                ("OPENAI_HTTP_401", False), ("OPENAI_API_KEY_MISSING", False),
+                                ("NODE_BOUNDARY_ERROR", False)):
+            with self.subTest(code=code):
+                error = self.invoke_failure(code, "deterministic error", partial_cost=.01)
+                self.assertEqual(error.code, code)
+                self.assertEqual(error.retryable, retryable)
+                self.assertFalse(error.provider_cost_uncertain)
+    def test_manual_guard_and_fixture_errors_are_not_provider_normalized(self):
+        error = self.invoke_failure("NODE_BOUNDARY_ERROR", "fetch failed", operation="guard_final")
+        self.assertEqual(error.code, "NODE_BOUNDARY_ERROR")
+        self.assertFalse(error.retryable)
+        error = self.invoke_failure("NODE_BOUNDARY_ERROR", "fetch failed", execution_mode="fixture")
+        self.assertFalse(error.retryable)
+    def test_registered_transport_explicitly_enables_gate_for_only_canonical_remote_process(self):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"operation_id": "recovery-gate-test", "state": "not_submitted"}))
+        with patch.object(transport, "configure_ssh"), patch.object(transport, "trusted_main_sha", return_value="a" * 40), patch.object(transport.subprocess, "run", side_effect=run):
+            transport.WbAutoanswersRecoveryProductionAdapter().readback({"capture_only": True}, "recovery-gate-test")
+        self.assertEqual(calls[0][-8:], ["env", "WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true", "python3", transport.REMOTE_APP,
+                                      "--runtime-dir", "/opt/wb-core-runtime/state", "--env-file", "/opt/wb-ai/.env"])
+        self.assertEqual(calls[0][-9], "wb-core-eu-root")
 
 
 class AdapterTest(unittest.TestCase):

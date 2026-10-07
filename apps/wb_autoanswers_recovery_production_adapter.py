@@ -105,6 +105,8 @@ class WbAutoanswersRecoveryProductionAdapter:
                 identity,
                 *shlex.split(options),
                 destination,
+                "env",
+                "WB_AUTOANSWERS_EXTERNAL_IO_ENABLED=true",
                 "python3",
                 REMOTE_APP,
                 "--runtime-dir",

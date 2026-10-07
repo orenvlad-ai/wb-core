@@ -112,20 +112,12 @@ function liveRoleRunner(observedTrace) {
   const baseUrl = String(process.env.OPENAI_RESPONSES_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/u, "");
   return async ({role, payload}) => {
     const started = Date.now();
-    let response;
-    try {
-      response = await fetch(`${baseUrl}/responses`, {
-        method: "POST",
-        headers: {Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json"},
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(120000)
-      });
-    } catch (cause) {
-      const error = new Error("Responses API transport failed");
-      error.code = ["TimeoutError", "AbortError"].includes(cause?.name) ? "OPENAI_TIMEOUT" : "OPENAI_NETWORK";
-      error.providerCostUncertain = true;
-      throw error;
-    }
+    const response = await fetch(`${baseUrl}/responses`, {
+      method: "POST",
+      headers: {Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(120000)
+    });
     const body = await response.json().catch(() => null);
     if (body?.usage) {
       observedTrace.push(usageRecord({
@@ -135,21 +127,10 @@ function liveRoleRunner(observedTrace) {
         latencyMs: Date.now() - started
       }));
     }
-    if (!response.ok) {
+    if (!response.ok || !body) {
       const providerCode = String(body?.error?.code || "");
       if (providerCode === "insufficient_quota") fail("OPENAI_INSUFFICIENT_QUOTA", "Responses API quota is exhausted");
-      const error = new Error(`Responses API HTTP ${response.status}`);
-      error.code = `OPENAI_HTTP_${response.status}`;
-      const retryAfter = response.headers.get("retry-after");
-      error.retryAfterSeconds = /^\d+$/u.test(retryAfter || "") ? Number(retryAfter) : Math.max(0, Math.ceil((Date.parse(retryAfter || "") - Date.now()) / 1000)) || 0;
-      error.providerCostUncertain = response.status >= 500;
-      throw error;
-    }
-    if (!body) {
-      const error = new Error("Responses API body is invalid");
-      error.code = "OPENAI_RESPONSE_INVALID";
-      error.providerCostUncertain = true;
-      throw error;
+      fail(`OPENAI_HTTP_${response.status}`, `Responses API HTTP ${response.status}`);
     }
     let parsed;
     try {
@@ -229,9 +210,7 @@ async function main() {
         message: String(error.message || error),
         partial_usage: error.partialUsage || null,
         partial_cost_usd: Number(error.partialCostUsd || 0),
-        partial_role_calls: Number(error.partialRoleCalls || 0),
-        retry_after_seconds: Number(error.retryAfterSeconds || 0),
-        provider_cost_uncertain: Boolean(error.providerCostUncertain)
+        partial_role_calls: Number(error.partialRoleCalls || 0)
       }
     }));
     process.exitCode = 1;
