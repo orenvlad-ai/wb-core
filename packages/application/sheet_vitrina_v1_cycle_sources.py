@@ -224,8 +224,32 @@ class SheetVitrinaCycleSources:
 
     def collected_source_summary(self, handle: CollectedLivePlanSources) -> dict:
         """Owned copied proofs only; never expose retained payloads or attempt notes."""
+        from packages.application import sheet_vitrina_v1_live_plan as live
         from packages.application.ready_publication import canonical, digest
-        collected = self._owned_collection(handle).sources
+        from packages.application.sheet_vitrina_v1_cycle import CycleStageFailure, CAPTURE_UNAVAILABLE_KINDS
+        invocation = self._owned_collection(handle)
+        collected = invocation.sources
+        diagnostics = collected.effects['collection_diagnostics']
+        captured = {(status.source_key, status.temporal_slot, status.column_date)
+                    for status, _ in collected.slots.values()}
+        local_keys = {'cost_price', live.OWN_PRODUCT_CAPITAL_SOURCE_KEY, live.SKU_ACTION_SOURCE_KEY}
+        recorded = {(item['source_key'], item['slot_kind'], item['requested_date'])
+                    for item in diagnostics['source_slots'] if item['source_key'] not in local_keys}
+        unsupported = {(item['source_key'], item['slot_kind'], item['requested_date'])
+                       for item in diagnostics['source_slots'] if item.get('origin') == 'not_supported'}
+        if (not diagnostics.get('finished_at') or not captured <= recorded or not recorded - captured <= unsupported
+                or len(captured) != len(collected.slots)):
+            raise CycleStageFailure('collection_capture_incomplete')
+        mode = invocation.kwargs.get('execution_mode', invocation.args[2] if len(invocation.args) > 2 else 'auto_daily')
+        full_scope = mode == 'auto_daily' and collected.scope[4:] == ([], [])
+        if full_scope:
+            # The remaining classification entries are derive-local operands,
+            # not external captures. Keep every original source group/slot.
+            external = set(live.SOURCE_CLASSIFICATION_GROUPS) - local_keys
+            expected = {(key, slot.slot_key, slot.column_date) for key in external
+                        for slot in live._build_temporal_slots(as_of_date=collected.scope[1], current_date=collected.scope[2])}
+            if recorded != expected or len(recorded) != sum(item['source_key'] not in local_keys for item in diagnostics['source_slots']):
+                raise CycleStageFailure('collection_full_scope_incomplete')
         slots = []
         for status, payload in collected.slots.values():
             accepted = _is_valid_temporal_candidate(source_key=status.source_key,
@@ -239,21 +263,46 @@ class SheetVitrinaCycleSources:
             if not latest:
                 match = re.search(r'(?:^|;)\s*latest_attempt_kind=([^;]+)', status.note)
                 latest = match.group(1).strip() if match else status.kind
+            kinds = CAPTURE_UNAVAILABLE_KINDS | {'success'}
+            if latest not in kinds:
+                latest = 'unknown'
             policy = ('archive_only' if status.source_key in ARCHIVED_ONLY_SOURCE_KEYS
                 else 'accepted_partial' if accepted and status.kind == 'incomplete'
                 else 'accepted_retained' if accepted and latest != status.kind
                 else 'accepted_complete' if accepted and status.kind == 'success' else 'unavailable')
+            payload_kind = str(getattr(payload, 'kind', '')) if payload is not None else ''
+            invalid = ''
+            if payload is not None and status.source_key not in ARCHIVED_ONLY_SOURCE_KEYS:
+                data = live._payload_diagnostics(payload)
+                if payload_kind not in kinds:
+                    payload_kind = 'unknown'
+                    invalid = 'payload_kind_unknown'
+                elif data.get('zero_fill_applied') is True:
+                    invalid = 'fabricated_zero_fill'
+                elif payload_kind in {'success', 'incomplete'} and live._resolve_freshness(payload) != status.column_date:
+                    invalid = 'payload_date_mismatch'
+                elif status.kind == 'success' and not accepted:
+                    invalid = 'unproved_success_payload'
+                elif status.source_key in {'ads_compact', 'fin_report_daily'} and payload_kind == 'incomplete' and not accepted:
+                    invalid = 'unproved_partial_payload'
+                elif payload_kind not in {'success', 'incomplete'} and getattr(payload, 'items', None):
+                    invalid = 'failed_payload_has_items'
+            error_code = str((status.diagnostics or {}).get('error_code') or '')
+            if not re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', error_code):
+                error_code = ''
             slots.append(dict(source_key=status.source_key, temporal_slot=status.temporal_slot,
                 date=status.column_date, kind=status.kind, latest_attempt_kind=latest,
                 accepted=bool(accepted), accepted_digest=digest(canonical(_plain_jsonable(payload))) if accepted else '',
                 requested_count=status.requested_count, covered_count=status.covered_count,
-                missing_count=len(status.missing_nm_ids), policy=policy))
+                missing_count=len(status.missing_nm_ids), policy=policy,
+                payload_present=payload is not None, payload_kind=payload_kind, invalid_payload_reason=invalid,
+                outcome_digest=digest(canonical(_plain_jsonable(payload))), error_code=error_code))
         for item in collected.effects['collection_diagnostics']['source_slots']:
-            if item.get('origin') == 'not_supported':
+            if item.get('origin') == 'not_supported' and (item['source_key'], item['slot_kind'], item['requested_date']) not in captured:
                 slots.append(dict(source_key=item['source_key'], temporal_slot=item['slot_kind'],
                     date=item['requested_date'], kind='not_available', latest_attempt_kind='not_available',
                     accepted=False, accepted_digest='', policy='temporal_role_unavailable'))
         return dict(scope_fingerprint=digest(canonical(collected.scope)),
             provenance_fingerprint=digest(canonical(collected.inputs)),
             bundle_version=collected.scope[0], as_of_date=collected.scope[1],
-            business_date=collected.scope[2], slots=slots)
+            business_date=collected.scope[2], collection_complete=True, full_scope=full_scope, slots=slots)

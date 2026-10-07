@@ -41,9 +41,10 @@ SLOT = '2026-09-29T09:00:00+00:00'
 
 def summary():
     return dict(scope_fingerprint='scope', provenance_fingerprint='provenance', bundle_version='bundle',
-        business_date='2026-09-29', slots=[dict(source_key='stocks', temporal_slot='today_current',
+        business_date='2026-09-29', collection_complete=True, full_scope=True,
+        slots=[dict(source_key='stocks', temporal_slot='today_current',
         date='2026-09-29', kind='success', latest_attempt_kind='success', accepted=True,
-        accepted_digest='digest', policy='accepted_complete')])
+        accepted_digest='digest', outcome_digest='digest', policy='accepted_complete')])
 
 
 class CycleFake:
@@ -291,13 +292,50 @@ with open(sys.argv[1],'rb') as stream:
         self.assertEqual(second['job_id'],active['job_id'])
         finish.set();thread.join(5);self.assertTrue(admission_idle(self.root)['idle'])
         self.assertTrue(heavy_admission_status(self.root)['idle'])
-    def test_explicit_degradation_policy_rejects_unproved_operands(self):
+    def test_capture_degradation_never_fabricates_accepted_operands(self):
         value=summary();slot=value['slots'][0]
         for policy in ('accepted_partial','accepted_retained','archive_only','temporal_role_unavailable'):
             slot['policy']=policy
             self.assertTrue(validate_collection(value).warnings)
-        slot.update(policy='unavailable',accepted=False)
+        slot.update(policy='unavailable',accepted=False,accepted_digest='',kind='missing')
+        self.assertTrue(validate_collection(value).warnings)
+        slot['accepted_digest']='forged'
+        with self.assertRaisesRegex(CycleStageFailure,'collection_accepted_proof_inconsistent'):validate_collection(value)
+        slot.update(accepted=True,accepted_digest='forged',policy='accepted_complete')
+        with self.assertRaisesRegex(CycleStageFailure,'collection_accepted_digest_changed'):validate_collection(value)
+        slot.update(accepted=False,accepted_digest='',policy='unavailable',kind='invented')
         with self.assertRaises(CycleStageFailure):validate_collection(value)
+        value['collection_complete']=False
+        with self.assertRaisesRegex(CycleStageFailure,'collection_proof_missing'):validate_collection(value)
+        value.update(collection_complete=True,full_scope=False)
+        with self.assertRaisesRegex(CycleStageFailure,'collection_full_scope_required'):validate_collection(value,require_full_scope=True)
+    def test_completed_full_capture_missing_sources_do_not_block_independent_domains(self):
+        for failure in ('', 'warehouse'):
+            with self.subTest(failure=failure):
+                value=summary();value['slots']=[]
+                for key,kind in (('spp','missing'),('spp_proxy','closure_exhausted'),
+                                 ('stocks','not_available'),('wb_buyer_authenticated','incomplete'),('fin_report_daily','error')):
+                    value['slots'].append(dict(source_key=key,temporal_slot='today_current',date='2026-09-29',
+                        kind=kind,latest_attempt_kind=kind,accepted=False,accepted_digest='',outcome_digest='absent',policy='unavailable'))
+                fake=CycleFake(self.root,fail=failure)
+                fake.sheet_plan_block.collected_source_summary=lambda handle:value
+                receipt,lock=self.accepted(key='isolated-'+failure,slot=f'2026-09-29T{12 if failure else 9:02}:00:00+00:00')
+                try:
+                    with heavy_admitted(self.root,operation='cycle'):
+                        if failure:
+                            with self.assertRaisesRegex(CycleStageFailure,'offline_warehouse'):run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+                        else:run_cycle(fake,self.store,receipt,self.config,lambda _:None)
+                finally:lock.close()
+                self.assertEqual(fake.events.count('api_sources'),1)
+                self.assertIn('finance_sources',fake.events);self.assertIn('fbs_generation',fake.events)
+                self.assertIn('warehouse',fake.events)
+                self.assertEqual(receipt['stages'][1]['status'],'degraded')
+                captured=json.loads(receipt['stages'][1]['versions']['source_capture_outcomes'])
+                self.assertTrue(all(not slot['accepted'] and not slot['accepted_digest'] for slot in captured))
+                if not failure:
+                    self.assertEqual(fake.events,list(STAGES[:7])+['derive']+list(STAGES[7:]))
+                    self.assertEqual(receipt['status'],'degraded')
+                else:self.assertNotIn('derive',fake.events)
     def test_history_delegates_exact_owned_context_and_fixed_dates(self):
         # Completion/FD/terminal predicates live in the actual Linux worker suite.
         # This checks the public canonical factory boundary without constructing
@@ -529,7 +567,7 @@ class SourceAndAdmissionTests(unittest.TestCase):
             self.assertTrue(all(item['accepted_digest'] for item in proof['slots']))
             proof['slots'].clear()
             self.assertEqual(len(case.sources.collected_source_summary(handle)['slots']),2)
-            self.assertNotIn('payload',str(case.sources.collected_source_summary(handle)))
+            self.assertTrue(all('payload' not in slot and 'items' not in slot for slot in case.sources.collected_source_summary(handle)['slots']))
             with self.assertRaises(ValueError):case.sources.collected_source_summary(CollectedLivePlanSources())
         finally:case.doCleanups()
     def test_actual_partial_ad_contract_and_partial_finance_fail_closed(self):
@@ -544,12 +582,64 @@ class SourceAndAdmissionTests(unittest.TestCase):
                 completeness_state='partial',zero_fill_applied=False,source_date='2026-09-28',source_observed_at=STAMP,
                 observed_campaign_ids=[1],dated_roster_state='unqualified'))
             collected.slots={('offline',):(status,data)}
+            collected.effects['collection_diagnostics']['source_slots']=[dict(source_key=status.source_key,
+                slot_kind=status.temporal_slot,requested_date=status.column_date,origin='upstream_fetch')]
             proof=case.sources.collected_source_summary(handle)
             self.assertTrue(validate_collection(proof).warnings)
+            data.snapshot_date='2026-09-27'
+            with self.assertRaisesRegex(CycleStageFailure,'payload_date_mismatch'):
+                validate_collection(case.sources.collected_source_summary(handle))
+            data.snapshot_date='2026-09-28'
             data.diagnostics['zero_fill_applied']=True
             with self.assertRaises(CycleStageFailure):validate_collection(case.sources.collected_source_summary(handle))
-            collected.slots={('offline',):(replace(status,source_key='fin_report_daily',kind='success'),data)}
-            with self.assertRaises(CycleStageFailure):validate_collection(case.sources.collected_source_summary(handle))
+            data.diagnostics['zero_fill_applied']=False
+            data.kind='success'
+            data.diagnostics['pagination']={'complete':False,'terminal_status':200}
+            collected.slots={('offline',):(replace(status,source_key='fin_report_daily',kind='success',diagnostics=data.diagnostics),data)}
+            collected.effects['collection_diagnostics']['source_slots'][0]['source_key']='fin_report_daily'
+            with self.assertRaisesRegex(CycleStageFailure,'unproved_success_payload'):
+                validate_collection(case.sources.collected_source_summary(handle))
+        finally:case.doCleanups()
+    def test_real_full_capture_missing_spp_and_partial_stock_display_publish_truthful_error(self):
+        from apps import sheet_vitrina_v1_closed_backlog_smoke as full_fixture
+        case=full_fixture.BacklogTests();case.setUp()
+        try:
+            # Canonical main capture, all groups and original dates, no selector.
+            stock=case.counters['stocks_block']
+            def partial(request):
+                stock.request_dates.append(request.snapshot_date)
+                return SimpleNamespace(result=SimpleNamespace(kind='incomplete',snapshot_date=request.snapshot_date,
+                    temporal_snapshot_acceptable=False,requested_count=len(request.nm_ids),covered_count=1,
+                    missing_nm_ids=list(request.nm_ids[1:]),items=[SimpleNamespace(nm_id=request.nm_ids[0],stock_total=7)],
+                    detail='fixture_partial_stock'))
+            with patch.object(case.counters['spp_block'],'execute',side_effect=RuntimeError('private provider response')) as spp, \
+                 patch.object(stock,'execute',side_effect=partial):
+                handle=case.main()
+            source_summary=case.sources.collected_source_summary(handle)
+            proof=validate_collection(source_summary,require_full_scope=True)
+            self.assertTrue(proof.warnings)
+            self.assertEqual(spp.call_count,1)  # yesterday current-only rollover never fetches.
+            self.assertEqual(len(source_summary['slots']),30)
+            self.assertNotIn('private provider',str(proof))
+            stock_slot=next(slot for slot in source_summary['slots'] if slot['source_key']=='stocks' and slot['temporal_slot']=='yesterday_closed')
+            self.assertFalse(stock_slot['accepted']);self.assertTrue(stock_slot['payload_present'])
+            self.assertEqual(stock_slot['payload_kind'],'incomplete')
+            counts={key:list(counter.request_dates) for key,counter in case.counters.items()}
+            entry=Entry(runtime_dir=case.runtime.runtime_dir,runtime=case.runtime,now_factory=lambda:full_fixture.NOW,
+                activated_at_factory=lambda:full_fixture.STAMP,refreshed_at_factory=lambda:full_fixture.STAMP)
+            with patch.object(case.sources,'collect_sources',side_effect=AssertionError('second full capture')), \
+                 patch.object(case.block,'build_plan',side_effect=AssertionError('publication recollects')):
+                plan=case.sources.derive_collected(handle)
+                versions,published=entry._cycle_publish_ready(plan)
+            self.assertEqual(versions['ready_semantic_status'],'error')
+            self.assertEqual(published.warnings[0]['semantic_status'],'error')
+            entry._cycle_verify_ready(versions)
+            self.assertEqual(counts,{key:list(counter.request_dates) for key,counter in case.counters.items()})
+            self.assertFalse(any(slot['accepted'] for slot in source_summary['slots'] if slot['source_key']=='spp'))
+            # A completed capture cannot silently omit a canonical source slot.
+            case.sources._owned_collection(handle).sources.effects['collection_diagnostics']['source_slots'].pop(0)
+            with self.assertRaisesRegex(CycleStageFailure,'collection_capture_incomplete|collection_full_scope_incomplete'):
+                case.sources.collected_source_summary(handle)
         finally:case.doCleanups()
     def test_source_free_daily_repair_reads_current_cost_and_no_fetch(self):
         with TemporaryDirectory() as temp:
@@ -580,6 +670,10 @@ class SourceAndAdmissionTests(unittest.TestCase):
                 versions,proof=entry._cycle_publish_ready(plan)
             self.assertEqual(versions['publication_operation_id'],proof.versions['publication_operation_id'])
             entry._cycle_verify_ready(versions)
+            with patch.object(entry,'_publish_sheet_refresh_plan',return_value={'status':'error','semantic_status':'error'}), \
+                 patch.object(entry,'_cycle_verify_ready',side_effect=AssertionError('unproved publication verified')):
+                with self.assertRaisesRegex(CycleStageFailure,'final_ready_publication_unproven'):
+                    entry._cycle_publish_ready(plan)
             with closing(sqlite3.connect(case.runtime.db_path)) as conn,conn:
                 conn.execute("UPDATE sheet_vitrina_v1_ready_snapshots SET plan_json=json_set(plan_json,'$.metadata.other_owner','changed')")
             with self.assertRaisesRegex(CycleStageFailure,'cycle_ready_receipt_changed'):
