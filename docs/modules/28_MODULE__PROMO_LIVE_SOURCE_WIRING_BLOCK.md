@@ -340,3 +340,43 @@ original/canonical byte equality. Provenance includes the observation window and
 material observation instead of claiming that all files were observed at start.
 Finished time still never certifies end-of-day completeness. Postmaterialization
 rechecks repeat the same proof before routine numeric display.
+
+Scoped promo publication preserves accepted inventory in its READY transaction.
+`packages/application/inventory_retention.py` verifies unchanged READY identity,
+accounting target/bindings and every stock/inventory value and cell quality. It
+resolves the exact retained book binding, verifies the immutable accepted capture
+and original completed publication, then verifies certification of the exact
+before READY digest (including existing retention chains). The atomic append is
+only `kind=inventory_retention` with `accepted_inventory_retention_v1`; it keeps
+the original capture/time/publisher and never captures or writes stock/book data.
+Uncertified absence stays absent. An exact relevant capture with missing original
+certification rejects publication. There is no added history-age/window limit.
+
+The candidate hash and scoped backup manifest include the inventory proof; the
+promo ledger retains exact new receipt rows and readback verifies them. Apply
+failure rolls back source, READY and receipt together. Rollback restores original
+READY bytes when no unrelated edit remains. When it preserves later unrelated
+cells, it certifies the unchanged inventory from the attested backup in that same
+inverse transaction. Old receipt rows remain append-only, and only a receipt
+matching the current READY content digest can affect the management reader.
+
+Already completed publications from the older writer can use the same bounded
+owner adapter with request `{"mode":"repair_inventory_retention",
+"runtime_dir":"...","publication_operation_id":"..."}`. Preview verifies the
+retained scoped SQLite file hash, manifest, original owner ledger/candidate,
+exact before/after promo target and row metadata; replaying the original scoped
+transformation must produce the current full READY bytes. It then reuses the
+same original capture/certification proof. One apply appends only retention
+receipts plus its compact repair ledger. It does not replace READY, sources,
+books or inventory. Backup loss, later READY/source drift or missing original
+certification rejects repair; no incident-specific exception is used. The
+existing owner request limit (seven dates) remains; no arbitrary history scan or
+full migration is added. The launcher retains its one-submit/readback contract.
+
+`apps/promo_inventory_retention_smoke.py` is routed through the promo publication
+CI group. It exercises actual management reads and native day-7 compilation,
+unchanged preliminary SKU/TOTAL/GROUP inventory cells, original publisher/time,
+retention chains, inverse publication with later unrelated edits, transactional
+failure, uncertified absence, missing original receipt, whole-READY/inventory
+drift, backup hash rejection and additive repair without a second submission.
+Reader/formula code is unchanged by this publication fix.

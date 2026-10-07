@@ -476,6 +476,49 @@ def cli_checks():
             assert command.main()==0 and update.call_args.kwargs['rolling14'] is True
     return {'migration_only_exact_held_manual':True,'separate_root_guard':True,'parent180_worker31_defaults':True,'ordinary_rolling14':True}
 
+def promo_composite_reason_scope_checks(runtime):
+    """Complete unconfirmed cost keeps prior text; only promo composite adds text."""
+    day = '2026-04-20'
+    state = runtime.load_current_state()
+    metrics = {m.metric_key: m for m in _effective_web_vitrina_metrics(state.metrics_v2)}
+    config = [ConfigV2Item(11, True, 'First', 'a', 1)]
+    groups = [{'group_key': 'a', 'label': 'A'}]
+    values = {'orderCount': 4, 'our_wb_unit_cost_rub': 20, 'promo_participation': 1,
+              'promo_count_by_price': 2, 'promo_entry_price_best': 570}
+    totals = [row('TOTAL', key, values={day: 0}) for key in (
+        'total_orderCount', 'total_our_wb_unit_cost_rub', 'total_promo_participation',
+        'total_promo_count_by_price', 'avg_promo_entry_price_best')]
+    params = SimpleNamespace(buyout_rate=.8)
+    cost_basis = {day: {11: {'quantity': 5, 'capital': 100, 'source_digest': 'sha256:source',
+        'presentation_digest': 'sha256:blob', 'presentation_version': 'sha256:version'}}}
+    def project(presentation):
+        sku = [row('SKU', key, 11, {day: value}, {day: dict(presentation)}) for key, value in values.items()]
+        result = include_group_rows(totals+sku, groups=groups, config=config, metrics=metrics,
+            formulas={f.formula_id:f for f in state.formulas_v2}, dates=[day], runtime=runtime,
+            today=day, parameters3=lambda d:params, parameters4=lambda d:params, cost_basis=cost_basis)
+        return {r.metric_key:r for r in result if r.scope_kind=='GROUP'}
+    plain = project({'state': 'unconfirmed', 'quality_state': 'preliminary'})
+    warning = 'Полнота на конец дня не подтверждена. marker_reason'
+    marked = project({'state': 'unconfirmed', 'quality_state': 'preliminary',
+        'reason': warning, 'quality_reason': warning,
+        'observation_quality': 'historical_composite_observation_only'})
+    unmarked = project({'state': 'unconfirmed', 'quality_state': 'preliminary',
+        'reason': 'private_cost_technical_reason', 'quality_reason': 'private_cost_technical_reason'})
+    for key in ('total_orderCount','total_our_wb_unit_cost_rub'):
+        assert plain[key].values_by_date[day] == marked[key].values_by_date[day] == unmarked[key].values_by_date[day]
+        assert plain[key].presentation_by_date[day] == marked[key].presentation_by_date[day] == unmarked[key].presentation_by_date[day],key
+    for key in ('total_promo_participation','total_promo_count_by_price','avg_promo_entry_price_best'):
+        assert marked[key].values_by_date[day] == plain[key].values_by_date[day]
+        assert marked[key].presentation_by_date[day]['state']=='unconfirmed'
+        assert warning in marked[key].presentation_by_date[day]['quality_reason'],key
+        assert unmarked[key].presentation_by_date[day] == plain[key].presentation_by_date[day],key
+    # Existing incomplete-input propagation is retained for all domains.
+    partial = project({'state':'unconfirmed','quality_state':'partial','reason':'existing_partial_reason'})
+    assert 'existing_partial_reason' in partial['total_orderCount'].presentation_by_date[day]['quality_reason']
+    return {'nonpromo_unconfirmed_all_fields_unchanged':True,'promo_marker_only_reason_inherited':True,
+            'existing_partial_reason_preserved':True}
+
+
 def main():
     started=time.monotonic()
     server=LocalWebVitrinaFixtureServer(with_ready_snapshot=True,ready_days=1)
@@ -507,6 +550,7 @@ def main():
             assert period.metadata['group_source_statuses']==[
                 {'source_key':'ads_compact','kind':'incomplete','temporal_slot':'2026-04-21'}]
             semantic=semantic_checks(runtime)
+            promo_reason_scope=promo_composite_reason_scope_checks(runtime)
             integrity=integrity_checks(runtime)
             normal=NativeDatedCompiler(runtime,datetime(2026,4,20,12,tzinfo=timezone.utc),'2026-04-20','2026-04-20')
             grouped=NativeDatedCompiler(runtime,datetime(2026,4,20,12,tzinfo=timezone.utc),'2026-04-20','2026-04-20',group_blocks=True)
@@ -517,6 +561,6 @@ def main():
                 if r['row_kind']=='group' and rid.startswith('GROUP:clean|'):
                     assert r['group_id']=='group:clean' and r['values']['group'][0]=='Clean renamed'
         assert before==hashlib.sha256(runtime.db_path.read_bytes()).hexdigest()
-    print(json.dumps({'status':'PASS','semantics':semantic,'integrity':integrity,'native_compiler_all16_unchanged':True,'stable_label_identity_order':True,'source_RO':True,'accepted_basis':basis_binding_checks(),'migration':migration_checks(),'membership':membership_checks(),'CLI':cli_checks(),'seconds':round(time.monotonic()-started,3)}))
+    print(json.dumps({'status':'PASS','semantics':semantic,'promo_reason_scope':promo_reason_scope,'integrity':integrity,'native_compiler_all16_unchanged':True,'stable_label_identity_order':True,'source_RO':True,'accepted_basis':basis_binding_checks(),'migration':migration_checks(),'membership':membership_checks(),'CLI':cli_checks(),'seconds':round(time.monotonic()-started,3)}))
 
 if __name__=='__main__':main()

@@ -391,7 +391,10 @@ def include_group_rows(rows, *, groups, config, metrics, formulas, dates,
                 preliminary = any(p.get('state') == 'unconfirmed' or p.get('quality_state') in {'preliminary', 'management_estimate'} for p in affected)
                 uncertain = partial or preliminary
                 inherited_reasons = list(dict.fromkeys(str(p.get('quality_reason') or p.get('reason') or '')
-                    for p in affected if input_incomplete(p) or p.get("state") == "unconfirmed"))
+                    for p in affected if input_incomplete(p) or (
+                        metric in {'total_promo_participation', 'total_promo_count_by_price', 'avg_promo_entry_price_best'}
+                        and p.get('state') == 'unconfirmed'
+                        and p.get('observation_quality') == 'historical_composite_observation_only')))
                 reason = ' '.join([reason, *[r for r in inherited_reasons if r][:3]])
                 undefined = value is None and aggregation.get('zero_denominator', False)
                 if undefined:

@@ -652,8 +652,8 @@
       "pip": ["openpyxl==3.1.5"]
     },
     "promo_archive_ready_publication": {
-      "patterns": ["apps/promo_archive_publication.py", "apps/promo_archive_publication_rollback.py"],
-      "commands": [["python3", "apps/promo_archive_publication_smoke.py"], ["python3", "apps/ready_writer_closure_smoke.py"]],
+      "patterns": ["apps/promo_archive_publication.py", "apps/promo_archive_publication_rollback.py", "packages/application/inventory_retention.py", "apps/promo_inventory_retention_smoke.py"],
+      "commands": [["python3", "apps/promo_archive_publication_smoke.py"], ["python3", "apps/promo_inventory_retention_smoke.py"], ["python3", "apps/ready_writer_closure_smoke.py"]],
       "pip": ["openpyxl==3.1.5"]
     },
     "disabled_proxy3_apply": {
