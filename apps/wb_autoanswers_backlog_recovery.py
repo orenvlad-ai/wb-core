@@ -500,6 +500,8 @@ def _classify_action(
         if row.get("write_started_at") or int(row.get("write_attempt_count") or 0):
             return "readback_only"
         return "rebind_publication"
+    if row.get("last_error_code") == "owner_policy_unsafe_public_reply":
+        return "safe_public_recovery"
     if str(row.get("final_route") or "") == "seller_chat":
         return "safe_public_transform"
     if audited_complete:
@@ -1167,7 +1169,8 @@ def apply_plan(
             evidence = AutoanswersRepository._completed_node_evidence(
                 conn, str(job["processing_key"])
             )
-            if str(job["final_route"] or "") == "seller_chat":
+            force_safe = planned["action"] == "safe_public_recovery"
+            if not force_safe and str(job["final_route"] or "") == "seller_chat":
                 _set_generated_and_enqueue(
                     repo,
                     conn,
@@ -1181,7 +1184,7 @@ def apply_plan(
                     source="seller_chat_safe_public_transform",
                 )
                 applied_actions.append({"feedback_id": feedback_id, "action": "safe_public_transformed"})
-            elif evidence is not None:
+            elif not force_safe and evidence is not None:
                 _set_generated_and_enqueue(
                     repo,
                     conn,
@@ -1195,7 +1198,7 @@ def apply_plan(
                     source="append_only_node_audit",
                 )
                 applied_actions.append({"feedback_id": feedback_id, "action": "audited_generation_recovered"})
-            elif job["final_reply"] and job["hard_gates_passed"] and job["node_contract_valid"]:
+            elif not force_safe and job["final_reply"] and job["hard_gates_passed"] and job["node_contract_valid"]:
                 _set_generated_and_enqueue(
                     repo,
                     conn,
@@ -1210,6 +1213,7 @@ def apply_plan(
                 )
                 applied_actions.append({"feedback_id": feedback_id, "action": "existing_generation_enqueued"})
             else:
+                _archive_original_job(conn, job, reason="explicit_safe_public_recovery", at=at)
                 conn.execute(
                     """
                     UPDATE sheet_vitrina_v1_wb_autoanswer_jobs
