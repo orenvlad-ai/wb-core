@@ -6801,7 +6801,24 @@ class RegistryUploadHttpServer(HTTPServer):
         self.server_name = host
         self.server_port = port
 
+    def service_actions(self) -> None:
+        # A background bounded loopback launcher lets this single request thread
+        # keep serving the canonical dispatch/readback endpoints. No GET/status
+        # handler creates work, and pending intent survives process restart.
+        from packages.application.business_data_cycle_wakeup import ServiceWakeup
+        wakeup = getattr(self, "_maintenance_cycle_wakeup", None)
+        if wakeup is None:
+            entrypoint = getattr(self.RequestHandlerClass, "runtime_entrypoint", None)
+            if entrypoint is None:
+                return
+            wakeup = ServiceWakeup(entrypoint.runtime.runtime_dir)
+            self._maintenance_cycle_wakeup = wakeup
+        wakeup.tick()
+
     def server_close(self) -> None:
+        wakeup = getattr(self, "_maintenance_cycle_wakeup", None)
+        if wakeup is not None:
+            wakeup.close()
         service = getattr(self.RequestHandlerClass, "_window_v3_service", None)
         try:
             if service is not None:
@@ -8600,7 +8617,7 @@ def _inject_business_data_write_barrier_ui(
     hidden_poll_interval_ms: int = 60_000,
     expose_test_api: bool = False,
 ) -> str:
-    if "</body>" not in body_text.lower():
+    if "</body>" not in body_text.lower() or 'id="wbCoreMaintenanceBarrierStyle"' in body_text:
         return body_text
     poll_interval_ms = max(1, int(poll_interval_ms))
     request_timeout_ms = max(1, int(request_timeout_ms))
@@ -8615,17 +8632,16 @@ def _inject_business_data_write_barrier_ui(
 <style id="wbCoreMaintenanceBarrierStyle">
   #wbCoreMaintenanceBarrier {{
     position: fixed; inset: 0 0 auto 0; z-index: 2147483647;
-    padding: 12px 18px;
-    font: 600 14px/1.4 system-ui, sans-serif; text-align: center;
-    box-shadow: 0 2px 12px rgba(0,0,0,.25);
+    padding: 6px 14px;
+    font: 500 13px/1.4 system-ui, sans-serif; text-align: center;
   }}
   #wbCoreMaintenanceBarrier[data-tone="warning"] {{
-    background: #fffbeb; color: #92400e; border-bottom: 1px solid #fcd34d;
+    background: #252033; color: #ece8f6; border-bottom: 1px solid #594476;
   }}
   #wbCoreMaintenanceBarrier[data-tone="danger"] {{
-    background: #fffbeb; color: #92400e; border-bottom: 1px solid #fcd34d;
+    background: #252033; color: #ece8f6; border-bottom: 1px solid #594476;
   }}
-  body.wb-core-maintenance-held {{ padding-top: 52px !important; }}
+  body.wb-core-maintenance-held {{ padding-top: var(--wb-core-maintenance-height, 0px) !important; }}
   [data-wb-core-maintenance-disabled="1"] {{
     cursor: not-allowed !important; opacity: .55 !important;
     pointer-events: none !important;
@@ -8648,6 +8664,47 @@ def _inject_business_data_write_barrier_ui(
   let consecutiveFailures = 0;
   let timer = null;
   let controller = null;
+  let alive = true;
+  const ancestorListeners = [];
+  // Visual ownership is independent of local write protection. A same-origin
+  // injected ancestor must prove it is actually displaying its connected bar.
+  const showing = () => alive && blocked && banner.isConnected && !banner.hidden
+    && !document.hidden && banner.getClientRects().length > 0;
+  window.__wbCoreMaintenanceVisual = {{schema: 1, banner, showing}};
+  const ancestorShowing = () => {{
+    let ancestor = window;
+    while (ancestor !== ancestor.parent) {{
+      try {{
+        ancestor = ancestor.parent;
+        const owner = ancestor.__wbCoreMaintenanceVisual;
+        if (owner && owner.schema === 1 && owner.banner === ancestor.document.getElementById("wbCoreMaintenanceBarrier")
+            && typeof owner.showing === "function" && owner.showing()) return true;
+      }} catch (_) {{ return false; }}
+    }}
+    return false;
+  }};
+  const syncVisual = () => {{
+    const visible = blocked && !ancestorShowing();
+    banner.hidden = !visible;
+    document.body.classList.toggle("wb-core-maintenance-held", visible);
+    document.body.style.setProperty("--wb-core-maintenance-height", visible ? banner.getBoundingClientRect().height + "px" : "0px");
+    window.dispatchEvent(new Event("wb-core-maintenance-visual"));
+  }};
+  const connectAncestors = () => {{
+    let ancestor = window;
+    while (ancestor !== ancestor.parent) {{
+      try {{
+        ancestor = ancestor.parent;
+        ancestor.addEventListener("wb-core-maintenance-visual", syncVisual);
+        if (!ancestorListeners.includes(ancestor)) ancestorListeners.push(ancestor);
+      }} catch (_) {{ break; }}
+    }}
+  }};
+  connectAncestors();
+  const bannerResize = new ResizeObserver(() => {{
+    document.body.style.setProperty("--wb-core-maintenance-height", banner.hidden ? "0px" : banner.getBoundingClientRect().height + "px");
+  }});
+  bannerResize.observe(banner);
   const controls = () => Array.from(document.querySelectorAll(
     '[data-wb-core-write], form[method="post" i] button, form[method="post" i] input, form[method="post" i] textarea'
   )).filter((element) => {{
@@ -8691,8 +8748,6 @@ def _inject_business_data_write_barrier_ui(
     lastCommittedSequence = sequence;
     confirmedStatus = status;
     blocked = status.active;
-    document.body.classList.toggle("wb-core-maintenance-held", blocked);
-    banner.hidden = !blocked;
     if (blocked) {{
       banner.dataset.tone = status.tone;
       banner.textContent = status.message || (
@@ -8705,6 +8760,7 @@ def _inject_business_data_write_barrier_ui(
       banner.textContent = "";
     }}
     syncControls();
+    syncVisual();
     return true;
   }};
 
@@ -8783,6 +8839,7 @@ def _inject_business_data_write_barrier_ui(
   }});
   observer.observe(document.body, {{childList: true, subtree: true}});
   document.addEventListener("visibilitychange", () => {{
+    syncVisual();
     if (timer !== null) {{
       window.clearTimeout(timer);
       timer = null;
@@ -8795,10 +8852,24 @@ def _inject_business_data_write_barrier_ui(
     }}
   }});
   window.addEventListener("pagehide", () => {{
+    alive = false;
+    window.dispatchEvent(new Event("wb-core-maintenance-visual"));
+    ancestorListeners.forEach((owner) => owner.removeEventListener("wb-core-maintenance-visual", syncVisual));
+    ancestorListeners.length = 0;
+    bannerResize.disconnect();
     if (timer !== null) window.clearTimeout(timer);
     if (controller !== null) controller.abort();
     observer.disconnect();
-  }}, {{once: true}});
+  }});
+  window.addEventListener("pageshow", (event) => {{
+    if (!event.persisted) return;
+    alive = true;
+    connectAncestors();
+    bannerResize.observe(banner);
+    observer.observe(document.body, {{childList: true, subtree: true}});
+    syncVisual();
+    refresh();
+  }});
 
   if ({expose_test_api_js}) {{
     window.__wbCoreMaintenanceBarrierTest = {{

@@ -55,7 +55,8 @@
         "apps/wb_buyer_chrome_price_smoke.py",
         "apps/search_cluster_cleaner_browser_smoke.py",
         "apps/wb_buyer_support_pilot_browser_smoke.py",
-        "apps/wb_buyer_support_smoke.py"
+        "apps/wb_buyer_support_smoke.py",
+        "apps/business_data_write_barrier_browser_smoke.py"
       ],
       "commands": [["python3", "-m", "playwright", "install", "--with-deps", "chromium"]],
       "pip": ["openpyxl==3.1.5", "playwright==1.58.0"]
@@ -158,6 +159,7 @@
     "business_data_cycle_dispatch": {
       "patterns": [
         "packages/application/business_data_cycle_dispatch.py",
+        "packages/application/business_data_cycle_wakeup.py",
         "packages/application/business_data_schedule_profile.py",
         "packages/application/registry_upload_http_entrypoint.py",
         "packages/adapters/registry_upload_http_entrypoint.py",

@@ -119,6 +119,14 @@ def _decode(dispatch_id):
 
 
 def prepare(runtime, now):
+    """Bounded metadata and diagnostics; observing a debt never launches it."""
+    from packages.application.business_data_cycle_wakeup import diagnostics
+    result = _prepare(runtime, now)
+    wakeup = diagnostics(runtime, now)
+    return {**result, 'maintenance_wakeup': wakeup} if wakeup else result
+
+
+def _prepare(runtime, now):
     """No lock, directory, receipt, constructor or source acceptance."""
     sha = _identity(runtime)
     if not selected(runtime):
@@ -127,6 +135,17 @@ def prepare(runtime, now):
     states = profile.effective_core(Path(runtime))
     if not readiness['ready'] or states[profile.WAREHOUSE_TIMER][0] != 'enabled':
         return {'status': 'blocked', 'accepted': False, 'blockers': readiness['blockers'] or ['master_owner_disabled']}
+    from packages.application.business_data_cycle_wakeup import policy, catchup_slot
+    refusal = policy(runtime, now)
+    if refusal:
+        return {'status': refusal, 'accepted': False, 'source_effects_started': False}
+    if catchup_slot(runtime, now):
+        from packages.application.business_data_heavy_admission import heavy_admission_status
+        from packages.application.finance_backup_handoff import cycle_backup_priority
+        if not heavy_admission_status(runtime)['idle']:
+            return {'status': 'busy', 'accepted': False, 'source_effects_started': False}
+        if cycle_backup_priority(runtime, now=now)['priority']:
+            return {'status': 'backup_priority', 'accepted': False, 'source_effects_started': False}
     config = history_config()
     slot = latest_slot(now)
     scope = {'schema': 1, 'profile': profile.fingerprint(profile.PROFILE), 'deployed_sha': sha,
@@ -163,10 +182,10 @@ def readback(runtime, dispatch_id):
 
 def _still_current(entrypoint, value):
     # Called only inside canonical acceptance serialization, after actual EX.
-    return (value['slot'] == latest_slot(entrypoint.now_factory())
-            and value['deployed_sha'] == _identity(entrypoint.runtime.runtime_dir)
+    return (value['deployed_sha'] == _identity(entrypoint.runtime.runtime_dir)
             and value['history'] == history_config().fingerprint()
-            and selected(entrypoint.runtime.runtime_dir))
+            and selected(entrypoint.runtime.runtime_dir)
+            and value['slot'] == latest_slot(entrypoint.now_factory()))
 
 
 def readback_fenced(entrypoint, dispatch_id):
@@ -218,8 +237,12 @@ def dispatch(entrypoint, payload):
     current = prepare(runtime, entrypoint.now_factory())
     if current.get('dispatch_id') != payload['dispatch_id']:
         return {'status': 'not_accepted', 'accepted': False, 'reason': current['status'], 'dispatch_id': payload['dispatch_id']}
+    def admission_guard():
+        from packages.application.business_data_cycle_wakeup import policy
+        return (_still_current(entrypoint, value)
+                and policy(runtime, entrypoint.now_factory, expected_slot=value['slot']) is None)
     result = entrypoint._start_sheet_cycle_job(request_key=value['request_key'], slot_utc=value['slot'], history_config=history_config(),
-        _dispatch_guard=lambda: _still_current(entrypoint, value))
+        _dispatch_guard=admission_guard)
     # Actual acceptance is proved by the canonical receipt, not a matching job name.
     proof = readback(runtime, payload['dispatch_id'])
     if proof['accepted'] is True:

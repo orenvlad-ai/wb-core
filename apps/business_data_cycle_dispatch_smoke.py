@@ -517,4 +517,328 @@ with patch.object(profile,'load_selector',return_value={'offline':True}), \
             code,read=request(url=base+'?'+urlencode({'dispatch_id':prepared['dispatch_id']}));self.assertEqual(code,200);self.assertTrue(read['accepted'])
             with patch.dict(os.environ,{'WB_CORE_WEB_AUTH_PASSWORD_HASH':''}):self.assertNotEqual(request()[0],200)
 
+class MaintenanceWakeupSmoke(unittest.TestCase):
+    SLOT = datetime(2026, 9, 28, 22, tzinfo=timezone.utc)
+
+    def setUp(self):
+        DispatchSmoke.setUp(self)
+        from packages.application import business_data_cycle_wakeup as wake
+        from packages.application import business_data_maintenance_pause as pause
+        from packages.application import business_data_write_barrier as barrier
+        from apps.business_data_maintenance_pause_smoke import FakeSystemd
+        self.wake, self.pause, self.barrier = wake, pause, barrier
+        self.systemd = FakeSystemd()
+        self.systemd.states[p.WAREHOUSE_TIMER].update(is_enabled='enabled', is_active='active')
+        self.proc = self.root / 'proc'; self.proc.mkdir()
+        self.options = dict(systemd=self.systemd, activity_reader=lambda: {
+            'contract_name': 'business_data_maintenance_activity_v1', 'admission_ready': True,
+            'complete': True, 'runtime_dir': str(self.root), 'jobs': [],
+            'feature_intent': {'enabled': True, 'schedules': ['01:17']}}, proc_root=self.proc,
+            window_id='wakeup-test-001', actor='offline', reason='maintenance debt proof')
+        for context in (patch.object(pause, '_cron_entries', return_value=[]),
+                        patch('packages.application.finance_backup_handoff.cycle_backup_priority', return_value={'priority': False})):
+            context.start(); self.addCleanup(context.stop)
+
+    def hold(self, start=None):
+        start = start or self.SLOT - timedelta(minutes=20)
+        with patch.object(self.barrier, '_utc_now', return_value=start.isoformat()), patch.object(self.pause, 'now_iso', return_value=start.isoformat()):
+            self.pause.pause(self.root, **self.options)
+        self.baseline = self.pause.load_state(self.root)['baseline']
+
+    def resume(self, when=None):
+        when = when or self.SLOT + timedelta(minutes=30)
+        with patch.object(self.barrier, '_utc_now', return_value=when.isoformat()), patch.object(self.pause, 'now_iso', return_value=when.isoformat()):
+            return self.pause.resume(self.root, **self.options)
+
+    def transport(self, fake, method, identity=None):
+        if method == 'POST': return d.dispatch(fake, {'dispatch_id': identity})
+        if identity: return d.readback_fenced(fake, identity)
+        return d.prepare(self.root, fake.now_factory())
+
+    def test_real_resume_debt_and_full_duration_acceptance_boundary(self):
+        self.hold(); self.resume()
+        value = self.wake.load(self.root)
+        self.assertEqual(value['missed_slot'], self.SLOT.isoformat())
+        self.assertEqual(self.pause.load_state(self.root)['baseline'], self.baseline)
+        limit = self.SLOT + timedelta(hours=1)
+        self.assertIsNone(self.wake.policy(self.root, limit))
+        self.assertEqual(d.prepare(self.root, limit)['status'], 'prepared')
+        self.assertEqual(d.prepare(self.root, limit + timedelta(microseconds=1))['status'], 'wait_next_slot')
+        # The selected normal next slot retains its former late-start semantics.
+        self.assertEqual(d.prepare(self.root, self.SLOT + timedelta(hours=5))['status'], 'prepared')
+        fake = CycleFake(self.root); fake.now_factory = lambda: limit
+        identity = d.prepare(self.root, limit)['dispatch_id']
+        original = Entry._start_sheet_cycle_job
+        def drift(**kwargs):
+            fake.now_factory = lambda: limit + timedelta(microseconds=1)
+            return original(fake, **kwargs)
+        with patch.object(fake, '_start_sheet_cycle_job', side_effect=drift):
+            self.assertFalse(d.dispatch(fake, {'dispatch_id': identity})['accepted'])
+        self.assertEqual(fake.events, [])
+        self.assertIsNone(CycleReceiptStore(self.root, lambda: '').read(d._decode(identity)['cycle_id']))
+
+    def test_clock_rechecked_after_metadata_proof_and_slot_rollover(self):
+        self.hold(); self.resume()
+        limit = self.SLOT + timedelta(hours=1)
+        reads = []
+        original = self.wake.load
+        def metadata(runtime):
+            reads.append('metadata')
+            return original(runtime)
+        def clock():
+            reads.append('clock')
+            return limit + timedelta(microseconds=1)
+        with patch.object(self.wake, 'load', side_effect=metadata):
+            self.assertEqual(self.wake.policy(self.root, clock, expected_slot=self.SLOT.isoformat()), 'wait_next_slot')
+        self.assertEqual(reads, ['metadata', 'clock'])
+        self.assertEqual(self.wake.policy(self.root, lambda: self.SLOT + timedelta(hours=3), expected_slot=self.SLOT.isoformat()), 'slot_expired')
+
+    def test_no_missed_slot_disabled_owner_and_already_owned_slot_do_not_arm(self):
+        self.hold(self.SLOT + timedelta(minutes=1)); self.resume()
+        self.assertIsNone(self.wake.load(self.root))
+        self.options['window_id'] = 'wakeup-test-002'
+        self.systemd.states[p.WAREHOUSE_TIMER].update(is_enabled='disabled', is_active='inactive')
+        self.hold(); self.resume()
+        self.assertIsNone(self.wake.load(self.root))
+        self.systemd.states[p.WAREHOUSE_TIMER].update(is_enabled='enabled', is_active='active')
+        fake = CycleFake(self.root); fake.now_factory = lambda: self.SLOT
+        accepted = d.dispatch(fake, {'dispatch_id': d.prepare(self.root, self.SLOT)['dispatch_id']})
+        self.assertTrue(accepted['accepted'])
+        for worker in list(fake.operator_jobs._threads.values()): worker.join(5)
+        self.options['window_id'] = 'wakeup-test-003'
+        self.hold(); self.resume()
+        self.assertIsNone(self.wake.load(self.root))
+
+    def test_partial_pause_exact_restore_still_records_proven_missed_slot(self):
+        start = self.SLOT - timedelta(minutes=20)
+        self.systemd.fail_once = p.WAREHOUSE_TIMER
+        with patch.object(self.barrier, '_utc_now', return_value=start.isoformat()), patch.object(self.pause, 'now_iso', return_value=start.isoformat()):
+            with self.assertRaisesRegex(RuntimeError, 'ambiguous local command'):
+                self.pause.pause(self.root, **self.options)
+        self.assertFalse(self.barrier.barrier_status(self.root)['hold_confirmed'])
+        self.resume()
+        self.assertEqual(self.wake.load(self.root)['missed_slot'], self.SLOT.isoformat())
+        self.assertFalse(self.barrier.barrier_status(self.root)['active'])
+
+    def test_long_pause_coalesces_latest_slot_and_idempotent_resume_does_not_rearm(self):
+        self.hold(self.SLOT - timedelta(hours=10)); self.resume()
+        self.assertEqual(self.wake.load(self.root)['missed_slot'], self.SLOT.isoformat())
+        original = self.wake.load(self.root)
+        self.wake._settle(self.root, original, 'accepted', 'complete')
+        self.assertTrue(self.resume()['idempotent'])
+        self.assertEqual(self.wake.load(self.root)['phase'], 'accepted')
+        self.assertEqual(self.pause.load_state(self.root)['baseline'], self.baseline)
+
+    def test_debt_durable_before_release_and_after_release_bookkeeping_crash(self):
+        self.hold()
+        write = self.barrier._atomic_write_private_json
+        def fail_release(path, value):
+            if path.name == self.barrier.STATE_FILENAME and value.get('phase') == 'released':
+                self.assertIsNotNone(self.wake.load(self.root))
+                raise RuntimeError('crash before release')
+            return write(path, value)
+        with patch.object(self.barrier, '_atomic_write_private_json', side_effect=fail_release):
+            with self.assertRaisesRegex(RuntimeError, 'crash before release'): self.resume()
+        with patch.object(d, 'launch', side_effect=AssertionError('active barrier launched')):
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=30))
+        save = self.pause.save_state
+        def fail_bookkeeping(runtime, state, event):
+            if event == 'pause_released':
+                state['phase'] = 'restoring'
+                raise RuntimeError('crash after release')
+            return save(runtime, state, event)
+        with patch.object(self.pause, 'save_state', side_effect=fail_bookkeeping):
+            with self.assertRaisesRegex(RuntimeError, 'crash after release'): self.resume()
+        self.assertFalse(self.barrier.barrier_status(self.root)['active'])
+        self.assertIsNone(self.wake.policy(self.root, self.SLOT + timedelta(minutes=30)))
+        self.assertEqual(self.pause.load_state(self.root)['phase'], 'restoring')
+        self.assertTrue(self.resume()['idempotent'])
+        self.assertEqual(self.pause.load_state(self.root)['baseline'], self.baseline)
+
+    def test_unknown_backup_busy_and_deadline_do_not_resend_or_stay_pending(self):
+        self.hold(); self.resume()
+        now = self.SLOT + timedelta(minutes=30)
+        with heavy_admitted(self.root, operation='finance'):
+            self.assertEqual(d.prepare(self.root, now)['status'], 'busy')
+        with patch('packages.application.finance_backup_handoff.cycle_backup_priority', return_value={'priority': True}):
+            self.assertEqual(d.prepare(self.root, now)['status'], 'backup_priority')
+        fake = CycleFake(self.root); fake.now_factory = lambda: now
+        calls = []
+        def request(method, identity=None):
+            calls.append(method)
+            if method == 'POST': raise TimeoutError('unknown one POST')
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request):
+            self.wake.coordinate(self.root, now)
+            self.wake.coordinate(self.root, now)
+            self.assertEqual(calls.count('POST'), 1)
+            self.assertEqual(self.wake.load(self.root)['last_status'], 'uncertain_same_operation')
+            # Deadline checked before unknown readback/busy, with no extra POST/GET.
+            old = list(calls)
+            self.wake.coordinate(self.root, self.SLOT + timedelta(hours=1, microseconds=1))
+            self.assertEqual(calls, old)
+        self.assertEqual(self.wake.load(self.root)['phase'], 'wait_next_slot')
+        self.assertIn('uncertain', self.wake.load(self.root)['last_status'])
+        self.assertEqual(d.prepare(self.root, now)['status'], 'wait_next_slot')
+
+    def test_concurrent_normal_launcher_and_service_restart_share_one_submit(self):
+        self.hold(); self.resume()
+        now = self.SLOT + timedelta(minutes=30)
+        fake = CycleFake(self.root); fake.now_factory = lambda: now
+        calls = []
+        def request(method, identity=None):
+            calls.append(method)
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request):
+            worker = threading.Thread(target=d.launch, args=(self.root,)); worker.start()
+            self.wake.coordinate(self.root, now); worker.join(5)
+            self.wake.coordinate(self.root, now)  # Fresh coordinator after restart.
+            self.assertEqual(calls.count('POST'), 1)
+            self.assertEqual(self.wake.load(self.root)['phase'], 'accepted')
+        for worker in list(fake.operator_jobs._threads.values()): worker.join(5)
+        self.assertEqual(fake.events.count('warehouse'), 1)
+
+    def test_backup_wait_then_accept_and_normal_slot_receipt_satisfies_debt(self):
+        self.hold(); self.resume()
+        now = self.SLOT + timedelta(minutes=30)
+        fake = CycleFake(self.root); fake.now_factory = lambda: now
+        calls = []
+        def request(method, identity=None):
+            calls.append(method)
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request):
+            with patch('packages.application.finance_backup_handoff.cycle_backup_priority', return_value={'priority': True}):
+                self.wake.coordinate(self.root, now)
+                self.assertNotIn('POST', calls)
+                self.assertEqual(self.wake.load(self.root)['last_status'], 'backup_priority')
+            d.launch(self.root)  # Normal scheduled launcher wins before wake tick.
+            self.wake.coordinate(self.root, now)
+            self.assertEqual(calls.count('POST'), 1)
+        self.assertEqual(self.wake.load(self.root)['phase'], 'accepted')
+        self.assertEqual(self.wake.load(self.root)['last_status'], 'canonical_slot_already_accepted')
+        for worker in list(fake.operator_jobs._threads.values()): worker.join(5)
+
+    def test_restart_after_rollover_expires_old_debt_without_borrowing_new_slot(self):
+        self.hold(); self.resume()
+        for age in (timedelta(hours=3), timedelta(hours=4, minutes=30)):
+            value = self.wake.load(self.root)
+            self.wake._settle(self.root, value, 'pending', 'busy')
+            now = self.SLOT + age
+            with patch.object(d, 'launch', side_effect=AssertionError('old debt launched new slot')):
+                self.wake.coordinate(self.root, now)
+            self.assertEqual(self.wake.load(self.root)['phase'], 'wait_next_slot')
+            self.assertEqual(d.prepare(self.root, now)['status'], 'prepared')
+
+    def test_service_hook_only_background_pending_not_status_or_empty_runtime(self):
+        from packages.adapters.registry_upload_http_entrypoint import RegistryUploadHttpServer
+        self.hold(); self.resume()
+        fake = CycleFake(self.root); fake.now_factory = lambda: self.SLOT + timedelta(minutes=30)
+        # Status remains metadata-only even with durable pending work.
+        with patch.object(self.wake, 'coordinate') as coordinate:
+            Entry.handle_business_data_cycle_dispatch_request(fake)
+            coordinate.assert_not_called()
+        handler = type('Handler', (), {'runtime_entrypoint': fake})
+        server = RegistryUploadHttpServer(('127.0.0.1', 0), handler)
+        thread_ids = []
+        try:
+            with patch.object(self.wake, 'coordinate', side_effect=lambda *args: thread_ids.append(threading.get_ident())):
+                server.service_actions()
+                server._maintenance_cycle_wakeup.thread.join(5)
+                self.assertEqual(len(thread_ids), 1)
+                self.assertNotEqual(thread_ids[0], threading.get_ident())
+                server.service_actions()  # Same process hook has bounded polling.
+                self.assertEqual(len(thread_ids), 1)
+                replacement = self.wake.ServiceWakeup(self.root)
+                replacement.tick(); replacement.thread.join(5)
+                self.assertEqual(len(thread_ids), 2)  # Startup recovers pending intent.
+                replacement.close(); replacement.next_check = 0; replacement.tick()
+                self.assertEqual(len(thread_ids), 2)
+        finally:
+            server.server_close()
+        empty = self.wake.ServiceWakeup(self.root / 'missing')
+        empty.tick(); self.assertIsNone(empty.thread)
+
+    def test_service_thread_start_failure_does_not_escape_or_duplicate_possible_worker(self):
+        self.hold(); self.resume()
+        wakeup = self.wake.ServiceWakeup(self.root)
+        with patch.object(threading.Thread, 'start', side_effect=RuntimeError('proven no start')):
+            wakeup.tick()  # No exception escapes to HTTPServer.service_actions.
+        self.assertIsNone(wakeup.thread)
+        self.assertIn('proven no start', wakeup.last_error)
+        self.assertEqual(self.wake.load(self.root)['phase'], 'pending')
+        entered, release = threading.Event(), threading.Event()
+        original = threading.Thread.start
+        def started_then_throws(thread):
+            original(thread)
+            self.assertTrue(entered.wait(2))
+            raise RuntimeError('started then throws')
+        def coordinate(*args):
+            entered.set(); release.wait(3)
+        wakeup.next_check = 0
+        with patch.object(self.wake, 'coordinate', side_effect=coordinate) as run, patch.object(threading.Thread, 'start', autospec=True, side_effect=started_then_throws) as start:
+            wakeup.tick()
+            handle = wakeup.thread
+            self.assertTrue(handle.is_alive())
+            self.assertIn('started then throws', wakeup.last_error)
+            wakeup.next_check = 0; wakeup.tick()
+            self.assertIs(wakeup.thread, handle)
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(run.call_count, 1)
+            release.set(); handle.join(5)
+        # Unknown native start without a bootstrapped child also retains handle.
+        class LimboThread:
+            def __init__(self, **kwargs): self._started = threading.Event()
+            def is_alive(self): return False
+            def start(self): raise RuntimeError('native start uncertain')
+        wakeup = self.wake.ServiceWakeup(self.root)
+        with patch.object(threading, 'Thread', side_effect=LimboThread) as create, patch('packages.application.business_data_procedure_admission.thread_start_is_proven_absent', return_value=False):
+            wakeup.tick(); handle = wakeup.thread
+            wakeup.next_check = 0; wakeup.tick()
+            self.assertIs(wakeup.thread, handle)
+            self.assertEqual(create.call_count, 1)
+        self.assertEqual(self.wake.load(self.root)['phase'], 'pending')
+
+    def test_known_race_refusal_has_explicit_wait_next_slot_outcome(self):
+        self.hold(); self.resume()
+        now = self.SLOT + timedelta(minutes=30)
+        fake = CycleFake(self.root); fake.now_factory = lambda: now
+        def request(method, identity=None):
+            if method == 'POST': return {'status': 'not_accepted', 'accepted': False, 'dispatch_id': identity}
+            return self.transport(fake, method, identity)
+        with patch.object(d, '_request', side_effect=request) as request_mock:
+            self.wake.coordinate(self.root, now)
+            self.wake.coordinate(self.root, now)
+            self.assertEqual([x.args[0] for x in request_mock.call_args_list].count('POST'), 1)
+        self.assertEqual(self.wake.load(self.root)['phase'], 'wait_next_slot')
+        self.assertEqual(self.wake.load(self.root)['last_status'], 'single_submit_not_accepted')
+
+    def test_reused_window_id_and_plan_cannot_revive_old_pending_debt(self):
+        self.hold(); self.resume()
+        old = self.wake.load(self.root)
+        self.hold(self.SLOT + timedelta(minutes=31))
+        self.assertEqual(self.barrier._load_state(self.root)['window_id'], old['window_id'])
+        self.assertEqual(self.barrier._load_state(self.root)['plan_fingerprint'], old['plan_fingerprint'])
+        with patch.object(d, 'launch', side_effect=AssertionError('stale generation launched')):
+            self.wake.coordinate(self.root, self.SLOT + timedelta(minutes=35))
+        self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+        self.resume(self.SLOT + timedelta(minutes=40))
+        self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+        self.assertIsNone(self.wake.policy(self.root, self.SLOT + timedelta(minutes=45)))
+
+    def test_new_maintenance_supersedes_old_pending_and_readonly_diagnostics_no_effects(self):
+        self.hold(); self.resume()
+        now = self.SLOT + timedelta(minutes=30)
+        self.options['window_id'] = 'wakeup-test-002'
+        self.hold(self.SLOT + timedelta(minutes=31))
+        before = {x.name: x.read_bytes() for x in self.root.iterdir() if x.is_file()}
+        with patch.object(d, 'launch', side_effect=AssertionError('status launched')):
+            self.wake.diagnostics(self.root, now)
+            d.prepare(self.root, now)
+            self.assertEqual(before, {x.name: x.read_bytes() for x in self.root.iterdir() if x.is_file()})
+            self.wake.coordinate(self.root, now)
+        self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+        self.resume()
+        self.assertEqual(self.wake.load(self.root)['phase'], 'superseded')
+
+
 if __name__=='__main__':unittest.main()
