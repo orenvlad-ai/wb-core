@@ -115,6 +115,7 @@ from packages.application.warehouse_recovery_policy import (  # noqa: E402
 )
 from packages.application.warehouse_functional_lock import (  # noqa: E402
     WarehouseFunctionalBusyError,
+    require_warehouse_job_owner,
     warehouse_functional_job_lock,
     warehouse_functional_write_lock,
 )
@@ -495,7 +496,7 @@ def _test_http_manual_snapshot_publication_order() -> None:
             collect_all_due_transit_costs=lambda: {}, reconcile_functional_ff_state=lambda: {})
         entry.our_wb_cost_block = SimpleNamespace(materialize_wb_supply_cost_layers=lambda **kw: 0)
         entry.warehouse_functional_block = SimpleNamespace(
-            build_sync_plan=lambda: {"plan_fingerprint":"p", "diff":{}},
+            build_sync_plan=lambda: action("plan", {"plan_fingerprint":"p", "diff":{}}),
             apply_plan=lambda *args, **kw: action("wb", {}), record_failed_sync=lambda exc: None)
         entry.inventory_planning = SimpleNamespace(current=lambda: action("planning", {}))
         entry.wb_finance_weekly_block = SimpleNamespace(recalculate_stale_cost_weeks=lambda: action("finance", {}))
@@ -507,23 +508,38 @@ def _test_http_manual_snapshot_publication_order() -> None:
             if status == "failed":
                 raise ValueError("fbs publication failed")
             return {"status":status}
+        def drain(db_path, runtime_dir):
+            _assert(db_path == entry.runtime.db_path, "manual overhead source DB")
+            _assert(runtime_dir == entry.runtime.runtime_dir, "manual overhead runtime")
+            require_warehouse_job_owner(runtime_dir)
+            return action("overhead_drain", {"processed_count": 0})
+        def reconcile(runtime):
+            _assert(runtime is entry.runtime, "manual overhead publication owner")
+            require_warehouse_job_owner(runtime.runtime_dir)
+            return action("overhead_reconcile", {"processed_count": 0})
         with tempfile.TemporaryDirectory(prefix="manual-publication-order-") as temporary, \
              patch("packages.application.fbs_accounting_runtime.refresh", side_effect=refresh), \
-             patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=AssertionError("duplicate independent publication")):
+             patch("packages.application.fbs_accounting_runtime.publish_ready", side_effect=AssertionError("duplicate independent publication")), \
+             patch("packages.application.operator_ff_overhead.drain", side_effect=drain) as overhead_drain, \
+             patch("packages.application.operator_ff_overhead.reconcile", side_effect=reconcile) as overhead_reconcile:
             entry.runtime.runtime_dir = Path(temporary)
+            entry.runtime.db_path = Path(temporary) / "registry.sqlite3"
             if status == "failed":
                 try:
                     entry.handle_warehouse_manual_sync_request()
                     raise AssertionError("failed accounting completed manual sync")
                 except ValueError as exc:
                     _assert(str(exc) == "fbs publication failed", "manual failure propagated")
-                _assert(events == ["wb", "fbs"], "dependent publication after failed FBS")
+                _assert(events == ["overhead_drain", "plan", "wb", "fbs"], "dependent publication after failed FBS")
+                overhead_reconcile.assert_not_called()
                 _assert(entry.warehouse_update_journal.finish.call_args.kwargs["status"] == "failed", "failed journal")
             else:
                 result = entry.handle_warehouse_manual_sync_request()
                 _assert(result["fbs_snapshot_accounting"] == {"status":status}, "manual accounting evidence")
-                expected = ["wb","fbs"]
-                _assert(events == expected + ["planning","proxy","economics","finance"], "manual accounting order")
+                expected = ["overhead_drain","plan","wb","fbs"]
+                _assert(events == expected + ["planning","proxy","economics","finance","overhead_reconcile"], "manual accounting order")
+                overhead_reconcile.assert_called_once_with(entry.runtime)
+            overhead_drain.assert_called_once_with(entry.runtime.db_path, entry.runtime.runtime_dir)
 
 
 def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
@@ -557,6 +573,7 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
             return "2026-08-03T08:00:00Z"
 
         def build_sync_plan(self):
+            events.append("plan")
             return {
                 "plan_fingerprint": "sha256:fixture-plan",
                 "diff": {"changed_line_count": 0},
@@ -597,6 +614,15 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                 runtime_dir = Path(tmp) / "runtime"
                 runtime_dir.mkdir()
                 runtime = FakeRuntime(runtime_dir)
+                def drain(db_path, root):
+                    _assert(db_path == runtime.db_path and root == runtime.runtime_dir,
+                            f"{command} overhead source ownership")
+                    require_warehouse_job_owner(root)
+                    return record("overhead_drain", {"processed_count": 0})
+                def reconcile(owner):
+                    _assert(owner is runtime, f"{command} overhead publication owner")
+                    require_warehouse_job_owner(owner.runtime_dir)
+                    return record("overhead_reconcile", {"processed_count": 0})
                 with (
                     patch(
                         "apps.warehouse_functional_runner.RegistryUploadDbBackedRuntime",
@@ -647,12 +673,15 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                     ) as publish_ready,
                     patch(
                         "apps.warehouse_functional_runner._read_exact_plan",
-                        return_value=FakeBlock().build_sync_plan(),
+                        return_value={"plan_fingerprint": "sha256:fixture-plan",
+                                      "diff": {"changed_line_count": 0}},
                     ),
                     patch(
                         "apps.warehouse_functional_runner._verify_sync_external_recheck",
                         return_value={"status": "ready"},
                     ),
+                    patch("packages.application.operator_ff_overhead.drain", side_effect=drain) as overhead_drain,
+                    patch("packages.application.operator_ff_overhead.reconcile", side_effect=reconcile) as overhead_reconcile,
                 ):
                     supplies_block.return_value.reconcile_functional_ff_state.return_value = {
                         "status": "success"
@@ -670,11 +699,20 @@ def _test_hourly_and_manual_cost_materialization_journal_details() -> None:
                 fbs_refresh.assert_called_once_with(runtime_dir, ready_runtime=runtime)
                 _assert(result["fbs_snapshot_accounting"] == fbs_result,
                         f"{command} returns accounting publication evidence")
-                expected = ["wb_published", "fbs_refreshed"]
+                expected = ["plan", "wb_published", "fbs_refreshed"]
+                tail = ["proxy", "finance"]
+                if trigger_source is None:
+                    overhead_drain.assert_not_called()
+                    overhead_reconcile.assert_not_called()
+                else:
+                    expected.insert(0, "overhead_drain")
+                    tail.append("overhead_reconcile")
+                    overhead_drain.assert_called_once_with(runtime.db_path, runtime.runtime_dir)
+                    overhead_reconcile.assert_called_once_with(runtime)
                 # The combined publisher owns its book/ready receipt; the
                 # runner must not issue a second independent publication.
                 publish_ready.assert_not_called()
-                _assert(events == expected + ["proxy", "finance"],
+                _assert(events == expected + tail,
                         f"{command} must publish active FBS before dependent costs: {events}")
                 if trigger_source is None:
                     continue
