@@ -816,7 +816,8 @@
         "packages/application/sheet_vitrina_v1_temporal_policy.py",
         "packages/application/sheet_vitrina_v1_live_plan.py",
         "packages/application/web_vitrina_group_blocks.py",
-        "packages/application/vitrina_catalog.py"
+        "packages/application/vitrina_catalog.py",
+        "packages/application/promo_historical_recovery.py"
       ],
       "commands": [
         ["python3", "apps/web_vitrina_history_activation_smoke.py"]
