@@ -25,10 +25,35 @@ def models(q):
 BRANDS=r'\b(?:uniq|nillkin|remax|глазурь|glazur|magic\s+glass\s+store)\b'
 PRODUCT=r'ст[её]кл|стекол|брон|защит|антишпион|\bglass\b'
 # Closed vocabulary for positive admission, independent of campaign/query labels.
-VOCAB=r'x|se|iphone|pro|promax|max|mini|plus|air|e|на|для|с|со|без|и|в|во|от|по|к|все|из|телефон[а-я]*|смартфон[а-я]*|экран[а-я]*|стекл[а-я]*|стекол|брон[а-я]*|защит[а-я]*|антишпион[а-я]*|матов[а-я]*|прозрачн[а-я]*|глянцев[а-я]*|антиблик[а-я]*|авто[а-я]*|установ[а-я]*|накле[а-я]*|покле[а-я]*|рам[а-я]*|бокс[а-я]*|аксессуар[а-я]*|оригинал[а-я]*|премиум|горилла|gorilla|glass|hd|d|h|черн[а-я]*|бел[а-я]*|полноэкранн[а-я]*|противоударн[а-я]*|защитка|защитки|magic|protection|комплект[а-я]*|набор[а-я]*|легк[а-я]*|шт|штук[а-я]*|упаковк[а-я]*|салфетк[а-я]*|окантовк[а-я]*|безрамочн[а-я]*'
+VOCAB=r'x|se|iphone|pro|promax|max|mini|plus|air|e|на|для|с|со|без|и|в|во|от|по|к|все|из|телефон[а-я]*|смартфон[а-я]*|экран[а-я]*|стекл[а-я]*|стекол|брон[а-я]*|защит[а-я]*|антишпион[а-я]*|матов[а-я]*|прозрачн[а-я]*|глянцев[а-я]*|антиблик[а-я]*|авто[а-я]*|установ[а-я]*|накле[а-я]*|покле[а-я]*|рам[а-я]*|бокс[а-я]*|аксессуар[а-я]*|оригинал[а-я]*|премиум|горилла|gorilla|glass|hd|d|h|черн[а-я]*|бел[а-я]*|полноэкранн[а-я]*|противоударн[а-я]*|защитка|защитки|magic|protection|комплект[а-я]*|набор[а-я]*|легк[а-я]*|шт|штук[а-я]*|упаковк[а-я]*|салфетк[а-я]*|окантовк[а-я]*|безрамочн[а-я]*|no|frame|noframe'
 
 # Known non-model words only unblock BROAD exclusion; they never grant admission.
 BROAD_WORDS=r'app|one|анти|пыл[а-я]*|apple|система|размер[а-я]*|чтобы|не|видно|потел[а-я]*|грамм|электроника|мобильн[а-я]*|поверхност[а-я]*|покрыти[а-я]*|скорость|сама|товар[а-я]*|кита[а-я]*|премиальн[а-я]*|мальчик[а-я]*|подрост[а-я]*|матированн[а-я]*|под'
+
+# A glass edge is distinct from the optional installation tool. Bare "с рамкой"
+# does not prove an edge; edging, a black frame or "рамка стекла" does.
+FRAMELESS=r'\b(?:без\s+(?:черн[а-я]*\s+)?(?:рам[а-я]*|окантовк[а-я]*)|безрамочн[а-я]*|no[\s-]*frame)\b'
+FRAME_EDGE=r'\b(?:окантовк[а-я]*|(?:черн[а-я]*|black)\s+рамк[а-я]*|рамк[а-я]*\s+(?:черн[а-я]*|black)|рамк[а-я]*\s+стекл[а-я]*)\b'
+FRAME_GLASS_EDGE=r'\b(?:окантовк[а-я]*|рамк[а-я]*\s+стекл[а-я]*)\b'
+FRAME_NEGATION=r'\b(?:не|без|кроме)\s+(?:(?:с|со)\s+)?(?:(?:черн[а-я]*|black)\s+)?$'
+FRAME_INSTALLER_BEFORE=r'\b(?:(?:авто)?установочн[а-я]*|для\s+(?:(?:легк|быстр|точн)[а-я]*\s+)?(?:(?:авто)?установк[а-я]*|накле[а-я]*|покле[а-я]*))\s+(?:(?:черн[а-я]*|black)\s+)?$'
+FRAME_INSTALLER_AFTER=r'^\s+(?:для\s+(?:(?:легк|быстр|точн)[а-я]*\s+)?(?:(?:авто)?установк[а-я]*|накле[а-я]*|покле[а-я]*)|(?:авто)?установочн[а-я]*)\b'
+
+def frame_requests(q):
+ """Positive edge/frameless evidence only; do not infer tool availability."""
+ def asserted(pattern):
+  for match in re.finditer(pattern,q):
+   before,after=q[:match.start()],q[match.end():]
+   if re.search(FRAME_NEGATION,before):continue
+   # Installation can describe a frame tool, but cannot erase an explicitly
+   # requested glass edge. The same distinction applies to "без окантовки".
+   tool_frame=re.search(r'\bрам[а-я]*\b',match[0]) and not re.search(FRAME_GLASS_EDGE,match[0])
+   if tool_frame and (re.search(FRAME_INSTALLER_BEFORE,before) or re.search(FRAME_INSTALLER_AFTER,after)):continue
+   return True
+  return False
+ # Inspect explicit edges separately: a shorter coloured-frame match must
+ # not swallow the overlapping "рамка стекла" and lose its glass ownership.
+ return asserted(FRAMELESS),asserted(FRAME_GLASS_EDGE) or asserted(FRAME_EDGE)
 
 def classify(query,profile):
  try:
@@ -67,6 +92,9 @@ def classify(query,profile):
  if asserted(r'антишпион') and profile['kind']!='anti':return result('exclude','COATING','Явно запрошен антишпион для другого покрытия')
  if asserted(r'матов[а-я]*') and profile['kind']!='matte':return result('exclude','COATING','Явно запрошено матовое стекло для другого покрытия')
  if asserted(r'прозрачн[а-я]*|глянцев[а-я]*') and profile['kind']!='clean':return result('exclude','COATING','Явно запрошено прозрачное/глянцевое стекло для другого покрытия')
+ frameless,edged=frame_requests(q)
+ if frameless and profile['frame']=='black':return result('exclude','NO_FRAME','Запрошено стекло без рамки, у товара чёрная рамка')
+ if edged and profile['frame']=='none':return result('exclude','FRAME','Запрошена окантовка стекла, у товара нет рамки')
  # A bare device or positively requested case remains a different object even
  # when its suffix/properties are unknown. Negated object-only phrases abstain.
  if not product and not accessories and not re.search(r'\b(?:только\s+)?не\s+(?:чехол|стекл)',q):
@@ -115,7 +143,6 @@ def classify(query,profile):
  if re.search(r'\bне\b|без\s+(?:антишпион|матов|прозрач)',q):return result('review','NEGATION','Отрицание свойства требует отдельного правила')
  unknown=[w for w in re.findall(r'[a-zа-я]+',category_q) if not re.fullmatch(VOCAB,w)]
  if unknown:return result('review','VOCAB_UNKNOWN','Неописанные слова: '+', '.join(sorted(set(unknown))))
- if re.search(r'без\s+(?:черн[а-я]*\s+)?(?:рам[а-я]*|окантовк[а-я]*)|безрамочн',q) and profile['frame']=='black':return result('exclude','NO_FRAME','Запрошено стекло без рамки, у товара чёрная рамка')
  if re.search(r'без\s+(?:антишпион|матов|прозрач)',q):return result('review','NEGATION','Отрицание свойства требует отдельного правила')
  anti=bool(re.search(r'антишпион',q));matte=bool(re.search(r'матов',q));clear=bool(re.search(r'прозрачн|глянцев',q))
  if sum([anti,matte,clear])>1:return result('review','PROPERTY_MIX','Несколько явно названных типов покрытия')
