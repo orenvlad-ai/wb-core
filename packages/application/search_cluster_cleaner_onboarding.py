@@ -243,15 +243,21 @@ def profiles_generation(directory, cleaner):
     return config.get('generation')
 
 
-def _fresh(profiles, cards, fetch):
-    deadline = time.monotonic() + 90
+def _fresh(profiles, cards, fetch, *, clock=None, sleep=None):
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    deadline = clock() + 90
     for p in profiles:
-        if time.monotonic() >= deadline: fail('sku_admission_fresh_deadline')
+        # Pace the first read too: preview and apply run in separate processes,
+        # so their adjacent Content reads need the same interval as this loop.
+        if deadline - clock() <= 0.7: fail('sku_admission_fresh_deadline')
+        sleep(0.7)
+        if clock() >= deadline: fail('sku_admission_fresh_deadline')
         fresh = fetch(p.nm_id)
         if (str(fresh.get('nm_id')) != str(p.nm_id)
                 or project_card(fresh, require_subject=True) != project_card(cards[p.nm_id], require_subject=True)):
             fail('sku_admission_current_card_drift')
-        if time.monotonic() >= deadline: fail('sku_admission_fresh_deadline')
+        if clock() >= deadline: fail('sku_admission_fresh_deadline')
 
 
 def _check_owned_profiles(cleaner, profiles, root_operation, *, allow_absent):

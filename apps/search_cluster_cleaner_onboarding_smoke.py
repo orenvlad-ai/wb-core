@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from packages.application import search_cluster_cleaner_onboarding as onboarding
 from packages.application.search_cluster_cleaner_batch_eligibility import eligibility_rows
 from packages.application.search_cluster_cleaner_self_service import LocalStageEAdapter
 from packages.domain import search_cluster_classifier as rules
+from packages.adapters.wb_content import WbContentHttpStatusError
 from apps.production_apply_launcher import execute as launcher
 from packages.contracts.search_cluster_cleaner import CleanerError, Profile, Target, Principal, canonical, digest
 
@@ -213,12 +215,84 @@ def test_published_admission_survives_rule_update():
     print('published admission/history survive later rules; new registration still binds current executable rules: ok')
 
 
+class FakeTime:
+    def __init__(self):
+        self.seconds=0.0
+        self.waits=[]
+
+    def now(self):return self.seconds
+
+    def sleep(self,seconds):
+        self.waits.append(seconds)
+        self.seconds+=seconds
+
+
+def test_fresh_card_pacing_and_deadline():
+    with Sandbox() as box:
+        request,fresh,extension=setup(box)
+        profiles=[];cards={}
+        for nm in range(300,330):
+            profiles.append(Profile.parse(dict(extension['profiles'][0],nm_id=nm)))
+            cards[nm]=dict(fresh[202],nm_id=str(nm))
+        timer=FakeTime();reads=[]
+        def fetch(nm):
+            reads.append(timer.now())
+            return copy.deepcopy(cards[nm])
+        onboarding._fresh(profiles,cards,fetch,clock=timer.now,sleep=timer.sleep)
+        assert len(reads)==30 and len(timer.waits)==30
+        assert math.isclose(reads[0],0.7) and math.isclose(timer.now(),21.0)
+        assert all(math.isclose(current-previous,0.7) for previous,current in zip(reads,reads[1:]))
+        # A separate preview/apply pass must also wait before its first fetch.
+        onboarding._fresh(profiles[:1],cards,fetch,clock=timer.now,sleep=timer.sleep)
+        assert math.isclose(reads[-1]-reads[-2],0.7)
+        # 30 fake reads cost 75s alone; their waits must also consume the 90s
+        # budget, preventing the final read rather than restarting a deadline.
+        timer=FakeTime();reads=[]
+        def slow_fetch(nm):
+            reads.append(timer.now());timer.seconds+=2.5
+            return copy.deepcopy(cards[nm])
+        expect_error('sku_admission_fresh_deadline',lambda:onboarding._fresh(profiles,cards,slow_fetch,clock=timer.now,sleep=timer.sleep))
+        assert len(reads)<30 and all(at<90 for at in reads)
+        # Sleep can return late: no Content request may start after its deadline.
+        timer=FakeTime();reads=[]
+        def oversleep(seconds):timer.seconds+=90
+        expect_error('sku_admission_fresh_deadline',lambda:onboarding._fresh(profiles,cards,fetch,clock=timer.now,sleep=oversleep))
+        assert reads==[]
+        before=old_state(box);calls=[]
+        def rate_limited(nm):
+            calls.append(nm)
+            if len(calls)==2:raise WbContentHttpStatusError(429,'synthetic Content rate limit')
+            return copy.deepcopy(fresh[nm])
+        with patch.object(stage_e,'fetch_current_card',side_effect=lambda nm:copy.deepcopy(fresh[nm])):
+            preview=box.execute('preview',operation_id=OP,request=request)
+        for action in ('preview','apply'):
+            calls=[]
+            with patch.object(stage_e,'fetch_current_card',side_effect=rate_limited):
+                try:box.execute(action,operation_id=OP,request=request,expected_prestate=preview['prestate_sha256'],expected_candidate=preview['candidate_sha256'])
+                except WbContentHttpStatusError as exc:assert exc.status_code==429
+                else:raise AssertionError('429 unexpectedly accepted')
+            assert calls==[202,203] and not (box.admission/onboarding.JOURNAL_NAME).exists()
+        assert old_state(box)==before
+        assert box.service().get_profile(202,Principal('owner',True,True,True))['revision']==0
+    print('30 Content reads paced across loops, waits consume deadline, late sleep/429 fail before claim: ok')
+
+
 def main():
-    test_success_and_launcher_repeat()
-    test_partial_and_exact_recovery()
-    test_refusals_and_cas()
-    test_foreign_profile_blocks_recovery()
-    test_published_admission_survives_rule_update()
+    # Keep lifecycle tests deterministic and fast without patching the shared
+    # time module used by SQLite or other application guards.
+    real_fresh=onboarding._fresh
+    timer=FakeTime()
+    def virtual_fresh(*args,**kwargs):
+        kwargs.setdefault('clock',timer.now)
+        kwargs.setdefault('sleep',timer.sleep)
+        return real_fresh(*args,**kwargs)
+    with patch.object(onboarding,'_fresh',new=virtual_fresh):
+        test_success_and_launcher_repeat()
+        test_partial_and_exact_recovery()
+        test_refusals_and_cas()
+        test_foreign_profile_blocks_recovery()
+        test_published_admission_survives_rule_update()
+        test_fresh_card_pacing_and_deadline()
     print('search_cluster_cleaner_onboarding_smoke: ok')
 
 
