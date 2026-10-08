@@ -502,6 +502,8 @@ def _run_admitted(
             journal.phase_started(durable_run_id, durable_phase)
             from packages.application.operator_ff_overhead import drain as drain_overheads, reconcile as reconcile_overheads
             drain_overheads(runtime.db_path, runtime.runtime_dir)
+            from packages.application.operator_warehouse_documents import drain as drain_operator_documents, reconcile as reconcile_operator_documents
+            operator_documents=drain_operator_documents(runtime)
             plan = _run_sync_phase(
                 "build_sync_plan",
                 phase_timings_ms,
@@ -595,6 +597,9 @@ def _run_admitted(
                 ),
             )
             reconcile_overheads(runtime)
+            from packages.application.fbs_accounting_runtime import current_publication_receipt
+            reconcile_operator_documents(runtime,request_ids=operator_documents['request_ids'],
+                finance_receipt=finance_cost_recalculation,economics_receipt=current_publication_receipt(runtime))
             completed_backup = backup_result
             journal.phase_finished(
                 durable_run_id,
@@ -1025,7 +1030,12 @@ def _recalculate_downstream_finance_cost(
     FBS cutoff.
     """
 
-    return block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks()
+    from packages.application.fbs_accounting_runtime import load
+    before=load(runtime.runtime_dir)[1]
+    receipt=block_from_env(runtime.runtime_dir).recalculate_stale_cost_weeks()
+    after=load(runtime.runtime_dir)[1]
+    return {**receipt,'accounting_version_before':before,'accounting_version':after,
+            'accounting_version_unchanged':before==after}
 
 
 def _verify_cutover_external_recheck(

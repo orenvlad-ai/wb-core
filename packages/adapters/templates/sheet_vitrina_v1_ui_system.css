@@ -573,3 +573,30 @@ body.is-embedded .panel, body.is-embedded .block { box-shadow: none; }
     transition-duration: .01ms !important;
   }
 }
+
+    /* Shared operator receipt and journal presentation. */
+    .ff-operation-receipt { max-width: 660px; margin: 8px auto; padding: 24px; text-align: center; }
+    .ff-operation-check { width: 60px; height: 60px; display: grid; place-items: center; margin: 0 auto 14px; border-radius: 50%; background: var(--success-text); color: var(--panel-bg); font-size: 36px; line-height: 1; }
+    .ff-operation-receipt h3 { margin: 0; color: var(--success-text); font-size: 25px; font-weight: 600; }
+    .ff-operation-receipt > p { margin: 8px 0 0; }
+    .ff-operation-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 16px; margin: 22px 0; text-align: left; border-radius: 10px; background: var(--panel-subtle); }
+    .ff-operation-summary div { min-width: 0; }
+    .ff-operation-summary dt { color: var(--muted); font-size: 12px; }
+    .ff-operation-summary dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+    .ff-operation-actions { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 14px; margin-top: 20px; }
+    .ff-operation-link { padding: 8px 2px; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+    .ff-operation-status { display: block; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+    .ff-operation-status[data-state="processed"] { color: var(--success-text); }
+    .ff-operation-status[data-state="delayed"], .ff-operation-status[data-state="needs_attention"] { color: var(--warning-text); }
+    .ff-operation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; margin-top: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; }
+    .ff-operation-row strong, .ff-operation-row p { overflow-wrap: anywhere; }
+    .ff-operation-row p { margin: 5px 0; }
+    .ff-operation-accepted { color: var(--success-text); font-size: 13px; }
+    .ff-operation-empty { padding: 24px 0; text-align: center; color: var(--muted); }
+    .ff-operation-detail { padding: 18px; margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; }
+    @media (max-width: 530px) {
+      .ff-operation-receipt { padding: 16px 4px; }
+      .ff-operation-row { grid-template-columns: minmax(0, 1fr); }
+      .ff-operation-row .button { justify-self: start; }
+      .ff-operation-summary { grid-template-columns: minmax(0, 1fr); }
+    }

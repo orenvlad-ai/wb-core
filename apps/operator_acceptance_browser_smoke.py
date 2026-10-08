@@ -73,7 +73,7 @@ def run(browser, base: str, directory: Path) -> None:
     reads = []
     journal_reads = []
     held_reads = []
-    controls = {"lose_confirm":False, "malformed_confirm":False, "lose_read":False, "reject_confirm":False, "reject_html":False, "commit_proxy403":False, "commit_proxy409":False, "malformed_read":False, "renewed_pdf":False, "hold_read_id":"", "mismatch_identity":""}
+    controls = {"lose_confirm":False, "malformed_confirm":False, "lose_read":False, "reject_confirm":False, "reject_html":False, "commit_proxy403":False, "commit_proxy409":False, "malformed_read":False, "renewed_pdf":False, "hold_read_id":"", "mismatch_identity":"", "receipt_domain":None, "receipt_source_domain":None}
 
     def send(route, payload):
         route.fulfill(status=200, content_type="application/json", body=json.dumps(payload, ensure_ascii=False))
@@ -121,7 +121,7 @@ def run(browser, base: str, directory: Path) -> None:
             if controls["reject_confirm"]:
                 route.fulfill(status=409, content_type="application/json", body=json.dumps({"reason_ru":"Дата документа изменилась. Проверьте документ снова."})); return
             data = previews[identity]
-            accepted[identity] = {"durable_saved":True,"operation_id":identity,"request_id":identity,
+            accepted[identity] = {"durable_saved":True,"document_kind":previews[identity]["document_kind"],"operation_id":identity,"request_id":identity,
                 "accepted_at":"2026-08-12T07:00:00Z", "state":"accepted", "label_ru":"Принято",
                 "reason_ru":"", "business_date":"2026-08-12", "summary":data["preview"]["summary"],
                 "source_document":{"request_id":identity,"filename":"payment.pdf" if identity == "pdf-browser" else "",
@@ -147,7 +147,10 @@ def run(browser, base: str, directory: Path) -> None:
         payload = dict(previews[identity])
         if selected_alias: payload["client_request_id"] = "browser-client-alias"
         if identity in accepted:
-            payload.update(confirm_allowed=False, acceptance=accepted[identity])
+            operation=dict(accepted[identity])
+            if controls['receipt_domain'] is not None: operation['domain']=controls['receipt_domain']
+            if controls['receipt_source_domain'] is not None: operation['source_ref']={'domain':controls['receipt_source_domain']}
+            payload.update(confirm_allowed=False, acceptance=operation)
         send(route, payload)
 
     def journal(route):
@@ -488,6 +491,45 @@ def run(browser, base: str, directory: Path) -> None:
     assert receipt.get_attribute("data-ff-operation-receipt") == manual
     assert page.locator('[data-ff-pool-request-id]').input_value() == manual
     assert len(confirmations) == 9
+    # The real FF host binds domain as well as same-ID readback. W1 cannot use
+    # the narrow domain-less legacy pool_overhead compatibility above.
+    page.locator('[data-ff-pool-tab="create"]').click()
+    page.locator('[data-ff-pool-amount]').fill("73.50")
+    page.locator('[data-ff-pool-preview]').click()
+    page.get_by_role("button", name="Подтвердить проведение", exact=True).wait_for()
+    native_id=page.locator('[data-ff-pool-request-id]').input_value()
+    previews[native_id]['document_kind']='pool_reallocation'
+    controls['receipt_domain']='foreign_domain'
+    before_count=len(confirmations)
+    page.get_by_role("button", name="Подтвердить проведение", exact=True).click()
+    page.get_by_text("Проверяем сохранение", exact=True).wait_for()
+    assert page.locator('[data-ff-operation-receipt]').count()==0
+    assert page.evaluate("localStorage.getItem('wb.ffPool.overheadConfirmation.v1')")==native_id
+    controls['receipt_domain']=None # domain missing is invalid for W1, same operation ID
+    page.get_by_role("button", name="Проверить статус", exact=True).click()
+    page.get_by_text("Проверяем сохранение", exact=True).wait_for()
+    assert page.locator('[data-ff-operation-receipt]').count()==0
+    controls['receipt_domain']='ff_pool_document';controls['receipt_source_domain']='foreign_domain'
+    page.get_by_role("button", name="Проверить статус", exact=True).click()
+    page.get_by_text("Проверяем сохранение", exact=True).wait_for()
+    assert page.locator('[data-ff-operation-receipt]').count()==0
+    controls['receipt_source_domain']='ff_pool_document'
+    page.get_by_role("button", name="Проверить статус", exact=True).click()
+    receipt.wait_for();assert receipt.get_attribute('data-ff-operation-receipt')==native_id
+    assert len(confirmations)==before_count+1
+    assert reads[-1]==native_id
+    # A same-ID journal detail also rejects explicit foreign domain.
+    accepted[native_id]['domain']='ff_pool_document'
+    page.locator('[data-ff-pool-tab="journal"]').click()
+    row=page.locator('[data-ff-operations-list] [data-ff-operation-id="'+native_id+'"]')
+    row.wait_for();accepted[native_id]['domain']='foreign_domain'
+    row.get_by_role('button',name='Подробнее').click()
+    detail.get_by_text('Сведения временно недоступны. Документ не нужно отправлять повторно.',exact=True).wait_for()
+    assert detail.locator('.ff-operation-accepted').count()==0
+    accepted[native_id]['domain']='ff_pool_document'
+    row.get_by_role('button',name='Подробнее').click()
+    detail.locator('.ff-operation-accepted').wait_for()
+    assert len(confirmations)==before_count+1
     assert not errors, errors
     context.close()
 

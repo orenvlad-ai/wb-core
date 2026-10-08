@@ -726,13 +726,23 @@ class BoundWarehouseTests(unittest.TestCase):
             store=CycleReceiptStore(root,lambda:STAMP);store.root.mkdir()
             receipt=dict(cycle_id='a'*32,status='running',slot_utc=SLOT,business_date='2026-09-29',stages=[{'stage':'warehouse','status':'running'}])
             accounting={'status':'published','ready_obligation':'complete','version':'book','operation_id':'book-ready'}
+            publication={'status':'published','accounting_version':'book','operation_id':'book-ready'}
             book={'state':{'periods':{'2026-09-29':{'snapshot':{'id':'fbs','digest':'fbs-digest'}}}}}
             with patch('packages.application.fbs_accounting_runtime.refresh',return_value=accounting) as refresh, \
                  patch('packages.application.fbs_accounting_runtime.load',return_value=(book,'book')), \
+                 patch('packages.application.fbs_accounting_runtime.current_publication_receipt',return_value=publication) as publication_read, \
+                 patch('packages.application.operator_warehouse_documents.drain',return_value={'request_ids':['receipt-1']}) as operator_drain, \
+                 patch('packages.application.operator_warehouse_documents.reconcile',return_value={}) as operator_reconcile, \
                  heavy_admitted(root, operation='cycle'):
                 proof=entry._cycle_warehouse(store,receipt,{'fbs_generation':'fbs','fbs_digest':'fbs-digest'})
             self.assertEqual(proof.versions['fbs_book'],'book')
             self.assertEqual(refresh.call_count,1)
+            publication_read.assert_called_once_with(entry.runtime)
+            operator_drain.assert_called_once_with(entry.runtime)
+            operator_reconcile.assert_called_once_with(entry.runtime,request_ids=['receipt-1'],
+                finance_receipt={'status':'applied','fingerprint':'weekly-cost','accounting_version':'book',
+                    'accounting_version_before':'book','accounting_version_unchanged':True},
+                economics_receipt={'plan_fingerprint':'economics','accounting_publication':publication})
             self.assertEqual(entry.wb_finance_weekly_block.recalculate_stale_cost_weeks.call_count,1)
             self.assertEqual(entry.calculation_parameters_block.publish_current_functional_economics.call_count,1)
             self.assertEqual(entry.warehouse_functional_block.build_sync_plan.call_count,1)
