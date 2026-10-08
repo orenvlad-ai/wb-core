@@ -614,6 +614,7 @@ def _run_admitted(
             payload = {
                 "status": "success",
                 "mode": args.command,
+                "wb_valuation": dict(plan.get("wb_valuation") or {}),
                 "sqlite_busy_timeout_ms": sqlite_busy_timeout_ms,
                 "phase_timings_ms": phase_timings_ms,
                 "backup": completed_backup,
@@ -627,7 +628,6 @@ def _run_admitted(
                 "wb_finance_cost_recalculation": finance_cost_recalculation,
                 "wb_transit_cost_replays": transit_cost_replays,
                 "ff_state": ff_state,
-                "wb_valuation": dict(plan.get("wb_valuation") or {}),
                 "plan_fingerprint": plan["plan_fingerprint"],
                 "diff": plan["diff"],
                 "active_version": result.get("active_version"),
