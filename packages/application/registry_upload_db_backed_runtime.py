@@ -7784,6 +7784,8 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.operator_trade_documents import before_write, record_saved
+            before_write(conn, document_id, kind="document")
             conn.execute(
                 """
                 INSERT INTO sheet_vitrina_v1_trade_documents(
@@ -7855,6 +7857,7 @@ class RegistryUploadDbBackedRuntime:
                     updated_at,
                 ),
             )
+            record_saved(conn, document_id)
             conn.commit()
         loaded = self.load_trade_document(document_id)
         if loaded is None:
@@ -7982,6 +7985,18 @@ class RegistryUploadDbBackedRuntime:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         with _connect(self.db_path) as conn:
             _ensure_schema(conn)
+            from packages.application.operator_trade_documents import before_write, record_saved
+            from packages.application.supplier_preparation_intents import guard_invoice_link_write
+            conn.execute("BEGIN IMMEDIATE")
+            before_write(conn, document_id, kind="document")
+            document = conn.execute("SELECT * FROM sheet_vitrina_v1_trade_documents WHERE document_id=?", (document_id,)).fetchone()
+            if document is None:
+                raise ValueError(f"trade document not found: {document_id}")
+            if document["document_type"] == "contract" and conn.execute("SELECT 1 FROM sheet_vitrina_v1_invoice_contract_links WHERE contract_document_id=?", (document_id,)).fetchone():
+                raise ValueError("contract document has linked invoice documents and cannot be archived")
+            if document["document_type"] == "invoice":
+                guard_invoice_link_write(conn, document_id, "", None)
+                conn.execute("DELETE FROM sheet_vitrina_v1_invoice_contract_links WHERE invoice_document_id=?", (document_id,))
             cursor = conn.execute(
                 """
                 UPDATE sheet_vitrina_v1_trade_documents
@@ -7991,6 +8006,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (updated_at, str(document_id or "").strip()),
             )
+            record_saved(conn, document_id)
             conn.commit()
             if cursor.rowcount <= 0:
                 raise ValueError(f"trade document not found: {document_id}")
@@ -8019,6 +8035,8 @@ class RegistryUploadDbBackedRuntime:
             _ensure_schema(conn)
             from packages.application.supplier_preparation_intents import guard_invoice_link_write
 
+            from packages.application.operator_trade_documents import before_write, record_saved
+            before_write(conn, invoice_document_id, kind="link")
             guard_invoice_link_write(conn, invoice_document_id, contract_document_id, preparation_request)
             conn.execute(
                 """
@@ -8046,6 +8064,7 @@ class RegistryUploadDbBackedRuntime:
                     str(source or ""),
                 ),
             )
+            record_saved(conn, invoice_document_id)
             conn.commit()
         link = self.load_invoice_contract_link(invoice_document_id)
         if link is None:
@@ -8082,6 +8101,8 @@ class RegistryUploadDbBackedRuntime:
             _ensure_schema(conn)
             from packages.application.supplier_preparation_intents import guard_invoice_link_write
 
+            from packages.application.operator_trade_documents import before_write, record_saved
+            before_write(conn, invoice_document_id, kind="link")
             guard_invoice_link_write(conn, invoice_document_id, "", preparation_request)
             cursor = conn.execute(
                 """
@@ -8090,6 +8111,7 @@ class RegistryUploadDbBackedRuntime:
                 """,
                 (invoice_document_id,),
             )
+            record_saved(conn, invoice_document_id)
             conn.commit()
             return cursor.rowcount > 0
 

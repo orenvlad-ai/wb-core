@@ -2825,6 +2825,7 @@ def _build_handler(
                         uploaded_filename=str(upload_payload.get("filename") or ""),
                         uploaded_content_type=str(upload_payload.get("content_type") or ""),
                         fields=upload_payload.get("fields") if isinstance(upload_payload.get("fields"), Mapping) else {},
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -3562,6 +3563,8 @@ def _build_handler(
                         _render_sheet_vitrina_settings_ui(
                             embedded=True,
                             can_manage_users=_current_web_user_can_manage_users(self),
+                            operator_actor_scope=_current_web_user_config_key(self),
+                            user_config_key=_current_web_user_config_key(self),
                         ),
                     )
                     return
@@ -5602,7 +5605,10 @@ def _build_handler(
                 if not _ensure_operator_role(self, parsed.path):
                     return
                 try:
-                    payload = entrypoint.handle_trade_documents_list_request()
+                    request_id = _resolve_single_query_param(parsed.query, "request_id")
+                    operation_id = _resolve_single_query_param(parsed.query, "operation_id")
+                    payload = entrypoint.handle_trade_operator_read(request_id=request_id, operation_id=operation_id,
+                        request_scope=_current_web_user_config_key(self)) if request_id or operation_id else entrypoint.handle_trade_documents_list_request()
                 except Exception as exc:  # pragma: no cover - bounded fallback
                     _write_json_response(
                         self,
@@ -6356,7 +6362,7 @@ def _build_handler(
                     result = entrypoint.handle_trade_documents_contract_patch_request(
                         invoice_document_id,
                         payload,
-                        actor=_current_web_user_config_key(self),
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self),
                     )
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -6377,7 +6383,7 @@ def _build_handler(
                 try:
                     document_id = _resolve_trade_document_id(parsed.path)
                     payload = _load_request_payload(self)
-                    result = entrypoint.handle_trade_documents_patch_request(document_id, payload)
+                    result = entrypoint.handle_trade_documents_patch_request(document_id, payload, actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6677,7 +6683,9 @@ def _build_handler(
                     return
                 try:
                     invoice_document_id = _resolve_trade_document_id(parsed.path)
-                    payload = entrypoint.handle_trade_documents_contract_delete_request(invoice_document_id)
+                    source_payload = _load_request_payload(self) if int(self.headers.get("Content-Length") or 0) else {}
+                    payload = entrypoint.handle_trade_documents_contract_delete_request(invoice_document_id, source_payload,
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -6696,7 +6704,9 @@ def _build_handler(
                     return
                 try:
                     document_id = _resolve_trade_document_id(parsed.path)
-                    payload = entrypoint.handle_trade_documents_archive_request(document_id)
+                    source_payload = _load_request_payload(self) if int(self.headers.get("Content-Length") or 0) else {}
+                    payload = entrypoint.handle_trade_documents_archive_request(document_id, source_payload,
+                        actor=_current_web_user_config_key(self), request_scope=_current_web_user_config_key(self))
                 except ValueError as exc:
                     _write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
@@ -11449,9 +11459,11 @@ def _render_sheet_vitrina_supplier_safe_ui(*, user_config_key: str = "local_oper
     )
 
 
-def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_users: bool = True) -> str:
+def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_users: bool = True, operator_actor_scope: str = "local_operator", user_config_key: str | None = None) -> str:
+    user_config_key = user_config_key or operator_actor_scope
     config_payload = {
         "page_title": "Настройки",
+        "user_config_key": user_config_key,
         "nomenclature_path": DEFAULT_NOMENCLATURE_PATH,
         "nomenclature_export_path": DEFAULT_NOMENCLATURE_EXPORT_PATH,
         "nomenclature_import_path": DEFAULT_NOMENCLATURE_IMPORT_PATH,
@@ -11496,6 +11508,8 @@ def _render_sheet_vitrina_settings_ui(*, embedded: bool = False, can_manage_user
     template = _inject_sheet_vitrina_ui_system(
         SETTINGS_UI_TEMPLATE_PATH.read_text(encoding="utf-8")
     )
+    asset = UI_SYSTEM_CSS_PATH.with_name("sheet_vitrina_v1_trade_acceptance.js").read_text(encoding="utf-8")
+    template = template.replace("</head>", "<script>\n" + asset + "\n</script>\n</head>", 1)
     return (
         template.replace("__SHEET_VITRINA_V1_SETTINGS_BODY_CLASS__", "is-embedded" if embedded else "")
         .replace(

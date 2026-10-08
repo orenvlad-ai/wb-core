@@ -6853,56 +6853,82 @@ class RegistryUploadHttpEntrypoint:
         )
 
     def handle_trade_documents_list_request(self) -> dict[str, Any]:
-        return self.supplier_shipments_block.list_trade_documents()
+        from packages.application.operator_trade_documents import read_documents
+        return {"contract_name": "sheet_vitrina_v1_trade_documents", "status": "ok",
+                "documents": read_documents(self.supplier_shipments_block)}
+
+    def handle_trade_operator_read(self, *, request_id="", operation_id="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import read_request, read_operation
+        if operation_id:
+            return read_operation(self.runtime.db_path, operation_id, request_scope=request_scope) or {"status": "unknown", "settled": False, "acceptance": None}
+        return read_request(self.runtime.db_path, request_id, request_scope=request_scope)
 
     def handle_trade_documents_create_request(
-        self,
-        file_bytes: bytes,
-        *,
-        uploaded_filename: str | None = None,
-        uploaded_content_type: str | None = None,
-        fields: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        fields = fields or {}
-        return self.supplier_shipments_block.create_trade_document_from_upload(
-            document_type=str(fields.get("document_type") or ""),
-            file_bytes=file_bytes,
-            uploaded_filename=uploaded_filename,
-            uploaded_content_type=uploaded_content_type,
-            number=str(fields.get("number") or ""),
-            document_date=str(fields.get("document_date") or ""),
-            supplier_name=str(fields.get("supplier_name") or ""),
-            currency=str(fields.get("currency") or ""),
-            amount_total=fields.get("amount_total"),
-        )
+        self, file_bytes: bytes, *, uploaded_filename=None, uploaded_content_type=None,
+        fields=None, actor="", request_scope="local_operator",
+    ):
+        fields = dict(fields or {})
+        def write(operands):
+            return self.supplier_shipments_block.create_trade_document_from_upload(
+                document_type=str(operands.get("document_type") or ""), file_bytes=file_bytes,
+                uploaded_filename=uploaded_filename, uploaded_content_type=uploaded_content_type,
+                number=str(operands.get("number") or ""), document_date=str(operands.get("document_date") or ""),
+                supplier_name=str(operands.get("supplier_name") or ""), currency=str(operands.get("currency") or ""),
+                amount_total=operands.get("amount_total"))
+        if not fields.get("request_id"):
+            return write(fields)
+        import hashlib
+        from packages.application.operator_trade_documents import execute
+        # Never trust the client file hash for identity or source binding.
+        fields["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
+        fields["filename"] = str(uploaded_filename or "")
+        return execute(self.supplier_shipments_block, action="upload", payload=fields, native_write=write,
+                       request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_patch_request(self, document_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        return self.supplier_shipments_block.update_trade_document(document_id, payload)
+    def handle_trade_documents_patch_request(self, document_id, payload, *, actor="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import execute
+        write = lambda operands: self.supplier_shipments_block.update_trade_document(document_id, operands)
+        if not payload.get("request_id"):
+            return write(payload)
+        return execute(self.supplier_shipments_block, action="edit", payload=payload, native_write=write,
+                       document_id=document_id, request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_archive_request(self, document_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.archive_trade_document(document_id)
+    def handle_trade_documents_archive_request(self, document_id, payload=None, *, actor="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import execute
+        payload = payload or {}
+        write = lambda _: self.supplier_shipments_block.archive_trade_document(document_id)
+        if not payload.get("request_id"):
+            return write(payload)
+        return execute(self.supplier_shipments_block, action="archive", payload=payload, native_write=write,
+                       document_id=document_id, request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_file_request(self, document_id: str) -> tuple[bytes, str, str]:
-        return self.supplier_shipments_block.download_trade_document_file(document_id)
+    def handle_trade_documents_file_request(self, document_id):
+        from packages.application.operator_trade_documents import read_documents
+        rows = read_documents(self.supplier_shipments_block, document_id=document_id)
+        if not rows or rows[0].get("status") != "active":
+            raise ValueError(f"trade document not found: {document_id}")
+        document = rows[0]
+        path = self.supplier_shipments_block._resolve_runtime_file(str(document.get("file_path") or ""))
+        if not path.is_file():
+            raise ValueError(f"trade document file is missing: {document_id}")
+        return path.read_bytes(), str(document.get("file_original_name") or "document"), str(document.get("file_content_type") or "application/octet-stream")
 
-    def handle_trade_documents_contract_patch_request(
-        self,
-        invoice_document_id: str,
-        payload: Mapping[str, Any],
-        *,
-        actor: str = "",
-    ) -> dict[str, Any]:
-        contract_document_id = str(payload.get("contract_document_id") or "").strip()
-        if contract_document_id:
-            return self.supplier_shipments_block.link_invoice_to_contract(
-                invoice_document_id,
-                contract_document_id=contract_document_id,
-                linked_by=actor,
-            )
-        return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+    def handle_trade_documents_contract_patch_request(self, invoice_document_id, payload, *, actor="", request_scope="local_operator"):
+        from packages.application.operator_trade_documents import execute
+        target = str(payload.get("contract_document_id") or "").strip()
+        def write(_):
+            if target:
+                return self.supplier_shipments_block.link_invoice_to_contract(invoice_document_id,
+                    contract_document_id=target, linked_by=actor)
+            return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+        if not payload.get("request_id"):
+            return write(payload)
+        return execute(self.supplier_shipments_block, action="link" if target else "unlink", payload=payload,
+                       native_write=write, document_id=invoice_document_id, request_scope=request_scope, actor=actor)
 
-    def handle_trade_documents_contract_delete_request(self, invoice_document_id: str) -> dict[str, Any]:
-        return self.supplier_shipments_block.unlink_invoice_contract(invoice_document_id)
+    def handle_trade_documents_contract_delete_request(self, invoice_document_id, payload=None, *, actor="", request_scope="local_operator"):
+        return self.handle_trade_documents_contract_patch_request(invoice_document_id, payload or {},
+            actor=actor, request_scope=request_scope)
 
     def handle_wb_supplies_list_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
         return self.wb_supplies_block.list_supplies(params)

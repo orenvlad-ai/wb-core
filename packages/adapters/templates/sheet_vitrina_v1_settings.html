@@ -360,7 +360,7 @@
         <div class="toolbar" style="justify-content: space-between;">
           <div>
             <h2 id="contractsTitle">Договоры</h2>
-            <p>Server-owned файлы договоров без Google Sheets/localStorage.</p>
+            <p>Договоры и связи с инвойсами.</p>
           </div>
           <div class="toolbar">
             <button id="addContractButton" class="primary" type="button">Добавить контракт</button>
@@ -414,7 +414,7 @@
         <div class="toolbar" style="justify-content: space-between;">
           <div>
             <h2 id="invoicesTitle">Инвойсы</h2>
-            <p>Server-owned файлы invoice без создания поставки из settings upload.</p>
+            <p>Файлы инвойсов. Загрузка сюда не создаёт заказ поставщику.</p>
           </div>
           <div class="toolbar">
             <button id="addInvoiceButton" class="primary" type="button">Добавить invoice</button>
@@ -2317,6 +2317,7 @@
           return;
         }
         contractRows.innerHTML = visible.map(renderContractRow).join("");
+        lockTradeForms(tradeLocked);
         Array.from(contractRows.querySelectorAll("[data-document-download]")).forEach((link) => {
           link.addEventListener("click", (event) => event.stopPropagation());
         });
@@ -2342,6 +2343,7 @@
           return;
         }
         invoiceRows.innerHTML = visible.map(renderInvoiceRow).join("");
+        lockTradeForms(tradeLocked);
         Array.from(invoiceRows.querySelectorAll("[data-document-download]")).forEach((link) => {
           link.addEventListener("click", (event) => event.stopPropagation());
         });
@@ -2522,7 +2524,27 @@
         }[source] || source || "-";
       }
 
+      const tradeReceipt = document.createElement("div");
+      tradeReceipt.id = "tradeSourceReceipt"; tradeReceipt.hidden = true;
+      document.querySelector(".settings-panels").prepend(tradeReceipt);
+      let tradeLocked = false;
+      function lockTradeForms(locked) {
+        tradeLocked = locked;
+        [addContractButton, addInvoiceButton, documentFileInput].forEach(el => {el.disabled = locked;});
+        document.querySelectorAll("[data-document-archive], [data-contract-save], [data-document-link], [data-document-unlink]").forEach(el => {el.disabled = locked;});
+      }
+      const tradeAcceptance = window.TradeSourceAcceptance.create({container: tradeReceipt, path: tradeDocumentsPath,
+        scope: config.user_config_key || "local_operator", onLock: lockTradeForms,
+        onError: error => setAllDocumentMessages(error.message, "error"),
+        onRecovered: async result => {editingContractId = ""; activateSettingsGroup("directories");
+          activateSettingsTab(result.acceptance.source_ref.document_type === "contract" ? "contracts" : "invoices");
+          await loadDocuments(); lockTradeForms(tradeLocked);}});
+      tradeAcceptance.recover().catch(error => setAllDocumentMessages(error.message, "error"));
+      const tradeOperationId = new URLSearchParams(location.search).get("operation_id");
+      if (tradeOperationId) tradeAcceptance.showOperation(tradeOperationId).catch(error => setAllDocumentMessages(error.message, "error"));
+
       function startDocumentUpload(documentType) {
+        if (tradeLocked) return;
         pendingDocumentType = documentType;
         documentFileInput.value = "";
         documentFileInput.click();
@@ -2532,30 +2554,16 @@
         if (!file || !pendingDocumentType) {
           return;
         }
-        const formData = new FormData();
-        formData.append("document_type", pendingDocumentType);
-        const controls = pendingDocumentType === "invoice" ? {
-          number: invoiceNumberInput,
-          date: invoiceDateInput,
-          supplier: invoiceSupplierInput
-        } : {
-          number: contractNumberInput,
-          date: contractDateInput,
-          supplier: contractSupplierInput
-        };
-        formData.append("number", controls.number.value.trim());
-        formData.append("document_date", controls.date.value.trim());
-        formData.append("supplier_name", controls.supplier.value.trim());
-        formData.append("file", file, file.name || (pendingDocumentType + ".xlsx"));
+        const controls = pendingDocumentType === "invoice" ? {number: invoiceNumberInput, date: invoiceDateInput, supplier: invoiceSupplierInput}
+          : {number: contractNumberInput, date: contractDateInput, supplier: contractSupplierInput};
+        const fileBytes = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+        const operands = {document_type: pendingDocumentType, number: controls.number.value.trim(),
+          document_date: controls.date.value.trim(), supplier_name: controls.supplier.value.trim(), filename: file.name,
+          file_sha256: Array.from(new Uint8Array(fileBytes), b => b.toString(16).padStart(2, "0")).join("")};
         setDocumentMessage(pendingDocumentType, "Загружаем документ...", "");
         try {
-          const uploadedType = pendingDocumentType;
-          const payload = await fetchJson(tradeDocumentsPath, { method: "POST", body: formData, headers: { Accept: "application/json" } });
-          await loadDocuments();
-          const document = payload.document || {};
-          const warnings = Array.isArray(document.parser_warnings) ? document.parser_warnings.filter(Boolean) : [];
-          const baseMessage = payload.status === "duplicate_existing" ? "Документ уже был в справочнике." : "Документ сохранён.";
-          setDocumentMessage(uploadedType, warnings.length ? baseMessage + " Есть parser warning." : baseMessage, warnings.length ? "warning" : "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath, "upload", operands, "POST", file);
+          setDocumentMessage(pendingDocumentType, "", "");
         } catch (error) {
           setDocumentMessage(pendingDocumentType, error.message, "error");
         } finally {
@@ -2571,13 +2579,9 @@
         }
         setDocumentMessage("invoice", "Связываем invoice с контрактом...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ contract_document_id: contractDocumentId })
-          });
-          await loadDocuments();
-          setDocumentMessage("invoice", "Связь сохранена.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract",
+            "link", {contract_document_id: contractDocumentId}, "PATCH", null, invoiceDocumentId);
+          setDocumentMessage("invoice", "", "");
         } catch (error) {
           setDocumentMessage("invoice", error.message, "error");
         }
@@ -2608,14 +2612,8 @@
         });
         setDocumentMessage("contract", "Сохраняем договор...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(documentId), {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify(payload)
-          });
-          editingContractId = "";
-          await loadDocuments();
-          setDocumentMessage("contract", "Договор сохранён.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(documentId), "edit", payload, "PATCH", null, documentId);
+          setDocumentMessage("contract", "", "");
         } catch (error) {
           setDocumentMessage("contract", error.message, "error");
         }
@@ -2628,12 +2626,8 @@
         }
         setDocumentMessage("invoice", "Отвязываем invoice от контракта...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", {
-            method: "DELETE",
-            headers: { Accept: "application/json" }
-          });
-          await loadDocuments();
-          setDocumentMessage("invoice", "Связь удалена.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(invoiceDocumentId) + "/contract", "unlink", {}, "DELETE", null, invoiceDocumentId);
+          setDocumentMessage("invoice", "", "");
         } catch (error) {
           setDocumentMessage("invoice", error.message, "error");
         }
@@ -2645,9 +2639,8 @@
         }
         setAllDocumentMessages("Архивируем документ...", "");
         try {
-          await fetchJson(tradeDocumentsPath + "/" + encodeURIComponent(documentId), { method: "DELETE", headers: { Accept: "application/json" } });
-          await loadDocuments();
-          setAllDocumentMessages("Документ архивирован.", "success");
+          await tradeAcceptance.mutate(tradeDocumentsPath + "/" + encodeURIComponent(documentId), "archive", {}, "DELETE", null, documentId);
+          setAllDocumentMessages("", "");
         } catch (error) {
           setAllDocumentMessages(error.message, "error");
         }

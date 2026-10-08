@@ -1539,8 +1539,7 @@ class SupplierShipmentsBlock:
             and self.runtime.count_contract_document_links(document_id) > 0
         ):
             raise ValueError("contract document has linked invoice documents and cannot be archived")
-        if str(existing.get("document_type") or "") == TRADE_DOCUMENT_TYPE_INVOICE:
-            self.runtime.delete_invoice_contract_link(document_id)
+        # Native archive atomically removes invoice links and retains its receipt.
         document = self.runtime.archive_trade_document(document_id, updated_at=self.timestamp_factory())
         return {
             "contract_name": "sheet_vitrina_v1_trade_documents",
