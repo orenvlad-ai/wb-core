@@ -24,6 +24,15 @@ def open_form(page,base):
     expect(page.locator('#fulfillmentServicesTitle')).to_be_visible()
 
 
+def choose_workbook(page, file):
+    # Use the operator's actual button/chooser. Direct assignment to the hidden
+    # input bypasses the busy guard while a previous acceptance/list refresh is
+    # still finishing, and can silently discard a synthetic change event.
+    with page.expect_file_chooser() as chosen:
+        page.locator('#fulfillmentUploadButton').click()
+    chosen.value.set_files(file)
+
+
 def test_chartsheet_diagnostic_retry():
     """A saved rejection ends one action; correcting the file starts a new one."""
     workbook=Workbook();chart=workbook.create_chartsheet();chart.add_chart(BarChart())
@@ -44,7 +53,7 @@ def test_chartsheet_diagnostic_retry():
                     else:route.continue_()
                 page.route('**/fulfillment-services/uploads',lose_response)
                 open_form(page,base)
-                page.locator('#fulfillmentFileInput').set_input_files({'name':'chart-only.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':chart_data})
+                choose_workbook(page, {'name':'chart-only.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':chart_data})
                 expect(page.locator('#fulfillmentServicesMessage')).to_contain_text('Документ не принят.',timeout=10000)
                 expect(page.locator('#fulfillmentAcceptance')).to_be_hidden()
                 expect(page.locator('#fulfillmentUploadButton')).to_be_enabled()
@@ -61,7 +70,7 @@ def test_chartsheet_diagnostic_retry():
                 expect(page.locator('#fulfillmentUploadButton')).to_be_enabled()
                 expect(page.locator('#fulfillmentAcceptance')).to_be_hidden()
                 assert mutations==['upload']
-                page.locator('#fulfillmentFileInput').set_input_files({'name':'corrected.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('1001')])})
+                choose_workbook(page, {'name':'corrected.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('1001')])})
                 expect(page.locator('#fulfillmentAcceptance .ff-operation-check')).to_be_visible(timeout=10000)
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Документ сохранён.')
                 expect(page.locator('#fulfillmentUploadButton')).to_be_enabled()
@@ -98,7 +107,7 @@ def main():
                 page.route('**/fulfillment-services/uploads',upload)
                 page.route('**/fulfillment-services/uploads?request_id=*',recovery)
                 open_form(page,base)
-                page.locator('#fulfillmentFileInput').set_input_files({'name':'synthetic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('1001')])})
+                choose_workbook(page, {'name':'synthetic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('1001')])})
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Проверяем сохранение',timeout=10000)
                 expect(page.locator('#fulfillmentUploadButton')).to_be_disabled()
                 assert page.locator('#fulfillmentAcceptance .ff-operation-check').count()==0
@@ -142,11 +151,11 @@ def main():
                 old=_wb_supply_row('4001',accepted_quantity=10,quantity_added=10,cost_total=0)
                 old.update(fact_date='2026-06-30',supply_date='2026-06-30')
                 rt.save_wb_supply_rows(rows=[old],warehouses=[],synced_at='2026-07-10T10:00:00Z')
-                page.locator('#fulfillmentFileInput').set_input_files({'name':'outside-window.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('4001')])})
+                choose_workbook(page, {'name':'outside-window.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('4001')])})
                 expect(page.locator('#fulfillmentAcceptance')).to_contain_text('Обработка не требуется',timeout=10000)
                 assert page.locator('#fulfillmentAcceptance').get_by_text('Обработано',exact=True).count()==0
                 assert mutations==['upload','delete','upload']
-                page.locator('#fulfillmentFileInput').set_input_files({'name':'diagnostic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('missing')])})
+                choose_workbook(page, {'name':'diagnostic.xlsx','mimeType':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','buffer':_build_workbook([_valid_row('missing')])})
                 expect(page.locator('#fulfillmentServicesMessage')).to_contain_text('Документ не принят.',timeout=10000)
                 expect(page.locator('#fulfillmentAcceptance')).to_be_hidden()
                 assert page.locator('#fulfillmentAcceptance .ff-operation-check').count()==0
