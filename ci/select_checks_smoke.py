@@ -535,6 +535,12 @@ def command_dependency_checks():
     complaints_browser = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=['apps/operator_complaint_runs_browser_smoke.py'], file_exists=lambda _, p: p == 'apps/operator_complaint_runs_browser_smoke.py')
     verify_plan(complaints_browser)
     assert 'playwright==1.58.0' in complaints_browser['pip'], complaints_browser
+    assert 'openpyxl==3.1.5' in complaints_browser['pip'], complaints_browser
+    for script in ('apps/operator_complaint_runs_http_smoke.py', 'apps/historical_dated_inputs_smoke.py', 'apps/operator_supplier_release_scope_smoke.py'):
+        scoped = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=[script], file_exists=lambda _, p: p == script)
+        verify_plan(scoped)
+        required = {'openpyxl==3.1.5'} if script == 'apps/operator_complaint_runs_http_smoke.py' else {'openpyxl==3.1.5', 'pypdf==6.4.1'}
+        assert required <= set(scoped['pip']), scoped
     for script in ('apps/operator_complaint_runs_smoke.py', 'apps/operator_complaint_runs_http_smoke.py', 'apps/historical_dated_inputs_smoke.py'):
         minimal = build_plan_from_paths(pull_request=41, base=BASE, head=HEAD, paths=[script], file_exists=lambda _, p: p == script)
         verify_plan(minimal)
