@@ -1815,6 +1815,15 @@
       align-items: start;
     }
 
+    .fbs-sku-actions { display:flex; gap:8px; padding:0 12px 8px; }
+    .fbs-sku-actions .action-button { padding:6px 10px; font-size:11px; }
+    .fbs-sku-list { max-height:300px; overflow:auto; margin:0 12px 8px; }
+    .fbs-sku-list label { display:flex; align-items:center; gap:8px; padding:5px 2px; font-size:12px; color:var(--muted-strong); }
+    .fbs-sku-list input[type=checkbox] { width:14px; height:14px; min-height:0; padding:0; flex:0 0 14px; margin:0; }
+    .fbs-sku-list .fbs-sku-category { font-weight:700; margin-top:6px; }
+    .fbs-sku-list .fbs-sku-item { padding-left:20px; }
+    .fbs-sku-picker .field-note { margin:0 12px 10px; }
+
     .fbs-settings-card,
     .fbs-result-card {
       gap: 12px;
@@ -4611,6 +4620,12 @@
                   </div>
                 </div>
               </details>
+              <details class="fbs-period-details fbs-sku-picker" id="fbsSkuPicker">
+                <summary id="fbsSkuSelectionSummary">SKU к заказу</summary>
+                <div class="fbs-sku-actions"><button class="action-button secondary-button" type="button" data-fbs-sku-all disabled>Все</button><button class="action-button secondary-button" type="button" data-fbs-sku-none disabled>Снять все</button></div>
+                <div class="fbs-sku-list" id="fbsSkuSelectionList"></div>
+                <p class="field-note" id="fbsSkuSelectionNote">Читаем список товаров для расчёта…</p>
+              </details>
               <div class="factory-actions">
                 <button id="fbsFulfillmentCalculateButton" class="action-button primary-button" type="button">Рассчитать заказ</button>
               </div>
@@ -6208,6 +6223,16 @@
       let fbsFulfillmentUiRevision = 0;
       let fbsFulfillmentStatusRequest = 0;
       let fbsFulfillmentCalculating = false;
+      let fbsReadinessScope = null;
+      let fbsStatusController = null;
+      let fbsStatusDebounce = 0;
+      const fbsSkuStorageKey = "wbc.fbs-fulfillment.excluded-skus.v1";
+      const fbsSkuSelection = {catalog:[], groups:[], excluded:new Set(), loaded:false, signature:null};
+      try {
+        const saved = JSON.parse(localStorage.getItem(fbsSkuStorageKey) || "[]");
+        if (Array.isArray(saved)) saved.forEach((id) => {if (Number.isSafeInteger(id) && id > 0) fbsSkuSelection.excluded.add(id);});
+      } catch (_) {}
+
       const stockReportActiveSkus = normalizeStockReportActiveSkus(config.stock_report_active_skus);
       const allStockReportSkuIds = stockReportActiveSkus.map((item) => item.nm_id);
       let persistedOperatorUiState = readPersistedOperatorUiState();
@@ -14280,6 +14305,95 @@
         return fbsFulfillmentFacilities.find((item) => String(item.facility_id || "") === facilityId) || null;
       }
 
+      function fbsSelectedSkuIds() {
+        return fbsSkuSelection.catalog.map((row) => row.nm_id).filter((id) => !fbsSkuSelection.excluded.has(id));
+      }
+
+      function fbsExcludedSkuIds() {
+        return fbsSkuSelection.catalog.map((row) => row.nm_id).filter((id) => fbsSkuSelection.excluded.has(id)).sort((a, b) => a - b);
+      }
+
+      function fbsSkuCategoryLabel(row) {
+        const raw = String(row.category || "");
+        return ({"no frame clean":"NF Clean", "no frame matte":"NF Mate", "no frame anti-spy":"NF Anti-Spy"}[raw.trim().replace(/\s+/g, " ").toLowerCase()] || raw || "Без категории");
+      }
+
+      function updateFbsSkuChecks() {
+        const list = document.getElementById("fbsSkuSelectionList");
+        list.querySelectorAll("[data-fbs-sku]").forEach((node) => {node.checked = !fbsSkuSelection.excluded.has(Number(node.dataset.fbsSku));});
+        list.querySelectorAll("[data-fbs-sku-category]").forEach((node) => {
+          const rows = fbsSkuSelection.groups[Number(node.dataset.fbsSkuCategory)].rows;
+          const count = rows.filter((row) => !fbsSkuSelection.excluded.has(row.nm_id)).length;
+          node.checked = count === rows.length;
+          node.indeterminate = count > 0 && count < rows.length;
+        });
+        const total = fbsSkuSelection.catalog.length, selected = fbsSelectedSkuIds().length;
+        document.querySelectorAll("#fbsSkuPicker [data-fbs-sku-all], #fbsSkuPicker [data-fbs-sku-none]").forEach((node) => {node.disabled = !fbsSkuSelection.loaded;});
+        document.getElementById("fbsSkuSelectionSummary").textContent = "SKU к заказу (" + selected + "/" + total + ")";
+        document.getElementById("fbsSkuSelectionNote").textContent = !fbsSkuSelection.loaded
+          ? "Список товаров пока недоступен. Обновите раздел перед расчётом."
+          : !selected ? "Не выбраны SKU. Отметьте товары или нажмите «Все»."
+          : "Выбрано " + selected + " из " + total + ". Исключённые товары не попадут в расчёт и Excel. Выбор независим от мониторинга.";
+      }
+
+      function renderFbsSkuCatalog(rawCatalog) {
+        const list = document.getElementById("fbsSkuSelectionList"), active = document.activeElement;
+        const focusedSku = active && active.dataset.fbsSku;
+        const focusedCategory = active && active.hasAttribute("data-fbs-sku-category") && fbsSkuSelection.groups[Number(active.dataset.fbsSkuCategory)]?.name;
+        const byId = new Map();
+        if (Array.isArray(rawCatalog)) rawCatalog.forEach((row) => {
+          if (row && Number.isSafeInteger(row.nm_id) && row.nm_id > 0) byId.set(row.nm_id, row);
+        });
+        fbsSkuSelection.catalog = Array.from(byId.values());
+        fbsSkuSelection.loaded = Array.isArray(rawCatalog);
+        const groups = new Map();
+        fbsSkuSelection.catalog.forEach((row) => {
+          const category = fbsSkuCategoryLabel(row);
+          if (!groups.has(category)) groups.set(category, []);
+          groups.get(category).push(row);
+        });
+        fbsSkuSelection.groups = Array.from(groups, ([name, rows]) => ({name, rows:rows.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ru") || a.nm_id - b.nm_id)})).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+        const signature = JSON.stringify(fbsSkuSelection.groups.map((group) => [group.name, group.rows.map((row) => [row.nm_id, row.name])]));
+        if (signature !== fbsSkuSelection.signature) {
+          const top = list.scrollTop;
+          fbsSkuSelection.signature = signature;
+          list.innerHTML = fbsSkuSelection.groups.map((group, index) => (
+            '<label class="fbs-sku-category"><input type="checkbox" data-fbs-sku-category="' + index + '">' + escapeHtml(group.name) + '</label>' + group.rows.map((row) => (
+              '<label class="fbs-sku-item"><input type="checkbox" data-fbs-sku="' + row.nm_id + '">' + escapeHtml(row.name || "SKU " + row.nm_id) + '</label>'
+            )).join("")
+          )).join("");
+          if (focusedSku || focusedCategory) {
+            const target = focusedSku ? list.querySelector('[data-fbs-sku="' + focusedSku + '"]') : list.querySelector('[data-fbs-sku-category="' + fbsSkuSelection.groups.findIndex((group) => group.name === focusedCategory) + '"]');
+            (target || document.getElementById("fbsSkuSelectionSummary")).focus({preventScroll:true});
+          }
+          list.scrollTop = top;
+        }
+        updateFbsSkuChecks();
+      }
+
+      function fbsSkuScope() {
+        return JSON.stringify(fbsExcludedSkuIds());
+      }
+
+      function queueFbsSkuReadiness() {
+        clearTimeout(fbsStatusDebounce);
+        ++fbsFulfillmentStatusRequest;
+        if (fbsStatusController) fbsStatusController.abort();
+        fbsReadinessScope = null;
+        if (fbsSelectedSkuIds().length) {
+          fbsStatusDebounce = setTimeout(() => { void loadFbsFulfillmentStatus({preserveUi:true}); }, 350);
+        }
+      }
+
+      function changeFbsSkuSelection() {
+        try {localStorage.setItem(fbsSkuStorageKey, JSON.stringify(Array.from(fbsSkuSelection.excluded).sort((a, b) => a - b)));} catch (_) {}
+        updateFbsSkuChecks();
+        invalidateFbsFulfillmentResult();
+        queueFbsSkuReadiness();
+        renderFbsFacilityReadiness();
+        scheduleEmbeddedHeightPost();
+      }
+
       function fbsFormFingerprint() {
         const mode = selectedFbsHistoryMode();
         return JSON.stringify({
@@ -14295,7 +14409,8 @@
             ? String(Number(fbsFulfillmentFields.sales_avg_period_days.value || 0))
             : null,
           sales_date_from: mode === "custom_period" ? fbsFulfillmentFields.sales_date_from.value : null,
-          sales_date_to: mode === "custom_period" ? fbsFulfillmentFields.sales_date_to.value : null
+          sales_date_to: mode === "custom_period" ? fbsFulfillmentFields.sales_date_to.value : null,
+          excluded_nm_ids: fbsExcludedSkuIds()
         });
       }
 
@@ -14314,7 +14429,8 @@
             ? null
             : String(Number(settings.sales_avg_period_days || 0)),
           sales_date_from: settings.sales_history_mode === "custom_period" ? settings.sales_date_from : null,
-          sales_date_to: settings.sales_history_mode === "custom_period" ? settings.sales_date_to : null
+          sales_date_to: settings.sales_history_mode === "custom_period" ? settings.sales_date_to : null,
+          excluded_nm_ids: Array.isArray(settings.excluded_nm_ids) ? settings.excluded_nm_ids.slice().sort((a, b) => a - b) : []
         });
       }
 
@@ -14335,16 +14451,23 @@
         const stockSource = facility.stock_source || {};
         fbsReadinessPhysical.textContent = stockSource.source ? "Официальный снимок FBS WB" : "—";
         fbsReadinessReserved.textContent = valueOrDash(stockSource.captured_at);
-        fbsReadinessAvailable.textContent = valueOrDash(facility.available);
+        const selectedIds = new Set(fbsSelectedSkuIds());
+        const certified = fbsReadinessScope === fbsSkuScope();
+        fbsReadinessAvailable.textContent = certified ? valueOrDash(facility.available) : "—";
         const currentInbound = fbsFulfillmentCurrentResult && fbsResultFingerprint(fbsFulfillmentCurrentResult) === fbsFormFingerprint()
           ? fbsFulfillmentCurrentResult.inbound_coverage || {}
           : null;
         fbsReadinessInbound.textContent = currentInbound
           ? formatWbNumber(currentInbound.total_quantity || 0) + " · поставок: " + valueOrDash(currentInbound.included_shipment_count || 0)
-          : selectedFbsInboundScope() === "all_active"
+          : fbsExcludedSkuIds().length
+            ? "После расчёта · выбранные SKU"
+            : selectedFbsInboundScope() === "all_active"
             ? "После расчёта · все активные заказы"
             : formatWbNumber(facility.remaining_active_inbound_qty || 0) + " · поставок: " + valueOrDash(facility.remaining_active_inbound_shipment_count || 0);
-        const blockers = Array.isArray(facility.blockers) ? facility.blockers.filter(Boolean) : [];
+        const blockers = certified && Array.isArray(facility.blockers) ? facility.blockers.filter(Boolean) : [];
+        if (!fbsSkuSelection.loaded) blockers.push("Список SKU пока недоступен");
+        else if (!selectedIds.size) blockers.push("Выберите хотя бы один SKU");
+        else if (!certified) blockers.push("Проверяем остатки выбранных SKU…");
         if (!fbsSalesHistoryCoverage.earliest_available_date || !fbsSalesHistoryCoverage.latest_available_date) {
           blockers.push("История заказов FBS пока недоступна");
         }
@@ -14352,7 +14475,7 @@
           ? "Расчёт заблокирован: " + blockers.join("; ")
           : stockSource.warning || "Полный официальный снимок FBS готов к расчёту.";
         fbsReadinessBlockers.className = "section-message " + (blockers.length || stockSource.warning ? "is-warning" : "is-success");
-        fbsFulfillmentCalculateButton.disabled = fbsFulfillmentCalculating || !facility.calculation_enabled || blockers.length > 0;
+        fbsFulfillmentCalculateButton.disabled = fbsFulfillmentCalculating || !certified || !facility.calculation_enabled || blockers.length > 0;
       }
 
       function renderFbsFulfillmentResult(result) {
@@ -14408,7 +14531,13 @@
         fbsResultInbound.textContent = formatWbNumber(inbound.total_quantity || 0) + " шт. · " + valueOrDash(inbound.included_shipment_count || 0) + " поставок";
         fbsResultSkuCount.textContent = recommendedRows.length + " из " + rows.length;
         fbsReadinessInbound.textContent = formatWbNumber(inbound.total_quantity || 0) + " · поставок: " + valueOrDash(inbound.included_shipment_count || 0);
-        fbsFulfillmentDownloadPath = result.recommendation_download_path || config.fbs_fulfillment_order_recommendation_path;
+        const exportBase = result.recommendation_download_path || config.fbs_fulfillment_order_recommendation_path;
+        fbsFulfillmentDownloadPath = "";
+        if (exportBase && result.calculation_id) {
+          const exportUrl = new URL(exportBase, window.location.href);
+          exportUrl.searchParams.set("calculation_id", String(result.calculation_id));
+          fbsFulfillmentDownloadPath = exportUrl.toString();
+        }
         fbsFulfillmentDownloadButton.disabled = !fbsFulfillmentDownloadPath;
       }
 
@@ -14442,6 +14571,15 @@
             if (defaults[key] !== undefined && fbsFulfillmentFields[key]) fbsFulfillmentFields[key].value = defaults[key];
           });
         }
+        renderFbsSkuCatalog(payload ? payload.sku_catalog : null);
+        if (options && options.scope !== fbsSkuScope()) {
+          // The first response discovers the catalog. Saved exclusions must be
+          // certified by another GET before any readiness or preview is used.
+          queueFbsSkuReadiness();
+          renderFbsFacilityReadiness();
+          return;
+        }
+        fbsReadinessScope = options ? options.scope : null;
         renderFbsFacilityReadiness();
         if (options && options.preserveUi) return;
         const lastResult = payload ? payload.last_result : null;
@@ -14465,18 +14603,38 @@
         );
       }
 
-      async function loadFbsFulfillmentStatus() {
+      async function loadFbsFulfillmentStatus(options) {
         if (!config.fbs_fulfillment_order_status_path) return;
+        clearTimeout(fbsStatusDebounce);
+        if (fbsSkuSelection.loaded && !fbsSelectedSkuIds().length) return;
+        const scope = fbsSkuScope();
+        if (fbsStatusController && fbsStatusController.scope !== scope) fbsStatusController.abort();
+        const controller = new AbortController();
+        controller.scope = scope;
+        fbsStatusController = controller;
         const requestId = ++fbsFulfillmentStatusRequest;
         const revision = fbsFulfillmentUiRevision;
+        const url = new URL(config.fbs_fulfillment_order_status_path, window.location.href);
+        url.searchParams.set("excluded_nm_ids", scope);
         try {
-          const response = await fetch(config.fbs_fulfillment_order_status_path, {method: "GET", headers: {"Accept": "application/json"}});
+          const response = await fetch(url.toString(), {method: "GET", headers: {"Accept": "application/json"}, signal:controller.signal});
           const payload = await readJson(response);
-          if (requestId !== fbsFulfillmentStatusRequest) return;
+          if (requestId !== fbsFulfillmentStatusRequest || scope !== fbsSkuScope()) return;
           if (!response.ok) throw new Error(valueOrDash(payload.error) + " (HTTP " + response.status + ")");
-          renderFbsFulfillmentStatus(payload, {preserveUi: revision !== fbsFulfillmentUiRevision});
+          const certifiedScope = payload && payload.readiness_scope;
+          if (!certifiedScope || !Array.isArray(certifiedScope.excluded_nm_ids)
+              || JSON.stringify(certifiedScope.excluded_nm_ids.slice().sort((a, b) => a - b)) !== scope) {
+            throw new Error("Сервер не подтвердил выбранный список SKU");
+          }
+          renderFbsFulfillmentStatus(payload, {scope, preserveUi: Boolean(options && options.preserveUi) || revision !== fbsFulfillmentUiRevision});
         } catch (error) {
-          if (requestId !== fbsFulfillmentStatusRequest || revision !== fbsFulfillmentUiRevision || fbsFulfillmentCurrentResult || fbsFulfillmentCalculating) return;
+          if (controller.signal.aborted || requestId !== fbsFulfillmentStatusRequest || scope !== fbsSkuScope()) return;
+          if (fbsReadinessScope !== scope) {
+            fbsReadinessBlockers.textContent = "Не удалось проверить остатки выбранных SKU. Откройте раздел заново для повторной проверки.";
+            fbsReadinessBlockers.className = "section-message is-warning";
+            fbsFulfillmentCalculateButton.disabled = true;
+          }
+          if (revision !== fbsFulfillmentUiRevision || fbsFulfillmentCurrentResult || fbsFulfillmentCalculating) return;
           setFbsFulfillmentMessage("Не удалось прочитать готовность FBS-расчёта: " + (error instanceof Error ? error.message : String(error)), "error");
         }
       }
@@ -14492,9 +14650,12 @@
           order_cycle_days: fbsFulfillmentFields.order_cycle_days.value,
           order_batch_qty: fbsFulfillmentFields.order_batch_qty.value,
           sales_history_mode: mode,
-          sales_avg_period_days: fbsFulfillmentFields.sales_avg_period_days.value
+          sales_avg_period_days: fbsFulfillmentFields.sales_avg_period_days.value,
+          excluded_nm_ids: fbsExcludedSkuIds()
         };
         if (!payload.target_facility_id) throw new Error("Выберите целевой фулфилмент.");
+        if (!fbsSkuSelection.loaded || !fbsSelectedSkuIds().length) throw new Error("Выберите хотя бы один SKU для заказа.");
+        if (fbsReadinessScope !== fbsSkuScope()) throw new Error("Дождитесь проверки остатков выбранных SKU.");
         if (mode === "custom_period") {
           payload.sales_date_from = fbsFulfillmentFields.sales_date_from.value;
           payload.sales_date_to = fbsFulfillmentFields.sales_date_to.value;
@@ -14548,6 +14709,11 @@
       }
 
       async function downloadFbsFulfillmentOrder() {
+        if (!fbsFulfillmentCurrentResult || fbsResultFingerprint(fbsFulfillmentCurrentResult) !== fbsFormFingerprint()) {
+          invalidateFbsFulfillmentResult();
+          setFbsFulfillmentMessage("Параметры изменены — пересчитайте заказ.", "warning");
+          return;
+        }
         if (!fbsFulfillmentDownloadPath) return;
         await downloadBinary(fbsFulfillmentDownloadPath, "sheet-vitrina-v1-fbs-fulfillment-order.xlsx", "FBS-рекомендация скачана.", setFbsFulfillmentMessage);
       }
@@ -16197,6 +16363,27 @@
         setFactoryMessage,
         [loadFactoryStatus]
       ));
+
+      document.getElementById("fbsSkuPicker").addEventListener("change", (event) => {
+        const sku = event.target.closest("[data-fbs-sku]");
+        const category = event.target.closest("[data-fbs-sku-category]");
+        if (sku) {
+          const id = Number(sku.dataset.fbsSku);
+          sku.checked ? fbsSkuSelection.excluded.delete(id) : fbsSkuSelection.excluded.add(id);
+        } else if (category) {
+          fbsSkuSelection.groups[Number(category.dataset.fbsSkuCategory)].rows.forEach((row) => {
+            category.checked ? fbsSkuSelection.excluded.delete(row.nm_id) : fbsSkuSelection.excluded.add(row.nm_id);
+          });
+        } else return;
+        changeFbsSkuSelection();
+      });
+      document.getElementById("fbsSkuPicker").addEventListener("click", (event) => {
+        if (event.target.closest("[data-fbs-sku-all]")) fbsSkuSelection.excluded.clear();
+        else if (event.target.closest("[data-fbs-sku-none]")) fbsSkuSelection.catalog.forEach((row) => fbsSkuSelection.excluded.add(row.nm_id));
+        else return;
+        changeFbsSkuSelection();
+      });
+      document.getElementById("fbsSkuPicker").addEventListener("toggle", scheduleEmbeddedHeightPost);
 
       calculateFactoryOrderButton.addEventListener("click", calculateFactoryOrder);
       fbsFulfillmentCalculateButton.addEventListener("click", calculateFbsFulfillmentOrder);

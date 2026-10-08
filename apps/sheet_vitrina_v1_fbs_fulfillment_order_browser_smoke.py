@@ -11,6 +11,8 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import threading
+from urllib.parse import parse_qs, urlparse
+from unittest.mock import patch
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -44,6 +46,7 @@ from packages.application.registry_upload_http_entrypoint import (  # noqa: E402
 from packages.contracts.registry_upload_http_entrypoint import (  # noqa: E402
     RegistryUploadHttpEntrypointConfig,
 )
+from packages.application.fbs_fulfillment_order import FbsFulfillmentOrderBlock
 from packages.application.wb_fbs_orders import OBSERVATIONS_TABLE  # noqa: E402
 
 
@@ -122,19 +125,27 @@ def main() -> int:
                 })();""")
                 held_status = []
                 hold_next_status = {"enabled": False}
+                forced_status_blocker = {"enabled": False}
                 def intercept_status(route):
-                    if not hold_next_status["enabled"]:
+                    if not hold_next_status["enabled"] and not forced_status_blocker["enabled"]:
                         route.continue_()
                         return
+                    hold = hold_next_status["enabled"]
                     hold_next_status["enabled"] = False
                     response = route.fetch()
                     try:
                         payload = response.json()
                     finally:
                         response.dispose()
+                    if forced_status_blocker["enabled"]:
+                        for item in payload["facilities"]:
+                            item.update(source_blocker="Нет полного официального снимка", calculation_enabled=False, blockers=["Нет полного официального снимка"])
+                    if not hold:
+                        route.fulfill(json=payload)
+                        return
                     held_status.append((route, payload))
                     page.evaluate("document.documentElement.dataset.fbsHeldStatus = String(Number(document.documentElement.dataset.fbsHeldStatus || 0) + 1)")
-                page.route("**/fbs-fulfillment-order/status", intercept_status)
+                page.route("**/fbs-fulfillment-order/status*", intercept_status)
                 def hold_status_request():
                     old_count = page.evaluate("Number(document.documentElement.dataset.fbsHeldStatus || 0)")
                     hold_next_status["enabled"] = True
@@ -143,11 +154,17 @@ def main() -> int:
                 def release_status_request():
                     previous = page.evaluate("window.__fbsStatusSettled")
                     route, payload = held_status.pop(0)
+                    cancelled = route.request.failure is not None
                     route.fulfill(json=payload)
-                    page.wait_for_function("count => window.__fbsStatusSettled > count", arg=previous)
+                    if not cancelled:
+                        page.wait_for_function("count => window.__fbsStatusSettled > count", arg=previous)
                 held_calculations = []
+                calculation_payloads = []
+                fbs_requests = []
+                page.on("request", lambda request: fbs_requests.append(request.url) if "/fbs-fulfillment-order/" in request.url else None)
                 hold_next_calculation = {"enabled": False}
                 def intercept_calculation(route):
+                    calculation_payloads.append(route.request.post_data_json)
                     if not hold_next_calculation["enabled"]:
                         route.continue_()
                         return
@@ -221,6 +238,47 @@ def main() -> int:
                 expect(page.locator("#fbsHistoryCoverage")).to_contain_text(
                     "2026-04-02 — 2026-04-17"
                 )
+
+                # The full eligible catalog starts selected. Category controls
+                # affect the calculation scope; the server certifies subset readiness.
+                expect(page.locator("#fbsSkuSelectionSummary")).to_have_text(f"SKU к заказу ({len(active_nm_ids)}/{len(active_nm_ids)})")
+                assert page.locator(".fbs-settings-card").evaluate("node => getComputedStyle(node).display === 'grid' && getComputedStyle(node).gap === '12px'")
+                page.locator("#fbsSkuSelectionSummary").click()
+                expect(page.locator("[data-fbs-sku]")).to_have_count(len(active_nm_ids))
+                labels = page.locator(".fbs-sku-category").all_text_contents()
+                assert labels == sorted(labels, key=lambda label: label.casefold())
+                category = page.locator("[data-fbs-sku-category]").first
+                category_ids = category.evaluate("node => {const ids=[];for(let label=node.parentElement.nextElementSibling;label&&!label.classList.contains('fbs-sku-category');label=label.nextElementSibling)ids.push(Number(label.querySelector('input').dataset.fbsSku));return ids}")
+                assert len(category_ids) > 1
+                requests_before_selection = len(fbs_requests)
+                category.uncheck()
+                assert page.locator("[data-fbs-sku]").evaluate_all("nodes => nodes.filter(n => !n.checked).map(n => Number(n.dataset.fbsSku))") == category_ids
+                category.check()
+                first_sku = page.locator("[data-fbs-sku]").first
+                first_id = int(first_sku.get_attribute("data-fbs-sku"))
+                first_sku.uncheck()
+                assert category.evaluate("node => node.indeterminate")
+                assert first_sku.evaluate("node => node === document.activeElement")
+                page.locator("[data-fbs-sku-none]").click()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
+                expect(page.locator("#fbsSkuSelectionNote")).to_contain_text("Не выбраны SKU")
+                page.locator("[data-fbs-sku-all]").click()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
+                assert not any("/calculate" in url for url in fbs_requests[requests_before_selection:])
+                # Excluding a SKU must never bypass a global snapshot failure.
+                forced_status_blocker["enabled"] = True
+                hold_status_request()
+                release_status_request()
+                first_sku.uncheck()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
+                expect(page.locator("#fbsReadinessBlockers")).to_contain_text("Нет полного официального снимка")
+                first_sku.check()
+                forced_status_blocker["enabled"] = False
+                settled = page.evaluate("window.__fbsStatusSettled")
+                page.locator('[data-supply-section-button="fbs-fulfillment"]').click()
+                page.wait_for_function("count => window.__fbsStatusSettled > count", arg=settled)
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
+                page.locator("#fbsSkuSelectionSummary").click()
 
                 facility.select_option(ORENBURG_ID)
                 expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
@@ -327,6 +385,120 @@ def main() -> int:
                 expect(page.locator("#fbsSalesAvgPeriodDays")).to_be_enabled()
                 expect(page.locator("#fbsSalesDateFrom")).to_be_disabled()
                 expect(page.locator("#fbsSalesDateTo")).to_be_disabled()
+
+                # Changing SKU scope invalidates the existing Excel and cannot
+                # be undone by an older readiness response.
+                page.locator("#fbsSkuSelectionSummary").click()
+                hold_status_request()
+                for stale_facility in held_status[0][1]["facilities"]:
+                    stale_facility["available"] = 987654321
+                first_sku.uncheck()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                first_sku.evaluate("node => window.oldSkuCheckbox = node")
+                first_sku.focus()
+                release_status_request()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled()
+                expect(page.locator("#fbsReadinessAvailable")).not_to_have_text("987654321")
+                assert first_sku.evaluate("node => node === window.oldSkuCheckbox && node === document.activeElement")
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                # Removed catalog IDs may remain in local preferences, but must
+                # not be sent to the strict current-catalog API.
+                page.evaluate("key => {const ids=JSON.parse(localStorage.getItem(key));ids.push(999999999);localStorage.setItem(key,JSON.stringify(ids));localStorage.setItem('wbc.stock-monitor.hidden-skus.v1',JSON.stringify([123]));}", "wbc.fbs-fulfillment.excluded-skus.v1")
+                page.reload(wait_until="domcontentloaded")
+                expect(page.locator("#fbsSkuSelectionSummary")).to_have_text(f"SKU к заказу ({len(active_nm_ids)-1}/{len(active_nm_ids)})", timeout=15000)
+                page.locator("#fbsSkuSelectionSummary").click()
+                first_sku = page.locator(f'[data-fbs-sku="{first_id}"]')
+                expect(first_sku).not_to_be_checked()
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                assert page.evaluate("localStorage.getItem('wbc.stock-monitor.hidden-skus.v1')") == "[123]"
+                # A newly added eligible SKU is selected implicitly, and a real
+                # catalog metadata change restores focus by stable identity.
+                hold_status_request()
+                route, incoming = held_status[0]
+                incoming["sku_catalog"].append({"nm_id": 999999998, "name": "Новый SKU", "category": "No Frame Clean"})
+                first_sku.focus()
+                release_status_request()
+                expect(page.locator('[data-fbs-sku="999999998"]')).to_be_checked()
+                assert first_sku.evaluate("node => node === document.activeElement")
+                settled = page.evaluate("window.__fbsStatusSettled")
+                page.locator('[data-supply-section-button="fbs-fulfillment"]').click()
+                page.wait_for_function("count => window.__fbsStatusSettled > count", arg=settled)
+                expect(page.locator('[data-fbs-sku="999999998"]')).to_have_count(0)
+                page.locator("#fbsFulfillmentCalculateButton").click()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён", timeout=15000)
+                assert calculation_payloads[-1]["excluded_nm_ids"] == [first_id]
+                saved = runtime.load_fbs_fulfillment_order_result_state()
+                assert saved["settings"]["excluded_nm_ids"] == [first_id]
+                assert first_id not in {row["nm_id"] for row in saved["rows"]}
+                assert len(saved["rows"]) == len(active_nm_ids) - 1
+                # Another client's calculation replaces the latest snapshot.
+                # This tab must export the immutable calculation it displays.
+                block = FbsFulfillmentOrderBlock(runtime=runtime, now_factory=lambda: NOW, timestamp_factory=lambda: NOW_TEXT)
+                other = block.calculate({**saved["settings"], "excluded_nm_ids": []})
+                assert other.calculation_id != saved["calculation_id"]
+                assert first_id in {row.nm_id for row in other.rows}
+                with page.expect_download(timeout=15000) as selected_download:
+                    page.locator("#fbsFulfillmentDownloadButton").click()
+                assert any("/recommendation.xlsx?" in url and parse_qs(urlparse(url).query).get("calculation_id") == [saved["calculation_id"]] for url in fbs_requests)
+                selected_path = Path(raw) / "selected-recommendation.xlsx"
+                selected_download.value.save_as(selected_path)
+                from openpyxl import load_workbook
+                workbook = load_workbook(selected_path, read_only=True, data_only=True)
+                exported = {int(row[0]) for row in workbook.active.iter_rows(min_row=2, values_only=True) if str(row[0] or "").isdigit()}
+                workbook.close()
+                assert first_id not in exported
+                assert exported == {row["nm_id"] for row in saved["rows"] if row["recommended_order_qty"] is not None}
+                # A successful POST sent for an earlier SKU choice must never
+                # restore its saved recommendation after another checkbox edit.
+                hold_calculation_request()
+                second_sku = page.locator("[data-fbs-sku]:checked").first
+                second_id = int(second_sku.get_attribute("data-fbs-sku"))
+                second_sku.uncheck()
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                held_calculations.pop(0).continue_()
+                expect(page.locator("#fbsFulfillmentCalculateButton")).to_have_text("Рассчитать заказ")
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Параметры изменены")
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
+                settled = page.evaluate("window.__fbsStatusSettled")
+                page.locator('[data-supply-section-button="fbs-fulfillment"]').click()
+                page.wait_for_function("count => window.__fbsStatusSettled > count", arg=settled)
+                expect(page.locator("#fbsFulfillmentDownloadButton")).to_be_disabled()
+                expect(page.locator("#fbsTotalQty")).to_have_text("—")
+                page.locator("#fbsFulfillmentCalculateButton").click()
+                expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён", timeout=15000)
+                assert calculation_payloads[-1]["excluded_nm_ids"] == sorted([first_id, second_id])
+                assert {first_id, second_id}.isdisjoint(row["nm_id"] for row in runtime.load_fbs_fulfillment_order_result_state()["rows"])
+
+                # A new eligible SKU lies outside the last complete official
+                # generation. ALL is blocked; excluding it is certified by the
+                # real scoped API while its full catalog stays available.
+                eligible = block._load_active_skus()
+                new_id = 999999999998
+                with patch.object(FbsFulfillmentOrderBlock, "_load_active_skus", return_value=eligible + [(new_id, "Новый SKU")]):
+                    page.locator("[data-fbs-sku-all]").click()
+                    expect(page.locator(f'[data-fbs-sku="{new_id}"]')).to_be_checked()
+                    expect(page.locator("#fbsReadinessBlockers")).to_contain_text("Нет полного официального снимка", timeout=15000)
+                    expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
+                    requests_before_none = len(fbs_requests)
+                    page.locator("[data-fbs-sku-none]").click()
+                    # Wait past the debounce deadline to prove empty scope
+                    # cannot request readiness or a calculation.
+                    page.wait_for_timeout(450)
+                    assert len(fbs_requests) == requests_before_none
+                    page.locator("[data-fbs-sku-all]").click()
+                    expect(page.locator("#fbsReadinessBlockers")).to_contain_text("Нет полного официального снимка", timeout=15000)
+                    page.locator(f'[data-fbs-sku="{new_id}"]').uncheck()
+                    expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_disabled()
+                    expect(page.locator("#fbsFulfillmentCalculateButton")).to_be_enabled(timeout=15000)
+                    expect(page.locator("[data-fbs-sku]")).to_have_count(len(active_nm_ids) + 1)
+                    expect(page.locator("#fbsSkuSelectionSummary")).to_have_text(f"SKU к заказу ({len(active_nm_ids)}/{len(active_nm_ids)+1})")
+                    assert any(json.loads(parse_qs(urlparse(url).query)["excluded_nm_ids"][0]) == [new_id] for url in fbs_requests if "/status?" in url)
+                    page.locator("#fbsFulfillmentCalculateButton").click()
+                    expect(page.locator("#fbsFulfillmentMessage")).to_contain_text("Расчёт завершён", timeout=15000)
+                    assert calculation_payloads[-1]["excluded_nm_ids"] == [new_id]
+                    assert {row["nm_id"] for row in runtime.load_fbs_fulfillment_order_result_state()["rows"]} == set(active_nm_ids)
 
                 page.set_viewport_size({"width": 390, "height": 844})
                 assert fbs_panel.evaluate(

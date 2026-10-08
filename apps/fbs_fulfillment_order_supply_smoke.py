@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import asdict
 import io
 import json
 import math
@@ -12,6 +13,7 @@ import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import zipfile
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -83,6 +85,18 @@ def main() -> int:
             timestamp_factory=lambda: NOW_TEXT,
         )
         status = block.build_status()
+        assert [item["nm_id"] for item in status.sku_catalog] == active_nm_ids
+        assert all(item["name"] and item["category"] for item in status.sku_catalog)
+        assert status.defaults["excluded_nm_ids"] == []
+        canonical_item = {"nm_id": active_nm_ids[0], "is_active": True, "is_hidden": False, "product_type": "canonical_type"}
+        with patch.object(runtime, "list_nomenclature_items", return_value=[canonical_item]), patch.object(runtime, "list_sku_groups", return_value=[{"group_key": "canonical_type", "label": "Категория из справочника"}]):
+            catalog = block._sku_catalog(block._load_active_skus())
+            assert catalog[0]["category"] == "Категория из справочника"
+            assert [item["nm_id"] for item in catalog] == active_nm_ids
+        with patch.object(runtime, "list_nomenclature_items", return_value=[]):
+            fallback_category = block._sku_catalog(block._load_active_skus())[0]["category"]
+        with patch.object(runtime, "list_nomenclature_items", return_value=[canonical_item, {**canonical_item, "product_type": "conflicting_type"}]):
+            assert block._sku_catalog(block._load_active_skus())[0]["category"] == fallback_category
         wb_state = InventoryPlanningReadModel(db_path=runtime.db_path).current()["wb"]
         assert wb_state["aggregate_only"] is True
         assert wb_state["raw_total"] > 100_000
@@ -111,6 +125,7 @@ def main() -> int:
         )
         assert last_n.horizon_days == 20
         assert last_n.settings.inbound_scope == "selected_facility"
+        assert last_n.settings.excluded_nm_ids == ()
         assert last_n.sales_window["actual_date_from"] == "2026-04-02"
         assert last_n.sales_window["actual_date_to"] == "2026-04-17"
         assert last_n.sales_window["calendar_day_count"] == 16
@@ -322,6 +337,64 @@ def main() -> int:
         exported = read_first_sheet_rows(body)
         assert str(active_nm_ids[0]) not in [r[0] for r in exported[1:-3] if r]
         assert str(active_nm_ids[1]) in [r[0] for r in exported[1:-3] if r]
+
+        # Exclusions change the operands and saved order, not just its display.
+        excluded_id = active_nm_ids[0]
+        selected_payload = {**asdict(custom.settings), "excluded_nm_ids": [excluded_id, excluded_id]}
+        with patch.object(block, "_demand_history", wraps=block._demand_history) as demand_read:
+            selected = block.calculate(selected_payload)
+        assert demand_read.call_args.args[1] == [(nm, name) for nm, name in block._load_active_skus() if nm != excluded_id]
+        assert selected.settings.excluded_nm_ids == (excluded_id,)
+        assert [row.nm_id for row in selected.rows] == [nm for nm in active_nm_ids if nm != excluded_id]
+        assert selected.summary.total_qty == sum(row.recommended_order_qty for row in custom.rows if row.nm_id != excluded_id)
+        assert selected.inbound_coverage["total_quantity"] == 0
+        assert selected.facility_readiness["available"] == 200 * (len(active_nm_ids) - 1)
+        assert all(row["nm_id"] != excluded_id for row in selected.facility_readiness["sku_values"])
+        selected_record = runtime.load_supply_calculation_registry_record(selected.calculation_id)
+        assert selected_record["payload"]["settings"]["excluded_nm_ids"] == [excluded_id]
+        assert selected_record["evidence"]["settings"]["excluded_nm_ids"] == [excluded_id]
+        assert all(row["nm_id"] != excluded_id for row in selected_record["evidence"]["demand_basis"]["per_sku"])
+        body, _ = block.download_recommendation()
+        assert [row[0] for row in read_first_sheet_rows(body)[1:-3] if row] == [str(nm) for nm in active_nm_ids if nm != excluded_id]
+        assert block.build_status().last_result["settings"]["excluded_nm_ids"] == [excluded_id]
+        before = runtime.list_supply_calculation_registry(calculation_type="fbs_fulfillment_order")["pagination"]["total"]
+        for value in (None, "all", [True], [str(excluded_id)], [1.5], [-1], [999999999999], active_nm_ids):
+            # Invalid selection fails before source reads or replacing the last-good result.
+            with patch("packages.application.fbs_fulfillment_order.current_official_fbs_facilities", side_effect=AssertionError("invalid selection read sources")):
+                _expect_error(block, {"target_facility_id": MOSCOW_ID, "excluded_nm_ids": value}, "SKU")
+            assert runtime.load_fbs_fulfillment_order_result_state()["calculation_id"] == selected.calculation_id
+        assert runtime.list_supply_calculation_registry(calculation_type="fbs_fulfillment_order")["pagination"]["total"] == before
+        assert {row.nm_id for row in block.calculate({"target_facility_id": MOSCOW_ID}).rows} == set(active_nm_ids)
+        # A different operator's newer calculation cannot replace the shown order's Excel.
+        body, _ = block.download_recommendation(calculation_id=selected.calculation_id)
+        assert [row[0] for row in read_first_sheet_rows(body)[1:-3] if row] == [str(nm) for nm in active_nm_ids if nm != excluded_id]
+        for invalid_id in ("", "not-an-id", "f" * 32):
+            try:
+                block.download_recommendation(calculation_id=invalid_id)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("explicit invalid calculation must never fall back to latest export")
+        # Newly eligible but uncollected SKU blocks ALL, not a source-certified subset.
+        eligible = block._load_active_skus()
+        new_id = 999999999999
+        with patch.object(block, "_load_active_skus", return_value=eligible + [(new_id, "New SKU")]):
+            all_status = block.build_status()
+            assert not next(f for f in all_status.facilities if f["facility_id"] == MOSCOW_ID)["calculation_enabled"]
+            scoped = block.build_status(excluded_nm_ids=[new_id])
+            assert next(f for f in scoped.facilities if f["facility_id"] == MOSCOW_ID)["calculation_enabled"]
+            assert scoped.readiness_scope == {"excluded_nm_ids": [new_id], "included_nm_ids": active_nm_ids}
+            assert [item["nm_id"] for item in scoped.sku_catalog] == active_nm_ids + [new_id]
+            assert block.calculate({"target_facility_id": MOSCOW_ID, "excluded_nm_ids": [new_id]}).status == "success"
+        # Excluding a SKU cannot bypass corruption of the source generation's dense proof.
+        from packages.application.wb_fbs_warehouse_registry import STOCK_ROWS_TABLE
+        with sqlite3.connect(runtime.db_path) as conn:
+            conn.execute(f"""INSERT INTO {STOCK_ROWS_TABLE}
+                (run_id,seller_warehouse_id,chrt_id,nm_id,amount,evidence_digest,provenance)
+                SELECT run_id,seller_warehouse_id,chrt_id+999999999999,nm_id,amount,evidence_digest,provenance
+                FROM {STOCK_ROWS_TABLE} WHERE nm_id=? LIMIT 1""", (excluded_id,))
+        blocked = block.build_status(excluded_nm_ids=[excluded_id])
+        assert all(not f["calculation_enabled"] and f["source_blocker"] for f in blocked.facilities)
 
     print("fbs_fulfillment_order_supply_smoke: ok")
     return 0
